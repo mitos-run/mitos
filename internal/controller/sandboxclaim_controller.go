@@ -151,10 +151,12 @@ type forkResult struct {
 }
 
 func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, preferredNode string) (*NodeInfo, string, error) {
-	// 1. If preferredNode is set and has a snapshot, use it
-	// 2. Otherwise pick the node with the most ready snapshots and lowest load
-	// 3. Return the node info and a snapshot ID
-	return nil, "", fmt.Errorf("no nodes with ready snapshots")
+	templateName := pool.Spec.TemplateRef.Name
+	node, err := r.NodeRegistry.SelectNode(templateName, preferredNode)
+	if err != nil {
+		return nil, "", err
+	}
+	return node, templateName, nil
 }
 
 func (r *SandboxClaimReconciler) prepareVolumes(ctx context.Context, templateVols []v1alpha1.SandboxVolume, sandboxID string, overrides []v1alpha1.VolumeOverride) ([]*workspace.PreparedVolume, error) {
@@ -182,7 +184,31 @@ func (r *SandboxClaimReconciler) prepareVolumes(ctx context.Context, templateVol
 
 func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (map[string]string, error) {
 	result := make(map[string]string)
-	// TODO: resolve k8s secrets and merge with env vars
+
+	for _, e := range env {
+		result[e.Name] = e.Value
+	}
+
+	coreClient := r.Client
+	for _, s := range secrets {
+		var secret corev1.Secret
+		if err := coreClient.Get(ctx, client.ObjectKey{
+			Namespace: namespace,
+			Name:      s.SecretRef.Name,
+		}, &secret); err != nil {
+			return nil, fmt.Errorf("secret %s: %w", s.SecretRef.Name, err)
+		}
+		value, ok := secret.Data[s.SecretRef.Key]
+		if !ok {
+			return nil, fmt.Errorf("key %s not found in secret %s", s.SecretRef.Key, s.SecretRef.Name)
+		}
+		envVar := s.EnvVar
+		if envVar == "" {
+			envVar = s.Name
+		}
+		result[envVar] = string(value)
+	}
+
 	return result, nil
 }
 

@@ -17,24 +17,6 @@ type SandboxPoolReconciler struct {
 	NodeRegistry *NodeRegistry
 }
 
-// NodeRegistry tracks forkd instances across the cluster.
-type NodeRegistry struct {
-	// Maps node name to its gRPC endpoint and capacity.
-	nodes map[string]*NodeInfo
-}
-
-type NodeInfo struct {
-	Name             string
-	Endpoint         string
-	ActiveSandboxes  int32
-	MaxSandboxes     int32
-	MemoryTotal      int64
-	MemoryUsed       int64
-	TemplateIDs      []string
-	SnapshotIDs      []string
-	LastHeartbeat    time.Time
-}
-
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
