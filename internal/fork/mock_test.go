@@ -1,6 +1,7 @@
 package fork
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -92,7 +93,7 @@ func TestMockEngine_ConcurrentForks(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id := "sandbox-" + time.Now().Format("150405.000000000") + "-" + string(rune('a'+i%26))
+			id := fmt.Sprintf("sandbox-concurrent-%d", i)
 			_, err := engine.Fork("python", id, ForkOpts{})
 			if err != nil {
 				errors <- err

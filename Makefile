@@ -9,8 +9,20 @@ build:
 	go build -o bin/controller ./cmd/controller/
 	go build -o bin/forkd ./cmd/forkd/
 
-test:
-	go test ./... -v
+test-unit:
+	go test ./internal/fork/... ./internal/workspace/... ./internal/vsock/... -v -count=1
+
+test-controller:
+	eval $$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest use 1.31 -p env) && \
+		go test ./internal/controller/... -v -count=1 -timeout 120s
+
+test-python:
+	cd sdk/python && PYTHONPATH=. python3 -m pytest tests/ -v
+
+test-e2e:
+	bash hack/e2e-test.sh
+
+test: test-unit test-python
 
 generate:
 	controller-gen object paths="./api/..."
