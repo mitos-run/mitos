@@ -1,0 +1,22 @@
+{
+  "name": "@paperclipai/sandbox-provider-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paperclip sandbox provider plugin for paperclipinc/sandbox — sub-millisecond Firecracker sandbox forking",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
