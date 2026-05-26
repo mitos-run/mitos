@@ -1,0 +1,33 @@
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/
+
+FROM ubuntu:22.04
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        btrfs-progs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Firecracker
+ARG FC_VERSION=v1.15.0
+RUN curl -fsSL -o /tmp/fc.tgz \
+        "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" && \
+    tar -xzf /tmp/fc.tgz -C /tmp && \
+    mv "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker && \
+    chmod +x /usr/local/bin/firecracker && \
+    rm -rf /tmp/fc.tgz /tmp/release-*
+
+COPY --from=builder /build/forkd /usr/local/bin/forkd
+
+VOLUME ["/var/lib/agent-run"]
+EXPOSE 9090 9091
+
+ENTRYPOINT ["/usr/local/bin/forkd"]

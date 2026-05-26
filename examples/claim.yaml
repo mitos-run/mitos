@@ -1,0 +1,17 @@
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: agent-session-1
+spec:
+  poolRef:
+    name: python-agent-pool
+  env:
+    - name: SESSION_ID
+      value: "abc-123"
+  secrets:
+    - name: openai-key
+      secretRef:
+        name: agent-secrets
+        key: OPENAI_API_KEY
+      envVar: OPENAI_API_KEY
+  timeout: 30m

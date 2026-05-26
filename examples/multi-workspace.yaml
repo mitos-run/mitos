@@ -1,0 +1,53 @@
+# Full workspace setup: shared data from S3, git-backed code, persistent state
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: full-workspace-agent
+spec:
+  image: python:3.12-slim
+  init:
+    - "pip install numpy pandas scikit-learn"
+  resources:
+    cpu: "2"
+    memory: "2Gi"
+  volumes:
+    # Shared dataset from S3 — same bucket mounted read-only across all forks
+    - name: datasets
+      mountPath: /data
+      readOnly: true
+      forkPolicy: Share
+      source:
+        s3:
+          bucket: ml-datasets
+          prefix: /training
+          region: us-east-1
+
+    # Git repo cloned as workspace — each fork gets a CoW snapshot
+    - name: code
+      mountPath: /workspace
+      size: 10Gi
+      storageClass: btrfs-csi
+      forkPolicy: Snapshot
+      snapshotClass: btrfs-snapshots
+      source:
+        git:
+          repo: https://github.com/org/agent-workspace
+          branch: main
+
+    # Persistent agent state — fully cloned on fork (independent copy)
+    - name: state
+      mountPath: /state
+      size: 2Gi
+      forkPolicy: Clone
+
+    # Scratch space — wiped fresh on every fork
+    - name: scratch
+      mountPath: /tmp
+      size: 1Gi
+      forkPolicy: Fresh
+
+  networkPolicy:
+    egress: deny
+    allow:
+      - "api.openai.com:443"
+      - "*.s3.amazonaws.com:443"

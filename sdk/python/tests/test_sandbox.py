@@ -1,0 +1,128 @@
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent_run.sandbox import Sandbox, SandboxFiles
+from agent_run.types import SandboxPhase
+
+
+@pytest.fixture
+def mock_api():
+    return MagicMock()
+
+
+@pytest.fixture
+def ready_sandbox(mock_api):
+    return Sandbox(
+        name="test-sandbox",
+        namespace="default",
+        pool="test-pool",
+        api=mock_api,
+        _endpoint="127.0.0.1:8080",
+        _phase=SandboxPhase.READY,
+    )
+
+
+@pytest.fixture
+def pending_sandbox(mock_api):
+    return Sandbox(
+        name="test-sandbox",
+        namespace="default",
+        pool="test-pool",
+        api=mock_api,
+    )
+
+
+def test_sandbox_repr(ready_sandbox):
+    r = repr(ready_sandbox)
+    assert "test-sandbox" in r
+    assert "Ready" in r
+
+
+def test_sandbox_endpoint(ready_sandbox):
+    assert ready_sandbox.endpoint == "127.0.0.1:8080"
+
+
+def test_sandbox_phase(ready_sandbox):
+    assert ready_sandbox.phase == SandboxPhase.READY
+
+
+def test_pending_sandbox_phase(pending_sandbox):
+    assert pending_sandbox.phase == SandboxPhase.PENDING
+
+
+def test_sandbox_context_manager(mock_api):
+    sandbox = Sandbox(
+        name="ctx-sandbox",
+        namespace="default",
+        pool="test-pool",
+        api=mock_api,
+        _endpoint="127.0.0.1:8080",
+        _phase=SandboxPhase.READY,
+    )
+
+    with sandbox as s:
+        assert s.name == "ctx-sandbox"
+
+    mock_api.delete_namespaced_custom_object.assert_called_once()
+
+
+def test_sandbox_terminate(ready_sandbox, mock_api):
+    ready_sandbox.terminate()
+
+    mock_api.delete_namespaced_custom_object.assert_called_once_with(
+        group="agentrun.dev",
+        version="v1alpha1",
+        namespace="default",
+        plural="sandboxclaims",
+        name="test-sandbox",
+    )
+    assert ready_sandbox.phase == SandboxPhase.TERMINATING
+
+
+def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
+    mock_api.get_namespaced_custom_object.return_value = {
+        "status": {
+            "readyForks": 2,
+            "forks": [
+                {"name": "fork-1", "endpoint": "127.0.0.1:9001", "phase": "Ready", "sandboxID": "f1", "node": "n1"},
+                {"name": "fork-2", "endpoint": "127.0.0.1:9002", "phase": "Ready", "sandboxID": "f2", "node": "n1"},
+            ],
+        }
+    }
+
+    forks = ready_sandbox.fork(2)
+
+    mock_api.create_namespaced_custom_object.assert_called_once()
+    call_kwargs = mock_api.create_namespaced_custom_object.call_args
+    body = call_kwargs.kwargs.get("body") or call_kwargs[1].get("body")
+    assert body["kind"] == "SandboxFork"
+    assert body["spec"]["replicas"] == 2
+    assert body["spec"]["sourceRef"]["name"] == "test-sandbox"
+
+    assert len(forks) == 2
+    assert forks[0].phase == SandboxPhase.READY
+    assert forks[1].phase == SandboxPhase.READY
+
+
+def test_sandbox_wait_ready_polls(pending_sandbox, mock_api):
+    mock_api.get_namespaced_custom_object.side_effect = [
+        {"status": {"phase": "Pending"}},
+        {"status": {"phase": "Restoring"}},
+        {"status": {"phase": "Ready", "endpoint": "10.0.0.5:8080"}},
+    ]
+
+    pending_sandbox._wait_ready(timeout=5.0)
+
+    assert pending_sandbox.phase == SandboxPhase.READY
+    assert pending_sandbox._endpoint == "10.0.0.5:8080"
+    assert mock_api.get_namespaced_custom_object.call_count == 3
+
+
+def test_sandbox_wait_ready_failed(pending_sandbox, mock_api):
+    mock_api.get_namespaced_custom_object.return_value = {
+        "status": {"phase": "Failed"}
+    }
+
+    with pytest.raises(RuntimeError, match="failed"):
+        pending_sandbox._wait_ready(timeout=1.0)

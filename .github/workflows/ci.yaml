@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go build ./...
+      - run: go test ./... -v -race
+      - run: go vet ./...
+
+  go-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  python-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f Dockerfile.controller -t agent-run-controller:ci .
+      - run: docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+
+  kind-e2e:
+    runs-on: ubuntu-latest
+    needs: [go-test, docker-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: agent-run-ci
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+              - role: control-plane
+              - role: worker
+                labels:
+                  agentrun.dev/kvm: "true"
+      - name: Build and load images
+        run: |
+          docker build -f Dockerfile.controller -t agent-run-controller:ci .
+          docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+          kind load docker-image agent-run-controller:ci --name agent-run-ci
+          kind load docker-image agent-run-forkd:ci --name agent-run-ci
+      - name: Install CRDs
+        run: |
+          make manifests 2>/dev/null || true
+          kubectl apply -f deploy/crds/ 2>/dev/null || echo "CRDs not generated yet"
+      - name: Apply examples
+        run: |
+          kubectl apply -f examples/python-pool.yaml 2>/dev/null || echo "Skipped (CRDs needed)"

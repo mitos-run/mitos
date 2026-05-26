@@ -1,0 +1,43 @@
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-agent
+spec:
+  image: python:3.12-slim
+  init:
+    - "pip install numpy pandas requests httpx"
+  resources:
+    cpu: "1"
+    memory: "512Mi"
+  volumes:
+    # Agent working directory — CoW-forked so each sandbox gets independent writes
+    - name: workspace
+      mountPath: /workspace
+      size: 5Gi
+      storageClass: btrfs-csi
+      forkPolicy: Snapshot
+      snapshotClass: btrfs-snapshots
+
+    # Scratch space — wiped on every fork
+    - name: tmp
+      mountPath: /tmp
+      size: 1Gi
+      forkPolicy: Fresh
+
+  networkPolicy:
+    egress: deny
+    allow:
+      - "api.openai.com:443"
+      - "api.anthropic.com:443"
+      - "pypi.org:443"
+---
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxPool
+metadata:
+  name: python-agent-pool
+spec:
+  templateRef:
+    name: python-agent
+  replicas: 10
+  snapshotAfter: Ready
+  scaleDownAfterSnapshot: true

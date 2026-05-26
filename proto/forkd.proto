@@ -1,0 +1,245 @@
+syntax = "proto3";
+
+package forkd;
+
+option go_package = "github.com/agent-run/agent-run/proto/forkd";
+
+service ForkDaemon {
+  // Template management
+  rpc CreateTemplate(CreateTemplateRequest) returns (CreateTemplateResponse);
+  rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+
+  // Snapshot management
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+
+  // Fork operations (hot path — must be <2ms)
+  rpc Fork(ForkRequest) returns (ForkResponse);
+  rpc ForkRunning(ForkRunningRequest) returns (ForkRunningResponse);
+
+  // Sandbox lifecycle
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc ExecStream(ExecStreamRequest) returns (stream ExecStreamResponse);
+  rpc Terminate(TerminateRequest) returns (TerminateResponse);
+
+  // File operations
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc ListDir(ListDirRequest) returns (ListDirResponse);
+
+  // Node capacity
+  rpc GetCapacity(GetCapacityRequest) returns (GetCapacityResponse);
+}
+
+// --- Template management ---
+
+message CreateTemplateRequest {
+  string template_id = 1;
+  string image = 2;
+  repeated string init_commands = 3;
+  string kernel_path = 4;
+  ResourceSpec resources = 5;
+}
+
+message CreateTemplateResponse {
+  string template_id = 1;
+  double creation_time_ms = 2;
+}
+
+message DeleteTemplateRequest {
+  string template_id = 1;
+}
+
+message DeleteTemplateResponse {}
+
+message ListTemplatesRequest {}
+
+message ListTemplatesResponse {
+  repeated TemplateInfo templates = 1;
+}
+
+message TemplateInfo {
+  string template_id = 1;
+  string image = 2;
+  int64 snapshot_size_bytes = 3;
+  int64 created_at_unix = 4;
+  bool ready = 5;
+}
+
+// --- Snapshot management ---
+
+message CreateSnapshotRequest {
+  string template_id = 1;
+  string snapshot_id = 2;
+  // Wait for this condition before snapshotting
+  string wait_condition = 3;
+  // Delay after condition is met
+  int32 delay_seconds = 4;
+}
+
+message CreateSnapshotResponse {
+  string snapshot_id = 1;
+  double snapshot_time_ms = 2;
+  int64 snapshot_size_bytes = 3;
+}
+
+message DeleteSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {}
+
+// --- Fork operations ---
+
+message ForkRequest {
+  string snapshot_id = 1;
+  string sandbox_id = 2;
+  repeated EnvVar env = 3;
+  repeated SecretVar secrets = 4;
+  NetworkConfig network = 5;
+}
+
+message ForkResponse {
+  string sandbox_id = 1;
+  string endpoint = 2;
+  double fork_time_ms = 3;
+  int64 memory_unique_bytes = 4;
+  int64 memory_shared_bytes = 5;
+}
+
+message ForkRunningRequest {
+  string source_sandbox_id = 1;
+  string new_sandbox_id = 2;
+  bool pause_source = 3;
+  repeated EnvVar env = 4;
+}
+
+message ForkRunningResponse {
+  string sandbox_id = 1;
+  string endpoint = 2;
+  double checkpoint_time_ms = 3;
+  double fork_time_ms = 4;
+}
+
+// --- Exec ---
+
+message ExecRequest {
+  string sandbox_id = 1;
+  string command = 2;
+  int32 timeout_seconds = 3;
+  string working_dir = 4;
+  repeated EnvVar env = 5;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  double exec_time_ms = 4;
+}
+
+message ExecStreamRequest {
+  string sandbox_id = 1;
+  string command = 2;
+  int32 timeout_seconds = 3;
+  string working_dir = 4;
+  repeated EnvVar env = 5;
+}
+
+message ExecStreamResponse {
+  enum Stream {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  Stream stream = 1;
+  bytes data = 2;
+  // Set on the final message
+  bool done = 3;
+  int32 exit_code = 4;
+}
+
+// --- Sandbox lifecycle ---
+
+message TerminateRequest {
+  string sandbox_id = 1;
+}
+
+message TerminateResponse {
+  double uptime_seconds = 1;
+}
+
+// --- File operations ---
+
+message ReadFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+}
+
+message ReadFileResponse {
+  bytes content = 1;
+  int64 size = 2;
+}
+
+message WriteFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+  bytes content = 3;
+  uint32 mode = 4;
+}
+
+message WriteFileResponse {}
+
+message ListDirRequest {
+  string sandbox_id = 1;
+  string path = 2;
+}
+
+message ListDirResponse {
+  repeated FileInfo entries = 1;
+}
+
+message FileInfo {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  int64 modified_at_unix = 4;
+  uint32 mode = 5;
+}
+
+// --- Node capacity ---
+
+message GetCapacityRequest {}
+
+message GetCapacityResponse {
+  int32 active_sandboxes = 1;
+  int32 max_sandboxes = 2;
+  int64 memory_total_bytes = 3;
+  int64 memory_used_bytes = 4;
+  int64 memory_shared_bytes = 5;
+  repeated string template_ids = 6;
+  repeated string snapshot_ids = 7;
+  bool kvm_available = 8;
+}
+
+// --- Shared types ---
+
+message ResourceSpec {
+  int32 vcpus = 1;
+  int64 memory_mb = 2;
+}
+
+message EnvVar {
+  string key = 1;
+  string value = 2;
+}
+
+message SecretVar {
+  string key = 1;
+  string value = 2;
+}
+
+message NetworkConfig {
+  string egress_policy = 1;
+  repeated string allow_list = 2;
+}

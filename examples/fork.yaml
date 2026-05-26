@@ -1,0 +1,8 @@
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxFork
+metadata:
+  name: parallel-attempt
+spec:
+  sourceRef:
+    name: agent-session-1
+  replicas: 3

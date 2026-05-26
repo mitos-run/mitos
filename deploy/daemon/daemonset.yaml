@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agent-run-forkd
+  namespace: agent-run
+  labels:
+    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/component: forkd
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-run
+      app.kubernetes.io/component: forkd
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-run
+        app.kubernetes.io/component: forkd
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        agentrun.dev/kvm: "true"
+
+      tolerations:
+        - key: agentrun.dev/dedicated
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: forkd
+          image: ghcr.io/agent-run/forkd:latest
+          args:
+            - --listen=:9090
+            - --data-dir=/var/lib/agent-run
+            - --firecracker=/usr/local/bin/firecracker
+            - --kernel=/var/lib/agent-run/vmlinux
+            - --metrics=:9091
+          ports:
+            - name: grpc
+              containerPort: 9090
+            - name: metrics
+              containerPort: 9091
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "16Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/agent-run
+            - name: kvm
+              mountPath: /dev/kvm
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/agent-run
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
