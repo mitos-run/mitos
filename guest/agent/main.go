@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/vsock"
+	"golang.org/x/sys/unix"
 )
 
 // Guest agent: runs as init (PID 1) inside the Firecracker VM.
@@ -283,19 +284,18 @@ func writeResponse(conn net.Conn, resp vsock.Response) {
 // Falls back to a Unix socket for testing.
 func listenVsock(port int) (net.Listener, error) {
 	// Try AF_VSOCK first (inside Firecracker VM)
-	fd, err := syscall.Socket(40, syscall.SOCK_STREAM, 0) // AF_VSOCK = 40
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err == nil {
-		// Bind to VMADDR_CID_ANY (uint32 max) on the agent port
-		addr := &syscall.SockaddrVM{
+		addr := &unix.SockaddrVM{
 			CID:  0xFFFFFFFF, // VMADDR_CID_ANY
 			Port: uint32(port),
 		}
-		if err := syscall.Bind(fd, addr); err != nil {
-			syscall.Close(fd)
+		if err := unix.Bind(fd, addr); err != nil {
+			unix.Close(fd)
 			return nil, fmt.Errorf("vsock bind: %w", err)
 		}
-		if err := syscall.Listen(fd, 128); err != nil {
-			syscall.Close(fd)
+		if err := unix.Listen(fd, 128); err != nil {
+			unix.Close(fd)
 			return nil, fmt.Errorf("vsock listen: %w", err)
 		}
 		file := os.NewFile(uintptr(fd), "vsock")
@@ -309,12 +309,8 @@ func listenVsock(port int) (net.Listener, error) {
 	return net.Listen("unix", sockPath)
 }
 
-// SockaddrVM is the vsock socket address.
-// This is defined in syscall on Linux but we need it for AF_VSOCK.
 func init() {
-	// Ensure /bin/sh exists for exec
 	if _, err := os.Stat("/bin/sh"); err != nil {
-		// Try busybox
 		paths := []string{"/bin/busybox", "/usr/bin/sh", "/usr/bin/bash"}
 		for _, p := range paths {
 			if _, err := os.Stat(p); err == nil {
@@ -323,9 +319,5 @@ func init() {
 			}
 		}
 	}
-}
-
-// Ensure workspace exists with some defaults
-func init() {
-	_ = strings.Join(nil, "") // force strings import
+	_ = strings.Join(nil, "")
 }
