@@ -57,7 +57,7 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
 				Reason:             "SecretInheritanceDenied",
-				Message:            "source claim holds secrets; set spec.allowSecretInheritance=true to fork it (forks duplicate guest memory, including secret values)",
+				Message:            "source claim holds secrets; recreate the fork with spec.allowSecretInheritance=true to permit it (forks duplicate guest memory, including secret values)",
 			})
 			if err := r.Status().Update(ctx, &fork); err != nil {
 				return ctrl.Result{}, err

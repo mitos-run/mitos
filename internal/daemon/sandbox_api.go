@@ -37,6 +37,8 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 // forkd deliberately does NOT enable this: its vsock paths come from the
 // fork engine, and a fallback to a global socket could deliver claim-time
 // secrets to an unrelated local process.
+//
+// Must be called before the API serves requests; the flag is not synchronized.
 func (api *SandboxAPI) EnableUnixFallback() {
 	api.unixFallback = true
 }
