@@ -115,10 +115,11 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - ⬜ Clock resync after restore; test: wall-clock within 500ms, post-snapshot
   TLS cert validates
 - ⬜ Live-fork secret policy: reject without `allowSecretInheritance: true`
-- ✅ Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
-  `privileged: true` for an explicit capability list (direct-exec dev path
-  behind an empty `--jailer` and sandbox-server remain unjailed; tracked in
-  threat model residuals)
+- 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
+  `privileged: true` for an explicit capability list (implemented;
+  capability set unproven until kvm-test runs under `--jailer`; direct-exec
+  dev path behind an empty `--jailer` and sandbox-server remain unjailed;
+  tracked in threat model residuals)
 - ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
   (rotation and token expiry pending; tracked in threat model residuals)
 - ⬜ Snapshot content addressing (digest in CRD status, verify-on-load)

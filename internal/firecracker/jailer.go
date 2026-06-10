@@ -183,6 +183,47 @@ func sameInode(a, b string) (bool, error) {
 	return os.SameFile(ai, bi), nil
 }
 
+// withinRoot reports whether path is root itself or lexically contained
+// inside it after cleaning. The root is compared in both its given and
+// symlink-resolved forms, so a root reached through a benign directory
+// symlink (such as /var on darwin) still contains its own resolved
+// children. The path is compared after lexical cleaning only; callers
+// that must defeat symlinks in the path resolve it first.
+func withinRoot(path, root string) (bool, error) {
+	clean := filepath.Clean(path)
+	roots := []string{filepath.Clean(root)}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		roots = append(roots, filepath.Clean(resolved))
+	}
+	for _, r := range roots {
+		if clean == r || strings.HasPrefix(clean, r+string(filepath.Separator)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// guardJailerLayout refuses a VM id whose dot segments would place the
+// per-VM jailer directories outside the chroot base (C1 defense in depth:
+// jailerChrootDir and friends use filepath.Join, which cleans `..`
+// segments, so a crafted id could otherwise escape). It runs before any
+// mkdir, chown, link, or exec on those paths.
+func guardJailerLayout(cfg VMConfig) error {
+	for _, p := range []string{
+		jailerVMDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
+		jailerChrootDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
+	} {
+		ok, err := withinRoot(p, cfg.Jailer.ChrootBaseDir)
+		if err != nil {
+			return fmt.Errorf("verify jailer dir %q stays under the chroot base: %w", p, err)
+		}
+		if !ok {
+			return fmt.Errorf("refusing VM id %q: its jailer directory %q escapes the chroot base %q; use a plain identifier without dots or path separators", cfg.ID, p, cfg.Jailer.ChrootBaseDir)
+		}
+	}
+	return nil
+}
+
 // guardChrootSource refuses any path that is not absolute or escapes both
 // the VM workspace and the data dir. It is applied to the requested path
 // and again to its symlink-resolved form.
@@ -195,17 +236,12 @@ func guardChrootSource(cfg VMConfig, p string) error {
 		if root == "" {
 			continue
 		}
-		roots := []string{filepath.Clean(root)}
-		// Compare against the symlink-resolved root as well, so a root
-		// reached through a benign directory symlink (such as /var on
-		// darwin) still contains its own resolved children.
-		if resolved, err := filepath.EvalSymlinks(root); err == nil {
-			roots = append(roots, filepath.Clean(resolved))
+		ok, err := withinRoot(clean, root)
+		if err != nil {
+			return fmt.Errorf("verify %q against chroot source root %q: %w", p, root, err)
 		}
-		for _, r := range roots {
-			if clean == r || strings.HasPrefix(clean, r+string(filepath.Separator)) {
-				return nil
-			}
+		if ok {
+			return nil
 		}
 	}
 	return fmt.Errorf("refusing to expose %q inside the jailer chroot: outside the VM workspace (%q) and the data dir (%q); place VM artifacts under the data dir", p, cfg.WorkDir, cfg.Jailer.DataDir)

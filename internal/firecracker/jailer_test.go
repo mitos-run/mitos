@@ -3,6 +3,7 @@ package firecracker
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -406,6 +407,142 @@ func TestStartVMJailedFailsClosedOnMisconfiguration(t *testing.T) {
 			t.Fatal("StartVM accepted a jailed VM without a uid allocator")
 		}
 	})
+}
+
+// TestStartVMJailedRefusesIDEscapingChrootBase covers C1 defense in depth:
+// even if a caller forgets to validate the VM id, StartVM must refuse an id
+// whose dot segments would place the jailer directories outside the chroot
+// base, and it must do so before any mkdir or exec touches the host.
+func TestStartVMJailedRefusesIDEscapingChrootBase(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "jail")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultVMConfig()
+	cfg.ID = "../../pwn"
+	cfg.WorkDir = filepath.Join(root, "data", "sandboxes", "vm-1")
+	cfg.Jailer = testJailerConfig(base, filepath.Join(root, "data"))
+	cfg.Jailer.Allocator = NewUIDAllocator(64000, 64000)
+
+	_, err := StartVM(cfg)
+	if err == nil {
+		t.Fatal("StartVM accepted a VM id that escapes the chroot base")
+	}
+	// The refusal must happen before any directory is created at the
+	// escaped location (root/pwn is where the traversal would land).
+	if _, statErr := os.Stat(filepath.Join(root, "pwn")); !os.IsNotExist(statErr) {
+		t.Fatalf("StartVM created a directory outside the chroot base: stat = %v", statErr)
+	}
+	// Nothing may have been created under the chroot base either.
+	entries, readErr := os.ReadDir(base)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("StartVM created %d entries under the chroot base before refusing", len(entries))
+	}
+	// The uid must not leak on the refused launch.
+	if _, _, acqErr := cfg.Jailer.Allocator.Acquire(); acqErr != nil {
+		t.Fatalf("uid leaked by refused StartVM: %v", acqErr)
+	}
+}
+
+func TestWithinRoot(t *testing.T) {
+	cases := []struct {
+		path, root string
+		want       bool
+	}{
+		{"/srv/jailer/firecracker/vm-1/root", "/srv/jailer", true},
+		{"/srv/jailer", "/srv/jailer", true},
+		{"/srv/jailer-evil", "/srv/jailer", false},
+		{"/srv/pwn/root", "/srv/jailer", false},
+		{"/srv/jailer/firecracker/../../pwn", "/srv/jailer", false},
+		{"/etc/passwd", "/srv/jailer", false},
+	}
+	for _, tc := range cases {
+		got, err := withinRoot(tc.path, tc.root)
+		if err != nil {
+			t.Fatalf("withinRoot(%q, %q): %v", tc.path, tc.root, err)
+		}
+		if got != tc.want {
+			t.Errorf("withinRoot(%q, %q) = %v, want %v", tc.path, tc.root, got, tc.want)
+		}
+	}
+}
+
+// TestKillReapsProcessBeforeReleasingUID covers I2: Kill must Wait on the
+// killed process (reaping it) BEFORE returning the jailed uid to the
+// allocator, so a new VM can never share a uid with a still-running
+// predecessor. The wait seam acquires from a single-uid allocator: if the
+// uid were released before the wait, that Acquire would succeed.
+func TestKillReapsProcessBeforeReleasingUID(t *testing.T) {
+	alloc := NewUIDAllocator(64000, 64000)
+	uid, _, err := alloc.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	uidFreeDuringWait := false
+	waited := false
+	c := &Client{
+		process:   cmd.Process,
+		jailedUID: uid,
+		allocator: alloc,
+		wait: func() error {
+			waited = true
+			if got, _, acqErr := alloc.Acquire(); acqErr == nil {
+				uidFreeDuringWait = true
+				alloc.Release(got)
+			}
+			return cmd.Wait()
+		},
+	}
+
+	if err := c.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if !waited {
+		t.Fatal("Kill did not wait on the killed process")
+	}
+	if uidFreeDuringWait {
+		t.Fatal("uid was released before the killed process was reaped")
+	}
+	// After Kill the uid must be free again.
+	got, _, err := alloc.Acquire()
+	if err != nil {
+		t.Fatalf("uid not released by Kill: %v", err)
+	}
+	if got != uid {
+		t.Fatalf("unexpected uid %d, want %d", got, uid)
+	}
+	// The process must be reaped: Wait on an already-waited process errors.
+	if _, waitErr := cmd.Process.Wait(); waitErr == nil {
+		t.Fatal("process was not reaped by Kill")
+	}
+}
+
+// TestKillReapsDirectExecProcess covers the direct-exec path of I2: no
+// allocator is involved, but Kill must still reap the killed process so it
+// does not linger as a zombie.
+func TestKillReapsDirectExecProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{process: cmd.Process, wait: cmd.Wait}
+	if err := c.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, waitErr := cmd.Process.Wait(); waitErr == nil {
+		t.Fatal("process was not reaped by Kill")
+	}
 }
 
 func TestStartVMJailedReleasesUIDOnLaunchFailure(t *testing.T) {

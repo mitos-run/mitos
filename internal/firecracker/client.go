@@ -21,6 +21,11 @@ type Client struct {
 	socketPath string
 	http       *http.Client
 	process    *os.Process
+	// wait reaps the launched process (exec.Cmd.Wait for StartVM
+	// clients). Kill calls it after the kill signal so the process is
+	// gone before its uid is released; nil for clients without a child
+	// process (ConnectVM).
+	wait func() error
 
 	// Jailer state; zero values for direct exec.
 	chrootDir   string // host path of the chroot root, "" when not jailed
@@ -66,6 +71,7 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	client := &Client{
 		socketPath: socketPath,
 		process:    cmd.Process,
+		wait:       cmd.Wait,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -78,6 +84,8 @@ func StartVM(cfg VMConfig) (*Client, error) {
 
 	if err := client.waitReady(5 * time.Second); err != nil {
 		_ = cmd.Process.Kill()
+		// Reap the failed launch so it does not linger as a zombie (I2).
+		_ = cmd.Wait()
 		return nil, fmt.Errorf("firecracker not ready: %w", err)
 	}
 
@@ -96,6 +104,12 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	}
 	if cfg.Jailer.Allocator == nil {
 		return nil, fmt.Errorf("jailer launch requires a uid allocator; construct the engine with a uid range")
+	}
+	// C1 defense in depth: refuse ids whose `..` segments would move the
+	// per-VM directories outside the chroot base, before any allocation
+	// or filesystem operation derived from the id.
+	if err := guardJailerLayout(cfg); err != nil {
+		return nil, err
 	}
 
 	uid, gid, err := cfg.Jailer.Allocator.Acquire()
@@ -132,6 +146,7 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	client := &Client{
 		socketPath:  socketPath,
 		process:     cmd.Process,
+		wait:        cmd.Wait,
 		chrootDir:   chrootDir,
 		jailerVMDir: jailerVMDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
 		jailedUID:   uid,
@@ -149,6 +164,9 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 
 	if err := client.waitReady(10 * time.Second); err != nil {
 		_ = cmd.Process.Kill()
+		// Reap before the deferred uid Release (I2): the uid must not be
+		// reusable while the killed jailer can still run under it.
+		_ = cmd.Wait()
 		return nil, fmt.Errorf("jailed firecracker not ready: %w", err)
 	}
 
@@ -346,6 +364,16 @@ func (c *Client) Kill() error {
 	var killErr error
 	if c.process != nil {
 		killErr = c.process.Kill()
+		// Reap the killed process BEFORE releasing its uid (I2): until
+		// the wait returns, the process can still run under the jailed
+		// uid, and releasing first could hand that uid to a new VM while
+		// the old one lives. The wait error is ignored; it reports the
+		// kill signal, and the zombie is reaped either way.
+		if c.wait != nil {
+			_ = c.wait()
+		} else {
+			_, _ = c.process.Wait()
+		}
 	}
 	// Jailed VMs: return the dedicated uid to the pool and remove the
 	// per-VM chroot workspace (hard links only; originals stay put).
