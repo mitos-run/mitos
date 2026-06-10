@@ -91,3 +91,33 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestPoolSnapshotAccounting(t *testing.T) {
+	addrWith, _ := startFakeForkd(t, "py-tmpl")
+	addrWithout, engineWithout := startFakeForkd(t)
+
+	registry := NewNodeRegistry()
+	registry.Register(&NodeInfo{Name: "has", Endpoint: addrWith, TemplateIDs: []string{"py-tmpl"}})
+	registry.Register(&NodeInfo{Name: "lacks", Endpoint: addrWithout})
+
+	r := &SandboxPoolReconciler{NodeRegistry: registry}
+
+	if got := r.readySnapshotCount("py-tmpl"); got != 1 {
+		t.Fatalf("ready = %d, want 1", got)
+	}
+
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", 5)
+	if err != nil {
+		t.Fatalf("createSnapshotsOnNodes: %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want 1 (only one node lacks the template)", created)
+	}
+	caps := engineWithout.GetCapacity()
+	if len(caps.TemplateIDs) != 1 || caps.TemplateIDs[0] != "py-tmpl" {
+		t.Fatalf("template not created on lacking node: %v", caps.TemplateIDs)
+	}
+	if got := r.readySnapshotCount("py-tmpl"); got != 2 {
+		t.Fatalf("ready after create = %d, want 2", got)
+	}
+}

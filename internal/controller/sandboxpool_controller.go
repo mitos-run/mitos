@@ -2,10 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,24 +36,25 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Count ready snapshots across nodes
-	readySnapshots := r.countReadySnapshots(ctx, &pool)
+	templateID := pool.Spec.TemplateRef.Name
+	readySnapshots := r.readySnapshotCount(templateID)
 	desired := pool.Spec.Replicas
 
 	if readySnapshots < desired {
 		deficit := desired - readySnapshots
 		logger.Info("snapshot deficit", "ready", readySnapshots, "desired", desired, "creating", deficit)
-
-		if err := r.createSnapshots(ctx, &pool, &template, deficit); err != nil {
+		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, deficit)
+		if err != nil {
 			logger.Error(err, "failed to create snapshots")
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
+		readySnapshots += created
 	}
 
 	// Update status
 	pool.Status.ReadySnapshots = readySnapshots
 	pool.Status.TotalSnapshots = readySnapshots
-	pool.Status.NodeDistribution = r.getNodeDistribution(ctx, &pool)
+	pool.Status.NodeDistribution = r.nodeDistribution(templateID)
 
 	now := metav1.Now()
 	pool.Status.LastSnapshotTime = &now
@@ -70,20 +73,52 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-func (r *SandboxPoolReconciler) createSnapshots(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, count int32) error {
-	// 1. Find nodes with capacity for new snapshots
-	// 2. For each node, call forkd.CreateTemplate + forkd.CreateSnapshot via gRPC
-	// 3. Distribute snapshots across nodes for availability
-	return nil
+// readySnapshotCount counts healthy nodes that hold the pool's template
+// snapshot. One snapshot per node per template, so replicas are capped by
+// node count.
+func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
+	return int32(len(r.NodeRegistry.NodesWithTemplate(templateID)))
 }
 
-func (r *SandboxPoolReconciler) countReadySnapshots(ctx context.Context, pool *v1alpha1.SandboxPool) int32 {
-	// Query all forkd instances for snapshots matching this pool
-	return 0
+// createSnapshotsOnNodes asks up to deficit healthy nodes that lack the
+// template to build it. Returns how many builds were started.
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, deficit int32) (int32, error) {
+	var created int32
+	var errs []error
+	for _, node := range r.NodeRegistry.ListNodes() {
+		if created >= deficit {
+			break
+		}
+		if !node.isHealthy() || node.hasSnapshot(templateID) {
+			continue
+		}
+		conn, err := r.NodeRegistry.GetConnection(node.Name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := forkdpb.NewForkDaemonClient(conn).CreateTemplate(ctx, &forkdpb.CreateTemplateRequest{
+			TemplateId: templateID,
+			Image:      image,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
+			continue
+		}
+		r.NodeRegistry.AddTemplate(node.Name, templateID)
+		created++
+	}
+	if created == 0 && len(errs) > 0 {
+		return 0, errors.Join(errs...)
+	}
+	return created, nil
 }
 
-func (r *SandboxPoolReconciler) getNodeDistribution(ctx context.Context, pool *v1alpha1.SandboxPool) map[string]int32 {
-	return nil
+func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]int32 {
+	dist := make(map[string]int32)
+	for _, n := range r.NodeRegistry.NodesWithTemplate(templateID) {
+		dist[n.Name] = 1
+	}
+	return dist
 }
 
 func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {

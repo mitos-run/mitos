@@ -130,6 +130,24 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 	return out
 }
 
+// AddTemplate records that a node now holds the given template snapshot.
+// Takes the write lock so NodeInfo.TemplateIDs is never mutated concurrently
+// with readers like NodesWithTemplate.
+func (r *NodeRegistry) AddTemplate(nodeName, templateID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	node, ok := r.nodes[nodeName]
+	if !ok {
+		return
+	}
+	for _, t := range node.TemplateIDs {
+		if t == templateID {
+			return
+		}
+	}
+	node.TemplateIDs = append(node.TemplateIDs, templateID)
+}
+
 // GetConnection returns a gRPC connection to a node's forkd, dialing once.
 func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
 	r.mu.Lock()
