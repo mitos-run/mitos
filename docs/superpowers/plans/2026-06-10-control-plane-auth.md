@@ -195,9 +195,9 @@ func RequireControllerIdentity(ctx context.Context, req any, info *grpc.UnarySer
 
 ### Task 5: docs truth pass + verification + PR
 
-- [ ] Threat model section 3: controller-forkd row flips to mitigated-when-deployed-as-shipped (mTLS, identity-pinned; programmatic insecure construction remains for tests and is flagged); sandbox HTTP API row flips to mitigated (per-sandbox bearer tokens, constant-time compare, claim-owned Secrets); section 6 plaintext-wire caveat replaced (secrets now transit mTLS when deployed as shipped). Keep honest residuals: token Secrets are readable by anyone with namespace-wide secret read; no rotation yet; jailer still open (issue #2).
-- [ ] ROADMAP section 1: flip the mTLS line to done with residuals noted.
-- [ ] Full verification (build, vet, lint darwin+linux, all Go suites with envtest, Python suite, dash grep zero, `git status` clean except intended).
-- [ ] Push branch `feat/control-plane-auth`, PR titled `Control-plane auth: forkd mTLS identity and sandbox API tokens` with `Closes #4`, watch CI, rerun transient kind-e2e Docker Hub flakes, merge when green per the standing workflow.
+- [x] Threat model section 3: controller-forkd row flips to mitigated-when-deployed-as-shipped (mTLS, identity-pinned; programmatic insecure construction remains for tests and is flagged); sandbox HTTP API row flips to mitigated (per-sandbox bearer tokens, constant-time compare, claim-owned Secrets); section 6 plaintext-wire caveat replaced (secrets now transit mTLS when deployed as shipped). Keep honest residuals: token Secrets are readable by anyone with namespace-wide secret read; no rotation yet; jailer still open (issue #2).
+- [x] ROADMAP section 1: flip the mTLS line to done with residuals noted.
+- [x] Full verification (build, vet, lint darwin+linux, all Go suites with envtest, Python suite, dash grep zero, `git status` clean except intended).
+- [x] Push branch `feat/control-plane-auth`, PR titled `Control-plane auth: forkd mTLS identity and sandbox API tokens` with `Closes #4`, watch CI, rerun transient kind-e2e Docker Hub flakes, merge when green per the standing workflow.
 
 **Out of scope:** token rotation; attenuated/macaroon tokens (issue #25 builds on this); jailer (#2); RBAC narrowing of controller secret reads (tracked in threat model section 6).
