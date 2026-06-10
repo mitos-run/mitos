@@ -1,0 +1,7 @@
+* @stubbi
+# Security-sensitive paths: named-human review required (SECURITY.md)
+/internal/fork/ @stubbi
+/internal/firecracker/ @stubbi
+/internal/daemon/ @stubbi
+/guest/ @stubbi
+/docs/threat-model.md @stubbi
