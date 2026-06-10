@@ -63,14 +63,7 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           cluster_name: agent-run-ci
-          config: |
-            kind: Cluster
-            apiVersion: kind.x-k8s.io/v1alpha4
-            nodes:
-              - role: control-plane
-              - role: worker
-                labels:
-                  agentrun.dev/kvm: "true"
+          config: hack/kind-config.yaml
       - name: Build and load images
         run: |
           docker build -f Dockerfile.controller -t agent-run-controller:ci .

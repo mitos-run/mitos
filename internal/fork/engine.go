@@ -121,7 +121,7 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 
 	// Load snapshot — Firecracker mmaps the mem file with MAP_PRIVATE
 	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {
-		fcClient.Kill()
+		_ = fcClient.Kill()
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
 
@@ -173,7 +173,11 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		if err := source.fcClient.Pause(); err != nil {
 			return nil, fmt.Errorf("pause source: %w", err)
 		}
-		defer source.fcClient.Resume()
+		defer func() {
+			if err := source.fcClient.Resume(); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: resume source %s after checkpoint: %v\n", sourceSandboxID, err)
+			}
+		}()
 	}
 
 	// Checkpoint the running sandbox
@@ -192,18 +196,24 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 
 	// Create a temporary "template" from the checkpoint so Fork can find it
 	tmpTemplateDir := filepath.Join(e.dataDir, "templates", sourceSandboxID+"-live")
-	os.MkdirAll(filepath.Join(tmpTemplateDir, "snapshot"), 0755)
+	if err := os.MkdirAll(filepath.Join(tmpTemplateDir, "snapshot"), 0755); err != nil {
+		return nil, fmt.Errorf("create live-template dir: %w", err)
+	}
+	defer os.RemoveAll(tmpTemplateDir)
 
 	// Symlink the checkpoint files as a snapshot
-	os.Symlink(
+	if err := os.Symlink(
 		filepath.Join(checkpointDir, "mem"),
 		filepath.Join(tmpTemplateDir, "snapshot", "mem"),
-	)
-	os.Symlink(
+	); err != nil {
+		return nil, fmt.Errorf("symlink checkpoint mem: %w", err)
+	}
+	if err := os.Symlink(
 		filepath.Join(checkpointDir, "vmstate"),
 		filepath.Join(tmpTemplateDir, "snapshot", "vmstate"),
-	)
-	defer os.RemoveAll(tmpTemplateDir)
+	); err != nil {
+		return nil, fmt.Errorf("symlink checkpoint vmstate: %w", err)
+	}
 
 	return e.Fork(sourceSandboxID+"-live", newSandboxID, ForkOpts{})
 }
@@ -223,7 +233,7 @@ func (e *Engine) Terminate(sandboxID string) error {
 		sandbox.agentClient.Close()
 	}
 	if sandbox.fcClient != nil {
-		sandbox.fcClient.Kill()
+		_ = sandbox.fcClient.Kill()
 	}
 
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)

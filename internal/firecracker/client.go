@@ -60,7 +60,7 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	}
 
 	if err := client.waitReady(5 * time.Second); err != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("firecracker not ready: %w", err)
 	}
 

@@ -73,7 +73,9 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	apiHandler := sandboxAPI.Handler()
 	mux.Handle("/v1/", apiHandler)
 
-	http.ListenAndServe(addr, mux)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("forkd: http server: %v", err)
+	}
 }
 
 // Fork handles a fork request from the controller.

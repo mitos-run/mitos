@@ -66,7 +66,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	os.MkdirAll(dataDir, 0755)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error: create data dir %s: %v\n", dataDir, err)
+		os.Exit(1)
+	}
 
 	s := &server{
 		rootfsPath: rootfsPath,
@@ -187,7 +190,7 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 
 	info := &sandboxInfo{
 		ID: req.ID, TemplateID: req.Template,
-		Endpoint: fmt.Sprintf("http://localhost:8080"), CreatedAt: time.Now(),
+		Endpoint: "http://localhost:8080", CreatedAt: time.Now(),
 		ForkTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
 	}
 
@@ -198,7 +201,10 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// In real mode, register the vsock connection for exec/files
 	if !s.mockMode {
 		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
-		s.sandboxAPI.RegisterSandbox(req.ID, vsockPath)
+		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
+			// Non-fatal: the sandbox exists but exec/files won't work until the agent is reachable.
+			log.Printf("register agent for sandbox %q: %v", req.ID, err)
+		}
 	}
 
 	log.Printf("fork %q from %q in %.2fms", req.ID, req.Template, info.ForkTimeMs)
@@ -236,11 +242,11 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 
 func resp(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func errResp(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

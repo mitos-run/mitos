@@ -67,7 +67,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "no node with ready snapshot")
 		claim.Status.Phase = v1alpha1.SandboxPending
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
@@ -76,7 +77,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "volume preparation failed")
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 	_ = volumes
@@ -86,7 +88,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 
@@ -98,12 +101,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if isNotFound(err) {
 			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
 			claim.Status.Phase = v1alpha1.SandboxPending
-			r.Status().Update(ctx, &claim)
+			// Best-effort status write; the return below already requeues or surfaces the error.
+			_ = r.Status().Update(ctx, &claim)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 
@@ -144,7 +149,8 @@ func (r *SandboxClaimReconciler) reconcileTimeout(ctx context.Context, claim *v1
 	deadline := claim.Status.StartedAt.Add(claim.Spec.Timeout.Duration)
 	if time.Now().After(deadline) {
 		claim.Status.Phase = v1alpha1.SandboxTerminating
-		r.Status().Update(ctx, claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, claim)
 		// Terminate via forkd
 		return ctrl.Result{}, nil
 	}

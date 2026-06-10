@@ -62,7 +62,7 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 	if err != nil {
 		return nil, fmt.Errorf("start VM: %w", err)
 	}
-	defer client.Kill()
+	defer func() { _ = client.Kill() }()
 
 	// Configure the VM
 	if err := client.SetBootSource(tm.kernelPath, cfg.BootArgs); err != nil {
