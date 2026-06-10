@@ -6,8 +6,10 @@ on:
     paths:
       - 'internal/firecracker/**'
       - 'internal/fork/**'
+      - 'internal/cas/**'
       - 'guest/**'
       - 'cmd/test-agent/**'
+      - 'cmd/cas-verify/**'
       - 'internal/vsock/**'
   pull_request:
     branches: [main]
@@ -167,6 +169,43 @@ jobs:
           # Clean up
           kill $FC_PID2 2>/dev/null || true
           echo "Firecracker snapshot create/restore test passed"
+
+      # CAS integrity proof on a REAL snapshot. The step above leaves a real
+      # multi-hundred-MB mem + vmstate under /tmp/agent-run-test/fc-test/snapshot
+      # (the runner persists /tmp across steps in one job). cas-verify runs the
+      # content-addressed store over those exact bytes:
+      #   check        proves byte-identical reconstruction (sha256 of every
+      #                Materialized file equals the original);
+      #   tamper-check flips one byte of one chunk in the store and asserts
+      #                Materialize fails, proving the verify-on-load gate on real
+      #                snapshot data, not a unit fixture.
+      # This phase genuinely gates: no continue-on-error.
+      - name: CAS integrity check over the real Firecracker snapshot
+        run: |
+          set -e
+          SNAP=/tmp/agent-run-test/fc-test/snapshot
+          echo "Real snapshot files under verification:"
+          ls -lh $SNAP/
+
+          go build -o /tmp/cas-verify ./cmd/cas-verify/
+
+          # Byte-identical reconstruction of the real mem + vmstate.
+          /tmp/cas-verify check \
+            -dir $SNAP \
+            -store /tmp/agent-run-test/cas-check \
+            -out /tmp/agent-run-test/cas-check-out \
+            -files mem,vmstate
+
+          # Tamper detection: corrupt one chunk, assert Materialize refuses it.
+          /tmp/cas-verify tamper-check \
+            -dir $SNAP \
+            -store /tmp/agent-run-test/cas-tamper \
+            -out /tmp/agent-run-test/cas-tamper-out \
+            -files mem,vmstate
+
+          echo "================================"
+          echo "  CAS integrity checks passed"
+          echo "================================"
 
       - name: Build guest agent
         run: |
