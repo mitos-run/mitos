@@ -544,6 +544,26 @@ jobs:
           mkdir -p $WORKDIR
           sudo chmod 666 /dev/kvm
 
+          # The GitHub runner has Docker installed, whose legacy `ip filter
+          # FORWARD` chain has policy DROP plus DOCKER-USER/DOCKER-FORWARD
+          # chains. nftables evaluates ALL base chains on the forward hook
+          # across families, and a DROP in ANY of them is terminal, so Docker's
+          # FORWARD policy would drop the sandbox's forwarded egress before our
+          # `inet agentrun_egress` table is ever consulted, masking our
+          # enforcement and timing out the ALLOWED connect. Insert a permissive
+          # rule into Docker's purpose-built user chain so Docker stops being
+          # the deciding verdict, leaving OUR `inet agentrun_egress` table as
+          # the actual egress enforcer under test. This keeps the proof honest:
+          # the DENY still comes from OUR table. With DOCKER-USER ACCEPT the
+          # ALLOWED dst passes (Docker accepts, our table accepts) and the
+          # DENIED dst is still dropped by OUR sb_<tap> chain, because a drop in
+          # our inet table is terminal regardless of Docker accepting. In
+          # production forkd runs the tap in the host or per-VM/pod netns
+          # without Docker's host FORWARD rules (husk pods #18), so this only
+          # removes an environmental artifact of the runner.
+          sudo iptables -I DOCKER-USER -j ACCEPT 2>/dev/null || sudo nft insert rule ip filter DOCKER-USER accept 2>/dev/null || true
+          sudo sysctl -w net.ipv4.ip_forward=1
+
           # Addressing.
           TAP=tap_egress
           HOST_IP=10.250.0.1
