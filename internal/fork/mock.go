@@ -16,6 +16,8 @@ type MockEngine struct {
 	counter   atomic.Int64
 	// Simulated fork latency
 	ForkDelay time.Duration
+	// PausedSources records source sandbox IDs that were "paused" during ForkRunning.
+	PausedSources []string
 }
 
 func NewMockEngine() *MockEngine {
@@ -130,6 +132,12 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 	e.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("sandbox %s not found", sourceSandboxID)
+	}
+
+	if pauseSource {
+		e.mu.Lock()
+		e.PausedSources = append(e.PausedSources, sourceSandboxID)
+		e.mu.Unlock()
 	}
 
 	time.Sleep(e.ForkDelay)

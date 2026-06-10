@@ -7,7 +7,7 @@ import (
 
 func TestRegisterOnZeroValueRegistry(t *testing.T) {
 	var r NodeRegistry // zero value, nil map
-	r.Register(&NodeInfo{Name: "n1", Endpoint: "10.0.0.1:9090"})
+	r.Register(&NodeInfo{Name: "n1", Endpoint: "10.0.0.1:9090", LastHeartbeat: time.Now()})
 
 	node, err := r.SelectNode("", "")
 	if err != nil {

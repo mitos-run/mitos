@@ -166,6 +166,9 @@ func TestMockForkRunning(t *testing.T) {
 	if got := e.GetCapacity().ActiveSandboxes; got != 2 {
 		t.Fatalf("active sandboxes = %d, want 2", got)
 	}
+	if len(e.PausedSources) != 1 || e.PausedSources[0] != parent.SandboxID {
+		t.Fatalf("PausedSources = %v, want [%s]", e.PausedSources, parent.SandboxID)
+	}
 
 	if _, err := e.ForkRunning("nope", "child2", false); err == nil {
 		t.Fatal("expected error for unknown source sandbox")
