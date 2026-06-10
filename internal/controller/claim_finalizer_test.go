@@ -159,3 +159,81 @@ func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
 	}
 	waitClaimGone(t, "fin2-claim")
 }
+
+// TestClaimDeleteWithUnreachableForkdCompletes covers the deletion-wedge fix:
+// the node stays REGISTERED and heartbeating, but its forkd server is stopped
+// so Terminate errors Unavailable. Deletion must still complete within the
+// bounded window: a confirm-terminate we cannot make must not wedge the object.
+func TestClaimDeleteWithUnreachableForkdCompletes(t *testing.T) {
+	stop, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-3", "fin3-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			stop()
+		}
+	}()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "fin3-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "fin3-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "fin3-tmpl"},
+			Replicas:    1,
+		},
+	}
+	claim := &v1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "fin3-claim", Namespace: "default"},
+		Spec: v1alpha1.SandboxClaimSpec{
+			PoolRef: v1alpha1.LocalObjectReference{Name: "fin3-pool"},
+		},
+	}
+	for _, obj := range []client.Object{template, pool, claim} {
+		if err := k8sClient.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	got := waitClaimReady(t, "fin3-claim")
+
+	// Stop only the forkd gRPC/HTTP servers (and remove the registry entry via
+	// the stop func). To exercise the unreachable-but-registered path we
+	// instead leave the node registered: re-register it after stopping the
+	// servers so the dial target points at a dead listener and Terminate errors
+	// Unavailable.
+	endpoint := mustNodeEndpoint(t, "fin-node-3")
+	stop()
+	stopped = true
+	testRegistry.Register(&controller.NodeInfo{
+		Name:         "fin-node-3",
+		Endpoint:     endpoint,
+		MaxSandboxes: 100,
+	})
+	t.Cleanup(func() { testRegistry.Unregister("fin-node-3") })
+
+	if err := k8sClient.Delete(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded: the Terminate RPC times out / errors Unavailable, which the
+	// finalizer treats as already-terminated, so the object is freed.
+	waitClaimGone(t, "fin3-claim")
+}
+
+// mustNodeEndpoint returns the gRPC endpoint of a registered node.
+func mustNodeEndpoint(t *testing.T, name string) string {
+	t.Helper()
+	node, ok := testRegistry.GetNode(name)
+	if !ok {
+		t.Fatalf("node %s not registered", name)
+	}
+	return node.Endpoint
+}
