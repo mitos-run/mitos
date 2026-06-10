@@ -84,7 +84,7 @@ Write the failing test first. Every behavior change lands with its test in the s
 ### git
 
 - Stage explicit paths only; never `git add -A`.
-- Never commit README.md unless explicitly asked.
+- README claims follow the no-unverified-claims rule: every number it states must be reproducible from `bench/` or carry an explicit issue reference marking it as a target.
 
 ## CI Pipeline
 
