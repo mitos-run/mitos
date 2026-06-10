@@ -96,9 +96,16 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		return nil, nil
 	}
 
-	allow, _, err := netconf.SplitAllowList(opts.Network.AllowList)
+	allow, skipped, err := netconf.SplitAllowList(opts.Network.AllowList)
 	if err != nil {
 		return nil, fmt.Errorf("parse egress allowlist for %s: %w", sandboxID, err)
+	}
+	// Name-based allow entries cannot be enforced without a controlled DNS
+	// resolver (PR2); they are parsed but dropped from the ruleset. Warn loudly
+	// so an operator is not misled into thinking a name rule is in effect. The
+	// entries are config (host:port), safe to log.
+	if len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "forkd: WARNING egress allowlist for %s has %d name-based entries that are NOT enforced (no controlled resolver yet): %v\n", sandboxID, len(skipped), skipped)
 	}
 	policy := v1alpha1.EgressPolicy(opts.Network.EgressPolicy)
 

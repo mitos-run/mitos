@@ -91,10 +91,18 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 // registers NOTHING, so HTTP calls to the sandbox fail closed with 401
 // (forkd never runs the API in tokenless mode). The token value is never
 // logged.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, apiToken string) (*fork.ForkResult, error) {
+//
+// netConf carries the template's NetworkPolicy (egress policy + allowlist).
+// It is parsed into fork.NetworkOpts and threaded into the engine, which uses
+// it to build the per-fork egress ruleset when networking is enabled. When
+// netConf is nil the fork gets no network identity (networking disabled or no
+// policy on the template). The egress policy and allowlist entries are safe to
+// log.
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, apiToken string) (*fork.ForkResult, error) {
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
+		Network: networkOpts(netConf),
 	})
 	if err != nil {
 		return nil, err
@@ -258,6 +266,25 @@ func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
 		})
 	}
 	return out
+}
+
+// networkOpts converts the proto NetworkConfig from a ForkRequest into the
+// engine's fork.NetworkOpts. It returns nil when the request carries no
+// network config (so the non-network fork path is untouched) and also when the
+// config is effectively empty (no egress policy and no allowlist), which the
+// engine treats the same as "no networking requested". The engine itself only
+// acts on a non-nil result when networking is enabled.
+func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
+	if c == nil {
+		return nil
+	}
+	if c.EgressPolicy == "" && len(c.AllowList) == 0 {
+		return nil
+	}
+	return &fork.NetworkOpts{
+		EgressPolicy: c.EgressPolicy,
+		AllowList:    c.AllowList,
+	}
 }
 
 // UpdateMetrics refreshes capacity metrics.
