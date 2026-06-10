@@ -34,13 +34,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, &claim)
 	}
 
-	// Already assigned; nothing to do
+	// Already assigned; drive maxLifetime / idleTimeout reaping.
 	if claim.Status.Phase == v1alpha1.SandboxReady {
-		return r.reconcileTimeout(ctx, &claim)
+		return r.reconcileLifetime(ctx, &claim)
 	}
 
-	// Already failed; don't retry
-	if claim.Status.Phase == v1alpha1.SandboxFailed {
+	// Terminal phases: don't retry.
+	if claim.Status.Phase == v1alpha1.SandboxFailed || claim.Status.Phase == v1alpha1.SandboxTerminated {
 		return ctrl.Result{}, nil
 	}
 
@@ -209,21 +209,103 @@ func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1a
 	return ctrl.Result{}, nil
 }
 
-func (r *SandboxClaimReconciler) reconcileTimeout(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
-	if claim.Spec.Timeout == nil || claim.Status.StartedAt == nil {
+// reconcileLifetime drives a Ready claim to the terminal Terminated phase when
+// it exceeds maxLifetime (Spec.Timeout from StartedAt) or goes idle
+// (Spec.IdleTimeout from the later of last-activity and StartedAt). Expiry
+// terminates the backing VM directly via terminateOnNode and leaves the
+// finalizer in place; the bounded, tolerant terminateOnNode keeps eventual
+// delete safe. A claim already Terminated returns immediately (idempotent).
+func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if claim.Status.Phase == v1alpha1.SandboxTerminated {
+		return ctrl.Result{}, nil
+	}
+	if claim.Status.StartedAt == nil {
 		return ctrl.Result{}, nil
 	}
 
-	deadline := claim.Status.StartedAt.Add(claim.Spec.Timeout.Duration)
-	if time.Now().After(deadline) {
-		claim.Status.Phase = v1alpha1.SandboxTerminating
-		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, claim)
-		// Terminate via forkd
+	hasMaxLifetime := claim.Spec.Timeout != nil
+	hasIdle := claim.Spec.IdleTimeout != nil
+	if !hasMaxLifetime && !hasIdle {
 		return ctrl.Result{}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: time.Until(deadline)}, nil
+	now := time.Now()
+	startedAt := claim.Status.StartedAt.Time
+
+	// maxLifetime takes precedence: it does not depend on a reachable forkd.
+	if hasMaxLifetime {
+		deadline := startedAt.Add(claim.Spec.Timeout.Duration)
+		if !now.Before(deadline) {
+			return r.terminateLifetime(ctx, claim, "MaxLifetimeExceeded",
+				fmt.Sprintf("max lifetime %s exceeded", claim.Spec.Timeout.Duration))
+		}
+	}
+
+	// Idle check needs last-activity from forkd. An unreachable node means we
+	// cannot evaluate idle this pass; requeue and try again.
+	requeue := time.Duration(0)
+	if hasIdle {
+		_, lastActivity, ok := sandboxActivity(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
+		if !ok {
+			logger.Info("cannot evaluate idle, node unreachable; requeueing", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		}
+		last := startedAt
+		if lastActivity.After(last) {
+			last = lastActivity
+		}
+		idleDeadline := last.Add(claim.Spec.IdleTimeout.Duration)
+		if now.After(idleDeadline) {
+			return r.terminateLifetime(ctx, claim, "IdleTimeout",
+				fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
+		}
+		requeue = time.Until(idleDeadline)
+	}
+
+	// Requeue at the nearest deadline.
+	if hasMaxLifetime {
+		untilMax := time.Until(startedAt.Add(claim.Spec.Timeout.Duration))
+		if requeue == 0 || untilMax < requeue {
+			requeue = untilMax
+		}
+	}
+	if requeue <= 0 {
+		requeue = 1 * time.Second
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// terminateLifetime reaps the claim's backing VM and stamps the terminal
+// Terminated phase with a FinishedAt time and a Terminated condition. The
+// finalizer stays in place; the bounded terminateOnNode keeps later delete
+// safe.
+func (r *SandboxClaimReconciler) terminateLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim, reason, message string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
+		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
+			logger.Error(err, "terminate backing sandbox on lifetime expiry", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{}, err
+		}
+	}
+
+	now := metav1.Now()
+	claim.Status.Phase = v1alpha1.SandboxTerminated
+	claim.Status.FinishedAt = &now
+	setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Terminated",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+	})
+	if err := r.Status().Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
+	logger.Info("claim terminated by lifetime policy", "claim", claim.Name, "reason", reason)
+	return ctrl.Result{}, nil
 }
 
 type forkResult struct {

@@ -49,7 +49,7 @@ func waitTerminated(t *testing.T, engine interface{ TerminatedIDs() []string }, 
 }
 
 func TestClaimDeleteReapsBackingVM(t *testing.T) {
-	stop, engine, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-1", "fin-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-1", "fin-tmpl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestClaimDeleteReapsBackingVM(t *testing.T) {
 }
 
 func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
-	stop, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-2", "fin2-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-2", "fin2-tmpl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
 // so Terminate errors Unavailable. Deletion must still complete within the
 // bounded window: a confirm-terminate we cannot make must not wedge the object.
 func TestClaimDeleteWithUnreachableForkdCompletes(t *testing.T) {
-	stop, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-3", "fin3-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-3", "fin3-tmpl")
 	if err != nil {
 		t.Fatal(err)
 	}

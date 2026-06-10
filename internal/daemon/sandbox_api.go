@@ -56,6 +56,16 @@ func (api *SandboxAPI) touch(sandboxID string) {
 	api.mu.Unlock()
 }
 
+// RecordActivity stamps t as the sandbox's last-activity time, overriding the
+// clock-based touch. It exists so callers (and tests of the GC reconciler) can
+// set a known last-activity for a sandbox id; forkd itself relies on the
+// implicit touch from exec and file handlers.
+func (api *SandboxAPI) RecordActivity(sandboxID string, t time.Time) {
+	api.mu.Lock()
+	api.lastActivity[sandboxID] = t
+	api.mu.Unlock()
+}
+
 // LastActivity returns the time of the most recent exec or file call on the
 // sandbox. The bool is false when the sandbox has never been accessed.
 func (api *SandboxAPI) LastActivity(sandboxID string) (time.Time, bool) {

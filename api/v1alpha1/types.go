@@ -181,8 +181,13 @@ type SandboxClaimSpec struct {
 	// Override fork policies for specific volumes on this claim.
 	VolumeOverrides []VolumeOverride `json:"volumeOverrides,omitempty"`
 
-	// Maximum wall-clock time for this sandbox. Zero means no limit.
+	// Maximum wall-clock time for this sandbox (maxLifetime). Zero means no
+	// limit.
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// IdleTimeout reaps the sandbox after this much time with no exec or file
+	// activity. Zero means no idle limit.
+	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
 
 	// Node preference. Empty means any node with capacity.
 	NodeName string `json:"nodeName,omitempty"`
@@ -207,6 +212,7 @@ const (
 	SandboxRestoring   SandboxPhase = "Restoring"
 	SandboxReady       SandboxPhase = "Ready"
 	SandboxTerminating SandboxPhase = "Terminating"
+	SandboxTerminated  SandboxPhase = "Terminated"
 	SandboxFailed      SandboxPhase = "Failed"
 )
 
@@ -217,7 +223,9 @@ type SandboxClaimStatus struct {
 	SandboxID      string             `json:"sandboxID,omitempty"`
 	ForkTimeMicros int64              `json:"forkTimeMicros,omitempty"`
 	StartedAt      *metav1.Time       `json:"startedAt,omitempty"`
-	Conditions     []metav1.Condition `json:"conditions,omitempty"`
+	// FinishedAt is set when the claim reaches the terminal Terminated phase.
+	FinishedAt *metav1.Time       `json:"finishedAt,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

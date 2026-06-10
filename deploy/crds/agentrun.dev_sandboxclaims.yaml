@@ -167,6 +167,11 @@ spec:
                   - name
                   type: object
                 type: array
+              idleTimeout:
+                description: |-
+                  IdleTimeout reaps the sandbox after this much time with no exec or file
+                  activity. Zero means no idle limit.
+                type: string
               nodeName:
                 description: Node preference. Empty means any node with capacity.
                 type: string
@@ -216,8 +221,9 @@ spec:
                   type: object
                 type: array
               timeout:
-                description: Maximum wall-clock time for this sandbox. Zero means
-                  no limit.
+                description: |-
+                  Maximum wall-clock time for this sandbox (maxLifetime). Zero means no
+                  limit.
                 type: string
               volumeOverrides:
                 description: Override fork policies for specific volumes on this claim.
@@ -294,6 +300,11 @@ spec:
                   type: object
                 type: array
               endpoint:
+                type: string
+              finishedAt:
+                description: FinishedAt is set when the claim reaches the terminal
+                  Terminated phase.
+                format: date-time
                 type: string
               forkTimeMicros:
                 format: int64
