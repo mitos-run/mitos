@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -208,39 +207,6 @@ func (r *NodeRegistry) PruneStale(maxAge time.Duration) int {
 		}
 	}
 	return pruned
-}
-
-// StartDiscovery watches for forkd pods and registers them.
-// In production, this watches k8s pods with the forkd label.
-func (r *NodeRegistry) StartDiscovery(ctx context.Context, mockMode bool) {
-	if mockMode {
-		// Register a mock node for local development
-		r.Register(&NodeInfo{
-			Name:         "mock-node-1",
-			Endpoint:     "localhost:9090",
-			MaxSandboxes: 1000,
-			MemoryTotal:  8 * 1024 * 1024 * 1024,
-			TemplateIDs:  []string{"default"},
-		})
-		return
-	}
-
-	// TODO: Watch pods with label app.kubernetes.io/component=forkd
-	// When a pod starts, register it with its pod IP + gRPC port
-	// When a pod terminates, unregister it
-	// Periodically prune stale nodes
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.PruneStale(2 * time.Minute)
-			}
-		}
-	}()
 }
 
 func (n *NodeInfo) isHealthy() bool {

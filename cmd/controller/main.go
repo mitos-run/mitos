@@ -77,6 +77,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
+	if discoveryNamespace == "" {
+		discoveryNamespace = "agent-run"
+	}
+	if err := mgr.Add(&controller.ForkdDiscovery{
+		Client:    mgr.GetClient(),
+		Registry:  nodeRegistry,
+		Namespace: discoveryNamespace,
+	}); err != nil {
+		logger.Error(err, "unable to add forkd discovery")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up health check")
 		os.Exit(1)
