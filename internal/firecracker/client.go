@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -19,10 +21,25 @@ type Client struct {
 	socketPath string
 	http       *http.Client
 	process    *os.Process
+
+	// Jailer state; zero values for direct exec.
+	chrootDir   string // host path of the chroot root, "" when not jailed
+	jailerVMDir string // per-VM jailer workspace, removed on Kill
+	jailedUID   uint32
+	jailedGID   uint32
+	allocator   *UIDAllocator
 }
 
-// StartVM launches a Firecracker process and returns a client connected to it.
+// StartVM launches a Firecracker process and returns a client connected
+// to it. With cfg.Jailer enabled the process is launched through the
+// jailer binary inside a per-VM chroot under a dedicated uid/gid; with
+// the zero JailerConfig the firecracker binary is exec'd directly,
+// exactly as before.
 func StartVM(cfg VMConfig) (*Client, error) {
+	if cfg.Jailer.Enabled() {
+		return startJailedVM(cfg)
+	}
+
 	socketPath := cfg.SocketPath
 	if socketPath == "" {
 		socketPath = filepath.Join(cfg.WorkDir, "firecracker.sock")
@@ -65,6 +82,105 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	}
 
 	return client, nil
+}
+
+// startJailedVM launches Firecracker through the jailer: it allocates a
+// per-VM uid/gid, hard-links the configured files into the per-VM
+// chroot, and waits for the API socket at its jailed location.
+func startJailedVM(cfg VMConfig) (*Client, error) {
+	if cfg.ID == "" {
+		return nil, fmt.Errorf("jailer launch requires a VM id (jailer --id)")
+	}
+	if filepath.Base(cfg.FirecrackerBin) != jailerExecFileName {
+		return nil, fmt.Errorf("jailer launch requires the firecracker binary to be named %q (the jailer derives the chroot layout from the --exec-file basename); got %q", jailerExecFileName, cfg.FirecrackerBin)
+	}
+	if cfg.Jailer.Allocator == nil {
+		return nil, fmt.Errorf("jailer launch requires a uid allocator; construct the engine with a uid range")
+	}
+
+	uid, gid, err := cfg.Jailer.Allocator.Acquire()
+	if err != nil {
+		return nil, fmt.Errorf("allocate jailer uid for %s: %w", cfg.ID, err)
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			cfg.Jailer.Allocator.Release(uid)
+		}
+	}()
+
+	chrootDir := jailerChrootDir(cfg.Jailer.ChrootBaseDir, cfg.ID)
+	if err := os.MkdirAll(filepath.Join(chrootDir, "run"), 0o755); err != nil {
+		return nil, fmt.Errorf("create chroot run dir: %w", err)
+	}
+	if _, err := prepareChroot(cfg, cfg.ID, cfg.ChrootFiles); err != nil {
+		return nil, fmt.Errorf("prepare chroot for %s: %w", cfg.ID, err)
+	}
+	chownIntoJail(chrootDir, cfg, uid, gid)
+
+	socketPath := jailedAPISocketPath(cfg.Jailer.ChrootBaseDir, cfg.ID)
+	os.Remove(socketPath)
+
+	cmd := exec.Command(cfg.Jailer.JailerBin, jailerArgs(cfg, uid, gid)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start jailer: %w", err)
+	}
+
+	client := &Client{
+		socketPath:  socketPath,
+		process:     cmd.Process,
+		chrootDir:   chrootDir,
+		jailerVMDir: jailerVMDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
+		jailedUID:   uid,
+		jailedGID:   gid,
+		allocator:   cfg.Jailer.Allocator,
+		http: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return net.Dial("unix", socketPath)
+				},
+			},
+			Timeout: 30 * time.Second,
+		},
+	}
+
+	if err := client.waitReady(10 * time.Second); err != nil {
+		_ = cmd.Process.Kill()
+		return nil, fmt.Errorf("jailed firecracker not ready: %w", err)
+	}
+
+	launched = true
+	return client, nil
+}
+
+// chownIntoJail hands the prepared chroot files and the API socket dir
+// to the jailed uid/gid so the deprivileged Firecracker can open them.
+// Failures are logged (path only, never contents) and not fatal: on a
+// correctly deployed root forkd they do not happen, and the VM fails
+// later with a clear permission error if one slipped through.
+func chownIntoJail(chrootDir string, cfg VMConfig, uid, gid uint32) {
+	targets := []string{filepath.Join(chrootDir, "run")}
+	for _, f := range cfg.ChrootFiles {
+		targets = append(targets, chrootPath(cfg.Jailer.ChrootBaseDir, cfg.ID, f))
+	}
+	for _, t := range targets {
+		if err := os.Chown(t, int(uid), int(gid)); err != nil {
+			fmt.Fprintf(os.Stderr, "firecracker: chown %s to jailed uid %d failed: %v\n", t, uid, err)
+		}
+	}
+}
+
+// HostPath maps a path as Firecracker sees it over its API to the host
+// location of the same file. For a jailed VM that is the mirrored path
+// inside the chroot; for direct exec it is the path itself.
+func (c *Client) HostPath(p string) string {
+	if c.chrootDir == "" {
+		return p
+	}
+	return filepath.Join(c.chrootDir, filepath.Clean(p))
 }
 
 // ConnectVM connects to an already-running Firecracker instance.
@@ -121,10 +237,32 @@ func (c *Client) AddDrive(driveID string, path string, readOnly bool, rootDevice
 }
 
 func (c *Client) SetVsock(guestCID int, udsPath string) error {
+	// For a jailed VM Firecracker binds the UDS inside its chroot; the
+	// mirrored parent directory must exist and be writable by the jailed
+	// uid before the API call.
+	if err := c.ensureJailedDir(filepath.Dir(udsPath)); err != nil {
+		return fmt.Errorf("prepare vsock dir in chroot: %w", err)
+	}
 	return c.put("/vsock", Vsock{
 		GuestCID: guestCID,
 		UdsPath:  udsPath,
 	})
+}
+
+// ensureJailedDir creates the in-chroot mirror of a host directory and
+// hands it to the jailed uid. No-op for direct-exec clients.
+func (c *Client) ensureJailedDir(hostDir string) error {
+	if c.chrootDir == "" {
+		return nil
+	}
+	dir := c.HostPath(hostDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.Chown(dir, int(c.jailedUID), int(c.jailedGID)); err != nil {
+		fmt.Fprintf(os.Stderr, "firecracker: chown %s to jailed uid %d failed: %v\n", dir, c.jailedUID, err)
+	}
+	return nil
 }
 
 // --- VM Lifecycle ---
@@ -144,11 +282,53 @@ func (c *Client) Resume() error {
 // --- Snapshot Operations ---
 
 func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
-	return c.put("/snapshot/create", SnapshotCreate{
+	// A jailed Firecracker writes both files inside its chroot; the
+	// mirrored destination dirs must exist and be writable by the jailed
+	// uid first, and the results are linked back out to the requested
+	// host paths afterwards so callers see them where they asked.
+	for _, p := range []string{memPath, snapshotPath} {
+		if err := c.ensureJailedDir(filepath.Dir(p)); err != nil {
+			return fmt.Errorf("prepare snapshot dir in chroot: %w", err)
+		}
+	}
+	if err := c.put("/snapshot/create", SnapshotCreate{
 		SnapshotType: "Full",
 		SnapshotPath: snapshotPath,
 		MemFilePath:  memPath,
-	})
+	}); err != nil {
+		return err
+	}
+	for _, p := range []string{memPath, snapshotPath} {
+		if err := c.exportFromJail(p); err != nil {
+			return fmt.Errorf("export snapshot file from chroot: %w", err)
+		}
+	}
+	return nil
+}
+
+// exportFromJail hard-links a file Firecracker produced inside the
+// chroot back to its host path (copy on EXDEV). No-op for direct exec.
+func (c *Client) exportFromJail(hostPath string) error {
+	if c.chrootDir == "" {
+		return nil
+	}
+	src := c.HostPath(hostPath)
+	if same, err := sameInode(src, hostPath); err == nil && same {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Remove(hostPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Link(src, hostPath); err != nil {
+		if !errors.Is(err, syscall.EXDEV) {
+			return err
+		}
+		return copyFile(src, hostPath)
+	}
+	return nil
 }
 
 func (c *Client) LoadSnapshot(memPath, snapshotPath string, resumeVM bool) error {
@@ -163,10 +343,22 @@ func (c *Client) LoadSnapshot(memPath, snapshotPath string, resumeVM bool) error
 // --- Process Management ---
 
 func (c *Client) Kill() error {
+	var killErr error
 	if c.process != nil {
-		return c.process.Kill()
+		killErr = c.process.Kill()
 	}
-	return nil
+	// Jailed VMs: return the dedicated uid to the pool and remove the
+	// per-VM chroot workspace (hard links only; originals stay put).
+	if c.allocator != nil {
+		c.allocator.Release(c.jailedUID)
+		c.allocator = nil
+	}
+	if c.jailerVMDir != "" {
+		if err := os.RemoveAll(c.jailerVMDir); err != nil {
+			fmt.Fprintf(os.Stderr, "firecracker: remove jailer dir %s: %v\n", c.jailerVMDir, err)
+		}
+	}
+	return killErr
 }
 
 func (c *Client) PID() int {

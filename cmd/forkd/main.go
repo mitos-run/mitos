@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/paperclipinc/sandbox/internal/daemon"
+	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/pki"
 	"google.golang.org/grpc"
@@ -56,7 +57,7 @@ func main() {
 		}
 		engine = mock
 	} else {
-		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath)
+		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, firecracker.JailerConfig{})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: failed to initialize: %v\n", err)
 			fmt.Fprintf(os.Stderr, "forkd: use --mock for local development without KVM\n")

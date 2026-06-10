@@ -14,13 +14,17 @@ type TemplateManager struct {
 	firecrackerBin string
 	kernelPath     string
 	dataDir        string
+	jailer         JailerConfig
 }
 
-func NewTemplateManager(firecrackerBin, kernelPath, dataDir string) *TemplateManager {
+// NewTemplateManager builds a template manager. A zero jailer config
+// keeps the direct-exec launch path.
+func NewTemplateManager(firecrackerBin, kernelPath, dataDir string, jailer JailerConfig) *TemplateManager {
 	return &TemplateManager{
 		firecrackerBin: firecrackerBin,
 		kernelPath:     kernelPath,
 		dataDir:        dataDir,
+		jailer:         jailer,
 	}
 }
 
@@ -56,6 +60,13 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 	cfg.FirecrackerBin = tm.firecrackerBin
 	cfg.WorkDir = workDir
 	cfg.ID = id
+	cfg.Jailer = tm.jailer
+	// Kernel and rootfs are hard-linked into the chroot in jailer mode so
+	// the API paths below resolve inside it.
+	cfg.ChrootFiles = []string{tm.kernelPath}
+	if cfg.RootfsPath != "" {
+		cfg.ChrootFiles = append(cfg.ChrootFiles, templateRootfs)
+	}
 
 	// Start the VM
 	client, err := StartVM(cfg)
