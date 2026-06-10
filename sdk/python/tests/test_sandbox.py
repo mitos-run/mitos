@@ -1,5 +1,7 @@
+import json
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from agent_run.sandbox import Sandbox, SandboxFiles
@@ -103,6 +105,8 @@ def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     assert len(forks) == 2
     assert forks[0].phase == SandboxPhase.READY
     assert forks[1].phase == SandboxPhase.READY
+    assert forks[0]._sandbox_id == "f1"
+    assert forks[1]._sandbox_id == "f2"
 
 
 def test_sandbox_wait_ready_polls(pending_sandbox, mock_api):
@@ -126,3 +130,49 @@ def test_sandbox_wait_ready_failed(pending_sandbox, mock_api):
 
     with pytest.raises(RuntimeError, match="failed"):
         pending_sandbox._wait_ready(timeout=1.0)
+
+
+def _ready_http_sandbox(transport: httpx.MockTransport) -> Sandbox:
+    sandbox = Sandbox(
+        name="claim-1",
+        namespace="default",
+        pool="pool-1",
+        api=MagicMock(),  # k8s API unused when endpoint/phase/sandbox_id pre-seeded
+        _endpoint="10.0.3.7:9091",
+        _phase=SandboxPhase.READY,
+    )
+    sandbox._sandbox_id = "sb-claim-1"
+    sandbox._http = httpx.Client(transport=transport)
+    return sandbox
+
+
+def test_exec_targets_v1_and_sends_sandbox_id():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["json"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"exit_code": 0, "stdout": "hi\n", "stderr": "", "exec_time_ms": 1.0},
+        )
+
+    result = _ready_http_sandbox(httpx.MockTransport(handler)).exec("echo hi")
+
+    assert result.stdout == "hi\n"
+    assert seen["url"] == "http://10.0.3.7:9091/v1/exec"
+    assert seen["json"]["sandbox"] == "sb-claim-1"
+
+
+def test_files_read_targets_v1_and_sends_sandbox_id():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["json"] = json.loads(request.content)
+        return httpx.Response(200, json={"content": "data", "size": 4})
+
+    content = _ready_http_sandbox(httpx.MockTransport(handler)).files.read("/workspace/x")
+    assert content == "data"
+    assert seen["url"].endswith("/v1/files/read")
+    assert seen["json"]["sandbox"] == "sb-claim-1"

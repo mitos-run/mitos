@@ -67,7 +67,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "no node with ready snapshot")
 		claim.Status.Phase = v1alpha1.SandboxPending
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
@@ -76,26 +77,38 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "volume preparation failed")
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 	_ = volumes
 
 	// Resolve secrets
-	env, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
+	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 
 	// Call forkd on the selected node — this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env)
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals)
 	if err != nil {
+		// A NotFound from forkd usually means the snapshot is not built on
+		// that node yet — transient while the pool reconciler catches up.
+		if isNotFound(err) {
+			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
+			claim.Status.Phase = v1alpha1.SandboxPending
+			// Best-effort status write; the return below already requeues or surfaces the error.
+			_ = r.Status().Update(ctx, &claim)
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		}
 		logger.Error(err, "fork failed", "node", node.Name)
 		claim.Status.Phase = v1alpha1.SandboxFailed
-		r.Status().Update(ctx, &claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
 	}
 
@@ -136,7 +149,8 @@ func (r *SandboxClaimReconciler) reconcileTimeout(ctx context.Context, claim *v1
 	deadline := claim.Status.StartedAt.Add(claim.Spec.Timeout.Duration)
 	if time.Now().After(deadline) {
 		claim.Status.Phase = v1alpha1.SandboxTerminating
-		r.Status().Update(ctx, claim)
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, claim)
 		// Terminate via forkd
 		return ctrl.Result{}, nil
 	}
@@ -182,11 +196,12 @@ func (r *SandboxClaimReconciler) prepareVolumes(ctx context.Context, templateVol
 	return prepared, nil
 }
 
-func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (map[string]string, error) {
-	result := make(map[string]string)
+func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (envOut, secretsOut map[string]string, err error) {
+	envOut = make(map[string]string)
+	secretsOut = make(map[string]string)
 
 	for _, e := range env {
-		result[e.Name] = e.Value
+		envOut[e.Name] = e.Value
 	}
 
 	coreClient := r.Client
@@ -196,25 +211,20 @@ func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace s
 			Namespace: namespace,
 			Name:      s.SecretRef.Name,
 		}, &secret); err != nil {
-			return nil, fmt.Errorf("secret %s: %w", s.SecretRef.Name, err)
+			return nil, nil, fmt.Errorf("secret %s: %w", s.SecretRef.Name, err)
 		}
 		value, ok := secret.Data[s.SecretRef.Key]
 		if !ok {
-			return nil, fmt.Errorf("key %s not found in secret %s", s.SecretRef.Key, s.SecretRef.Name)
+			return nil, nil, fmt.Errorf("key %s not found in secret %s", s.SecretRef.Key, s.SecretRef.Name)
 		}
 		envVar := s.EnvVar
 		if envVar == "" {
 			envVar = s.Name
 		}
-		result[envVar] = string(value)
+		secretsOut[envVar] = string(value)
 	}
 
-	return result, nil
-}
-
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env map[string]string) (*forkResult, error) {
-	// Call forkd.Fork() via gRPC on the target node
-	return nil, fmt.Errorf("not implemented")
+	return envOut, secretsOut, nil
 }
 
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {

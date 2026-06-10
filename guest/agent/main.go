@@ -69,17 +69,24 @@ func initSystem() {
 	}
 
 	for _, m := range mounts {
-		os.MkdirAll(m.target, 0755)
+		// PID-1 init: setup failures are non-fatal by design; log and continue.
+		if err := os.MkdirAll(m.target, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", m.target, err)
+		}
 		if err := syscall.Mount(m.source, m.target, m.fstype, m.flags, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "mount %s: %v\n", m.target, err)
 		}
 	}
 
-	// Create workspace directory
-	os.MkdirAll("/workspace", 0755)
+	// Create workspace directory (non-fatal on failure, like mounts above)
+	if err := os.MkdirAll("/workspace", 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "mkdir /workspace: %v\n", err)
+	}
 
-	// Set hostname
-	syscall.Sethostname([]byte("sandbox"))
+	// Set hostname (non-fatal on failure)
+	if err := syscall.Sethostname([]byte("sandbox")); err != nil {
+		fmt.Fprintf(os.Stderr, "sethostname: %v\n", err)
+	}
 }
 
 func handleConnection(conn net.Conn) {
@@ -277,7 +284,9 @@ func writeResponse(conn net.Conn, resp vsock.Response) {
 	if err != nil {
 		return
 	}
-	conn.Write(append(data, '\n'))
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: write response: %v\n", err)
+	}
 }
 
 // vsockListener implements net.Listener using raw AF_VSOCK syscalls.
@@ -363,7 +372,8 @@ func init() {
 		paths := []string{"/bin/busybox", "/usr/bin/sh", "/usr/bin/bash"}
 		for _, p := range paths {
 			if _, err := os.Stat(p); err == nil {
-				os.Symlink(p, "/bin/sh")
+				// Best-effort shell discovery; exec falls back to the error path if this fails.
+				_ = os.Symlink(p, "/bin/sh")
 				break
 			}
 		}

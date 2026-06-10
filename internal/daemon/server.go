@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
@@ -46,9 +48,7 @@ func NewServer(engine ForkEngine, sandboxAPI *SandboxAPI) *Server {
 
 // RegisterForkDaemonServer registers the gRPC service.
 func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
-	// TODO: register generated protobuf service
-	_ = s
-	_ = srv
+	forkdpb.RegisterForkDaemonServer(s, &grpcService{srv: srv})
 }
 
 // ServeHTTP starts the HTTP server for metrics, health, and sandbox API.
@@ -73,7 +73,9 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	apiHandler := sandboxAPI.Handler()
 	mux.Handle("/v1/", apiHandler)
 
-	http.ListenAndServe(addr, mux)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("forkd: http server: %v", err)
+	}
 }
 
 // Fork handles a fork request from the controller.
@@ -89,11 +91,32 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	// Connect to the guest agent so exec/files work
-	vsockPath := fmt.Sprintf("/var/lib/agent-run/sandboxes/%s/vsock.sock", sandboxID)
-	s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath)
+	s.registerAgent(result.SandboxID, result.VsockPath)
 
 	return result, nil
+}
+
+// ForkRunning checkpoints a running sandbox and forks it.
+func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error) {
+	result, err := s.engine.ForkRunning(sourceSandboxID, newSandboxID, pauseSource)
+	if err != nil {
+		return nil, err
+	}
+
+	forkDuration.Observe(result.ForkTimeMs / 1000.0)
+	activeSandboxes.Inc()
+
+	s.registerAgent(result.SandboxID, result.VsockPath)
+	return result, nil
+}
+
+// registerAgent connects the sandbox API to the guest agent. Failure is
+// logged, not fatal: the sandbox is running, but exec/files will 404 until
+// an agent connection is established (mock mode has no agent at all).
+func (s *Server) registerAgent(sandboxID, vsockPath string) {
+	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+		log.Printf("forkd: sandbox %s: guest agent not connected: %v", sandboxID, err)
+	}
 }
 
 // Terminate handles a sandbox termination request.

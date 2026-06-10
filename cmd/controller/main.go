@@ -36,7 +36,7 @@ func main() {
 	logger := ctrl.Log.WithName("setup")
 
 	if mockMode {
-		logger.Info("running in mock mode — no KVM required, fork operations are simulated")
+		logger.Info("--mock on the controller is a no-op: mock mode now lives in forkd (run `forkd --mock`); the controller discovers mock forkd instances via pod discovery")
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nodeRegistry := &controller.NodeRegistry{}
+	nodeRegistry := controller.NewNodeRegistry()
 
 	if err := (&controller.SandboxPoolReconciler{
 		Client:       mgr.GetClient(),
@@ -74,6 +74,19 @@ func main() {
 		NodeRegistry: nodeRegistry,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxFork")
+		os.Exit(1)
+	}
+
+	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
+	if discoveryNamespace == "" {
+		discoveryNamespace = "agent-run"
+	}
+	if err := mgr.Add(&controller.ForkdDiscovery{
+		Client:    mgr.GetClient(),
+		Registry:  nodeRegistry,
+		Namespace: discoveryNamespace,
+	}); err != nil {
+		logger.Error(err, "unable to add forkd discovery")
 		os.Exit(1)
 	}
 

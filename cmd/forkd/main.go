@@ -36,7 +36,10 @@ func main() {
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
 		mock := fork.NewMockEngine()
-		mock.CreateTemplate("default", "python:3.12-slim", 0)
+		if err := mock.CreateTemplate("default", "python:3.12-slim", 0); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: mock template: %v\n", err)
+			os.Exit(1)
+		}
 		engine = mock
 	} else {
 		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath)

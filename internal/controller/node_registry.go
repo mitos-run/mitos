@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -19,8 +18,11 @@ type NodeRegistry struct {
 }
 
 type NodeInfo struct {
-	Name            string
-	Endpoint        string
+	Name     string
+	Endpoint string
+	// HTTPEndpoint is the forkd HTTP sandbox API (exec/files), e.g. "10.0.3.7:9091".
+	// This is what claim status endpoints point at.
+	HTTPEndpoint    string
 	ActiveSandboxes int32
 	MaxSandboxes    int32
 	MemoryTotal     int64
@@ -41,6 +43,16 @@ func NewNodeRegistry() *NodeRegistry {
 func (r *NodeRegistry) Register(info *NodeInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.nodes == nil {
+		r.nodes = make(map[string]*NodeInfo)
+	}
+	if old, ok := r.nodes[info.Name]; ok && old.conn != nil {
+		if old.Endpoint == info.Endpoint && info.conn == nil {
+			info.conn = old.conn // carry the dialed connection forward
+		} else {
+			old.conn.Close()
+		}
+	}
 	info.LastHeartbeat = time.Now()
 	r.nodes[info.Name] = info
 }
@@ -111,15 +123,54 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 	return best, nil
 }
 
-// GetConnection returns a gRPC connection to a node's forkd.
-func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
+// NodesWithTemplate returns healthy nodes that hold the given template snapshot.
+func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*NodeInfo
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.hasSnapshot(templateID) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// AddTemplate records that a node now holds the given template snapshot.
+// Takes the write lock so NodeInfo.TemplateIDs is never mutated concurrently
+// with readers like NodesWithTemplate.
+func (r *NodeRegistry) AddTemplate(nodeName, templateID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	node, ok := r.nodes[nodeName]
-	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+	for _, t := range node.TemplateIDs {
+		if t == templateID {
+			return
+		}
+	}
+	node.TemplateIDs = append(node.TemplateIDs, templateID)
+}
+
+// GetNode returns the registered node by name.
+func (r *NodeRegistry) GetNode(name string) (*NodeInfo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	node, ok := r.nodes[name]
+	return node, ok
+}
+
+// GetConnection returns a gRPC connection to a node's forkd, dialing once.
+func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	node, ok := r.nodes[nodeName]
 	if !ok {
 		return nil, fmt.Errorf("node %s not found", nodeName)
 	}
-
 	if node.conn != nil {
 		return node.conn, nil
 	}
@@ -131,11 +182,7 @@ func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) 
 	if err != nil {
 		return nil, fmt.Errorf("connect to forkd on %s: %w", nodeName, err)
 	}
-
-	r.mu.Lock()
 	node.conn = conn
-	r.mu.Unlock()
-
 	return conn, nil
 }
 
@@ -158,7 +205,7 @@ func (r *NodeRegistry) PruneStale(maxAge time.Duration) int {
 
 	pruned := 0
 	for name, node := range r.nodes {
-		if time.Since(node.LastHeartbeat) > maxAge {
+		if time.Since(node.LastHeartbeat) >= maxAge {
 			if node.conn != nil {
 				node.conn.Close()
 			}
@@ -167,39 +214,6 @@ func (r *NodeRegistry) PruneStale(maxAge time.Duration) int {
 		}
 	}
 	return pruned
-}
-
-// StartDiscovery watches for forkd pods and registers them.
-// In production, this watches k8s pods with the forkd label.
-func (r *NodeRegistry) StartDiscovery(ctx context.Context, mockMode bool) {
-	if mockMode {
-		// Register a mock node for local development
-		r.Register(&NodeInfo{
-			Name:         "mock-node-1",
-			Endpoint:     "localhost:9090",
-			MaxSandboxes: 1000,
-			MemoryTotal:  8 * 1024 * 1024 * 1024,
-			TemplateIDs:  []string{"default"},
-		})
-		return
-	}
-
-	// TODO: Watch pods with label app.kubernetes.io/component=forkd
-	// When a pod starts, register it with its pod IP + gRPC port
-	// When a pod terminates, unregister it
-	// Periodically prune stale nodes
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.PruneStale(2 * time.Minute)
-			}
-		}
-	}()
 }
 
 func (n *NodeInfo) isHealthy() bool {

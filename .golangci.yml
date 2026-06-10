@@ -1,0 +1,9 @@
+run:
+  timeout: 5m
+
+issues:
+  exclude-rules:
+    # Test files: unchecked fire-and-forget calls in fixtures are acceptable.
+    - path: _test\.go
+      linters:
+        - errcheck
