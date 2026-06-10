@@ -46,7 +46,7 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Find the node running the source sandbox
-	node, ok := r.NodeRegistry.nodes[source.Status.Node]
+	node, ok := r.NodeRegistry.GetNode(source.Status.Node)
 	if !ok {
 		return ctrl.Result{}, fmt.Errorf("node %s not found in registry", source.Status.Node)
 	}

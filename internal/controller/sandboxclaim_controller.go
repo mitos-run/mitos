@@ -93,6 +93,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Call forkd on the selected node — this is the <2ms hot path
 	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env)
 	if err != nil {
+		// A NotFound from forkd usually means the snapshot is not built on
+		// that node yet — transient while the pool reconciler catches up.
+		if isNotFound(err) {
+			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
+			claim.Status.Phase = v1alpha1.SandboxPending
+			r.Status().Update(ctx, &claim)
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		}
 		logger.Error(err, "fork failed", "node", node.Name)
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		r.Status().Update(ctx, &claim)

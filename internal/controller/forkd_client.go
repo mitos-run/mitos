@@ -2,10 +2,23 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// isNotFound reports whether err (possibly wrapped) carries gRPC NotFound.
+func isNotFound(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if s, ok := status.FromError(e); ok && s.Code() == codes.NotFound {
+			return true
+		}
+	}
+	return false
+}
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
 // The returned endpoint is the node's HTTP sandbox API — what clients (SDKs)

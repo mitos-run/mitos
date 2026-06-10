@@ -148,6 +148,14 @@ func (r *NodeRegistry) AddTemplate(nodeName, templateID string) {
 	node.TemplateIDs = append(node.TemplateIDs, templateID)
 }
 
+// GetNode returns the registered node by name.
+func (r *NodeRegistry) GetNode(name string) (*NodeInfo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	node, ok := r.nodes[name]
+	return node, ok
+}
+
 // GetConnection returns a gRPC connection to a node's forkd, dialing once.
 func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
 	r.mu.Lock()

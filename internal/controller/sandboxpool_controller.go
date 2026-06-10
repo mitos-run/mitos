@@ -97,10 +97,17 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			errs = append(errs, err)
 			continue
 		}
-		if _, err := forkdpb.NewForkDaemonClient(conn).CreateTemplate(ctx, &forkdpb.CreateTemplateRequest{
+		// CreateTemplate on the real engine boots a VM and snapshots it —
+		// O(minutes). This blocks the pool reconcile worker; bounded here so a
+		// hung node cannot stall pool reconciliation forever. Moving builds to
+		// a background queue is roadmap work (snapshot distribution).
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		_, err = forkdpb.NewForkDaemonClient(conn).CreateTemplate(cctx, &forkdpb.CreateTemplateRequest{
 			TemplateId: templateID,
 			Image:      image,
-		}); err != nil {
+		})
+		cancel()
+		if err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 			continue
 		}
@@ -116,6 +123,8 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]int32 {
 	dist := make(map[string]int32)
 	for _, n := range r.NodeRegistry.NodesWithTemplate(templateID) {
+		// One snapshot per node in the current model; becomes a real count when
+		// snapshot distribution lands (ROADMAP §3).
 		dist[n.Name] = 1
 	}
 	return dist
