@@ -147,6 +147,10 @@ type CreateTemplateResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	TemplateId     string                 `protobuf:"bytes,1,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
 	CreationTimeMs float64                `protobuf:"fixed64,2,opt,name=creation_time_ms,json=creationTimeMs,proto3" json:"creation_time_ms,omitempty"`
+	// Content-addressed manifest digest of the snapshot just built. A stable
+	// identifier for the snapshot, safe to log; the controller records it in the
+	// SandboxPool status.
+	TemplateDigest string `protobuf:"bytes,3,opt,name=template_digest,json=templateDigest,proto3" json:"template_digest,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -193,6 +197,13 @@ func (x *CreateTemplateResponse) GetCreationTimeMs() float64 {
 		return x.CreationTimeMs
 	}
 	return 0
+}
+
+func (x *CreateTemplateResponse) GetTemplateDigest() string {
+	if x != nil {
+		return x.TemplateDigest
+	}
+	return ""
 }
 
 type DeleteTemplateRequest struct {
@@ -1901,8 +1912,13 @@ type GetCapacityResponse struct {
 	TemplateIds       []string               `protobuf:"bytes,6,rep,name=template_ids,json=templateIds,proto3" json:"template_ids,omitempty"`
 	SnapshotIds       []string               `protobuf:"bytes,7,rep,name=snapshot_ids,json=snapshotIds,proto3" json:"snapshot_ids,omitempty"`
 	KvmAvailable      bool                   `protobuf:"varint,8,opt,name=kvm_available,json=kvmAvailable,proto3" json:"kvm_available,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// template_digests maps each template id to its content-addressed snapshot
+	// manifest digest (safe to log). Lets the controller record the snapshot
+	// identity in the SandboxPool status even for templates it did not just
+	// build.
+	TemplateDigests map[string]string `protobuf:"bytes,9,rep,name=template_digests,json=templateDigests,proto3" json:"template_digests,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GetCapacityResponse) Reset() {
@@ -1989,6 +2005,13 @@ func (x *GetCapacityResponse) GetKvmAvailable() bool {
 		return x.KvmAvailable
 	}
 	return false
+}
+
+func (x *GetCapacityResponse) GetTemplateDigests() map[string]string {
+	if x != nil {
+		return x.TemplateDigests
+	}
+	return nil
 }
 
 type ResourceSpec struct {
@@ -2211,11 +2234,12 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\rinit_commands\x18\x03 \x03(\tR\finitCommands\x12\x1f\n" +
 	"\vkernel_path\x18\x04 \x01(\tR\n" +
 	"kernelPath\x121\n" +
-	"\tresources\x18\x05 \x01(\v2\x13.forkd.ResourceSpecR\tresources\"c\n" +
+	"\tresources\x18\x05 \x01(\v2\x13.forkd.ResourceSpecR\tresources\"\x8c\x01\n" +
 	"\x16CreateTemplateResponse\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12(\n" +
-	"\x10creation_time_ms\x18\x02 \x01(\x01R\x0ecreationTimeMs\"8\n" +
+	"\x10creation_time_ms\x18\x02 \x01(\x01R\x0ecreationTimeMs\x12'\n" +
+	"\x0ftemplate_digest\x18\x03 \x01(\tR\x0etemplateDigest\"8\n" +
 	"\x15DeleteTemplateRequest\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\"\x18\n" +
@@ -2348,7 +2372,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x12(\n" +
 	"\x10modified_at_unix\x18\x04 \x01(\x03R\x0emodifiedAtUnix\x12\x12\n" +
 	"\x04mode\x18\x05 \x01(\rR\x04mode\"\x14\n" +
-	"\x12GetCapacityRequest\"\xda\x02\n" +
+	"\x12GetCapacityRequest\"\xfa\x03\n" +
 	"\x13GetCapacityResponse\x12)\n" +
 	"\x10active_sandboxes\x18\x01 \x01(\x05R\x0factiveSandboxes\x12#\n" +
 	"\rmax_sandboxes\x18\x02 \x01(\x05R\fmaxSandboxes\x12,\n" +
@@ -2357,7 +2381,11 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x13memory_shared_bytes\x18\x05 \x01(\x03R\x11memorySharedBytes\x12!\n" +
 	"\ftemplate_ids\x18\x06 \x03(\tR\vtemplateIds\x12!\n" +
 	"\fsnapshot_ids\x18\a \x03(\tR\vsnapshotIds\x12#\n" +
-	"\rkvm_available\x18\b \x01(\bR\fkvmAvailable\"A\n" +
+	"\rkvm_available\x18\b \x01(\bR\fkvmAvailable\x12Z\n" +
+	"\x10template_digests\x18\t \x03(\v2/.forkd.GetCapacityResponse.TemplateDigestsEntryR\x0ftemplateDigests\x1aB\n" +
+	"\x14TemplateDigestsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
 	"\fResourceSpec\x12\x14\n" +
 	"\x05vcpus\x18\x01 \x01(\x05R\x05vcpus\x12\x1b\n" +
 	"\tmemory_mb\x18\x02 \x01(\x03R\bmemoryMb\"0\n" +
@@ -2403,7 +2431,7 @@ func file_proto_forkd_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_forkd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_proto_forkd_proto_goTypes = []any{
 	(ExecStreamResponse_Stream)(0), // 0: forkd.ExecStreamResponse.Stream
 	(*CreateTemplateRequest)(nil),  // 1: forkd.CreateTemplateRequest
@@ -2443,6 +2471,7 @@ var file_proto_forkd_proto_goTypes = []any{
 	(*EnvVar)(nil),                 // 35: forkd.EnvVar
 	(*SecretVar)(nil),              // 36: forkd.SecretVar
 	(*NetworkConfig)(nil),          // 37: forkd.NetworkConfig
+	nil,                            // 38: forkd.GetCapacityResponse.TemplateDigestsEntry
 }
 var file_proto_forkd_proto_depIdxs = []int32{
 	34, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
@@ -2456,41 +2485,42 @@ var file_proto_forkd_proto_depIdxs = []int32{
 	0,  // 8: forkd.ExecStreamResponse.stream:type_name -> forkd.ExecStreamResponse.Stream
 	24, // 9: forkd.ListSandboxesResponse.sandboxes:type_name -> forkd.SandboxInfo
 	31, // 10: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
-	1,  // 11: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
-	3,  // 12: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
-	5,  // 13: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
-	8,  // 14: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
-	10, // 15: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
-	12, // 16: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
-	14, // 17: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
-	16, // 18: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
-	18, // 19: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
-	20, // 20: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
-	22, // 21: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
-	25, // 22: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
-	27, // 23: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
-	29, // 24: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
-	32, // 25: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
-	2,  // 26: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
-	4,  // 27: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
-	6,  // 28: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
-	9,  // 29: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
-	11, // 30: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
-	13, // 31: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
-	15, // 32: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
-	17, // 33: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
-	19, // 34: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
-	21, // 35: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
-	23, // 36: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
-	26, // 37: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
-	28, // 38: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
-	30, // 39: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
-	33, // 40: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
-	26, // [26:41] is the sub-list for method output_type
-	11, // [11:26] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	38, // 11: forkd.GetCapacityResponse.template_digests:type_name -> forkd.GetCapacityResponse.TemplateDigestsEntry
+	1,  // 12: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
+	3,  // 13: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
+	5,  // 14: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
+	8,  // 15: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
+	10, // 16: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
+	12, // 17: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
+	14, // 18: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
+	16, // 19: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
+	18, // 20: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
+	20, // 21: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
+	22, // 22: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
+	25, // 23: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
+	27, // 24: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
+	29, // 25: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
+	32, // 26: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
+	2,  // 27: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
+	4,  // 28: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
+	6,  // 29: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
+	9,  // 30: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
+	11, // 31: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
+	13, // 32: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
+	15, // 33: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
+	17, // 34: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
+	19, // 35: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
+	21, // 36: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
+	23, // 37: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
+	26, // 38: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
+	28, // 39: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
+	30, // 40: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
+	33, // 41: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
+	27, // [27:42] is the sub-list for method output_type
+	12, // [12:27] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_proto_forkd_proto_init() }
@@ -2504,7 +2534,7 @@ func file_proto_forkd_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_forkd_proto_rawDesc), len(file_proto_forkd_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   37,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

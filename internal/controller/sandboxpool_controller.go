@@ -55,6 +55,9 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	pool.Status.ReadySnapshots = readySnapshots
 	pool.Status.TotalSnapshots = readySnapshots
 	pool.Status.NodeDistribution = r.nodeDistribution(templateID)
+	if digest, ok := r.NodeRegistry.TemplateDigest(templateID); ok {
+		pool.Status.TemplateDigest = digest
+	}
 
 	now := metav1.Now()
 	pool.Status.LastSnapshotTime = &now
@@ -102,7 +105,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// hung node cannot stall pool reconciliation forever. Moving builds to
 		// a background queue is roadmap work (snapshot distribution).
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		_, err = forkdpb.NewForkDaemonClient(conn).CreateTemplate(cctx, &forkdpb.CreateTemplateRequest{
+		resp, err := forkdpb.NewForkDaemonClient(conn).CreateTemplate(cctx, &forkdpb.CreateTemplateRequest{
 			TemplateId: templateID,
 			Image:      image,
 		})
@@ -111,7 +114,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 			continue
 		}
-		r.NodeRegistry.AddTemplate(node.Name, templateID)
+		r.NodeRegistry.AddTemplateWithDigest(node.Name, templateID, resp.TemplateDigest)
 		created++
 	}
 	if created == 0 && len(errs) > 0 {

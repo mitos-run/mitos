@@ -115,6 +115,7 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
 	info.MemoryUsed = resp.MemoryUsedBytes
 	info.TemplateIDs = resp.TemplateIds
 	info.SnapshotIDs = resp.SnapshotIds
+	info.TemplateDigests = resp.TemplateDigests
 }
 
 // NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod

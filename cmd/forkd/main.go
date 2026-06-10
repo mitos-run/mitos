@@ -26,9 +26,11 @@ func main() {
 		tlsCert        string
 		tlsKey         string
 		tlsCA          string
-		jailerBin      string
-		chrootBase     string
-		uidRange       string
+		jailerBin       string
+		chrootBase      string
+		uidRange        string
+		casDir          string
+		allowUnverified bool
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -43,6 +45,8 @@ func main() {
 	flag.StringVar(&jailerBin, "jailer", "", "Jailer binary path; every VM is launched through it with a per-VM uid and chroot. Empty disables the jailer (development only)")
 	flag.StringVar(&chrootBase, "chroot-base", "/srv/jailer", "Jailer chroot base directory; must share a filesystem with --data-dir")
 	flag.StringVar(&uidRange, "uid-range", "64000-64999", "Inclusive uid/gid range for per-VM jailer users, formatted low-high")
+	flag.StringVar(&casDir, "cas-dir", "", "Content-addressed store directory for snapshot integrity and transfer. Empty means <data-dir>/cas")
+	flag.BoolVar(&allowUnverified, "allow-unverified-snapshots", false, "Allow forking snapshots that fail or skip integrity verification (development only; refused by default)")
 	flag.Parse()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
@@ -70,7 +74,10 @@ func main() {
 		if !jailerCfg.Enabled() {
 			fmt.Fprintln(os.Stderr, "forkd: jailer DISABLED; Firecracker runs unjailed as forkd's user (threat model section 1); supply --jailer for any non-development deployment")
 		}
-		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg)
+		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg, fork.EngineOpts{
+			CASDir:          casDir,
+			AllowUnverified: allowUnverified,
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: failed to initialize: %v\n", err)
 			fmt.Fprintf(os.Stderr, "forkd: use --mock for local development without KVM\n")

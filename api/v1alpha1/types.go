@@ -148,6 +148,12 @@ type SandboxPoolStatus struct {
 	LastSnapshotTime *metav1.Time       `json:"lastSnapshotTime,omitempty"`
 	Conditions       []metav1.Condition `json:"conditions,omitempty"`
 	NodeDistribution map[string]int32   `json:"nodeDistribution,omitempty"`
+
+	// TemplateDigest is the content-addressed manifest digest of the pool's
+	// snapshot, as reported by the node(s) holding it. It makes the snapshot
+	// identity visible in the CRD so integrity can be audited. A content
+	// address, safe to log.
+	TemplateDigest string `json:"templateDigest,omitempty"`
 }
 
 // +kubebuilder:object:root=true

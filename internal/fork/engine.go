@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -21,6 +22,36 @@ type Engine struct {
 	jailer         firecracker.JailerConfig
 	sandboxes      map[string]*Sandbox
 	nextPort       int32
+
+	// casStore content-addresses every template snapshot for integrity
+	// verification (issue #9) and incremental transfer (Task 4). Rooted at
+	// <casDir>, defaulting to <dataDir>/cas.
+	casStore *cas.Store
+	// allowUnverified, when true, lets Fork proceed on a snapshot that failed
+	// or skipped verification, after a loud one-time warning. Development
+	// escape hatch only; default false refuses unverified forks.
+	allowUnverified bool
+	// vmmVersion is threaded into every snapshot manifest. Empty for now; the
+	// version-compat contract is tracked separately (#32).
+	vmmVersion string
+	// unverifiedWarned records snapshot IDs that already emitted the loud
+	// allow-unverified warning, so it fires once per template not per fork.
+	unverifiedWarned map[string]struct{}
+	// templateDigests caches the recorded manifest digest per template id so
+	// GetCapacity can report it to the controller without re-reading disk.
+	templateDigests map[string]cas.Digest
+}
+
+// EngineOpts carries the optional, security-relevant engine configuration so
+// the positional constructor stays short. The zero value is the safe default:
+// CAS under <dataDir>/cas and unverified forks refused.
+type EngineOpts struct {
+	// CASDir roots the content-addressed store. Empty means <dataDir>/cas.
+	CASDir string
+	// AllowUnverified disables the verify-on-load refusal (development only).
+	AllowUnverified bool
+	// VMMVersion is recorded in every snapshot manifest. May be empty.
+	VMMVersion string
 }
 
 type Template struct {
@@ -73,7 +104,7 @@ type SandboxRecord struct {
 // launches Firecracker directly (development only; flagged in the threat
 // model); with JailerBin set every VM runs through the jailer with a
 // dedicated uid/gid from the configured range and a per-VM chroot.
-func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.JailerConfig) (*Engine, error) {
+func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.JailerConfig, opts EngineOpts) (*Engine, error) {
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
@@ -88,13 +119,27 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		}
 	}
 
+	casDir := opts.CASDir
+	if casDir == "" {
+		casDir = filepath.Join(dataDir, "cas")
+	}
+	store, err := cas.New(casDir)
+	if err != nil {
+		return nil, fmt.Errorf("init CAS store: %w", err)
+	}
+
 	return &Engine{
-		dataDir:        dataDir,
-		firecrackerBin: firecrackerBin,
-		jailer:         jailer,
-		templateMgr:    firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer),
-		sandboxes:      make(map[string]*Sandbox),
-		nextPort:       10000,
+		dataDir:          dataDir,
+		firecrackerBin:   firecrackerBin,
+		jailer:           jailer,
+		templateMgr:      firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer),
+		sandboxes:        make(map[string]*Sandbox),
+		nextPort:         10000,
+		casStore:         store,
+		allowUnverified:  opts.AllowUnverified,
+		vmmVersion:       opts.VMMVersion,
+		unverifiedWarned: make(map[string]struct{}),
+		templateDigests:  make(map[string]cas.Digest),
 	}, nil
 }
 
@@ -115,6 +160,12 @@ func validateKVM() error {
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
 // This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
+	// Verify-on-load gate (issue #9): cheap marker check, with a one-time
+	// lazy verify for templates this process did not build. Refuses on
+	// mismatch unless the development escape hatch is set.
+	if err := e.ensureVerified(snapshotID); err != nil {
+		return nil, err
+	}
 	// The drive path embedded in the snapshot points at the template's
 	// rootfs; in jailer mode that file must be linked into the new VM's
 	// chroot at the same path for the restore to resolve it.
@@ -331,21 +382,100 @@ func (e *Engine) GetCapacity() Capacity {
 
 	templateIDs, _ := e.templateMgr.ListTemplates()
 
+	digests := make(map[string]string, len(templateIDs))
+	for _, id := range templateIDs {
+		if d, ok := e.templateDigests[id]; ok {
+			digests[id] = string(d)
+			continue
+		}
+		// Template present on disk but not yet recorded by this process
+		// (e.g. discovered after a restart). Surface the persisted digest so
+		// the controller can still record it; verification happens lazily at
+		// first fork.
+		if d, err := readDigestFile(e.dataDir, id); err == nil {
+			digests[id] = string(d)
+		}
+	}
+
 	return Capacity{
 		ActiveSandboxes: int32(len(e.sandboxes)),
 		MemoryUsed:      totalUnique + totalShared,
 		MemoryShared:    totalShared,
 		TemplateIDs:     templateIDs,
+		TemplateDigests: digests,
 		KVMAvailable:    true,
 	}
 }
 
-// CreateTemplate boots a VM, runs init, snapshots it.
+// CreateTemplate boots a VM, runs init, snapshots it, then content-addresses
+// the resulting snapshot into the CAS store, pins its manifest, records the
+// digest, and writes the verified marker. The template is trusted at creation
+// (this process just built it), so no re-hash gate is applied here.
 func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
 	cfg := firecracker.DefaultVMConfig()
 	cfg.RootfsPath = rootfsPath
-	_, err := e.templateMgr.CreateTemplate(id, cfg, initWaitSecs)
-	return err
+	if _, err := e.templateMgr.CreateTemplate(id, cfg, initWaitSecs); err != nil {
+		return err
+	}
+	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.vmmVersion)
+	if err != nil {
+		return fmt.Errorf("record template %s digest: %w", id, err)
+	}
+	e.mu.Lock()
+	e.templateDigests[id] = d
+	e.mu.Unlock()
+	return nil
+}
+
+// VerifyTemplate re-derives the manifest digest of a template's on-disk
+// snapshot from the CAS store and compares it to the recorded digest. On match
+// it (re)writes the verified marker and caches the digest; on mismatch it
+// returns an error and leaves the template unverified. This is the
+// verify-on-load path for templates this process did not build, e.g. ones
+// discovered on disk after a forkd restart. It is intentionally NOT called per
+// fork: see verify.go for the verify-once-at-registration rationale.
+func (e *Engine) VerifyTemplate(id string) error {
+	d, err := verifyTemplate(e.casStore, e.dataDir, id, e.vmmVersion)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.templateDigests[id] = d
+	e.mu.Unlock()
+	return nil
+}
+
+// ensureVerified is the cheap Fork-time gate. It stats the verified marker
+// (no hashing) and, only if it is absent, performs a one-time lazy
+// verification. A failed verification refuses the fork unless allowUnverified
+// is set, in which case it logs a loud one-time warning per template and
+// proceeds. Steady state hits only the marker stat.
+func (e *Engine) ensureVerified(snapshotID string) error {
+	if isVerified(e.dataDir, snapshotID) {
+		return nil
+	}
+	if err := e.VerifyTemplate(snapshotID); err != nil {
+		if e.allowUnverified {
+			e.warnUnverifiedOnce(snapshotID, err)
+			return nil
+		}
+		return fmt.Errorf("refusing to fork unverified snapshot %s: %w (set --allow-unverified-snapshots to override in development)", snapshotID, err)
+	}
+	return nil
+}
+
+// warnUnverifiedOnce emits the loud allow-unverified warning a single time per
+// snapshot id. The digest and id are safe to log; no secret values are touched.
+func (e *Engine) warnUnverifiedOnce(snapshotID string, cause error) {
+	e.mu.Lock()
+	_, seen := e.unverifiedWarned[snapshotID]
+	if !seen {
+		e.unverifiedWarned[snapshotID] = struct{}{}
+	}
+	e.mu.Unlock()
+	if !seen {
+		fmt.Fprintf(os.Stderr, "forkd: WARNING forking UNVERIFIED snapshot %s: %v; integrity is NOT enforced because --allow-unverified-snapshots is set (development only)\n", snapshotID, cause)
+	}
 }
 
 type Capacity struct {
@@ -356,6 +486,10 @@ type Capacity struct {
 	MemoryShared    int64
 	TemplateIDs     []string
 	SnapshotIDs     []string
+	// TemplateDigests maps each template id to its recorded snapshot manifest
+	// digest (a content address, safe to log). The controller records this in
+	// the SandboxPool status so the snapshot identity is visible in the CRD.
+	TemplateDigests map[string]string
 	KVMAvailable    bool
 }
 

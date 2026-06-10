@@ -72,3 +72,20 @@ func TestNodesWithTemplate(t *testing.T) {
 		t.Fatalf("got %d nodes, want 2", len(got))
 	}
 }
+
+func TestTemplateDigestRecordedAndReported(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(&NodeInfo{Name: "a", Endpoint: "10.0.0.1:9090", LastHeartbeat: time.Now()})
+
+	r.AddTemplateWithDigest("a", "py", "abc123")
+
+	if d, ok := r.TemplateDigest("py"); !ok || d != "abc123" {
+		t.Fatalf("TemplateDigest = %q, %v; want abc123, true", d, ok)
+	}
+
+	// A template with no recorded digest reports not-found.
+	r.AddTemplate("a", "node")
+	if d, ok := r.TemplateDigest("node"); ok || d != "" {
+		t.Fatalf("TemplateDigest(node) = %q, %v; want empty, false", d, ok)
+	}
+}
