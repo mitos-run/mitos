@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a defect in the sandbox system
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce the behavior (manifests, SDK calls, commands).
+      placeholder: |
+        1. Apply this SandboxPool ...
+        2. Create this SandboxClaim ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes version, KVM or mock engine, deployment method (make install, kind, bare metal), component versions.
+      placeholder: |
+        - Kubernetes version:
+        - Engine: KVM / mock
+        - Deployment method:
+        - Component versions (controller, forkd, SDK):
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant controller, forkd, or guest agent logs. Remove any secret values before posting.
+      render: text
+    validations:
+      required: false
