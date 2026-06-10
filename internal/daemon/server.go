@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
@@ -46,9 +47,7 @@ func NewServer(engine ForkEngine, sandboxAPI *SandboxAPI) *Server {
 
 // RegisterForkDaemonServer registers the gRPC service.
 func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
-	// TODO: register generated protobuf service
-	_ = s
-	_ = srv
+	forkdpb.RegisterForkDaemonServer(s, &grpcService{srv: srv})
 }
 
 // ServeHTTP starts the HTTP server for metrics, health, and sandbox API.
@@ -90,8 +89,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	activeSandboxes.Inc()
 
 	// Connect to the guest agent so exec/files work
-	vsockPath := fmt.Sprintf("/var/lib/agent-run/sandboxes/%s/vsock.sock", sandboxID)
-	s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath)
+	s.sandboxAPI.RegisterSandbox(result.SandboxID, result.VsockPath)
 
 	return result, nil
 }
