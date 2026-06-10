@@ -117,7 +117,8 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - ⬜ Live-fork secret policy: reject without `allowSecretInheritance: true`
 - ⬜ Firecracker under jailer (per-VM UID, chroot, cgroup); priority zero in
   the threat model
-- ⬜ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
+- ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
+  (rotation and token expiry pending; tracked in threat model residuals)
 - ⬜ Snapshot content addressing (digest in CRD status, verify-on-load)
 - ⬜ Lifetime memory accounting (`agentrun_memory_unique_bytes` over time,
   not just T=0)
