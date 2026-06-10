@@ -36,6 +36,10 @@ type NodeInfo struct {
 	MemoryUsed      int64
 	TemplateIDs     []string
 	SnapshotIDs     []string
+	// TemplateDigests maps each held template id to its content-addressed
+	// snapshot manifest digest, as reported by the node's GetCapacity. Safe
+	// to log; used by the pool reconciler to record the digest in CRD status.
+	TemplateDigests map[string]string
 	LastHeartbeat   time.Time
 	// TLS, when set, overrides the registry-level TLS config for dials to
 	// this node; lets tests run mixed TLS/insecure fleets in one registry.
@@ -150,11 +154,24 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 // Takes the write lock so NodeInfo.TemplateIDs is never mutated concurrently
 // with readers like NodesWithTemplate.
 func (r *NodeRegistry) AddTemplate(nodeName, templateID string) {
+	r.AddTemplateWithDigest(nodeName, templateID, "")
+}
+
+// AddTemplateWithDigest records a node's template snapshot and its
+// content-addressed digest (empty digest is allowed, e.g. mock engine). The
+// digest is what the pool reconciler surfaces in the CRD status.
+func (r *NodeRegistry) AddTemplateWithDigest(nodeName, templateID, digest string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	node, ok := r.nodes[nodeName]
 	if !ok {
 		return
+	}
+	if digest != "" {
+		if node.TemplateDigests == nil {
+			node.TemplateDigests = make(map[string]string)
+		}
+		node.TemplateDigests[templateID] = digest
 	}
 	for _, t := range node.TemplateIDs {
 		if t == templateID {
@@ -162,6 +179,23 @@ func (r *NodeRegistry) AddTemplate(nodeName, templateID string) {
 		}
 	}
 	node.TemplateIDs = append(node.TemplateIDs, templateID)
+}
+
+// TemplateDigest returns the content-addressed digest reported by any healthy
+// node holding the template, and whether one was found. Nodes report identical
+// content for the same template (content addressing), so the first match wins.
+func (r *NodeRegistry) TemplateDigest(templateID string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, n := range r.nodes {
+		if !n.isHealthy() || !n.hasSnapshot(templateID) {
+			continue
+		}
+		if d, ok := n.TemplateDigests[templateID]; ok && d != "" {
+			return d, true
+		}
+	}
+	return "", false
 }
 
 // GetNode returns the registered node by name.

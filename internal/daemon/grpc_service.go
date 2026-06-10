@@ -75,6 +75,7 @@ func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityReq
 		TemplateIds:       c.TemplateIDs,
 		SnapshotIds:       c.SnapshotIDs,
 		KvmAvailable:      c.KVMAvailable,
+		TemplateDigests:   c.TemplateDigests,
 	}, nil
 }
 
@@ -85,7 +86,14 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, 0); err != nil {
 		return nil, grpcError(err)
 	}
-	return &forkdpb.CreateTemplateResponse{TemplateId: req.TemplateId}, nil
+	// Report the content-addressed digest the engine just recorded so the
+	// controller can store it in the SandboxPool status. The mock engine does
+	// not produce one; an empty digest is acceptable there.
+	digest := g.srv.engine.GetCapacity().TemplateDigests[req.TemplateId]
+	return &forkdpb.CreateTemplateResponse{
+		TemplateId:     req.TemplateId,
+		TemplateDigest: digest,
+	}, nil
 }
 
 func (g *grpcService) Exec(ctx context.Context, _ *forkdpb.ExecRequest) (*forkdpb.ExecResponse, error) {

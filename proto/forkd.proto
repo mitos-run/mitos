@@ -46,6 +46,10 @@ message CreateTemplateRequest {
 message CreateTemplateResponse {
   string template_id = 1;
   double creation_time_ms = 2;
+  // Content-addressed manifest digest of the snapshot just built. A stable
+  // identifier for the snapshot, safe to log; the controller records it in the
+  // SandboxPool status.
+  string template_digest = 3;
 }
 
 message DeleteTemplateRequest {
@@ -241,6 +245,11 @@ message GetCapacityResponse {
   repeated string template_ids = 6;
   repeated string snapshot_ids = 7;
   bool kvm_available = 8;
+  // template_digests maps each template id to its content-addressed snapshot
+  // manifest digest (safe to log). Lets the controller record the snapshot
+  // identity in the SandboxPool status even for templates it did not just
+  // build.
+  map<string, string> template_digests = 9;
 }
 
 // --- Shared types ---

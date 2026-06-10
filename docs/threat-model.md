@@ -70,9 +70,9 @@ arbitrary code at sandbox privilege.
 
 | Control | Status | Detail |
 |---|---|---|
-| Content addressing (digest in CRD status) | **open** | Snapshots are bare files under `/var/lib/agent-run/templates/<id>/snapshot/`; identity is the directory name. No digests anywhere. |
-| Verify-on-load | **open** | forkd loads whatever is on disk. |
-| Publish authorization | **open** | Anything that can write the hostPath can plant a snapshot. Required: snapshots recorded with digest + publisher identity in pool status; forkd refuses undigested artifacts (with an explicit dev-mode escape hatch). |
+| Content addressing (digest in CRD status) | **mitigated** | Every template snapshot is content-addressed in a CAS store the moment it is built: its sha256 manifest digest is recorded to `<dataDir>/templates/<id>/manifest.digest`, pinned in the store, reported through forkd `GetCapacity`/`CreateTemplate`, and written to `SandboxPoolStatus.TemplateDigest` so the snapshot identity is visible in `kubectl get sandboxpool -o yaml`. The digest is a content address and is safe to log. |
+| Verify-on-load | **mitigated** | forkd verifies a snapshot's on-disk bytes against the recorded digest before it is forked, and refuses on mismatch. To keep the fork hot path cheap, verification is verify-once-at-registration: at build time (trusted, marker written without re-hash) or at first use after a restart (lazy re-hash), recorded by a `verified` marker that Fork only stats. The dev-mode escape `--allow-unverified-snapshots` downgrades a failed verification to a loud one-time warning. Residual: verification is at registration, not per fork, so tampering AFTER a snapshot is verified is not re-detected until the marker is cleared; external snapshot import is not yet supported. |
+| Publish authorization | **mitigated** | Snapshots are produced only by forkd's own `CreateTemplate`, which is reachable solely over the mTLS-gated gRPC surface from the controller (PR #41). Externally supplied snapshots are not accepted, so the publish surface is exactly that authenticated `CreateTemplate` call. External snapshot import is future work. |
 
 ## 6. Secrets
 
