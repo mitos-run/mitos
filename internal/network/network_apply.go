@@ -65,9 +65,17 @@ func setup(
 		return fmt.Errorf("bring tap %s up: %w", id.TapName, err)
 	}
 
-	ruleset := netconf.RenderEgressRuleset(id.TapName, id.GuestIP, policy, allow, resolverIP)
-	if err := run(ctx, netconf.NftApplyArgs(), ruleset); err != nil {
-		return fmt.Errorf("apply egress ruleset for tap %s: %w", id.TapName, err)
+	// Install the idempotent shared table/base chain/dispatch map first, then
+	// this sandbox's own regular chain and dispatch element. Reapplying the
+	// shared skeleton is a no-op when it already exists and never flushes
+	// another sandbox's chain, so a second sandbox's Setup cannot drop the
+	// first sandbox's traffic.
+	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedTable()); err != nil {
+		return fmt.Errorf("apply shared egress table for tap %s: %w", id.TapName, err)
+	}
+	chain := netconf.RenderSandboxChain(id.TapName, id.GuestIP, policy, allow, resolverIP)
+	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
+		return fmt.Errorf("apply egress chain for tap %s: %w", id.TapName, err)
 	}
 
 	if opts.uplink != "" {
@@ -79,9 +87,12 @@ func setup(
 }
 
 // teardown runs the ordered host commands to remove a sandbox's network:
-// delete the tap (which also removes its addresses) and delete the per-tap
-// nftables table. Teardown is best-effort: it attempts both steps and returns
-// the first error so a partial failure does not leak the other resource.
+// delete the tap (which also removes its addresses), remove this sandbox's
+// dispatch element from the shared verdict map, and delete its per-sandbox
+// chain. The shared table, base chain, and map are left intact because other
+// sandboxes may still use them. Teardown is best-effort: it attempts every
+// step and returns the first error so a partial failure does not leak the
+// other resources.
 func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOptions) error {
 	var firstErr error
 
@@ -93,8 +104,13 @@ func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOp
 	if err := run(ctx, netconf.LinkDelArgs(id.TapName), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("delete tap %s: %w", id.TapName, err)
 	}
-	if err := run(ctx, netconf.NftDeleteTableArgs(id.TapName), ""); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("delete egress table for tap %s: %w", id.TapName, err)
+	// Remove the dispatch element before the chain: while the element exists it
+	// references the chain, so the chain delete would be refused.
+	if err := run(ctx, netconf.NftDeleteDispatchElementArgs(id.TapName), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete egress dispatch element for tap %s: %w", id.TapName, err)
+	}
+	if err := run(ctx, netconf.NftDeleteSandboxChainArgs(id.TapName), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete egress chain for tap %s: %w", id.TapName, err)
 	}
 	return firstErr
 }

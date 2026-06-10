@@ -59,30 +59,85 @@ func TestSplitAllowList(t *testing.T) {
 	}
 }
 
-func TestRenderEgressRulesetContents(t *testing.T) {
+// TestRenderSharedTableShape asserts the shared table holds ONE base chain
+// hooked forward with policy ACCEPT (so non-sandbox host forwarding is
+// untouched) plus a verdict map keyed by interface for per-sandbox dispatch.
+// There must be no policy-drop base chain: sandbox drops live only inside the
+// per-sandbox regular chains.
+func TestRenderSharedTableShape(t *testing.T) {
+	out := RenderSharedTable()
+
+	wantContains := []string{
+		"add table inet " + SharedTableName(),
+		"add chain inet " + SharedTableName() + " " + BaseChainName(),
+		"type filter hook forward priority 0",
+		"policy accept",                                  // base chain never drops
+		"add map inet " + SharedTableName() + " " + DispatchMapName(),
+		"type ifname : verdict",                          // dispatch by interface
+		"iifname vmap @" + DispatchMapName(),             // base chain dispatches
+	}
+	for _, w := range wantContains {
+		if !strings.Contains(out, w) {
+			t.Errorf("shared table missing %q\n---\n%s", w, out)
+		}
+	}
+	if strings.Contains(out, "policy drop") {
+		t.Errorf("shared base chain must not carry policy drop\n%s", out)
+	}
+}
+
+// TestRenderSandboxChainContents asserts a per-sandbox regular chain (no hook,
+// no policy) that ends in drop, plus the dispatch element that routes this
+// tap's traffic into it. The drop is a verdict for THIS packet only (reached
+// only via the per-tap jump), so it cannot affect other sandboxes.
+func TestRenderSandboxChainContents(t *testing.T) {
 	allow := []HostPort{
 		{IP: net.ParseIP("10.0.0.5"), Port: 443},
 		{IP: net.ParseIP("192.168.1.10"), Port: 80},
 	}
-	out := RenderEgressRuleset("sbabcd1234", net.ParseIP("10.200.0.2"),
+	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
 		v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 
+	chain := SandboxChainName("sbabcd1234")
 	wantContains := []string{
-		"sbabcd1234",          // scoped to the tap
-		"ip saddr 10.200.0.2", // from the guest IP
+		"add chain inet " + SharedTableName() + " " + chain, // regular chain, no hook
+		"ip saddr 10.200.0.2",                               // anti-spoof: from guest IP
 		"ct state established,related accept",
 		"ip daddr 10.0.0.5 tcp dport 443 accept",
 		"ip daddr 192.168.1.10 tcp dport 80 accept",
 		"ip daddr 10.200.0.1 udp dport 53 accept", // DNS to resolver only
 		"ip daddr 10.200.0.1 tcp dport 53 accept",
-		"policy drop", // default drop
+		// dispatch element routes this tap into the chain.
+		"add element inet " + SharedTableName() + " " + DispatchMapName(),
+		`"sbabcd1234" : jump ` + chain,
 	}
 	for _, w := range wantContains {
 		if !strings.Contains(out, w) {
-			t.Errorf("ruleset missing %q\n---\n%s", w, out)
+			t.Errorf("sandbox chain missing %q\n---\n%s", w, out)
 		}
 	}
-	// Exactly the two allowlisted accepts (count "dport" accepts for non-DNS).
+	// The regular chain must not be a hooked base chain and must not set policy.
+	if strings.Contains(out, "type filter hook") {
+		t.Errorf("per-sandbox chain must be a regular chain, not hooked\n%s", out)
+	}
+	if strings.Contains(out, "policy") {
+		t.Errorf("per-sandbox chain must not set a policy\n%s", out)
+	}
+	// The final verdict in the chain is drop (terminal for this packet only).
+	addRules := []string{}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if strings.HasPrefix(line, "add rule inet "+SharedTableName()+" "+chain) {
+			addRules = append(addRules, line)
+		}
+	}
+	if len(addRules) == 0 {
+		t.Fatalf("no rules added to chain\n%s", out)
+	}
+	last := addRules[len(addRules)-1]
+	if !strings.HasSuffix(last, " drop") {
+		t.Errorf("final chain rule must be drop, got %q\n%s", last, out)
+	}
+	// Exactly the two allowlisted accepts.
 	if got := strings.Count(out, "tcp dport 443 accept"); got != 1 {
 		t.Errorf("expected exactly 1 accept for :443, got %d", got)
 	}
@@ -91,24 +146,84 @@ func TestRenderEgressRulesetContents(t *testing.T) {
 	}
 }
 
-func TestRenderEgressRulesetDeterministic(t *testing.T) {
+// TestRenderSandboxChainsIndependent renders for TWO sandboxes and asserts each
+// gets its own regular chain ending in drop and its own dispatch element, with
+// no shared policy-drop base chain. This is the regression guard for the
+// cross-fork drop: sandbox B's drop lives in chain sb_B reached only by tapB,
+// so it can never terminate sandbox A's allowed traffic on tapA.
+func TestRenderSandboxChainsIndependent(t *testing.T) {
+	a := RenderSandboxChain("sbtapA", net.ParseIP("10.200.0.2"),
+		v1alpha1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}, net.ParseIP("10.200.0.1"))
+	b := RenderSandboxChain("sbtapB", net.ParseIP("10.200.0.6"),
+		v1alpha1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.9"), Port: 8080}}, net.ParseIP("10.200.0.5"))
+
+	if SandboxChainName("sbtapA") == SandboxChainName("sbtapB") {
+		t.Fatal("chain names collide")
+	}
+	if !strings.Contains(a, SandboxChainName("sbtapA")) || strings.Contains(a, SandboxChainName("sbtapB")) {
+		t.Errorf("sandbox A render leaks into B's chain\n%s", a)
+	}
+	if !strings.Contains(b, SandboxChainName("sbtapB")) || strings.Contains(b, SandboxChainName("sptapA")) {
+		t.Errorf("sandbox B render leaks into A's chain\n%s", b)
+	}
+	// Neither per-sandbox render touches the base chain policy.
+	for _, out := range []string{a, b} {
+		if strings.Contains(out, "policy drop") || strings.Contains(out, "hook forward") {
+			t.Errorf("per-sandbox render must not redefine the base chain\n%s", out)
+		}
+	}
+	// Each render's dispatch element keys on its own tap only.
+	if !strings.Contains(a, `"sptapA"`) && !strings.Contains(a, `"sbtapA"`) {
+		t.Errorf("A missing its dispatch element\n%s", a)
+	}
+	if strings.Contains(a, `"sbtapB"`) {
+		t.Errorf("A must not dispatch B's tap\n%s", a)
+	}
+}
+
+func TestRenderSandboxChainDeterministic(t *testing.T) {
 	allow := []HostPort{
 		{IP: net.ParseIP("10.0.0.5"), Port: 443},
 		{IP: net.ParseIP("192.168.1.10"), Port: 80},
 	}
-	a := RenderEgressRuleset("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
-	b := RenderEgressRuleset("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+	a := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+	b := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 	if a != b {
-		t.Errorf("ruleset not deterministic:\n%s\n---\n%s", a, b)
+		t.Errorf("render not deterministic:\n%s\n---\n%s", a, b)
 	}
 }
 
-func TestRenderEgressRulesetNoResolverOmitsDNS(t *testing.T) {
-	out := RenderEgressRuleset("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, nil, nil)
+// lastChainRule returns the last `add rule ... <chain>` line in a render, used
+// to assert the chain's final verdict regardless of trailing element lines.
+func lastChainRule(t *testing.T, out, chain string) string {
+	t.Helper()
+	var last string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if strings.HasPrefix(line, "add rule inet "+SharedTableName()+" "+chain) {
+			last = line
+		}
+	}
+	if last == "" {
+		t.Fatalf("no rule found for chain %s\n%s", chain, out)
+	}
+	return last
+}
+
+func TestRenderSandboxChainNoResolverOmitsDNS(t *testing.T) {
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, nil, nil)
 	if strings.Contains(out, "dport 53") {
 		t.Errorf("expected no DNS rule without a resolver IP\n%s", out)
 	}
-	if !strings.Contains(out, "policy drop") {
-		t.Errorf("expected default drop\n%s", out)
+	if !strings.HasSuffix(lastChainRule(t, out, SandboxChainName("sbx")), " drop") {
+		t.Errorf("chain must still end in drop\n%s", out)
+	}
+}
+
+func TestRenderSandboxChainAllowPolicy(t *testing.T) {
+	// With EgressAllow the per-sandbox chain ends in accept, not drop, so a
+	// permissive sandbox is not boxed in by its own chain.
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressAllow, nil, nil)
+	if !strings.HasSuffix(lastChainRule(t, out, SandboxChainName("sbx")), " accept") {
+		t.Errorf("EgressAllow chain must end in accept\n%s", out)
 	}
 }

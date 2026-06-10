@@ -2,6 +2,7 @@ package fork
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/paperclipinc/sandbox/api/v1alpha1"
@@ -138,6 +139,37 @@ func TestPrepareForkNetworkDistinctPerFork(t *testing.T) {
 	}
 	if a.overrides[0].HostDevName == b.overrides[0].HostDevName {
 		t.Errorf("override taps collide: %q", a.overrides[0].HostDevName)
+	}
+}
+
+// TestForkRunningFailsClosedWithNetworking asserts that a live fork
+// (ForkRunning) of a sandbox is rejected with an explicit, actionable error
+// while per-VM netns is not yet available (#18). Restoring the source's baked
+// NIC into a second live VM would collide on tap/MAC/IP, so we fail closed
+// rather than silently break networking.
+func TestForkRunningFailsClosedWithNetworking(t *testing.T) {
+	e, _, _ := newNetEngine(t)
+	e.sandboxes = map[string]*Sandbox{
+		"src": {ID: "src"},
+	}
+
+	_, err := e.ForkRunning("src", "child", false)
+	if err == nil {
+		t.Fatal("expected ForkRunning to fail closed when networking is enabled")
+	}
+	if !strings.Contains(err.Error(), "not supported yet") || !strings.Contains(err.Error(), "#18") {
+		t.Errorf("error = %q, want an explicit unsupported message referencing #18", err)
+	}
+}
+
+// TestForkRunningUnknownSandboxWithNetworking keeps the not-found path intact:
+// a missing source still reports not found, not the networking error.
+func TestForkRunningUnknownSandboxWithNetworking(t *testing.T) {
+	e, _, _ := newNetEngine(t)
+	e.sandboxes = map[string]*Sandbox{}
+	_, err := e.ForkRunning("nope", "child", false)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not-found error, got %v", err)
 	}
 }
 

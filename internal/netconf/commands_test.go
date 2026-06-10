@@ -46,11 +46,19 @@ func TestNftApplyArgs(t *testing.T) {
 	}
 }
 
-func TestNftDeleteTableArgs(t *testing.T) {
-	got := NftDeleteTableArgs("sbtap0")
-	want := []string{"nft", "delete", "table", "ip", TableName("sbtap0")}
+func TestNftDeleteDispatchElementArgs(t *testing.T) {
+	got := NftDeleteDispatchElementArgs("sbtap0")
+	want := []string{"nft", "delete", "element", "inet", SharedTableName(), DispatchMapName(), `{ "sbtap0" }`}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("NftDeleteTableArgs = %v, want %v", got, want)
+		t.Errorf("NftDeleteDispatchElementArgs = %v, want %v", got, want)
+	}
+}
+
+func TestNftDeleteSandboxChainArgs(t *testing.T) {
+	got := NftDeleteSandboxChainArgs("sbtap0")
+	want := []string{"nft", "delete", "chain", "inet", SharedTableName(), SandboxChainName("sbtap0")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NftDeleteSandboxChainArgs = %v, want %v", got, want)
 	}
 }
 

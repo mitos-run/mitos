@@ -32,15 +32,26 @@ func LinkDelArgs(tap string) []string {
 }
 
 // NftApplyArgs builds the argv to apply a rendered ruleset from stdin:
-// nft -f -. The caller pipes the RenderEgressRuleset output on stdin.
+// nft -f -. The caller pipes a rendered ruleset (RenderSharedTable or
+// RenderSandboxChain) on stdin.
 func NftApplyArgs() []string {
 	return []string{"nft", "-f", "-"}
 }
 
-// NftDeleteTableArgs builds the argv to remove a tap's egress table:
-// nft delete table ip <table>.
-func NftDeleteTableArgs(tap string) []string {
-	return []string{"nft", "delete", "table", "ip", TableName(tap)}
+// NftDeleteDispatchElementArgs builds the argv to remove this tap's dispatch
+// element from the shared verdict map: nft delete element inet <table> <map>
+// { "<tap>" }. After this no traffic jumps into the sandbox chain, so the
+// chain can be removed. Deleting by key needs no rule handle.
+func NftDeleteDispatchElementArgs(tap string) []string {
+	return []string{"nft", "delete", "element", "inet", SharedTableName(), DispatchMapName(),
+		fmt.Sprintf("{ %q }", tap)}
+}
+
+// NftDeleteSandboxChainArgs builds the argv to remove this sandbox's regular
+// chain from the shared table: nft delete chain inet <table> sb_<tap>. The
+// shared table, base chain, and map are left intact for other sandboxes.
+func NftDeleteSandboxChainArgs(tap string) []string {
+	return []string{"nft", "delete", "chain", "inet", SharedTableName(), SandboxChainName(tap)}
 }
 
 // MasqueradeAddArgs builds the argv to add a MASQUERADE rule for the sandbox

@@ -422,6 +422,14 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		return nil, fmt.Errorf("sandbox %s not found", sourceSandboxID)
 	}
 
+	// Fail closed: a live fork restores the source's baked NIC, which would
+	// collide on tap/MAC/IP with the source's live network. Until per-VM netns
+	// (husk pods #18) isolates each fork's interface, live-forking a networked
+	// sandbox is unsupported.
+	if e.networkEnabled() {
+		return nil, fmt.Errorf("live fork (ForkRunning) of a networked sandbox is not supported yet; tracked in #18")
+	}
+
 	if pauseSource && source.fcClient != nil {
 		if err := source.fcClient.Pause(); err != nil {
 			return nil, fmt.Errorf("pause source: %w", err)
