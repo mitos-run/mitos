@@ -35,3 +35,20 @@ func TestMergeNilMaps(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestMergeBaseEmptyValueSurvives(t *testing.T) {
+	got := Merge([]string{"KEY="}, nil, nil)
+	if !slices.Contains(got, "KEY=") {
+		t.Fatalf("KEY= (empty value) dropped: got %v", got)
+	}
+}
+
+func TestMergeBaseNoEqualsPassesThroughVerbatim(t *testing.T) {
+	got := Merge([]string{"NOEQUALS", "A=1"}, nil, nil)
+	if !slices.Contains(got, "NOEQUALS") {
+		t.Fatalf("NOEQUALS dropped: got %v", got)
+	}
+	if !slices.Contains(got, "A=1") {
+		t.Fatalf("A=1 missing: got %v", got)
+	}
+}

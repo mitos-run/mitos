@@ -19,9 +19,14 @@ func Merge(base []string, configured, request map[string]string) []string {
 		merged[k] = v
 	}
 
+	// Base entries without '=' have no key to merge on; pass them through
+	// verbatim rather than silently dropping them.
+	var verbatim []string
 	for _, kv := range base {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			set(k, v)
+		} else {
+			verbatim = append(verbatim, kv)
 		}
 	}
 	for k, v := range configured {
@@ -31,7 +36,8 @@ func Merge(base []string, configured, request map[string]string) []string {
 		set(k, v)
 	}
 
-	out := make([]string, 0, len(order))
+	out := make([]string, 0, len(verbatim)+len(order))
+	out = append(out, verbatim...)
 	for _, k := range order {
 		out = append(out, k+"="+merged[k])
 	}

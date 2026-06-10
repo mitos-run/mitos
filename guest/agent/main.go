@@ -178,6 +178,9 @@ func handleRequest(req *vsock.Request) vsock.Response {
 }
 
 func handleConfigure(req *vsock.ConfigureRequest) vsock.Response {
+	// The merge is additive: retrying configure with a different key set does
+	// not remove previously delivered keys. The forkd delivery path sends
+	// configure exactly once per fork, so this only matters for manual retries.
 	configuredMu.Lock()
 	for k, v := range req.Env {
 		configuredEnv[k] = v
