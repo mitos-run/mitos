@@ -14,13 +14,13 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
 
 - ✅ Honest README: every unimplemented feature labeled, every number marked
   measured-or-target
-- 🔨 controller ↔ forkd gRPC (claim/fork actually produce sandboxes;
+- ✅ controller ↔ forkd gRPC (claim/fork actually produce sandboxes;
   was `not implemented` stubs)
-- 🔨 SandboxPool snapshot accounting and creation (was a no-op)
-- 🔨 forkd node discovery + capacity heartbeats (was a TODO)
-- 🔨 Truthful claim endpoints (point at forkd's sandbox API, not a
+- ✅ SandboxPool snapshot accounting and creation (was a no-op)
+- ✅ forkd node discovery + capacity heartbeats (was a TODO)
+- ✅ Truthful claim endpoints (point at forkd's sandbox API, not a
   fabricated address)
-- 🔨 Python SDK k8s mode speaks the actual forkd API
+- ✅ Python SDK k8s mode speaks the actual forkd API
 - ⬜ Volume fork policies actually attach volumes to VMs (handlers are
   currently no-ops; `Snapshot` needs a real btrfs/reflink backend)
 - ⬜ Secrets delivered into the guest over vsock (resolved by controller
