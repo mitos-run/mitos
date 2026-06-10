@@ -144,3 +144,30 @@ func TestMockEngine_MemoryAccounting(t *testing.T) {
 		t.Errorf("expected %d bytes used, got %d", expectedUsed, cap.MemoryUsed)
 	}
 }
+
+func TestMockForkRunning(t *testing.T) {
+	e := NewMockEngine()
+	e.ForkDelay = 0
+	if err := e.CreateTemplate("py", "python:3.12-slim", 0); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := e.Fork("py", "parent", ForkOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	child, err := e.ForkRunning(parent.SandboxID, "child", true)
+	if err != nil {
+		t.Fatalf("ForkRunning: %v", err)
+	}
+	if child.SandboxID != "child" {
+		t.Fatalf("got %q, want child", child.SandboxID)
+	}
+	if got := e.GetCapacity().ActiveSandboxes; got != 2 {
+		t.Fatalf("active sandboxes = %d, want 2", got)
+	}
+
+	if _, err := e.ForkRunning("nope", "child2", false); err == nil {
+		t.Fatal("expected error for unknown source sandbox")
+	}
+}
