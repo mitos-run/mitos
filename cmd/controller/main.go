@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nodeRegistry := &controller.NodeRegistry{}
+	nodeRegistry := controller.NewNodeRegistry()
 
 	if err := (&controller.SandboxPoolReconciler{
 		Client:       mgr.GetClient(),

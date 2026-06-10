@@ -18,12 +18,13 @@ import (
 )
 
 var (
-	testEnv   *envtest.Environment
-	cfg       *rest.Config
-	k8sClient client.Client
-	scheme    *runtime.Scheme
-	ctx       context.Context
-	cancel    context.CancelFunc
+	testEnv      *envtest.Environment
+	cfg          *rest.Config
+	k8sClient    client.Client
+	scheme       *runtime.Scheme
+	ctx          context.Context
+	cancel       context.CancelFunc
+	testRegistry *controller.NodeRegistry
 )
 
 func TestMain(m *testing.M) {
@@ -64,7 +65,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	nodeRegistry := &controller.NodeRegistry{}
+	nodeRegistry := controller.NewNodeRegistry()
+	testRegistry = nodeRegistry
 
 	_ = (&controller.SandboxPoolReconciler{
 		Client:       mgr.GetClient(),

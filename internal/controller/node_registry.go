@@ -41,6 +41,9 @@ func NewNodeRegistry() *NodeRegistry {
 func (r *NodeRegistry) Register(info *NodeInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.nodes == nil {
+		r.nodes = make(map[string]*NodeInfo)
+	}
 	info.LastHeartbeat = time.Now()
 	r.nodes[info.Name] = info
 }
