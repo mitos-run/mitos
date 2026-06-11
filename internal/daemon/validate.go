@@ -21,3 +21,16 @@ func validateSandboxID(s string) error {
 	}
 	return nil
 }
+
+// validateVolumeName applies the same path-safety guard as validateSandboxID to
+// a volume name. Volume names flow from the CRD through the Fork/CreateTemplate
+// RPCs into filepath.Join (the host backing path) and the Firecracker drive id,
+// so a name like `../../etc/x` would otherwise escape the sandbox volumes dir.
+// The pattern forbids dots and separators, so a validated name can never
+// introduce a `..` segment or an extra path element.
+func validateVolumeName(name string) error {
+	if !sandboxIDPattern.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q: names must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", name)
+	}
+	return nil
+}

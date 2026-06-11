@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -98,11 +101,16 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 // netConf is nil the fork gets no network identity (networking disabled or no
 // policy on the template). The egress policy and allowlist entries are safe to
 // log.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, apiToken string) (*fork.ForkResult, error) {
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, volumes []*forkdpb.VolumeMount, apiToken string) (*fork.ForkResult, error) {
+	vols, err := volumeSpecs(volumes)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: invalid volume spec: %w", sandboxID, err)
+	}
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
 		Network: networkOpts(netConf),
+		Volumes: vols,
 	})
 	if err != nil {
 		return nil, err
@@ -111,7 +119,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork); err != nil {
+	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork, result.VolumeMounts); err != nil {
 		// A sandbox that reports Ready without its secrets is a lie; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
 		activeSandboxes.Dec()
@@ -136,7 +144,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 // Config delivery keeps its prior policy: strict only when secrets are present
 // (a sandbox Ready without its secrets is a lie); env-only failures are
 // best-effort. Secret values and entropy are never logged.
-func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string, guestNet *vsock.NotifyForkedNetwork) error {
+func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	if !s.engine.GetCapacity().KVMAvailable {
 		return nil // mock engine: no guest to deliver to
 	}
@@ -145,7 +153,7 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
 
-	if err := s.notifyForked(sandboxID, guestNet); err != nil {
+	if err := s.notifyForked(sandboxID, guestNet, volumes); err != nil {
 		return err
 	}
 
@@ -165,13 +173,13 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // crypto/rand entropy) to a connected guest. The agent must already be
 // registered. Entropy is never logged. Errors are returned so the caller can
 // reap the sandbox: a guest that did not reseed shares RNG state.
-func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork) error {
+func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
 		return fmt.Errorf("generate fork entropy: %w", err)
 	}
 	gen := s.forkGeneration.Add(1)
-	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet); err != nil {
+	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet, volumes); err != nil {
 		return fmt.Errorf("notify guest of fork: %w", err)
 	}
 	return nil
@@ -225,8 +233,9 @@ func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
 	}
 	// Live forks inherit the source VM's baked network identity in memory; the
 	// engine does not (yet) re-address them, so no per-fork network config is
-	// delivered here. Distinct-identity live forks are a follow-up (#18).
-	return s.notifyForked(sandboxID, nil)
+	// delivered here. Distinct-identity live forks are a follow-up (#18). Live
+	// forks also inherit the source's mounted volumes, so no mount table is sent.
+	return s.notifyForked(sandboxID, nil, nil)
 }
 
 // Terminate handles a sandbox termination request.
@@ -285,6 +294,38 @@ func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
 		EgressPolicy: c.EgressPolicy,
 		AllowList:    c.AllowList,
 	}
+}
+
+// volumeSpecs converts the proto VolumeMounts into engine volume specs. It
+// parses each size string into megabytes and carries the fork policy through as
+// the API string. An unparseable size fails the whole fork: a volume sized
+// wrong is a hard misconfiguration, not something to silently default.
+func volumeSpecs(mounts []*forkdpb.VolumeMount) ([]volume.Spec, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	specs := make([]volume.Spec, 0, len(mounts))
+	for _, m := range mounts {
+		// Volume names land in host backing paths and the Firecracker drive id,
+		// so reject any name that could escape the sandbox volumes dir before it
+		// reaches the engine or filesystem (the C1 traversal guard, mirrored from
+		// validateSandboxID). Return InvalidArgument so the RPC fails loudly.
+		if err := validateVolumeName(m.Name); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		sizeMB, err := volume.ParseSizeMB(m.Size)
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", m.Name, err)
+		}
+		specs = append(specs, volume.Spec{
+			Name:      m.Name,
+			SizeMB:    sizeMB,
+			MountPath: m.MountPath,
+			ReadOnly:  m.ReadOnly,
+			Policy:    volume.ForkPolicy(m.ForkPolicy),
+		})
+	}
+	return specs, nil
 }
 
 // UpdateMetrics refreshes capacity metrics.

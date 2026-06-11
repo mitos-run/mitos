@@ -22,7 +22,7 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 	if err := validateIDs(req.SnapshotId, req.SandboxId); err != nil {
 		return nil, err
 	}
-	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.ApiToken)
+	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.Volumes, req.ApiToken)
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -83,7 +83,11 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	if err := validateIDs(req.TemplateId); err != nil {
 		return nil, err
 	}
-	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands); err != nil {
+	vols, err := volumeSpecs(req.Volumes)
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols); err != nil {
 		return nil, grpcError(err)
 	}
 	// Report the content-addressed digest the engine just recorded so the
@@ -129,8 +133,13 @@ func validateIDs(ids ...string) error {
 	return nil
 }
 
-// grpcError maps engine errors to gRPC status codes.
+// grpcError maps engine errors to gRPC status codes. An error that already
+// carries a gRPC status (e.g. the InvalidArgument from volume-name validation)
+// is passed through unchanged so its code is not flattened to Internal.
 func grpcError(err error) error {
+	if _, ok := status.FromError(err); ok && status.Code(err) != codes.Unknown {
+		return err
+	}
 	if strings.Contains(err.Error(), "not found") {
 		return status.Error(codes.NotFound, err.Error())
 	}

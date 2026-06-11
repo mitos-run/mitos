@@ -42,6 +42,13 @@ const (
 )
 
 type SandboxVolume struct {
+	// Name identifies the volume; it becomes the host backing-file name and the
+	// Firecracker drive id, so it is constrained to a path-safe shape (no dots,
+	// no slashes) to prevent traversal out of the sandbox volumes dir. The
+	// pattern omits the upper bound (a bounded {m,n} quantifier breaks the
+	// controller-gen marker parser on the comma); MaxLength caps the length at 64.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`
+	// +kubebuilder:validation:MaxLength=64
 	Name       string        `json:"name"`
 	Size       string        `json:"size,omitempty"`
 	Source     *VolumeSource `json:"source,omitempty"`

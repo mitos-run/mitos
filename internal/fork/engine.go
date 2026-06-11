@@ -16,6 +16,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
+	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
@@ -58,6 +59,15 @@ type Engine struct {
 	netAlloc   *netconf.Allocator
 	resolverIP net.IP
 
+	// Volumes are opt-in. When enableVolumes is set and volBackend is non-nil,
+	// the template build bakes one placeholder drive per template volume into
+	// the snapshot, and every fork prepares its OWN backing per fork policy and
+	// rebinds the drive to it (PATCH /drives) after the snapshot is resumed.
+	// Both off (the default) means volumes are DISABLED and the engine behaves
+	// exactly as before: no drives are attached and no backings are prepared.
+	enableVolumes bool
+	volBackend    *volume.Backend
+
 	// agentBinPath and busyboxPath are injected into a rootfs built from an
 	// OCI image (see EngineOpts). Unused for file-path rootfs templates.
 	agentBinPath string
@@ -90,6 +100,118 @@ var (
 // manager and allocator must be present.
 func (e *Engine) networkEnabled() bool {
 	return e.netMgr != nil && e.netAlloc != nil
+}
+
+// volumesEnabled reports whether per-fork volumes are wired. Both the flag and
+// the backend must be present.
+func (e *Engine) volumesEnabled() bool {
+	return e.enableVolumes && e.volBackend != nil
+}
+
+// driveRebind maps one baked snapshot drive (by drive id, which equals the
+// volume name) to the host backing file the fork prepared for it. After the
+// snapshot is loaded and resumed, each rebind is applied with PATCH /drives so
+// the fork's drive points at its OWN backing before the guest mounts it. The
+// drive id and host path carry no secrets and are safe to log.
+type driveRebind struct {
+	DriveID    string
+	PathOnHost string
+}
+
+// prepareForkVolumes prepares a per-fork backing file for each volume spec per
+// its fork policy, returning the drive rebinds (drive id -> backing path) the
+// caller applies after restore and the Prepared records. It returns (nil, nil,
+// nil) when volumes are disabled or there are no specs, so the non-volume path
+// is untouched. Each backing is sandbox-scoped, so two forks never share a
+// Fresh backing and each Snapshot fork gets its own reflink copy. The Snapshot
+// and Clone source is the template's seed backing at
+// <dataDir>/templates/<id>/volumes/<name>.ext4, baked into the snapshot at
+// build time. On any failure the already-prepared per-fork backings are removed
+// so a partial preparation does not leak.
+func (e *Engine) prepareForkVolumes(templateID, sandboxID string, specs []volume.Spec) ([]driveRebind, []volume.Prepared, error) {
+	if !e.volumesEnabled() || len(specs) == 0 {
+		return nil, nil, nil
+	}
+	rebinds := make([]driveRebind, 0, len(specs))
+	prepared := make([]volume.Prepared, 0, len(specs))
+	for _, spec := range specs {
+		p, err := e.prepareForkVolume(templateID, sandboxID, spec)
+		if err != nil {
+			// Roll back the per-fork backings prepared so far; the template seed
+			// (Share) is never removed here.
+			_ = e.volBackend.Cleanup(sandboxID)
+			return nil, nil, fmt.Errorf("prepare volume %s for %s: %w", spec.Name, sandboxID, err)
+		}
+		prepared = append(prepared, p)
+		// The drive id is the volume name, matching the placeholder drive the
+		// template build attached under the same id.
+		rebinds = append(rebinds, driveRebind{DriveID: spec.Name, PathOnHost: p.HostPath})
+	}
+	return rebinds, prepared, nil
+}
+
+// volumeMountTable builds the guest mount table from the per-fork prepared
+// volumes, in the SAME order they were attached. Firecracker enumerates block
+// devices in attach order: the rootfs drive is /dev/vda and the i-th volume
+// drive (0-based) is /dev/vd{b+i}. The guest agent mounts each entry's Device at
+// MountPath after the host has rebound the drive to this fork's backing. Returns
+// nil when there are no volumes so the guest mounts nothing.
+func volumeMountTable(prepared []volume.Prepared) []vsock.VolumeMountEntry {
+	if len(prepared) == 0 {
+		return nil
+	}
+	entries := make([]vsock.VolumeMountEntry, 0, len(prepared))
+	for i, p := range prepared {
+		entries = append(entries, vsock.VolumeMountEntry{
+			Device:    volumeDeviceName(i),
+			MountPath: p.MountPath,
+			ReadOnly:  p.ReadOnly,
+		})
+	}
+	return entries
+}
+
+// volumeDeviceName returns the guest block device node for the i-th volume drive
+// (0-based). The rootfs is /dev/vda, so volumes follow as /dev/vdb, /dev/vdc, ...
+// in attach order. i is bounded by the number of template volumes (small), so a
+// single trailing letter is sufficient.
+func volumeDeviceName(i int) string {
+	return fmt.Sprintf("/dev/vd%c", 'b'+i)
+}
+
+// driveReadOnly resolves whether a volume's baked Firecracker drive must be
+// read-only at the BLOCK-DEVICE level. Firecracker bakes is_read_only into the
+// snapshot at template build time and PATCH /drives cannot flip it on a fork's
+// rebind, so the flag must be correct at build time. A volume is read-only at
+// the drive iff it is declared spec.ReadOnly OR its resolved policy is Share:
+// Share attaches the SAME seed backing to every fork, so a writable drive would
+// let one fork corrupt or leak into the shared seed and every sibling fork.
+// Fresh/Snapshot/Clone forks each get their own backing, so they stay writable
+// unless explicitly marked read-only.
+func driveReadOnly(spec volume.Spec) bool {
+	return spec.ReadOnly || spec.Policy == volume.ForkPolicyShare
+}
+
+// prepareForkVolume dispatches one spec to the backend method for its policy.
+// Fresh formats a new empty ext4; Snapshot reflink-copies the template seed;
+// Share attaches the template seed read-only with no copy; Clone makes a full
+// copy of the template seed.
+func (e *Engine) prepareForkVolume(templateID, sandboxID string, spec volume.Spec) (volume.Prepared, error) {
+	seed := e.volBackend.TemplateVolumePath(templateID, spec.Name)
+	switch spec.Policy {
+	case volume.ForkPolicyFresh:
+		return e.volBackend.Fresh(spec, sandboxID)
+	case volume.ForkPolicySnapshot:
+		return e.volBackend.Snapshot(spec, sandboxID, seed)
+	case volume.ForkPolicyShare:
+		return e.volBackend.Share(spec, sandboxID, seed)
+	case volume.ForkPolicyClone:
+		return e.volBackend.Clone(spec, sandboxID, seed)
+	default:
+		// An unset or unknown policy defaults to Fresh: a per-fork empty volume
+		// is the safe choice (no shared or copied template content leaks).
+		return e.volBackend.Fresh(spec, sandboxID)
+	}
 }
 
 // forkNetwork is the result of preparing one fork's networking: the acquired
@@ -188,6 +310,15 @@ type EngineOpts struct {
 	// BusyboxPath is an optional static /bin/sh source injected when an image
 	// lacks a shell. Empty means images without a shell cannot run init.
 	BusyboxPath string
+	// EnableVolumes turns on per-fork volume drives: the template build bakes a
+	// placeholder drive per template volume and each fork prepares its own
+	// backing and rebinds the drive. Default false leaves volumes DISABLED (no
+	// drives attached, existing behavior). VolumeBackend must be set when true.
+	EnableVolumes bool
+	// VolumeBackend prepares volume backing files under the data dir. Nil leaves
+	// volumes disabled; when EnableVolumes is true NewEngine constructs a
+	// default backend rooted at <dataDir> if this is nil.
+	VolumeBackend *volume.Backend
 }
 
 type Template struct {
@@ -221,6 +352,10 @@ type Sandbox struct {
 	// enabled and the fork requested it; the zero value (empty TapName) means
 	// no host network was set up and Terminate skips teardown.
 	netID netconf.Identity
+	// hasVolumes records whether this sandbox had per-fork volume backings
+	// prepared, so Terminate cleans them up. False means Terminate skips the
+	// volume cleanup entirely (no backend call for sandboxes without volumes).
+	hasVolumes bool
 }
 
 type ForkResult struct {
@@ -235,6 +370,12 @@ type ForkResult struct {
 	// its distinct guest IP + gateway. Nil when networking is disabled or the
 	// fork carried no NetworkOpts. Addresses are safe to log.
 	GuestNetwork *vsock.NotifyForkedNetwork
+	// VolumeMounts, when non-empty, is the per-fork volume mount table the daemon
+	// delivers to the guest in the NotifyForked message AFTER the drives are
+	// rebound, so the guest mounts each device at its mount path. Nil when
+	// volumes are disabled or the fork carried none. Device nodes and paths are
+	// safe to log.
+	VolumeMounts []vsock.VolumeMountEntry
 }
 
 // SandboxRecord is the minimal view of a live sandbox an engine reports
@@ -273,6 +414,13 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		return nil, fmt.Errorf("init CAS store: %w", err)
 	}
 
+	// Volumes are opt-in. When enabled, default the backend to one rooted at the
+	// data dir so backing files live alongside snapshots and sandboxes.
+	volBackend := opts.VolumeBackend
+	if opts.EnableVolumes && volBackend == nil {
+		volBackend = volume.New(dataDir)
+	}
+
 	tmplMgr := firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer)
 	e := &Engine{
 		dataDir:              dataDir,
@@ -291,6 +439,8 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		resolverIP:           opts.ResolverIP,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
+		enableVolumes:        opts.EnableVolumes,
+		volBackend:           volBackend,
 		buildRootfsFromImage: buildRootfsFromImage,
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
@@ -400,6 +550,19 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		overrides = fnet.overrides
 	}
 
+	// Per-fork volumes (opt-in). Prepare a distinct backing per volume per the
+	// fork policy BEFORE the snapshot is loaded so the files exist; the drive
+	// rebinds are applied with PATCH after resume. Returns nil when volumes are
+	// disabled or the fork carries none.
+	rebinds, prepared, err := e.prepareForkVolumes(snapshotID, sandboxID, opts.Volumes)
+	if err != nil {
+		_ = fcClient.Kill()
+		if fnet != nil {
+			e.teardownForkNetwork(sandboxID, fnet.identity)
+		}
+		return nil, err
+	}
+
 	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE. When
 	// networking is on, network_overrides rebinds the baked NIC to the fork's
 	// own tap (v1.15 supports this; it is the network analog of the relative
@@ -409,7 +572,26 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		if fnet != nil {
 			e.teardownForkNetwork(sandboxID, fnet.identity)
 		}
+		if len(rebinds) > 0 {
+			_ = e.volBackend.Cleanup(sandboxID)
+		}
 		return nil, fmt.Errorf("load snapshot: %w", err)
+	}
+
+	// Rebind each baked placeholder volume drive to THIS fork's backing now that
+	// the snapshot is loaded and resumed. The guest mounts the volumes only
+	// after it receives the post-restore vsock mount table (Task 4), so the
+	// PATCH lands before the device is in use. Firecracker supports updating a
+	// drive's path_on_host on a restored+resumed VM (v1.15).
+	for _, rb := range rebinds {
+		if err := fcClient.PatchDrive(rb.DriveID, rb.PathOnHost); err != nil {
+			_ = fcClient.Kill()
+			if fnet != nil {
+				e.teardownForkNetwork(sandboxID, fnet.identity)
+			}
+			_ = e.volBackend.Cleanup(sandboxID)
+			return nil, fmt.Errorf("rebind volume drive %s for %s: %w", rb.DriveID, sandboxID, err)
+		}
 	}
 
 	elapsed := time.Since(start)
@@ -436,6 +618,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		sandbox.netID = fnet.identity
 		guestNet = fnet.guestNet
 	}
+	sandbox.hasVolumes = len(rebinds) > 0
 
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
 
@@ -451,6 +634,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    vsockPath,
 		GuestNetwork: guestNet,
+		VolumeMounts: volumeMountTable(prepared),
 	}, nil
 }
 
@@ -548,6 +732,16 @@ func (e *Engine) Terminate(sandboxID string) error {
 		e.teardownForkNetwork(sandboxID, sandbox.netID)
 	}
 
+	// Remove this fork's per-volume backing files. Skipped for sandboxes
+	// without volumes so no backend call is made on the common path. The
+	// sandbox dir RemoveAll below also covers the volumes, but Cleanup is the
+	// backend's own contract and keeps the path explicit; both are best effort.
+	if sandbox.hasVolumes && e.volBackend != nil {
+		if err := e.volBackend.Cleanup(sandboxID); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: cleanup volumes for %s: %v\n", sandboxID, err)
+		}
+	}
+
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
 	os.RemoveAll(sandboxDir)
 
@@ -616,7 +810,7 @@ func (e *Engine) GetCapacity() Capacity {
 // path unchanged; an OCI reference is pulled, the agent is injected, and a
 // rootfs.ext4 is built from it before boot. A nonzero init command aborts the
 // build so a broken template is never snapshotted or served.
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string) error {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error {
 	cfg := firecracker.DefaultVMConfig()
 
 	// The template rootfs runs the guest agent as PID 1 at /init: ociroot
@@ -676,6 +870,28 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string) 
 			GuestMAC:    placeholderMAC,
 			HostDevName: firecracker.PlaceholderTapName,
 		}
+	}
+
+	// When volumes are enabled, create one seed backing per template volume and
+	// bake a placeholder drive for it into the snapshot. The seed is an empty
+	// ext4 of the spec size at <dataDir>/templates/<id>/volumes/<name>.ext4; it
+	// is the source for Snapshot/Share/Clone forks and the placeholder backing
+	// the snapshot's block device points at. Firecracker cannot add a drive on
+	// restore, so the device must exist at snapshot time; each fork rebinds it.
+	if e.volumesEnabled() && len(volumes) > 0 {
+		drives := make([]firecracker.VolumeDrive, 0, len(volumes))
+		for _, spec := range volumes {
+			seed, err := e.volBackend.FreshTemplate(spec, id)
+			if err != nil {
+				return fmt.Errorf("seed template volume %s for %s: %w", spec.Name, id, err)
+			}
+			drives = append(drives, firecracker.VolumeDrive{
+				DriveID:    spec.Name,
+				PathOnHost: seed,
+				ReadOnly:   driveReadOnly(spec),
+			})
+		}
+		cfg.VolumeDrives = drives
 	}
 
 	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
@@ -761,6 +977,11 @@ type ForkOpts struct {
 	Env     map[string]string
 	Secrets map[string]string
 	Network *NetworkOpts
+	// Volumes are the per-fork volume specs resolved from the template (with
+	// VolumeOverrides applied) and threaded through the Fork RPC. The real
+	// engine prepares and attaches their backing drives; until that lands
+	// (Task 3) it carries them without acting on them.
+	Volumes []volume.Spec
 }
 
 type NetworkOpts struct {
