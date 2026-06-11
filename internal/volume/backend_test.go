@@ -207,6 +207,36 @@ func TestCleanupRemovesVolumesDir(t *testing.T) {
 	}
 }
 
+// TestBackendRejectsTraversingNames is the defense-in-depth half of the volume
+// name traversal guard: even if a bad name reaches the backend (the gRPC layer
+// should already have rejected it), no path is built and nothing is written
+// outside the backend root.
+func TestBackendRejectsTraversingNames(t *testing.T) {
+	bad := []string{"", "..", "../x", "a/b", "a.b", "/abs", strings.Repeat("a", 65)}
+	for _, name := range bad {
+		b, rr := newTestBackend(t)
+		spec := Spec{Name: name, SizeMB: 64, MountPath: "/x", Policy: ForkPolicyFresh}
+
+		if _, err := b.Fresh(spec, "sb-1"); err == nil {
+			t.Errorf("Fresh(%q) = nil error, want rejection", name)
+		}
+		if _, err := b.Snapshot(spec, "sb-1", filepath.Join(t.TempDir(), "src.ext4")); err == nil {
+			t.Errorf("Snapshot(%q) = nil error, want rejection", name)
+		}
+		if _, err := b.Clone(spec, "sb-1", filepath.Join(t.TempDir(), "src.ext4")); err == nil {
+			t.Errorf("Clone(%q) = nil error, want rejection", name)
+		}
+		if _, err := b.FreshTemplate(spec, "tmpl-1"); err == nil {
+			t.Errorf("FreshTemplate(%q) = nil error, want rejection", name)
+		}
+		// No runner command (mkfs/cp) must have been issued for a rejected name,
+		// so nothing was written anywhere.
+		if len(rr.calls) != 0 {
+			t.Errorf("name %q produced runner calls %v, want none", name, rr.calls)
+		}
+	}
+}
+
 func TestParseSizeMB(t *testing.T) {
 	cases := []struct {
 		in      string

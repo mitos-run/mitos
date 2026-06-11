@@ -16,6 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -303,6 +305,13 @@ func volumeSpecs(mounts []*forkdpb.VolumeMount) ([]volume.Spec, error) {
 	}
 	specs := make([]volume.Spec, 0, len(mounts))
 	for _, m := range mounts {
+		// Volume names land in host backing paths and the Firecracker drive id,
+		// so reject any name that could escape the sandbox volumes dir before it
+		// reaches the engine or filesystem (the C1 traversal guard, mirrored from
+		// validateSandboxID). Return InvalidArgument so the RPC fails loudly.
+		if err := validateVolumeName(m.Name); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 		sizeMB, err := volume.ParseSizeMB(m.Size)
 		if err != nil {
 			return nil, fmt.Errorf("volume %s: %w", m.Name, err)

@@ -150,6 +150,19 @@ func (e *Engine) prepareForkVolumes(templateID, sandboxID string, specs []volume
 	return rebinds, prepared, nil
 }
 
+// driveReadOnly resolves whether a volume's baked Firecracker drive must be
+// read-only at the BLOCK-DEVICE level. Firecracker bakes is_read_only into the
+// snapshot at template build time and PATCH /drives cannot flip it on a fork's
+// rebind, so the flag must be correct at build time. A volume is read-only at
+// the drive iff it is declared spec.ReadOnly OR its resolved policy is Share:
+// Share attaches the SAME seed backing to every fork, so a writable drive would
+// let one fork corrupt or leak into the shared seed and every sibling fork.
+// Fresh/Snapshot/Clone forks each get their own backing, so they stay writable
+// unless explicitly marked read-only.
+func driveReadOnly(spec volume.Spec) bool {
+	return spec.ReadOnly || spec.Policy == volume.ForkPolicyShare
+}
+
 // prepareForkVolume dispatches one spec to the backend method for its policy.
 // Fresh formats a new empty ext4; Snapshot reflink-copies the template seed;
 // Share attaches the template seed read-only with no copy; Clone makes a full
@@ -839,7 +852,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 			drives = append(drives, firecracker.VolumeDrive{
 				DriveID:    spec.Name,
 				PathOnHost: seed,
-				ReadOnly:   spec.ReadOnly,
+				ReadOnly:   driveReadOnly(spec),
 			})
 		}
 		cfg.VolumeDrives = drives

@@ -193,6 +193,85 @@ func filepathGlobExists(dir string) (string, bool) {
 	return dir, len(matches) > 0
 }
 
+// TestDriveReadOnlyFromPolicy proves the resolved read-only flag the template
+// build bakes into each placeholder drive: a volume is read-only at the drive
+// level iff spec.ReadOnly is true OR the resolved policy is Share. Firecracker
+// cannot flip is_read_only on a PATCH /drives rebind, so a Share (or any
+// readOnly) volume MUST bake is_read_only=true at snapshot time, else a fork
+// could write the shared seed.
+func TestDriveReadOnlyFromPolicy(t *testing.T) {
+	cases := []struct {
+		name   string
+		spec   volume.Spec
+		wantRO bool
+	}{
+		{"share bakes read-only even when spec.ReadOnly is false",
+			volume.Spec{Name: "shared", Policy: volume.ForkPolicyShare}, true},
+		{"explicit readOnly bakes read-only",
+			volume.Spec{Name: "ro", ReadOnly: true, Policy: volume.ForkPolicyFresh}, true},
+		{"fresh writable bakes writable",
+			volume.Spec{Name: "data", Policy: volume.ForkPolicyFresh}, false},
+		{"snapshot writable bakes writable",
+			volume.Spec{Name: "work", Policy: volume.ForkPolicySnapshot}, false},
+		{"readOnly share bakes read-only",
+			volume.Spec{Name: "rs", ReadOnly: true, Policy: volume.ForkPolicyShare}, true},
+	}
+	for _, c := range cases {
+		if got := driveReadOnly(c.spec); got != c.wantRO {
+			t.Errorf("%s: driveReadOnly = %v, want %v", c.name, got, c.wantRO)
+		}
+	}
+}
+
+// TestCreateTemplateBakesReadOnlyForShare proves the build path wires the
+// resolved read-only flag into the placeholder drive: a Share volume declared
+// WITHOUT spec.ReadOnly still bakes a read-only drive, while a Fresh writable
+// volume bakes a writable drive.
+func TestCreateTemplateBakesReadOnlyForShare(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := cas.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cas.New: %v", err)
+	}
+	rr := &recordingVolRunner{}
+	e := &Engine{
+		dataDir:          dataDir,
+		casStore:         store,
+		sandboxes:        make(map[string]*Sandbox),
+		unverifiedWarned: make(map[string]struct{}),
+		templateDigests:  make(map[string]cas.Digest),
+		enableVolumes:    true,
+		volBackend:       volume.NewWithRunner(dataDir, rr.run),
+	}
+	rootfs := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed rootfs: %v", err)
+	}
+	var gotDrives []firecracker.VolumeDrive
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+		gotDrives = cfg.VolumeDrives
+		return nil
+	}
+
+	vols := []volume.Spec{
+		// Share declared without spec.ReadOnly: must still bake read-only.
+		{Name: "shared", SizeMB: 64, MountPath: "/shared", Policy: volume.ForkPolicyShare},
+		// Fresh writable: must bake writable.
+		{Name: "scratch", SizeMB: 32, MountPath: "/scratch", Policy: volume.ForkPolicyFresh},
+	}
+	_ = e.CreateTemplate("tmpl", rootfs, nil, vols)
+
+	if len(gotDrives) != 2 {
+		t.Fatalf("expected 2 placeholder drives, got %d", len(gotDrives))
+	}
+	if !gotDrives[0].ReadOnly {
+		t.Errorf("Share volume must bake is_read_only=true even without spec.ReadOnly")
+	}
+	if gotDrives[1].ReadOnly {
+		t.Errorf("Fresh writable volume must bake a writable drive")
+	}
+}
+
 // TestCreateTemplateBakesPlaceholderDrives proves the build path: a
 // volumes-enabled CreateTemplate seeds one template backing per declared volume
 // and passes a placeholder VolumeDrive (drive id = volume name, in order) to the

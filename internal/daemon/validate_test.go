@@ -44,3 +44,36 @@ func TestValidateSandboxID(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateVolumeName(t *testing.T) {
+	valid := []string{
+		"data",
+		"work-1",
+		"v",
+		"A0",
+		strings.Repeat("a", 64),
+	}
+	for _, name := range valid {
+		if err := validateVolumeName(name); err != nil {
+			t.Errorf("validateVolumeName(%q) = %v, want nil", name, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"..",
+		"../x",
+		"a/b",
+		"a.b",
+		strings.Repeat("a", 65),
+		"/abs",
+		"-lead",
+		"_lead",
+		"space here",
+	}
+	for _, name := range invalid {
+		if err := validateVolumeName(name); err == nil {
+			t.Errorf("validateVolumeName(%q) = nil, want error", name)
+		}
+	}
+}

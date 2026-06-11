@@ -133,8 +133,13 @@ func validateIDs(ids ...string) error {
 	return nil
 }
 
-// grpcError maps engine errors to gRPC status codes.
+// grpcError maps engine errors to gRPC status codes. An error that already
+// carries a gRPC status (e.g. the InvalidArgument from volume-name validation)
+// is passed through unchanged so its code is not flattened to Internal.
 func grpcError(err error) error {
+	if _, ok := status.FromError(err); ok && status.Code(err) != codes.Unknown {
+		return err
+	}
 	if strings.Contains(err.Error(), "not found") {
 		return status.Error(codes.NotFound, err.Error())
 	}

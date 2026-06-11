@@ -16,7 +16,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 )
+
+// namePattern constrains a volume name to the same path-safe shape forkd's
+// validateSandboxID enforces: 1-64 chars of [a-zA-Z0-9_-] starting with a
+// letter or digit, no dots and no separators. A name that matches can never
+// introduce a `..` segment or an extra path element, so filepath.Join below
+// cannot escape the backend root. This is the defense-in-depth half of the C1
+// traversal guard; the gRPC boundary validates the same pattern first.
+var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// validateName rejects a volume name that could escape the backend root before
+// any path is built from it.
+func validateName(name string) error {
+	if !namePattern.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q: names must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", name)
+	}
+	return nil
+}
 
 // ForkPolicy names a backing-image preparation strategy. The values mirror the
 // API ForkPolicy strings so a controller can pass them through unchanged.
@@ -112,6 +130,9 @@ func (b *Backend) TemplateVolumePath(templateID, name string) string {
 // targets the template-scoped path so the snapshot can bake the block device
 // and forks can reflink/copy from it. Returns the seed host path.
 func (b *Backend) FreshTemplate(spec Spec, templateID string) (string, error) {
+	if err := validateName(spec.Name); err != nil {
+		return "", err
+	}
 	dst := b.TemplateVolumePath(templateID, spec.Name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", fmt.Errorf("template volume %s: mkdir: %w", spec.Name, err)
@@ -132,6 +153,9 @@ func (b *Backend) FreshTemplate(spec Spec, templateID string) (string, error) {
 
 // Fresh creates an empty ext4 image sized from the spec.
 func (b *Backend) Fresh(spec Spec, sandboxID string) (Prepared, error) {
+	if err := validateName(spec.Name); err != nil {
+		return Prepared{}, err
+	}
 	dst := b.volumePath(sandboxID, spec.Name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return Prepared{}, fmt.Errorf("volume %s: mkdir: %w", spec.Name, err)
@@ -154,10 +178,13 @@ func (b *Backend) Fresh(spec Spec, sandboxID string) (Prepared, error) {
 // Snapshot reflink-copies sourcePath to a per-fork backing file. It first tries
 // cp --reflink=always for a true copy-on-write clone; on filesystems without
 // reflink support (anything but btrfs/xfs) that fails, so it falls back to
-// cp --reflink=auto, which performs a full copy. The fallback is logged by the
-// caller through the returned error path only on hard failure; a successful
-// fallback is silent here.
+// cp --reflink=auto, which performs a full copy. A successful fallback logs a
+// warning (CoW was unavailable for this filesystem); a hard failure returns an
+// error.
 func (b *Backend) Snapshot(spec Spec, sandboxID, sourcePath string) (Prepared, error) {
+	if err := validateName(spec.Name); err != nil {
+		return Prepared{}, err
+	}
 	dst := b.volumePath(sandboxID, spec.Name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return Prepared{}, fmt.Errorf("volume %s: mkdir: %w", spec.Name, err)
@@ -165,6 +192,10 @@ func (b *Backend) Snapshot(spec Spec, sandboxID, sourcePath string) (Prepared, e
 	err := b.runner([]string{"cp", "--reflink=always", sourcePath, dst})
 	if err != nil {
 		// Reflink unavailable on this filesystem; fall back to a full copy.
+		// Warn so an operator knows this fork did NOT get instant copy-on-write
+		// (the destination is a full byte copy, costing time and space). The
+		// paths carry no secrets and are safe to log.
+		fmt.Fprintf(os.Stderr, "volume: WARNING reflink CoW unavailable for %s (filesystem lacks reflink support); falling back to a full copy of %s to %s\n", spec.Name, sourcePath, dst)
 		if err := b.runner([]string{"cp", "--reflink=auto", sourcePath, dst}); err != nil {
 			return Prepared{}, fmt.Errorf("volume %s: snapshot copy: %w", spec.Name, err)
 		}
@@ -175,11 +206,17 @@ func (b *Backend) Snapshot(spec Spec, sandboxID, sourcePath string) (Prepared, e
 // Share returns the source image as a read-only attach with no copy. All forks
 // share the same backing file.
 func (b *Backend) Share(spec Spec, _, sourcePath string) (Prepared, error) {
+	if err := validateName(spec.Name); err != nil {
+		return Prepared{}, err
+	}
 	return Prepared{Name: spec.Name, HostPath: sourcePath, MountPath: spec.MountPath, ReadOnly: true}, nil
 }
 
 // Clone makes a full byte-for-byte copy of sourcePath into a per-fork file.
 func (b *Backend) Clone(spec Spec, sandboxID, sourcePath string) (Prepared, error) {
+	if err := validateName(spec.Name); err != nil {
+		return Prepared{}, err
+	}
 	dst := b.volumePath(sandboxID, spec.Name)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return Prepared{}, fmt.Errorf("volume %s: mkdir: %w", spec.Name, err)

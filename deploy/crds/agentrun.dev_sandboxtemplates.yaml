@@ -203,6 +203,14 @@ spec:
                     mountPath:
                       type: string
                     name:
+                      description: |-
+                        Name identifies the volume; it becomes the host backing-file name and the
+                        Firecracker drive id, so it is constrained to a path-safe shape (no dots,
+                        no slashes) to prevent traversal out of the sandbox volumes dir. The
+                        pattern omits the upper bound (a bounded {m,n} quantifier breaks the
+                        controller-gen marker parser on the comma); MaxLength caps the length at 64.
+                      maxLength: 64
+                      pattern: ^[a-zA-Z0-9][a-zA-Z0-9_-]*$
                       type: string
                     readOnly:
                       type: boolean
