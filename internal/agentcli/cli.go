@@ -29,21 +29,6 @@ Flags:
   -h, --help         print this help
 `
 
-// DevRunner runs an external command (kind, kubectl) for the dev subcommand.
-// Task 2 wires a real exec runner via SetDevRunner; in Task 1 it is nil and the
-// dev subcommand reports that it is not wired.
-type DevRunner func(ctx context.Context, argv []string) error
-
-// devUpFn and devDownFn are the dev orchestration entry points. They are package
-// variables so cmd/agentrun (Task 2) can wire the real DevUp/DevDown without the
-// CLI dispatcher importing the k8s machinery directly. When nil (Task 1), dev
-// reports that it is not wired.
-var (
-	devUpFn   func(ctx context.Context, runner DevRunner, out io.Writer) int
-	devDownFn func(ctx context.Context, runner DevRunner, out io.Writer) int
-	devRunner DevRunner
-)
-
 // Run is the testable CLI entry point. It dispatches args (without the program
 // name) against backend, writing normal output to out and diagnostics to errw,
 // and returns a process exit code:

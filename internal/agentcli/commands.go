@@ -187,28 +187,20 @@ func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, ou
 	return 0
 }
 
-// cmdDev dispatches `dev up|down`. The orchestration lives behind devUpFn /
-// devDownFn package variables so the CLI dispatcher does not depend on the k8s
-// machinery. When those are nil (Task 1, or a binary built without dev wiring),
-// dev reports that it is not wired.
-func cmdDev(ctx context.Context, args []string, out, errw io.Writer) int {
+// cmdDev validates the `dev up|down` arguments. The dev orchestration shells out
+// to kind and kubectl, which the pure CLI dispatcher does not do; cmd/agentrun
+// intercepts the dev subcommand before agentcli.Run and runs DevUp/DevDown with
+// a real exec runner. Reaching cmdDev means dev was invoked through a path that
+// did not wire the runner, so it reports that and returns nonzero.
+func cmdDev(_ context.Context, args []string, _, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "dev: 'up' or 'down' is required\n\n%s", usage)
 		return 2
 	}
 	switch args[0] {
-	case "up":
-		if devUpFn == nil {
-			fmt.Fprintln(errw, "dev up: not wired in this build")
-			return 1
-		}
-		return devUpFn(ctx, devRunner, out)
-	case "down":
-		if devDownFn == nil {
-			fmt.Fprintln(errw, "dev down: not wired in this build")
-			return 1
-		}
-		return devDownFn(ctx, devRunner, out)
+	case "up", "down":
+		fmt.Fprintf(errw, "dev %s: run via the agentrun binary, which wires the kind/kubectl runner\n", args[0])
+		return 1
 	default:
 		fmt.Fprintf(errw, "unknown dev subcommand %q\n\n%s", args[0], usage)
 		return 2
