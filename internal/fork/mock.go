@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/paperclipinc/sandbox/internal/metering"
 	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -121,6 +122,7 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 
 	sandbox := &Sandbox{
 		ID:           sandboxID,
+		TemplateID:   snapshotID, // mock snapshot id IS the template id
 		SnapshotID:   snapshotID,
 		Endpoint:     endpoint,
 		CreatedAt:    time.Now(),
@@ -235,19 +237,32 @@ func (e *MockEngine) ListSandboxes() []SandboxRecord {
 
 func (e *MockEngine) GetCapacity() Capacity {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
-
 	templateIDs := make([]string, 0, len(e.templates))
 	for id := range e.templates {
 		templateIDs = append(templateIDs, id)
 	}
+	// Route through the same CoW-aware aggregation as the real engine so mock
+	// tests see N forks of one template count the shared region once.
+	samples := make([]metering.Sample, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		samples = append(samples, metering.Sample{
+			ID:           s.ID,
+			Template:     s.TemplateID,
+			MemoryUnique: s.MemoryUnique,
+			MemoryShared: s.MemoryShared,
+		})
+	}
+	active := int32(len(e.sandboxes))
+	e.mu.RUnlock()
+
+	report := metering.Aggregate(samples)
 
 	return Capacity{
-		ActiveSandboxes: int32(len(e.sandboxes)),
+		ActiveSandboxes: active,
 		MaxSandboxes:    1000,
 		MemoryTotal:     8 * 1024 * 1024 * 1024,
-		MemoryUsed:      int64(len(e.sandboxes)) * 265 * 1024,
-		MemoryShared:    256 * 1024 * 1024,
+		MemoryUsed:      report.UsedCoWAware,
+		MemoryShared:    report.SharedOnceTotal(),
 		TemplateIDs:     templateIDs,
 		KVMAvailable:    false,
 	}
@@ -284,6 +299,7 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 	id := e.counter.Add(1)
 	sandbox := &Sandbox{
 		ID:           newSandboxID,
+		TemplateID:   source.TemplateID,
 		SnapshotID:   source.SnapshotID,
 		Endpoint:     fmt.Sprintf("127.0.0.1:%d", 10000+id),
 		CreatedAt:    time.Now(),

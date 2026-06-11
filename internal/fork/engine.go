@@ -14,6 +14,7 @@ import (
 	"github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/sandbox/internal/metering"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
 	"github.com/paperclipinc/sandbox/internal/snapcompat"
@@ -448,6 +449,11 @@ type Sandbox struct {
 	// prepared, so Terminate cleans them up. False means Terminate skips the
 	// volume cleanup entirely (no backend call for sandboxes without volumes).
 	hasVolumes bool
+	// volumes are the resolved per-fork volume specs this sandbox was forked
+	// with (nil when volumes are disabled or none were requested). The disk
+	// metering path uses them to find each volume's backing and seed paths;
+	// they are not on the hot fork path.
+	volumes []volume.Spec
 }
 
 type ForkResult struct {
@@ -746,6 +752,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 
 	sandbox := &Sandbox{
 		ID:         sandboxID,
+		TemplateID: snapshotID,
 		SnapshotID: snapshotID,
 		Endpoint:   endpoint,
 		Pid:        fcClient.PID(),
@@ -753,6 +760,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		fcClient:   fcClient,
 		VsockPath:  vsockPath,
 		rootfsPath: rootfsPath,
+		volumes:    opts.Volumes,
 	}
 	var guestNet *vsock.NotifyForkedNetwork
 	if fnet != nil {
@@ -902,23 +910,32 @@ func (e *Engine) ListSandboxes() []SandboxRecord {
 	return records
 }
 
-// GetCapacity returns the current node capacity.
+// GetCapacity returns the current node capacity. Memory is CoW-aware: forks of
+// the same template map the SAME shared page set (MAP_PRIVATE restore of one
+// snapshot), so the shared footprint is counted ONCE per template rather than
+// once per fork. Capacity.MemoryUsed is the honest resident total
+// (sum of per-fork unique + each template's shared set counted once) and
+// Capacity.MemoryShared is the shared-once footprint across all templates.
+// GetCapacity stays memory-only and lock-light on the hot heartbeat path; disk
+// metering (which stats backing files) lives in Metering(), not here.
 func (e *Engine) GetCapacity() Capacity {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	var totalUnique, totalShared int64
-	for _, s := range e.sandboxes {
-		totalUnique += s.MemoryUnique
-		totalShared += s.MemoryShared
+	samples := e.memorySamplesLocked()
+	activeSandboxes := int32(len(e.sandboxes))
+	digestsByID := make(map[string]string, len(e.templateDigests))
+	for id, d := range e.templateDigests {
+		digestsByID[id] = string(d)
 	}
+	e.mu.RUnlock()
+
+	report := metering.Aggregate(samples)
 
 	templateIDs, _ := e.templateMgr.ListTemplates()
 
 	digests := make(map[string]string, len(templateIDs))
 	for _, id := range templateIDs {
-		if d, ok := e.templateDigests[id]; ok {
-			digests[id] = string(d)
+		if d, ok := digestsByID[id]; ok {
+			digests[id] = d
 			continue
 		}
 		// Template present on disk but not yet recorded by this process
@@ -931,13 +948,34 @@ func (e *Engine) GetCapacity() Capacity {
 	}
 
 	return Capacity{
-		ActiveSandboxes: int32(len(e.sandboxes)),
-		MemoryUsed:      totalUnique + totalShared,
-		MemoryShared:    totalShared,
+		ActiveSandboxes: activeSandboxes,
+		// MemoryUsed is the CoW-aware resident total (per-fork unique plus each
+		// template's shared set counted once), NOT the naive per-fork sum.
+		MemoryUsed: report.UsedCoWAware,
+		// MemoryShared is the shared-once footprint summed over templates
+		// (UsedCoWAware minus the unique total): the honest shared bytes.
+		MemoryShared:    report.SharedOnceTotal(),
 		TemplateIDs:     templateIDs,
 		TemplateDigests: digests,
 		KVMAvailable:    true,
 	}
+}
+
+// memorySamplesLocked builds the per-sandbox memory metering samples from the
+// live sandbox map. It assumes e.mu is held (read or write). Disk fields are
+// left zero here: GetCapacity is the hot heartbeat path and must not stat
+// backing files; disk accounting is gathered in Metering() instead.
+func (e *Engine) memorySamplesLocked() []metering.Sample {
+	samples := make([]metering.Sample, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		samples = append(samples, metering.Sample{
+			ID:           s.ID,
+			Template:     s.TemplateID,
+			MemoryUnique: s.MemoryUnique,
+			MemoryShared: s.MemoryShared,
+		})
+	}
+	return samples
 }
 
 // CreateTemplate builds a template from an image ref or an existing rootfs file
