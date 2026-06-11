@@ -880,6 +880,150 @@ jobs:
             /tmp/bench-execrt.json
           if-no-files-found: warn
 
+      # CoW-aware metering proof: fork N (4) REAL sandboxes from ONE template
+      # built by the bench phase above, then read the engine's CoW-aware
+      # metering report (memory derived from /proc/<pid>/smaps_rollup on the
+      # runner, disk from stat). The assertions prove the shared template region
+      # is counted ONCE across the forks, not once per fork:
+      #
+      #   * UsedCoWAware << UsedNaive  (the shared restored page set is
+      #     deduplicated: naive counts it N times, CoW-aware counts it once)
+      #   * CoWSavings > 0             (the deduplicated bytes are real)
+      #   * per-fork unique << shared-once  (each fork's marginal physical cost
+      #     is its private-dirty set, far below the once-paid template share)
+      #
+      # This is BOTH a correctness gate and an honest density datapoint: the
+      # marginal cost of an additional fork is the unique set, not a whole VM.
+      # The numbers are SHARED-CI-CLASS (noisy ubuntu-latest), reproducible per
+      # run, and NOT bare-metal figures.
+      #
+      # Setup reuses the bench template at $BENCH_DATA/templates/bench (built by
+      # the bench phase: snapshot + rootfs + verified marker). A
+      # snapshot-build/setup flake (template missing, driver fails to fork) is
+      # logged distinctly from a real assertion failure so the cause is obvious.
+      - name: CoW-aware metering proof, 4 forks of one template count shared memory once
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          TPL_DIR=$BENCH_DATA/templates/$TPL
+
+          sudo chmod 666 /dev/kvm
+
+          # Setup precondition: the bench phase must have laid out the template.
+          # Treat a missing template as a SETUP FLAKE, not an assertion failure.
+          if [ ! -f "$TPL_DIR/snapshot/vmstate" ] || [ ! -f "$TPL_DIR/rootfs.ext4" ]; then
+            echo "SETUP-FLAKE: bench template not present at $TPL_DIR (snapshot build did not complete); cannot run metering proof"
+            ls -lhR "$TPL_DIR" || true
+            exit 1
+          fi
+
+          go build -o /tmp/bench ./cmd/bench/
+
+          # Fork 4 sandboxes from the one template and emit the report JSON.
+          # cmd/bench exits non-zero if a fork fails: that is a SETUP FLAKE
+          # (KVM/snapshot problem), distinct from the assertions below which run
+          # only once a valid report exists.
+          if ! /tmp/bench \
+              --mode metering \
+              --template $TPL \
+              --data-dir $BENCH_DATA \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/agent-run-test/vmlinux \
+              --forks 4 --settle-ms 800 \
+              --summary --json /tmp/metering.json > /tmp/metering.out 2>&1; then
+            echo "SETUP-FLAKE: metering driver failed to fork/restore on this runner (KVM or snapshot issue), NOT a metering assertion failure"
+            cat /tmp/metering.out || true
+            exit 1
+          fi
+          cat /tmp/metering.out
+
+          # From here on, failures are REAL METERING ASSERTION FAILURES.
+          USED_COW=$(jq -r '.UsedCoWAware' /tmp/metering.json)
+          USED_NAIVE=$(jq -r '.UsedNaive' /tmp/metering.json)
+          SAVINGS=$(jq -r '.CoWSavings' /tmp/metering.json)
+          TOTAL_UNIQUE=$(jq -r '.TotalUnique' /tmp/metering.json)
+          FORK_COUNT=$(jq -r '.Sandboxes | length' /tmp/metering.json)
+          # Shared-once is the single template group's representative shared set.
+          SHARED_ONCE=$(jq -r '[.Templates[].SharedOnce] | add // 0' /tmp/metering.json)
+          # Max per-fork unique (the worst-case marginal memory of one fork).
+          MAX_UNIQUE=$(jq -r '[.Sandboxes[].MemoryUnique] | max // 0' /tmp/metering.json)
+
+          echo "metering: forks=$FORK_COUNT UsedCoWAware=$USED_COW UsedNaive=$USED_NAIVE CoWSavings=$SAVINGS TotalUnique=$TOTAL_UNIQUE sharedOnce=$SHARED_ONCE maxForkUnique=$MAX_UNIQUE"
+
+          fail() { echo "METERING-ASSERTION-FAILED: $1"; exit 1; }
+
+          # Sanity: we forked 4 sandboxes.
+          [ "$FORK_COUNT" -eq 4 ] || fail "expected 4 forks in report, got $FORK_COUNT"
+
+          # All values are integer byte counts; use shell integer comparisons
+          # (no bc dependency). 64-bit runner shells handle the magnitudes here.
+
+          # (1) CoW-aware total must be strictly less than the naive total: the
+          # shared template region is counted once, not 4x.
+          if [ "$USED_COW" -ge "$USED_NAIVE" ]; then
+            fail "UsedCoWAware ($USED_COW) is not < UsedNaive ($USED_NAIVE); shared region was not deduplicated"
+          fi
+
+          # (2) Savings must be positive (the deduplicated shared bytes).
+          if [ "$SAVINGS" -le 0 ]; then
+            fail "CoWSavings ($SAVINGS) is not > 0"
+          fi
+
+          # (3) The shared template set must be counted once: with 4 forks the
+          # naive total counts it ~4x, so savings should be roughly (forks-1) x
+          # shared-once. Require savings to be at least the shared-once set once
+          # over (a strong, conservative form of "counted once not four times").
+          if [ "$SHARED_ONCE" -gt 0 ]; then
+            if [ "$SAVINGS" -lt "$SHARED_ONCE" ]; then
+              fail "CoWSavings ($SAVINGS) < one shared-once set ($SHARED_ONCE); shared region not deduplicated across forks"
+            fi
+          fi
+
+          # (4) Each fork's marginal cost is its unique set, which must be small
+          # relative to the once-paid shared template set. Gate the worst-case
+          # per-fork unique strictly below the shared-once set.
+          if [ "$SHARED_ONCE" -gt 0 ]; then
+            if [ "$MAX_UNIQUE" -ge "$SHARED_ONCE" ]; then
+              fail "max per-fork unique ($MAX_UNIQUE) is not < shared-once ($SHARED_ONCE); per-fork marginal cost is not the unique set"
+            fi
+          fi
+
+          echo "All CoW-aware metering assertions passed."
+
+          # Publish the honest density datapoint to the run summary.
+          to_mib() { awk "BEGIN { printf \"%.2f\", $1 / 1048576 }"; }
+          {
+            echo ""
+            echo "## CoW-aware metering density (shared-CI-class, NOT bare metal)"
+            echo ""
+            echo "4 real forks of ONE template on \`ubuntu-latest\`. Memory from \`/proc/<pid>/smaps_rollup\`, disk from stat. The shared restored template page set is counted ONCE, so per-fork marginal cost is the unique (private-dirty) set."
+            echo ""
+            echo "| metric | bytes | MiB |"
+            echo "| --- | --- | --- |"
+            echo "| UsedCoWAware (unique + shared-once) | $USED_COW | $(to_mib "$USED_COW") |"
+            echo "| UsedNaive (shared counted per fork) | $USED_NAIVE | $(to_mib "$USED_NAIVE") |"
+            echo "| CoWSavings (deduplicated) | $SAVINGS | $(to_mib "$SAVINGS") |"
+            echo "| TotalUnique (sum of per-fork private-dirty) | $TOTAL_UNIQUE | $(to_mib "$TOTAL_UNIQUE") |"
+            echo "| shared-once (one template's shared set) | $SHARED_ONCE | $(to_mib "$SHARED_ONCE") |"
+            echo "| max per-fork unique (marginal cost) | $MAX_UNIQUE | $(to_mib "$MAX_UNIQUE") |"
+            echo ""
+            echo "Reproducible from this metering CI phase (\`cmd/bench --mode metering\`). See \`docs/metering.md\` and BENCHMARKS.md."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "================================"
+          echo "  CoW-aware metering proven: shared template memory counted once"
+          echo "================================"
+
+      - name: Upload metering report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metering-report
+          path: /tmp/metering.json
+          if-no-files-found: warn
+
       # Install the host networking tools the egress phases need. nftables and
       # iproute2 are what the real internal/network Linux Manager shells out to
       # (nft, ip); a stock ubuntu-latest runner has iproute2 but may lack nft.

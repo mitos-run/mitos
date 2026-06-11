@@ -47,3 +47,32 @@ func TestParseConfigExecRT(t *testing.T) {
 		t.Errorf("iterations = %d, want 10", cfg.iterations)
 	}
 }
+
+func TestParseConfigMetering(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "metering", "--template", "t", "--forks", "4"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modeMetering {
+		t.Errorf("mode = %q, want %q", cfg.mode, modeMetering)
+	}
+	if cfg.forks != 4 {
+		t.Errorf("forks = %d, want 4", cfg.forks)
+	}
+}
+
+func TestParseConfigMeteringDefaultForks(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "metering", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.forks != 4 {
+		t.Errorf("default forks = %d, want 4", cfg.forks)
+	}
+}
+
+func TestParseConfigMeteringRejectsZeroForks(t *testing.T) {
+	if _, err := parseConfig([]string{"--mode", "metering", "--template", "t", "--forks", "0"}); err == nil {
+		t.Fatal("expected error for --forks 0 in metering mode")
+	}
+}

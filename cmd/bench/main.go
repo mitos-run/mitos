@@ -15,6 +15,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -23,12 +24,14 @@ import (
 	"github.com/paperclipinc/sandbox/internal/benchstat"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/metering"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
 const (
 	modeForkExec = "fork-exec"
 	modeExecRT   = "exec-rt"
+	modeMetering = "metering"
 )
 
 // config holds the parsed, validated flags. Parsing is split out so it can be
@@ -43,6 +46,11 @@ type config struct {
 	kernel      string
 	jsonPath    string
 	summary     bool
+	// forks is the number of sandboxes the metering mode forks from one
+	// template before reading the CoW-aware metering report. It is unused by
+	// the latency modes.
+	forks    int
+	settleMs int
 }
 
 // parseConfig parses args (excluding the program name) into a validated config.
@@ -50,7 +58,7 @@ func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 
 	var cfg config
-	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt")
+	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering")
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
 	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
@@ -59,13 +67,15 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/agent-run/vmlinux", "guest kernel path")
 	fs.StringVar(&cfg.jsonPath, "json", "", "optional path to write results JSON")
 	fs.BoolVar(&cfg.summary, "summary", false, "print the summary table to stdout")
+	fs.IntVar(&cfg.forks, "forks", 4, "metering mode: number of sandboxes to fork from one template before reading the report")
+	fs.IntVar(&cfg.settleMs, "settle-ms", 500, "metering mode: milliseconds to let the forks settle before reading the report")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 
-	if cfg.mode != modeForkExec && cfg.mode != modeExecRT {
-		return config{}, fmt.Errorf("invalid --mode %q: want %s or %s", cfg.mode, modeForkExec, modeExecRT)
+	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering {
+		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering)
 	}
 	if cfg.template == "" {
 		return config{}, fmt.Errorf("--template is required")
@@ -75,6 +85,14 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.warmup < 0 {
 		return config{}, fmt.Errorf("--warmup must not be negative, got %d", cfg.warmup)
+	}
+	if cfg.mode == modeMetering {
+		if cfg.forks < 1 {
+			return config{}, fmt.Errorf("--forks must be at least 1 in metering mode, got %d", cfg.forks)
+		}
+		if cfg.settleMs < 0 {
+			return config{}, fmt.Errorf("--settle-ms must not be negative, got %d", cfg.settleMs)
+		}
 	}
 	return cfg, nil
 }
@@ -99,6 +117,12 @@ func run(cfg config) error {
 	engine, err := fork.NewEngine(cfg.dataDir, cfg.firecracker, cfg.kernel, firecracker.JailerConfig{}, fork.EngineOpts{})
 	if err != nil {
 		return fmt.Errorf("init engine (needs Linux + /dev/kvm + template under --data-dir): %w", err)
+	}
+
+	// Metering mode forks N real sandboxes from one template and prints the
+	// CoW-aware metering report; it does not produce a latency distribution.
+	if cfg.mode == modeMetering {
+		return runMetering(engine, cfg)
 	}
 
 	var result benchstat.Result
@@ -130,6 +154,83 @@ func run(cfg config) error {
 		}
 	}
 	return nil
+}
+
+// runMetering forks cfg.forks real sandboxes from one template, lets them
+// settle, then reads the engine's CoW-aware metering report and prints it as
+// JSON (machine-readable for the CI jq assertions) plus a human summary. The
+// forks are NOT torn down before the report is read: the whole point is to
+// observe N concurrent forks of one template sharing the same restored page
+// set, so the shared template region is counted once and the per-fork marginal
+// cost is the unique set. Every fork is torn down after the report is captured.
+//
+// This proves metering correctness AND yields an honest density datapoint: the
+// shared template footprint is paid once, and each additional fork adds only
+// its unique (private-dirty) pages.
+func runMetering(engine *fork.Engine, cfg config) error {
+	forked := make([]string, 0, cfg.forks)
+	// Tear every fork down on the way out, success or failure, so a metering
+	// run never leaks VMs on the runner.
+	defer func() {
+		for _, id := range forked {
+			_ = engine.Terminate(id)
+		}
+	}()
+
+	for i := 0; i < cfg.forks; i++ {
+		id := fmt.Sprintf("meter-%d", i)
+		if _, err := engine.Fork(cfg.template, id, fork.ForkOpts{}); err != nil {
+			return fmt.Errorf("fork %d of %d: %w", i+1, cfg.forks, err)
+		}
+		forked = append(forked, id)
+	}
+
+	// Let the forks settle so their resident set reflects a steady restored
+	// state rather than the instant after restore.
+	if cfg.settleMs > 0 {
+		time.Sleep(time.Duration(cfg.settleMs) * time.Millisecond)
+	}
+
+	report := engine.Metering()
+
+	out, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal metering report: %w", err)
+	}
+	// The JSON is the contract the CI jq assertions parse; print it on its own.
+	fmt.Println(string(out))
+
+	if cfg.summary {
+		printMeteringSummary(report, cfg.forks)
+	}
+	if cfg.jsonPath != "" {
+		if err := os.WriteFile(cfg.jsonPath, out, 0o644); err != nil {
+			return fmt.Errorf("write metering json: %w", err)
+		}
+	}
+	return nil
+}
+
+// printMeteringSummary prints a short human-readable summary of the CoW-aware
+// metering report to stdout. All numbers are derived from the real engine
+// report (smaps-derived memory, stat-derived disk); nothing is invented.
+func printMeteringSummary(report metering.Report, forks int) {
+	mib := func(b int64) float64 { return float64(b) / (1024 * 1024) }
+	fmt.Printf("\n=== CoW-aware metering: %d fork(s) of one template ===\n", forks)
+	fmt.Printf("  sandboxes:        %d\n", len(report.Sandboxes))
+	fmt.Printf("  templates:        %d\n", len(report.Templates))
+	fmt.Printf("  TotalUnique:      %.2f MiB (sum of every fork's private-dirty set)\n", mib(report.TotalUnique))
+	fmt.Printf("  UsedCoWAware:     %.2f MiB (unique + each template's shared set counted once)\n", mib(report.UsedCoWAware))
+	fmt.Printf("  UsedNaive:        %.2f MiB (unique + every fork's shared set, double-counted)\n", mib(report.UsedNaive))
+	fmt.Printf("  CoWSavings:       %.2f MiB (naive - CoW-aware)\n", mib(report.CoWSavings))
+	for _, t := range report.Templates {
+		fmt.Printf("  template %q: forks=%d sharedOnce=%.2f MiB diskSharedOnce=%.2f MiB\n",
+			t.Template, t.ForkCount, mib(t.SharedOnce), mib(t.DiskSharedOnce))
+	}
+	for _, s := range report.Sandboxes {
+		fmt.Printf("  fork %q: unique=%.2f MiB shared=%.2f MiB\n",
+			s.ID, mib(s.MemoryUnique), mib(s.MemoryShared))
+	}
 }
 
 // benchForkExec measures the time from fork start to the first successful exec
