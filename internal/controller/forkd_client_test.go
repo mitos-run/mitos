@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"reflect"
 	"testing"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
@@ -193,7 +194,8 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 		t.Fatalf("ready = %d, want 1", got)
 	}
 
-	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", 5)
+	initCommands := []string{"echo ready"}
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, 5)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -203,6 +205,13 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	caps := engineWithout.GetCapacity()
 	if len(caps.TemplateIDs) != 1 || caps.TemplateIDs[0] != "py-tmpl" {
 		t.Fatalf("template not created on lacking node: %v", caps.TemplateIDs)
+	}
+	// The init commands must flow from template.Spec.Init through the
+	// CreateTemplate RPC to the engine; without that plumbing template.Spec.Init
+	// silently never reaches the VM build. Assert the engine that actually built
+	// the template received them.
+	if got := engineWithout.LastInitCommands(); !reflect.DeepEqual(got, initCommands) {
+		t.Fatalf("engine init commands = %v, want %v", got, initCommands)
 	}
 	if got := r.readySnapshotCount("py-tmpl"); got != 2 {
 		t.Fatalf("ready after create = %d, want 2", got)
