@@ -18,3 +18,9 @@ resources:
   - rbac/clusterrolebinding.yaml
   - controller/deployment.yaml
   - daemon/daemonset.yaml
+  # The KVM device plugin runs on every node and advertises agentrun.dev/kvm
+  # only where /dev/kvm exists, so husk pods can request KVM as a scheduled
+  # resource instead of privileged: true (the PSA-restricted path). It does
+  # NOT replace forkd's privileged /dev/kvm hostPath in this base; that
+  # migration is a follow-up.
+  - device-plugin/daemonset.yaml

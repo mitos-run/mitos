@@ -59,7 +59,7 @@ jobs:
         # talos-validate job, so they are excluded here.
         run: |
           kubeconform -strict -summary -ignore-missing-schemas \
-            crds/ controller/ rbac/ daemon/
+            crds/ controller/ rbac/ daemon/ device-plugin/
         working-directory: deploy
       - name: kustomize base resolves
         run: kubectl kustomize deploy/ > /dev/null
@@ -149,8 +149,10 @@ jobs:
         run: |
           docker build -f Dockerfile.controller -t agent-run-controller:ci .
           docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+          docker build -f Dockerfile.kvm-device-plugin -t agent-run-kvm-device-plugin:ci .
           kind load docker-image agent-run-controller:ci --name agent-run-ci
           kind load docker-image agent-run-forkd:ci --name agent-run-ci
+          kind load docker-image agent-run-kvm-device-plugin:ci --name agent-run-ci
       - name: Build agentrun CLI
         run: go build -o /usr/local/bin/agentrun ./cmd/agentrun/
       - name: agentrun dev up (mock control plane on the existing kind cluster)
@@ -166,6 +168,72 @@ jobs:
         run: |
           kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
           kubectl -n agent-run rollout status daemonset/agent-run-forkd --timeout=180s
+      - name: Deploy the KVM device plugin DaemonSet
+        # Apply the production device-plugin DaemonSet, overriding the image to
+        # the :ci tag loaded above (IfNotPresent so kind serves the local image,
+        # no registry pull). On kind there is NO /dev/kvm, so the plugin
+        # correctly advertises ZERO and registers anyway: this proves the
+        # plugin runs and registers on a no-KVM node without crashing.
+        run: |
+          set -euo pipefail
+          kubectl apply -f deploy/device-plugin/daemonset.yaml
+          kubectl -n agent-run set image daemonset/agent-run-kvm-device-plugin \
+            kvm-device-plugin=agent-run-kvm-device-plugin:ci
+          kubectl -n agent-run patch daemonset/agent-run-kvm-device-plugin --type=json \
+            -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
+      - name: Device plugin DaemonSet becomes Ready and stays up
+        # Gate on the DaemonSet rolling out Ready, then confirm the pod is not
+        # crashlooping (restartCount stays 0 after a short settle). The plugin
+        # serves its socket and registers with the kubelet; advertising zero on
+        # a no-KVM node is the correct, honest behavior.
+        run: |
+          set -euo pipefail
+          kubectl -n agent-run rollout status daemonset/agent-run-kvm-device-plugin --timeout=180s
+          sleep 15
+          restarts=$(kubectl -n agent-run get pods \
+            -l app.kubernetes.io/component=kvm-device-plugin \
+            -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+          echo "device-plugin restartCount: ${restarts:-none}"
+          for r in $restarts; do
+            if [ "$r" != "0" ]; then
+              echo "device plugin restarted ($r); dumping logs"
+              kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=50 || true
+              exit 1
+            fi
+          done
+          kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=20 || true
+      - name: A pod requesting agentrun.dev/kvm stays Pending on the no-KVM cluster
+        # Honest scheduler truth: kind has no /dev/kvm, so the plugin advertises
+        # zero and a pod requesting the resource is unschedulable. Assert it
+        # stays Pending (NOT that it gets /dev/kvm: a pod actually receiving the
+        # device needs a KVM-kubelet node, which kind is not).
+        run: |
+          set -euo pipefail
+          cat <<'POD' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kvm-resource-probe
+            namespace: agent-run
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: probe
+                image: registry.k8s.io/pause:3.9
+                resources:
+                  limits:
+                    agentrun.dev/kvm: "1"
+          POD
+          # Give the scheduler time to (fail to) place it, then assert Pending.
+          sleep 20
+          phase=$(kubectl -n agent-run get pod kvm-resource-probe -o jsonpath='{.status.phase}')
+          echo "probe pod phase: $phase"
+          kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A2 'Events:' || true
+          if [ "$phase" != "Pending" ]; then
+            echo "expected Pending (no KVM advertised), got $phase"
+            exit 1
+          fi
+          kubectl -n agent-run delete pod kvm-resource-probe --ignore-not-found=true
       - name: agentrun sandbox ls (control-plane dispatch lists claims)
         run: agentrun sandbox ls
       - name: agentrun sandbox create reaches Ready on the mock engine
@@ -186,4 +254,7 @@ jobs:
           agentrun sandbox terminate "$ID"
       - name: agentrun dev down (cleanup)
         if: always()
-        run: kubectl delete -k deploy/dev/ --ignore-not-found=true || true
+        run: |
+          kubectl -n agent-run delete pod kvm-resource-probe --ignore-not-found=true || true
+          kubectl delete -f deploy/device-plugin/daemonset.yaml --ignore-not-found=true || true
+          kubectl delete -k deploy/dev/ --ignore-not-found=true || true

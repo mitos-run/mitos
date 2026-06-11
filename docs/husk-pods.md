@@ -252,7 +252,77 @@ that metering: the per-pod memcg is the right enforcement boundary
 (`memory.max` per pod) and a useful signal, but the per-tenant BILL comes from
 the CoW-aware metering, not the first-faulter `memory.current`.
 
-## 5. Proven vs remaining
+## 5. Device plugin (/dev/kvm without privileged)
+
+A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device
+the way forkd does today (a `hostPath` to `/dev/kvm` plus a permissive
+capability set) is incompatible with the PSA `restricted` profile husk pods
+target. The Kubernetes device-plugin mechanism is the restricted-profile path:
+the pod requests `agentrun.dev/kvm` like any extended resource and the kubelet,
+not the pod spec, injects the device.
+
+`cmd/kvm-device-plugin` (implemented in `internal/deviceplugin`) is that plugin.
+It runs as a DaemonSet on every node and implements the v1beta1 `DevicePlugin`
+gRPC service:
+
+- **Scheduler truth.** `ListAndWatch` advertises `--device-count` healthy slots
+  (synthetic ids `kvm-0..kvm-{N-1}`) ONLY where the host `/dev/kvm` exists, and
+  ZERO where it does not. A node without `/dev/kvm` advertises nothing, so the
+  scheduler never places a pod that requests the resource there. `/dev/kvm` is
+  shareable, so the slot count is a soft per-node concurrency cap on husk pods,
+  not a count of physical devices. The DaemonSet runs everywhere (no
+  `nodeSelector`) on purpose: a node that gains `/dev/kvm` is covered
+  automatically on the plugin's next registration, with no relabel.
+- **Device injection.** `Allocate` returns a `DeviceSpec` per configured device
+  path (`/dev/kvm` and `/dev/net/tun`), each mapped host-path to the same
+  container-path with `rw` permissions, so the kubelet bind-mounts the device
+  nodes into the admitted container. The pod never sets `privileged: true` and
+  carries no `/dev/kvm` `hostPath` of its own.
+- **Registration.** The Registrar serves the plugin on a unix socket under the
+  kubelet device-plugins dir and registers with the kubelet (Version, Endpoint,
+  ResourceName), re-registering on failure so a kubelet restart is recovered.
+
+The DaemonSet (`deploy/device-plugin/daemonset.yaml`) needs only minimal
+privileges, NOT forkd's privileged set: it runs as root because the kubelet
+device-plugins dir is root-owned (it must write its socket there), but it is
+unprivileged with all capabilities dropped, `allowPrivilegeEscalation: false`
+and a read-only root filesystem. Its only host access is the kubelet
+device-plugins dir (to serve and register) and a read-only `/dev` mount (to
+`stat /dev/kvm`); it creates no device nodes and starts no VMs. So a husk pod
+requesting `agentrun.dev/kvm` is PSA-restricted minus exactly the documented
+device-plugin exception, not a privileged escape.
+
+This is the PSA-restricted alternative to forkd's current privileged
+`/dev/kvm` hostPath. It does NOT remove that hostPath: migrating the forkd
+DaemonSet to request the resource instead of mounting the device is a follow-up.
+
+### Proven vs remaining for the device plugin
+
+**Proven:**
+
+- The gRPC service and the kubelet registration are unit-tested
+  (`internal/deviceplugin/plugin_test.go`): `ListAndWatch` advertises
+  `deviceCount` healthy devices when `/dev/kvm` is present and zero when it is
+  absent (driven over an in-memory plugin server); `Allocate` returns the
+  `/dev/kvm` and `/dev/net/tun` `DeviceSpec`s with matching host/container paths
+  and `rw` permissions; and the Registrar registers against a FAKE kubelet
+  Registration server over a unix socket with the right Version, Endpoint, and
+  ResourceName. No real kubelet is involved.
+- The kind e2e job deploys the DaemonSet and gates on it becoming Ready and not
+  crashlooping. kind has no `/dev/kvm`, so the plugin correctly advertises ZERO
+  and registers anyway, and a pod requesting `agentrun.dev/kvm: 1` stays
+  Pending: the honest scheduler truth on a no-KVM cluster.
+
+**Open:**
+
+- A pod ACTUALLY receiving `/dev/kvm` from the plugin needs a node whose kubelet
+  has a real `/dev/kvm` (a KVM-kubelet reference node); the kind cluster cannot
+  prove device injection because it has no KVM.
+- Running the husk stub INSIDE a pod that requests this resource (the pod spec
+  wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
+  hostPath to request the resource are follow-ups (see section 6).
+
+## 6. Proven vs remaining
 
 ### Proven so far
 
@@ -275,14 +345,20 @@ the CoW-aware metering, not the first-faulter `memory.current`.
   two VMs from one bench snapshot and gates on distinct RNG streams, each guest
   wall clock within 2s of the runner, and a delivered env var plus secret
   readable in each guest with the secret value absent from the host-side logs.
+- The `/dev/kvm` device plugin: `cmd/kvm-device-plugin` (in
+  `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where `/dev/kvm`
+  exists and injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod
+  gets KVM as a scheduled resource instead of `privileged: true` (section 5).
+  The DevicePlugin and Registration gRPC are unit-tested against a fake kubelet,
+  and the kind e2e gates on the DaemonSet registering and advertising zero on a
+  no-KVM node. A pod actually receiving the device needs a KVM-kubelet node, and
+  the forkd-DaemonSet migration off its privileged hostPath is a follow-up.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
 This PR does NOT migrate any controller and does NOT make sandboxes pods. The
 full husk-pods epic still needs:
 
-- the `/dev/kvm` device plugin (exposing KVM to the pod instead of
-  `privileged: true`);
 - running the stub INSIDE a real husk pod (the pod spec, the device-plugin
   resource request, the cgroup/netns placement); the stub binary and its control
   protocol exist, but nothing runs it in a pod yet;

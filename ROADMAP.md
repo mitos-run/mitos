@@ -50,8 +50,20 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     clock within 2s of the runner, and a delivered env var plus secret readable
     in each guest with the secret value absent from the host-side logs. See
     `docs/fork-correctness.md` and `docs/husk-pods.md`.
-  - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged);
-    running the stub INSIDE a real husk pod (pod spec, device-plugin resource
+  - ✅ The `/dev/kvm` device plugin (vs privileged): `cmd/kvm-device-plugin`
+    (in `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where
+    `/dev/kvm` exists (scheduler truth: a no-KVM node advertises zero) and
+    injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod requests
+    KVM as a scheduled resource instead of `privileged: true`. The DevicePlugin
+    and Registration gRPC are unit-tested against a fake kubelet, and the kind
+    e2e gates on the `agent-run-kvm-device-plugin` DaemonSet registering and
+    advertising zero on the no-KVM kind node (a pod requesting the resource
+    stays Pending there: honest scheduler truth). A pod actually receiving
+    `/dev/kvm` needs a KVM-kubelet node, and migrating the forkd DaemonSet off
+    its privileged `/dev/kvm` hostPath to request the resource is a follow-up.
+    See `docs/husk-pods.md` section 5.
+  - ⬜ Still open (rest of #18): running the stub INSIDE a real husk pod (pod
+    spec, device-plugin resource
     request, cgroup/netns placement); migrating the pool/claim/fork controllers
     to create + activate husk pods, including sourcing the claim-time env and
     secrets from the controller (the stub can already apply them per activation);
