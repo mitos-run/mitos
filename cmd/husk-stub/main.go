@@ -17,7 +17,16 @@
 // an already-serving stub's --control-socket, sends one ActivateRequest for
 // --snapshot-dir, prints the ActivateResult as JSON on stdout, and exits 0 only
 // when the result is OK. This is the in-CI driver for the activation-latency
-// proof; it spawns no VMM of its own.
+// proof; it spawns no VMM of its own. With --control-addr (plus the TLS flags)
+// instead of --control-socket the activate client drives the NETWORK mTLS
+// control channel via the controller's ActivateHuskPod, the slice-2 transport.
+//
+// With --emit-certs DIR the binary issues a fresh internal/pki test CA and the
+// two control plane leaves (the husk server leaf with the pki.ServerName SAN,
+// the controller client leaf with the pki.ControllerName SAN) plus an
+// independent wrong-CA controller leaf for negative mTLS tests, writes them as
+// PEM files under DIR, and exits. It spawns no VMM. This keeps the CI cert SANs
+// in lockstep with the names the husk control channel pins and authorizes.
 package main
 
 import (
@@ -34,6 +43,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/paperclipinc/sandbox/internal/controller"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/pki"
@@ -127,14 +137,20 @@ func run() error {
 		tlsCA          = flag.String("tls-ca", "", "path to the control plane CA certificate PEM (mTLS); used to verify the controller client certificate")
 		vcpus          = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB         = flag.Int("mem-mib", 512, "guest memory in MiB")
-		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket, send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket (or --control-addr over mTLS), send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		controlAddr    = flag.String("control-addr", "", "activate client mode: TCP address (host:port) of a husk pod's mTLS NETWORK control to activate over; uses ActivateHuskPod and requires --tls-cert/--tls-key/--tls-ca. Mutually exclusive with --control-socket")
 		snapshotDir    = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
 		secretFile     = flag.String("secret-file", "", "activate client mode: path to a KEY=VALUE secret file (one per line) delivered to the guest; values are never logged")
+		emitCerts      = flag.String("emit-certs", "", "issue an internal/pki test CA and control plane leaves into this directory, then exit (spawns no VMM): ca.crt, server.{crt,key} (pki.ServerName SAN), controller.{crt,key} (pki.ControllerName SAN), wrong-ca.crt + wrong-controller.{crt,key} (a different CA, for negative mTLS tests)")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
 	flag.Var(&secretFlag, "secret", "activate client mode: repeatable KEY=VALUE guest secret; values are never logged")
 	flag.Parse()
+
+	if *emitCerts != "" {
+		return emitTestCerts(*emitCerts)
+	}
 
 	if *activate {
 		secrets := secretFlag.orNil()
@@ -144,6 +160,12 @@ func run() error {
 			if err != nil {
 				return err
 			}
+		}
+		if *controlAddr != "" {
+			if *controlSocket != "" {
+				return fmt.Errorf("--control-addr and --control-socket are mutually exclusive")
+			}
+			return runNetworkActivateClient(*controlAddr, *snapshotDir, *tlsCert, *tlsKey, *tlsCA, envFlag.orNil(), secrets)
 		}
 		return runActivateClient(*controlSocket, *snapshotDir, envFlag.orNil(), secrets)
 	}
@@ -314,5 +336,125 @@ func runActivateClient(controlSocket, snapshotDir string, env, secrets map[strin
 	if !res.OK {
 		return fmt.Errorf("activate failed: %s", res.Error)
 	}
+	return nil
+}
+
+// runNetworkActivateClient drives the NETWORK mTLS control channel: it builds
+// the controller client TLS config (pki.ClientTLSConfig, which pins the husk
+// server identity and presents the controller client certificate), then calls
+// the controller's ActivateHuskPod against addr. This is the in-CI driver for
+// the slice-2 network-activation proof; it exercises the exact reconcile path
+// the claim controller uses (ActivateHuskPod), not a bespoke client. It owns no
+// VMM.
+//
+// The TLS flags are REQUIRED here: ActivateHuskPod refuses a nil tlsConf so the
+// activation secrets are never sent over an unauthenticated channel. Secret and
+// env VALUES are never logged: only the result (OK, latency, vsock path, and
+// any error, none of which carries a secret) is printed.
+func runNetworkActivateClient(addr, snapshotDir, certPath, keyPath, caPath string, env, secrets map[string]string) error {
+	if snapshotDir == "" {
+		return fmt.Errorf("--activate requires --snapshot-dir")
+	}
+	if certPath == "" || keyPath == "" || caPath == "" {
+		return fmt.Errorf("--control-addr requires --tls-cert, --tls-key, and --tls-ca: refusing to send activation secrets over an unauthenticated channel")
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-ca: %w", err)
+	}
+	tlsConf, err := pki.ClientTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return fmt.Errorf("build controller client TLS config: %w", err)
+	}
+
+	res, err := controller.ActivateHuskPod(context.Background(), addr, tlsConf, husk.ActivateRequest{
+		SnapshotDir: snapshotDir,
+		Env:         env,
+		Secrets:     secrets,
+	})
+	if err != nil {
+		return fmt.Errorf("activate over network control: %w", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(res); err != nil {
+		return fmt.Errorf("encode activate result: %w", err)
+	}
+	if !res.OK {
+		return fmt.Errorf("activate failed: %s", res.Error)
+	}
+	return nil
+}
+
+// emitTestCerts issues a fresh internal/pki test CA and the control plane leaves
+// into dir so the CI can stand up the mTLS network control channel with SANs
+// that match exactly what the husk server pins and authorizes. Reusing
+// internal/pki (not openssl) guarantees the husk server leaf carries
+// pki.ServerName and the controller client leaf carries pki.ControllerName, the
+// two names ServerTLSConfig/ClientTLSConfig and AuthorizeControllerIdentity
+// depend on. It also emits an INDEPENDENT second CA and a controller leaf signed
+// by it (wrong-ca.crt + wrong-controller.{crt,key}) so the negative mTLS test
+// can prove a wrong-CA client is rejected. No secret material beyond these test
+// keys is in scope; this command is for CI/test only.
+func emitTestCerts(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+
+	ca, err := pki.NewCA("husk-stub-test")
+	if err != nil {
+		return fmt.Errorf("create test CA: %w", err)
+	}
+	server, err := ca.Issue(pki.ServerName)
+	if err != nil {
+		return fmt.Errorf("issue server leaf: %w", err)
+	}
+	clientLeaf, err := ca.Issue(pki.ControllerName)
+	if err != nil {
+		return fmt.Errorf("issue controller leaf: %w", err)
+	}
+
+	// An INDEPENDENT CA and a controller leaf signed by it: the negative test
+	// presents this leaf, whose SAN is correct but whose chain does not verify
+	// against the husk server's trusted CA, so the mTLS handshake must reject it.
+	wrongCA, err := pki.NewCA("husk-stub-test-wrong")
+	if err != nil {
+		return fmt.Errorf("create wrong test CA: %w", err)
+	}
+	wrongClient, err := wrongCA.Issue(pki.ControllerName)
+	if err != nil {
+		return fmt.Errorf("issue wrong-CA controller leaf: %w", err)
+	}
+
+	files := map[string][]byte{
+		"ca.crt":               ca.CertPEM(),
+		"server.crt":           server.CertPEM,
+		"server.key":           server.KeyPEM,
+		"controller.crt":       clientLeaf.CertPEM,
+		"controller.key":       clientLeaf.KeyPEM,
+		"wrong-ca.crt":         wrongCA.CertPEM(),
+		"wrong-controller.crt": wrongClient.CertPEM,
+		"wrong-controller.key": wrongClient.KeyPEM,
+	}
+	for name, pemBytes := range files {
+		// Key material is 0o600; certificates and the CA cert are world-readable.
+		mode := os.FileMode(0o644)
+		if strings.HasSuffix(name, ".key") {
+			mode = 0o600
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), pemBytes, mode); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk-stub: wrote %d test cert files to %s\n", len(files), dir)
 	return nil
 }
