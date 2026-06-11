@@ -36,6 +36,10 @@ type SandboxAPI struct {
 	// allowTokenless permits requests for sandboxes that have NO registered
 	// token. Opt-in: see AllowTokenless.
 	allowTokenless bool
+	// auditor records a structured event after each exec/file op. Defaults to
+	// NopAuditor (auditing off); set via SetAuditor. It only ever sees safe
+	// summaries (command, path, byte count): never file content or secrets.
+	auditor Auditor
 }
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
@@ -45,7 +49,18 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		vsockDir:     vsockDir,
 		lastActivity: make(map[string]time.Time),
 		now:          time.Now,
+		auditor:      NopAuditor{},
 	}
+}
+
+// SetAuditor installs the auditor that records a structured event after each
+// exec and file operation. Passing nil installs the NopAuditor (auditing off).
+// Must be called before the API serves requests; the field is not synchronized.
+func (api *SandboxAPI) SetAuditor(a Auditor) {
+	if a == nil {
+		a = NopAuditor{}
+	}
+	api.auditor = a
 }
 
 // touch stamps the current time as the sandbox's last activity. Called at the
@@ -298,6 +313,16 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The command is safe to record (commands are not secret values); it is
+	// truncated to a bound. The exit code rides in Detail. OK reports that the
+	// call was served, not the exit code.
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "exec",
+		Detail:    fmt.Sprintf("exit=%d cmd=%s", result.ExitCode, truncateCommand(req.Command)),
+		OK:        true,
+	})
+
 	writeJSON(w, result)
 }
 
@@ -333,6 +358,15 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the path and byte count only; the content is never audited.
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "read",
+		Detail:    req.Path,
+		Bytes:     len(content),
+		OK:        true,
+	})
+
 	writeJSON(w, map[string]any{"content": string(content), "size": len(content)})
 }
 
@@ -360,6 +394,15 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the path and byte count only; the content is never audited.
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "write",
+		Detail:    req.Path,
+		Bytes:     len(req.Content),
+		OK:        true,
+	})
+
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -383,6 +426,13 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "list",
+		Detail:    req.Path,
+		OK:        true,
+	})
+
 	writeJSON(w, map[string]any{"entries": entries})
 }
 
@@ -405,6 +455,13 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "mkdir",
+		Detail:    req.Path,
+		OK:        true,
+	})
+
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -426,6 +483,13 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err.Error(), 500)
 		return
 	}
+
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "remove",
+		Detail:    req.Path,
+		OK:        true,
+	})
 
 	writeJSON(w, map[string]string{"status": "ok"})
 }

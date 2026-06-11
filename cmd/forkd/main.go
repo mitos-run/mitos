@@ -40,6 +40,7 @@ func main() {
 		agentBin        string
 		busyboxBin      string
 		enableVolumes   bool
+		auditLog        string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -63,6 +64,7 @@ func main() {
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
+	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.Parse()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
@@ -134,6 +136,15 @@ func main() {
 	}
 
 	sandboxAPI := daemon.NewSandboxAPI(dataDir)
+	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
+		os.Exit(1)
+	}
+	if auditCloser != nil {
+		defer auditCloser.Close()
+	}
+	sandboxAPI.SetAuditor(auditor)
 	server := daemon.NewServer(engine, sandboxAPI)
 
 	// Start gRPC server (controller communication)
