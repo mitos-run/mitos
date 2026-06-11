@@ -47,6 +47,12 @@ func run(args []string) int {
 		return runDev(ctx, rest[1:])
 	}
 
+	// Usage is printable without a cluster, so a developer with no kubeconfig
+	// can still discover the commands.
+	if rest[0] == "-h" || rest[0] == "--help" || rest[0] == "help" {
+		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
+	}
+
 	backend, err := buildBackend(namespace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
