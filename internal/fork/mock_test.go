@@ -139,9 +139,18 @@ func TestMockEngine_MemoryAccounting(t *testing.T) {
 	}
 
 	cap := engine.GetCapacity()
-	expectedUsed := int64(10) * 265 * 1024
+	// CoW-aware: ten forks of one template count the 256MiB shared region ONCE,
+	// plus 265KiB unique per fork. The naive sum would be 10*(265KiB+256MiB).
+	const (
+		uniquePerFork = int64(265 * 1024)
+		sharedOnce    = int64(256 * 1024 * 1024)
+	)
+	expectedUsed := 10*uniquePerFork + sharedOnce
 	if cap.MemoryUsed != expectedUsed {
-		t.Errorf("expected %d bytes used, got %d", expectedUsed, cap.MemoryUsed)
+		t.Errorf("expected %d bytes used (CoW-aware), got %d", expectedUsed, cap.MemoryUsed)
+	}
+	if cap.MemoryShared != sharedOnce {
+		t.Errorf("expected shared %d (counted once), got %d", sharedOnce, cap.MemoryShared)
 	}
 }
 

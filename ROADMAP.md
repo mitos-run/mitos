@@ -95,8 +95,24 @@ Format-freeze blockers:
   are refused. See docs/snapshot-format.md. Open follow-ups: Firecracker CPU
   templates for cross-CPU-model restore, and live cross-Firecracker-version
   restore testing (needs two FC versions in CI).
-- ⬜ Per-workspace encryption keys / crypto-shredding (#31).
-- ⬜ CoW-aware metering, the shared-pages billing primitive (#33).
+- ✅ CoW-aware metering, the shared-pages billing primitive (#33): forks of one
+  template restore the same snapshot with `MAP_PRIVATE`, so `internal/metering`
+  counts each template's shared page set ONCE (the max-of-forks representative)
+  instead of once per fork. `GetCapacity` reports the CoW-aware resident total
+  (sum of per-fork unique + each template's shared-once), so the scheduler no
+  longer double-counts the shared template region across forks. The engine
+  `Metering()` report also accounts CoW disk for reflink (Snapshot) volumes
+  (seed shared once, fork divergence unique). forkd serves it on the operational
+  `GET /v1/metering` endpoint, and the memory gauges are CoW-aware plus
+  `agentrun_cow_memory_savings_bytes` and `agentrun_metered_disk_bytes`. Proven
+  by unit tests and a KVM CI phase that forks 4 sandboxes from one template and
+  asserts the shared region is counted once (CoW-aware total below naive,
+  positive savings, per-fork unique below the shared-once set), an honest
+  density datapoint. See docs/metering.md and BENCHMARKS.md. Open follow-ups:
+  precise reflink/btrfs block accounting (apparent sizes today), PSS-based
+  attribution, and per-tenant rollups tied to Workspace (#21).
+- ⬜ Per-workspace encryption keys / crypto-shredding (#31): the last open
+  format-freeze blocker.
 
 ## 0. Make the claimed system real (in progress)
 
