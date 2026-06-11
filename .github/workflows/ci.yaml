@@ -913,10 +913,8 @@ jobs:
           # (b) The SAME securityContext minus the two exceptions IS admitted into
           # restricted (no hostPath, runAsNonRoot=true), proving the securityContext
           # itself is restricted-clean.
-          cat <<'YAML' | kubectl apply -n psa-conf -f - || {
-            echo "CONFORMANCE-FAILED: the restricted-clean husk securityContext (minus exceptions) was not admitted into restricted"
-            exit 1
-          }
+          set +e
+          clean_out=$(cat <<'YAML' | kubectl apply -n psa-conf -f - 2>&1
           apiVersion: v1
           kind: Pod
           metadata:
@@ -944,6 +942,13 @@ jobs:
                   seccompProfile:
                     type: RuntimeDefault
           YAML
+          )
+          clean_rc=$?
+          set -e
+          if [ "$clean_rc" -ne 0 ]; then
+            echo "CONFORMANCE-FAILED: the restricted-clean husk securityContext (minus exceptions) was not admitted into restricted: $clean_out"
+            exit 1
+          fi
           echo "PASS: the husk securityContext minus the documented exceptions IS admitted into restricted (restricted-clean)"
 
           # (c) Control: a genuinely privileged pod IS rejected by restricted, so
