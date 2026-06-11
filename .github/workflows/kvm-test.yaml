@@ -19,6 +19,8 @@ on:
       - 'cmd/vol-smoke/**'
       - 'cmd/crypt-smoke/**'
       - 'cmd/pull-smoke/**'
+      - 'cmd/husk-stub/**'
+      - 'internal/husk/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
       - 'internal/vsock/**'
@@ -1426,6 +1428,205 @@ jobs:
         with:
           name: husk-probe-report
           path: /tmp/husk.json
+          if-no-files-found: warn
+
+      # Husk-stub in-place activation proof (#18). This phase proves the
+      # prepare/activate SPLIT and measures the activation latency, the
+      # claim-time cost of a husk pod. The model:
+      #
+      #   prepare  cmd/husk-stub brings up a DORMANT Firecracker VMM (process +
+      #            API socket, no snapshot loaded) and serves a control socket.
+      #            In production this is the pre-started VMM inside an
+      #            already-scheduled husk pod, so the VMM process is NOT spawned
+      #            at claim time.
+      #   activate the husk-stub --activate control client sends ONE
+      #            ActivateRequest for the bench template snapshot; the serving
+      #            stub LoadSnapshotWithOverrides + resumes the VM in place and
+      #            waits for the guest agent to answer over vsock, then replies
+      #            with LatencyMs (load-start to guest-ready). This is the only
+      #            cost paid at claim time.
+      #
+      # The phase reuses the bench template snapshot laid out by the bench phase
+      # at $BENCH_DATA/templates/bench/snapshot/{mem,vmstate}. One husk-stub owns
+      # exactly one VM, so each activation needs a FRESH dormant stub: the loop
+      # starts a stub, waits for its control socket, activates, records LatencyMs,
+      # and kills the stub. The husk-stub is LONG-LIVED: it KEEPS the activated
+      # VM alive after the activate reply and tears it down only on SIGTERM, so
+      # the first activation additionally execs a real command through the guest
+      # agent over the returned vsock path WHILE THE SERVING STUB IS STILL ALIVE
+      # holding the VM (cmd/test-agent default suite). The gate is "activate OK
+      # AND exec works", not just a control reply. The background stub PID is
+      # killed after the exec (and on every failure path) so no FC process leaks.
+      #
+      # HONEST SCOPE: these are SHARED-CI-CLASS numbers on noisy ubuntu-latest,
+      # reproducible per run, NOT bare metal. The <=10ms warm activation figure is
+      # the bare-metal reference-node TARGET (#18/#15); this phase does NOT assert
+      # it and must not be quoted as achieving it. A missing snapshot, missing
+      # /dev/kvm, or a control socket that never appears is a SETUP FLAKE
+      # (HUSK-STUB-SETUP), distinct from a real activate/exec failure
+      # (HUSK-STUB-FAILED). This phase GATES on activate OK + exec.
+      - name: Husk-stub in-place activation latency (prepare then activate)
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
+          WORKBASE=/tmp/agent-run-test/husk-stub
+          mkdir -p $WORKBASE
+
+          fail_setup()  { echo "HUSK-STUB-SETUP: $1"; exit 1; }
+          fail_active() { echo "HUSK-STUB-FAILED: $1"; exit 1; }
+
+          sudo chmod 666 /dev/kvm || fail_setup "no /dev/kvm on this runner"
+
+          # Setup precondition: the bench phase laid out the template snapshot.
+          if [ ! -f "$SNAP_DIR/mem" ] || [ ! -f "$SNAP_DIR/vmstate" ]; then
+            ls -lhR "$SNAP_DIR" || true
+            fail_setup "bench template snapshot not present at $SNAP_DIR (snapshot build did not complete); cannot run husk-stub activation"
+          fi
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # activate_once <n>: start a FRESH dormant husk-stub in its own workdir,
+          # wait for its control socket, run the --activate client, print the
+          # result JSON to $WORKBASE/result<n>.json, and kill the stub. Echoes the
+          # measured LatencyMs on success; a setup vs activate failure is
+          # distinguished by the markers above. On the FIRST run it also execs a
+          # real command through the guest agent over the returned vsock path
+          # WHILE the background serving stub is still alive holding the activated
+          # VM (the stub is long-lived and does not kill the VM on activate-done);
+          # the stub is killed only after the exec, and on every failure path.
+          activate_once() {
+            local n=$1
+            local workdir=$WORKBASE/vm$n
+            local ctrl=$WORKBASE/control$n.sock
+            local stublog=$WORKBASE/stub$n.log
+            local result=$WORKBASE/result$n.json
+            mkdir -p $workdir
+            rm -f $ctrl
+
+            # Prepare: dormant VMM + control socket served in the background. The
+            # stub runs firecracker in $workdir, so the snapshot's baked relative
+            # vsock.sock is rebound at $workdir/vsock.sock.
+            /tmp/husk-stub \
+              --firecracker /usr/local/bin/firecracker \
+              --workdir $workdir \
+              --control-socket $ctrl \
+              --mem-mib 256 \
+              > $stublog 2>&1 &
+            local stub_pid=$!
+
+            # Wait for the control socket to appear (dormant VMM came up).
+            local ready=0
+            for i in $(seq 1 40); do
+              if [ -S "$ctrl" ]; then ready=1; break; fi
+              if ! kill -0 $stub_pid 2>/dev/null; then break; fi
+              sleep 0.25
+            done
+            if [ "$ready" -ne 1 ]; then
+              echo "=== stub$n log ==="; cat $stublog || true
+              kill $stub_pid 2>/dev/null || true
+              fail_setup "control socket $ctrl never appeared (dormant VMM did not come up); SETUP, not an activate failure"
+            fi
+
+            # Activate: the control client sends one ActivateRequest for the bench
+            # snapshot and prints the ActivateResult JSON. Exit non-zero => not OK.
+            if ! /tmp/husk-stub --activate --control-socket $ctrl --snapshot-dir $SNAP_DIR > $result 2>$WORKBASE/activate$n.err; then
+              echo "=== activate$n stderr ==="; cat $WORKBASE/activate$n.err || true
+              echo "=== result$n.json ==="; cat $result || true
+              echo "=== stub$n log ==="; cat $stublog || true
+              kill $stub_pid 2>/dev/null || true
+              fail_active "activate $n did not return OK (snapshot load or guest-readiness failed); this is a real activation failure"
+            fi
+            cat $result
+
+            local ok lat vsock
+            ok=$(jq -r '.ok' $result)
+            lat=$(jq -r '.latency_ms' $result)
+            vsock=$(jq -r '.vsock_path' $result)
+            if [ "$ok" != "true" ]; then
+              kill $stub_pid 2>/dev/null || true
+              fail_active "activate $n result ok=$ok"
+            fi
+            echo "activate $n: OK latency_ms=$lat vsock=$vsock"
+
+            # First run: exec a real command through the guest agent over the
+            # returned vsock path, so the gate is activate OK AND a working exec.
+            if [ "$n" -eq 1 ]; then
+              echo "Proving exec works through the activated VM (vsock=$vsock)..."
+              if ! timeout 60 /tmp/test-agent "$vsock"; then
+                echo "=== stub$n log ==="; cat $stublog || true
+                kill $stub_pid 2>/dev/null || true
+                fail_active "exec through the activated guest agent FAILED; the VM was reported active but is not usable"
+              fi
+              echo "PASS: exec works through the activated VM"
+            fi
+
+            echo "$lat" >> $WORKBASE/latencies.txt
+            kill $stub_pid 2>/dev/null || true
+            sleep 0.3
+          }
+
+          rm -f $WORKBASE/latencies.txt
+          # Iterations: one is enough to gate (activate OK + exec); a small loop
+          # gives a nearest-rank distribution. Each needs a fresh dormant stub.
+          ITERS=10
+          for n in $(seq 1 $ITERS); do
+            echo "================================"
+            echo "  husk-stub prepare + activate iteration $n/$ITERS"
+            echo "================================"
+            activate_once $n
+          done
+
+          # Nearest-rank percentiles over the collected activation latencies
+          # (same nearest-rank method as internal/benchstat: index ceil(p*N), so
+          # P50/P99 are real observed samples, not interpolations). All values are
+          # the LatencyMs the stub measured for load-start to guest-ready.
+          echo "Collected activation latencies (ms):"
+          cat $WORKBASE/latencies.txt
+          STATS=$(sort -n $WORKBASE/latencies.txt | LC_ALL=C awk '
+            function nr(p,   idx){ idx=int(p*n + 0.999999); if(idx<1)idx=1; if(idx>n)idx=n; return v[idx] }
+            { v[NR]=$1 }
+            END {
+              n=NR
+              if (n==0) { print "0 0 0 0 0"; exit }
+              printf "%d %.3f %.3f %.3f %.3f", n, v[1], nr(0.50), nr(0.99), v[n]
+            }')
+          read -r CNT MIN P50 P99 MAX <<< "$STATS"
+          echo "husk-stub activation latency: n=$CNT min=${MIN}ms p50=${P50}ms p99=${P99}ms max=${MAX}ms"
+
+          {
+            echo ""
+            echo "## Husk-stub in-place activation latency (shared-CI-class, NOT bare metal)"
+            echo ""
+            echo "Prepare = a DORMANT Firecracker VMM pre-started by \`cmd/husk-stub\` (the VMM process is NOT spawned at claim time). Activate = in-place \`LoadSnapshotWithOverrides\` + resume + guest-ready over vsock, the only cost paid at claim. ${CNT} prepare+activate cycles on \`ubuntu-latest\` (noisy shared runner), each a fresh dormant stub activating the bench template snapshot. LatencyMs is load-start to guest-ready, measured by the stub."
+            echo ""
+            echo "The first iteration additionally execs a real command through the guest agent over the activated VM's vsock (gate: activate OK AND exec works)."
+            echo ""
+            echo "| metric | ms |"
+            echo "| --- | --- |"
+            echo "| min | ${MIN} |"
+            echo "| p50 (nearest-rank) | ${P50} |"
+            echo "| p99 (nearest-rank) | ${P99} |"
+            echo "| max | ${MAX} |"
+            echo ""
+            echo "These numbers are reproducible per run but are NOT bare metal. The **<=10ms warm activation figure is the bare-metal reference-node TARGET (#18/#15), not a shared-CI claim** and is not asserted here. See \`docs/husk-pods.md\` and BENCHMARKS.md."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "================================"
+          echo "  Husk-stub prepare/activate proven: dormant VMM activated in place, exec works"
+          echo "================================"
+
+      - name: Upload husk-stub activation results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: husk-stub-activation
+          path: |
+            /tmp/agent-run-test/husk-stub/result*.json
+            /tmp/agent-run-test/husk-stub/latencies.txt
           if-no-files-found: warn
 
       # Install the host networking tools the egress phases need. nftables and
