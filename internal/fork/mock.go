@@ -100,13 +100,13 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 	}, nil
 }
 
-func (e *MockEngine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.templates[id] = &Template{
 		ID:          id,
-		Image:       rootfsPath,
+		Image:       image,
 		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", id),
 		CreatedAt:   time.Now(),
 		Ready:       true,

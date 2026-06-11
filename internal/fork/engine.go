@@ -57,6 +57,22 @@ type Engine struct {
 	netMgr     network.Manager
 	netAlloc   *netconf.Allocator
 	resolverIP net.IP
+
+	// agentBinPath and busyboxPath are injected into a rootfs built from an
+	// OCI image (see EngineOpts). Unused for file-path rootfs templates.
+	agentBinPath string
+	busyboxPath  string
+
+	// buildRootfsFromImage turns an OCI image ref into a bootable rootfs.ext4
+	// at outPath. It is a seam so CreateTemplate can be tested without a
+	// registry; the default pulls, extracts, injects the agent, and builds the
+	// ext4 image.
+	buildRootfsFromImage func(ctx context.Context, ref, outPath, agentBin, busyboxBin string) error
+
+	// runTemplateBuild boots the VM, runs init in it, and snapshots it. It is a
+	// seam so the init-failure safety property can be tested WITHOUT launching
+	// Firecracker. The default delegates to the firecracker TemplateManager.
+	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
 }
 
 // Placeholder network identity used only while building a template snapshot.
@@ -163,6 +179,15 @@ type EngineOpts struct {
 	// ResolverIP is the optional DNS resolver guests may reach. Nil omits the
 	// DNS allow rule from each fork's egress ruleset.
 	ResolverIP net.IP
+	// AgentBinPath is the host path of the guest agent binary injected as
+	// /init when CreateTemplate builds a rootfs from an OCI image. It is
+	// REQUIRED for image builds and unused for file-path rootfs templates.
+	// For now forkd must be shipped/mounted with this binary present; a
+	// follow-up will go:embed the agent into forkd so the flag is optional.
+	AgentBinPath string
+	// BusyboxPath is an optional static /bin/sh source injected when an image
+	// lacks a shell. Empty means images without a shell cannot run init.
+	BusyboxPath string
 }
 
 type Template struct {
@@ -248,22 +273,31 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		return nil, fmt.Errorf("init CAS store: %w", err)
 	}
 
-	return &Engine{
-		dataDir:          dataDir,
-		firecrackerBin:   firecrackerBin,
-		jailer:           jailer,
-		templateMgr:      firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer),
-		sandboxes:        make(map[string]*Sandbox),
-		nextPort:         10000,
-		casStore:         store,
-		allowUnverified:  opts.AllowUnverified,
-		vmmVersion:       opts.VMMVersion,
-		unverifiedWarned: make(map[string]struct{}),
-		templateDigests:  make(map[string]cas.Digest),
-		netMgr:           opts.NetManager,
-		netAlloc:         opts.NetAllocator,
-		resolverIP:       opts.ResolverIP,
-	}, nil
+	tmplMgr := firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer)
+	e := &Engine{
+		dataDir:              dataDir,
+		firecrackerBin:       firecrackerBin,
+		jailer:               jailer,
+		templateMgr:          tmplMgr,
+		sandboxes:            make(map[string]*Sandbox),
+		nextPort:             10000,
+		casStore:             store,
+		allowUnverified:      opts.AllowUnverified,
+		vmmVersion:           opts.VMMVersion,
+		unverifiedWarned:     make(map[string]struct{}),
+		templateDigests:      make(map[string]cas.Digest),
+		netMgr:               opts.NetManager,
+		netAlloc:             opts.NetAllocator,
+		resolverIP:           opts.ResolverIP,
+		agentBinPath:         opts.AgentBinPath,
+		busyboxPath:          opts.BusyboxPath,
+		buildRootfsFromImage: buildRootfsFromImage,
+	}
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
+		return err
+	}
+	return e, nil
 }
 
 func validateKVM() error {
@@ -571,13 +605,39 @@ func (e *Engine) GetCapacity() Capacity {
 	}
 }
 
-// CreateTemplate boots a VM, runs init, snapshots it, then content-addresses
-// the resulting snapshot into the CAS store, pins its manifest, records the
-// digest, and writes the verified marker. The template is trusted at creation
-// (this process just built it), so no re-hash gate is applied here.
-func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
+// CreateTemplate builds a template from an image ref or an existing rootfs file
+// path, boots it, runs each init command IN the VM (failing the build if any
+// command exits nonzero), snapshots it, then content-addresses the resulting
+// snapshot into the CAS store, pins its manifest, records the digest, and
+// writes the verified marker. The template is trusted at creation (this process
+// just built it), so no re-hash gate is applied here.
+//
+// image is resolved by isImageRef: an existing file path takes the legacy copy
+// path unchanged; an OCI reference is pulled, the agent is injected, and a
+// rootfs.ext4 is built from it before boot. A nonzero init command aborts the
+// build so a broken template is never snapshotted or served.
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string) error {
 	cfg := firecracker.DefaultVMConfig()
-	cfg.RootfsPath = rootfsPath
+
+	if isImageRef(image) {
+		// Build the rootfs from the image into the template's own rootfs path.
+		// The template manager copies cfg.RootfsPath into the template workdir,
+		// so build into a temp file and remove it after the build.
+		builtRootfs, err := os.CreateTemp("", "tmpl-rootfs-*.ext4")
+		if err != nil {
+			return fmt.Errorf("create temp rootfs for template %s: %w", id, err)
+		}
+		builtPath := builtRootfs.Name()
+		_ = builtRootfs.Close()
+		defer func() { _ = os.Remove(builtPath) }()
+
+		if err := e.buildRootfsFromImage(context.Background(), image, builtPath, e.agentBinPath, e.busyboxPath); err != nil {
+			return fmt.Errorf("build template %s from image %q: %w", id, image, err)
+		}
+		cfg.RootfsPath = builtPath
+	} else {
+		cfg.RootfsPath = image
+	}
 
 	// When networking is enabled, bake a placeholder NIC into the snapshot so
 	// every fork has a net device to remap to its own tap via
@@ -608,7 +668,7 @@ func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) 
 		}
 	}
 
-	if _, err := e.templateMgr.CreateTemplate(id, cfg, initWaitSecs); err != nil {
+	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
 		return err
 	}
 	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.vmmVersion)

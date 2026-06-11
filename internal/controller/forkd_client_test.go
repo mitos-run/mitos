@@ -21,7 +21,7 @@ func startFakeForkd(t *testing.T, templates ...string) (string, *fork.MockEngine
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, 0); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

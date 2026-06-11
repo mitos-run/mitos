@@ -37,6 +37,8 @@ func main() {
 		sandboxSubnet   string
 		uplink          string
 		dnsResolver     string
+		agentBin        string
+		busyboxBin      string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -57,6 +59,8 @@ func main() {
 	flag.StringVar(&sandboxSubnet, "sandbox-subnet", "10.200.0.0/16", "IPv4 subnet carved into per-sandbox /30 point-to-point links; requires --enable-networking")
 	flag.StringVar(&uplink, "uplink", "", "Host egress interface for the optional sandbox-subnet MASQUERADE rule. Empty relies on the node's existing NAT")
 	flag.StringVar(&dnsResolver, "dns-resolver", "", "DNS resolver IP guests may reach; adds a DNS allow rule to each fork's egress ruleset. Empty omits the rule")
+	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
+	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.Parse()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
@@ -70,7 +74,7 @@ func main() {
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
 		mock := fork.NewMockEngine()
-		if err := mock.CreateTemplate("default", "python:3.12-slim", 0); err != nil {
+		if err := mock.CreateTemplate("default", "python:3.12-slim", nil); err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: mock template: %v\n", err)
 			os.Exit(1)
 		}
@@ -87,6 +91,8 @@ func main() {
 		engineOpts := fork.EngineOpts{
 			CASDir:          casDir,
 			AllowUnverified: allowUnverified,
+			AgentBinPath:    agentBin,
+			BusyboxPath:     busyboxBin,
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")

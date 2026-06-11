@@ -5,7 +5,66 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/paperclipinc/sandbox/internal/vsock"
 )
+
+// execFunc runs a single shell command in the booted template VM and returns
+// its result. It is the seam between the template build and the guest-agent
+// vsock transport: the production path connects over vsock, while tests inject
+// a fake so the init-command safety logic can be exercised without Firecracker.
+type execFunc func(command string) (*vsock.ExecResponse, error)
+
+// initExecTimeoutSecs bounds each init command run in the template VM. Image
+// init steps (pip install, apt-get) can be slow, so this is generous.
+const initExecTimeoutSecs = 600
+
+// initConnectAttempts and initConnectDelay bound the wait for the guest agent
+// to come up inside the freshly booted template VM before init runs.
+const (
+	initConnectAttempts = 30
+	initConnectDelay    = 1 * time.Second
+)
+
+// runInitCommands runs each init command in order through exec, failing the
+// build on the first command that exits nonzero or errors. A failed init must
+// NOT be snapshotted (a template whose `pip install` failed must never be
+// served), so the returned error names the offending command and its stderr
+// and execution stops immediately. An empty list is a no-op.
+func runInitCommands(exec execFunc, commands []string) error {
+	for _, cmd := range commands {
+		res, err := exec(cmd)
+		if err != nil {
+			return fmt.Errorf("init command %q: %w", cmd, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("init command %q failed with exit code %d: %s", cmd, res.ExitCode, res.Stderr)
+		}
+	}
+	return nil
+}
+
+// connectInitExec connects to the guest agent over the template VM's vsock UDS
+// and returns an execFunc that runs commands in /workspace. It retries while
+// the agent finishes starting (mirrors cmd/test-agent's bounded retry).
+func connectInitExec(vsockPath string) (execFunc, func(), error) {
+	var client *vsock.Client
+	var err error
+	for attempt := 0; attempt < initConnectAttempts; attempt++ {
+		client, err = vsock.Connect(vsockPath, vsock.AgentPort)
+		if err == nil {
+			break
+		}
+		time.Sleep(initConnectDelay)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to guest agent for init (%s): %w", vsockPath, err)
+	}
+	exec := func(command string) (*vsock.ExecResponse, error) {
+		return client.Exec(command, "/workspace", nil, initExecTimeoutSecs)
+	}
+	return exec, func() { _ = client.Close() }, nil
+}
 
 // VsockRelPath is the vsock uds_path configured before snapshot and thus
 // baked into every template snapshot. It is deliberately RELATIVE so that
@@ -33,6 +92,12 @@ type TemplateManager struct {
 	kernelPath     string
 	dataDir        string
 	jailer         JailerConfig
+
+	// connectInit resolves the booted template VM's vsock path to an execFunc
+	// for running init commands. It is a seam: the default connects over vsock
+	// to the guest agent; tests override it. It returns the exec, a cleanup to
+	// close the connection, and an error.
+	connectInit func(vsockPath string) (execFunc, func(), error)
 }
 
 // NewTemplateManager builds a template manager. A zero jailer config
@@ -43,6 +108,7 @@ func NewTemplateManager(firecrackerBin, kernelPath, dataDir string, jailer Jaile
 		kernelPath:     kernelPath,
 		dataDir:        dataDir,
 		jailer:         jailer,
+		connectInit:    connectInitExec,
 	}
 }
 
@@ -55,9 +121,12 @@ type TemplateResult struct {
 	SnapshotSize   int64
 }
 
-// CreateTemplate boots a VM, waits for it to be ready, optionally runs init
-// commands, then snapshots it. The VM is killed after snapshot.
-func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSeconds int) (*TemplateResult, error) {
+// CreateTemplate boots a VM, runs each init command IN the VM over the guest
+// agent vsock, then snapshots it. If any init command exits nonzero the build
+// fails and nothing is snapshotted, so a broken template (e.g. a failed
+// `pip install`) is never served. With no init commands the VM is snapshotted
+// as soon as it has booted. The VM is killed after snapshot.
+func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string) (*TemplateResult, error) {
 	start := time.Now()
 
 	snapshotDir := filepath.Join(tm.dataDir, "templates", id, "snapshot")
@@ -138,10 +207,23 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 		return nil, fmt.Errorf("start instance: %w", err)
 	}
 
-	// Wait for init to complete.
-	// In production, this would be replaced by guest agent signaling readiness.
-	if initWaitSeconds > 0 {
-		time.Sleep(time.Duration(initWaitSeconds) * time.Second)
+	// Run init commands inside the booted VM over the guest agent. This
+	// replaces the old blind sleep: instead of hoping the VM is ready we
+	// connect to the agent (with a bounded startup retry) and run each init
+	// command, FAILING the build if any command exits nonzero so a broken
+	// template is never snapshotted. The vsock UDS is the baked relative path
+	// resolved against this template VM's working directory (see SetVsock).
+	if len(initCommands) > 0 {
+		vsockPath := client.VsockHostPath(VsockRelPath)
+		exec, closeExec, err := tm.connectInit(vsockPath)
+		if err != nil {
+			return nil, fmt.Errorf("template %s: %w", id, err)
+		}
+		err = runInitCommands(exec, initCommands)
+		closeExec()
+		if err != nil {
+			return nil, fmt.Errorf("template %s init failed: %w", id, err)
+		}
 	}
 
 	// Pause the VM before snapshot
