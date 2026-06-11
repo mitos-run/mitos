@@ -239,12 +239,19 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 }
 
 // Serve accepts control connections on ln and dispatches each to Activate,
-// replying with the ActivateResult. A husk owns one VM, so once an Activate
-// SUCCEEDS Serve stops accepting new connections and returns nil: the VM is
-// live and there is nothing more to activate. Before a successful activate it
-// keeps serving (so a failed-closed activate can be retried) until ctx is
-// cancelled or the listener closes. Per-connection errors are returned to the
-// peer in the result and do not tear down the server.
+// replying with the ActivateResult.
+//
+// A husk pod is LONG-LIVED: it holds its single active VM until the pod is
+// terminated. So a SUCCESSFUL activate does NOT end Serve. After the VM is
+// active Serve keeps running, holding the live VM (which now serves the
+// sandbox) and rejecting further activate attempts via Activate's state check,
+// until ctx is cancelled or the listener closes. Before a successful activate
+// it likewise keeps serving so a failed-closed activate can be retried.
+//
+// Serve never tears the VM down: it returns nil on ctx cancel / listener close
+// and leaves the VM running. The caller (cmd/husk-stub) calls Close on real
+// shutdown to kill the VM. Per-connection errors are returned to the peer in
+// the result and do not stop the server.
 func (s *Stub) Serve(ctx context.Context, ln net.Listener) error {
 	// Unblock Accept when the context is cancelled.
 	go func() {
@@ -263,31 +270,28 @@ func (s *Stub) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return fmt.Errorf("husk: accept control connection: %w", err)
 		}
-		activated := s.handleConn(ctx, conn)
-		if activated {
-			// One VM per husk: the activate succeeded, so stop listening.
-			return nil
-		}
+		// The activate result is sent to the peer; whether it succeeded or not,
+		// the husk keeps serving and holding its VM until shutdown.
+		s.handleConn(ctx, conn)
 	}
 }
 
-// handleConn reads one ActivateRequest, runs Activate, writes the result, and
-// reports whether the activate succeeded. Connection-level read/write failures
-// are logged to stderr (paths only, no secrets) and do not propagate.
-func (s *Stub) handleConn(ctx context.Context, conn net.Conn) (activated bool) {
+// handleConn reads one ActivateRequest, runs Activate, and writes the result.
+// Connection-level read/write failures are logged to stderr (paths only, no
+// secrets) and do not propagate; the server keeps running.
+func (s *Stub) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	req, err := ReadRequest(conn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "husk: read activate request: %v\n", err)
-		return false
+		return
 	}
 	res, _ := s.Activate(ctx, req)
 	if werr := WriteResult(conn, res); werr != nil {
 		fmt.Fprintf(os.Stderr, "husk: write activate result: %v\n", werr)
 		// The result may not have reached the peer, but the VM state is what it
-		// is; report activation per the result we computed.
+		// is; the husk holds the VM per the result we computed.
 	}
-	return res.OK
 }
 
 // State returns the current lifecycle state.

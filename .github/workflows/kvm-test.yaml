@@ -1450,10 +1450,13 @@ jobs:
       # at $BENCH_DATA/templates/bench/snapshot/{mem,vmstate}. One husk-stub owns
       # exactly one VM, so each activation needs a FRESH dormant stub: the loop
       # starts a stub, waits for its control socket, activates, records LatencyMs,
-      # and kills the stub. The first activation additionally execs a real command
-      # through the guest agent over the returned vsock path (cmd/test-agent
-      # default suite), so the gate is "activate OK AND exec works", not just a
-      # control reply.
+      # and kills the stub. The husk-stub is LONG-LIVED: it KEEPS the activated
+      # VM alive after the activate reply and tears it down only on SIGTERM, so
+      # the first activation additionally execs a real command through the guest
+      # agent over the returned vsock path WHILE THE SERVING STUB IS STILL ALIVE
+      # holding the VM (cmd/test-agent default suite). The gate is "activate OK
+      # AND exec works", not just a control reply. The background stub PID is
+      # killed after the exec (and on every failure path) so no FC process leaks.
       #
       # HONEST SCOPE: these are SHARED-CI-CLASS numbers on noisy ubuntu-latest,
       # reproducible per run, NOT bare metal. The <=10ms warm activation figure is
@@ -1491,7 +1494,10 @@ jobs:
           # result JSON to $WORKBASE/result<n>.json, and kill the stub. Echoes the
           # measured LatencyMs on success; a setup vs activate failure is
           # distinguished by the markers above. On the FIRST run it also execs a
-          # real command through the guest agent over the returned vsock path.
+          # real command through the guest agent over the returned vsock path
+          # WHILE the background serving stub is still alive holding the activated
+          # VM (the stub is long-lived and does not kill the VM on activate-done);
+          # the stub is killed only after the exec, and on every failure path.
           activate_once() {
             local n=$1
             local workdir=$WORKBASE/vm$n

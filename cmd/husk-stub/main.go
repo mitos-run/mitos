@@ -3,6 +3,11 @@
 // the VM in place by loading a snapshot when an activate request arrives. One
 // husk-stub process owns exactly one VM.
 //
+// A husk pod is LONG-LIVED. After a successful activate the process KEEPS the
+// VM alive and serving the sandbox; it tears the VM down ONLY on a terminate
+// signal (SIGINT/SIGTERM) or context cancel. It does not exit (and does not
+// kill the VM) just because an activate completed.
+//
 // The activate path drives a VMM and FAILS CLOSED: a snapshot-load or
 // guest-readiness failure is reported as an error result and the VM is left
 // unusable rather than reported as live. All lifecycle logging goes to stderr
@@ -86,8 +91,11 @@ func run() error {
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: dormant, state=%s\n", stub.State())
 
-	// Tear the VMM down on exit (signal or after serving), reaping the
-	// firecracker process.
+	// A husk pod is LONG-LIVED: it holds its active VM until the pod is
+	// terminated. Tear the VMM down (reaping the firecracker process) ONLY on
+	// shutdown, i.e. when Serve returns after a signal (SIGINT/SIGTERM) or ctx
+	// cancel. We do NOT close right after a successful activate; the activated
+	// VM must outlive activate so it can serve the sandbox.
 	defer func() {
 		if err := stub.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "husk-stub: close: %v\n", err)
@@ -102,10 +110,14 @@ func run() error {
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: serving control socket %s\n", *controlSocket)
 
+	// Serve blocks: it handles the activate and then keeps holding the active
+	// VM, returning only on a signal (SIGINT/SIGTERM) or ctx cancel. The
+	// deferred Close above then kills the VM. The VM is alive and usable for
+	// the whole serving lifetime.
 	if err := stub.Serve(ctx, ln); err != nil {
 		return fmt.Errorf("serve control socket: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "husk-stub: stopped, state=%s\n", stub.State())
+	fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
 	return nil
 }
 

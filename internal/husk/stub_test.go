@@ -193,7 +193,13 @@ func TestActivateGuestNotReadyFailsClosed(t *testing.T) {
 
 func TestServeDispatchesActivate(t *testing.T) {
 	vm := &fakeVMM{}
-	s := newTestStub(t, vm, readyOK)
+	// A readiness wait long enough that the measured activate latency is
+	// non-zero even on a fast machine (the fake load is instantaneous).
+	readySlow := func(string, time.Duration) error {
+		time.Sleep(time.Millisecond)
+		return nil
+	}
+	s := newTestStub(t, vm, readySlow)
 	if err := s.Prepare(context.Background()); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -204,8 +210,11 @@ func TestServeDispatchesActivate(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- s.Serve(context.Background(), ln) }()
+	go func() { serveErr <- s.Serve(ctx, ln) }()
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -227,14 +236,42 @@ func TestServeDispatchesActivate(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 
-	// Serve returns after a successful activate (one VM per husk).
+	// A husk pod is long-lived: after a SUCCESSFUL activate the stub must keep
+	// running and holding the active VM (the VM serves the sandbox). Serve must
+	// NOT return on its own, and the VM must NOT be closed. It returns only when
+	// the context is cancelled (a husk-pod terminate) or the listener closes.
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve returned after a successful activate (must hold the VM until shutdown), err=%v", err)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: still serving, holding the active VM.
+	}
+	if s.State() != StateActive {
+		t.Fatalf("after activate state = %s, want active", s.State())
+	}
+
+	vm.mu.Lock()
+	closed := vm.closed
+	vm.mu.Unlock()
+	if closed {
+		t.Fatal("a successful activate must NOT close the VM; the VM must outlive activate")
+	}
+
+	// Shutdown (ctx cancel) makes Serve return; Serve itself never closes the VM.
+	cancel()
 	select {
 	case err := <-serveErr:
 		if err != nil {
-			t.Fatalf("Serve returned error: %v", err)
+			t.Fatalf("Serve returned error on shutdown: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Serve did not return after successful activate")
+		t.Fatal("Serve did not return after context cancel")
+	}
+	vm.mu.Lock()
+	closed = vm.closed
+	vm.mu.Unlock()
+	if closed {
+		t.Fatal("Serve must not close the VM itself; only an explicit Close tears it down")
 	}
 }
 
