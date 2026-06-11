@@ -23,6 +23,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/husk"
+	"github.com/paperclipinc/sandbox/internal/pki"
 )
 
 // kvFlag collects repeatable KEY=VALUE flags into a map. It is used for --env
@@ -119,6 +121,10 @@ func run() error {
 		kernel         = flag.String("kernel", "", "path to the guest kernel image")
 		workdir        = flag.String("workdir", "", "per-VM working directory (firecracker cmd.Dir; vsock UDS is bound relative to it)")
 		controlSocket  = flag.String("control-socket", "", "path to the control Unix socket to listen on for activate requests")
+		controlListen  = flag.String("control-listen", "", "TCP address (host:port) to serve the mTLS NETWORK control on for activate requests; the husk pod uses this. Requires --tls-cert/--tls-key/--tls-ca; refuses to serve without them")
+		tlsCert        = flag.String("tls-cert", "", "path to the husk server certificate PEM (mTLS); the forkd server leaf identity")
+		tlsKey         = flag.String("tls-key", "", "path to the husk server key PEM (mTLS)")
+		tlsCA          = flag.String("tls-ca", "", "path to the control plane CA certificate PEM (mTLS); used to verify the controller client certificate")
 		vcpus          = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB         = flag.Int("mem-mib", 512, "guest memory in MiB")
 		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket, send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
@@ -145,8 +151,26 @@ func run() error {
 	if *workdir == "" {
 		return fmt.Errorf("--workdir is required")
 	}
-	if *controlSocket == "" {
-		return fmt.Errorf("--control-socket is required")
+	if *controlSocket == "" && *controlListen == "" {
+		return fmt.Errorf("one of --control-socket or --control-listen is required")
+	}
+
+	// Fail closed: the network control channel activates a VM with tenant
+	// secrets, so it MUST be mTLS-authenticated. Refuse to serve --control-listen
+	// unless all three TLS flags are set, mirroring forkd's encryption guard. An
+	// unauthenticated activate channel that delivers secrets is unacceptable.
+	tlsConfigured := *tlsCert != "" && *tlsKey != "" && *tlsCA != ""
+	if *controlListen != "" && !tlsConfigured {
+		return fmt.Errorf("--control-listen requires --tls-cert, --tls-key, and --tls-ca: refusing to serve an unauthenticated network control channel that delivers secrets")
+	}
+
+	var controlTLS *tls.Config
+	if *controlListen != "" {
+		var err error
+		controlTLS, err = buildControlTLS(*tlsCert, *tlsKey, *tlsCA)
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(*workdir, 0o755); err != nil {
@@ -185,6 +209,25 @@ func run() error {
 		}
 	}()
 
+	// The husk pod uses the mTLS NETWORK control: when --control-listen is set
+	// (with TLS, enforced above), serve ServeTLS authorized to the controller
+	// identity. The unix --control-socket path remains for the in-CI driver and
+	// local use. Both Serve variants block, holding the active VM and returning
+	// only on a signal (SIGINT/SIGTERM) or ctx cancel; the deferred Close then
+	// kills the VM. The VM is alive and usable for the whole serving lifetime.
+	if *controlListen != "" {
+		ln, err := net.Listen("tcp", *controlListen)
+		if err != nil {
+			return fmt.Errorf("listen on control address %s: %w", *controlListen, err)
+		}
+		fmt.Fprintf(os.Stderr, "husk-stub: serving mTLS network control %s\n", *controlListen)
+		if err := husk.ServeTLS(ctx, ln, stub, controlTLS, husk.AuthorizeControllerIdentity); err != nil {
+			return fmt.Errorf("serve network control: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
+		return nil
+	}
+
 	// Fresh control socket; a stale file from a prior run would block bind.
 	_ = os.Remove(*controlSocket)
 	ln, err := net.Listen("unix", *controlSocket)
@@ -193,15 +236,36 @@ func run() error {
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: serving control socket %s\n", *controlSocket)
 
-	// Serve blocks: it handles the activate and then keeps holding the active
-	// VM, returning only on a signal (SIGINT/SIGTERM) or ctx cancel. The
-	// deferred Close above then kills the VM. The VM is alive and usable for
-	// the whole serving lifetime.
 	if err := stub.Serve(ctx, ln); err != nil {
 		return fmt.Errorf("serve control socket: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
 	return nil
+}
+
+// buildControlTLS reads the husk server certificate, key, and the control plane
+// CA, and builds the mTLS server config that requires and verifies the
+// controller client certificate (pki.ServerTLSConfig). Secret material (the
+// private key bytes) is never logged: errors name the flag and the underlying
+// read/parse error only.
+func buildControlTLS(certPath, keyPath, caPath string) (*tls.Config, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-ca: %w", err)
+	}
+	cfg, err := pki.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return nil, fmt.Errorf("build husk control TLS config: %w", err)
+	}
+	return cfg, nil
 }
 
 // runActivateClient connects to an already-serving stub's control socket, sends
