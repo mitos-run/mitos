@@ -24,7 +24,7 @@ import (
 // snapshot's baked placeholder NIC to this husk's tap, exactly as the engine
 // fork path passes them. All fields are config and carry no secrets.
 type ActivateRequest struct {
-	SnapshotDir      string                         `json:"snapshot_dir"`
+	SnapshotDir      string                        `json:"snapshot_dir"`
 	NetworkOverrides []firecracker.NetworkOverride `json:"network_overrides,omitempty"`
 }
 
