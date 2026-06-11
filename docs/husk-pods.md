@@ -747,8 +747,23 @@ Each husk pod is owner-referenced to its pool, and the pool reconciler watches
 its pods (`Owns(&corev1.Pod{})`). A husk pod delete (drain, eviction, crash,
 `kubectl delete`) therefore enqueues the owning pool, and `reconcileHuskPods`
 recreates the replacement so the warm pool count returns to `Replicas` without
-waiting for the periodic 30s requeue. The warm pool self-heals a lost dormant
+waiting for the periodic requeue. The warm pool self-heals a lost dormant
 slot with no operator action.
+
+The warm pool is maintained INDEPENDENT of the snapshot build. The husk-mode
+reconcile runs `reconcileHuskPods` FIRST and unconditionally, then attempts the
+template snapshot build best-effort; a build that does not produce a ready
+snapshot (or errors) is logged and reported in status but NEVER short-circuits
+the warm-pool maintenance. The husk pods schedule DORMANT and cannot ACTIVATE
+until the snapshot is present on their node, but the pool of pod objects exists
+and self-heals regardless of build state. This decoupling is what lets the
+warm pool come up and self-heal on kind, where forkd cannot boot a VM to build
+the snapshot (the nested-VMM boundary) so a ready snapshot never appears. The
+reconcile also requeues on a bounded interval (a shorter cadence while the
+snapshot is not yet built, the steady 30s once ready), so the warm pool
+re-converges to `Replicas` even if a pod delete event is missed, and a later
+reconcile tightens each husk pod's nodeAffinity onto the snapshot-holding node
+once a holder appears.
 
 ### Claim re-pend on husk pod loss (resilience)
 

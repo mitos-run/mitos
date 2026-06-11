@@ -26,8 +26,10 @@ import (
 	"github.com/paperclipinc/sandbox/internal/husk"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -186,6 +188,111 @@ func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 	}
 	if !foundNew {
 		t.Fatalf("self-heal produced no new pod (still only the victim %s)", victim.Name)
+	}
+}
+
+// TestHuskWarmPoolDecoupledFromSnapshotBuild proves the warm pool of husk pods
+// is maintained to Replicas and self-heals a deleted pod EVEN WHEN the template
+// snapshot is never built. This is exactly the kind-e2e failure mode: on kind
+// forkd cannot boot a VM to snapshot (the nested-VMM boundary), so the build
+// never produces a ready snapshot, yet the warm pool of dormant pods must still
+// exist and self-heal. Here the registry has NO forkd node, so ensureTemplateBuilt
+// can never register a holder (readySnapshotCount stays 0). The full Reconcile is
+// driven (not just reconcileHuskPods) so the build-vs-warm-pool decoupling in
+// Reconcile itself is under test: a build that produces no ready snapshot must not
+// short-circuit warm-pool maintenance.
+func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
+	c := k8sClient
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "nobuild-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "nobuild-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "nobuild-tmpl"},
+			Replicas:    2,
+		},
+	}
+	for _, obj := range []client.Object{template, pool} {
+		if err := c.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, p := range listHuskPods(t, c, "nobuild-pool") {
+			_ = c.Delete(ctx, &p)
+		}
+		_ = c.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "nobuild-pool-husk", Namespace: "default"}})
+		_ = c.Delete(ctx, pool)
+		_ = c.Delete(ctx, template)
+	})
+
+	// An empty registry: no forkd node holds or can build the template, so
+	// readySnapshotCount stays 0 for the whole test (the kind nested-VMM boundary).
+	reg := controller.NewNodeRegistry()
+	r := &controller.SandboxPoolReconciler{
+		Client:          c,
+		NodeRegistry:    reg,
+		EnableHuskPods:  true,
+		HuskStubImage:   "agent-run-husk-stub:test",
+		KVMResourceName: "agentrun.dev/kvm",
+	}
+
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+
+	// The suite registers a manager-level raw-mode pool reconciler that also
+	// reconciles this pool and writes its status, so a direct full Reconcile can
+	// race it on the status subresource (a benign optimistic-lock conflict). The
+	// reconcileReady helper drives the husk Reconcile and tolerates that conflict;
+	// the WARM-POOL effect (husk pod creation) is conflict-free, so it lands
+	// regardless. This is the realistic behavior: controller-runtime requeues a
+	// conflicting reconcile and the next pass converges.
+	reconcileOnce := func(stage string) ctrl.Result {
+		res, err := r.Reconcile(ctx, req)
+		if err != nil && !apierrors.IsConflict(err) {
+			t.Fatalf("reconcile (%s): %v", stage, err)
+		}
+		return res
+	}
+
+	// First full reconcile: the snapshot is NOT built (no holder), yet the warm
+	// pool must come up to Replicas=2.
+	reconcileOnce("initial")
+	pods := waitHuskPodCount(t, c, "nobuild-pool", 2)
+
+	// Sanity: the snapshot really is not built (no holder), so this asserts the
+	// warm pool was maintained INDEPENDENT of the build.
+	if holders := reg.NodesWithTemplate("nobuild-tmpl"); len(holders) != 0 {
+		t.Fatalf("expected no snapshot holders (decoupling test), got %v", holders)
+	}
+
+	// Self-heal: delete a husk pod and reconcile again. The replacement must be
+	// recreated to Replicas even though the snapshot is STILL not built.
+	victim := pods[0]
+	if err := c.Delete(ctx, &victim); err != nil {
+		t.Fatalf("delete husk pod: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(listHuskPods(t, c, "nobuild-pool")) < 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	reconcileOnce("self-heal")
+	healed := waitHuskPodCount(t, c, "nobuild-pool", 2)
+
+	foundNew := false
+	for _, p := range healed {
+		if p.Name != victim.Name {
+			foundNew = true
+		}
+	}
+	if !foundNew {
+		t.Fatalf("self-heal produced no new pod (still only the victim %s); warm pool did not recover with the snapshot unbuilt", victim.Name)
 	}
 }
 
