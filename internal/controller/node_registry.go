@@ -260,6 +260,48 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 	return out
 }
 
+// TemplateSource picks a healthy node that holds the template AND reports a
+// content-addressed digest for it, and returns the holder, its CAS-serving base
+// URL, and the digest. It is the source the pool reconciler distributes from:
+// a deficit node pulls the manifest (by digest) from this holder's CAS surface.
+// ok is false when no holder reports a digest (e.g. only a mock-engine holder
+// with an empty digest, which cannot be a pull source). The holder is chosen
+// deterministically by node name so repeated reconciles pick the same source.
+func (r *NodeRegistry) TemplateSource(templateID string) (holder *NodeInfo, casURL, digest string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var best *NodeInfo
+	var bestDigest string
+	for _, n := range r.nodes {
+		if !n.isHealthy() || !n.hasSnapshot(templateID) {
+			continue
+		}
+		d := n.TemplateDigests[templateID]
+		if d == "" || n.HTTPEndpoint == "" {
+			continue
+		}
+		if best == nil || n.Name < best.Name {
+			best = n
+			bestDigest = d
+		}
+	}
+	if best == nil {
+		return nil, "", "", false
+	}
+	return best, best.casBaseURL(), bestDigest, true
+}
+
+// casBaseURL derives the node's CAS-serving base URL from its HTTP sandbox API
+// endpoint. The CAS surface is mounted under /cas on the same HTTP port and is
+// served over TLS only (template distribution requires mTLS), so the scheme is
+// https. Returns "" when the node reports no HTTP endpoint.
+func (n *NodeInfo) casBaseURL() string {
+	if n.HTTPEndpoint == "" {
+		return ""
+	}
+	return "https://" + n.HTTPEndpoint + "/cas"
+}
+
 // AddTemplate records that a node now holds the given template snapshot.
 // Takes the write lock so NodeInfo.TemplateIDs is never mutated concurrently
 // with readers like NodesWithTemplate.

@@ -2,6 +2,8 @@ package fork
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -57,6 +59,10 @@ type MockEngine struct {
 	// its presence/length, so a test can confirm a token was carried without the
 	// value touching test state.
 	pulls []MockPullCall
+	// templateDigests maps each template id to a fabricated stable content
+	// address so the mock can stand in for a CAS-addressed holder; GetCapacity
+	// surfaces it as the real engine does.
+	templateDigests map[string]string
 }
 
 // MockPullCall is one recorded PullTemplate the mock engine received. TokenLen
@@ -217,7 +223,22 @@ func (e *MockEngine) CreateTemplate(id string, image string, initCommands []stri
 		CreatedAt:   time.Now(),
 		Ready:       true,
 	}
+	// Report a deterministic content-address per template so the distribution
+	// path has a digest to pull against (the real engine returns a true CAS
+	// digest; the mock fabricates a stable one). 64 hex chars to match the
+	// sha256 shape the registry and CRD status expect.
+	if e.templateDigests == nil {
+		e.templateDigests = make(map[string]string)
+	}
+	e.templateDigests[id] = mockTemplateDigest(id)
 	return nil
+}
+
+// mockTemplateDigest fabricates a stable 64-char hex digest for a template id so
+// the mock can stand in for a CAS-addressed holder in distribution tests.
+func mockTemplateDigest(id string) string {
+	sum := sha256.Sum256([]byte("mock-template:" + id))
+	return hex.EncodeToString(sum[:])
 }
 
 // PullTemplate records the pull and registers the template as present, so a
@@ -239,6 +260,12 @@ func (e *MockEngine) PullTemplate(_ context.Context, templateID, manifestDigest,
 		CreatedAt:   time.Now(),
 		Ready:       true,
 	}
+	// A pulled template carries the holder's digest, so the receiving node also
+	// reports it as a content-addressed holder.
+	if e.templateDigests == nil {
+		e.templateDigests = make(map[string]string)
+	}
+	e.templateDigests[templateID] = manifestDigest
 	return nil
 }
 
@@ -319,6 +346,10 @@ func (e *MockEngine) GetCapacity() Capacity {
 	}
 	active := int32(len(e.sandboxes))
 	memTotal := e.memoryTotalBytes
+	digests := make(map[string]string, len(e.templateDigests))
+	for id, d := range e.templateDigests {
+		digests[id] = d
+	}
 	e.mu.RUnlock()
 
 	report := metering.Aggregate(samples)
@@ -350,6 +381,7 @@ func (e *MockEngine) GetCapacity() Capacity {
 		MemoryUsed:        report.UsedCoWAware,
 		MemoryShared:      report.SharedOnceTotal(),
 		TemplateIDs:       templateIDs,
+		TemplateDigests:   digests,
 		TemplateEstimates: estimates,
 		KVMAvailable:      false,
 	}
