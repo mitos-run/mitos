@@ -26,11 +26,11 @@ import (
 // test can assert the controller delivered a key without the value ever
 // touching test state or logs.
 type EncKeyRecorder struct {
-	mu             sync.Mutex
-	createKeyLen   int
-	createKeySeen  bool
-	forkKeyLen     int
-	forkKeySeen    bool
+	mu            sync.Mutex
+	createKeyLen  int
+	createKeySeen bool
+	forkKeyLen    int
+	forkKeySeen   bool
 }
 
 // CreateTemplateKeyLen returns whether a CreateTemplate carried an encryption

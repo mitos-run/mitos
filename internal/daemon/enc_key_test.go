@@ -21,7 +21,7 @@ import (
 // the request-delivered key was available to the engine during the call. It does
 // no real work otherwise.
 type keyProbeEngine struct {
-	ForkEngine // embedded so unused methods are present; calling them panics (none are exercised)
+	ForkEngine   // embedded so unused methods are present; calling them panics (none are exercised)
 	prov         *fork.RequestKeyProvider
 	createKey    []byte
 	createKeyErr error
