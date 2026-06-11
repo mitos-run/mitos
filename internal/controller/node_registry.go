@@ -92,6 +92,20 @@ func (r *NodeRegistry) SetOvercommitFactor(f float64) {
 	r.overcommitFactor = f
 }
 
+// SetNodeMemory overwrites a registered node's reported memory budget
+// (MemoryTotal) and current usage (MemoryUsed) under the write lock. It exists
+// for tests and for capacity bookkeeping that does not arrive on a full
+// heartbeat; production heartbeats set these fields via Register. A node not in
+// the registry is a no-op.
+func (r *NodeRegistry) SetNodeMemory(name string, total, used int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if node, ok := r.nodes[name]; ok {
+		node.MemoryTotal = total
+		node.MemoryUsed = used
+	}
+}
+
 // Register adds or updates a node in the registry.
 func (r *NodeRegistry) Register(info *NodeInfo) {
 	r.mu.Lock()
