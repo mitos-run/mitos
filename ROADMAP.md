@@ -50,8 +50,23 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     clock within 2s of the runner, and a delivered env var plus secret readable
     in each guest with the secret value absent from the host-side logs. See
     `docs/fork-correctness.md` and `docs/husk-pods.md`.
-  - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged);
-    running the stub INSIDE a real husk pod (pod spec, device-plugin resource
+  - ✅ The `/dev/kvm` device plugin (vs privileged): `cmd/kvm-device-plugin`
+    (in `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where
+    `/dev/kvm` exists (scheduler truth: a no-KVM node advertises zero) and
+    injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod requests
+    KVM as a scheduled resource instead of `privileged: true`. The DevicePlugin
+    and Registration gRPC are unit-tested against a fake kubelet. The kind e2e
+    proves the full advertise->schedule->inject path end to end on the
+    KVM-capable kind-e2e runner: a non-privileged probe pod (no `privileged`,
+    no hostPath, all capabilities dropped) requesting `agentrun.dev/kvm: 1` is
+    scheduled to Running and `kubectl exec` confirms `/dev/kvm` is present
+    inside the container, injected solely by `Allocate`. This is the full
+    PSA-restricted device-access path proven in CI. The assertion is adaptive:
+    on a no-KVM runner it asserts Pending (honest scheduler truth). Migrating
+    the forkd DaemonSet off its privileged `/dev/kvm` hostPath is a follow-up.
+    See `docs/husk-pods.md` section 5.
+  - ⬜ Still open (rest of #18): running the stub INSIDE a real husk pod (pod
+    spec, device-plugin resource
     request, cgroup/netns placement); migrating the pool/claim/fork controllers
     to create + activate husk pods, including sourcing the claim-time env and
     secrets from the controller (the stub can already apply them per activation);

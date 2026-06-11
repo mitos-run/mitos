@@ -1,0 +1,12 @@
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o kvm-device-plugin ./cmd/kvm-device-plugin/
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /build/kvm-device-plugin /kvm-device-plugin
+ENTRYPOINT ["/kvm-device-plugin"]
