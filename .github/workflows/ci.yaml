@@ -32,6 +32,38 @@ jobs:
           version: latest
           args: --timeout=5m
 
+  manifests:
+    # Validate the production deploy manifests: kubeconform schema-checks every
+    # YAML under deploy/ and kubectl proves the kustomize base resolves. Core
+    # kinds (Deployment, ClusterRole, ServiceAccount, DaemonSet, Namespace) are
+    # validated strictly; the agentrun.dev custom kinds (SandboxTemplate,
+    # SandboxPool, SandboxClaim, SandboxFork) have no published schema, so
+    # -ignore-missing-schemas skips them rather than failing. The CRD
+    # definitions themselves (kind: CustomResourceDefinition) ARE validated.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      - name: kubeconform validates deploy manifests
+        # -strict rejects unknown fields; -ignore-missing-schemas skips the
+        # agentrun.dev custom kinds (no published schema) while still strictly
+        # validating every core kind. deploy/talos holds Talos MachineConfig
+        # PATCHES (no Kubernetes kind), which are schema-checked by the
+        # talos-validate job, so they are excluded here.
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            crds/ controller/ rbac/ daemon/
+        working-directory: deploy
+      - name: kustomize base resolves
+        run: kubectl kustomize deploy/ > /dev/null
+
   python-test:
     runs-on: ubuntu-latest
     defaults:
