@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,9 +21,50 @@ import (
 // tracer is the controller component tracer; no-op unless tracing is configured.
 var tracer = observability.Tracer("agentrun-controller")
 
+// DefaultMaxPendingDuration bounds how long a claim may stay Pending for lack of
+// node capacity before the reconciler gives up and fails it with an actionable
+// capacity-exhaustion message. Override per-deployment with --max-pending-duration.
+const DefaultMaxPendingDuration = 5 * time.Minute
+
+// pendingSinceAnnotation stamps, in RFC3339, the instant a claim first went
+// Pending for lack of capacity. It is the durable source of truth for the
+// bounded-wait deadline: a status condition's LastTransitionTime would reset on
+// any unrelated condition churn, whereas this annotation only changes when the
+// claim enters or leaves the capacity-pending state. Cleared on successful
+// placement so a later capacity shortage starts a fresh clock.
+const pendingSinceAnnotation = "agentrun.dev/capacity-pending-since"
+
+// capacityPendingRequeue is the backoff between capacity-pending retries: long
+// enough not to hot-loop a full cluster, short enough to place a claim promptly
+// once a node frees up or a new node joins.
+const capacityPendingRequeue = 5 * time.Second
+
 type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
+
+	// MaxPendingDuration bounds the capacity-pending wait; zero falls back to
+	// DefaultMaxPendingDuration. Set from the --max-pending-duration flag.
+	MaxPendingDuration time.Duration
+
+	// Now is the reconciler's clock, injectable for tests. Nil uses time.Now.
+	Now func() time.Time
+}
+
+// now returns the reconciler's current time, honoring the injectable clock.
+func (r *SandboxClaimReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// maxPendingDuration returns the configured bound or the default.
+func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
+	if r.MaxPendingDuration > 0 {
+		return r.MaxPendingDuration
+	}
+	return DefaultMaxPendingDuration
 }
 
 // SandboxClaim ownership: get/list/watch to reconcile, update to write the
@@ -109,12 +151,32 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Pick a node with a ready snapshot
 	node, snapshotID, err := r.selectNode(ctx, &pool, claim.Spec.NodeName)
 	if err != nil {
-		logger.Error(err, "no node with ready snapshot")
+		// No node admits the fork under the overcommit policy: this is a real
+		// capacity shortage, not a missing snapshot. Pend with backpressure and
+		// fail cleanly after a bounded wait rather than hammering a full cluster
+		// forever (or, worse, forcing a placement that OOMs a node).
+		if errors.Is(err, ErrNoCapacity) {
+			return r.reconcileNoCapacity(ctx, &claim, err)
+		}
+		// No registered/healthy node, or no node holds the snapshot yet: a
+		// transient placement precondition the pool reconciler is expected to
+		// resolve. Pend and retry indefinitely (no bounded fail).
+		logger.Info("no node available for placement, pending", "error", err.Error())
+		r.clearPendingSince(&claim)
 		claim.Status.Phase = v1alpha1.SandboxPending
 		recordClaimPending()
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
+	// Placement succeeded: clear any capacity-pending stamp so a later shortage
+	// starts a fresh bounded-wait clock.
+	if claim.Annotations[pendingSinceAnnotation] != "" {
+		r.clearPendingSince(&claim)
+		if err := r.Update(ctx, &claim); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Translate the template's volumes (with this claim's VolumeOverrides
@@ -222,6 +284,83 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	)
 
 	return ctrl.Result{}, nil
+}
+
+// reconcileNoCapacity handles a placement that no node admits under the
+// overcommit policy. It pends the claim with an LLM-legible NoCapacity
+// condition and backs off, stamping the first-pending instant. Once the claim
+// has waited longer than the bounded max-pending duration without ever placing,
+// it gives up and fails the claim with an actionable capacity-exhaustion
+// message (and a claim_errors metric, reason "capacity"). A claim that becomes
+// admittable before the deadline proceeds to Restoring on a later reconcile.
+func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim *v1alpha1.SandboxClaim, cause error) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	now := r.now()
+
+	// Stamp the first-pending instant on the metadata annotation if absent.
+	// This is the durable deadline anchor across reconciles.
+	pendingSince := now
+	if stamp := claim.Annotations[pendingSinceAnnotation]; stamp != "" {
+		if parsed, perr := time.Parse(time.RFC3339, stamp); perr == nil {
+			pendingSince = parsed
+		}
+	} else {
+		if claim.Annotations == nil {
+			claim.Annotations = map[string]string{}
+		}
+		claim.Annotations[pendingSinceAnnotation] = now.Format(time.RFC3339)
+		if err := r.Update(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	waited := now.Sub(pendingSince)
+	maxWait := r.maxPendingDuration()
+
+	// Bounded fail: capacity never freed within the allowed wait. Surface an
+	// actionable terminal error and stamp FinishedAt so the GC TTL pass reaps it.
+	if waited >= maxWait {
+		recordClaimError(claim.Spec.PoolRef.Name, "capacity")
+		finished := metav1.NewTime(now)
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.FinishedAt = &finished
+		setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: finished,
+			Reason:             "CapacityExhausted",
+			Message: fmt.Sprintf(
+				"no node had memory capacity under the overcommit policy for %s (waited past the %s bound); scale out forkd nodes or raise the overcommit factor, then recreate the claim",
+				waited.Round(time.Second), maxWait,
+			),
+		})
+		_ = r.Status().Update(ctx, claim)
+		logger.Info("claim failed: capacity exhausted past bounded wait", "claim", claim.Name, "waited", waited.Round(time.Second), "maxWait", maxWait)
+		return ctrl.Result{}, nil
+	}
+
+	// Within the bounded wait: pend with backpressure and retry.
+	claim.Status.Phase = v1alpha1.SandboxPending
+	recordClaimPending()
+	setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(now),
+		Reason:             "NoCapacity",
+		Message: fmt.Sprintf(
+			"no node has memory capacity under the overcommit policy; the claim will retry (waited %s of %s), scale out nodes or raise the overcommit factor",
+			waited.Round(time.Second), maxWait,
+		),
+	})
+	// Best-effort status write; the return below requeues regardless.
+	_ = r.Status().Update(ctx, claim)
+	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+}
+
+// clearPendingSince removes the capacity-pending stamp from the claim's
+// annotations (in memory; the caller persists if needed). Idempotent.
+func (r *SandboxClaimReconciler) clearPendingSince(claim *v1alpha1.SandboxClaim) {
+	delete(claim.Annotations, pendingSinceAnnotation)
 }
 
 // reconcileDelete reaps the claim's backing VM via forkd Terminate, then

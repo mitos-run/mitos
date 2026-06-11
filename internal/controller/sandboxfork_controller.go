@@ -93,7 +93,12 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
-	// Find the node running the source sandbox
+	// Find the node running the source sandbox. A live/standard fork is pinned
+	// to the source sandbox's node by construction: ForkRunning copies the
+	// source VM's already-resident guest memory in place, so the fork cannot be
+	// placed on any other node and the capacity-aware SelectNode does not apply
+	// here (it governs cold claim placement, where a node is genuinely chosen).
+	// The node's own admission still guards the live fork at the forkd layer.
 	node, ok := r.NodeRegistry.GetNode(source.Status.Node)
 	if !ok {
 		return ctrl.Result{}, fmt.Errorf("node %s not found in registry", source.Status.Node)
