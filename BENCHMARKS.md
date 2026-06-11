@@ -66,6 +66,48 @@ quoted as the product's latency.
 
 To regenerate the numbers on your own hardware, see [`bench/README.md`](bench/README.md).
 
+## CoW density datapoint
+
+A separate datapoint measures the memory density of forking, not latency: when N
+sandboxes are forked from ONE template, every fork restores the SAME snapshot
+with `MAP_PRIVATE`, so they map the same shared page set. The honest physical
+footprint counts that shared template region ONCE; the marginal cost of an
+additional fork is its unique (private-dirty) set. The naive accounting counts
+the shared region once per fork and overstates the footprint.
+
+This is produced by `cmd/bench --mode metering`, which forks N (default 4) real
+sandboxes from one template, lets them settle, and reads the engine's CoW-aware
+metering `Report` (memory from `/proc/<pid>/smaps_rollup`, disk from stat). The
+**metering CI phase** in the `KVM Integration Test` workflow runs it with
+`--forks 4`, asserts the CoW-aware total is below the naive total, that
+`CoWSavings` is positive and at least one shared-template set (the shared region
+deduplicated across all forks), and that each fork's unique set is smaller than
+the once-paid shared set. It then publishes the byte counts to the run's job
+summary.
+
+The reported metrics are:
+
+- `UsedCoWAware`: sum of per-fork unique plus each template's shared set counted
+  once. The honest resident footprint.
+- `UsedNaive`: sum of per-fork unique plus every fork's shared set (the shared
+  region double-counted), for comparison.
+- `CoWSavings`: `UsedNaive - UsedCoWAware`, the bytes the CoW model reveals are
+  not actually consumed per fork.
+- per-fork `MemoryUnique`: the marginal physical cost of one additional fork.
+
+These are **SHARED-CI-CLASS** (noisy `ubuntu-latest`), reproducible per run, and
+NOT bare-metal figures.
+
+> Populated from the CI run. The byte counts (`UsedCoWAware` vs `UsedNaive`,
+> `CoWSavings`, per-fork unique, shared-once) are printed to the metering CI
+> phase step log AND appended to the run's job summary as a table, and the raw
+> report JSON is uploaded as the `metering-report` workflow artifact. See the
+> most recent `KVM Integration Test` run summary for the current shared-CI-class
+> density numbers. As with the latency tables, we do not paste numbers here: a
+> hand-copied number would be exactly the kind of unverifiable claim this
+> harness exists to eliminate. The aggregation rules and what is exact vs
+> approximate are documented in [`docs/metering.md`](docs/metering.md).
+
 ## Open (not yet measured)
 
 These are explicitly out of scope for the current harness and tracked in
