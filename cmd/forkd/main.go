@@ -27,32 +27,32 @@ import (
 
 func main() {
 	var (
-		listenAddr      string
-		httpAddr        string
-		dataDir         string
-		firecrackerBin  string
-		kernelPath      string
-		mockMode        bool
-		tlsCert         string
-		tlsKey          string
-		tlsCA           string
-		jailerBin       string
-		chrootBase      string
-		uidRange        string
+		listenAddr        string
+		httpAddr          string
+		dataDir           string
+		firecrackerBin    string
+		kernelPath        string
+		mockMode          bool
+		tlsCert           string
+		tlsKey            string
+		tlsCA             string
+		jailerBin         string
+		chrootBase        string
+		uidRange          string
 		casDir            string
 		allowUnverified   bool
 		allowIncompatible bool
-		enableNet       bool
-		sandboxSubnet   string
-		uplink          string
-		dnsResolver     string
-		enableDNSEgress bool
-		dnsUpstream     string
-		agentBin        string
-		busyboxBin      string
-		enableVolumes   bool
-		auditLog        string
-		otlpEndpoint    string
+		enableNet         bool
+		sandboxSubnet     string
+		uplink            string
+		dnsResolver       string
+		enableDNSEgress   bool
+		dnsUpstream       string
+		agentBin          string
+		busyboxBin        string
+		enableVolumes     bool
+		auditLog          string
+		otlpEndpoint      string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
