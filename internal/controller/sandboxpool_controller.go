@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,9 +61,13 @@ type SandboxPoolReconciler struct {
 // husk pod warm-pool path (issue #18) creates and deletes Pods, so the
 // reconciler needs create;delete on pods on top of the get;list;watch the forkd
 // discovery already declares.
+// The husk warm pool is bounded against voluntary disruption (node drain,
+// eviction) by a PodDisruptionBudget the reconciler creates-or-updates per pool
+// (issue #18, slice 4b), so it needs the policy/poddisruptionbudgets verbs.
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -111,6 +116,14 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		warm, err := r.reconcileHuskPods(ctx, &pool, &template)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		// Bound voluntary disruption of the warm pool: a PodDisruptionBudget so a
+		// node drain evicts husk pods one at a time instead of collapsing the pool.
+		// A PDB error is logged and we requeue; it does not block the warm-pool
+		// status update (the pool is still functional, just unbounded on drain).
+		if err := r.ensureHuskPDB(ctx, &pool); err != nil {
+			logger.Error(err, "failed to ensure husk PDB")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		readySnapshots := r.readySnapshotCount(templateID)
@@ -336,8 +349,16 @@ func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]i
 }
 
 func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Owns(pods): a husk pod is owner-referenced to its pool, so a husk pod
+	// delete (a node drain, an eviction, an operator kubectl delete) enqueues the
+	// owning pool. The deficit logic in reconcileHuskPods then recreates the
+	// replacement, so the warm pool SELF-HEALS a lost dormant slot without
+	// waiting for the periodic 30s requeue. Owns(pods) also covers the
+	// owner-referenced husk PodDisruptionBudget for free via the same ownership
+	// edge for pods; the PDB itself is reconciled on the pool's own events.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.SandboxPool{}).
+		Owns(&corev1.Pod{}).
 		Complete(r)
 }
 
