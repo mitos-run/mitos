@@ -6,6 +6,9 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -13,6 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// tracer is the controller component tracer; no-op unless tracing is configured.
+var tracer = observability.Tracer("agentrun-controller")
 
 type SandboxClaimReconciler struct {
 	client.Client
@@ -22,10 +28,20 @@ type SandboxClaimReconciler struct {
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// controller.reconcileClaim spans the whole reconcile. Only claim
+	// name/namespace and the pool name (config, no secrets) are attributes; the
+	// fork RPC below is a child span carrying the trace to forkd over gRPC.
+	ctx, span := tracer.Start(ctx, "controller.reconcileClaim", trace.WithAttributes(
+		attribute.String("claim.name", req.Name),
+		attribute.String("claim.namespace", req.Namespace),
+	))
+	defer span.End()
+
 	var claim v1alpha1.SandboxClaim
 	if err := r.Get(ctx, req.NamespacedName, &claim); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	span.SetAttributes(attribute.String("pool", claim.Spec.PoolRef.Name))
 
 	// A claim under deletion: reap its backing VM via the finalizer before the
 	// API object is allowed to disappear.
@@ -82,6 +98,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "no node with ready snapshot")
 		claim.Status.Phase = v1alpha1.SandboxPending
+		recordClaimPending()
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
@@ -96,6 +113,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "secret")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
@@ -136,6 +154,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
+		recordClaimError(claim.Spec.PoolRef.Name, "fork")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
@@ -152,6 +171,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// retry the Secret. The token exists only in this Secret.
 	if err := ensureSandboxTokenSecret(ctx, r.Client, &claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
 		logger.Error(err, "token secret write failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "token")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;

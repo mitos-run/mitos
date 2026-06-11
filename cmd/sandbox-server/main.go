@@ -51,6 +51,7 @@ func main() {
 		kernelPath     string
 		rootfsPath     string
 		mockMode       bool
+		auditLog       string
 	)
 
 	flag.StringVar(&addr, "addr", ":8080", "Listen address")
@@ -59,6 +60,7 @@ func main() {
 	flag.StringVar(&kernelPath, "kernel", "", "Guest kernel path (required unless --mock)")
 	flag.StringVar(&rootfsPath, "rootfs", "", "Guest rootfs path (required unless --mock)")
 	flag.BoolVar(&mockMode, "mock", false, "Mock mode (no KVM, simulated responses)")
+	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.Parse()
 
 	if !mockMode && (kernelPath == "" || rootfsPath == "") {
@@ -86,6 +88,16 @@ func main() {
 	// tokenless by design. forkd never sets this: there, a sandbox without
 	// a registered token fails closed with 401.
 	s.sandboxAPI.AllowTokenless()
+
+	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if auditCloser != nil {
+		defer auditCloser.Close()
+	}
+	s.sandboxAPI.SetAuditor(auditor)
 
 	if !mockMode {
 		// Standalone sandbox-server keeps the direct-exec dev path; the

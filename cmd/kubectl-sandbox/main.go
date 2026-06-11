@@ -1,0 +1,151 @@
+// Command kubectl-sandbox is a kubectl plugin that lists agentrun.dev sandbox
+// objects. Installed as "kubectl-sandbox" on PATH, it is invoked as
+// "kubectl sandbox <subcommand>".
+//
+// Subcommands:
+//
+//	ls   list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
+//	ps   list SandboxForks, or one claim's forks if a name is given
+//
+// Flags: -n <namespace>, -A (all namespaces). The plugin reads the cluster
+// connection from the standard kubeconfig resolution (KUBECONFIG, --kubeconfig,
+// or in-cluster). top/tree/exec/logs are documented follow-ups (issue #29).
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"time"
+
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/cli/sandboxtable"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+)
+
+var scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+}
+
+const usage = `kubectl sandbox: list agentrun.dev sandbox objects
+
+Usage:
+  kubectl sandbox ls [-n namespace] [-A]        list SandboxClaims
+  kubectl sandbox ps [name] [-n namespace] [-A] list SandboxForks (or one claim's forks)
+
+Flags:
+  -n string   namespace (default "default")
+  -A          all namespaces
+`
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+	sub := os.Args[1]
+
+	fs := flag.NewFlagSet(sub, flag.ExitOnError)
+	var namespace string
+	var allNamespaces bool
+	fs.StringVar(&namespace, "n", "default", "namespace")
+	fs.BoolVar(&allNamespaces, "A", false, "all namespaces")
+
+	switch sub {
+	case "ls":
+		_ = fs.Parse(os.Args[2:])
+		if err := runLs(namespace, allNamespaces); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "ps":
+		_ = fs.Parse(os.Args[2:])
+		var name string
+		if fs.NArg() > 0 {
+			name = fs.Arg(0)
+		}
+		if err := runPs(namespace, allNamespaces, name); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "top", "tree", "exec", "logs":
+		fmt.Fprintf(os.Stderr, "kubectl sandbox %s: not yet implemented, see https://github.com/paperclipinc/sandbox/issues/29\n", sub)
+		os.Exit(2)
+	case "-h", "--help", "help":
+		fmt.Fprint(os.Stdout, usage)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", sub, usage)
+		os.Exit(2)
+	}
+}
+
+// newClient builds a controller-runtime client from the standard kubeconfig
+// resolution with the v1alpha1 scheme registered.
+func newClient() (client.Client, error) {
+	cfg, err := ctrlconfig.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("build client: %w", err)
+	}
+	return c, nil
+}
+
+// listOpts returns the namespace scoping for a list call: none for all
+// namespaces, otherwise the chosen namespace.
+func listOpts(namespace string, allNamespaces bool) []client.ListOption {
+	if allNamespaces {
+		return nil
+	}
+	return []client.ListOption{client.InNamespace(namespace)}
+}
+
+func runLs(namespace string, allNamespaces bool) error {
+	c, err := newClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var claims v1alpha1.SandboxClaimList
+	if err := c.List(ctx, &claims, listOpts(namespace, allNamespaces)...); err != nil {
+		return fmt.Errorf("list claims: %w", err)
+	}
+	fmt.Print(sandboxtable.FormatClaims(claims.Items, time.Now()))
+	return nil
+}
+
+func runPs(namespace string, allNamespaces bool, name string) error {
+	c, err := newClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var forks v1alpha1.SandboxForkList
+	if err := c.List(ctx, &forks, listOpts(namespace, allNamespaces)...); err != nil {
+		return fmt.Errorf("list forks: %w", err)
+	}
+	items := forks.Items
+	if name != "" {
+		filtered := items[:0:0]
+		for i := range items {
+			if items[i].Spec.SourceRef.Name == name {
+				filtered = append(filtered, items[i])
+			}
+		}
+		items = filtered
+	}
+	fmt.Print(sandboxtable.FormatForks(items, time.Now()))
+	return nil
+}
