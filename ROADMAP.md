@@ -332,12 +332,31 @@ or spoof.
 
 ## 6. Density and scheduling
 
-- ⬜ Bin-pack forks onto nodes already holding the snapshot; spread across
-  failure domains only on request
-- ⬜ NUMA pinning + hugepage backing; per-node max density config
-- ⬜ Documented overcommit policy + saturation behavior
-- ⬜ Pending-claims metric for Karpenter/cluster-autoscaler; static
-  capacity-planning guide for bare metal
+The admission model, packing policy, overcommit safety argument, and
+pending/backpressure behavior are documented in docs/scheduling.md.
+
+- ✅ Capacity-aware admission: each node's budget is host MemTotal minus a
+  reserve, times an overcommit factor, checked against the CoW-aware
+  MemoryUsed (#33) with a per-template cold-vs-warm marginal-cost projection.
+  A fork is admitted to a node only when its projected cost fits. Unit-tested
+  in internal/controller/scheduler_test.go.
+- ✅ CoW bin-packing: SelectNode packs forks of one template onto a warm
+  snapshot-holder to maximize CoW sharing (reversing the old load-spreading)
+  and spills cold starts to the most-available node.
+- ✅ Documented overcommit policy + saturation behavior: claims with no
+  fitting node pend with backpressure (NoCapacity condition, bounded backoff)
+  and fail cleanly with an actionable capacity-exhaustion error after a
+  bounded --max-pending-duration instead of OOMing a node. The pending-claims
+  metric (agentrun_claim_pending_total) is the autoscaler/back-pressure
+  signal; envtest-proven in internal/controller.
+- ⬜ NUMA pinning + hugepage-backed guest memory; KSM same-page-merging
+  tuning; per-node max density config (needs hardware)
+- ⬜ Multi-resource bin-packing (disk, CPU, and the cold-start
+  snapshot-distribution cost, which ties into #14); preemption/eviction under
+  pressure; predictive prewarming
+- ⬜ MEASURED bare-metal density curve on the pinned reference node (section 4;
+  a target until run on hardware, never fabricated); cluster-autoscaler /
+  Karpenter integration driven by the pending-claims signal
 
 ## 7. Ergonomics, UX, and compat
 
