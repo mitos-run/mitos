@@ -10,5 +10,5 @@ type ForkEngine interface {
 	Terminate(sandboxID string) error
 	GetCapacity() fork.Capacity
 	ListSandboxes() []fork.SandboxRecord
-	CreateTemplate(id string, rootfsPath string, initWaitSecs int) error
+	CreateTemplate(id string, image string, initCommands []string) error
 }

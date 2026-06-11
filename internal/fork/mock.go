@@ -29,6 +29,20 @@ type MockEngine struct {
 	// the fork carried none). Tests assert the template's NetworkPolicy was
 	// plumbed all the way through the Fork RPC to the engine.
 	lastNetwork *NetworkOpts
+	// lastInitCommands records the init commands of the most recent
+	// CreateTemplate call. Tests assert template.Spec.Init was plumbed all the
+	// way through the CreateTemplate RPC to the engine.
+	lastInitCommands []string
+}
+
+// LastInitCommands returns the init commands passed to the most recent
+// CreateTemplate call, or nil if none has been recorded (or the last build
+// carried none). It lets controller envtests assert template.Spec.Init reached
+// the engine through the CreateTemplate RPC.
+func (e *MockEngine) LastInitCommands() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastInitCommands
 }
 
 // LastForkNetwork returns the NetworkOpts passed to the most recent Fork call,
@@ -100,13 +114,14 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 	}, nil
 }
 
-func (e *MockEngine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	e.lastInitCommands = initCommands
 	e.templates[id] = &Template{
 		ID:          id,
-		Image:       rootfsPath,
+		Image:       image,
 		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", id),
 		CreatedAt:   time.Now(),
 		Ready:       true,

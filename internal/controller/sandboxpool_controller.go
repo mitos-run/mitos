@@ -43,7 +43,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if readySnapshots < desired {
 		deficit := desired - readySnapshots
 		logger.Info("snapshot deficit", "ready", readySnapshots, "desired", desired, "creating", deficit)
-		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, deficit)
+		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, deficit)
 		if err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -85,7 +85,7 @@ func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
 
 // createSnapshotsOnNodes asks up to deficit healthy nodes that lack the
 // template to build it. Returns how many builds were started.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, deficit int32) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, deficit int32) (int32, error) {
 	var created int32
 	var errs []error
 	for _, node := range r.NodeRegistry.ListNodes() {
@@ -106,8 +106,9 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// a background queue is roadmap work (snapshot distribution).
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		resp, err := forkdpb.NewForkDaemonClient(conn).CreateTemplate(cctx, &forkdpb.CreateTemplateRequest{
-			TemplateId: templateID,
-			Image:      image,
+			TemplateId:   templateID,
+			Image:        image,
+			InitCommands: initCommands,
 		})
 		cancel()
 		if err != nil {

@@ -83,7 +83,7 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	if err := validateIDs(req.TemplateId); err != nil {
 		return nil, err
 	}
-	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, 0); err != nil {
+	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands); err != nil {
 		return nil, grpcError(err)
 	}
 	// Report the content-addressed digest the engine just recorded so the

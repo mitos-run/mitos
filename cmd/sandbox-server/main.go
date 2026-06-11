@@ -144,7 +144,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		cfg := firecracker.DefaultVMConfig()
 		cfg.RootfsPath = s.rootfsPath
-		if _, err := s.templateMgr.CreateTemplate(req.ID, cfg, req.InitWaitSecs); err != nil {
+		if _, err := s.templateMgr.CreateTemplate(req.ID, cfg, nil); err != nil {
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return
 		}
