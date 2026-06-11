@@ -64,6 +64,39 @@ jobs:
       - name: kustomize base resolves
         run: kubectl kustomize deploy/ > /dev/null
 
+  talos-validate:
+    # Validate the Talos machine configs. worker-kvm.yaml and controlplane.yaml
+    # are PATCHES, not full configs, so we generate a throwaway base with
+    # talosctl gen config, merge each patch onto its generated base, and run
+    # talosctl validate --mode metal on the merged documents. A malformed field
+    # in either patch fails the merge or the validate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install talosctl
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/talosctl \
+            https://github.com/siderolabs/talos/releases/latest/download/talosctl-linux-amd64
+          sudo install /tmp/talosctl /usr/local/bin/talosctl
+          talosctl version --client
+      - name: Generate a throwaway base config
+        run: talosctl gen config testcluster https://10.0.0.1:6443 --output-dir /tmp/talos
+      - name: Merge and validate the KVM worker patch
+        run: |
+          set -euo pipefail
+          talosctl machineconfig patch /tmp/talos/worker.yaml \
+            --patch @deploy/talos/worker-kvm.yaml \
+            -o /tmp/worker-kvm-merged.yaml
+          talosctl validate --config /tmp/worker-kvm-merged.yaml --mode metal
+      - name: Merge and validate the control-plane patch
+        run: |
+          set -euo pipefail
+          talosctl machineconfig patch /tmp/talos/controlplane.yaml \
+            --patch @deploy/talos/controlplane.yaml \
+            -o /tmp/controlplane-merged.yaml
+          talosctl validate --config /tmp/controlplane-merged.yaml --mode metal
+
   python-test:
     runs-on: ubuntu-latest
     defaults:
