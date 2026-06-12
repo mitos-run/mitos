@@ -79,6 +79,14 @@ func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, s
 	r.Feed = NewEmitFeed(recorder, sink, clock)
 }
 
+// EmitRevisionCreatedForTest exposes emitRevisionCreated to the external
+// controller_test package so the revision.created payload mapping (including the
+// agentrun.dev/trace-id annotation -> TraceID correlation field) can be
+// unit-tested directly against a recording sink, without a full reconcile.
+func EmitRevisionCreatedForTest(recorder record.EventRecorder, sink eventfeed.Sink, rev *v1alpha1.WorkspaceRevision) {
+	NewEmitFeed(recorder, sink, nil).emitRevisionCreated(context.Background(), rev)
+}
+
 // SetCheckpointForTest injects a fake live-VM checkpointer (the drain seam).
 // The fake records whether the Checkpoint drain policy routed through it and
 // returns the scripted captured/error. nil restores the default.

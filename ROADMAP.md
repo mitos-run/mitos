@@ -694,10 +694,18 @@ verified. In rough order of leverage:
 - ✅ OpenTelemetry trace for the claim/fork path: controller.reconcileClaim →
   controller.forkOnNode → forkd.Fork → engine.fork, with W3C trace-id
   propagation over gRPC, enabled by --otlp-endpoint, no secrets in spans; PROVEN
-  by in-memory span tests in CI. OPEN: guest-ready and first-exec spans need the
-  guest-telemetry vsock bridge, and a single trace id stamped across
-  pod/logs/Hubble/Workspace revisions needs husk pods (#18) and the Workspace
-  (#21).
+  by in-memory span tests in CI.
+- ✅ Trace-to-revision link: the claim reconcile trace id is stamped on the
+  WorkspaceRevision it produces (the agentrun.dev/trace-id annotation, valid id
+  only, omitted when tracing is off), a workspace.dehydrate child span names the
+  revision and the contentManifest digest, and the trace id rides the
+  revision.created feed event (traceId field), so a revision resolves to the
+  orchestrator request that created it and back. No secrets in spans, the
+  annotation, or the feed field; PROVEN by in-memory span and feed unit tests in
+  CI. OPEN: guest-ready and first-exec spans need the guest-telemetry vsock
+  bridge (the in-VM tail), a single trace id across Hubble network flows needs
+  the Cilium/Hubble integration, and Grafana dashboards plus PrometheusRule
+  alerts that pivot on the trace id are the 1.0 maturity bar.
 - ✅ Metrics: orphan-sweep counts, pending-claim requeues, and per-pool claim
   error rates are exported (agentrun_orphan_sweeps_total,
   agentrun_claim_pending_total, agentrun_claim_errors_total{pool,reason},
