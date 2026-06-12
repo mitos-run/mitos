@@ -499,6 +499,107 @@ jobs:
 
           kill $FC_PID 2>/dev/null || true
 
+      # Workspace hydrate/dehydrate data path proof (W4 slice 2). This phase
+      # proves the bulk workspace tar transfer end to end on REAL VMs: it boots
+      # TWO guest VMs from the agent rootfs, writes a set of known files (a nested
+      # tree, binary content, and a secret file) into the SOURCE VM's /workspace
+      # over vsock, Dehydrates that workspace into a content-addressed manifest in
+      # a node CAS store, Hydrates the manifest into the DESTINATION VM's
+      # /workspace, and asserts every known file came back BYTE-IDENTICAL while the
+      # secret was EXCLUDED from the revision. cmd/ws-smoke drives the production
+      # internal/workspace.Dehydrate / Hydrate helpers over the real vsock TarDir /
+      # UntarDir guest ops, so the thing under test is the in-VM round trip, not a
+      # host fake. This phase GATES: a mismatch, a transfer error, or a secret leak
+      # is a real FAIL (exit 1); a VM that did not boot is a SETUP error (exit 2).
+      - name: Workspace transfer, dehydrate one VM and hydrate another byte-identical over the real vsock tar path
+        timeout-minutes: 8
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/ws-smoke ./cmd/ws-smoke/
+
+          WSDIR=/tmp/agent-run-test/ws-transfer
+          rm -rf "$WSDIR"
+          mkdir -p "$WSDIR"
+
+          # Build one ext4 rootfs with the agent as /init plus a busybox shell,
+          # then clone it per VM so the two guests have independent disks.
+          build_rootfs() {
+            local img="$1"
+            dd if=/dev/zero of="$img" bs=1M count=256 status=none
+            mkfs.ext4 -q -F "$img"
+            local mnt
+            mnt="$(mktemp -d)"
+            sudo mount -o loop "$img" "$mnt"
+            sudo mkdir -p "$mnt"/{bin,dev,proc,sys,tmp,workspace,etc}
+            sudo cp /tmp/agent-run-test/agent "$mnt/init"
+            sudo chmod +x "$mnt/init"
+            sudo cp /tmp/agent-run-test/busybox "$mnt/bin/busybox" 2>/dev/null || \
+              sudo curl -fsSL -o "$mnt/bin/busybox" \
+                "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+            sudo chmod +x "$mnt/bin/busybox"
+            for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+              sudo ln -sf /bin/busybox "$mnt/bin/$cmd"
+            done
+            echo "sandbox" | sudo tee "$mnt/etc/hostname" > /dev/null
+            sudo umount "$mnt"
+            rmdir "$mnt"
+          }
+
+          # Boot a VM with vsock and echo its vsock UDS path. Records the FC pid in
+          # the named file so the caller can reap it.
+          boot_vm() {
+            local name="$1" rootfs="$2" pidfile="$3"
+            local sock="$WSDIR/$name.fc.sock"
+            local vsock_uds="$WSDIR/$name.vsock.sock"
+            /usr/local/bin/firecracker --api-sock "$sock" > "$WSDIR/$name.serial.log" 2>&1 &
+            echo $! > "$pidfile"
+            sleep 1
+            curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/boot-source' \
+              -H 'Content-Type: application/json' \
+              -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/drives/rootfs' \
+              -H 'Content-Type: application/json' \
+              -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$rootfs\", \"is_root_device\": true, \"is_read_only\": false}"
+            curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/machine-config' \
+              -H 'Content-Type: application/json' \
+              -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+            curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/vsock' \
+              -H 'Content-Type: application/json' \
+              -d "{\"guest_cid\": 3, \"uds_path\": \"$vsock_uds\"}"
+            curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/actions' \
+              -H 'Content-Type: application/json' \
+              -d '{"action_type": "InstanceStart"}'
+            echo "$vsock_uds"
+          }
+
+          build_rootfs "$WSDIR/src.ext4"
+          build_rootfs "$WSDIR/dst.ext4"
+          sudo chmod 666 /dev/kvm
+
+          SRC_VSOCK="$(boot_vm src "$WSDIR/src.ext4" "$WSDIR/src.pid")"
+          DST_VSOCK="$(boot_vm dst "$WSDIR/dst.ext4" "$WSDIR/dst.pid")"
+
+          echo "Waiting for both guest agents to come up..."
+          sleep 8
+
+          if ! /tmp/ws-smoke --cas "$WSDIR/cas" --src "$SRC_VSOCK" --dst "$DST_VSOCK"; then
+            rc=$?
+            echo "=== source serial ==="; cat "$WSDIR/src.serial.log" || true
+            echo "=== destination serial ==="; cat "$WSDIR/dst.serial.log" || true
+            kill "$(cat "$WSDIR/src.pid")" "$(cat "$WSDIR/dst.pid")" 2>/dev/null || true
+            if [ "$rc" -eq 2 ]; then
+              echo "SETUP error: a VM did not boot or the agent was unreachable"
+            fi
+            exit "$rc"
+          fi
+
+          kill "$(cat "$WSDIR/src.pid")" "$(cat "$WSDIR/dst.pid")" 2>/dev/null || true
+          echo "================================"
+          echo "  Workspace hydrate/dehydrate round trip proven byte-identical on real VMs"
+          echo "================================"
+
       # Snapshot distribution proof (#14, build-once-distribute). This phase
       # proves a PEER pulls a template over the production CAS-serving path and
       # forks from it. cmd/pull-smoke drives TWO real fork engines with TWO data

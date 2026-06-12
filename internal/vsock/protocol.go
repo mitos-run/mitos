@@ -15,7 +15,28 @@ const (
 	TypePing         RequestType = "ping"
 	TypeConfigure    RequestType = "configure"
 	TypeNotifyForked RequestType = "notify_forked"
+	TypeTarDir       RequestType = "tar_dir"
+	TypeUntarDir     RequestType = "untar_dir"
 )
+
+// MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
+// the base64 the JSON encoder applies to a []byte field). The tar of a guest
+// directory is buffered whole in memory on both the guest and host (this slice
+// does not stream), so the cap keeps the workspace transfer to one bounded
+// allocation per side. A directory whose tar would exceed this is refused rather
+// than risking an unbounded guest allocation; a streaming (chunked) transfer for
+// very large workspaces is a later W4 slice. The guest enforces the cap on the
+// tar it produces (TarDir) and on the tar it accepts (UntarDir); the host client
+// enforces it before sending. MaxMessageBytes is the matching line-buffer size
+// on both vsock ends (the base64 JSON message is ~4/3 the raw bytes plus
+// framing).
+const MaxTarBytes = 64 << 20
+
+// MaxMessageBytes is the vsock line-buffer capacity on both the host client and
+// the guest agent. It must hold the largest framed JSON message, which for the
+// tar ops is the base64 encoding of up to MaxTarBytes (~4/3) plus the JSON
+// envelope, with headroom.
+const MaxMessageBytes = 96 << 20
 
 type Request struct {
 	Type         RequestType          `json:"type"`
@@ -27,6 +48,8 @@ type Request struct {
 	Remove       *RemoveRequest       `json:"remove,omitempty"`
 	Configure    *ConfigureRequest    `json:"configure,omitempty"`
 	NotifyForked *NotifyForkedRequest `json:"notify_forked,omitempty"`
+	TarDir       *TarDirRequest       `json:"tar_dir,omitempty"`
+	UntarDir     *UntarDirRequest     `json:"untar_dir,omitempty"`
 }
 
 // NotifyForkedRequest tells the guest a restore just happened so it can repair
@@ -126,6 +149,23 @@ type RemoveRequest struct {
 	Path string `json:"path"`
 }
 
+// TarDirRequest asks the guest agent to tar a directory tree and return the tar
+// bytes. Path is restricted by the guest to a workspace-transfer allowlist (only
+// /workspace and paths under it); the guest never tars / or any secret/token
+// path. The whole tar is buffered in the response, bounded by MaxTarBytes.
+type TarDirRequest struct {
+	Path string `json:"path"`
+}
+
+// UntarDirRequest asks the guest agent to extract a tar (produced by TarDir or by
+// the host's CAS materialize -> tar path) into Path. The guest sanitizes every
+// member name against traversal (no absolute paths, no ".." escape outside Path)
+// before writing. The tar is bounded by MaxTarBytes.
+type UntarDirRequest struct {
+	Path string `json:"path"`
+	Tar  []byte `json:"tar"`
+}
+
 type Response struct {
 	OK           bool                  `json:"ok"`
 	Error        string                `json:"error,omitempty"`
@@ -134,6 +174,13 @@ type Response struct {
 	ListDir      *ListDirResponse      `json:"list_dir,omitempty"`
 	Ping         *PingResponse         `json:"ping,omitempty"`
 	NotifyForked *NotifyForkedResponse `json:"notify_forked,omitempty"`
+	TarDir       *TarDirResponse       `json:"tar_dir,omitempty"`
+}
+
+// TarDirResponse carries the tar bytes of the requested directory. The tar is
+// buffered whole, bounded by MaxTarBytes.
+type TarDirResponse struct {
+	Tar []byte `json:"tar"`
 }
 
 // NotifyForkedResponse reports what the guest did in response to a fork

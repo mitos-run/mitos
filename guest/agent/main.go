@@ -102,7 +102,10 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024) // 10MB max message
+	// The line buffer must hold the largest framed message; for the bulk tar ops
+	// that is the base64 JSON of up to vsock.MaxTarBytes. vsock.MaxMessageBytes
+	// is the matching cap on the host client.
+	scanner.Buffer(make([]byte, 1024*1024), vsock.MaxMessageBytes)
 
 	for scanner.Scan() {
 		var req vsock.Request
@@ -177,6 +180,18 @@ func handleRequest(req *vsock.Request) vsock.Response {
 			return vsock.Response{OK: false, Error: "notify_forked request is nil"}
 		}
 		return handleNotifyForked(req.NotifyForked)
+
+	case vsock.TypeTarDir:
+		if req.TarDir == nil {
+			return vsock.Response{OK: false, Error: "tar_dir request is nil"}
+		}
+		return handleTarDir(req.TarDir)
+
+	case vsock.TypeUntarDir:
+		if req.UntarDir == nil {
+			return vsock.Response{OK: false, Error: "untar_dir request is nil"}
+		}
+		return handleUntarDir(req.UntarDir)
 
 	default:
 		return vsock.Response{OK: false, Error: fmt.Sprintf("unknown request type: %s", req.Type)}
