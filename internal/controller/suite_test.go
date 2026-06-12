@@ -59,6 +59,7 @@ var (
 	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
 	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
 	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
 )
 
 // setWSTransfer installs the workspace hydrate/dehydrate fakes; nil restores a
@@ -81,6 +82,28 @@ func setWSDiff(diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, pare
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsDiff = diff
+}
+
+// setWSRendezvous installs the git rendezvous fake; nil falls back to the
+// production default (workspace.Rendezvous via the git CLI).
+func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string) error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsRendezvous = rv
+}
+
+// setWSRepoFiles installs the git repo-paths resolver fake; nil falls back to a
+// default that resolves no files.
+func setWSRepoFiles(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsRepoFiles = fn
+}
+
+func currentWSRepoFiles() func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsRepoFiles
 }
 
 func currentWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
@@ -254,6 +277,12 @@ func TestMain(m *testing.M) {
 				return fn(ctx, repoFiles, remote, branch)
 			}
 			return nil
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+			if fn := currentWSRepoFiles(); fn != nil {
+				return fn(ctx, claim, digest, gitPaths)
+			}
+			return nil, nil
 		},
 	)
 	if err := rawClaim.SetupWithManager(mgr); err != nil {

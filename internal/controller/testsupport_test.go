@@ -80,11 +80,13 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
 	diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error),
 	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error,
+	repoFiles func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error),
 ) {
 	r.HydrateWorkspace = hydrate
 	r.DehydrateWorkspace = dehydrate
 	r.DiffWorkspace = diff
 	r.RendezvousGit = rendezvous
+	r.RepoFilesForGit = repoFiles
 }
 
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test

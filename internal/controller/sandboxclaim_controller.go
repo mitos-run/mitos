@@ -115,6 +115,11 @@ type SandboxClaimReconciler struct {
 	// fake.
 	RendezvousGit rendezvousFunc
 
+	// RepoFilesForGit resolves the workspace spec.git.paths content from a
+	// dehydrated revision manifest for a {git} output. Nil defaults to the real
+	// store-backed path; envtest injects a fake.
+	RepoFilesForGit repoFilesFunc
+
 	// eventFilter optionally restricts which claims this reconciler watches. Nil
 	// watches all claims (the production default: a deployment runs exactly one
 	// claim reconciler, husk or raw). It exists so a test harness can run a raw

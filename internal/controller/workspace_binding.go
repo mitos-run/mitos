@@ -3,6 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
@@ -37,11 +40,17 @@ type dehydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, exclu
 type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
 
 // rendezvousFunc is the seam the claim reconciler pushes the workspace repo
-// paths to a git rendezvous remote through. The production value resolves the
-// repo-paths content from the dehydrated set and calls workspace.Rendezvous;
-// envtest and unit tests inject a fake. repoFiles is the resolved
-// name -> content map of the workspace spec.git.paths.
+// paths to a git rendezvous remote through. The production value calls
+// workspace.Rendezvous (the git CLI); envtest and unit tests inject a fake.
+// repoFiles is the resolved name -> content map of the workspace spec.git.paths.
 type rendezvousFunc func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+
+// repoFilesFunc is the seam that resolves the workspace spec.git.paths content
+// from a just-dehydrated revision manifest into a name -> content map. The
+// production value reads the files under the gitPaths prefixes from the CAS
+// store; envtest injects a fake. The resolved names are workspace-relative so a
+// "/workspace/repo" git path materializes as "repo/...".
+type repoFilesFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
 
 // workspaceHydratedAnnotation marks a claim whose workspace head was already
 // hydrated into its sandbox, so a requeue of a Ready claim does not hydrate
@@ -92,6 +101,26 @@ func (r *SandboxClaimReconciler) diff() diffFunc {
 	return r.defaultDiff
 }
 
+// rendezvous returns the configured git rendezvous seam or the default real path
+// (workspace.Rendezvous via the git CLI).
+func (r *SandboxClaimReconciler) rendezvous() rendezvousFunc {
+	if r.RendezvousGit != nil {
+		return r.RendezvousGit
+	}
+	return func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+		return workspace.Rendezvous(ctx, repoFiles, remote, branch)
+	}
+}
+
+// repoFiles returns the configured repo-paths resolver seam or the default real
+// path that reads the git-path files from the CAS store.
+func (r *SandboxClaimReconciler) repoFiles() repoFilesFunc {
+	if r.RepoFilesForGit != nil {
+		return r.RepoFilesForGit
+	}
+	return r.defaultRepoFiles
+}
+
 // defaultHydrate is the production hydrate path. It requires the node-side
 // transport that reaches the claim's guest agent (the same path that delivers
 // exec/file traffic). That transport is wired by the node integration; until it
@@ -138,6 +167,76 @@ func (r *SandboxClaimReconciler) defaultDiff(ctx context.Context, claim *v1alpha
 		return workspace.Diff{}, fmt.Errorf("read child manifest %s: %w", child, err)
 	}
 	return workspace.DiffManifests(parentManifest, childManifest), nil
+}
+
+// defaultRepoFiles is the production repo-paths resolver. It reads the
+// just-dehydrated revision's manifest from the CAS store, keeps the file entries
+// that fall under the workspace spec.git.paths prefixes, and materializes their
+// content into a name -> content map for the git rendezvous push. See
+// defaultHydrate for the transport requirement.
+func (r *SandboxClaimReconciler) defaultRepoFiles(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+	_, store, err := r.workspaceTransport(claim)
+	if err != nil {
+		return nil, err
+	}
+	if err := digest.Validate(); err != nil {
+		return nil, fmt.Errorf("git rendezvous manifest digest: %w", err)
+	}
+	m, err := store.GetManifest(digest)
+	if err != nil {
+		return nil, fmt.Errorf("read git rendezvous manifest %s: %w", digest, err)
+	}
+
+	prefixes := workspace.CapturePaths(gitPathsAsOutputs(gitPaths))
+	tmp, err := os.MkdirTemp("", "ws-gitpaths-*")
+	if err != nil {
+		return nil, fmt.Errorf("git rendezvous temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp) //nolint:errcheck // best-effort cleanup
+
+	out := map[string]string{}
+	for _, fe := range m.Files {
+		if !nameUnderAnyPrefix(fe.Name, prefixes) {
+			continue
+		}
+		dst := filepath.Join(tmp, "f")
+		if err := store.MaterializeFileTo(digest, fe.Name, dst); err != nil {
+			return nil, fmt.Errorf("materialize git rendezvous file %s: %w", fe.Name, err)
+		}
+		content, err := os.ReadFile(dst) //nolint:gosec // dst is controller-owned temp
+		if err != nil {
+			return nil, fmt.Errorf("read git rendezvous file %s: %w", fe.Name, err)
+		}
+		out[fe.Name] = string(content)
+	}
+	return out, nil
+}
+
+// gitPathsAsOutputs adapts spec.git.paths into OutputSpec Path entries so the
+// CapturePaths normalizer (the same /workspace-relative prefix logic) can be
+// reused for the git-path filter.
+func gitPathsAsOutputs(gitPaths []string) []v1alpha1.OutputSpec {
+	out := make([]v1alpha1.OutputSpec, 0, len(gitPaths))
+	for _, p := range gitPaths {
+		out = append(out, v1alpha1.OutputSpec{Path: p})
+	}
+	return out
+}
+
+// nameUnderAnyPrefix reports whether a workspace-relative file name equals or
+// sits under one of the prefixes. An empty prefix set (no git.paths normalized
+// to a subtree) matches nothing, so a bare "/workspace" git path captures the
+// whole tree only when it normalizes to a real prefix.
+func nameUnderAnyPrefix(name string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, p := range prefixes {
+		if name == p || strings.HasPrefix(name, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // workspaceTransport resolves the guest agent transport and CAS store the real
@@ -318,7 +417,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 
 	// Push the workspace repo paths to any git rendezvous remote, recording the
 	// pushes for the revision status.
-	gitPushes, gitErr := r.rendezvousOnTerminate(ctx, claim, rev.Name)
+	gitPushes, gitErr := r.rendezvousOnTerminate(ctx, claim, digest)
 
 	// Record the diff summary and git pushes on the revision status subresource,
 	// if either was produced.
@@ -344,10 +443,66 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 }
 
 // rendezvousOnTerminate pushes the workspace repo paths to each {git} output's
-// rendezvous remote on a per-attempt branch. The git rendezvous itself is wired
-// in Task 2; this slice records no pushes so the diff wiring lands first.
-func (r *SandboxClaimReconciler) rendezvousOnTerminate(_ context.Context, _ *v1alpha1.SandboxClaim, _ string) ([]v1alpha1.GitPushRecord, error) {
-	return nil, nil
+// rendezvous remote on a per-attempt branch, returning the recorded pushes. The
+// repo paths come from the workspace spec.git.paths resolved against the
+// just-dehydrated content (digest). A {git} output whose workspace declares no
+// spec.git.paths is an honest no-op with a logged warning: there is nothing to
+// push. A push failure is returned (not swallowed) so the caller surfaces it on
+// the claim/revision condition. Git is the merge layer: this pushes a per-attempt
+// branch, the engine never merges working trees.
+func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest) ([]v1alpha1.GitPushRecord, error) {
+	gitOutputs := gitOutputsOf(claim.Spec.Outputs)
+	if len(gitOutputs) == 0 {
+		return nil, nil
+	}
+	logger := log.FromContext(ctx)
+
+	var ws v1alpha1.Workspace
+	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); err != nil {
+		return nil, fmt.Errorf("resolve workspace %s for git rendezvous: %w", claim.Spec.WorkspaceRef.Name, err)
+	}
+	gitPaths := ws.Spec.Git.Paths
+	if len(gitPaths) == 0 {
+		// Honest: a {git} output with no repo paths declared has nothing to push.
+		logger.Info("git output declared but workspace has no spec.git.paths; nothing to push",
+			"claim", claim.Name, "workspace", ws.Name)
+		return nil, nil
+	}
+
+	repoFiles, err := r.repoFiles()(ctx, claim, digest, gitPaths)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git rendezvous repo paths for claim %s: %w", claim.Name, err)
+	}
+	if len(repoFiles) == 0 {
+		logger.Info("git rendezvous resolved no files under spec.git.paths; nothing to push",
+			"claim", claim.Name, "workspace", ws.Name, "paths", gitPaths)
+		return nil, nil
+	}
+
+	var pushes []v1alpha1.GitPushRecord
+	for _, g := range gitOutputs {
+		branch, berr := workspace.RenderBranch(g.Branch, claim.Name)
+		if berr != nil {
+			return pushes, fmt.Errorf("render git rendezvous branch for claim %s: %w", claim.Name, berr)
+		}
+		if perr := r.rendezvous()(ctx, repoFiles, g.Remote, branch); perr != nil {
+			return pushes, fmt.Errorf("git rendezvous push for claim %s to %s on %s: %w", claim.Name, g.Remote, branch, perr)
+		}
+		logger.Info("git rendezvous pushed workspace repo paths", "claim", claim.Name, "remote", g.Remote, "branch", branch)
+		pushes = append(pushes, v1alpha1.GitPushRecord{Remote: g.Remote, Branch: branch})
+	}
+	return pushes, nil
+}
+
+// gitOutputsOf returns the {git} outputs from a claim's spec.outputs.
+func gitOutputsOf(outputs []v1alpha1.OutputSpec) []*v1alpha1.GitOutput {
+	var gits []*v1alpha1.GitOutput
+	for i := range outputs {
+		if outputs[i].Git != nil {
+			gits = append(gits, outputs[i].Git)
+		}
+	}
+	return gits
 }
 
 // outputsWantDiff reports whether any output requested a content-hash diff.

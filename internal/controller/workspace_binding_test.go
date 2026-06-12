@@ -372,6 +372,94 @@ func TestClaimWorkspaceOutputsDiffRecorded(t *testing.T) {
 	t.Fatal("revision did not record a diff summary within 10s")
 }
 
+// TestClaimWorkspaceGitOutputPushes asserts that a {git} output on a workspace
+// with spec.git.paths renders the per-attempt branch, calls the rendezvous seam
+// with the resolved repo files, and records the push on the new revision status.
+func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x44)))
+
+	// The repo-paths resolver returns one file under the git path.
+	setWSRepoFiles(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ cas.Digest, gitPaths []string) (map[string]string, error) {
+		return map[string]string{"repo/main.go": "package main\n"}, nil
+	})
+	t.Cleanup(func() { setWSRepoFiles(nil) })
+
+	var (
+		gitMu      sync.Mutex
+		gotRemote  string
+		gotBranch  string
+		gotFiles   map[string]string
+		pushCalled int
+	)
+	setWSRendezvous(func(_ context.Context, repoFiles map[string]string, remote, branch string) error {
+		gitMu.Lock()
+		defer gitMu.Unlock()
+		pushCalled++
+		gotRemote, gotBranch, gotFiles = remote, branch, repoFiles
+		return nil
+	})
+	t.Cleanup(func() { setWSRendezvous(nil) })
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-git-node", "wsg-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	ws := makeWorkspace(t, "ws-git", v1alpha1.WorkspaceRetention{})
+	ws.Spec.Git = v1alpha1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
+	if err := k8sClient.Update(ctx, ws); err != nil {
+		t.Fatalf("set workspace git paths: %v", err)
+	}
+
+	makeBoundClaim(t, "wsg", "ws-git", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-git-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "rendezvous", Branch: "attempt/{{.name}}"}}},
+	})
+	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxTerminated)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		gitMu.Lock()
+		called, remote, branch, files := pushCalled, gotRemote, gotBranch, gotFiles
+		gitMu.Unlock()
+		if called >= 1 {
+			if remote != "rendezvous" {
+				t.Fatalf("rendezvous remote = %q, want rendezvous", remote)
+			}
+			if branch != "attempt/wsg-claim" {
+				t.Fatalf("rendezvous branch = %q, want attempt/wsg-claim", branch)
+			}
+			if files["repo/main.go"] != "package main\n" {
+				t.Fatalf("rendezvous repo files = %v, missing repo/main.go", files)
+			}
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if pushCalled == 0 {
+		t.Fatal("git rendezvous seam was not invoked within 10s")
+	}
+
+	// The push must be recorded on the new revision status.
+	wsHead := waitWorkspace(t, "ws-git", func(w *v1alpha1.Workspace) bool { return w.Status.Head != "" }, "head advanced")
+	for time.Now().Before(deadline) {
+		var head v1alpha1.WorkspaceRevision
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: wsHead.Status.Head}, &head); err == nil {
+			if len(head.Status.GitPushes) == 1 &&
+				head.Status.GitPushes[0].Branch == "attempt/wsg-claim" &&
+				head.Status.GitPushes[0].Remote == "rendezvous" {
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("revision did not record the git push within 10s")
+}
+
 func containsExclude(list []string, want string) bool {
 	for _, v := range list {
 		if v == want {
