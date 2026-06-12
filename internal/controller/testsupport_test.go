@@ -30,6 +30,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
+// TraceIDAnnotationsForTest exposes traceIDAnnotations to the external
+// controller_test package so the trace-id stamp omit branch (tracing off ->
+// nil, no fake id) can be unit-tested deterministically without the OTel global
+// provider one-time-delegate gotcha.
+func TraceIDAnnotationsForTest(ctx context.Context) map[string]string {
+	return traceIDAnnotations(ctx)
+}
+
 // BuildHuskPodForTest exposes buildHuskPod to the external controller_test
 // package so the husk pod spec can be unit-tested.
 func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {

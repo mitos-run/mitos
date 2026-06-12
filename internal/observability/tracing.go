@@ -13,6 +13,7 @@ package observability
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
@@ -23,7 +24,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/stats"
 )
 
@@ -78,28 +78,65 @@ func Tracer(name string) trace.Tracer {
 	return otel.Tracer(name)
 }
 
-// InMemoryForTest installs an in-memory span recorder as the global
-// TracerProvider and the W3C trace-context propagator, so tests can drive code
-// that starts spans and then assert on what was recorded. It returns the
-// recorder and a restore func that reinstalls the prior global provider and
-// propagator. Cross-process propagation tests rely on the propagator being set
-// so a gRPC client injects trace context and the server-side recorder shares
-// the trace id.
-func InMemoryForTest() (*tracetest.SpanRecorder, func()) {
-	prevProp := otel.GetTextMapPropagator()
+// inMemoryProvider is the process-wide test recorder and its provider. OTel's
+// global delegating tracer wires its delegate exactly once per process (a
+// sync.Once in the otel global state), so the FIRST in-memory provider installed
+// is the one every cached package-level tracer forwards to for the rest of the
+// process. A second, distinct recorder would never see those spans. Sharing one
+// process-wide recorder across all InMemoryForTest callers keeps every test's
+// spans flowing to the recorder the cached tracers are actually bound to.
+var (
+	inMemoryOnce     sync.Once
+	inMemoryRecorder *inMemorySpanRecorder
+)
 
-	recorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	otel.SetTracerProvider(tp)
+// inMemorySpanRecorder is a tracetest.SpanRecorder whose ended-span buffer can be
+// reset between tests, so each test that installs the shared recorder starts from
+// a clean slate while keeping the single process-wide delegate binding intact.
+type inMemorySpanRecorder struct {
+	*tracetest.SpanRecorder
+	tp *sdktrace.TracerProvider
+}
+
+// InMemoryForTest installs (once per process) an in-memory span recorder as the
+// global TracerProvider and the W3C trace-context propagator, so tests can drive
+// code that starts spans and then assert on what was recorded. It returns the
+// shared recorder, reset to empty, and a restore func.
+//
+// The provider is installed only once because OTel delegates each cached tracer
+// to the first real provider permanently; the restore func therefore does NOT
+// swap the provider back (that would orphan the cached tracers on a no-op that
+// never receives spans). Instead it resets the recorder buffer so the next test
+// starts clean. Each test anchors its assertions on its own uniquely named
+// objects, so the shared, accumulating recorder is unambiguous.
+//
+// Cross-process propagation tests rely on the propagator being set so a gRPC
+// client injects trace context and the server-side recorder shares the trace id.
+func InMemoryForTest() (*tracetest.SpanRecorder, func()) {
+	inMemoryOnce.Do(func() {
+		recorder := tracetest.NewSpanRecorder()
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+		otel.SetTracerProvider(tp)
+		otel.SetTextMapPropagator(propagation.TraceContext{})
+		inMemoryRecorder = &inMemorySpanRecorder{SpanRecorder: recorder, tp: tp}
+	})
+
+	// Reset the shared recorder so this test sees only spans it produces from now
+	// on. tracetest.SpanRecorder has no public reset, so we rebind a fresh
+	// recorder as the provider's processor: the provider is the SAME object the
+	// cached tracers already delegate to, so the new processor takes effect
+	// without re-triggering the one-time delegate.
+	fresh := tracetest.NewSpanRecorder()
+	inMemoryRecorder.tp.UnregisterSpanProcessor(inMemoryRecorder.SpanRecorder)
+	inMemoryRecorder.tp.RegisterSpanProcessor(fresh)
+	inMemoryRecorder.SpanRecorder = fresh
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	return recorder, func() {
-		// otel's global provider is a delegating wrapper, so capturing and
-		// re-setting GetTracerProvider() would re-point it at the recorder.
-		// Restore the default no-op provider instead, which is the global's
-		// pre-Setup state and what disabled tracing uses.
-		otel.SetTracerProvider(noop.NewTracerProvider())
-		otel.SetTextMapPropagator(prevProp)
+	return fresh, func() {
+		// Leave the shared provider in place (the cached tracers are bound to it);
+		// just detach this test's recorder so later spans are not appended to a
+		// buffer a finished test still holds.
+		inMemoryRecorder.tp.UnregisterSpanProcessor(fresh)
 	}
 }
 

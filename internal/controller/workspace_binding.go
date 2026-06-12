@@ -10,6 +10,9 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -97,6 +100,29 @@ const workspaceHydratedAnnotation = "agentrun.dev/workspace-hydrated-head"
 // already dehydrated into a committed revision on terminate, so a re-entrant
 // terminate (lifetime expiry then delete) does not create a second revision.
 const workspaceDehydratedAnnotation = "agentrun.dev/workspace-dehydrated"
+
+// traceIDAnnotation stamps the active reconcile's trace id onto a WorkspaceRevision
+// so an operator can resolve a committed revision back to the exact orchestrator
+// request (the controller.reconcileClaim trace) that produced it, and the same id
+// rides the revision.created feed event for an external indexer. It is set only
+// when tracing is enabled (the trace id is valid); a no-op provider leaves the
+// annotation absent rather than stamping a fake id. A trace id is an opaque
+// correlation id, not a secret.
+const traceIDAnnotation = "agentrun.dev/trace-id"
+
+// traceIDAnnotations returns the annotation map a new WorkspaceRevision is
+// stamped with for the active trace, or nil when tracing is off. The trace id is
+// read from the active span context: a valid id (a real provider is installed)
+// is stamped under agentrun.dev/trace-id; an invalid id (the no-op provider /
+// tracing disabled) yields nil, so a fake all-zero id is never written. A trace
+// id is an opaque correlation id, never a secret value.
+func traceIDAnnotations(ctx context.Context) map[string]string {
+	sc := trace.SpanFromContext(ctx).SpanContext()
+	if !sc.TraceID().IsValid() {
+		return nil
+	}
+	return map[string]string{traceIDAnnotation: sc.TraceID().String()}
+}
 
 // WorkspaceSecretExcludePaths are the guest /workspace paths the dehydrate must
 // strip so a captured revision never carries credential material. Secret VALUES
@@ -499,11 +525,34 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	logger := log.FromContext(ctx)
 
+	// workspace.dehydrate is a child of controller.reconcileClaim (it starts from
+	// the reconcile ctx), so the captured revision resolves to the request that
+	// created it. Attributes name content pointers and counts only (workspace and
+	// revision NAMES, the contentManifest DIGEST, the captured-path COUNT, and
+	// whether a memory snapshot was paired); never a secret value. The revision
+	// name and the digest are set once known, below.
+	ctx, span := tracer.Start(ctx, "workspace.dehydrate", trace.WithAttributes(
+		attribute.String("workspace.name", claim.Spec.WorkspaceRef.Name),
+	))
+	var dehydrateErr error
+	defer func() {
+		if dehydrateErr != nil {
+			span.SetStatus(codes.Error, "dehydrate failed")
+			span.RecordError(dehydrateErr)
+		}
+		span.End()
+	}()
+
+	// dehydrateOnTerminate returns through named results below; the deferred span
+	// end reads dehydrateErr, so each early return assigns it.
+	var err error
+	finish := func(e error) error { dehydrateErr = e; return e }
+
 	// Resolve the workspace head BEFORE this revision: it is the diff parent and
 	// the lineage tip the new revision descends from.
 	parentManifest, parentHead, _, err := r.resolveWorkspaceHead(ctx, claim)
 	if err != nil {
-		return err
+		return finish(err)
 	}
 	parentRev := ""
 	if parentHead != nil {
@@ -514,13 +563,17 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	// captures the whole workspace (the slice-2 default).
 	capturePaths := workspace.CapturePaths(claim.Spec.Outputs)
 
+	span.SetAttributes(attribute.Int("captured.path.count", len(capturePaths)))
+
 	digest, err := r.dehydrate()(ctx, claim, WorkspaceSecretExcludePaths, capturePaths)
 	if err != nil {
-		return fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err)
+		return finish(fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err))
 	}
 	if err := digest.Validate(); err != nil {
-		return fmt.Errorf("dehydrate claim %s produced an invalid content digest: %w", claim.Name, err)
+		return finish(fmt.Errorf("dehydrate claim %s produced an invalid content digest: %w", claim.Name, err))
 	}
+	// The contentManifest digest is a content address, not a secret.
+	span.SetAttributes(attribute.String("content.manifest.digest", string(digest)))
 
 	// A {diff: true} output records the content-hash diff of this revision against
 	// the parent head, so an indexer or a human can see what changed.
@@ -528,7 +581,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	if outputsWantDiff(claim.Spec.Outputs) {
 		d, derr := r.diff()(ctx, claim, parentManifest, digest)
 		if derr != nil {
-			return fmt.Errorf("diff claim %s revision against parent %s: %w", claim.Name, parentRev, derr)
+			return finish(fmt.Errorf("diff claim %s revision against parent %s: %w", claim.Name, parentRev, derr))
 		}
 		diffSummary = &v1alpha1.RevisionDiffSummary{
 			ParentRevision: parentRev,
@@ -552,7 +605,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	if claim.Spec.CheckpointOnTerminate {
 		snap, cerr := r.checkpointMemory()(ctx, claim)
 		if cerr != nil {
-			return fmt.Errorf("checkpoint memory snapshot for claim %s: %w", claim.Name, cerr)
+			return finish(fmt.Errorf("checkpoint memory snapshot for claim %s: %w", claim.Name, cerr))
 		}
 		if snap.Ref != "" {
 			ref := snap.Ref
@@ -564,11 +617,20 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		}
 	}
 
+	span.SetAttributes(attribute.Bool("memory.snapshot.paired", memSnapshotRef != nil))
+
+	// Stamp the active reconcile's trace id onto the revision so it resolves to the
+	// orchestrator request that created it. Only a valid trace id (tracing enabled)
+	// is stamped; a no-op provider leaves the annotation absent rather than writing
+	// a fake id. A trace id is an opaque correlation id, never a secret.
+	annotations := traceIDAnnotations(ctx)
+
 	rev := &v1alpha1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: claim.Spec.WorkspaceRef.Name + "-",
 			Namespace:    claim.Namespace,
 			Labels:       map[string]string{WorkspaceLabel: claim.Spec.WorkspaceRef.Name},
+			Annotations:  annotations,
 		},
 		Spec: v1alpha1.WorkspaceRevisionSpec{
 			WorkspaceRef:            v1alpha1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
@@ -580,8 +642,10 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		Status: v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionPending},
 	}
 	if err := r.Create(ctx, rev); err != nil {
-		return fmt.Errorf("create workspace revision for claim %s: %w", claim.Name, err)
+		return finish(fmt.Errorf("create workspace revision for claim %s: %w", claim.Name, err))
 	}
+	// The revision name is a generated object name, not a secret.
+	span.SetAttributes(attribute.String("revision.name", rev.Name))
 	logger.Info("dehydrated sandbox workspace into a new revision", "claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "revision", rev.Name)
 
 	// Announce the new revision on the change feed: a Kubernetes Event on the
@@ -602,7 +666,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		rev.Status.DiffSummary = diffSummary
 		rev.Status.GitPushes = gitPushes
 		if err := r.Status().Update(ctx, rev); err != nil {
-			return fmt.Errorf("record revision %s diff/git status: %w", rev.Name, err)
+			return finish(fmt.Errorf("record revision %s diff/git status: %w", rev.Name, err))
 		}
 	}
 
@@ -611,12 +675,12 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	claim.Annotations[workspaceDehydratedAnnotation] = rev.Name
 	if err := r.Update(ctx, claim); err != nil {
-		return err
+		return finish(err)
 	}
 	// A git push failure is surfaced (not swallowed) only after the revision and
 	// dehydrated annotation are durable, so the work is never lost and the
 	// terminate retries the push.
-	return gitErr
+	return finish(gitErr)
 }
 
 // rendezvousOnTerminate pushes the workspace repo paths to each {git} output's
