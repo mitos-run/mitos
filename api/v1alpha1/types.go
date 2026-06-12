@@ -257,6 +257,24 @@ type SandboxClaimSpec struct {
 	// +optional
 	WorkspaceRef *LocalObjectReference `json:"workspaceRef,omitempty"`
 
+	// ServiceAccount is the principal this claim runs as, the identity the
+	// workspace grants are evaluated against and the principal a memory snapshot
+	// captured on terminate is bound to. A memory snapshot is never paired or
+	// served across principals: a resume only loads a head's memory image when the
+	// activating claim's ServiceAccount matches the principal that captured it.
+	// Empty is the unnamed default principal.
+	// +optional
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+
+	// CheckpointOnTerminate asks the controller to capture the sandbox's VM memory
+	// snapshot when this claim terminates, pairing it with the new
+	// WorkspaceRevision (memorySnapshotRef) so the workspace head becomes
+	// resumable: a later claim with the same principal can resume from the
+	// captured VM state instead of a cold start. Requires WorkspaceRef. A plain
+	// terminate (this unset) leaves the revision's memorySnapshotRef nil.
+	// +optional
+	CheckpointOnTerminate bool `json:"checkpointOnTerminate,omitempty"`
+
 	// TTLSecondsAfterFinished bounds how long a finished claim (terminal
 	// Terminated or Failed phase) lingers in the API after FinishedAt before the
 	// garbage collector deletes it, freeing etcd. Unset uses the controller's

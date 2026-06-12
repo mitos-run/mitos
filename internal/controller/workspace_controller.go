@@ -59,6 +59,25 @@ const (
 // seam (and, later, dehydrate) supplies a revision's ContentManifest.
 type WorkspaceReconciler struct {
 	client.Client
+
+	// SnapshotExists verifies a head revision's paired memory snapshot still
+	// exists and is principal-bound, for the resumable status (W4 Task 2): a head
+	// is resumable only when it carries a memorySnapshotRef AND the referenced
+	// snapshot exists (a GC'd snapshot flips resumable false). Nil defaults to a
+	// fail-closed check that treats every snapshot as absent, so an unwired
+	// controller never marks a head resumable it cannot verify.
+	SnapshotExists memorySnapshotExistsFunc
+}
+
+// snapshotExists returns the configured existence-check seam or a fail-closed
+// default.
+func (r *WorkspaceReconciler) snapshotExists() memorySnapshotExistsFunc {
+	if r.SnapshotExists != nil {
+		return r.SnapshotExists
+	}
+	return func(context.Context, string, string) (bool, error) {
+		return false, nil
+	}
 }
 
 // +kubebuilder:rbac:groups=agentrun.dev,resources=workspaces;workspacerevisions,verbs=get;list;watch;create;update;patch;delete
@@ -118,7 +137,23 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		msg = "no committed revision yet"
 	}
 
-	resumable := head != nil && head.Spec.MemorySnapshotRef != nil
+	// A head is resumable only when it pairs a memory snapshot AND that snapshot
+	// still exists (verified, principal-bound, via the store seam). A GC'd
+	// snapshot flips resumable false, so the status never advertises a resume that
+	// would fail. A verification error leaves resumable false (fail closed) and is
+	// logged; the next reconcile retries.
+	resumable := false
+	if head != nil && head.Spec.MemorySnapshotRef != nil {
+		principal := ""
+		if head.Spec.MemorySnapshotPrincipal != nil {
+			principal = *head.Spec.MemorySnapshotPrincipal
+		}
+		exists, existsErr := r.snapshotExists()(ctx, *head.Spec.MemorySnapshotRef, principal)
+		if existsErr != nil {
+			logger.Error(existsErr, "verify head memory snapshot existence; treating head as non-resumable this pass", "workspace", ws.Name, "head", head.Name)
+		}
+		resumable = existsErr == nil && exists
+	}
 
 	patch := client.MergeFrom(ws.DeepCopy())
 	ws.Status.Head = headName(head)

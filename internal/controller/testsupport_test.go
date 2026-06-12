@@ -16,6 +16,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/daemon"
+	"github.com/paperclipinc/sandbox/internal/eventfeed"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/observability"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -62,6 +64,13 @@ func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context,
 	r.Activate = fn
 }
 
+// SetFeedForTest wires the change feed (the Kubernetes Event recorder, the
+// CloudEvents sink, and a pinned clock) so envtest can assert both the Event
+// mirror and the CloudEvents emit without a real webhook or wall clock.
+func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, sink eventfeed.Sink, clock func() time.Time) {
+	r.Feed = NewEmitFeed(recorder, sink, clock)
+}
+
 // SetCheckpointForTest injects a fake live-VM checkpointer (the drain seam).
 // The fake records whether the Checkpoint drain policy routed through it and
 // returns the scripted captured/error. nil restores the default.
@@ -87,6 +96,36 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	r.DiffWorkspace = diff
 	r.RendezvousGit = rendezvous
 	r.RepoFilesForGit = repoFiles
+}
+
+// MemSnapshotResultForTest is the exported alias of the unexported
+// memSnapshotResult so the external controller_test package can name the
+// checkpoint fake's return type.
+type MemSnapshotResultForTest = memSnapshotResult
+
+// NewMemSnapshotResult builds a MemSnapshotResultForTest for tests.
+func NewMemSnapshotResult(ref, principal string) MemSnapshotResultForTest {
+	return memSnapshotResult{Ref: ref, Principal: principal}
+}
+
+// SetMemorySnapshotForTest injects the memory-snapshot pairing seams (W4 Task
+// 2): the checkpoint-on-terminate capture, the resume-on-activate restore, and
+// the principal-bound existence check. envtest drives the pairing decision and
+// the resume/hydrate request without a real VM.
+func (r *SandboxClaimReconciler) SetMemorySnapshotForTest(
+	checkpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (MemSnapshotResultForTest, error),
+	resume func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error,
+	exists func(ctx context.Context, ref, principal string) (bool, error),
+) {
+	r.CheckpointMemory = checkpoint
+	r.ResumeMemory = resume
+	r.MemorySnapshotExists = exists
+}
+
+// SetSnapshotExistsForTest injects the workspace reconciler's resumable
+// existence check so a test can flip a head's snapshot present/absent.
+func (r *WorkspaceReconciler) SetSnapshotExistsForTest(exists func(ctx context.Context, ref, principal string) (bool, error)) {
+	r.SnapshotExists = exists
 }
 
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test

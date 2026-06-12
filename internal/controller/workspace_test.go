@@ -13,6 +13,7 @@ package controller_test
 // test seam that stands in for dehydrate.
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -139,8 +140,18 @@ func TestWorkspaceHeadAndCountFromCommittedRevisions(t *testing.T) {
 }
 
 func TestWorkspaceResumableWhenHeadHasMemorySnapshot(t *testing.T) {
-	makeWorkspace(t, "ws-resume", v1alpha1.WorkspaceRetention{})
+	// The resumable status verifies the paired memory snapshot still exists
+	// (fail-closed by default). Install an existence fake that confirms this
+	// revision's snapshot; reset on cleanup so a later reconcile fail-closes.
+	// Other workspaces are unaffected: their revisions carry no
+	// memorySnapshotRef, so the head is never resumable regardless of this fake.
 	snap := "mem-snap-abc"
+	setMemSnapshot(nil, nil, func(_ context.Context, ref, _ string) (bool, error) {
+		return ref == snap, nil
+	})
+	t.Cleanup(func() { setMemSnapshot(nil, nil, nil) })
+
+	makeWorkspace(t, "ws-resume", v1alpha1.WorkspaceRetention{})
 	makeRevision(t, "ws-resume-r1", "ws-resume", testManifest(0x33), &snap, nil)
 
 	waitWorkspace(t, "ws-resume", func(ws *v1alpha1.Workspace) bool {

@@ -45,6 +45,41 @@ type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, ch
 // repoFiles is the resolved name -> content map of the workspace spec.git.paths.
 type rendezvousFunc func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
 
+// memSnapshotResult is what the memory-snapshot checkpointer returns: the
+// snapshot ref (a CAS digest / snapshot id, a content pointer, never the memory
+// bytes) and the principal the snapshot is bound to (the capturing claim's
+// ServiceAccount).
+type memSnapshotResult struct {
+	Ref       string
+	Principal string
+}
+
+// checkpointMemoryFunc is the seam the claim reconciler captures a sandbox's VM
+// memory snapshot through on a checkpoint-on-terminate. The production value
+// drives the husk Checkpoint / engine CreateSnapshot path (the live-VM snapshot
+// from issue #18 4b); envtest injects a fake that returns a scripted ref +
+// principal. It is only called when the claim sets CheckpointOnTerminate. The
+// returned ref pairs with the new revision (memorySnapshotRef) and the principal
+// binds it (memorySnapshotPrincipal). A real VM-memory image is the bare-metal
+// tail; the pairing decision and the request are what this seam proves.
+type checkpointMemoryFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim) (memSnapshotResult, error)
+
+// memorySnapshotExistsFunc is the seam the controller verifies a paired memory
+// snapshot still exists through (for the resumable status and the resume
+// decision). It is principal-bound: it returns true only when a snapshot with
+// the given ref exists AND is bound to the given principal, so a GC'd snapshot
+// flips resumable false and a cross-principal ref is never resumable. The
+// production value checks the snapshot/CAS store; envtest injects a fake.
+type memorySnapshotExistsFunc func(ctx context.Context, ref, principal string) (bool, error)
+
+// resumeMemoryFunc is the seam the claim reconciler requests a memory-snapshot
+// restore through on activating a resumable head. The production value drives
+// the husk activation to load that memory image into the sandbox VM; envtest
+// injects a fake that records the ref it was asked to restore. The real
+// VM-memory restore is the KVM/bare-metal tail; the pairing decision and the
+// request are envtest-proven via this seam.
+type resumeMemoryFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error
+
 // repoFilesFunc is the seam that resolves the workspace spec.git.paths content
 // from a just-dehydrated revision manifest into a name -> content map. The
 // production value reads the files under the gitPaths prefixes from the CAS
@@ -119,6 +154,49 @@ func (r *SandboxClaimReconciler) repoFiles() repoFilesFunc {
 		return r.RepoFilesForGit
 	}
 	return r.defaultRepoFiles
+}
+
+// checkpointMemory returns the configured memory-checkpoint seam or a
+// fail-closed default. The default reports a clear, actionable error rather than
+// silently skipping the snapshot, so a checkpoint-on-terminate on a controller
+// without the node-side memory-snapshot wiring fails loud instead of producing a
+// revision falsely marked resumable.
+func (r *SandboxClaimReconciler) checkpointMemory() checkpointMemoryFunc {
+	if r.CheckpointMemory != nil {
+		return r.CheckpointMemory
+	}
+	return func(_ context.Context, claim *v1alpha1.SandboxClaim) (memSnapshotResult, error) {
+		return memSnapshotResult{}, fmt.Errorf(
+			"memory-snapshot checkpoint-on-terminate is not wired on this controller: bind CheckpointMemory (the husk Checkpoint / engine CreateSnapshot path) before setting spec.checkpointOnTerminate on claim %s",
+			claim.Name,
+		)
+	}
+}
+
+// resumeMemory returns the configured memory-restore seam or a fail-closed
+// default (see checkpointMemory for the wiring requirement).
+func (r *SandboxClaimReconciler) resumeMemory() resumeMemoryFunc {
+	if r.ResumeMemory != nil {
+		return r.ResumeMemory
+	}
+	return func(_ context.Context, claim *v1alpha1.SandboxClaim, _ string) error {
+		return fmt.Errorf(
+			"memory-snapshot resume is not wired on this controller: bind ResumeMemory (the husk activation memory-restore path) before resuming a resumable head on claim %s",
+			claim.Name,
+		)
+	}
+}
+
+// memorySnapshotExists returns the configured existence-check seam or a
+// fail-closed default that reports the snapshot is absent, so an unwired
+// controller never marks a head resumable it cannot verify.
+func (r *SandboxClaimReconciler) memorySnapshotExists() memorySnapshotExistsFunc {
+	if r.MemorySnapshotExists != nil {
+		return r.MemorySnapshotExists
+	}
+	return func(context.Context, string, string) (bool, error) {
+		return false, nil
+	}
 }
 
 // defaultHydrate is the production hydrate path. It requires the node-side
@@ -254,26 +332,28 @@ func (r *SandboxClaimReconciler) workspaceTransport(claim *v1alpha1.SandboxClaim
 // resolveWorkspaceHead loads the Workspace named by the claim's WorkspaceRef and
 // returns its head revision's ContentManifest digest. An empty workspace (no
 // committed head yet) returns an empty digest and ok=false, which the caller
-// treats as nothing to hydrate. A missing Workspace is an error.
-func (r *SandboxClaimReconciler) resolveWorkspaceHead(ctx context.Context, claim *v1alpha1.SandboxClaim) (manifest cas.Digest, headName string, ok bool, err error) {
+// treats as nothing to hydrate. A missing Workspace is an error. The head
+// revision is returned too (nil when ok is false) so the caller can read its
+// memory-snapshot pairing.
+func (r *SandboxClaimReconciler) resolveWorkspaceHead(ctx context.Context, claim *v1alpha1.SandboxClaim) (manifest cas.Digest, head *v1alpha1.WorkspaceRevision, ok bool, err error) {
 	var ws v1alpha1.Workspace
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); err != nil {
-		return "", "", false, fmt.Errorf("resolve workspace %s: %w", claim.Spec.WorkspaceRef.Name, err)
+		return "", nil, false, fmt.Errorf("resolve workspace %s: %w", claim.Spec.WorkspaceRef.Name, err)
 	}
 	if ws.Status.Head == "" {
-		return "", "", false, nil
+		return "", nil, false, nil
 	}
-	var head v1alpha1.WorkspaceRevision
-	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: ws.Status.Head}, &head); err != nil {
-		return "", "", false, fmt.Errorf("resolve workspace %s head revision %s: %w", ws.Name, ws.Status.Head, err)
+	var headRev v1alpha1.WorkspaceRevision
+	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: ws.Status.Head}, &headRev); err != nil {
+		return "", nil, false, fmt.Errorf("resolve workspace %s head revision %s: %w", ws.Name, ws.Status.Head, err)
 	}
-	d := cas.Digest(head.Spec.ContentManifest)
+	d := cas.Digest(headRev.Spec.ContentManifest)
 	if d.Validate() != nil {
 		// Head names a revision whose manifest is not a valid content address;
 		// nothing safe to hydrate.
-		return "", head.Name, false, nil
+		return "", &headRev, false, nil
 	}
-	return d, head.Name, true, nil
+	return d, &headRev, true, nil
 }
 
 // workspaceBusyClaim returns the name of an active claim (one that holds the
@@ -324,11 +404,25 @@ func (r *SandboxClaimReconciler) hydrateOnActivate(ctx context.Context, claim *v
 	}
 	logger := log.FromContext(ctx)
 
-	manifest, headName, ok, err := r.resolveWorkspaceHead(ctx, claim)
+	manifest, head, ok, err := r.resolveWorkspaceHead(ctx, claim)
 	if err != nil {
 		return err
 	}
+	headName := ""
+	if head != nil {
+		headName = head.Name
+	}
 	if ok {
+		// A resumable head (its memorySnapshotRef is set, the snapshot still
+		// exists, and the activating claim's principal matches the snapshot's
+		// principal) resumes the VM memory image PLUS the workspace content,
+		// paired. A non-resumable head (no snapshot, GC'd snapshot, or a
+		// principal mismatch) hydrates content only. The principal check is the
+		// secrets boundary: a memory image carries secrets-in-RAM and is never
+		// served across principals.
+		if err := r.maybeResumeMemory(ctx, claim, head); err != nil {
+			return err
+		}
 		if err := r.hydrate()(ctx, claim, manifest); err != nil {
 			return fmt.Errorf("hydrate workspace %s head %s into claim %s: %w", claim.Spec.WorkspaceRef.Name, headName, claim.Name, err)
 		}
@@ -342,6 +436,52 @@ func (r *SandboxClaimReconciler) hydrateOnActivate(ctx context.Context, claim *v
 	}
 	claim.Annotations[workspaceHydratedAnnotation] = headName
 	return r.Update(ctx, claim)
+}
+
+// maybeResumeMemory requests the memory-snapshot restore for a resumable head.
+// A head is resumable only when it carries a memorySnapshotRef AND the snapshot
+// still exists AND it is bound to the activating claim's principal. A
+// non-resumable head (no ref, a GC'd snapshot, or a principal mismatch) is a
+// no-op: the caller hydrates content only. A cross-principal head is REFUSED
+// (an error), never silently downgraded, so an attempt to resume another
+// principal's secrets-in-RAM is loud, not quiet.
+func (r *SandboxClaimReconciler) maybeResumeMemory(ctx context.Context, claim *v1alpha1.SandboxClaim, head *v1alpha1.WorkspaceRevision) error {
+	if head.Spec.MemorySnapshotRef == nil {
+		return nil
+	}
+	ref := *head.Spec.MemorySnapshotRef
+	logger := log.FromContext(ctx)
+
+	// Principal binding: the snapshot is served only to the principal that
+	// captured it. A mismatch is refused, not downgraded to a cold start, so the
+	// caller cannot accidentally proceed past a cross-principal denial.
+	boundPrincipal := ""
+	if head.Spec.MemorySnapshotPrincipal != nil {
+		boundPrincipal = *head.Spec.MemorySnapshotPrincipal
+	}
+	if boundPrincipal != claim.Spec.ServiceAccount {
+		return fmt.Errorf(
+			"refusing to resume workspace %s head %s: its memory snapshot is bound to a different principal; a memory image carries secrets-in-RAM and is never served across principals",
+			claim.Spec.WorkspaceRef.Name, head.Name)
+	}
+
+	// Verify the snapshot still exists (a GC'd snapshot is not resumable); the
+	// check is principal-bound too. An absent snapshot degrades to content-only
+	// hydrate (the head is simply no longer resumable), which is safe.
+	exists, err := r.memorySnapshotExists()(ctx, ref, boundPrincipal)
+	if err != nil {
+		return fmt.Errorf("verify memory snapshot for workspace %s head %s: %w", claim.Spec.WorkspaceRef.Name, head.Name, err)
+	}
+	if !exists {
+		logger.Info("head pairs a memory snapshot but it no longer exists; hydrating content only", "claim", claim.Name, "head", head.Name)
+		return nil
+	}
+
+	if err := r.resumeMemory()(ctx, claim, ref); err != nil {
+		return fmt.Errorf("resume memory snapshot for workspace %s head %s into claim %s: %w", claim.Spec.WorkspaceRef.Name, head.Name, claim.Name, err)
+	}
+	logger.Info("resumed VM memory snapshot for resumable head, paired with content hydrate", "claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "head", head.Name)
+	return nil
 }
 
 // dehydrateOnTerminate captures the claim's sandbox /workspace into a new
@@ -361,9 +501,13 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 
 	// Resolve the workspace head BEFORE this revision: it is the diff parent and
 	// the lineage tip the new revision descends from.
-	parentManifest, parentRev, _, err := r.resolveWorkspaceHead(ctx, claim)
+	parentManifest, parentHead, _, err := r.resolveWorkspaceHead(ctx, claim)
 	if err != nil {
 		return err
+	}
+	parentRev := ""
+	if parentHead != nil {
+		parentRev = parentHead.Name
 	}
 
 	// Outputs narrow the capture to the listed /workspace subtrees; no Path output
@@ -397,6 +541,29 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		}
 	}
 
+	// Checkpoint-on-terminate pairs the new revision with the sandbox's VM memory
+	// snapshot, making the workspace head resumable. The snapshot is bound to the
+	// claim's principal (its ServiceAccount): a memory image carries
+	// secrets-in-RAM and is never served across principals. A plain terminate
+	// (CheckpointOnTerminate unset) leaves both refs nil (a content-only,
+	// non-resumable revision). A checkpoint error aborts the terminate (the work
+	// is captured on retry) rather than silently producing a content-only revision.
+	var memSnapshotRef, memSnapshotPrincipal *string
+	if claim.Spec.CheckpointOnTerminate {
+		snap, cerr := r.checkpointMemory()(ctx, claim)
+		if cerr != nil {
+			return fmt.Errorf("checkpoint memory snapshot for claim %s: %w", claim.Name, cerr)
+		}
+		if snap.Ref != "" {
+			ref := snap.Ref
+			principal := snap.Principal
+			memSnapshotRef = &ref
+			memSnapshotPrincipal = &principal
+			logger.Info("captured VM memory snapshot on terminate; pairing it with the new revision",
+				"claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "principal", principal)
+		}
+	}
+
 	rev := &v1alpha1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: claim.Spec.WorkspaceRef.Name + "-",
@@ -404,9 +571,11 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 			Labels:       map[string]string{WorkspaceLabel: claim.Spec.WorkspaceRef.Name},
 		},
 		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
-			Source:          v1alpha1.RevisionSource{FromClaim: claim.Name},
-			ContentManifest: string(digest),
+			WorkspaceRef:            v1alpha1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
+			Source:                  v1alpha1.RevisionSource{FromClaim: claim.Name},
+			ContentManifest:         string(digest),
+			MemorySnapshotRef:       memSnapshotRef,
+			MemorySnapshotPrincipal: memSnapshotPrincipal,
 		},
 		Status: v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionPending},
 	}
@@ -414,6 +583,14 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		return fmt.Errorf("create workspace revision for claim %s: %w", claim.Name, err)
 	}
 	logger.Info("dehydrated sandbox workspace into a new revision", "claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "revision", rev.Name)
+
+	// Announce the new revision on the change feed: a Kubernetes Event on the
+	// revision plus, when configured, a revision.created CloudEvent to the
+	// operator webhook. The payload carries the workspace and revision NAMES, the
+	// contentManifest DIGEST, lineage, and the memorySnapshotRef pointer only; no
+	// secret values. This is how an external indexer learns of the new revision
+	// without polling.
+	r.Feed.emitRevisionCreated(ctx, rev)
 
 	// Push the workspace repo paths to any git rendezvous remote, recording the
 	// pushes for the revision status.

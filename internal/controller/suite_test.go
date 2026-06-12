@@ -15,6 +15,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/eventfeed"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,80 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+// recordingSink is the suite's fake CloudEvents sink: it records every emitted
+// event so a test can assert the feed envelope and dedupe id without a real
+// webhook. Concurrency-safe (the manager emits from reconcile goroutines).
+type recordingSink struct {
+	mu     sync.Mutex
+	events []eventfeed.Event
+}
+
+func (s *recordingSink) Emit(_ context.Context, e eventfeed.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+	return nil
+}
+
+// byType returns the recorded events of the given CloudEvent type.
+func (s *recordingSink) byType(t string) []eventfeed.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []eventfeed.Event
+	for _, e := range s.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+var (
+	// testSink records the feed CloudEvents the suite's raw claim reconciler
+	// emits, so the binding/feed tests can assert the envelope and dedupe id.
+	testSink = &recordingSink{}
+	// testEventRecorder is the suite's Kubernetes Event recorder. It is a
+	// non-blocking buffering recorder rather than record.NewFakeRecorder: the
+	// FakeRecorder's channel BLOCKS the caller once full, and the suite emits one
+	// Event per claim phase transition and per revision across every test on the
+	// reconcile path, so a bounded channel would fill and stall reconciles (the
+	// claims would time out). This recorder appends under a mutex and never
+	// blocks; waitForEvent scans its snapshot.
+	testEventRecorder = &bufferingRecorder{}
+)
+
+// bufferingRecorder is a non-blocking record.EventRecorder for the suite: it
+// accumulates formatted events ("<type> <reason> <message>") under a mutex and
+// never blocks the reconcile path. waitForEvent scans snapshot() for a match.
+type bufferingRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *bufferingRecorder) record(eventtype, reason, msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, eventtype+" "+reason+" "+msg)
+}
+
+func (r *bufferingRecorder) Event(_ runtime.Object, eventtype, reason, message string) {
+	r.record(eventtype, reason, message)
+}
+
+func (r *bufferingRecorder) Eventf(_ runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+	r.record(eventtype, reason, fmt.Sprintf(messageFmt, args...))
+}
+
+func (r *bufferingRecorder) AnnotatedEventf(_ runtime.Object, _ map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
+	r.record(eventtype, reason, fmt.Sprintf(messageFmt, args...))
+}
+
+func (r *bufferingRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
 
 var (
 	testEnv      *envtest.Environment
@@ -60,7 +135,50 @@ var (
 	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
 	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
 	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
+
+	// memSnapshotMu guards the swappable memory-snapshot pairing fakes (W4 Task
+	// 2). Tests set them via setMemSnapshot before creating their claim/workspace.
+	memSnapshotMu sync.Mutex
+	memCheckpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error)
+	memResume     func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error
+	memExists     func(ctx context.Context, ref, principal string) (bool, error)
 )
+
+// MemSnapshotResultForTest is re-exported below for the suite's swappable fake
+// signature; the real result type is unexported in the controller package.
+
+// setMemSnapshot installs the memory-snapshot pairing fakes. nil for any leaves
+// a safe default: checkpoint returns nothing captured, resume errors (so a test
+// that expects resume but forgot to install it fails), exists returns false.
+func setMemSnapshot(
+	checkpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error),
+	resume func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error,
+	exists func(ctx context.Context, ref, principal string) (bool, error),
+) {
+	memSnapshotMu.Lock()
+	defer memSnapshotMu.Unlock()
+	memCheckpoint = checkpoint
+	memResume = resume
+	memExists = exists
+}
+
+func currentMemCheckpoint() func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error) {
+	memSnapshotMu.Lock()
+	defer memSnapshotMu.Unlock()
+	return memCheckpoint
+}
+
+func currentMemResume() func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+	memSnapshotMu.Lock()
+	defer memSnapshotMu.Unlock()
+	return memResume
+}
+
+func currentMemExists() func(ctx context.Context, ref, principal string) (bool, error) {
+	memSnapshotMu.Lock()
+	defer memSnapshotMu.Unlock()
+	return memExists
+}
 
 // setWSTransfer installs the workspace hydrate/dehydrate fakes; nil restores a
 // default that fails closed so a test that forgot to set them does not silently
@@ -250,6 +368,33 @@ func TestMain(m *testing.M) {
 	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
 	// fight the husk reconciler over the same object.
 	rawClaim.SkipLabel(controller.HuskTestClaimLabel)
+	// Wire the change feed: the buffered FakeRecorder for the always-on Event
+	// mirror and the recording sink for the CloudEvents egress. A nil clock uses
+	// the wall clock; the feed tests assert the envelope, not an exact time.
+	rawClaim.SetFeedForTest(testEventRecorder, testSink, nil)
+	// Route the memory-snapshot pairing seams through the per-test swappable
+	// fakes (W4 Task 2). Safe defaults: checkpoint captures nothing, resume
+	// errors (a test that wants resume must install it), exists reports absent.
+	rawClaim.SetMemorySnapshotForTest(
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error) {
+			if fn := currentMemCheckpoint(); fn != nil {
+				return fn(ctx, claim)
+			}
+			return controller.MemSnapshotResultForTest{}, nil
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+			if fn := currentMemResume(); fn != nil {
+				return fn(ctx, claim, ref)
+			}
+			return fmt.Errorf("no memory resume fake installed")
+		},
+		func(ctx context.Context, ref, principal string) (bool, error) {
+			if fn := currentMemExists(); fn != nil {
+				return fn(ctx, ref, principal)
+			}
+			return false, nil
+		},
+	)
 	// Route the workspace hydrate/dehydrate seams through the per-test swappable
 	// fakes so the binding lifecycle is driven without a VM. A test that does not
 	// install fakes but uses a workspaceRef gets a fail-closed default.
@@ -318,9 +463,20 @@ func TestMain(m *testing.M) {
 
 	// The Workspace reconciler (W4): manages the revision DAG, retention,
 	// lineage, and head/revisions/resumable status. Core, not behind any flag.
-	if err := (&controller.WorkspaceReconciler{
+	wsReconciler := &controller.WorkspaceReconciler{
 		Client: mgr.GetClient(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	// The resumable status verifies a head's paired memory snapshot exists
+	// (principal-bound) through the same swappable fake the resume path uses, so
+	// a GC'd snapshot flips resumable false in the same test that drove the
+	// checkpoint.
+	wsReconciler.SetSnapshotExistsForTest(func(ctx context.Context, ref, principal string) (bool, error) {
+		if fn := currentMemExists(); fn != nil {
+			return fn(ctx, ref, principal)
+		}
+		return false, nil
+	})
+	if err := wsReconciler.SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
 
