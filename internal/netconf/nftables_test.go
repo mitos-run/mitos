@@ -327,3 +327,45 @@ func TestParseNameAllowListInvalid(t *testing.T) {
 		}
 	}
 }
+
+// TestParseNameAllowListWildcardAccepted asserts a well-formed single-leading
+// wildcard is parsed and keyed verbatim (lowercased, trailing dot stripped) so
+// the registry can match it with the anchored suffix rule.
+func TestParseNameAllowListWildcardAccepted(t *testing.T) {
+	names, err := ParseNameAllowList([]string{
+		"*.example.com:443",
+		"*.Example.com:8443", // same key, second port
+		"*.docs.example.com:443",
+	})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	got := names["*.example.com"]
+	if len(got) != 2 || got[0] != 443 || got[1] != 8443 {
+		t.Errorf("*.example.com ports = %v, want [443 8443]", got)
+	}
+	if docs := names["*.docs.example.com"]; len(docs) != 1 || docs[0] != 443 {
+		t.Errorf("*.docs.example.com ports = %v, want [443]", docs)
+	}
+}
+
+// TestParseNameAllowListInvalidWildcard is the boundary-validation suite: a
+// malformed wildcard must be REJECTED at the boundary, never silently treated
+// as a literal name. A valid wildcard is exactly a single leading "*." plus a
+// valid domain.
+func TestParseNameAllowListInvalidWildcard(t *testing.T) {
+	for _, s := range []string{
+		"*:443",              // bare star, no domain
+		"*.:443",             // star dot, empty domain
+		"*foo.com:443",       // star not its own label
+		"a.*.com:443",        // star not leading
+		"**.com:443",         // double star in the leading label
+		"*.*.com:443",        // two wildcard labels
+		"*.example.*:443",    // trailing wildcard label
+		"*..example.com:443", // empty label after the leading *.
+	} {
+		if _, err := ParseNameAllowList([]string{s}); err == nil {
+			t.Errorf("ParseNameAllowList(%q) expected error for malformed wildcard, got nil", s)
+		}
+	}
+}

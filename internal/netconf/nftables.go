@@ -114,6 +114,12 @@ func SplitAllowList(entries []string) (enforceable []HostPort, skipped []string,
 // enforced statically by the chain, not by the resolver). A malformed entry
 // fails the whole call. The result is the map the dnsproxy Registry.Register
 // takes; an empty map (no name entries) means the sandbox has no name egress.
+//
+// A wildcard name is permitted but is the egress boundary, so it is validated
+// here: it must be exactly a single leading "*." followed by a valid domain.
+// "*", "*.", "*foo.com", "a.*.com", "**.com", and any name with more than one
+// "*" are REJECTED rather than silently treated as a literal name. A rejected
+// wildcard fails the whole call with a clear error.
 func ParseNameAllowList(entries []string) (map[string][]int, error) {
 	names := make(map[string][]int)
 	seen := make(map[string]map[int]bool)
@@ -136,6 +142,9 @@ func ParseNameAllowList(entries []string) (map[string][]int, error) {
 			// An IP:port entry: enforced statically by the chain, not the resolver.
 			continue
 		}
+		if verr := validateNameAllowEntry(host); verr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: %w", e, verr)
+		}
 		key := strings.ToLower(strings.TrimSuffix(host, "."))
 		if seen[key] == nil {
 			seen[key] = make(map[int]bool)
@@ -149,6 +158,79 @@ func ParseNameAllowList(entries []string) (map[string][]int, error) {
 		sort.Ints(ports)
 	}
 	return names, nil
+}
+
+// validateNameAllowEntry validates a DNS-name allow entry (host part, no port)
+// at the egress boundary. A wildcard is the security-critical case: it must be
+// exactly a single leading "*." plus a valid domain. The check runs on the
+// trailing-dot-stripped host; a "*" anywhere except as the entire first label
+// is rejected. A non-wildcard name must be a valid domain.
+func validateNameAllowEntry(host string) error {
+	name := strings.TrimSuffix(host, ".")
+	if name == "" {
+		return fmt.Errorf("empty name")
+	}
+	if strings.HasPrefix(name, "*.") {
+		domain := strings.TrimPrefix(name, "*.")
+		if strings.Contains(domain, "*") {
+			return fmt.Errorf("wildcard must be a single leading %q label", "*.")
+		}
+		if !isValidDomain(domain) {
+			return fmt.Errorf("wildcard %q must be %q followed by a valid domain", name, "*.")
+		}
+		return nil
+	}
+	if strings.Contains(name, "*") {
+		return fmt.Errorf("a wildcard must be exactly a single leading %q label, got %q", "*.", name)
+	}
+	if !isValidDomain(name) {
+		return fmt.Errorf("invalid domain %q", name)
+	}
+	return nil
+}
+
+// isValidDomain reports whether s is a syntactically valid DNS domain: at least
+// two dot-separated labels, each label non-empty, no embedded "*", and only
+// letters, digits, and hyphens with no leading or trailing hyphen per label.
+// This is a deliberately conservative syntax check, not a registry lookup.
+func isValidDomain(s string) bool {
+	if s == "" {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if !isValidLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidLabel reports whether label is a valid DNS label: non-empty, no longer
+// than 63 octets, alphanumeric or hyphen, and not starting or ending with a
+// hyphen.
+func isValidLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // RenderSharedTable renders the idempotent skeleton every sandbox shares: one
