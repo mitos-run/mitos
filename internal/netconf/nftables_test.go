@@ -232,11 +232,55 @@ func TestRenderSandboxChainDynamicSet(t *testing.T) {
 	if dynAccept >= finalVerdict {
 		t.Errorf("dynamic accept must come before the final verdict\n%s", out)
 	}
-	// Every accept (including the dynamic one) must be saddr-pinned.
+	// Every v4 accept (including the dynamic one) must be saddr-pinned. The v6
+	// rules are deliberately not saddr-pinned: the guest has no v6 source address
+	// to anti-spoof against, and the v6 default-deny is the boundary there.
 	for _, l := range lines {
-		if strings.HasPrefix(l, rulePrefix) && !strings.Contains(l, "ip saddr 10.200.0.2") {
-			t.Errorf("rule not saddr-pinned: %q", l)
+		if !strings.HasPrefix(l, rulePrefix) {
+			continue
 		}
+		if strings.Contains(l, "ip6 ") || strings.Contains(l, "meta nfproto ipv6") {
+			continue
+		}
+		if !strings.Contains(l, "ip saddr 10.200.0.2") {
+			t.Errorf("v4 rule not saddr-pinned: %q", l)
+		}
+	}
+}
+
+// TestRenderSandboxChainV6DynamicSet asserts the per-sandbox chain declares a
+// SEPARATE v6 dynamic allow set (ipv6_addr . inet_service) and accepts traffic
+// whose (ip6 daddr . tcp dport) is present in it, and that the chain ends with
+// a v6 default-deny so any unpinned v6 destination is dropped under EgressDeny.
+func TestRenderSandboxChainV6DynamicSet(t *testing.T) {
+	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
+		v1alpha1.EgressDeny, nil, net.ParseIP("10.200.0.1"))
+
+	table := SharedTableName()
+	set6 := SandboxAllowSet6Name("sbabcd1234")
+
+	setDecl := "add set inet " + table + " " + set6 + " { type ipv6_addr . inet_service ; flags timeout ; }"
+	if !strings.Contains(out, setDecl) {
+		t.Errorf("missing v6 dynamic set declaration %q\n---\n%s", setDecl, out)
+	}
+	acceptRule := "ip6 daddr . tcp dport @" + set6 + " accept"
+	if !strings.Contains(out, acceptRule) {
+		t.Errorf("missing v6 dynamic set accept rule %q\n---\n%s", acceptRule, out)
+	}
+	// v6 default-deny: an unpinned v6 destination is dropped.
+	v6Drop := "meta nfproto ipv6 drop"
+	if !strings.Contains(out, v6Drop) {
+		t.Errorf("missing v6 default-deny %q\n---\n%s", v6Drop, out)
+	}
+}
+
+// TestRenderSandboxChainV6AllowPolicy asserts that under EgressAllow the v6
+// final verdict is accept, mirroring v4, so a permissive sandbox is not boxed
+// in on v6 either.
+func TestRenderSandboxChainV6AllowPolicy(t *testing.T) {
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressAllow, nil, nil)
+	if !strings.Contains(out, "meta nfproto ipv6 accept") {
+		t.Errorf("EgressAllow chain must end its v6 path in accept\n%s", out)
 	}
 }
 
@@ -324,6 +368,48 @@ func TestParseNameAllowListInvalid(t *testing.T) {
 	for _, s := range []string{"api.example.com", "api.example.com:0", "api.example.com:bad", ":443"} {
 		if _, err := ParseNameAllowList([]string{s}); err == nil {
 			t.Errorf("ParseNameAllowList(%q) expected error, got nil", s)
+		}
+	}
+}
+
+// TestParseNameAllowListWildcardAccepted asserts a well-formed single-leading
+// wildcard is parsed and keyed verbatim (lowercased, trailing dot stripped) so
+// the registry can match it with the anchored suffix rule.
+func TestParseNameAllowListWildcardAccepted(t *testing.T) {
+	names, err := ParseNameAllowList([]string{
+		"*.example.com:443",
+		"*.Example.com:8443", // same key, second port
+		"*.docs.example.com:443",
+	})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	got := names["*.example.com"]
+	if len(got) != 2 || got[0] != 443 || got[1] != 8443 {
+		t.Errorf("*.example.com ports = %v, want [443 8443]", got)
+	}
+	if docs := names["*.docs.example.com"]; len(docs) != 1 || docs[0] != 443 {
+		t.Errorf("*.docs.example.com ports = %v, want [443]", docs)
+	}
+}
+
+// TestParseNameAllowListInvalidWildcard is the boundary-validation suite: a
+// malformed wildcard must be REJECTED at the boundary, never silently treated
+// as a literal name. A valid wildcard is exactly a single leading "*." plus a
+// valid domain.
+func TestParseNameAllowListInvalidWildcard(t *testing.T) {
+	for _, s := range []string{
+		"*:443",              // bare star, no domain
+		"*.:443",             // star dot, empty domain
+		"*foo.com:443",       // star not its own label
+		"a.*.com:443",        // star not leading
+		"**.com:443",         // double star in the leading label
+		"*.*.com:443",        // two wildcard labels
+		"*.example.*:443",    // trailing wildcard label
+		"*..example.com:443", // empty label after the leading *.
+	} {
+		if _, err := ParseNameAllowList([]string{s}); err == nil {
+			t.Errorf("ParseNameAllowList(%q) expected error for malformed wildcard, got nil", s)
 		}
 	}
 }

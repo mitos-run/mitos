@@ -57,6 +57,15 @@ func SandboxAllowSetName(tap string) string {
 	return "sb_" + tap + "_dyn"
 }
 
+// SandboxAllowSet6Name returns the per-sandbox dynamic IPv6 allow set name for a
+// tap. It mirrors SandboxAllowSetName but holds (ipv6_addr . inet_service)
+// elements: the DNS proxy pins resolved AAAA addresses here so a name's IPv6
+// address is reachable for its TTL, just as A addresses are pinned into the v4
+// set. It is named distinctly from the v4 set so the two coexist in one chain.
+func SandboxAllowSet6Name(tap string) string {
+	return "sb_" + tap + "_dyn6"
+}
+
 // ParseAllowEntry parses a single allowlist entry of the form host:port. When
 // host is a literal IPv4 address it returns the HostPort and isName=false.
 // When host is a DNS name it returns isName=true (these cannot be enforced in
@@ -114,6 +123,12 @@ func SplitAllowList(entries []string) (enforceable []HostPort, skipped []string,
 // enforced statically by the chain, not by the resolver). A malformed entry
 // fails the whole call. The result is the map the dnsproxy Registry.Register
 // takes; an empty map (no name entries) means the sandbox has no name egress.
+//
+// A wildcard name is permitted but is the egress boundary, so it is validated
+// here: it must be exactly a single leading "*." followed by a valid domain.
+// "*", "*.", "*foo.com", "a.*.com", "**.com", and any name with more than one
+// "*" are REJECTED rather than silently treated as a literal name. A rejected
+// wildcard fails the whole call with a clear error.
 func ParseNameAllowList(entries []string) (map[string][]int, error) {
 	names := make(map[string][]int)
 	seen := make(map[string]map[int]bool)
@@ -136,6 +151,9 @@ func ParseNameAllowList(entries []string) (map[string][]int, error) {
 			// An IP:port entry: enforced statically by the chain, not the resolver.
 			continue
 		}
+		if verr := validateNameAllowEntry(host); verr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: %w", e, verr)
+		}
 		key := strings.ToLower(strings.TrimSuffix(host, "."))
 		if seen[key] == nil {
 			seen[key] = make(map[int]bool)
@@ -149,6 +167,79 @@ func ParseNameAllowList(entries []string) (map[string][]int, error) {
 		sort.Ints(ports)
 	}
 	return names, nil
+}
+
+// validateNameAllowEntry validates a DNS-name allow entry (host part, no port)
+// at the egress boundary. A wildcard is the security-critical case: it must be
+// exactly a single leading "*." plus a valid domain. The check runs on the
+// trailing-dot-stripped host; a "*" anywhere except as the entire first label
+// is rejected. A non-wildcard name must be a valid domain.
+func validateNameAllowEntry(host string) error {
+	name := strings.TrimSuffix(host, ".")
+	if name == "" {
+		return fmt.Errorf("empty name")
+	}
+	if strings.HasPrefix(name, "*.") {
+		domain := strings.TrimPrefix(name, "*.")
+		if strings.Contains(domain, "*") {
+			return fmt.Errorf("wildcard must be a single leading %q label", "*.")
+		}
+		if !isValidDomain(domain) {
+			return fmt.Errorf("wildcard %q must be %q followed by a valid domain", name, "*.")
+		}
+		return nil
+	}
+	if strings.Contains(name, "*") {
+		return fmt.Errorf("a wildcard must be exactly a single leading %q label, got %q", "*.", name)
+	}
+	if !isValidDomain(name) {
+		return fmt.Errorf("invalid domain %q", name)
+	}
+	return nil
+}
+
+// isValidDomain reports whether s is a syntactically valid DNS domain: at least
+// two dot-separated labels, each label non-empty, no embedded "*", and only
+// letters, digits, and hyphens with no leading or trailing hyphen per label.
+// This is a deliberately conservative syntax check, not a registry lookup.
+func isValidDomain(s string) bool {
+	if s == "" {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if !isValidLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidLabel reports whether label is a valid DNS label: non-empty, no longer
+// than 63 octets, alphanumeric or hyphen, and not starting or ending with a
+// hyphen.
+func isValidLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // RenderSharedTable renders the idempotent skeleton every sandbox shares: one
@@ -243,6 +334,17 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service ; flags timeout ; }\n", table, set)
 	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr . tcp dport @%s accept\n", table, chain, saddr, set)
 
+	// IPv6 dynamic allow set: the DNS proxy pins resolved AAAA addresses here
+	// with a timeout, mirroring the v4 set. Accept v6 traffic whose
+	// (ip6 daddr . tcp dport) is currently present. The accept is NOT saddr
+	// pinned: the guest is assigned only a v4 /30 source identity today, so there
+	// is no v6 source address to anti-spoof against; the v6 default-deny below is
+	// the boundary. The set is declared before its accept so the reference
+	// resolves.
+	set6 := SandboxAllowSet6Name(tap)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . inet_service ; flags timeout ; }\n", table, set6)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s accept\n", table, chain, set6)
+
 	// Final verdict for this sandbox's packets: drop under EgressDeny, accept
 	// under EgressAllow. Terminal within this regular chain for this packet
 	// only, so it cannot affect other taps' chains.
@@ -251,6 +353,12 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 		final = "accept"
 	}
 	fmt.Fprintf(&b, "add rule inet %s %s %s %s\n", table, chain, saddr, final)
+	// v6 final verdict, scoped to the v6 family so it cannot disturb the v4
+	// saddr-pinned verdict above. Under EgressDeny this is the v6 default-deny:
+	// any v6 destination not present in the v6 pin set is dropped, so v6 egress
+	// is enforced and not silently permitted by fall-through to the base chain's
+	// accept policy.
+	fmt.Fprintf(&b, "add rule inet %s %s meta nfproto ipv6 %s\n", table, chain, final)
 
 	// Dispatch element: route this tap into the chain. Delete is by key on
 	// teardown, so no rule handles are tracked.
