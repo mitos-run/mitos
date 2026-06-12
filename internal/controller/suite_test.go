@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -62,10 +61,47 @@ var (
 	// testSink records the feed CloudEvents the suite's raw claim reconciler
 	// emits, so the binding/feed tests can assert the envelope and dedupe id.
 	testSink = &recordingSink{}
-	// testEventRecorder is the suite's Kubernetes Event recorder; a buffered
-	// FakeRecorder so a test can assert the always-on Event mirror.
-	testEventRecorder = record.NewFakeRecorder(128)
+	// testEventRecorder is the suite's Kubernetes Event recorder. It is a
+	// non-blocking buffering recorder rather than record.NewFakeRecorder: the
+	// FakeRecorder's channel BLOCKS the caller once full, and the suite emits one
+	// Event per claim phase transition and per revision across every test on the
+	// reconcile path, so a bounded channel would fill and stall reconciles (the
+	// claims would time out). This recorder appends under a mutex and never
+	// blocks; waitForEvent scans its snapshot.
+	testEventRecorder = &bufferingRecorder{}
 )
+
+// bufferingRecorder is a non-blocking record.EventRecorder for the suite: it
+// accumulates formatted events ("<type> <reason> <message>") under a mutex and
+// never blocks the reconcile path. waitForEvent scans snapshot() for a match.
+type bufferingRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *bufferingRecorder) record(eventtype, reason, msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, eventtype+" "+reason+" "+msg)
+}
+
+func (r *bufferingRecorder) Event(_ runtime.Object, eventtype, reason, message string) {
+	r.record(eventtype, reason, message)
+}
+
+func (r *bufferingRecorder) Eventf(_ runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+	r.record(eventtype, reason, fmt.Sprintf(messageFmt, args...))
+}
+
+func (r *bufferingRecorder) AnnotatedEventf(_ runtime.Object, _ map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
+	r.record(eventtype, reason, fmt.Sprintf(messageFmt, args...))
+}
+
+func (r *bufferingRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
 
 var (
 	testEnv      *envtest.Environment

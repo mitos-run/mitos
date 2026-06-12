@@ -141,13 +141,12 @@ func waitForEvent(t *testing.T, reason, contains string) bool {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		select {
-		case line := <-testEventRecorder.Events:
+		for _, line := range testEventRecorder.snapshot() {
 			if strings.Contains(line, reason) && strings.Contains(line, contains) {
 				return true
 			}
-		case <-time.After(150 * time.Millisecond):
 		}
+		time.Sleep(150 * time.Millisecond)
 	}
 	return false
 }
