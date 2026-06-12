@@ -30,6 +30,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
+// TraceIDAnnotationsForTest exposes traceIDAnnotations to the external
+// controller_test package so the trace-id stamp omit branch (tracing off ->
+// nil, no fake id) can be unit-tested deterministically without the OTel global
+// provider one-time-delegate gotcha.
+func TraceIDAnnotationsForTest(ctx context.Context) map[string]string {
+	return traceIDAnnotations(ctx)
+}
+
 // BuildHuskPodForTest exposes buildHuskPod to the external controller_test
 // package so the husk pod spec can be unit-tested.
 func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
@@ -69,6 +77,14 @@ func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context,
 // mirror and the CloudEvents emit without a real webhook or wall clock.
 func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, sink eventfeed.Sink, clock func() time.Time) {
 	r.Feed = NewEmitFeed(recorder, sink, clock)
+}
+
+// EmitRevisionCreatedForTest exposes emitRevisionCreated to the external
+// controller_test package so the revision.created payload mapping (including the
+// agentrun.dev/trace-id annotation -> TraceID correlation field) can be
+// unit-tested directly against a recording sink, without a full reconcile.
+func EmitRevisionCreatedForTest(recorder record.EventRecorder, sink eventfeed.Sink, rev *v1alpha1.WorkspaceRevision) {
+	NewEmitFeed(recorder, sink, nil).emitRevisionCreated(context.Background(), rev)
 }
 
 // SetCheckpointForTest injects a fake live-VM checkpointer (the drain seam).

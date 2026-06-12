@@ -56,11 +56,43 @@ forkd      --otlp-endpoint=otel-collector:4317
 The endpoint is a `host:port` for an OTLP gRPC receiver. An empty value disables
 tracing.
 
+### Trace-to-revision link
+
+When a claim terminates with a bound workspace, the dehydrate path captures the
+sandbox `/workspace` into a new WorkspaceRevision. That capture is a child span
+and the reconcile trace id is carried onto the revision, so a committed revision
+resolves to the exact orchestrator request that produced it, and the reverse:
+
+```
+controller.reconcileClaim         (controller)
+  workspace.dehydrate             (controller, on terminate)
+```
+
+- `workspace.dehydrate` opens when `dehydrateOnTerminate` runs, as a child of
+  `controller.reconcileClaim` (same trace id). Attributes: `workspace.name`,
+  `revision.name`, `content.manifest.digest` (the contentManifest digest, a
+  content address), `captured.path.count`, and `memory.snapshot.paired` (a
+  bool). Names, a digest, a count, and a bool only; no secret value.
+- The active reconcile trace id is stamped on the new revision as the
+  `agentrun.dev/trace-id` annotation BEFORE the revision is created, but only
+  when tracing is enabled (the trace id is valid). With tracing off (the no-op
+  provider) the annotation is omitted: a fake all-zero id is never written.
+- The same trace id rides the `revision.created` feed CloudEvent as its
+  `traceId` field (read from the annotation, empty when absent), so an external
+  indexer correlates the revision event with the orchestrator trace without
+  polling and without a secret. See the Audit/feed surface and `internal/eventfeed`.
+
+This links the CONTROL-plane trace to the revision. The guest-side first-exec
+and guest-ready spans (the in-VM telemetry tail) are the remaining piece; see
+OPEN.
+
 ### Secret safety
 
 Spans carry only ids (claim name/namespace, pool, node, snapshot id, sandbox
-id), counts, and timings. No span attribute carries a secret value, env value,
-file content, or token.
+id, workspace and revision names, the contentManifest digest), counts, and
+timings. The `agentrun.dev/trace-id` annotation and the feed `traceId` field
+are opaque correlation ids, not secrets. No span attribute, annotation, or feed
+field carries a secret value, env value, file content, or token.
 
 ### PROVEN
 
@@ -69,13 +101,22 @@ file content, or token.
   span tests).
 - Cross-process trace-id propagation over gRPC is asserted: a server span shares
   the client span's trace id.
+- The trace-to-revision link is asserted in CI: the reconcile trace id is
+  stamped on the WorkspaceRevision (`agentrun.dev/trace-id`) and equals the
+  `workspace.dehydrate` span's trace id, the span is a child of the reconcile
+  span with the expected attributes and no secret values, the annotation is
+  omitted when tracing is off, and the `revision.created` feed event carries the
+  trace id (empty when absent).
 
 ### OPEN
 
-- The guest-telemetry vsock bridge (cpu steal, balloon pressure, in-guest
-  process table) is not yet wired; see issue #29.
-- A single trace id stamped across the pod, its logs, Hubble flows, and
-  Workspace revisions needs husk pods (#18) and the Workspace (#21).
+- The guest-side first-exec and guest-ready spans (the in-VM telemetry bridge
+  over vsock: cpu steal, balloon pressure, in-guest process table) are the
+  bare-metal tail and are not yet wired; see issue #29.
+- A single trace id stamped across Hubble network flows needs the Cilium/Hubble
+  integration.
+- Grafana dashboards and PrometheusRule alerts that pivot on the trace id are a
+  1.0 maturity item (#29).
 
 ## Audit log
 

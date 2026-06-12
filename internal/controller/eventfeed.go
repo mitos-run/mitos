@@ -83,6 +83,10 @@ func (f emitFeed) emitRevisionCreated(ctx context.Context, rev *v1alpha1.Workspa
 		ContentManifest:   rev.Spec.ContentManifest,
 		Lineage:           revisionLineage(rev),
 		MemorySnapshotRef: memRef,
+		// Carry the revision's stamped trace id (empty when absent) so an indexer
+		// correlates this event with the orchestrator trace. A correlation id, not
+		// a secret.
+		TraceID: rev.Annotations[traceIDAnnotation],
 	}
 
 	// The always-on channel: a Kubernetes Event on the revision object. The

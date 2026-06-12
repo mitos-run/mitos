@@ -63,6 +63,12 @@ type RevisionCreatedData struct {
 	// with (a CAS digest / snapshot id), making the head resumable. A pointer,
 	// not the snapshot bytes; never a secret value.
 	MemorySnapshotRef string `json:"memorySnapshotRef,omitempty"`
+	// TraceID, when set, is the orchestrator trace that produced the revision
+	// (the controller.reconcileClaim trace, stamped on the revision as the
+	// agentrun.dev/trace-id annotation). It lets an external indexer correlate
+	// the revision.created event with the request trace. An opaque correlation
+	// id, never a secret value; empty when tracing was disabled.
+	TraceID string `json:"traceId,omitempty"`
 }
 
 // PhaseChangedData is the typed payload of a sandbox.phase.changed event. It
