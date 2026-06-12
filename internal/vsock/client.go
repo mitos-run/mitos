@@ -16,7 +16,7 @@ type Client struct {
 
 func newClient(conn net.Conn) *Client {
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
 	return &Client{conn: conn, scanner: scanner}
 }
 
@@ -36,7 +36,7 @@ func Connect(udsPath string, guestPort int) (*Client, error) {
 	}
 
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
 	if scanner.Scan() {
 		resp := scanner.Text()
 		if len(resp) < 2 || resp[:2] != "OK" {
@@ -203,5 +203,37 @@ func (c *Client) Mkdir(path string) error {
 
 func (c *Client) Remove(path string) error {
 	_, err := c.send(&Request{Type: TypeRemove, Remove: &RemoveRequest{Path: path}})
+	return err
+}
+
+// TarDir asks the guest agent to tar the directory at path and returns the tar
+// bytes. The guest restricts path to the workspace-transfer allowlist and bounds
+// the tar to MaxTarBytes. This is the host half of the bulk workspace dehydrate.
+func (c *Client) TarDir(path string) ([]byte, error) {
+	resp, err := c.send(&Request{
+		Type:   TypeTarDir,
+		TarDir: &TarDirRequest{Path: path},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.TarDir == nil {
+		return nil, fmt.Errorf("tar_dir: empty response")
+	}
+	return resp.TarDir.Tar, nil
+}
+
+// UntarDir asks the guest agent to extract tar into the directory at path. The
+// caller must keep tar within MaxTarBytes (this is the size the guest accepts and
+// the line buffer holds). The guest sanitizes every member against traversal.
+// This is the host half of the bulk workspace hydrate.
+func (c *Client) UntarDir(path string, tar []byte) error {
+	if len(tar) > MaxTarBytes {
+		return fmt.Errorf("untar_dir: tar size %d exceeds max %d", len(tar), MaxTarBytes)
+	}
+	_, err := c.send(&Request{
+		Type:     TypeUntarDir,
+		UntarDir: &UntarDirRequest{Path: path, Tar: tar},
+	})
 	return err
 }

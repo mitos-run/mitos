@@ -344,3 +344,70 @@ func TestConfigure(t *testing.T) {
 		t.Fatalf("agent saw %+v", got)
 	}
 }
+
+func TestTarDirClient(t *testing.T) {
+	var gotPath string
+	want := []byte("fake-tar-bytes")
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type != TypeTarDir || req.TarDir == nil {
+			return Response{OK: false, Error: "unexpected type"}
+		}
+		gotPath = req.TarDir.Path
+		return Response{OK: true, TarDir: &TarDirResponse{Tar: want}}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	got, err := client.TarDir("/workspace")
+	if err != nil {
+		t.Fatalf("TarDir: %v", err)
+	}
+	if gotPath != "/workspace" {
+		t.Fatalf("agent saw path %q", gotPath)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("TarDir returned %q, want %q", got, want)
+	}
+}
+
+func TestUntarDirClient(t *testing.T) {
+	var gotPath string
+	var gotTar []byte
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type != TypeUntarDir || req.UntarDir == nil {
+			return Response{OK: false, Error: "unexpected type"}
+		}
+		gotPath = req.UntarDir.Path
+		gotTar = req.UntarDir.Tar
+		return Response{OK: true}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	payload := []byte("tar-payload")
+	if err := client.UntarDir("/workspace", payload); err != nil {
+		t.Fatalf("UntarDir: %v", err)
+	}
+	if gotPath != "/workspace" {
+		t.Fatalf("agent saw path %q", gotPath)
+	}
+	if !bytes.Equal(gotTar, payload) {
+		t.Fatalf("agent saw tar %q, want %q", gotTar, payload)
+	}
+}
+
+func TestUntarDirClientRejectsOversize(t *testing.T) {
+	client := &Client{}
+	err := client.UntarDir("/workspace", make([]byte, MaxTarBytes+1))
+	if err == nil {
+		t.Fatal("UntarDir accepted an oversize tar; want rejection")
+	}
+}
