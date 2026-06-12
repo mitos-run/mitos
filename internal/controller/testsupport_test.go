@@ -98,6 +98,36 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	r.RepoFilesForGit = repoFiles
 }
 
+// MemSnapshotResultForTest is the exported alias of the unexported
+// memSnapshotResult so the external controller_test package can name the
+// checkpoint fake's return type.
+type MemSnapshotResultForTest = memSnapshotResult
+
+// NewMemSnapshotResult builds a MemSnapshotResultForTest for tests.
+func NewMemSnapshotResult(ref, principal string) MemSnapshotResultForTest {
+	return memSnapshotResult{Ref: ref, Principal: principal}
+}
+
+// SetMemorySnapshotForTest injects the memory-snapshot pairing seams (W4 Task
+// 2): the checkpoint-on-terminate capture, the resume-on-activate restore, and
+// the principal-bound existence check. envtest drives the pairing decision and
+// the resume/hydrate request without a real VM.
+func (r *SandboxClaimReconciler) SetMemorySnapshotForTest(
+	checkpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (MemSnapshotResultForTest, error),
+	resume func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error,
+	exists func(ctx context.Context, ref, principal string) (bool, error),
+) {
+	r.CheckpointMemory = checkpoint
+	r.ResumeMemory = resume
+	r.MemorySnapshotExists = exists
+}
+
+// SetSnapshotExistsForTest injects the workspace reconciler's resumable
+// existence check so a test can flip a head's snapshot present/absent.
+func (r *WorkspaceReconciler) SetSnapshotExistsForTest(exists func(ctx context.Context, ref, principal string) (bool, error)) {
+	r.SnapshotExists = exists
+}
+
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test
 // package so the PDB create-or-update can be envtested directly.
 func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *v1alpha1.SandboxPool) error {

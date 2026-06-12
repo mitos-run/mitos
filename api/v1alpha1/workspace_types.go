@@ -161,6 +161,15 @@ type WorkspaceRevisionSpec struct {
 	// revision resumable. Principal-bound per the secrets policy.
 	// +optional
 	MemorySnapshotRef *string `json:"memorySnapshotRef,omitempty"`
+
+	// MemorySnapshotPrincipal is the principal (the capturing claim's
+	// ServiceAccount) the paired memory snapshot is bound to. A memory snapshot
+	// carries secrets-in-RAM, so it is never served across principals: a resume
+	// loads the memory image only when the activating claim's principal matches
+	// this value. Set together with MemorySnapshotRef; nil for a content-only
+	// revision.
+	// +optional
+	MemorySnapshotPrincipal *string `json:"memorySnapshotPrincipal,omitempty"`
 }
 
 type RevisionSource struct {

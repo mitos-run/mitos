@@ -126,6 +126,16 @@ type SandboxClaimReconciler struct {
 	// store-backed path; envtest injects a fake.
 	RepoFilesForGit repoFilesFunc
 
+	// CheckpointMemory captures the sandbox VM memory snapshot on a
+	// checkpoint-on-terminate (W4 Task 2), pairing it with the new revision.
+	// ResumeMemory requests the memory-snapshot restore on activating a resumable
+	// head. MemorySnapshotExists verifies a paired snapshot still exists and is
+	// principal-bound (for the resumable status and the resume decision). Nil
+	// defaults to a fail-closed real path; envtest injects fakes.
+	CheckpointMemory     checkpointMemoryFunc
+	ResumeMemory         resumeMemoryFunc
+	MemorySnapshotExists memorySnapshotExistsFunc
+
 	// eventFilter optionally restricts which claims this reconciler watches. Nil
 	// watches all claims (the production default: a deployment runs exactly one
 	// claim reconciler, husk or raw). It exists so a test harness can run a raw
