@@ -163,9 +163,18 @@ activate before loading, so a tampered-on-disk or incompatible snapshot is
 refused at activate time on the husk path; and (c) it is a
 BASE IMAGE, not tenant data: tenant secrets are delivered post-restore over the
 control channel (surface 2), never baked into the shared snapshot (section 6).
-Cross-pod isolation of the mount is the read-only property, not a per-pod copy;
-fully pod-native snapshot delivery (a CAS pull into the pod, removing the shared
-hostPath) is a documented follow-up.
+Cross-pod isolation of the snapshot mem/vmstate is the read-only property, not a
+per-pod copy. The ROOTFS, by contrast, is no longer shared read-write: each
+activation gets its OWN copy-on-write clone of the template rootfs
+(`internal/husk` `Stub.Prepare` reflink-clones `<dataDir>/templates/<id>/rootfs.ext4`
+to a per-pod file under the writable `<dataDir>/husk-rootfs` hostPath, and
+`Stub.Activate` rebinds the snapshot's baked `rootfs` drive to that clone with
+`PatchDrive` after load), so concurrent activations of one template never write
+through to a single shared rootfs or leak one tenant's filesystem state into
+another. This closes the prior residual where the template dir (including the
+rootfs) was mounted read-write and shared. The clone is removed on pod teardown
+(`Stub.Close`). Fully pod-native snapshot delivery (a CAS pull into the pod,
+removing the shared read-only mem/vmstate hostPath) remains a documented follow-up.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
