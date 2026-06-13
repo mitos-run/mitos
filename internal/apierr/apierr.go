@@ -82,6 +82,12 @@ var Catalogue = map[string]Error{
 		Remediation: "Confirm the sandbox id exists and is Ready before calling.",
 		Status:      http.StatusNotFound,
 	},
+	"too_many_streams": {
+		Code:        "too_many_streams",
+		Message:     "the sandbox is at its concurrent-stream limit",
+		Remediation: "Close an existing streaming exec, run_code, or PTY session for this sandbox before opening another, or raise the forkd --max-streams-per-sandbox ceiling. Existing streams are unaffected.",
+		Status:      http.StatusTooManyRequests,
+	},
 	"exec_failed": {
 		Code:        "exec_failed",
 		Message:     "the command could not be executed in the sandbox",

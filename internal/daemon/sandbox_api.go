@@ -46,6 +46,21 @@ type SandboxAPI struct {
 	// NopAuditor (auditing off); set via SetAuditor. It only ever sees safe
 	// summaries (command, path, byte count): never file content or secrets.
 	auditor Auditor
+
+	// maxStreams is the per-sandbox ceiling on concurrent OPEN streams
+	// (production-blocker #2, cap 3). Each streaming exec, run_code, and PTY
+	// holds a dedicated vsock connection plus host goroutines for the command
+	// lifetime; without a cap a single tenant could open unbounded streams and
+	// exhaust host vsock connections and goroutines. acquireStream enforces it at
+	// stream OPEN (off the activate path); a NEW stream over the cap is rejected
+	// with 429, existing streams are never killed. Zero or negative disables the
+	// cap (unbounded, the prior behavior). Set via SetMaxStreamsPerSandbox.
+	maxStreams int
+	// openStreams counts the currently OPEN streams per sandbox id, guarded by
+	// mu. acquireStream increments on open and the returned release decrements on
+	// close, deleting the entry at zero so the map does not grow across sandbox
+	// lifetimes.
+	openStreams map[string]int
 }
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
@@ -57,7 +72,51 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		lastActivity: make(map[string]time.Time),
 		now:          time.Now,
 		auditor:      NopAuditor{},
+		openStreams:  make(map[string]int),
 	}
+}
+
+// SetMaxStreamsPerSandbox sets the per-sandbox ceiling on concurrent OPEN
+// streams (streaming exec, run_code, PTY). A NEW stream opened while a sandbox
+// is already at the cap is rejected with 429; existing streams are never
+// killed. n<=0 disables the cap (unbounded). Must be called before the API
+// serves requests; the field is not synchronized.
+func (api *SandboxAPI) SetMaxStreamsPerSandbox(n int) {
+	api.maxStreams = n
+}
+
+// acquireStream reserves one concurrent-stream slot for sandboxID, enforcing the
+// per-sandbox cap (production-blocker #2, cap 3). It returns a release func and
+// true when admitted; the caller MUST call release exactly once (defer) when the
+// stream closes. It returns false when the sandbox is already at the cap, in
+// which case the caller must reject the NEW stream and never call release. The
+// cap is checked here, at stream OPEN, before the dedicated vsock connection is
+// dialed; it is a single map lookup under mu and never touches the activate or
+// fork hot path. maxStreams<=0 disables the cap.
+func (api *SandboxAPI) acquireStream(sandboxID string) (release func(), ok bool) {
+	if api.maxStreams <= 0 {
+		return func() {}, true
+	}
+	api.mu.Lock()
+	if api.openStreams[sandboxID] >= api.maxStreams {
+		api.mu.Unlock()
+		return nil, false
+	}
+	api.openStreams[sandboxID]++
+	api.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			api.mu.Lock()
+			if n := api.openStreams[sandboxID] - 1; n > 0 {
+				api.openStreams[sandboxID] = n
+			} else {
+				delete(api.openStreams, sandboxID)
+			}
+			api.mu.Unlock()
+		})
+	}, true
 }
 
 // SetAuditor installs the auditor that records a structured event after each
@@ -429,6 +488,17 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): reject a
+	// NEW stream when the sandbox is already at the cap, BEFORE writing the 200
+	// header or dialing the dedicated vsock connection. Existing streams are
+	// never touched. Checked at OPEN, off the activate path.
+	release, ok := api.acquireStream(req.Sandbox)
+	if !ok {
+		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		return
+	}
+	defer release()
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
@@ -507,6 +577,17 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 		writeErr(w, err.Error(), 404)
 		return
 	}
+
+	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): a run_code
+	// stream holds a dedicated vsock connection for the command lifetime, so it
+	// counts against the same per-sandbox ceiling. Reject a NEW one over the cap
+	// before writing the 200 header; existing streams are never touched.
+	release, ok := api.acquireStream(req.Sandbox)
+	if !ok {
+		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		return
+	}
+	defer release()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
