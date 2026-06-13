@@ -42,7 +42,7 @@ Two ways to run it:
 ## Features
 
 **Fast**
-- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; fork->first-exec is measured reproducibly in CI (shared-runner-class, see [BENCHMARKS.md](BENCHMARKS.md)). A first bare-metal reference run (Hetzner dedicated i7-6700, Talos KVM, Firecracker v1.15) measured **~6-16 ms snapshot restore**, a **~27 ms warm-claim activate with the integrity gate enforced**, and **~3 MiB marginal memory per forked sandbox** via CoW page sharing (see [bench/results](bench/results)). The competitor-comparison harness on matched hardware is [#15](https://github.com/paperclipinc/mitos/issues/15)
+- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; fork->first-exec is measured reproducibly in CI (shared-runner-class, see [BENCHMARKS.md](BENCHMARKS.md)). On the bare-metal reference node (Hetzner dedicated i7-6700, Talos Linux kernel 6.18, Firecracker v1.15, the default husk path) a first reference run measured **warm-claim activate P50 ~27 ms** (N=11; the time the controller records to load the snapshot, run the fork-correctness handshake, and reach guest-ready, integrity gate enforced), **~6-16 ms snapshot restore**, and **~3 MiB marginal memory per forked sandbox** via CoW page sharing. The activate figure is engine time, not the claim->Ready wall clock (~0.5-1.8 s here, reconcile-bound). Every number is reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh) and [bench/results](bench/results). The competitor-comparison harness on matched hardware is [#15](https://github.com/paperclipinc/mitos/issues/15)
 - Pre-snapshotted pools built from OCI images: `internal/ociroot` flattens an image into an ext4 rootfs and runs your `init` steps in the VM before snapshotting, so there is no cold start on claim ([#10](https://github.com/paperclipinc/mitos/issues/10), see [docs/templates.md](docs/templates.md))
 - CoW memory sharing across forks: you pay for unique pages, not for copies
 - Content-addressed snapshot distribution: forks pull only the missing sha256 chunks from a holder node over mTLS, so pool rebuilds ship deltas not whole multi-GB images, with a snapshot version-compatibility contract that refuses to restore an incompatible snapshot ([#14](https://github.com/paperclipinc/mitos/issues/14), [#32](https://github.com/paperclipinc/mitos/issues/32), see [docs/snapshot-distribution.md](docs/snapshot-distribution.md))
@@ -225,6 +225,23 @@ The target developer surface (three-line common path, git-shaped workspace verbs
 ## Comparison
 
 The honest version: a numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/paperclipinc/mitos/issues/15). Until then, the qualitative pareto map across every alternative we know of:
+
+### Where mitos sits on latency
+
+The differentiator is not a single fastest-number claim. `mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime that does N-way live copy-on-write fork of a running microVM, and it does so with a **warm-claim activate in the tens-of-ms class** (P50 ~27 ms on the bare-metal reference node; reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh), full method and node spec in [BENCHMARKS.md](BENCHMARKS.md) and [bench/results](bench/results)).
+
+For context only, a few latency figures other vendors publish. These are **their published numbers, for different operations, on different hardware, measured with different methodology**; they are NOT measured by us and this is NOT a head-to-head claim. We do not assert we beat any of them on any specific operation, because we have not run the matched-hardware comparison (that is [#15](https://github.com/paperclipinc/mitos/issues/15)).
+
+| runtime | published figure (theirs, not ours) | operation they describe |
+|---|---|---|
+| mitos (ours, measured) | ~27 ms P50 | warm-claim activate (snapshot load + fork-correctness handshake + guest-ready) on the bare-metal reference node |
+| E2B | ~150 ms | sandbox create |
+| Daytona | sub-90 ms | create from snapshot |
+| Modal | sub-second | sandbox create |
+| CodeSandbox SDK | ~863 ms / ~495 ms | live fork / memory-resume |
+| Fly Machines | < 1 s | machine start |
+
+The rows measure different things on different hardware, so the table is orientation, not a leaderboard. What is comparable and real today is the qualitative pareto map below: the combination of open source, self-hostable, k8s-native, and live snapshot fork is the axis where `mitos` is alone.
 
 | | sandbox | E2B | Modal | Daytona | Morph | Cloudflare | Box (box.ascii.dev) | Agent Sandbox (k8s-sigs) | Kata/KubeVirt | raw Firecracker |
 |---|---|---|---|---|---|---|---|---|---|---|

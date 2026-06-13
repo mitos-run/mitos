@@ -140,6 +140,64 @@ it.
 > here: a hand-copied number would be exactly the kind of unverifiable claim this
 > harness exists to eliminate.
 
+## Bare-metal reference node (#16)
+
+The sections above are SHARED-CI-CLASS: noisy `ubuntu-latest`, frequently
+nested-virt, regenerated per run. This section records the first reference-node
+numbers measured on the #16 bare-metal reference hardware. These are the only
+bare-metal numbers the project publishes as its own, and each one traces to a
+reproducible source in `bench/`.
+
+### Reference node
+
+- Hardware: Hetzner dedicated, Intel Core i7-6700 (4c / 8t, 8 logical CPU),
+  64 GiB RAM.
+- OS / cluster: Talos Linux, kernel 6.18.33-talos; `/var/lib/mitos` on xfs.
+- Path: the default husk path (unprivileged pod, `/dev/kvm` via the device
+  plugin).
+- Template: `ghcr.io/paperclipinc/sandbox-base-python:3.12-slim`.
+- VMM: Firecracker v1.15.0, verify-at-Prepare (the integrity gate is paid in the
+  dormant Prepare phase, so the activate runs at engine speed).
+
+### Measured (this node)
+
+| metric | value | what it measures | source |
+| --- | --- | --- | --- |
+| warm-claim activate latency | P50 ~27 ms (N=11: min 21.45, P50 26.53, P95 46.66, max 46.66 ms) | husk-stub-reported snapshot load + fork-correctness handshake + guest-ready, parsed from the claim's Ready condition message ("activated ... in X ms") | `bench/husk-activate-latency.sh`, results in `bench/results/2026-06-13-bare-metal-husk.md` |
+| snapshot restore (`/snapshot/load`) | ~6-16 ms | the Firecracker engine restore step alone | `bench/results/2026-06-13-bare-metal-husk.md` (forkd / husk-stub logs) |
+| marginal memory per forked sandbox | ~3 MiB | per-VM unique (private-dirty) cost via CoW page sharing; the shared snapshot page set is counted once across cgroup v2 memcgs (per-VM dirty ~5 MiB, not overstated) | husk-probe CI proof; `docs/metering.md` for the accounting rules |
+
+### Honest scope of the activate number
+
+The ~27 ms is the engine activate the controller records, NOT the end-to-end
+claim->Ready wall clock. On this node that wall clock is ~0.5-1.8 s and is
+reconcile-bound: the Kubernetes control-loop round-trip (watch + queue + status
+poll) plus warm-pool refill, NOT the engine. We report the variance and do not
+present the activate as the wall-clock claim latency.
+
+The bare-metal engine fork->first-exec was NOT re-measured this session. The
+`cmd/bench` `fork-exec` harness number (shared-CI-class, see "Results" above)
+remains the cited fork->first-exec figure; no bare-metal fork->first-exec number
+is stated.
+
+### How to reproduce
+
+```sh
+bench/husk-activate-latency.sh <kubeconfig> <pool> [namespace] [iterations]
+```
+
+The script creates N sequential `SandboxClaim`s against a warm pool, waits for
+Ready, parses the activate latency out of the Ready condition message, releases
+each claim between iterations, and prints min / P50 / P95 / max plus the raw
+samples. The full node spec, sample set, restore samples, CoW basis, and cluster
+setup are in
+[`bench/results/2026-06-13-bare-metal-husk.md`](bench/results/2026-06-13-bare-metal-husk.md).
+
+The **<= 10ms warm activation figure remains the bare-metal TARGET (#18/#15)**:
+the activate restore step reaches sub-10 ms on this node, but the full activate
+(restore + handshake + guest-ready) measures ~27 ms P50 here, so the <= 10ms
+claim->first-exec target is not yet met end to end and stays OPEN.
+
 ## Raw-forkd vs pod-native: claim to first exec
 
 This section synthesizes the two existing shared-CI datapoints above into the
@@ -290,11 +348,16 @@ same-hardware figure is what the bare-metal harness run produces.
 These are explicitly out of scope for the current harness and tracked in
 [#15](https://github.com/paperclipinc/mitos/issues/15) / roadmap section 4:
 
-- **Bare-metal reference numbers** on the Hetzner + Talos reference node. The
-  CI numbers above are shared-runner-class; the representative numbers need the
-  reference hardware to exist. This includes the **<= 10ms warm husk-pod
-  activation TARGET** (#18/#15): the husk-stub activation latency datapoint above
-  is shared-CI-class and is explicitly not that bare-metal target.
+- **Bare-metal reference numbers** on the Hetzner + Talos reference node. A first
+  reference run is now recorded in the "Bare-metal reference node (#16)" section
+  above (warm-claim activate P50 ~27 ms, restore ~6-16 ms, ~3 MiB marginal memory
+  per fork), reproducible from `bench/husk-activate-latency.sh` and
+  `bench/results/2026-06-13-bare-metal-husk.md`. Still open: the bare-metal engine
+  fork->first-exec via `cmd/bench` (not run on the box this session) and a pinned
+  reference-node CI runner so the numbers regenerate on every run. The **<= 10ms
+  warm husk-pod activation TARGET** (#18/#15) also remains OPEN: the activate
+  restore step is sub-10 ms on the reference node, but the full activate measures
+  ~27 ms P50 there, so the end-to-end target is not yet met.
 - **Claim to first-exec end to end through the controller** on a real cluster
   (claim a `Sandbox` CRD, wait for the pool to hand back a forked VM, exec):
   the current harness measures the engine data path, not the controller +
