@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Optional
 
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
+from kubernetes.client.rest import ApiException
 
+from mitos.errors import AgentRunError
 from mitos.sandbox import Sandbox
 from mitos.types import PoolStatus, SandboxPhase
 
 
 API_GROUP = "mitos.run"
 API_VERSION = "v1alpha1"
+
+_DEFAULT_POOL_PREFIX = "mitos-default-"
+_SLUG_RE = re.compile(r"[^a-z0-9.-]+")
+
+
+def default_pool_name(image: str) -> str:
+    """Derives a deterministic default-pool name for an image. The image is
+    lowercased, "/" and ":" become "-", any other unsafe character collapses to
+    "-", and the slug is bounded so the pool name stays a valid object name.
+    Kept byte-for-byte equivalent to the TypeScript defaultPoolName."""
+    slug = image.lower().replace("/", "-").replace(":", "-")
+    slug = _SLUG_RE.sub("-", slug).strip("-")
+    return _DEFAULT_POOL_PREFIX + slug[:40]
 
 
 class AgentRun:
@@ -22,6 +38,7 @@ class AgentRun:
         namespace: str = "default",
         kubeconfig: Optional[str] = None,
         in_cluster: bool = False,
+        allow_default_pool: bool = True,
     ):
         if in_cluster:
             k8s_config.load_incluster_config()
@@ -33,6 +50,121 @@ class AgentRun:
         # per-sandbox bearer token Secrets.
         self._core_api = k8s_client.CoreV1Api()
         self._namespace = namespace
+        self._allow_default_pool = allow_default_pool
+
+    def sandbox(
+        self,
+        image: Optional[str] = None,
+        pool: Optional[str] = None,
+        name: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+        secrets: Optional[dict[str, tuple[str, str]]] = None,
+        timeout: Optional[str] = None,
+        ready: bool = False,
+    ) -> Sandbox:
+        """The one-liner entry point (docs/api/v2-spec.md section 1.2).
+
+        Pass image= for the lazy path: the client ensures a default pool named
+        mitos-default-<image-slug> exists (creating it and its SandboxTemplate
+        if absent and allowed), then claims from it. Pass pool= for the explicit
+        path, which never creates anything. Exactly one of image or pool is
+        required.
+
+        With ready=True the call blocks until the sandbox is Ready (or raises),
+        so the caller stops sleeping-and-hoping; with ready=False (default) the
+        first exec/files call lazily waits, preserving today's behavior.
+        """
+        if pool is None and image is None:
+            raise AgentRunError(
+                "sandbox() needs an image or a pool",
+                code="missing_image_or_pool",
+                remediation='Pass image="python" for a lazy default pool, or pool="my-pool" for an existing pool.',
+            )
+        if pool is None:
+            if not self._allow_default_pool:
+                raise AgentRunError(
+                    "default pools are disabled on this client",
+                    code="no_default_pool",
+                    remediation="Pass pool=<name> for an existing pool, or construct AgentRun(allow_default_pool=True).",
+                )
+            pool = self._ensure_default_pool(image)  # type: ignore[arg-type]
+
+        sb = self.create(
+            pool=pool,
+            name=name,
+            env=env,
+            secrets=secrets,
+            timeout=timeout,
+        )
+        if ready:
+            sb.wait_until_ready()
+        return sb
+
+    def _ensure_default_pool(self, image: str) -> str:
+        """get-or-create the default SandboxPool for an image. Returns the pool
+        name. A pre-existing pool is reused untouched; a missing one is created
+        along with a SandboxTemplate (spec.image) it references via templateRef.
+
+        The CRD splits image from pool: SandboxPoolSpec carries templateRef +
+        replicas (api/v1alpha1/types.go), and SandboxTemplateSpec carries the
+        image, so the default path materializes both objects under the same
+        deterministic name."""
+        name = default_pool_name(image)
+        try:
+            self._api.get_namespaced_custom_object(
+                group=API_GROUP,
+                version=API_VERSION,
+                namespace=self._namespace,
+                plural="sandboxpools",
+                name=name,
+            )
+            return name
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        template = {
+            "apiVersion": f"{API_GROUP}/{API_VERSION}",
+            "kind": "SandboxTemplate",
+            "metadata": {"name": name, "namespace": self._namespace},
+            "spec": {"image": image},
+        }
+        self._create_or_reuse(template, "sandboxtemplates")
+
+        pool = {
+            "apiVersion": f"{API_GROUP}/{API_VERSION}",
+            "kind": "SandboxPool",
+            "metadata": {"name": name, "namespace": self._namespace},
+            "spec": {
+                "templateRef": {"name": name},
+                "replicas": 1,
+            },
+        }
+        self._create_or_reuse(pool, "sandboxpools")
+        return name
+
+    def _create_or_reuse(self, body: dict, plural: str) -> None:
+        """Create a namespaced custom object, tolerating a 409 from a concurrent
+        creator (the object is reused untouched)."""
+        try:
+            self._api.create_namespaced_custom_object(
+                group=API_GROUP,
+                version=API_VERSION,
+                namespace=self._namespace,
+                plural=plural,
+                body=body,
+            )
+        except ApiException as exc:
+            if exc.status != 409:  # raced another creator; reuse it
+                raise
+
+    def from_name(self, name: str) -> Sandbox:
+        """Reconnect to an existing sandbox by name, returning a live Sandbox
+        handle (a durable handle across processes). The handle resolves its
+        endpoint, phase, and per-sandbox token from the cluster; if the sandbox
+        is Ready you can exec against it immediately. Alias-quality wrapper over
+        get(), named for the reconnect use case."""
+        return self.get(name)
 
     def create(
         self,
