@@ -11,6 +11,8 @@ import httpx
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
+from mitos._envelope import raise_for_status, raise_for_status_stream
+from mitos.errors import AgentRunError
 from mitos.types import (
     BackgroundProcess,
     ExecResult,
@@ -112,7 +114,7 @@ class SandboxFiles:
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
         return resp.json()["content"]
 
     def read_bytes(self, path: str) -> bytes:
@@ -121,7 +123,7 @@ class SandboxFiles:
             json={"sandbox": self._sandbox._sandbox_ref, "path": path, "binary": True},
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
         return bytes.fromhex(resp.json()["content"])
 
     def write(self, path: str, content: str | bytes, mode: int = 0o644) -> None:
@@ -137,7 +139,7 @@ class SandboxFiles:
             json=data,
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
 
     def list(self, path: str = "/") -> list[FileInfo]:
         resp = self._sandbox._http.post(
@@ -145,7 +147,7 @@ class SandboxFiles:
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
         return [
             FileInfo(
                 name=f["name"],
@@ -161,8 +163,10 @@ class SandboxFiles:
         try:
             self.list(path)
             return True
-        except httpx.HTTPStatusError:
-            return False
+        except AgentRunError as exc:
+            if exc.status == 404:
+                return False
+            raise
 
     def remove(self, path: str) -> None:
         resp = self._sandbox._http.post(
@@ -170,7 +174,7 @@ class SandboxFiles:
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
 
     def mkdir(self, path: str) -> None:
         resp = self._sandbox._http.post(
@@ -178,7 +182,7 @@ class SandboxFiles:
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
             headers=self._sandbox._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._sandbox._token)
 
 
 class Sandbox:
@@ -331,7 +335,7 @@ class Sandbox:
             timeout=timeout + 5,
             headers=self._auth_headers(),
         )
-        resp.raise_for_status()
+        raise_for_status(resp, token=self._token)
         data = resp.json()
         return ExecResult(
             exit_code=data["exit_code"],
@@ -370,7 +374,7 @@ class Sandbox:
             timeout=timeout + 10,
             headers=self._auth_headers(),
         ) as resp:
-            resp.raise_for_status()
+            raise_for_status_stream(resp, token=self._token)
             return _parse_run_code_stream(
                 resp.iter_lines(),
                 on_stdout,
@@ -413,7 +417,7 @@ class Sandbox:
         ) as resp:
             if on_response is not None:
                 on_response(resp)
-            resp.raise_for_status()
+            raise_for_status_stream(resp, token=self._token)
             for line in resp.iter_lines():
                 if not line:
                     continue
