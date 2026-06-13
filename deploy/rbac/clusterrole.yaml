@@ -85,6 +85,8 @@ rules:
       - delete
       - get
       - list
+      - patch
+      - update
       - watch
   # Secrets: get/list/watch to read sandbox-referenced mounted Secrets and to
   # reconcile the per-sandbox token Secret; create/update to mint and heal that

@@ -82,13 +82,17 @@ const (
 	huskCAMountPath       = "/etc/husk/ca"
 	huskSnapshotMountPath = "/var/lib/agent-run/snapshot"
 	huskKernelMountPath   = "/var/lib/agent-run/kernel/vmlinux"
-	// huskManifestMountPath is the in-pod path the recorded CAS manifest is
-	// mounted at (read-only). The stub decodes it, binds it to the activate
-	// request's ExpectedDigest, re-hashes the loaded snapshot files against it,
-	// and runs the snapcompat check, all BEFORE loading the snapshot. This is the
-	// husk mirror of forkd's verify-on-load gate (issues #9 and #32). The manifest
-	// is a content-addressed artifact, not a secret.
-	huskManifestMountPath = "/var/lib/agent-run/manifest.json"
+	// huskManifestDirMountPath is the in-pod path the CAS manifests DIRECTORY is
+	// mounted at (read-only); the stub reads <dir>/<digest>. The stub decodes
+	// that file, binds it to the activate request's ExpectedDigest, re-hashes the
+	// loaded snapshot files against it, and runs the snapcompat check, all BEFORE
+	// loading the snapshot. This is the husk mirror of forkd's verify-on-load gate
+	// (issues #9 and #32). The manifest is a content-addressed artifact, not a
+	// secret. We mount the DIRECTORY, not the single manifest file: on Talos the
+	// kubelet's single-file hostPath check fails for a file at this depth ("is not
+	// a file" / "no such file or directory") even when it exists, while a
+	// directory hostPath mounts cleanly and exposes the file inside it.
+	huskManifestDirMountPath = "/var/lib/agent-run/manifests"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -262,7 +266,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// the stub logs this loudly. The manifest mount itself is added in the snapshot
 	// block below (it shares the snapshot placement requirement).
 	if opts.ExpectedDigest != "" {
-		args = append(args, "--manifest", huskManifestMountPath)
+		args = append(args, "--manifest", filepath.Join(huskManifestDirMountPath, opts.ExpectedDigest))
 	} else {
 		args = append(args, "--allow-unverified-snapshots")
 	}
@@ -301,7 +305,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		mounts = append(mounts, corev1.VolumeMount{Name: "husk-ca", MountPath: huskCAMountPath, ReadOnly: true})
 	}
 	if opts.SnapshotID != "" {
-		hostType := corev1.HostPathDirectory
+		// DirectoryOrCreate / FileOrCreate, not the strict Directory / File: on
+		// Talos the kubelet's strict hostPath type check rejects these mounts
+		// ("is not a file/directory") even when the path exists and is the right
+		// type, because the kubelet performs the os.Stat in a mount view that
+		// differs from where the pod bind mount resolves. The OrCreate variants
+		// skip that pre-check and bind the existing snapshot/kernel/manifest. The
+		// safety this drops (fail-fast if the snapshot is missing) is not the real
+		// gate anyway: the husk stub re-verifies the snapshot against the recorded
+		// CAS manifest digest before loading (fail-closed), so an empty or wrong
+		// snapshot is rejected at activation, not silently run.
+		hostType := corev1.HostPathDirectoryOrCreate
 		volumes = append(volumes, corev1.Volume{
 			Name: "snapshot",
 			VolumeSource: corev1.VolumeSource{
@@ -313,7 +327,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "snapshot", MountPath: huskSnapshotMountPath, ReadOnly: true})
 
-		fileType := corev1.HostPathFile
+		fileType := corev1.HostPathFileOrCreate
 
 		// The recorded CAS manifest, mounted read-only so the stub can re-verify
 		// the snapshot against it before loading (fail-closed). Only added when the
@@ -324,12 +338,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				Name: "snapshot-manifest",
 				VolumeSource: corev1.VolumeSource{
 					HostPath: &corev1.HostPathVolumeSource{
-						Path: filepath.Join(dataDir, "cas", "manifests", opts.ExpectedDigest),
-						Type: &fileType,
+						Path: filepath.Join(dataDir, "cas", "manifests"),
+						Type: &hostType,
 					},
 				},
 			})
-			mounts = append(mounts, corev1.VolumeMount{Name: "snapshot-manifest", MountPath: huskManifestMountPath, ReadOnly: true})
+			mounts = append(mounts, corev1.VolumeMount{Name: "snapshot-manifest", MountPath: huskManifestDirMountPath, ReadOnly: true})
 		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "kernel",
@@ -341,6 +355,36 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			},
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "kernel", MountPath: huskKernelMountPath, ReadOnly: true})
+
+		// The template directory, mounted at the SAME absolute path the snapshot
+		// was built at (<dataDir>/templates/<id>), so the rootfs.ext4 drive the
+		// snapshot's vmstate references resolves on load. Firecracker re-opens the
+		// drive at its baked path_on_host during /snapshot/load; without this the
+		// load fails with "Block: Virtio backend error" (the drive file is absent
+		// in the husk pod's mount namespace). A directory mount, not a single-file
+		// one, both sidesteps the Talos single-file hostPath check and exposes the
+		// rootfs at exactly the baked path.
+		//
+		// PRODUCTION FOLLOW-UP (per-activation rootfs CoW): this mounts the shared
+		// template rootfs read-write, so the resumed VM writes into it directly.
+		// That is correct for a warm pool of one dormant pod per snapshot (a single
+		// activation owns the rootfs), but concurrent activations of one snapshot
+		// would share and corrupt it. The fork engine already does the right thing
+		// (reflink/copy the rootfs per fork, then PatchDrive after load); the husk
+		// activation path needs the same: copy templates/<id>/rootfs.ext4 to a
+		// per-activation file on a writable volume and PatchDrive to it after the
+		// snapshot loads. Tracked as the husk-rootfs-CoW follow-up.
+		templateDir := filepath.Join(dataDir, "templates", opts.SnapshotID)
+		volumes = append(volumes, corev1.Volume{
+			Name: "template",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: templateDir,
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir})
 	}
 
 	// Placement: the dormant VMM needs /dev/kvm (the kvm nodeSelector) AND the
