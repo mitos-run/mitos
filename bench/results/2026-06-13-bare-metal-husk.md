@@ -32,3 +32,20 @@ Template image: python:3.12-slim (mirrored to ghcr, authenticated pull).
 - Per-activation rootfs CoW not yet implemented (shared template rootfs mounted rw).
 - Jailer pivot_root unavailable in-pod (ran unjailed); needs a private bind-mount.
 - Claim reports sandboxID=<pod>, but the exec API expects sandbox="husk".
+
+## Latency fix: verify-at-Prepare (re-measured on the renamed mitos.run stack)
+
+The husk Activate originally re-hashed the full snapshot (~680 MiB) against the
+manifest before loading (the fail-closed integrity gate), which dominated the
+claim path. Moving that verification into the dormant Prepare phase (pre-paid,
+read-only immutable snapshot) drops the activate to engine speed:
+
+- Activate latency (husk-stub reported, verification ENFORCED): 1360 ms -> 27.26 ms (~50x).
+- Claim -> Ready wall clock: ~1700 ms -> 395 ms (~4x); the residual is the
+  controller reconcile round-trip (watch + queue + poll), not the engine.
+- Prepare now takes ~1.37 s (the re-hash, during the warm dormant period, before
+  any claim arrives).
+- Snapshot restore (load) under the fix: 8.5 / 15.9 ms.
+
+Net: the fork/restore engine is ~6-16 ms; a warm claim activates in ~27 ms with
+the integrity gate fully enforced; end-to-end is ~395 ms, reconcile-bound.
