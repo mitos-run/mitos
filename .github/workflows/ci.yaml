@@ -611,7 +611,7 @@ jobs:
               name: husk-e2e
             replicas: 2
           YAML
-          kubectl -n default get sandboxtemplate husk-e2e
+          kubectl -n default get sandboxtemplate.mitos.run husk-e2e
           kubectl -n default get sandboxpool husk-e2e
       - name: The pool creates husk pods that schedule onto the KVM node
         # GATE (cluster lifecycle): the controller's pool reconcile CREATES husk
@@ -1166,7 +1166,7 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== re-pend diagnostics ==="
-            kubectl -n default get sandboxclaim repend-probe -o yaml 2>/dev/null || true
+            kubectl -n default get sandboxclaim.mitos.run repend-probe -o yaml 2>/dev/null || true
             kubectl get pods -n default -l mitos.run/husk=true -o wide || true
             kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
           }
@@ -1205,7 +1205,7 @@ jobs:
 
           repended=0
           for i in $(seq 1 36); do
-            phase=$(kubectl -n default get sandboxclaim repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            phase=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
             echo "  [${i}/36] repend-probe phase: '${phase}'"
             if [ "$phase" = "Pending" ]; then repended=1; break; fi
             sleep 5
@@ -1215,7 +1215,7 @@ jobs:
             exit 1
           fi
           # Endpoint/Node cleared on re-pend.
-          ep=$(kubectl -n default get sandboxclaim repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
+          ep=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
           [ -z "$ep" ] || { echo "EVICTION-FAILED: re-pended claim still advertises endpoint '${ep}'"; exit 1; }
           # The pool recreates a replacement husk pod (warm pool restored).
           poolcount=0
@@ -1227,7 +1227,7 @@ jobs:
           done
           [ "$poolcount" -eq 1 ] || { echo "EVICTION-FAILED: the pool did not recreate a replacement husk pod after the re-pend"; exit 1; }
           echo "PASS: the claim re-pended (Pending, endpoint cleared) on husk pod loss and the pool recreated a replacement. The full re-activate onto a Ready dormant pod completes where the VMM runs (kvm-test.yaml / bare metal)."
-          kubectl -n default delete sandboxclaim repend-probe --ignore-not-found=true --wait=false || true
+          kubectl -n default delete sandboxclaim.mitos.run repend-probe --ignore-not-found=true --wait=false || true
       - name: Eviction 4, an over-allocatable husk-shaped pod is Unschedulable (autoscaler signal)
         # The native cluster-autoscaler pending signal: a husk-shaped pod whose
         # requests exceed node allocatable stays Pending with an Unschedulable
@@ -1300,7 +1300,7 @@ jobs:
           dump() {
             echo "=== husk activation diagnostics ==="
             kubectl get pods -A -l mitos.run/husk=true -o wide || true
-            kubectl -n default get sandboxclaim husk-e2e-claim -o yaml || true
+            kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim -o yaml || true
             kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
             for p in $(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
               ns=${p%%/*}; name=${p##*/}
@@ -1352,7 +1352,7 @@ jobs:
           # claim minted, port-forward to the husk pod's sandbox port, and run a
           # command. The token Secret is <claim>-sandbox-token; its value is a
           # secret and is not echoed.
-          endpoint=$(kubectl -n default get sandboxclaim husk-e2e-claim -o jsonpath='{.status.endpoint}')
+          endpoint=$(kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim -o jsonpath='{.status.endpoint}')
           echo "claim endpoint (podIP:port): $endpoint"
           podip=${endpoint%%:*}
           sbport=${endpoint##*:}
@@ -1386,9 +1386,9 @@ jobs:
       - name: Husk e2e diagnostics and cleanup
         if: always()
         run: |
-          kubectl -n default delete sandboxclaim husk-e2e-claim --ignore-not-found=true || true
+          kubectl -n default delete sandboxclaim.mitos.run husk-e2e-claim --ignore-not-found=true || true
           kubectl -n default delete sandboxpool husk-e2e --ignore-not-found=true || true
-          kubectl -n default delete sandboxtemplate husk-e2e --ignore-not-found=true || true
+          kubectl -n default delete sandboxtemplate.mitos.run husk-e2e --ignore-not-found=true || true
           kubectl get pods -A -l mitos.run/husk=true -o wide || true
 
   facade-conformance:
@@ -1535,7 +1535,7 @@ jobs:
               name: default
             replicas: 0
           YAML
-          kubectl -n default get sandboxtemplate default
+          kubectl -n default get sandboxtemplate.mitos.run default
           kubectl -n default get sandboxpool default
       - name: Apply the upstream example Sandbox manifest UNCHANGED
         # The conformance acceptance: their example manifest applies verbatim.
@@ -1561,8 +1561,8 @@ jobs:
             echo "=== facade-conformance diagnostics ==="
             kubectl -n default get sandbox.agents.x-k8s.io -o wide || true
             kubectl -n default describe sandbox.agents.x-k8s.io hello-world || true
-            kubectl -n default get sandboxclaim -o wide || true
-            kubectl -n default describe sandboxclaim hello-world || true
+            kubectl -n default get sandboxclaim.mitos.run -o wide || true
+            kubectl -n default describe sandboxclaim.mitos.run hello-world || true
             kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
@@ -1576,7 +1576,7 @@ jobs:
           # annotation.
           claimed=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
               claimed=1
               break
             fi
@@ -1587,9 +1587,9 @@ jobs:
             echo "FACADE-CONFORMANCE: facade did not create the bridged SandboxClaim"
             exit 1
           fi
-          owner=$(kubectl -n default get sandboxclaim hello-world \
+          owner=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
-          pool=$(kubectl -n default get sandboxclaim hello-world \
+          pool=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
             -o jsonpath='{.metadata.annotations.mitos\.dev/pool}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: claim owner = '$owner', want Sandbox/hello-world"
@@ -1628,7 +1628,7 @@ jobs:
           kubectl -n default delete sandbox.agents.x-k8s.io hello-world
           gone=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+            if ! kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
               gone=1
               break
             fi
@@ -1646,7 +1646,7 @@ jobs:
           # facade deletes the claim.
           sed 's#^spec:#spec:\n  replicas: 1#' /tmp/hello-world.yaml | kubectl -n default apply -f -
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
               break
             fi
             sleep 2
@@ -1655,7 +1655,7 @@ jobs:
             -p '{"spec":{"replicas":0}}'
           term=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+            if ! kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
               term=1
               break
             fi
@@ -1678,7 +1678,7 @@ jobs:
             -p '{"spec":{"replicas":1}}'
           resumed=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
               resumed=1
               break
             fi
@@ -1689,7 +1689,7 @@ jobs:
             echo "FACADE-CONFORMANCE: replicas 1->0->1 did not re-activate the bridged claim"
             exit 1
           fi
-          owner=$(kubectl -n default get sandboxclaim hello-world \
+          owner=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: re-activated claim owner = '$owner', want Sandbox/hello-world"
