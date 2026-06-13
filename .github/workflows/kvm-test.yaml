@@ -1737,6 +1737,76 @@ jobs:
           echo "  Husk-stub prepare/activate proven: dormant VMM activated in place, exec works"
           echo "================================"
 
+      - name: Husk jailed-activation (real KVM, pivot_root, per-VM uid)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          BENCH_DATA=/tmp/mitos-test/bench-data
+          TPL=bench
+          BENCH_SNAP=$BENCH_DATA/templates/$TPL/snapshot
+
+          fail_setup()  { echo "HUSK-JAILED-SETUP: $1"; exit 1; }
+
+          sudo chmod 666 /dev/kvm || fail_setup "no /dev/kvm on this runner"
+
+          # Setup precondition: the bench phase laid out the template snapshot.
+          if [ ! -f "$BENCH_SNAP/mem" ] || [ ! -f "$BENCH_SNAP/vmstate" ]; then
+            ls -lhR "$BENCH_SNAP" || true
+            fail_setup "bench template snapshot not present at $BENCH_SNAP; cannot run jailed activation"
+          fi
+
+          # Stage the snapshot + kernel under /var/lib/mitos, the data dir the husk
+          # stub bounds its jailer chroot file set to (huskVMConfig sets
+          # Jailer.DataDir=/var/lib/mitos, matching the production husk pod where the
+          # kernel is /var/lib/mitos/kernel/vmlinux and the snapshot is
+          # /var/lib/mitos/snapshot). The CI bench artifacts live under /tmp, so we
+          # mirror them under the production data dir here; otherwise guardChrootSource
+          # would refuse to expose a /tmp path inside the jail. The snapshot mem file
+          # is hard-linked (or copied) into each VM chroot at Activate, so it must be
+          # under the data dir.
+          sudo mkdir -p /var/lib/mitos/snapshot /var/lib/mitos/kernel /run/husk/jail /run/husk/vm
+          sudo cp "$BENCH_SNAP/mem" "$BENCH_SNAP/vmstate" /var/lib/mitos/snapshot/
+          sudo cp /tmp/mitos-test/vmlinux /var/lib/mitos/kernel/vmlinux
+          SNAP_DIR=/var/lib/mitos/snapshot
+          KERNEL=/var/lib/mitos/kernel/vmlinux
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+
+          # Start a dormant jailed stub: --jailer makes the stub privatize the
+          # chroot base and launch Firecracker through the jailer. Needs root
+          # (CAP_SYS_ADMIN) and /dev/kvm, both present on this runner.
+          sudo /tmp/husk-stub \
+            --firecracker /usr/local/bin/firecracker \
+            --jailer /usr/local/bin/jailer \
+            --chroot-base /run/husk/jail \
+            --uid-range 64000-64999 \
+            --kernel "$KERNEL" \
+            --workdir /run/husk/vm \
+            --control-socket /run/husk/control.sock \
+            --allow-unverified-snapshots &
+          STUB_PID=$!
+          # Wait for the dormant control socket.
+          for i in $(seq 1 100); do [ -S /run/husk/control.sock ] && break; sleep 0.1; done
+          # Activate the bench snapshot in place over the control socket.
+          sudo /tmp/husk-stub --activate \
+            --control-socket /run/husk/control.sock \
+            --snapshot-dir "$SNAP_DIR" \
+            --allow-unverified-snapshots | tee /tmp/activate.json
+          grep -q '"ok":true' /tmp/activate.json || { echo "JAILED-ACTIVATE-FAILED"; exit 1; }
+          # Prove the jail: the jailer created a per-VM chroot under the base, and
+          # the Firecracker process runs as a NON-ZERO uid from the range.
+          test -d /run/husk/jail/firecracker || { echo "no jailer chroot dir created"; exit 1; }
+          FC_PID=$(pgrep -f 'firecracker --api-sock' | head -1)
+          FC_UID=$(awk '/^Uid:/{print $2}' /proc/$FC_PID/status)
+          echo "firecracker runs as uid $FC_UID"
+          [ "$FC_UID" -ge 64000 ] && [ "$FC_UID" -le 64999 ] || { echo "JAILED-UID-FAILED: uid $FC_UID not in 64000-64999"; exit 1; }
+          # Prove pivot_root: the FC process root is the per-VM chroot, not /.
+          FC_ROOT=$(sudo readlink /proc/$FC_PID/root)
+          echo "firecracker root: $FC_ROOT"
+          case "$FC_ROOT" in /run/husk/jail/firecracker/*/root) ;; *) echo "JAILED-PIVOT-FAILED: root $FC_ROOT"; exit 1;; esac
+          echo "JAILED_OK"
+          sudo kill $STUB_PID || true
+
       - name: Upload husk-stub activation results artifact
         if: always()
         uses: actions/upload-artifact@v4
