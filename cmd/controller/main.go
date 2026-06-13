@@ -9,6 +9,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/eventfeed"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/observability"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -52,6 +53,7 @@ func main() {
 	var huskControlPort int
 	var huskDataDir string
 	var eventSinkURL string
+	var kekFile string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -65,6 +67,7 @@ func main() {
 	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/mitos", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
+	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to WRAP each Encrypted template's per-template DEK (envelope encryption). REQUIRED when any reconciled template sets Encrypted: true; without it EnsureEncKey fails closed. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -138,6 +141,22 @@ func main() {
 		poolControllerNamespace = "mitos"
 	}
 
+	// Build the envelope-encryption KMS from --kek-file. The KEK is loaded by
+	// PATH (never a value in argv) and its bytes are never logged; only the
+	// non-secret KEK id is. When --kek-file is empty no KMS is wired and
+	// EnsureEncKey fails closed for any Encrypted template (a plaintext-only
+	// deployment is unaffected). Cloud KMS providers are a documented follow-up.
+	var encKMS kms.Wrapper
+	if kekFile != "" {
+		w, kerr := kms.LoadLocalKEKFromFile(kekFile)
+		if kerr != nil {
+			logger.Error(kerr, "load KEK file")
+			os.Exit(1)
+		}
+		encKMS = w
+		logger.Info("envelope encryption KMS loaded", "kekID", w.KEKID())
+	}
+
 	if err := (&controller.SandboxPoolReconciler{
 		Client:              mgr.GetClient(),
 		NodeRegistry:        nodeRegistry,
@@ -149,6 +168,7 @@ func main() {
 		HuskTLSSecretName:   controller.ForkdTLSSecretName,
 		HuskCASecretName:    controller.CASecretName,
 		ControllerNamespace: poolControllerNamespace,
+		KMS:                 encKMS,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)
@@ -165,6 +185,7 @@ func main() {
 		MaxPendingDuration: maxPendingDuration,
 		EnableHuskPods:     enableHuskPods,
 		HuskControlPort:    huskControlPort,
+		KMS:                encKMS,
 		Feed: controller.NewEmitFeed(
 			// record.EventRecorder (the v1 events API) is still supported; the v2
 			// events API GetEventRecorder returns a different type with a different

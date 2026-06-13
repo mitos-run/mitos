@@ -19,6 +19,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/daemon"
 	"github.com/paperclipinc/mitos/internal/dnsproxy"
 	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/netconf"
 	"github.com/paperclipinc/mitos/internal/network"
 	"github.com/paperclipinc/mitos/internal/observability"
@@ -54,6 +55,7 @@ func main() {
 		busyboxBin        string
 		enableVolumes     bool
 		enableEncryption  bool
+		kekFile           string
 		auditLog          string
 		otlpEndpoint      string
 		memReserveBytes   int64
@@ -89,6 +91,7 @@ func main() {
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
 	flag.BoolVar(&enableEncryption, "enable-encryption", false, "Encrypt template snapshots at rest: each template is built inside a per-template LUKS2 container (requires cryptsetup) and crypto-shred at delete. Default false (plaintext snapshots on disk, exactly as before). KEY CUSTODY: the per-template encryption key is supplied by the controller over the mTLS gRPC request (CreateTemplate/Fork), held in forkd memory only for the lifetime of an open container, and never written to the node data disk. REQUIRES mTLS: this flag refuses to start unless the gRPC server is configured with --tls-cert/--tls-key/--tls-ca (and the controller runs PKI bootstrap), so the key is never sent over an insecure channel")
+	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to UNWRAP the per-template DEK delivered over the mTLS RPC (envelope encryption). REQUIRED with --enable-encryption. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
@@ -192,17 +195,29 @@ func main() {
 			fmt.Println("forkd: per-fork volumes ENABLED")
 		}
 		if enableEncryption {
+			// Envelope key custody: the controller owns the per-template DEK, wraps
+			// it with the KMS KEK, and delivers only the WRAPPED DEK on each mTLS
+			// RPC. The node neither generates nor persists the plaintext DEK; the
+			// RequestKeyProvider unwraps via the local KEK on demand and zeroizes
+			// the plaintext after the cryptsetup call. The KEK arrives by PATH
+			// (--kek-file), never as a value in argv. Fail closed: refuse to start
+			// if encryption is enabled without a KEK, so a wrapped DEK can never
+			// arrive without an unwrapper. The same provider instance is wired into
+			// both the engine (it reads the DEK via KeyFor) and the daemon server
+			// (the handlers stash the wrapped DEK via SetWrappedKey and forget it).
+			if kekFile == "" {
+				fmt.Fprintln(os.Stderr, "forkd: --enable-encryption requires --kek-file (the KEK that unwraps the per-template DEK); refusing to start so a wrapped DEK can never arrive without an unwrapper")
+				os.Exit(1)
+			}
+			wrapper, kerr := kms.LoadLocalKEKFromFile(kekFile)
+			if kerr != nil {
+				fmt.Fprintf(os.Stderr, "forkd: load KEK: %v\n", kerr)
+				os.Exit(1)
+			}
 			engineOpts.EnableEncryption = true
-			// PR2 key custody: the controller owns the per-template key (a
-			// Kubernetes Secret in etcd) and delivers it on each mTLS RPC. The
-			// node neither generates nor persists the key; the RequestKeyProvider
-			// holds it only for the duration of a CreateTemplate/Fork call. The
-			// SAME provider instance is wired into both the engine (it reads the
-			// key via KeyFor) and the daemon server (the handlers stash the
-			// request key via SetKey and forget it after).
-			reqKeyProvider = fork.NewRequestKeyProvider()
+			reqKeyProvider = fork.NewRequestKeyProvider(wrapper)
 			engineOpts.KeyProvider = reqKeyProvider
-			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR2: key custody is the controller/etcd; the key arrives over the mTLS RPC, never generated or persisted on the node)")
+			fmt.Printf("forkd: at-rest snapshot encryption ENABLED (envelope: the per-template DEK arrives WRAPPED over the mTLS RPC and is unwrapped by the local KEK %s; the plaintext DEK is never generated or persisted on the node)\n", wrapper.KEKID())
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")
