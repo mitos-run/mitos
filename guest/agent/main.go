@@ -143,6 +143,17 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
+		if req.Type == vsock.TypePty {
+			if req.Pty == nil {
+				writeResponse(conn, vsock.Response{OK: false, Error: "pty request is nil"})
+				return
+			}
+			// A PTY owns its connection bidirectionally: it reads input/resize
+			// frames and writes output/exit frames until the shell exits.
+			handlePtyStream(conn, req.Pty)
+			return
+		}
+
 		resp := handleRequest(&req)
 		writeResponse(conn, resp)
 	}
