@@ -15,6 +15,7 @@ package controller_test
 //     is documented in huskpod.go).
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -381,6 +382,64 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	}
 	if !mounted {
 		t.Error("manifest volume is not mounted into the container")
+	}
+}
+
+func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "cow-pool", Namespace: "default", UID: "pool-uid-cow"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "cow-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cow-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:  "mitos-husk-stub:test",
+		SnapshotID: "cow-tmpl",
+		DataDir:    "/var/lib/mitos",
+	})
+	container := pod.Spec.Containers[0]
+
+	// The CoW dir hostPath volume must be present and WRITABLE (ReadOnly false),
+	// co-located under the node data dir as a sibling of templates.
+	var cowMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == "husk-rootfs-cow" {
+			cowMount = &container.VolumeMounts[i]
+		}
+	}
+	if cowMount == nil {
+		t.Fatal("expected a husk-rootfs-cow volume mount")
+	}
+	if cowMount.ReadOnly {
+		t.Error("the rootfs CoW dir must be mounted read-write")
+	}
+
+	var cowVol *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "husk-rootfs-cow" {
+			cowVol = &pod.Spec.Volumes[i]
+		}
+	}
+	if cowVol == nil || cowVol.HostPath == nil {
+		t.Fatal("expected a husk-rootfs-cow hostPath volume")
+	}
+	wantHostPath := filepath.Join("/var/lib/mitos", "husk-rootfs")
+	if cowVol.HostPath.Path != wantHostPath {
+		t.Errorf("CoW hostPath = %q, want %q (sibling of templates under the data dir)", cowVol.HostPath.Path, wantHostPath)
+	}
+
+	// The stub must be told where to clone from and to.
+	args := strings.Join(container.Args, " ")
+	if !strings.Contains(args, "--rootfs-cow-dir "+cowMount.MountPath) {
+		t.Errorf("args missing --rootfs-cow-dir %s: %v", cowMount.MountPath, container.Args)
+	}
+	wantTemplateRootfs := filepath.Join("/var/lib/mitos", "templates", "cow-tmpl", "rootfs.ext4")
+	if !strings.Contains(args, "--template-rootfs "+wantTemplateRootfs) {
+		t.Errorf("args missing --template-rootfs %s: %v", wantTemplateRootfs, container.Args)
 	}
 }
 
