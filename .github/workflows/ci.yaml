@@ -274,7 +274,7 @@ jobs:
 
           # Read the allocatable value; empty or "0" means not advertised.
           kvm_allocatable=$(kubectl get nodes \
-            -o jsonpath='{.items[*].status.allocatable.mitos\.dev/kvm}' 2>/dev/null || true)
+            -o jsonpath='{.items[*].status.allocatable.mitos\.run/kvm}' 2>/dev/null || true)
           echo "node allocatable mitos.run/kvm: '${kvm_allocatable}'"
 
           kvm_advertised=false
@@ -547,7 +547,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
-            kvm=$(kubectl get nodes -o jsonpath='{.items[*].status.allocatable.mitos\.dev/kvm}' 2>/dev/null || true)
+            kvm=$(kubectl get nodes -o jsonpath='{.items[*].status.allocatable.mitos\.run/kvm}' 2>/dev/null || true)
             echo "  [${i}/30] allocatable mitos.run/kvm: '${kvm}'"
             for v in $kvm; do
               if [ -n "$v" ] && [ "$v" != "0" ]; then
@@ -864,7 +864,7 @@ jobs:
           # The policy selects the husk pod: list pods matching the SAME selector
           # and assert the husk pod is among them.
           sel=$(kubectl -n "$hns" get networkpolicy husk-egress \
-            -o jsonpath='{.spec.podSelector.matchLabels.mitos\.dev/husk}')
+            -o jsonpath='{.spec.podSelector.matchLabels.mitos\.run/husk}')
           [ "$sel" = "true" ] || { echo "CONFORMANCE-FAILED: netpol selector is not mitos.run/husk=true"; exit 1; }
           matched=$(kubectl -n "$hns" get pods -l mitos.run/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
           [ "$matched" -ge 1 ] || { echo "CONFORMANCE-FAILED: the netpol selector matches no husk pod"; exit 1; }
@@ -1096,8 +1096,8 @@ jobs:
             kubectl get pdb -A || true
             exit 1
           fi
-          sel_pool=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.dev/pool}')
-          sel_husk=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.dev/husk}')
+          sel_pool=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.run/pool}')
+          sel_husk=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.run/husk}')
           minavail=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.minAvailable}')
           echo "PDB selector: pool='${sel_pool}' husk='${sel_husk}', minAvailable='${minavail}'"
           [ "$sel_pool" = "husk-e2e" ] || { echo "EVICTION-FAILED: PDB pool selector is not husk-e2e"; exit 1; }
@@ -1590,7 +1590,7 @@ jobs:
           owner=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
           pool=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
-            -o jsonpath='{.metadata.annotations.mitos\.dev/pool}')
+            -o jsonpath='{.metadata.annotations.mitos\.run/pool}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: claim owner = '$owner', want Sandbox/hello-world"
             exit 1
@@ -1788,7 +1788,7 @@ jobs:
           bound_pool=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
             -o jsonpath='{.spec.poolRef.name}')
           policy=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
-            -o jsonpath='{.metadata.annotations.mitos\.dev/warmpool-policy}')
+            -o jsonpath='{.metadata.annotations.mitos\.run/warmpool-policy}')
           if [ "$bound_pool" != "sandboxwarmpool-example" ]; then
             echo "FACADE-CONFORMANCE: our claim poolRef = '$bound_pool', want sandboxwarmpool-example"
             exit 1
