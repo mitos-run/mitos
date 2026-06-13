@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,31 +34,31 @@ import (
 const (
 	// huskPoolLabel carries the owning pool name on every husk pod, so a
 	// reconcile can list exactly this pool's husk pods.
-	huskPoolLabel = "agentrun.dev/pool"
+	huskPoolLabel = "mitos.run/pool"
 	// huskLabel marks a pod as a husk pod (vs any other pod the controller may
 	// touch). Both labels together form the warm-pool selector.
-	huskLabel = "agentrun.dev/husk"
+	huskLabel = "mitos.run/husk"
 	// huskContainerName is the single container in a husk pod.
 	huskContainerName = "husk-stub"
 
 	// defaultKVMResourceName is the extended resource the KVM device plugin
 	// advertises (deploy/device-plugin). A husk pod requests one slot so it is
 	// scheduled only onto a node with /dev/kvm; this replaces privileged: true.
-	defaultKVMResourceName = "agentrun.dev/kvm"
+	defaultKVMResourceName = "mitos.run/kvm"
 
 	// huskWorkdir is the per-VM working directory the stub uses.
 	huskWorkdir = "/run/husk/vm"
 
 	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
 	// Selection skips any pod carrying it: one claim activates one husk pod.
-	huskClaimLabel = "agentrun.dev/claim"
+	huskClaimLabel = "mitos.run/claim"
 
 	// huskKVMNodeLabel is the node label the KVM device plugin / node bootstrap
 	// sets on a node that has /dev/kvm (deploy/talos). A husk pod is pinned to
 	// such a node so the dormant VMM can open KVM AND so it lands where the
 	// template snapshot is materialized (the pool's build/distribution machinery
 	// places the snapshot on these nodes; see the placement note below).
-	huskKVMNodeLabel = "agentrun.dev/kvm"
+	huskKVMNodeLabel = "mitos.run/kvm"
 
 	// HuskControlPort is the fixed TCP port the husk stub serves the mTLS network
 	// control on (--control-listen). The controller dials podIP:HuskControlPort
@@ -80,15 +80,19 @@ const (
 	// /etc/forkd/ca split.
 	huskTLSMountPath      = "/etc/husk/tls"
 	huskCAMountPath       = "/etc/husk/ca"
-	huskSnapshotMountPath = "/var/lib/agent-run/snapshot"
-	huskKernelMountPath   = "/var/lib/agent-run/kernel/vmlinux"
-	// huskManifestMountPath is the in-pod path the recorded CAS manifest is
-	// mounted at (read-only). The stub decodes it, binds it to the activate
-	// request's ExpectedDigest, re-hashes the loaded snapshot files against it,
-	// and runs the snapcompat check, all BEFORE loading the snapshot. This is the
-	// husk mirror of forkd's verify-on-load gate (issues #9 and #32). The manifest
-	// is a content-addressed artifact, not a secret.
-	huskManifestMountPath = "/var/lib/agent-run/manifest.json"
+	huskSnapshotMountPath = "/var/lib/mitos/snapshot"
+	huskKernelMountPath   = "/var/lib/mitos/kernel/vmlinux"
+	// huskManifestDirMountPath is the in-pod path the CAS manifests DIRECTORY is
+	// mounted at (read-only); the stub reads <dir>/<digest>. The stub decodes
+	// that file, binds it to the activate request's ExpectedDigest, re-hashes the
+	// loaded snapshot files against it, and runs the snapcompat check, all BEFORE
+	// loading the snapshot. This is the husk mirror of forkd's verify-on-load gate
+	// (issues #9 and #32). The manifest is a content-addressed artifact, not a
+	// secret. We mount the DIRECTORY, not the single manifest file: on Talos the
+	// kubelet's single-file hostPath check fails for a file at this depth ("is not
+	// a file" / "no such file or directory") even when it exists, while a
+	// directory hostPath mounts cleanly and exposes the file inside it.
+	huskManifestDirMountPath = "/var/lib/mitos/manifests"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -101,14 +105,14 @@ type HuskPodOptions struct {
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
 	// KVMResourceName is the extended resource the husk pod requests for KVM
-	// access. Empty defaults to agentrun.dev/kvm.
+	// access. Empty defaults to mitos.run/kvm.
 	KVMResourceName string
 	// SnapshotID names the template snapshot the husk pod activates. It is the
 	// template id; the node-local snapshot lives at
 	// <DataDir>/templates/<SnapshotID>/snapshot. Empty means no snapshot mount is
 	// added (the pod cannot activate; only meaningful with the activation slice).
 	SnapshotID string
-	// DataDir is the forkd data directory on the node (default /var/lib/agent-run).
+	// DataDir is the forkd data directory on the node (default /var/lib/mitos).
 	// The snapshot hostPath is rooted here. Empty defaults to the forkd default.
 	DataDir string
 	// ExpectedDigest is the template's recorded CAS manifest digest, as reported
@@ -123,7 +127,7 @@ type HuskPodOptions struct {
 	// TLSSecretName is the Secret holding the husk stub's mTLS server leaf
 	// (tls.crt, tls.key), mounted read-only so the stub can serve the mTLS network
 	// control. This mirrors how forkd gets its leaf from a mounted PKI Secret
-	// (agent-run-forkd-tls). Empty means no TLS mount is added.
+	// (mitos-forkd-tls). Empty means no TLS mount is added.
 	TLSSecretName string
 	// CASecretName is the Secret holding the control plane CA (ca.crt only),
 	// mounted read-only so the stub can verify the controller client cert. Kept
@@ -148,7 +152,7 @@ const hostnameNodeLabel = "kubernetes.io/hostname"
 // defaultDataDir is the forkd data directory default; the snapshot hostPath is
 // rooted here when HuskPodOptions.DataDir is empty (matches cmd/forkd's
 // --data-dir default).
-const defaultDataDir = "/var/lib/agent-run"
+const defaultDataDir = "/var/lib/mitos"
 
 // defaultHuskCPU and defaultHuskMemory size a husk pod when the template
 // carries no Resources. They make the sandbox visible to the scheduler as
@@ -206,7 +210,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// snapshot hostPath + runAsNonRoot-false (the /dev/kvm device) exceptions". Its
 	// securityContext is restricted-clean: with those two exceptions removed the
 	// SAME securityContext is admitted into a restricted namespace (verified on
-	// kind). The agentrun.dev/kvm device-plugin resource replaces privileged: true.
+	// kind). The mitos.run/kvm device-plugin resource replaces privileged: true.
 	//
 	// The individual controls the husk pod DOES satisfy:
 	//   - Privileged: false. The whole point of the husk model is to drop
@@ -262,7 +266,13 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// the stub logs this loudly. The manifest mount itself is added in the snapshot
 	// block below (it shares the snapshot placement requirement).
 	if opts.ExpectedDigest != "" {
-		args = append(args, "--manifest", huskManifestMountPath)
+		args = append(args, "--manifest", filepath.Join(huskManifestDirMountPath, opts.ExpectedDigest))
+		// Pass the snapshot dir + expected digest so the dormant pod verifies the
+		// snapshot (the ~680 MiB re-hash) during Prepare, off the claim's Activate
+		// hot path. The claim then activates in ~tens of ms (load + handshake)
+		// instead of ~1.3 s (re-hash). The activate request carries the same
+		// SnapshotDir + ExpectedDigest, which the stub confirms before loading.
+		args = append(args, "--snapshot-dir", huskSnapshotMountPath, "--expected-digest", opts.ExpectedDigest)
 	} else {
 		args = append(args, "--allow-unverified-snapshots")
 	}
@@ -301,7 +311,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		mounts = append(mounts, corev1.VolumeMount{Name: "husk-ca", MountPath: huskCAMountPath, ReadOnly: true})
 	}
 	if opts.SnapshotID != "" {
-		hostType := corev1.HostPathDirectory
+		// DirectoryOrCreate / FileOrCreate, not the strict Directory / File: on
+		// Talos the kubelet's strict hostPath type check rejects these mounts
+		// ("is not a file/directory") even when the path exists and is the right
+		// type, because the kubelet performs the os.Stat in a mount view that
+		// differs from where the pod bind mount resolves. The OrCreate variants
+		// skip that pre-check and bind the existing snapshot/kernel/manifest. The
+		// safety this drops (fail-fast if the snapshot is missing) is not the real
+		// gate anyway: the husk stub re-verifies the snapshot against the recorded
+		// CAS manifest digest before loading (fail-closed), so an empty or wrong
+		// snapshot is rejected at activation, not silently run.
+		hostType := corev1.HostPathDirectoryOrCreate
 		volumes = append(volumes, corev1.Volume{
 			Name: "snapshot",
 			VolumeSource: corev1.VolumeSource{
@@ -313,7 +333,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "snapshot", MountPath: huskSnapshotMountPath, ReadOnly: true})
 
-		fileType := corev1.HostPathFile
+		fileType := corev1.HostPathFileOrCreate
 
 		// The recorded CAS manifest, mounted read-only so the stub can re-verify
 		// the snapshot against it before loading (fail-closed). Only added when the
@@ -324,12 +344,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				Name: "snapshot-manifest",
 				VolumeSource: corev1.VolumeSource{
 					HostPath: &corev1.HostPathVolumeSource{
-						Path: filepath.Join(dataDir, "cas", "manifests", opts.ExpectedDigest),
-						Type: &fileType,
+						Path: filepath.Join(dataDir, "cas", "manifests"),
+						Type: &hostType,
 					},
 				},
 			})
-			mounts = append(mounts, corev1.VolumeMount{Name: "snapshot-manifest", MountPath: huskManifestMountPath, ReadOnly: true})
+			mounts = append(mounts, corev1.VolumeMount{Name: "snapshot-manifest", MountPath: huskManifestDirMountPath, ReadOnly: true})
 		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "kernel",
@@ -341,6 +361,36 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			},
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "kernel", MountPath: huskKernelMountPath, ReadOnly: true})
+
+		// The template directory, mounted at the SAME absolute path the snapshot
+		// was built at (<dataDir>/templates/<id>), so the rootfs.ext4 drive the
+		// snapshot's vmstate references resolves on load. Firecracker re-opens the
+		// drive at its baked path_on_host during /snapshot/load; without this the
+		// load fails with "Block: Virtio backend error" (the drive file is absent
+		// in the husk pod's mount namespace). A directory mount, not a single-file
+		// one, both sidesteps the Talos single-file hostPath check and exposes the
+		// rootfs at exactly the baked path.
+		//
+		// PRODUCTION FOLLOW-UP (per-activation rootfs CoW): this mounts the shared
+		// template rootfs read-write, so the resumed VM writes into it directly.
+		// That is correct for a warm pool of one dormant pod per snapshot (a single
+		// activation owns the rootfs), but concurrent activations of one snapshot
+		// would share and corrupt it. The fork engine already does the right thing
+		// (reflink/copy the rootfs per fork, then PatchDrive after load); the husk
+		// activation path needs the same: copy templates/<id>/rootfs.ext4 to a
+		// per-activation file on a writable volume and PatchDrive to it after the
+		// snapshot loads. Tracked as the husk-rootfs-CoW follow-up.
+		templateDir := filepath.Join(dataDir, "templates", opts.SnapshotID)
+		volumes = append(volumes, corev1.Volume{
+			Name: "template",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: templateDir,
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir})
 	}
 
 	// Placement: the dormant VMM needs /dev/kvm (the kvm nodeSelector) AND the
@@ -455,7 +505,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
-	// core/v1 and agentrun.dev/v1alpha1). An error here means the scheme is
+	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is
 	// missing a type and is a programming error; the caller logs and skips.
 	_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
 	return pod
@@ -499,13 +549,29 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		owned = append(owned, p)
 	}
 
-	existing := int32(len(owned))
+	// Count only UNCLAIMED (dormant) pods toward the warm target. A pod carrying
+	// the claim label has been consumed by a SandboxClaim: it is activating or
+	// active, holding tenant state, and is NOT a warm slot. Counting it would
+	// leave the pool one warm pod short for every outstanding claim (the slot a
+	// claim took is never refilled), which is exactly the "no warm husk pod is
+	// ready" stall. Excluding claimed pods makes the pool maintain Replicas
+	// DORMANT pods, refilling each slot a claim consumes; the total pod count is
+	// then Replicas (warm) + the number of active claims.
+	dormant := make([]corev1.Pod, 0, len(owned))
+	for i := range owned {
+		if _, claimed := owned[i].Labels[huskClaimLabel]; claimed {
+			continue
+		}
+		dormant = append(dormant, owned[i])
+	}
+
+	existing := int32(len(dormant))
 	desired := pool.Spec.Replicas
 
 	switch {
 	case existing < desired:
 		deficit := desired - existing
-		logger.Info("husk pod deficit", "existing", existing, "desired", desired, "creating", deficit)
+		logger.Info("husk pod deficit", "dormant", existing, "desired", desired, "creating", deficit)
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
 			KVMResourceName: r.KVMResourceName,
@@ -532,14 +598,15 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		}
 
 	case existing > desired:
-		// Delete the extras deterministically: sort by name and delete the
-		// tail (newest GenerateName suffixes sort last), so repeated reconciles
-		// pick the same victims and the set converges.
-		sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
+		// Delete the extras deterministically from the DORMANT set only (never a
+		// claimed/active pod, which holds a tenant's running VM): sort by name and
+		// delete the tail (newest GenerateName suffixes sort last), so repeated
+		// reconciles pick the same victims and the set converges.
+		sort.Slice(dormant, func(i, j int) bool { return dormant[i].Name < dormant[j].Name })
 		surplus := existing - desired
-		logger.Info("husk pod surplus", "existing", existing, "desired", desired, "deleting", surplus)
+		logger.Info("husk pod surplus", "dormant", existing, "desired", desired, "deleting", surplus)
 		for i := int32(0); i < surplus; i++ {
-			victim := owned[len(owned)-1-int(i)]
+			victim := dormant[len(dormant)-1-int(i)]
 			if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
 				return existing, fmt.Errorf("delete surplus husk pod %s: %w", victim.Name, err)
 			}
@@ -568,7 +635,7 @@ func huskPodReady(p *corev1.Pod) bool {
 }
 
 // selectDormantHuskPod returns one Running+Ready husk pod for the pool that has
-// a PodIP and is not yet claimed (no agentrun.dev/claim label). It is the warm
+// a PodIP and is not yet claimed (no mitos.run/claim label). It is the warm
 // slot the claim path activates. Returns nil (no error) when none is available,
 // so the caller pends the claim. Selection is deterministic (lowest name) so
 // concurrent reconciles converge on the same victim; the optimistic-lock
@@ -577,6 +644,28 @@ func huskPodReady(p *corev1.Pod) bool {
 // carries the pod's resourceVersion so exactly one wins and the loser gets a 409
 // Conflict and requeues to pick a different dormant pod. A pod is therefore
 // claimed (and activated) by exactly one claim.
+// findClaimedHuskPod returns the husk pod this claim already claimed (the
+// claim-label patch committed on a prior reconcile), so a retrying claim REUSES
+// its pod instead of selecting and claiming a fresh dormant one. Without this,
+// any claim that claims a pod then fails before reaching Ready leaks a pod on
+// every retry, and a refilling warm pool feeds that leak into a runaway that
+// drains the pool. Returns nil when this claim holds no pod yet.
+func (r *SandboxClaimReconciler) findClaimedHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool, claimName string) (*corev1.Pod, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(pool.Namespace),
+		client.MatchingLabels{huskPoolLabel: pool.Name, huskClaimLabel: claimName},
+	); err != nil {
+		return nil, fmt.Errorf("list claimed husk pods for %s: %w", claimName, err)
+	}
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return &pods.Items[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -608,7 +697,7 @@ func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool 
 	return &chosen, nil
 }
 
-// markHuskPodClaimed stamps the agentrun.dev/claim label on a husk pod so it is
+// markHuskPodClaimed stamps the mitos.run/claim label on a husk pod so it is
 // not selected again. It uses an OPTIMISTIC-LOCK merge patch: the patch carries
 // the pod's resourceVersion, so the API server rejects it with a 409 Conflict if
 // the pod was modified (for instance, claimed by a racing reconcile) since this

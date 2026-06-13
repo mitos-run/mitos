@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/husk"
-	"github.com/paperclipinc/sandbox/internal/observability"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/observability"
+	"github.com/paperclipinc/mitos/internal/vsock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +28,7 @@ import (
 )
 
 // tracer is the controller component tracer; no-op unless tracing is configured.
-var tracer = observability.Tracer("agentrun-controller")
+var tracer = observability.Tracer("mitos-controller")
 
 // DefaultMaxPendingDuration bounds how long a claim may stay Pending for lack of
 // node capacity before the reconciler gives up and fails it with an actionable
@@ -41,7 +41,7 @@ const DefaultMaxPendingDuration = 5 * time.Minute
 // any unrelated condition churn, whereas this annotation only changes when the
 // claim enters or leaves the capacity-pending state. Cleared on successful
 // placement so a later capacity shortage starts a fresh clock.
-const pendingSinceAnnotation = "agentrun.dev/capacity-pending-since"
+const pendingSinceAnnotation = "mitos.run/capacity-pending-since"
 
 // capacityPendingRequeue is the backoff between capacity-pending retries: long
 // enough not to hot-loop a full cluster, short enough to place a claim promptly
@@ -177,12 +177,12 @@ func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
 // SandboxClaim ownership: get/list/watch to reconcile, update to write the
 // terminate finalizer, delete for the garbage collector's TTL sweep of
 // finished claims. status writes phase, conditions, and FinishedAt.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/finalizers,verbs=update
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims/finalizers,verbs=update
 // SandboxTemplate and SandboxPool are read-only inputs to claim placement.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch
 // Secrets: get/list to read mounted secrets referenced by a sandbox and to
 // reconcile the per-sandbox token Secret; create/update to mint and heal that
 // token Secret (and the controller's PKI Secrets, see EnsurePKI); delete to
@@ -526,9 +526,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	pod, err := r.selectDormantHuskPod(ctx, pool)
+	// Reuse the pod this claim already claimed on a prior reconcile (idempotent);
+	// only select + claim a fresh dormant pod when this claim holds none. This
+	// stops a retrying claim from leaking a new pod each pass.
+	pod, err := r.findClaimedHuskPod(ctx, pool, claim.Name)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	reusingPod := pod != nil
+	if pod == nil {
+		pod, err = r.selectDormantHuskPod(ctx, pool)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if pod == nil {
 		// No warm husk slot: pend and retry. The pool reconciler is expected to
@@ -586,30 +596,33 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		activate = ActivateHuskPod
 	}
 
-	// Claim the dormant pod BEFORE activating it: stamp the agentrun.dev/claim
+	// Claim the dormant pod BEFORE activating it: stamp the mitos.run/claim
 	// label under an OPTIMISTIC LOCK. This is the mutual-exclusion commit. Two
 	// concurrent claims may both select the same dormant pod, but the
 	// resourceVersion-guarded patch lets exactly one win; the loser gets a 409
 	// Conflict and must NOT activate this pod (a second tenant on the same VM).
 	// Winning the label patch is the gate to Activate, so a pod is activated by
 	// exactly one claim. On conflict we requeue so the next reconcile picks a
-	// different dormant pod.
-	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
-		if apierrors.IsConflict(err) {
-			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
-			claim.Status.Phase = v1alpha1.SandboxPending
-			setCondition(&claim.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: metav1.NewTime(r.now()),
-				Reason:             "HuskPodRaced",
-				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
-			})
-			_ = r.Status().Update(ctx, claim)
-			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	// different dormant pod. Skipped when REUSING a pod this claim already holds
+	// (the label is already ours).
+	if !reusingPod {
+		if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+				claim.Status.Phase = v1alpha1.SandboxPending
+				setCondition(&claim.Status.Conditions, metav1.Condition{
+					Type:               "Ready",
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: metav1.NewTime(r.now()),
+					Reason:             "HuskPodRaced",
+					Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
+				})
+				_ = r.Status().Update(ctx, claim)
+				return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+			}
+			logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
+			return ctrl.Result{}, err
 		}
-		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
-		return ctrl.Result{}, err
 	}
 
 	// The recorded snapshot manifest digest the husk stub re-verifies the on-disk
@@ -803,6 +816,25 @@ func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1a
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 
+	// Husk path: the claim's backing VM lives in the husk pod this claim activated,
+	// labeled with the claim name. Delete it to reap the VM and FREE THE WARM-POOL
+	// SLOT: a husk pod is single-use (once a tenant ran in it, it cannot be
+	// re-dormanted safely), so releasing the claim deletes the pod and the pool
+	// reconcile refills a fresh dormant pod. Without this the pod lingers
+	// claimed-but-idle and the pool never recovers the slot. No-op in raw-forkd
+	// mode (no pod carries the label); terminateOnNode below covers that path.
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		logger.Error(err, "list claimed husk pods on delete; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+	for i := range claimedHusk.Items {
+		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "delete claimed husk pod on release", "pod", claimedHusk.Items[i].Name)
+			return ctrl.Result{}, err
+		}
+	}
+
 	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
 		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
 			logger.Error(err, "terminate backing sandbox on delete", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
@@ -984,7 +1016,7 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.For(&v1alpha1.SandboxClaim{})
 	}
 	// In husk mode, watch husk pods and map a pod event to the claim named in its
-	// agentrun.dev/claim label. A husk pod delete (drain, eviction, kubectl
+	// mitos.run/claim label. A husk pod delete (drain, eviction, kubectl
 	// delete) then promptly reconciles the active claim, which re-pends per the
 	// pool's DrainPolicy instead of waiting for the claim's own periodic requeue.
 	// The mapped reconcile re-Gets the claim and routes through checkHuskPodLost,

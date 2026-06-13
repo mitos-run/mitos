@@ -50,30 +50,40 @@ func secureJoin(destDir, entryName string) (string, error) {
 
 // symlinkTargetStaysInside reports whether a symlink whose on-disk location is
 // linkPath (already resolved through secureJoin) and whose stored target is
-// target would, when followed, resolve to a location inside destDir. Absolute
-// targets are rejected outright because they would point at the host
-// filesystem when the rootfs is mounted elsewhere. Relative targets are
-// resolved both lexically (to reject an escaping "..") and through SecureJoin
-// from the link's own directory (to resolve any symlinked parent on disk);
-// the symlink is accepted only when both agree it stays inside destDir.
+// target resolves to a location inside destDir when interpreted the way the
+// kernel will at runtime: destDir is the rootfs root ("/"). An ABSOLUTE target
+// is therefore resolved relative to destDir, not the host filesystem, exactly
+// as the guest sees it once the rootfs is mounted as "/": absolute symlinks
+// like /etc/ssl/certs/X.pem -> /usr/share/ca-certificates/... are normal and
+// ubiquitous (ca-certificates, the alternatives system), not an escape.
+// Rejecting them outright would break almost every real base image. A RELATIVE
+// target resolves from the link's own directory. In BOTH cases the target is
+// resolved through SecureJoin with destDir as the root, which clamps the walk
+// to destDir, and the result is rejected if it still escapes. This is safe
+// because every later file/hardlink write also goes through secureJoin /
+// SecureJoin, so even a symlink pointing at "/" cannot let a subsequent entry
+// write through it onto the host: SecureJoin treats that "/" as destDir.
 func symlinkTargetStaysInside(destDir, linkPath, target string) bool {
+	var walk string
 	if filepath.IsAbs(target) {
-		return false
+		// Absolute target: rootfs-relative, i.e. relative to destDir.
+		walk = filepath.Clean(target)
+	} else {
+		// Relative target: resolve from the link's own directory.
+		linkDirRel, err := filepath.Rel(filepath.Clean(destDir), filepath.Dir(linkPath))
+		if err != nil || linkDirRel == ".." || hasDotDotPrefix(linkDirRel) {
+			return false
+		}
+		// Lexical check: a relative target may use ".." to climb within
+		// destDir, but must not climb above it.
+		if escapesLexically(destDir, filepath.Join(filepath.Dir(linkPath), target)) {
+			return false
+		}
+		walk = filepath.Join(linkDirRel, target)
 	}
-	// Lexical check: a relative target may legitimately use ".." to climb
-	// within destDir, but it must not climb above it.
-	lexical := filepath.Join(filepath.Dir(linkPath), target)
-	if escapesLexically(destDir, lexical) {
-		return false
-	}
-	// On-disk check: resolve the link's directory relative to destDir and
-	// SecureJoin the target so a symlinked parent cannot redirect the result
-	// outside destDir.
-	linkDirRel, err := filepath.Rel(filepath.Clean(destDir), filepath.Dir(linkPath))
-	if err != nil || linkDirRel == ".." || hasDotDotPrefix(linkDirRel) {
-		return false
-	}
-	resolved, err := securejoin.SecureJoin(destDir, filepath.Join(linkDirRel, target))
+	// On-disk check: SecureJoin resolves any symlinked parent against destDir
+	// as the root, so the result cannot be redirected outside destDir.
+	resolved, err := securejoin.SecureJoin(destDir, walk)
 	if err != nil || escapesLexically(destDir, resolved) {
 		return false
 	}

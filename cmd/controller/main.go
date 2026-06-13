@@ -6,10 +6,10 @@ import (
 	"os"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/eventfeed"
-	"github.com/paperclipinc/sandbox/internal/observability"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/eventfeed"
+	"github.com/paperclipinc/mitos/internal/observability"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -60,9 +60,9 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.BoolVar(&enableHuskPods, "enable-husk-pods", true, "Pod-native default (issue #18): each SandboxPool builds the template snapshot AND maintains a warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes; claims activate a dormant husk pod in place. This is the default; pass --enable-raw-forkd to fall back to the fork-per-claim path. Ignored when --enable-raw-forkd or --mock is set (both force raw-forkd).")
 	flag.BoolVar(&enableRawForkd, "enable-raw-forkd", false, "Fallback run path: build the snapshot and fork per claim on a holder node (no husk pods). Off by default (the husk pod-native path runs). --mock implies this. husk-pods needs real KVM nodes; raw-forkd is the path the mock/dev overlay uses.")
-	flag.StringVar(&huskStubImage, "husk-stub-image", "agent-run-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
+	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
-	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/agent-run", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
+	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/mitos", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
 	flag.Parse()
@@ -70,7 +70,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	logger := ctrl.Log.WithName("setup")
 
-	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-controller", otlpEndpoint)
+	shutdownTracing, err := observability.Setup(context.Background(), "mitos-controller", otlpEndpoint)
 	if err != nil {
 		logger.Error(err, "tracing setup failed")
 		os.Exit(1)
@@ -99,6 +99,14 @@ func main() {
 			BindAddress: metricsAddr,
 		},
 		HealthProbeBindAddress: probeAddr,
+		// Leader election: the Deployment runs multiple replicas for HA, so EXACTLY
+		// ONE may run the reconcilers at a time. Without it every replica reconciles
+		// every object, racing on status writes (optimistic-lock "object has been
+		// modified") AND each independently selecting + claiming dormant husk pods
+		// for the same claim, which under a refilling warm pool becomes a runaway
+		// that drains the pool. The lease lives in the controller's own namespace.
+		LeaderElection:   true,
+		LeaderElectionID: "mitos-controller-leader",
 	})
 	if err != nil {
 		logger.Error(err, "unable to create manager")
@@ -131,7 +139,7 @@ func main() {
 		PeerToken:         peerToken,
 		EnableHuskPods:    enableHuskPods,
 		HuskStubImage:     huskStubImage,
-		KVMResourceName:   "agentrun.dev/kvm",
+		KVMResourceName:   "mitos.run/kvm",
 		DataDir:           huskDataDir,
 		HuskTLSSecretName: controller.ForkdTLSSecretName,
 		HuskCASecretName:  controller.CASecretName,
@@ -156,7 +164,7 @@ func main() {
 			// events API GetEventRecorder returns a different type with a different
 			// signature, so migrating is a separate change. controller-runtime's own
 			// tests carry the same nolint on this deprecation.
-			mgr.GetEventRecorderFor("agentrun-controller"), //nolint:staticcheck // v1 events API supported; v2 migration out of scope
+			mgr.GetEventRecorderFor("mitos-controller"), //nolint:staticcheck // v1 events API supported; v2 migration out of scope
 			eventSink,
 			nil,
 		),
@@ -187,7 +195,7 @@ func main() {
 
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
 	if discoveryNamespace == "" {
-		discoveryNamespace = "agent-run"
+		discoveryNamespace = "mitos"
 	}
 	discovery := &controller.ForkdDiscovery{
 		Client:    mgr.GetClient(),

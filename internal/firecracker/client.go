@@ -68,6 +68,16 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	}
 
 	os.Remove(socketPath)
+	// Firecracker binds the vsock host UDS at WorkDir/VsockRelPath and does NOT
+	// unlink it on exit. A crashed or killed prior VM in this same WorkDir (the
+	// template build dir is reused across build attempts; direct-exec forks
+	// reuse a sandbox dir on retry) therefore leaves a stale socket file, and
+	// the next launch fails its PUT /vsock with EADDRINUSE ("Address in use").
+	// Remove it up front, symmetric with the API socket above, so a retry binds
+	// cleanly instead of wedging the build/fork in a collision loop. Under the
+	// jailer this path lives in the per-VM chroot and the collision cannot
+	// occur; this guards the direct-exec path.
+	os.Remove(filepath.Join(cfg.WorkDir, VsockRelPath))
 
 	args := []string{
 		"--api-sock", socketPath,
