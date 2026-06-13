@@ -93,6 +93,12 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Leader election: the controller binary acquires a Lease at startup (the same
+  # code runs in mock mode), so the dev mock controller needs leases even at
+  # replicas 1, or the manager blocks the reconcilers and claims never reconcile.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "update", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
