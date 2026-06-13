@@ -402,13 +402,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				},
 			},
 		})
-		// READ-ONLY: the stub only READS the template rootfs to reflink-clone it
-		// per activation; it never writes the template dir. Mounting it read-only
-		// (like the snapshot, kernel, and manifest mounts) closes the shared-RW
-		// residual at the mount itself, so no husk pod can write through to the
-		// shared template even if a future code path tried. The per-activation CoW
-		// clone is written to the SEPARATE writable husk-rootfs-cow mount below.
-		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir, ReadOnly: true})
+		// Mounted READ-WRITE, but the guest never writes the template. Firecracker
+		// opens the snapshot's BAKED rootfs path (this template rootfs.ext4) with
+		// O_RDWR during /snapshot/load, so a read-only mount makes the load fail
+		// EROFS (verified on real KVM). The VM stays PAUSED through load (resume
+		// =false) -> PatchDrive(rootfs -> per-pod clone) -> Resume, so by the time
+		// the guest runs its rootfs is the per-activation CoW clone (the SEPARATE
+		// writable husk-rootfs mount below), never the template. Isolation is from
+		// the rebind-before-resume, not the mount mode: the template is only OPENED
+		// (not written) during the paused load and the fd is replaced by PatchDrive
+		// before resume, so concurrent activations never write the shared template.
+		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir})
 
 		// The writable per-activation rootfs CoW directory, a sibling of the
 		// template dir under the node data dir so the stub's reflink clone of the

@@ -442,9 +442,12 @@ func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
 		t.Errorf("args missing --template-rootfs %s: %v", wantTemplateRootfs, container.Args)
 	}
 
-	// The template dir mount (the clone SOURCE) must be READ-ONLY: the stub only
-	// reads it to clone the rootfs, so a writable mount would re-open the shared-RW
-	// residual this fix closes.
+	// The template dir mount is READ-WRITE: Firecracker opens the snapshot's baked
+	// rootfs path (this template rootfs.ext4) with O_RDWR during /snapshot/load, so
+	// a read-only mount makes the load fail EROFS (verified on real KVM). Isolation
+	// is NOT from the mount mode: the VM stays paused through load -> PatchDrive
+	// (rootfs -> per-pod clone) -> resume, so the guest writes only its clone, never
+	// the template. The template is only opened (not written) during the paused load.
 	var tmplMount *corev1.VolumeMount
 	for i := range container.VolumeMounts {
 		if container.VolumeMounts[i].Name == "template" {
@@ -454,8 +457,8 @@ func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
 	if tmplMount == nil {
 		t.Fatal("expected a template volume mount")
 	}
-	if !tmplMount.ReadOnly {
-		t.Error("the template dir mount must be read-only (the stub only reads it to clone the rootfs)")
+	if tmplMount.ReadOnly {
+		t.Error("the template dir mount must be read-write so Firecracker can open the baked rootfs path at load; isolation is from rebind-before-resume, not the mount mode")
 	}
 
 	// The per-pod VM id flows from the downward API pod name: a POD_NAME env from
