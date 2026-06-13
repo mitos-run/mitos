@@ -163,9 +163,26 @@ activate before loading, so a tampered-on-disk or incompatible snapshot is
 refused at activate time on the husk path; and (c) it is a
 BASE IMAGE, not tenant data: tenant secrets are delivered post-restore over the
 control channel (surface 2), never baked into the shared snapshot (section 6).
-Cross-pod isolation of the mount is the read-only property, not a per-pod copy;
-fully pod-native snapshot delivery (a CAS pull into the pod, removing the shared
-hostPath) is a documented follow-up.
+Cross-pod isolation of the snapshot mem/vmstate is the read-only property, not a
+per-pod copy. The ROOTFS isolation is from a per-activation copy-on-write clone
+rebound while the guest is FROZEN, not from a read-only template mount. The
+template dir (which holds `rootfs.ext4`) is mounted read-write, because
+Firecracker opens the snapshot's baked rootfs path with O_RDWR during
+`/snapshot/load` (a read-only mount fails the load EROFS, verified on real KVM);
+isolation does NOT rely on the mount mode. Each activation gets its OWN clone:
+`internal/husk` `Stub.Prepare` reflink-clones `<dataDir>/templates/<id>/rootfs
+.ext4` to a PER-POD file `<dataDir>/husk-rootfs/<pod-name>/rootfs.ext4` (the clone
+path is scoped to the per-pod VM id the controller passes via the downward API
+`metadata.name`, so two husk pods sharing the node CoW hostPath never collide on,
+overwrite, or delete each other's clone), and `Stub.Activate` loads the snapshot
+PAUSED (`resume=false`), rebinds the baked `rootfs` drive to that clone with
+`PatchDrive` while the guest is frozen, THEN resumes. The template is only OPENED
+(never written) during the paused load and the drive fd is replaced by PatchDrive
+before resume, so the guest writes only its own clone, never a single block of the
+shared template, and concurrent activations of one template never leak one
+tenant's filesystem state into another. The clone is removed on pod teardown
+(`Stub.Close`). Fully pod-native snapshot delivery (a CAS pull into the pod,
+removing the shared read-only mem/vmstate hostPath) remains a documented follow-up.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests

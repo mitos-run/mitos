@@ -29,6 +29,19 @@ type fakeVMM struct {
 	gotResume bool
 	gotOverr  []firecracker.NetworkOverride
 	closed    bool
+
+	patchCalls []struct {
+		driveID string
+		path    string
+	}
+	patchErr error
+
+	resumeCalls int
+	resumeErr   error
+
+	// callOrder records the activate-time VMM call sequence ("load", "patch",
+	// "resume") so a test can assert load(resume=false) -> PatchDrive -> Resume.
+	callOrder []string
 }
 
 func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error {
@@ -39,11 +52,31 @@ func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, o
 	f.gotState = snapshot
 	f.gotResume = resume
 	f.gotOverr = overrides
+	f.callOrder = append(f.callOrder, "load")
 	return f.loadErr
 }
 
 func (f *fakeVMM) VsockHostPath(rel string) string {
 	return filepath.Join("/run/husk", rel)
+}
+
+func (f *fakeVMM) PatchDrive(driveID, pathOnHost string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.patchCalls = append(f.patchCalls, struct {
+		driveID string
+		path    string
+	}{driveID, pathOnHost})
+	f.callOrder = append(f.callOrder, "patch")
+	return f.patchErr
+}
+
+func (f *fakeVMM) Resume() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumeCalls++
+	f.callOrder = append(f.callOrder, "resume")
+	return f.resumeErr
 }
 
 func (f *fakeVMM) Close() error {
@@ -159,8 +192,13 @@ func TestPrepareThenActivateSucceeds(t *testing.T) {
 	if vm.gotState != "/data/templates/tmpl/snapshot/vmstate" {
 		t.Errorf("vmstate path = %q", vm.gotState)
 	}
-	if !vm.gotResume {
-		t.Error("expected resume=true")
+	// The husk path loads PAUSED (resume=false) and resumes explicitly AFTER the
+	// rootfs rebind, so the guest never writes through the shared template.
+	if vm.gotResume {
+		t.Error("expected snapshot load with resume=false (rebind happens while paused)")
+	}
+	if vm.resumeCalls != 1 {
+		t.Errorf("expected exactly 1 explicit Resume call, got %d", vm.resumeCalls)
 	}
 	if len(vm.gotOverr) != 1 || vm.gotOverr[0].HostDevName != "tap-1" {
 		t.Errorf("overrides not threaded through: %+v", vm.gotOverr)
@@ -554,6 +592,302 @@ func TestActivateNeverLogsEntropyOrSecrets(t *testing.T) {
 		if enc != "" && strings.Contains(logged, enc) {
 			t.Fatalf("entropy bytes leaked to stderr (%d-byte form)", len(enc))
 		}
+	}
+}
+
+func TestPrepareClonesRootfsWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "templates", "tmpl", "rootfs.ext4")
+	if err := os.MkdirAll(filepath.Dir(tmplRootfs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmplRootfs, []byte("ROOTFS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+
+	var gotSrc, gotDst string
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink: func(src, dst string) error {
+			gotSrc, gotDst = src, dst
+			return os.WriteFile(dst, []byte("CLONE"), 0o644)
+		},
+	})
+
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if gotSrc != tmplRootfs {
+		t.Errorf("reflink src = %q, want template rootfs %q", gotSrc, tmplRootfs)
+	}
+	wantDst := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if gotDst != wantDst {
+		t.Errorf("reflink dst = %q, want per-activation path %q", gotDst, wantDst)
+	}
+	if _, err := os.Stat(wantDst); err != nil {
+		t.Errorf("clone not written: %v", err)
+	}
+}
+
+// TestPrepareClonePathScopedToVMID proves the per-activation rootfs clone path
+// is scoped to the (per-pod) VM id: two stubs with DISTINCT ids clone to
+// DISTINCT files under the same CoW dir. This is the cross-pod-corruption fix:
+// the controller passes the pod name as the VM id, so two husk pods sharing the
+// node CoW hostPath never overwrite or delete each other's live rootfs.
+func TestPrepareClonePathScopedToVMID(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("ROOTFS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+
+	clonePathFor := func(vmID string) string {
+		var gotDst string
+		s := New(firecracker.VMConfig{ID: vmID}, Options{
+			Start:              func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+			Ready:              readyOK,
+			Notify:             (&fakeNotifier{}).notify,
+			Verify:             verifyOK,
+			RootfsTemplatePath: tmplRootfs,
+			RootfsCoWDir:       cowDir,
+			Reflink: func(src, dst string) error {
+				gotDst = dst
+				return os.WriteFile(dst, []byte("CLONE"), 0o644)
+			},
+		})
+		if err := s.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare(%s): %v", vmID, err)
+		}
+		return gotDst
+	}
+
+	a := clonePathFor("pool-husk-aaaaa")
+	b := clonePathFor("pool-husk-bbbbb")
+	if a == b {
+		t.Fatalf("distinct VM ids must yield distinct clone paths; both = %q", a)
+	}
+	if a != filepath.Join(cowDir, "pool-husk-aaaaa", "rootfs.ext4") {
+		t.Errorf("clone path for first id = %q", a)
+	}
+	if b != filepath.Join(cowDir, "pool-husk-bbbbb", "rootfs.ext4") {
+		t.Errorf("clone path for second id = %q", b)
+	}
+}
+
+func TestPrepareSkipsCloneWhenUnconfigured(t *testing.T) {
+	called := false
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		Reflink: func(src, dst string) error { called = true; return nil },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if called {
+		t.Error("reflink must not run when RootfsTemplatePath/RootfsCoWDir are empty")
+	}
+}
+
+func TestPrepareCloneFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vm := &fakeVMM{}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       filepath.Join(dir, "husk-rootfs"),
+		Reflink:            func(src, dst string) error { return errors.New("no space") },
+	})
+	if err := s.Prepare(context.Background()); err == nil {
+		t.Fatal("expected Prepare to fail closed on clone error")
+	}
+	if s.State() == StateDormant {
+		t.Error("state must not be dormant after a failed clone")
+	}
+	if !vm.closed {
+		t.Error("the dormant VMM must be torn down when Prepare fails closed")
+	}
+}
+
+func TestActivateRebindsRootfsDriveToClone(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+	vm := &fakeVMM{}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: filepath.Join(dir, "snap")})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("activate not OK: %s", res.Error)
+	}
+	if len(vm.patchCalls) != 1 {
+		t.Fatalf("expected exactly 1 PatchDrive call, got %d: %v", len(vm.patchCalls), vm.patchCalls)
+	}
+	if vm.patchCalls[0].driveID != "rootfs" {
+		t.Errorf("rebind drive id = %q, want \"rootfs\"", vm.patchCalls[0].driveID)
+	}
+	wantPath := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if vm.patchCalls[0].path != wantPath {
+		t.Errorf("rebind path = %q, want clone %q", vm.patchCalls[0].path, wantPath)
+	}
+	// The rootfs rebind MUST happen on the paused VM (resume=false on load) and
+	// BEFORE the explicit Resume, so the guest never writes the shared template.
+	if vm.gotResume {
+		t.Error("snapshot must be loaded with resume=false so the rebind lands while paused")
+	}
+	vm.mu.Lock()
+	order := append([]string(nil), vm.callOrder...)
+	vm.mu.Unlock()
+	want := []string{"load", "patch", "resume"}
+	if len(order) != len(want) {
+		t.Fatalf("VMM call order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("VMM call order = %v, want %v", order, want)
+		}
+	}
+}
+
+// TestActivateResumeFailureFailsClosed proves a Resume rejection after the
+// rootfs rebind fails the activate closed: the VM is never marked active.
+func TestActivateResumeFailureFailsClosed(t *testing.T) {
+	vm := &fakeVMM{resumeErr: errors.New("resume rejected")}
+	s := newTestStub(t, vm, readyOK)
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap"})
+	if err == nil {
+		t.Fatal("expected activate to fail closed on resume error")
+	}
+	if res.OK {
+		t.Fatal("fail closed: result must not be OK when resume is rejected")
+	}
+	if s.State() == StateActive {
+		t.Errorf("state must not be active after a failed resume, got %s", s.State())
+	}
+	// The snapshot loaded (paused) before the resume failed.
+	if vm.loadCalls != 1 {
+		t.Errorf("expected the snapshot to load before resume, got %d loads", vm.loadCalls)
+	}
+}
+
+func TestActivateNoRebindWhenNoClone(t *testing.T) {
+	vm := &fakeVMM{}
+	s := newTestStub(t, vm, readyOK)
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap"})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("activate not OK: %s", res.Error)
+	}
+	if len(vm.patchCalls) != 0 {
+		t.Errorf("no rootfs clone configured, so no PatchDrive expected, got %v", vm.patchCalls)
+	}
+}
+
+func TestActivateRebindFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vm := &fakeVMM{patchErr: errors.New("drive busy")}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       filepath.Join(dir, "husk-rootfs"),
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: filepath.Join(dir, "snap")})
+	if err == nil {
+		t.Fatal("expected activate to fail closed on rebind error")
+	}
+	if res.OK {
+		t.Fatal("fail closed: result must not be OK")
+	}
+	if s.State() == StateActive {
+		t.Errorf("state must not be active after a failed rebind, got %s", s.State())
+	}
+}
+
+// TestFakeVMMSatisfiesInterface fails to compile if the vmm interface gains a
+// method fakeVMM does not implement, keeping the fake in lockstep with the seam.
+func TestFakeVMMSatisfiesInterface(t *testing.T) {
+	var _ vmm = (*fakeVMM)(nil)
+}
+
+func TestCloseRemovesRootfsClone(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	clonePath := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if _, err := os.Stat(clonePath); err != nil {
+		t.Fatalf("clone should exist after Prepare: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(clonePath); !os.IsNotExist(err) {
+		t.Errorf("clone should be removed after Close, stat err = %v", err)
 	}
 }
 

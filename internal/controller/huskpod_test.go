@@ -15,6 +15,7 @@ package controller_test
 //     is documented in huskpod.go).
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -381,6 +382,103 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	}
 	if !mounted {
 		t.Error("manifest volume is not mounted into the container")
+	}
+}
+
+func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "cow-pool", Namespace: "default", UID: "pool-uid-cow"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "cow-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cow-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:  "mitos-husk-stub:test",
+		SnapshotID: "cow-tmpl",
+		DataDir:    "/var/lib/mitos",
+	})
+	container := pod.Spec.Containers[0]
+
+	// The CoW dir hostPath volume must be present and WRITABLE (ReadOnly false),
+	// co-located under the node data dir as a sibling of templates.
+	var cowMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == "husk-rootfs-cow" {
+			cowMount = &container.VolumeMounts[i]
+		}
+	}
+	if cowMount == nil {
+		t.Fatal("expected a husk-rootfs-cow volume mount")
+	}
+	if cowMount.ReadOnly {
+		t.Error("the rootfs CoW dir must be mounted read-write")
+	}
+
+	var cowVol *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "husk-rootfs-cow" {
+			cowVol = &pod.Spec.Volumes[i]
+		}
+	}
+	if cowVol == nil || cowVol.HostPath == nil {
+		t.Fatal("expected a husk-rootfs-cow hostPath volume")
+	}
+	wantHostPath := filepath.Join("/var/lib/mitos", "husk-rootfs")
+	if cowVol.HostPath.Path != wantHostPath {
+		t.Errorf("CoW hostPath = %q, want %q (sibling of templates under the data dir)", cowVol.HostPath.Path, wantHostPath)
+	}
+
+	// The stub must be told where to clone from and to.
+	args := strings.Join(container.Args, " ")
+	if !strings.Contains(args, "--rootfs-cow-dir "+cowMount.MountPath) {
+		t.Errorf("args missing --rootfs-cow-dir %s: %v", cowMount.MountPath, container.Args)
+	}
+	wantTemplateRootfs := filepath.Join("/var/lib/mitos", "templates", "cow-tmpl", "rootfs.ext4")
+	if !strings.Contains(args, "--template-rootfs "+wantTemplateRootfs) {
+		t.Errorf("args missing --template-rootfs %s: %v", wantTemplateRootfs, container.Args)
+	}
+
+	// The template dir mount is READ-WRITE: Firecracker opens the snapshot's baked
+	// rootfs path (this template rootfs.ext4) with O_RDWR during /snapshot/load, so
+	// a read-only mount makes the load fail EROFS (verified on real KVM). Isolation
+	// is NOT from the mount mode: the VM stays paused through load -> PatchDrive
+	// (rootfs -> per-pod clone) -> resume, so the guest writes only its clone, never
+	// the template. The template is only opened (not written) during the paused load.
+	var tmplMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == "template" {
+			tmplMount = &container.VolumeMounts[i]
+		}
+	}
+	if tmplMount == nil {
+		t.Fatal("expected a template volume mount")
+	}
+	if tmplMount.ReadOnly {
+		t.Error("the template dir mount must be read-write so Firecracker can open the baked rootfs path at load; isolation is from rebind-before-resume, not the mount mode")
+	}
+
+	// The per-pod VM id flows from the downward API pod name: a POD_NAME env from
+	// metadata.name plus --vm-id $(POD_NAME). This scopes the clone path per pod so
+	// two husk pods on one node never collide on the shared CoW hostPath.
+	var podNameEnv *corev1.EnvVar
+	for i := range container.Env {
+		if container.Env[i].Name == "POD_NAME" {
+			podNameEnv = &container.Env[i]
+		}
+	}
+	if podNameEnv == nil {
+		t.Fatal("expected a POD_NAME env var")
+	}
+	if podNameEnv.ValueFrom == nil || podNameEnv.ValueFrom.FieldRef == nil ||
+		podNameEnv.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+		t.Errorf("POD_NAME must come from the downward API metadata.name, got %+v", podNameEnv.ValueFrom)
+	}
+	if !strings.Contains(args, "--vm-id $(POD_NAME)") {
+		t.Errorf("args missing --vm-id $(POD_NAME): %v", container.Args)
 	}
 }
 

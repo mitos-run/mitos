@@ -93,6 +93,13 @@ const (
 	// a file" / "no such file or directory") even when it exists, while a
 	// directory hostPath mounts cleanly and exposes the file inside it.
 	huskManifestDirMountPath = "/var/lib/mitos/manifests"
+	// huskRootfsCoWMountPath is the in-pod path the writable per-activation rootfs
+	// CoW directory is mounted at. It is a hostPath under the node data dir
+	// (<dataDir>/husk-rootfs), co-located with the template dir on the SAME node
+	// filesystem so the stub's reflink clone of the template rootfs lands on a
+	// reflink-capable filesystem (a full copy fallback otherwise). Each activation
+	// writes its own clone under here, never the shared read-only template rootfs.
+	huskRootfsCoWMountPath = "/var/lib/mitos/husk-rootfs"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -256,6 +263,15 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		"--tls-cert", filepath.Join(huskTLSMountPath, "tls.crt"),
 		"--tls-key", filepath.Join(huskTLSMountPath, "tls.key"),
 		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
+		// Per-pod VM id from the downward API pod name (set on the container env
+		// below). It scopes this pod's per-activation rootfs CoW clone path
+		// (<rootfs-cow-dir>/<id>/rootfs.ext4), which is written under a node
+		// hostPath shared by EVERY husk pod on the node. Without a per-pod id every
+		// husk pod would clone to the IDENTICAL path and overwrite or delete each
+		// other's live rootfs (cross-pod corruption); the pod name is unique per
+		// node, so each pod gets its own clone. $(POD_NAME) is substituted by the
+		// kubelet from the env var, not the shell.
+		"--vm-id", "$(POD_NAME)",
 	}
 
 	// Snapshot verify gate (fail-closed): when the pool has a recorded template
@@ -371,15 +387,11 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// one, both sidesteps the Talos single-file hostPath check and exposes the
 		// rootfs at exactly the baked path.
 		//
-		// PRODUCTION FOLLOW-UP (per-activation rootfs CoW): this mounts the shared
-		// template rootfs read-write, so the resumed VM writes into it directly.
-		// That is correct for a warm pool of one dormant pod per snapshot (a single
-		// activation owns the rootfs), but concurrent activations of one snapshot
-		// would share and corrupt it. The fork engine already does the right thing
-		// (reflink/copy the rootfs per fork, then PatchDrive after load); the husk
-		// activation path needs the same: copy templates/<id>/rootfs.ext4 to a
-		// per-activation file on a writable volume and PatchDrive to it after the
-		// snapshot loads. Tracked as the husk-rootfs-CoW follow-up.
+		// The stub then rebinds the rootfs drive to a PER-ACTIVATION copy-on-write
+		// clone (see the husk-rootfs-cow mount below) immediately after load, so the
+		// resumed VM writes its OWN rootfs, never the shared template rootfs:
+		// concurrent activations of one template no longer share or corrupt a single
+		// rootfs. The clone source (this template rootfs) stays effectively read-only.
 		templateDir := filepath.Join(dataDir, "templates", opts.SnapshotID)
 		volumes = append(volumes, corev1.Volume{
 			Name: "template",
@@ -390,7 +402,44 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				},
 			},
 		})
+		// Mounted READ-WRITE, but the guest never writes the template. Firecracker
+		// opens the snapshot's BAKED rootfs path (this template rootfs.ext4) with
+		// O_RDWR during /snapshot/load, so a read-only mount makes the load fail
+		// EROFS (verified on real KVM). The VM stays PAUSED through load (resume
+		// =false) -> PatchDrive(rootfs -> per-pod clone) -> Resume, so by the time
+		// the guest runs its rootfs is the per-activation CoW clone (the SEPARATE
+		// writable husk-rootfs mount below), never the template. Isolation is from
+		// the rebind-before-resume, not the mount mode: the template is only OPENED
+		// (not written) during the paused load and the fd is replaced by PatchDrive
+		// before resume, so concurrent activations never write the shared template.
 		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir})
+
+		// The writable per-activation rootfs CoW directory, a sibling of the
+		// template dir under the node data dir so the stub's reflink clone of the
+		// template rootfs stays on ONE reflink-capable filesystem. Mounted
+		// READ-WRITE (unlike the snapshot and template mounts) because the stub
+		// writes this activation's clone here; an emptyDir would land on a
+		// different filesystem and defeat reflink. DirectoryOrCreate so the dir is
+		// created on first use.
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-rootfs-cow",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "husk-rootfs"),
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-rootfs-cow", MountPath: huskRootfsCoWMountPath})
+
+		// Tell the stub where to clone from (the in-pod template rootfs at its baked
+		// path) and to (the writable CoW dir). At Prepare the stub reflink-clones the
+		// template rootfs to a per-pod file under the CoW dir and at Activate rebinds
+		// the rootfs drive to it, so concurrent activations never share a rootfs.
+		args = append(args,
+			"--rootfs-cow-dir", huskRootfsCoWMountPath,
+			"--template-rootfs", filepath.Join(templateDir, "rootfs.ext4"),
+		)
 	}
 
 	// Placement: the dormant VMM needs /dev/kvm (the kvm nodeSelector) AND the
@@ -462,6 +511,20 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 					// snapshot are read-only hostPath mounts. The controller dials
 					// the control port to activate (slice 2).
 					Args: args,
+					// POD_NAME via the downward API: the kubelet substitutes it
+					// into the --vm-id $(POD_NAME) arg above so each husk pod gets
+					// a UNIQUE per-pod VM id. That id scopes the per-activation
+					// rootfs CoW clone path under the shared node hostPath, so two
+					// husk pods on one node never collide on, overwrite, or delete
+					// each other's rootfs clone. The pod name is unique per node.
+					Env: []corev1.EnvVar{{
+						Name: "POD_NAME",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.name",
+							},
+						},
+					}},
 					Ports: []corev1.ContainerPort{{
 						// The activated VM's sandbox HTTP API (exec/files). The
 						// claim's Status.Endpoint is podIP:this, so it must be a

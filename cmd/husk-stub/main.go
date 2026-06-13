@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,6 +61,14 @@ import (
 // so one fixed id is sufficient; the controller addresses the in-pod API by
 // podIP:port, and the per-sandbox bearer token (not the id) is the auth gate.
 const huskSandboxID = "husk"
+
+// huskVMIDPattern is the allowlist the --vm-id flag must satisfy before it is
+// joined into the per-activation rootfs CoW clone path (and handed to
+// firecracker.StartVM, which applies the same constraint). It forbids path
+// separators and traversal sequences, so a per-pod id can never escape the CoW
+// directory. It is intentionally identical to firecracker's internal vmIDPattern
+// (a DNS-1123-compatible allowlist that a Kubernetes pod name satisfies).
+var huskVMIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
 // kvFlag collects repeatable KEY=VALUE flags into a map. It is used for --env
 // and --secret. The String method NEVER renders the values: a --secret flag's
@@ -159,6 +168,9 @@ func run() error {
 		manifest        = flag.String("manifest", "", "path to the recorded CAS manifest for the template snapshot. When set, the stub re-verifies the snapshot (digest integrity + snapcompat) against it BEFORE loading, fail-closed (the husk mirror of forkd's verify-on-load gate, issues #9 and #32). The manifest is a content address, not a secret")
 		allowUnverified = flag.Bool("allow-unverified-snapshots", false, "DEVELOPMENT ONLY: skip the activate-time snapshot integrity + compatibility verification, mirroring forkd's --allow-unverified-snapshots. Default false keeps verify enforced; a missing manifest/digest or a failed check then refuses the activate (fail-closed)")
 		expectedDigest  = flag.String("expected-digest", "", "activate client mode: the template's recorded CAS manifest digest, threaded into the ActivateRequest so the serving stub verifies the snapshot against it (a content address, not a secret)")
+		rootfsCoWDir    = flag.String("rootfs-cow-dir", "", "directory on the SAME node filesystem as the template rootfs where this activation's copy-on-write rootfs clone is written (reflink where supported, full copy otherwise). Empty keeps the prior behavior of writing the shared template rootfs in place. A content address, not a secret")
+		templateRootfs  = flag.String("template-rootfs", "", "host path of the template rootfs.ext4 to clone per activation. Empty (with --rootfs-cow-dir) disables the per-activation clone")
+		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -226,8 +238,24 @@ func run() error {
 		return fmt.Errorf("create workdir: %w", err)
 	}
 
+	// The VM id is PER-POD: it scopes this pod's per-activation rootfs CoW clone
+	// path (<rootfs-cow-dir>/<id>/rootfs.ext4) so two husk pods that share the
+	// node's CoW hostPath never write, overwrite, or delete the same clone file.
+	// The controller passes the pod name via the downward API; an empty flag
+	// keeps the legacy fixed id (single-pod-per-node assumption). The id is joined
+	// into a filesystem path here and in firecracker.StartVM, so validate it at
+	// this trust boundary up front (the same DNS-1123-compatible allowlist the
+	// firecracker client enforces) rather than relying on call ordering.
+	vmConfigID := *vmID
+	if vmConfigID == "" {
+		vmConfigID = huskSandboxID
+	}
+	if !huskVMIDPattern.MatchString(vmConfigID) {
+		return fmt.Errorf("--vm-id %q is invalid: must match %s", vmConfigID, huskVMIDPattern.String())
+	}
+
 	cfg := firecracker.VMConfig{
-		ID:             "husk",
+		ID:             vmConfigID,
 		FirecrackerBin: *firecrackerBin,
 		WorkDir:        *workdir,
 		KernelPath:     *kernel,
@@ -277,6 +305,13 @@ func run() error {
 		// so the claim's Activate is just the load + handshake, not the re-hash.
 		PrepareSnapshotDir:    *snapshotDir,
 		PrepareExpectedDigest: *expectedDigest,
+		// Per-activation rootfs CoW: clone the template rootfs to a per-pod file
+		// on a writable co-located volume at Prepare and rebind the rootfs drive
+		// to it at Activate, so concurrent activations of one template never
+		// share or corrupt a single rootfs. Both empty keeps the prior in-place
+		// shared-rootfs behavior.
+		RootfsTemplatePath: *templateRootfs,
+		RootfsCoWDir:       *rootfsCoWDir,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")

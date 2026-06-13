@@ -13,6 +13,7 @@ import (
 
 	"github.com/paperclipinc/mitos/internal/firecracker"
 	"github.com/paperclipinc/mitos/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
@@ -53,10 +54,25 @@ func (s State) String() string {
 // real Firecracker process or KVM.
 type vmm interface {
 	// LoadSnapshotWithOverrides loads the snapshot mem+vmstate files and (when
-	// resume is true) resumes the VM, remapping NICs per overrides.
+	// resume is true) resumes the VM, remapping NICs per overrides. The husk
+	// activate path loads with resume=false so it can rebind the rootfs drive
+	// (PatchDrive) while the VM is PAUSED, before the guest can write anything,
+	// then resumes explicitly via Resume.
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
+	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
+	// file via PATCH /drives, on the loaded-but-PAUSED restored VM (before Resume)
+	// so the guest never touches the shared template backing. Firecracker's runtime
+	// API controller accepts a drive path_on_host PATCH in the Paused state with no
+	// root-device restriction (verified against the pinned v1.15 rpc_interface). The
+	// husk activate path uses it to point the rootfs drive at this activation's CoW
+	// clone, the same rebind the fork engine applies to volume drives.
+	PatchDrive(driveID, pathOnHost string) error
+	// Resume transitions the loaded VM from Paused to Running (PATCH /vm Resumed).
+	// The husk activate path calls it AFTER the rootfs drive rebind so the guest
+	// resumes already bound to its own per-activation rootfs clone.
+	Resume() error
 	// Close tears the VMM down.
 	Close() error
 }
@@ -119,6 +135,13 @@ func productionNotifier(vsockPath string, generation uint64, entropy []byte, req
 	}
 	return nil
 }
+
+// reflinker copies a source file to a destination with copy-on-write semantics
+// (reflink where the filesystem supports it, full copy otherwise). The husk
+// stub clones the template rootfs to a per-activation file through it. The
+// production seam is volume.Backend.ReflinkCopy; tests inject a fake. src and
+// dst carry no secrets.
+type reflinker func(src, dst string) error
 
 // productionStarter wraps firecracker.StartVM. *firecracker.Client satisfies
 // vmm (it has LoadSnapshotWithOverrides, VsockHostPath, and we adapt Kill to
@@ -218,6 +241,20 @@ type Options struct {
 	// Activate path as before. The values are content addresses, not secrets.
 	PrepareSnapshotDir    string
 	PrepareExpectedDigest string
+	// RootfsTemplatePath and RootfsCoWDir, when both set, give this activation its
+	// OWN copy-on-write clone of the template rootfs instead of writing the shared
+	// template rootfs.ext4 in place. At Prepare the stub reflink-clones
+	// RootfsTemplatePath to <RootfsCoWDir>/<vm id>/rootfs.ext4 (pre-paid, dormant),
+	// and at Activate it rebinds the snapshot's baked "rootfs" drive to that clone
+	// with PatchDrive after the snapshot loads. Both empty keeps the prior behavior
+	// (the resumed VM writes the shared template rootfs). The paths are content
+	// addresses, not secrets.
+	RootfsTemplatePath string
+	RootfsCoWDir       string
+	// Reflink performs the per-activation rootfs clone. Nil uses the production
+	// seam (volume.Backend.ReflinkCopy, which is FICLONE with a full-copy
+	// fallback). Tests inject a fake.
+	Reflink reflinker
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -242,6 +279,15 @@ type Stub struct {
 	prepareSnapshotDir    string
 	prepareExpectedDigest string
 
+	// rootfsTemplatePath / rootfsCoWDir configure the per-activation rootfs CoW;
+	// reflink performs the clone; rootfsClonePath records the clone Prepare made so
+	// Activate rebinds the drive to it and Close removes it. Empty rootfsClonePath
+	// means no per-activation rootfs was prepared (prior behavior).
+	rootfsTemplatePath string
+	rootfsCoWDir       string
+	reflink            reflinker
+	rootfsClonePath    string
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -264,6 +310,10 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 
 		prepareSnapshotDir:    opts.PrepareSnapshotDir,
 		prepareExpectedDigest: opts.PrepareExpectedDigest,
+
+		rootfsTemplatePath: opts.RootfsTemplatePath,
+		rootfsCoWDir:       opts.RootfsCoWDir,
+		reflink:            opts.Reflink,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -283,6 +333,9 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.readyTimeout == 0 {
 		s.readyTimeout = DefaultReadyTimeout
+	}
+	if s.reflink == nil {
+		s.reflink = volume.New("").ReflinkCopy
 	}
 	return s
 }
@@ -325,6 +378,33 @@ func (s *Stub) Prepare(ctx context.Context) error {
 			return fmt.Errorf("husk: prepare-time snapshot verification failed: %w", err)
 		}
 		s.prepareVerified = true
+	}
+
+	// Per-activation rootfs CoW (opt-in): clone the template rootfs to this
+	// activation's OWN file NOW, during the dormant pre-paid window, so the
+	// Activate hot path is only load + handshake (the clone, especially a
+	// full-copy fallback on a non-reflink filesystem, must never land on the hot
+	// path). The clone source is read-only and content-addressed, so a clone taken
+	// here is byte-identical to one taken at Activate. Fail closed: a clone failure
+	// tears the dormant VMM down and keeps the pod out of StateDormant so the pool
+	// never offers it.
+	if s.rootfsTemplatePath != "" && s.rootfsCoWDir != "" {
+		clonePath := filepath.Join(s.rootfsCoWDir, s.cfg.ID, "rootfs.ext4")
+		// Create the clone's parent directory before handing the path to the
+		// reflinker. The production seam (volume.ReflinkCopy) also MkdirAlls
+		// (idempotent), but doing it here keeps the stub the owner of the clone
+		// location so any reflinker, including a test fake, writes to a real dir.
+		if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
+			_ = s.vm.Close()
+			s.vm = nil
+			return fmt.Errorf("husk: create per-activation rootfs dir: %w", err)
+		}
+		if err := s.reflink(s.rootfsTemplatePath, clonePath); err != nil {
+			_ = s.vm.Close()
+			s.vm = nil
+			return fmt.Errorf("husk: clone per-activation rootfs: %w", err)
+		}
+		s.rootfsClonePath = clonePath
 	}
 
 	s.state = StateDormant
@@ -380,10 +460,42 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		}
 	}
 
-	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, true, req.NetworkOverrides); err != nil {
+	// Load the snapshot PAUSED (resume=false). The rootfs drive rebind below MUST
+	// happen before the guest runs, and PATCH /drives on the ROOT device of an
+	// already-RESUMED VM both leaves a write window (any writeback between resume
+	// and the rebind hits the SHARED template rootfs) and may be rejected by
+	// Firecracker. Loading paused lets us rebind while the guest is frozen, then
+	// resume explicitly. nil overrides restores exactly as before.
+	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, req.NetworkOverrides); err != nil {
 		// Fail closed: the snapshot did not load; the VM is not usable. Leave
 		// state dormant so a retry (or teardown) can decide what to do.
 		werr := fmt.Errorf("husk: load snapshot from %s: %w", req.SnapshotDir, err)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Rebind the baked "rootfs" drive to THIS activation's CoW clone while the VM
+	// is still PAUSED (loaded, not yet resumed), so the guest never writes a single
+	// block through the shared template rootfs. This is the husk analog of the fork
+	// engine's per-fork volume drive rebind: the snapshot bakes the rootfs block
+	// device at path_on_host, and Firecracker's runtime API controller accepts a
+	// drive path_on_host PATCH in the Paused state with no root-device restriction.
+	// Skipped when no per-activation clone was prepared (the prior shared-rootfs
+	// behavior). Fail closed: a rebind failure means the VM is still pointed at the
+	// shared template rootfs, which is exactly the corruption hazard this prevents,
+	// so do NOT resume or mark active. The drive id and path carry no secrets.
+	if s.rootfsClonePath != "" {
+		if err := s.vm.PatchDrive("rootfs", s.rootfsClonePath); err != nil {
+			werr := fmt.Errorf("husk: rebind rootfs drive to per-activation clone: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	// Resume the VM only AFTER the rootfs drive is rebound, so the guest comes up
+	// already bound to its own per-activation rootfs clone, never the shared
+	// template. Fail closed: if the resume is rejected the VM never runs, so do NOT
+	// mark active.
+	if err := s.vm.Resume(); err != nil {
+		werr := fmt.Errorf("husk: resume VM after rootfs rebind: %w", err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 
@@ -507,6 +619,19 @@ func (s *Stub) State() State {
 func (s *Stub) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Best effort: remove this activation's rootfs CoW clone so it does not
+	// outlive the pod. A reflink clone shares extents with the template until
+	// written, so removing it frees only the activation's own divergent blocks.
+	// Path only is logged on failure; the clone carries no secrets. Done before
+	// the vm == nil early return so a clone is reaped even when no VMM is held.
+	if s.rootfsClonePath != "" {
+		if rmErr := os.Remove(s.rootfsClonePath); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(os.Stderr, "husk: remove per-activation rootfs clone %s: %v\n", s.rootfsClonePath, rmErr)
+		}
+		s.rootfsClonePath = ""
+	}
+
 	if s.vm == nil {
 		return nil
 	}

@@ -934,6 +934,37 @@ jobs:
           echo "  Per-fork volumes proven (Fresh round-trip + Snapshot CoW independence)"
           echo "================================"
 
+      # Per-activation rootfs CoW: exercise volume.ReflinkCopy against a REAL
+      # cp --reflink on a reflink-capable filesystem (btrfs loopback), the same
+      # FICLONE fast path the husk per-activation rootfs clone uses. The test is
+      # build-tagged reflink_integration so the default unit suite (and darwin,
+      # which has no cp --reflink) skips it; here it runs on a btrfs mount where
+      # the reflink fast path is available, and asserts the clone is byte-identical
+      # to the source. On a non-reflink filesystem the production ReflinkCopy logs
+      # the WARNING and falls back to a full copy, so byte-equality holds either way.
+      - name: Per-activation rootfs CoW, reflink clone byte-identical on btrfs
+        timeout-minutes: 5
+        run: |
+          set -e
+          sudo apt-get install -y btrfs-progs
+          REFLINK_ROOT=/mnt/reflink-btrfs
+          REFLINK_IMG=/tmp/mitos-test/reflink-btrfs.img
+          dd if=/dev/zero of=$REFLINK_IMG bs=1M count=512 status=none
+          mkfs.btrfs -q $REFLINK_IMG
+          sudo mkdir -p $REFLINK_ROOT
+          sudo mount -o loop $REFLINK_IMG $REFLINK_ROOT
+          sudo chmod 777 $REFLINK_ROOT
+          echo "Reflink test data dir on btrfs (reflink-capable):"
+          mount | grep "$REFLINK_ROOT"
+          # TMPDIR on the btrfs mount so the test's t.TempDir (src + dst) is
+          # reflink-capable and cp --reflink=always succeeds.
+          TMPDIR=$REFLINK_ROOT go test -tags reflink_integration \
+            ./internal/volume/ -run TestReflinkCopyRealFilesystem -v
+          sudo umount $REFLINK_ROOT || true
+          echo "================================"
+          echo "  Per-activation rootfs CoW reflink proven (byte-identical clone on btrfs)"
+          echo "================================"
+
       # Encryption-at-rest proof (#31) on REAL cryptsetup. This phase drives the
       # REAL internal/storecrypt Manager (cmd/crypt-smoke uses the production
       # DefaultRunner, so the same package code forkd's encryption integration
