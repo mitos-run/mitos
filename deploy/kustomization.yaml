@@ -19,6 +19,7 @@ resources:
   - rbac/clusterrolebinding.yaml
   - controller/deployment.yaml
   - daemon/daemonset.yaml
+  - kernel/daemonset.yaml
   # The KVM device plugin runs on every node and advertises mitos.run/kvm
   # only where /dev/kvm exists, so husk pods can request KVM as a scheduled
   # resource instead of privileged: true (the PSA-restricted path). It does
