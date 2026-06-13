@@ -113,6 +113,24 @@ func jailerArgs(cfg VMConfig, id string, uid, gid uint32) []string {
 	}
 }
 
+// PrepareChrootForVM hard-links (or copies on EXDEV) the given host files into
+// the VM's chroot at their mirrored locations, creating the chroot directory
+// tree as needed. It is the exported seam the husk stub calls at Activate to
+// place the per-activate snapshot files (mem, vmstate) in the chroot before the
+// jailed Firecracker loads them; the fork engine instead passes these via
+// VMConfig.ChrootFiles at launch. It applies the same guard as prepareChroot
+// (paths must be absolute and within the VM workspace or the data dir), so a
+// caller cannot expose an arbitrary host file inside the jail. It does NOT chown
+// the files to the jailed uid: the jailer launch path chowns the chroot file set
+// (chownIntoJail) after it allocates the uid, and these files are prepared just
+// before that launch.
+func PrepareChrootForVM(cfg VMConfig, vmID string, files []string) error {
+	if _, err := prepareChroot(cfg, vmID, files); err != nil {
+		return err
+	}
+	return nil
+}
+
 // prepareChroot hard-links each file into the VM's chroot at its mirrored
 // location and returns the host-path to in-chroot-path mapping (identity
 // under the mirror layout; see chrootPath). Symlinks are resolved first

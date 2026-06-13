@@ -611,3 +611,53 @@ func TestVsockHostPathPerCwd(t *testing.T) {
 		t.Fatalf("jailed VsockHostPath = %q, want %q", jailed.VsockHostPath(VsockRelPath), want)
 	}
 }
+
+func TestPrepareChrootForVMLinksFiles(t *testing.T) {
+	// PrepareChrootForVM is the exported seam the husk stub calls at Activate to
+	// place per-activate snapshot files in the chroot. It must hard-link each file
+	// into the mirrored chroot location, refusing paths outside the allowed roots
+	// (same guard as prepareChroot).
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	src := filepath.Join(dataDir, "templates", "t1", "snapshot", "mem")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("snap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultVMConfig()
+	cfg.ID = "husk"
+	cfg.Jailer = testJailerConfig(filepath.Join(root, "jail"), dataDir)
+
+	if err := PrepareChrootForVM(cfg, "husk", []string{src}); err != nil {
+		t.Fatalf("PrepareChrootForVM: %v", err)
+	}
+	linked := chrootPath(cfg.Jailer.ChrootBaseDir, "husk", src)
+	info, err := os.Stat(linked)
+	if err != nil {
+		t.Fatalf("linked file missing: %v", err)
+	}
+	srcInfo, _ := os.Stat(src)
+	if !os.SameFile(info, srcInfo) {
+		t.Fatalf("expected %q to be a hard link of %q", linked, src)
+	}
+}
+
+func TestPrepareChrootForVMRefusesEscapingPath(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultVMConfig()
+	cfg.Jailer = testJailerConfig(filepath.Join(root, "jail"), dataDir)
+	if err := PrepareChrootForVM(cfg, "husk", []string{outside}); err == nil {
+		t.Fatal("PrepareChrootForVM accepted a path outside the data dir")
+	}
+}
