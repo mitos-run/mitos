@@ -89,6 +89,48 @@ type SandboxPoolReconciler struct {
 	// Built from the controller --kek-file (local AES-256-GCM KEK in dev/CI; a
 	// cloud KMS provider is a documented follow-up).
 	KMS kms.Wrapper
+
+	// Now is the reconciler's clock, injectable for tests; nil uses time.Now. It
+	// is read when deciding whether the warm-pool scale-down cooldown has elapsed.
+	Now func() time.Time
+
+	// Demand is the shared per-pool claim-arrival tracker the warm-pool
+	// autoscaler reads to decide whether the scale-down cooldown has elapsed. The
+	// SAME *PoolDemand instance must be shared with the SandboxClaimReconciler so
+	// claim arrivals recorded there are visible here. Nil disables demand-aware
+	// cooldown (the pool then treats every reconcile as "no recent claim", which
+	// only relaxes scale-down; scale-up is unaffected). Only used when
+	// EnableHuskPods and Autoscale are set.
+	Demand *PoolDemand
+}
+
+// now returns the reconciler's clock, honoring the injectable Now seam.
+func (r *SandboxPoolReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// desiredWarm computes the autoscaler's desired dormant count for the pool given
+// the current dormant and in-use counts, reading the shared demand tracker for
+// the last claim arrival so the scale-down cooldown is honored. It is the single
+// place the formula and the cooldown clock meet.
+func (r *SandboxPoolReconciler) desiredWarm(pool *v1alpha1.SandboxPool, dormant, inUse int32) int32 {
+	var lastClaim *metav1.Time
+	if r.Demand != nil {
+		if t, ok := r.Demand.LastArrival(poolKey(pool)); ok {
+			mt := metav1.NewTime(t)
+			lastClaim = &mt
+		}
+	}
+	desired, _ := computeDesiredWarm(pool, dormant, inUse, lastClaim, r.now())
+	return desired
+}
+
+// poolKey is the namespace/name demand-tracker key for a pool.
+func poolKey(pool *v1alpha1.SandboxPool) string {
+	return pool.Namespace + "/" + pool.Name
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed
@@ -147,17 +189,39 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// The raw-forkd path below (flag off, behind --enable-raw-forkd) is the
 	// fork-per-claim fallback and does NOT create husk pods.
 	if r.EnableHuskPods {
-		// Warm pool FIRST, unconditionally: maintain the husk pod count to
-		// Replicas and self-heal a deleted slot. This is decoupled from the
-		// snapshot build so a build that does not complete never blocks the warm
-		// pool. A reconcileHuskPods error (an API failure listing/creating pods)
-		// requeues; the build is then skipped this pass and retried on the requeue.
-		res, err := r.reconcileHuskPods(ctx, &pool, &template, pool.Spec.Replicas)
+		// Warm pool FIRST, unconditionally: maintain the husk pod count to the
+		// autoscaler's desired count and self-heal a deleted slot. This is
+		// decoupled from the snapshot build so a build that does not complete never
+		// blocks the warm pool. A reconcileHuskPods error (an API failure
+		// listing/creating pods) requeues; the build is then skipped this pass and
+		// retried on the requeue.
+		//
+		// Autoscale the warm pool: first read the current dormant + in-use counts,
+		// compute the desired dormant count from demand (in-use + spare, clamped to
+		// [minWarm, maxWarm], scale-down gated by the cooldown), then drive the pool
+		// toward it. When Autoscale is nil desired == Replicas (legacy behavior).
+		dormantNow, inUseNow, err := r.countHuskPods(ctx, &pool)
+		if err != nil {
+			logger.Error(err, "failed to count husk pods")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		desiredWarm := r.desiredWarm(&pool, dormantNow, inUseNow)
+
+		res, err := r.reconcileHuskPods(ctx, &pool, &template, desiredWarm)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		warm := res.dormant
+
+		// Metrics + scale-event counters.
+		setWarmPoolGauges(poolKey(&pool), res.dormant, res.inUse, desiredWarm)
+		if res.scaledUp {
+			recordWarmScaleUp(poolKey(&pool))
+		}
+		if res.scaledDn {
+			recordWarmScaleDown(poolKey(&pool))
+		}
 
 		// Build the snapshot the husk pods activate against, BEST-EFFORT. A build
 		// error is logged and reported in status, and we requeue to keep trying,
@@ -183,17 +247,23 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		pool.Status.ReadySnapshots = readySnapshots
 		pool.Status.TotalSnapshots = readySnapshots
 		pool.Status.NodeDistribution = r.nodeDistribution(templateID)
-		if digest, ok := r.NodeRegistry.TemplateDigest(templateID); ok {
-			pool.Status.TemplateDigest = digest
+		pool.Status.DesiredWarm = desiredWarm
+		if r.NodeRegistry != nil {
+			if digest, ok := r.NodeRegistry.TemplateDigest(templateID); ok {
+				pool.Status.TemplateDigest = digest
+			}
 		}
 		now := metav1.Now()
 		pool.Status.LastSnapshotTime = &now
+		if res.scaledDn {
+			pool.Status.LastScaleDownTime = &now
+		}
 		setCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
-			Status:             conditionStatus(warm >= desired && readySnapshots > 0),
+			Status:             conditionStatus(warm >= desiredWarm && readySnapshots > 0),
 			LastTransitionTime: now,
 			Reason:             "HuskPodsReady",
-			Message:            fmt.Sprintf("%d/%d husk pods, %d snapshot node(s)", warm, desired, readySnapshots),
+			Message:            fmt.Sprintf("%d/%d warm husk pods (%d in use), %d snapshot node(s)", warm, desiredWarm, res.inUse, readySnapshots),
 		})
 		if err := r.Status().Update(ctx, &pool); err != nil {
 			return ctrl.Result{}, err

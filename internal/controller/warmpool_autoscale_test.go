@@ -239,3 +239,34 @@ func TestReconcileHuskPodsDesiredArg(t *testing.T) {
 		t.Fatalf("scaledDn = false, want true on a delete")
 	}
 }
+
+func TestPoolReconcileAutoscaleDesired(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "pool-uid"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "t"},
+			Replicas:    1,
+			Autoscale:   &v1alpha1.PoolAutoscaleSpec{MinWarm: 1, MaxWarm: 10, TargetSpare: 2, ScaleDownCooldownSeconds: 300},
+		},
+	}
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "img"},
+	}
+	cl := newAutoscaleFakeClient(t, pool, tmpl)
+	r := &SandboxPoolReconciler{
+		Client: cl, EnableHuskPods: true, HuskStubImage: "stub:latest",
+		Demand: NewPoolDemand(),
+	}
+
+	// No in-use, no demand: desired = clamp(0+2,1,10)=2.
+	desired := r.desiredWarm(pool, 0, 0)
+	if desired != 2 {
+		t.Fatalf("desiredWarm with no in-use = %d, want 2", desired)
+	}
+
+	// 4 in-use drives desired to 6.
+	if got := r.desiredWarm(pool, 0, 4); got != 6 {
+		t.Fatalf("desiredWarm with 4 in-use = %d, want 6", got)
+	}
+}
