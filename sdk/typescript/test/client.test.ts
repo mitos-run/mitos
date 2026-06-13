@@ -7,9 +7,21 @@ import type { CustomObject, CustomObjectList, K8sApi } from "../src/k8s.js";
 // FakeK8s is a scriptable K8sApi so the cluster logic is tested without a live
 // cluster. getClaim returns a queued sequence of statuses; readSecret returns a
 // configured map; createClaim/deleteClaim record their inputs.
+// notFound builds an error carrying a 404 statusCode, matching how the real
+// KubeConfigApi surfaces a missing object so the client can tell absent from a
+// real failure.
+function notFound(): Error {
+  const e = new Error("not found") as Error & { statusCode: number };
+  e.statusCode = 404;
+  return e;
+}
+
 class FakeK8s implements K8sApi {
   createdClaims: CustomObject[] = [];
   deletedClaims: string[] = [];
+  createdPools: CustomObject[] = [];
+  createdTemplates: CustomObject[] = [];
+  getPoolCalls = 0;
   getCalls = 0;
 
   constructor(
@@ -18,8 +30,25 @@ class FakeK8s implements K8sApi {
       secret?: Record<string, string>;
       secretThrows?: boolean;
       listItems?: CustomObject[];
+      poolExists?: boolean;
     },
   ) {}
+
+  async getPool(_ns: string, name: string): Promise<CustomObject> {
+    this.getPoolCalls += 1;
+    if (this.opts.poolExists) {
+      return { metadata: { name } };
+    }
+    throw notFound();
+  }
+
+  async createPool(_ns: string, pool: CustomObject): Promise<void> {
+    this.createdPools.push(pool);
+  }
+
+  async createTemplate(_ns: string, template: CustomObject): Promise<void> {
+    this.createdTemplates.push(template);
+  }
 
   async createClaim(_ns: string, claim: CustomObject): Promise<CustomObject> {
     this.createdClaims.push(claim);
@@ -200,5 +229,66 @@ describe("AgentRun.list", () => {
 
     const filtered = await run.list("p1");
     expect(filtered.map((x) => x.name)).toEqual(["a"]);
+  });
+});
+
+describe("AgentRun.sandbox(image) lazy default pool", () => {
+  const ready = [{ phase: "Ready", endpoint: "10.0.0.5:9091", sandboxID: "sbx" }];
+
+  it("creates mitos-default-<image> when the pool is absent, then claims from it", async () => {
+    const fake = new FakeK8s({ getResponses: ready, poolExists: false });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    const sb = await c.sandbox("python");
+    expect(fake.createdTemplates).toHaveLength(1);
+    expect(fake.createdTemplates[0].metadata?.name).toBe("mitos-default-python");
+    expect(fake.createdTemplates[0].spec).toEqual({ image: "python" });
+    expect(fake.createdPools).toHaveLength(1);
+    expect(fake.createdPools[0].metadata?.name).toBe("mitos-default-python");
+    expect(fake.createdPools[0].spec).toEqual({
+      templateRef: { name: "mitos-default-python" },
+      replicas: 1,
+    });
+    expect(fake.createdClaims[0].spec).toEqual({ poolRef: { name: "mitos-default-python" } });
+    expect(sb.id).toMatch(/^sandbox-/);
+  });
+
+  it("reuses an existing default pool (no create)", async () => {
+    const fake = new FakeK8s({ getResponses: ready, poolExists: true });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    await c.sandbox("python");
+    expect(fake.createdPools).toHaveLength(0);
+    expect(fake.createdTemplates).toHaveLength(0);
+  });
+
+  it("explicit pool never creates a pool", async () => {
+    const fake = new FakeK8s({ getResponses: ready, poolExists: false });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    await c.sandbox("python", { pool: "my-pool" });
+    expect(fake.getPoolCalls).toBe(0);
+    expect(fake.createdPools).toHaveLength(0);
+    expect(fake.createdClaims[0].spec).toEqual({ poolRef: { name: "my-pool" } });
+  });
+
+  it("fromName reconnects a Ready sandbox", async () => {
+    const fake = new FakeK8s({
+      getResponses: [{ phase: "Ready", endpoint: "10.0.0.9:8443", sandboxID: "sbx" }],
+      secret: { token: "tok" },
+    });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    const sb = await c.fromName("agent-session-1");
+    expect(sb.id).toBe("agent-session-1");
+    expect(sb.endpoint).toContain("10.0.0.9:8443");
+  });
+
+  it("opt-out raises without a pool", async () => {
+    const fake = new FakeK8s({ getResponses: ready, poolExists: false });
+    const c = new AgentRun({ k8s: fake, allowDefaultPool: false, sleep: noSleep });
+    await expect(c.sandbox("python")).rejects.toMatchObject({ code: "no_default_pool" });
+  });
+
+  it("requires an image or a pool", async () => {
+    const fake = new FakeK8s({ getResponses: ready });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    await expect(c.sandbox()).rejects.toMatchObject({ code: "missing_image_or_pool" });
   });
 });
