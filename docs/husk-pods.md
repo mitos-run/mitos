@@ -390,10 +390,18 @@ test `TestPrepareChrootForVMMakesFilesReadableByJailedUID` asserts the resulting
 mode; the jailed VMM actually opening and restoring the file is verified only on
 KVM (pending the green run on #16).
 
-This needs exactly one capability beyond what the device plugin grants:
-`CAP_SYS_ADMIN`, for the `mount(2)` above and for the jailer's own jail
-construction (cgroup + namespace + chroot). The jailer then drops to the
-unprivileged per-VM uid inside the jail, so the VMM does NOT keep `CAP_SYS_ADMIN`.
+This needs the Firecracker jailer's build set beyond what the device plugin
+grants, the SAME set the raw-forkd DaemonSet already gives the jailer
+(`deploy/daemon/daemonset.yaml`, `cmd/forkd/jailer.go`): `CAP_SYS_ADMIN` for the
+`mount(2)` above and the jailer's own jail construction (cgroup + namespace +
+chroot); `CAP_MKNOD` to create `/dev/kvm` and `/dev/net/tun` INSIDE the chroot
+from the device-plugin-injected nodes; `CAP_CHOWN` to hand the chroot (including
+those device nodes) to the per-VM uid; and `CAP_SETUID`/`CAP_SETGID` to drop the
+launched Firecracker to that uid/gid. Without `CAP_MKNOD` and `CAP_CHOWN` the
+jailed Firecracker has no usable `/dev/kvm` and `KVM_CREATE_VM` fails with
+`Permission denied (os error 13) ... configured on the /dev/kvm file's ACL`. The
+jailer then drops to the unprivileged per-VM uid inside the jail, so the VMM does
+NOT keep any of these capabilities (they stay on the parent jailer process).
 `/dev/kvm` and `/dev/net/tun` are still injected by the device plugin; the jailer
 mknods them inside the chroot from the injected device nodes.
 
@@ -439,8 +447,11 @@ to `spec.replicas`:
   conformance slice; this slice proves the object exists with the requests set.
 - The container `securityContext` is the new-execution-surface lockdown,
   documented per field in `huskpod.go`: `privileged: false`,
-  `allowPrivilegeEscalation: false`, all capabilities dropped (`drop: [ALL]`,
-  none added back; networking capabilities arrive with the networking slice),
+  `allowPrivilegeEscalation: false`, all capabilities dropped then the in-pod
+  jailer's build set added back (`drop: [ALL]`, `add: [SYS_ADMIN, MKNOD, CHOWN,
+  SETUID, SETGID]`, the SAME set raw-forkd grants the jailer; the jailer drops to
+  the per-VM uid so the VMM keeps none of them; networking capabilities arrive
+  with the networking slice),
   `seccompProfile: RuntimeDefault`. `runAsNonRoot: false` is the single
   documented exception: Firecracker opens the device-plugin-injected `/dev/kvm`,
   and the dormant-VMM bring-up is simplest as uid 0 WITHOUT `privileged`; moving

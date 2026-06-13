@@ -17,7 +17,7 @@ has happened.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd / husk stub treat its output as data only |
-| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, add only CAP_SYS_ADMIN (the in-pod jailer + chroot-base mount), `seccomp: RuntimeDefault`, read-only snapshot mount, every VM jailed (per-VM uid, chroot, nested cgroup) | controller (mTLS control channel) | controller |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, add the in-pod jailer's build set (CAP_SYS_ADMIN, CAP_MKNOD, CAP_CHOWN, CAP_SETUID, CAP_SETGID; the SAME set raw-forkd grants the jailer), `seccomp: RuntimeDefault`, read-only snapshot mount, every VM jailed (per-VM uid, chroot, nested cgroup) | controller (mTLS control channel) | controller |
 | forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | root DaemonSet pod with `/dev/kvm` and an explicit capability list (not `privileged`) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
@@ -86,7 +86,7 @@ load-bearing:
 
 - `privileged: false`,
 - `allowPrivilegeEscalation: false` (no setuid path regains privilege),
-- `capabilities.drop: [ALL]`, add EXACTLY `CAP_SYS_ADMIN`: the in-pod jailer needs it to build each VM's jail (cgroup + mount namespace + chroot), and the stub needs the one `mount(2)` that bind-mounts and privatizes the jailer chroot base so the jailer can `pivot_root` inside the pod (a pod's rootfs is commonly a shared mount, which `pivot_root` refuses). The jailer then drops to an unprivileged per-VM uid inside the jail, so a VMM escape does NOT inherit `CAP_SYS_ADMIN`,
+- `capabilities.drop: [ALL]`, add EXACTLY the Firecracker jailer's build set, the SAME set the raw-forkd DaemonSet grants for the same jailer (`deploy/daemon/daemonset.yaml`, `cmd/forkd/jailer.go`): `CAP_SYS_ADMIN` (the jailer's cgroup + mount namespace + chroot setup, plus the stub's one `mount(2)` that bind-mounts and privatizes the jailer chroot base so the jailer can `pivot_root` inside the pod, a pod's rootfs being commonly a shared mount which `pivot_root` refuses), `CAP_MKNOD` (the jailer mknods `/dev/kvm` and `/dev/net/tun` INSIDE the chroot from the device-plugin-injected nodes; without it the jailed Firecracker has no `/dev/kvm` and `KVM_CREATE_VM` fails with `Permission denied (os error 13)`), `CAP_CHOWN` (the jailer chowns the chroot, including those device nodes, to the per-VM uid), and `CAP_SETUID`/`CAP_SETGID` (the jailer drops the launched Firecracker to that uid/gid). The jailer then drops to that unprivileged per-VM uid inside the jail, so a VMM escape does NOT inherit any of these capabilities (they stay on the parent jailer process, not the dropped VMM),
 - `seccompProfile: RuntimeDefault` at BOTH the pod and the container level,
 - the ONLY host mount is the READ-ONLY snapshot dir plus the read-only kernel
   file (surface 3),
@@ -114,7 +114,9 @@ The in-pod `pivot_root` precondition is handled by the stub: before any launch i
 bind-mounts the chroot base (a pod-writable emptyDir, NOT the read-only snapshot
 hostPath) onto itself and marks it `MS_PRIVATE`, so the new root is a mount point
 with non-shared parent propagation, exactly what `pivot_root(2)` requires. The
-cost is the single added `CAP_SYS_ADMIN` above; the benefit is that a guest that
+cost is the added jailer capability set above (`CAP_SYS_ADMIN`, `CAP_MKNOD`,
+`CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID`, the same set raw-forkd already grants the
+jailer); the benefit is that a guest that
 escapes the microVM now lands as a THROWAWAY uid in an EMPTY chroot, not as the
 pod's uid 0. CI-asserted; pending a green KVM run on the bare-metal node (#16):
 the `kvm-test.yaml` husk jailed-activation phase asserts the activated Firecracker
@@ -274,8 +276,8 @@ is discussed separately below the table.
 
 | Axis | Old forkd (raw-forkd) | Husk pod | Verdict |
 |---|---|---|---|
-| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (the `/dev/kvm` device exception), no escalation, drop ALL caps and add ONLY `CAP_SYS_ADMIN` for the in-pod jailer (which drops to a per-VM uid inside the jail) | husk BETTER |
-| Capabilities | explicit set incl. `CAP_SYS_ADMIN`, `SYS_CHROOT` | `drop: [ALL]`, none added | husk BETTER |
+| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (the `/dev/kvm` device exception), no escalation, drop ALL caps and add the in-pod jailer's build set (`CAP_SYS_ADMIN`, `CAP_MKNOD`, `CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID`); the jailer then drops to a per-VM uid inside the jail | husk BETTER (not privileged; the jailer caps live on the parent, not the VMM) |
+| Capabilities | explicit set incl. `CAP_SYS_ADMIN`, `SYS_CHROOT`, `MKNOD`, `CHOWN`, `SETUID`, `SETGID` | `drop: [ALL]`, add the SAME jailer build set (`CAP_SYS_ADMIN`, `CAP_MKNOD`, `CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID`) | EQUAL on the jailer build set (both run the same jailer); husk drops the wider raw-forkd extras (`SYS_CHROOT`, `DAC_OVERRIDE`, `FOWNER`, `NET_ADMIN`) and is not `privileged` |
 | Host FS access | hostPath to the node data dir (RW) | READ-ONLY node hostPaths only: the snapshot mount, the kernel file, and (when verify is enforced) the CAS manifest the stub checks the snapshot against; all read-only | husk BETTER |
 | Device access (`/dev/kvm` + kernel) | `/dev/kvm` via hostPath | `/dev/kvm` via device plugin (no privilege) | EQUAL on the inherent KVM/kernel escape surface; husk removes only the privileged REQUIREMENT, not the device surface |
 | Network governance | host-nftables in forkd's netns | pod netns governed by NetworkPolicy/Cilium (object-level proven; in-VM bare-metal) | husk BETTER (defense-in-depth pod netns); in-VM enforcement bare-metal-pending |

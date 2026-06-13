@@ -111,11 +111,40 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("Capabilities.Drop = %+v, want [ALL]", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "SYS_ADMIN" {
-		t.Errorf("Capabilities.Add = %+v, want [SYS_ADMIN] (the in-pod jailer + chroot-base mount)", sc.Capabilities.Add)
-	}
+	assertJailerCaps(t, sc.Capabilities)
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("SeccompProfile = %+v, want RuntimeDefault", sc.SeccompProfile)
+	}
+}
+
+// wantJailerCaps is the EXACT capability set the husk container adds back: the
+// Firecracker jailer's build set (the same one the raw-forkd DaemonSet grants).
+// SYS_ADMIN (mount/cgroup/namespace + the chroot-base privatize mount), MKNOD
+// (/dev/kvm and /dev/net/tun nodes inside the chroot), CHOWN (hand the chroot and
+// those device nodes to the per-VM uid), and SETUID/SETGID (drop the launched
+// Firecracker to that uid/gid). Without MKNOD/CHOWN the jailed uid cannot open
+// /dev/kvm and KVM_CREATE_VM fails with EACCES (the bug the KVM CI caught).
+var wantJailerCaps = []corev1.Capability{"SYS_ADMIN", "MKNOD", "CHOWN", "SETUID", "SETGID"}
+
+// assertJailerCaps checks the container adds back EXACTLY wantJailerCaps, in any
+// order, and nothing else.
+func assertJailerCaps(t *testing.T, caps *corev1.Capabilities) {
+	t.Helper()
+	if caps == nil {
+		t.Fatal("Capabilities is nil; want the jailer build set added back")
+	}
+	got := map[corev1.Capability]bool{}
+	for _, c := range caps.Add {
+		got[c] = true
+	}
+	if len(caps.Add) != len(wantJailerCaps) {
+		t.Errorf("Capabilities.Add = %+v, want exactly %+v (the jailer build set)", caps.Add, wantJailerCaps)
+		return
+	}
+	for _, w := range wantJailerCaps {
+		if !got[w] {
+			t.Errorf("Capabilities.Add = %+v missing %q; want exactly %+v (the jailer build set)", caps.Add, w, wantJailerCaps)
+		}
 	}
 }
 
@@ -127,12 +156,13 @@ func TestBuildHuskPodSpec(t *testing.T) {
 // husk pod is admitted into a baseline/restricted namespace only EXCEPT the
 // read-only snapshot hostPath (forbidden under both baseline and restricted),
 // runAsNonRoot=false (forbidden under restricted, the /dev/kvm device exception),
-// and the single added CAP_SYS_ADMIN (restricted permits only NET_BIND_SERVICE to
-// be added; the husk pod needs SYS_ADMIN for the in-pod jailer + the chroot-base
-// mount that makes pivot_root work in a pod, documented in docs/threat-model.md),
-// plus the mitos.run/kvm device-plugin resource. The empirical PSA finding (a
-// restricted namespace rejects the husk pod on exactly hostPath + runAsNonRoot +
-// the added capability, and the SAME securityContext minus those is admitted into
+// and the added jailer capability set (restricted permits only NET_BIND_SERVICE
+// to be added; the husk pod needs the jailer's build set SYS_ADMIN, MKNOD, CHOWN,
+// SETUID, SETGID for the in-pod jailer + the chroot-base mount that makes
+// pivot_root work in a pod, documented in docs/threat-model.md), plus the
+// mitos.run/kvm device-plugin resource. The empirical PSA finding (a restricted
+// namespace rejects the husk pod on exactly hostPath + runAsNonRoot + the added
+// capabilities, and the SAME securityContext minus those is admitted into
 // restricted) is proven object-level on kind in the conformance job; this unit
 // test pins the spec fields those exceptions and the satisfied controls
 // correspond to.
@@ -187,9 +217,7 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("container Capabilities.Drop = %+v, want [ALL] (restricted control)", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "SYS_ADMIN" {
-		t.Errorf("container Capabilities.Add = %+v, want [SYS_ADMIN] (the in-pod jailer + chroot-base mount; the one documented PSA-restricted exception beyond the existing hostPath + runAsNonRoot ones)", sc.Capabilities.Add)
-	}
+	assertJailerCaps(t, sc.Capabilities)
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("container SeccompProfile = %+v, want RuntimeDefault (restricted control)", sc.SeccompProfile)
 	}
@@ -645,12 +673,11 @@ func TestHuskPodRunsJailed(t *testing.T) {
 		t.Error("husk pod missing the jailer-chroot volume mount")
 	}
 
-	// Exactly CAP_SYS_ADMIN is added back (for mount(2) + the jailer); ALL dropped.
+	// The jailer build set is added back (mount(2) + jailer jail construction,
+	// including the /dev/kvm mknod + chown to the per-VM uid); ALL dropped.
 	caps := c.SecurityContext.Capabilities
 	if len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
 		t.Errorf("capabilities.drop = %v, want [ALL]", caps.Drop)
 	}
-	if len(caps.Add) != 1 || caps.Add[0] != "SYS_ADMIN" {
-		t.Errorf("capabilities.add = %v, want [SYS_ADMIN]", caps.Add)
-	}
+	assertJailerCaps(t, caps)
 }

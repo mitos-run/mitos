@@ -231,17 +231,22 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	//     privileged: true; KVM access comes from the device plugin slot, not
 	//     from a privileged container.
 	//   - AllowPrivilegeEscalation: false. No setuid path can regain privilege.
-	//   - Capabilities Drop ALL, add EXACTLY CAP_SYS_ADMIN. The stub launches
-	//     each VM through the jailer, which needs CAP_SYS_ADMIN to build the jail
-	//     (cgroup + mount namespace + chroot); the stub itself needs it for the
-	//     one mount(2) that bind-mounts and privatizes the chroot base so the
-	//     jailer can pivot_root inside the pod (a pod's rootfs is commonly a shared
-	//     mount, which pivot_root refuses). This is the SINGLE capability the
-	//     jailed-in-pod model adds; the jailer then drops to an unprivileged per-VM
-	//     uid inside the jail, so a guest that escapes the microVM lands as a
-	//     throwaway uid in an empty chroot, NOT with CAP_SYS_ADMIN. Networking
-	//     capabilities (e.g. NET_ADMIN for tap setup) arrive with the networking
-	//     slice, not here.
+	//   - Capabilities Drop ALL, add EXACTLY the jailer's build set:
+	//     CAP_SYS_ADMIN, CAP_MKNOD, CAP_CHOWN, CAP_SETUID, CAP_SETGID, the SAME
+	//     set the raw-forkd DaemonSet grants for the same jailer
+	//     (deploy/daemon/daemonset.yaml). The jailer needs CAP_SYS_ADMIN for the
+	//     jail's mount/cgroup/namespace setup (and the stub for the one mount(2)
+	//     that privatizes the chroot base so pivot_root works in a pod);
+	//     CAP_MKNOD to create /dev/kvm and /dev/net/tun inside the chroot from
+	//     the device-plugin-injected nodes (without it the jailed Firecracker has
+	//     no /dev/kvm and KVM_CREATE_VM fails with EACCES); CAP_CHOWN to hand the
+	//     chroot (and those device nodes) to the per-VM uid; CAP_SETUID and
+	//     CAP_SETGID to drop the launched Firecracker to that uid/gid. The jailer
+	//     then drops to the unprivileged per-VM uid inside the jail, so a guest
+	//     that escapes the microVM lands as a throwaway uid in an empty chroot,
+	//     NOT holding any of these caps (they stay on the parent jailer process).
+	//     Networking capabilities (e.g. NET_ADMIN for tap setup) arrive with the
+	//     networking slice, not here.
 	//   - SeccompProfile RuntimeDefault, set at BOTH the pod and the container
 	//     securityContext level. restricted checks the profile at the pod OR the
 	//     container level; setting both keeps the pod-level control satisfied even
@@ -536,19 +541,41 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						AllowPrivilegeEscalation: ptrBool(false),
 						RunAsNonRoot:             ptrBool(runAsNonRoot),
 						Capabilities: &corev1.Capabilities{
-							// Drop everything, then add back EXACTLY CAP_SYS_ADMIN.
-							// The stub needs it for two things, both inside the pod's
-							// own mount namespace: (1) mount(2) to bind + privatize
-							// the jailer chroot base so the jailer can pivot_root in a
-							// pod; (2) the jailer's own jail construction (cgroup +
-							// namespace + chroot). This is the SINGLE capability the
-							// jailed-in-pod model adds; the jailer then drops to an
-							// unprivileged per-VM uid inside the jail, so a VMM escape
-							// does NOT inherit CAP_SYS_ADMIN. Without it the VM would
-							// run UNJAILED as the pod uid, which is unacceptable for
-							// untrusted tenants. Documented in docs/threat-model.md.
+							// Drop everything, then add back EXACTLY the set the
+							// Firecracker jailer needs to build each VM's jail, the
+							// SAME set the raw-forkd DaemonSet grants for the same
+							// jailer (deploy/daemon/daemonset.yaml, cmd/forkd/jailer.go):
+							//   - SYS_ADMIN: the jailer's mount/cgroup/namespace setup,
+							//     plus the stub's one mount(2) that bind-mounts and
+							//     privatizes the chroot base so the jailer can pivot_root
+							//     inside the pod (a pod's rootfs is commonly a shared
+							//     mount, which pivot_root refuses).
+							//   - MKNOD: the jailer mknods /dev/kvm and /dev/net/tun
+							//     INSIDE the chroot from the device-plugin-injected
+							//     nodes. WITHOUT this the jailed Firecracker has no
+							//     /dev/kvm and KVM_CREATE_VM fails with "Permission
+							//     denied (os error 13) ... configured on the /dev/kvm
+							//     file's ACL"; this is the bug the KVM CI caught.
+							//   - CHOWN: the jailer chowns the chroot (including the
+							//     mknod'd device nodes) to the per-VM uid so the
+							//     deprivileged Firecracker can open them.
+							//   - SETUID, SETGID: the jailer drops the launched
+							//     Firecracker to the per-VM uid/gid.
+							// The jailer then drops to that unprivileged per-VM uid
+							// inside the jail, so a guest that escapes the microVM lands
+							// as a throwaway uid in an empty chroot, NOT holding any of
+							// these capabilities (they live on the parent jailer process,
+							// not the dropped VMM). Networking capabilities (e.g.
+							// NET_ADMIN for tap setup) arrive with the networking slice,
+							// not here. Documented in docs/threat-model.md.
 							Drop: []corev1.Capability{"ALL"},
-							Add:  []corev1.Capability{"SYS_ADMIN"},
+							Add: []corev1.Capability{
+								"SYS_ADMIN",
+								"MKNOD",
+								"CHOWN",
+								"SETUID",
+								"SETGID",
+							},
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,

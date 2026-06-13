@@ -45,6 +45,17 @@ func parseHuskUIDRange(s string) (uint32, uint32, error) {
 // file into the chroot once at Activate). The same-filesystem CoW optimization
 // is a forkd-builder concern, not a husk-runner one.
 //
+// TODO(perf, tracked follow-up): that EXDEV copy is ~one full memfile copy
+// (~268 MiB+ per activation in the KVM CI) because the chroot base (pod emptyDir)
+// and the snapshot (read-only node hostPath) are deliberately on DIFFERENT
+// filesystems. Co-locating them is NOT a safe drop-in: the chroot base must be
+// pod-writable and torn down with the pod, whereas the snapshot hostPath is
+// read-only and node-shared, so making the chroot base a writable subdir of the
+// snapshot hostPath would both widen the host write surface and leave per-VM jails
+// outliving the pod. The real fix is the per-activation copy-on-write plan (share
+// the snapshot pages CoW instead of copying), which owns this; do not redesign the
+// volume layout here just to dodge the copy.
+//
 // An empty jailerBin disables the jailer (the development direct-exec path; the
 // caller logs a loud warning and the threat model flags the residual). euid is
 // the caller's effective uid (os.Geteuid()), injected so the check is testable.
