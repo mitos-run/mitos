@@ -111,3 +111,13 @@ func (d *PoolDemand) LastArrival(key string) (time.Time, bool) {
 	t, ok := d.last[key]
 	return t, ok
 }
+
+// Forget drops the demand-tracker entry for the pool key. It is called when a
+// pool is genuinely deleted (the reconcile saw NotFound) so the process-local
+// map does not accumulate one entry per distinct pool name over the controller
+// lifetime. Forgetting an unknown key is a no-op. Safe for concurrent use.
+func (d *PoolDemand) Forget(key string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.last, key)
+}

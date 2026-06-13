@@ -151,6 +151,24 @@ func setWarmPoolGauges(pool string, dormant, inUse, desired int32) {
 func recordWarmScaleUp(pool string)   { warmScaleUpTotal.WithLabelValues(pool).Inc() }
 func recordWarmScaleDown(pool string) { warmScaleDownTotal.WithLabelValues(pool).Inc() }
 
+// forgetPoolMetrics drops every per-pool warm-pool label series for the given
+// pool key. It is called only when a SandboxPool is genuinely deleted (the
+// reconcile saw NotFound), so the controller does not accumulate one stale
+// label series per distinct pool name over its lifetime. The gauges and
+// scale-event counters carry a single "pool" label, so DeleteLabelValues clears
+// them; the call is a no-op for a pool that was never recorded. Per-pool claim
+// error series (pool, reason) are intentionally NOT cleared here: they are a
+// terminal failure record an operator may still want to read after the pool is
+// gone, and reason is not enumerable from this site.
+func forgetPoolMetrics(pool string) {
+	poolReadySnapshots.DeleteLabelValues(pool)
+	poolWarmDormant.DeleteLabelValues(pool)
+	poolWarmInUse.DeleteLabelValues(pool)
+	poolDesiredWarm.DeleteLabelValues(pool)
+	warmScaleUpTotal.DeleteLabelValues(pool)
+	warmScaleDownTotal.DeleteLabelValues(pool)
+}
+
 // observeRefillLatency records seconds from husk pod create to ready dormant.
 func observeRefillLatency(seconds float64) { refillLatencySeconds.Observe(seconds) }
 

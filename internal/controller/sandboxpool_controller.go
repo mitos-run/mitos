@@ -10,6 +10,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/kms"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -150,7 +151,21 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	var pool v1alpha1.SandboxPool
 	if err := r.Get(ctx, req.NamespacedName, &pool); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// The pool is genuinely deleted (not a transient error): drop its
+			// process-local demand-tracker entry and its per-pool metric label
+			// series so neither accumulates one entry per distinct pool name over
+			// the controller lifetime. req.NamespacedName is the same namespace/name
+			// poolKey builds. Only ever runs on NotFound, never on a transient Get
+			// error (which is returned for requeue below).
+			key := req.Namespace + "/" + req.Name
+			if r.Demand != nil {
+				r.Demand.Forget(key)
+			}
+			forgetPoolMetrics(key)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	var template v1alpha1.SandboxTemplate

@@ -156,6 +156,89 @@ func TestPoolDemandTracker(t *testing.T) {
 	}
 }
 
+func TestPoolDemandForget(t *testing.T) {
+	d := NewPoolDemand()
+	keyA := "ns/poolA"
+	keyB := "ns/poolB"
+	t1 := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	d.RecordArrival(keyA, t1)
+	d.RecordArrival(keyB, t1)
+
+	// Forget removes only the named pool's entry.
+	d.Forget(keyA)
+	if _, ok := d.LastArrival(keyA); ok {
+		t.Fatal("poolA entry should be gone after Forget")
+	}
+	if _, ok := d.LastArrival(keyB); !ok {
+		t.Fatal("poolB entry must survive Forget(poolA)")
+	}
+
+	// Forget of an unknown key is a no-op (no panic).
+	d.Forget("ns/never-seen")
+}
+
+// metricSeriesExists reports whether the named metric family has at least one
+// series carrying the given label key/value pair.
+func metricSeriesExists(t *testing.T, name, labelKey, labelVal string) bool {
+	t.Helper()
+	mfs, err := ctrlmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == labelKey && l.GetValue() == labelVal {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestForgetPoolMetricsClearsLabelSeries(t *testing.T) {
+	const pool = "ns/poolForget"
+
+	// Seed every per-pool warm-pool series for this pool name.
+	setPoolReadySnapshots(pool, 1)
+	setWarmPoolGauges(pool, 3, 5, 7)
+	recordWarmScaleUp(pool)
+	recordWarmScaleDown(pool)
+
+	// Sanity: the series exist before cleanup.
+	for _, name := range []string{
+		"mitos_pool_ready_snapshots",
+		"mitos_pool_warm_dormant",
+		"mitos_pool_warm_in_use",
+		"mitos_pool_desired_warm",
+		"mitos_pool_warm_scale_up_total",
+		"mitos_pool_warm_scale_down_total",
+	} {
+		if !metricSeriesExists(t, name, "pool", pool) {
+			t.Fatalf("precondition: %s{pool=%q} should exist before Forget", name, pool)
+		}
+	}
+
+	forgetPoolMetrics(pool)
+
+	for _, name := range []string{
+		"mitos_pool_ready_snapshots",
+		"mitos_pool_warm_dormant",
+		"mitos_pool_warm_in_use",
+		"mitos_pool_desired_warm",
+		"mitos_pool_warm_scale_up_total",
+		"mitos_pool_warm_scale_down_total",
+	} {
+		if metricSeriesExists(t, name, "pool", pool) {
+			t.Fatalf("%s{pool=%q} should be cleared after forgetPoolMetrics", name, pool)
+		}
+	}
+}
+
 func gaugeValueByLabel(t *testing.T, name, labelKey, labelVal string) float64 {
 	t.Helper()
 	mfs, err := ctrlmetrics.Registry.Gather()
