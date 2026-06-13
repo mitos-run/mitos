@@ -163,6 +163,42 @@ func TestPtyWebSocketRejectsMissingToken(t *testing.T) {
 	}
 }
 
+// TestPtyWebSocketRejectsCrossSandboxToken registers two sandboxes A and B with
+// distinct tokens, then attempts to open B's PTY using A's token. The auth gate
+// compares the presented token against the token of the ?sandbox= id (B), so
+// A's token must not drive B's PTY: the upgrade must be rejected with 401.
+func TestPtyWebSocketRejectsCrossSandboxToken(t *testing.T) {
+	dir := shortVsockDir(t)
+	api := NewSandboxAPI(dir)
+	for _, sb := range []struct{ id, token string }{{"sbA", "tokenA"}, {"sbB", "tokenB"}} {
+		sock := filepath.Join(dir, sb.id, "vsock.sock")
+		if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		startFakePtyUDS(t, sock)
+		api.RegisterToken(sb.id, sb.token)
+		if err := api.RegisterSandbox(sb.id, sock); err != nil {
+			t.Fatal(err)
+		}
+		api.RegisterStreamPath(sb.id, sock)
+	}
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Present A's token while targeting B's PTY.
+	_, resp, err := websocket.Dial(ctx, wsURL(srv.URL, "sbB"), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer tokenA"}},
+	})
+	if err == nil {
+		t.Fatal("expected dial to fail: A's token must not drive B's pty")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v", resp)
+	}
+}
+
 func TestPtyWebSocketTokenlessAllowed(t *testing.T) {
 	_, srv := newPtyAPI(t, "") // AllowTokenless, like sandbox-server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
