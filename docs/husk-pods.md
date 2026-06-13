@@ -381,10 +381,12 @@ unprivileged per-VM uid inside the jail, so the VMM does NOT keep `CAP_SYS_ADMIN
 `/dev/kvm` and `/dev/net/tun` are still injected by the device plugin; the jailer
 mknods them inside the chroot from the injected device nodes.
 
-CI-proven on real KVM (`kvm-test.yaml` husk jailed-activation phase): a jailed
-dormant stub activates a snapshot in place, the activated Firecracker runs as a
-uid in 64000-64999, and its `/proc/<pid>/root` is the per-VM chroot, not `/`. The
-mount setup itself is verified in the KVM-CI unit phase
+CI-asserted; pending a green KVM run on the bare-metal node (#16): the
+`kvm-test.yaml` husk jailed-activation phase asserts a jailed dormant stub
+activates a snapshot in place, the activated Firecracker runs as a uid in
+64000-64999, and its `/proc/<pid>/root` is the per-VM chroot, not `/`. That KVM
+phase has not yet run green, so this is asserted in CI but not yet proven on
+hardware. The mount setup itself is exercised in the KVM-CI unit phase
 (`cmd/husk-stub/mount_linux_test.go`, gated to root/`CAP_SYS_ADMIN`).
 
 ## 6. Controller migration: husk pod lifecycle (slice 1)

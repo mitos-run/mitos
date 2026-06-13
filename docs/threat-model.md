@@ -116,9 +116,11 @@ hostPath) onto itself and marks it `MS_PRIVATE`, so the new root is a mount poin
 with non-shared parent propagation, exactly what `pivot_root(2)` requires. The
 cost is the single added `CAP_SYS_ADMIN` above; the benefit is that a guest that
 escapes the microVM now lands as a THROWAWAY uid in an EMPTY chroot, not as the
-pod's uid 0. CI-proven on real KVM (`kvm-test.yaml` husk jailed-activation phase):
-the activated Firecracker runs as a uid in 64000-64999 and its `/proc/<pid>/root`
-is the per-VM chroot, not `/`.
+pod's uid 0. CI-asserted; pending a green KVM run on the bare-metal node (#16):
+the `kvm-test.yaml` husk jailed-activation phase asserts the activated Firecracker
+runs as a uid in 64000-64999 and its `/proc/<pid>/root` is the per-VM chroot, not
+`/`. That KVM phase has not yet run green, so this claim is asserted in CI but not
+yet proven on hardware.
 
 This is the core "provably better" claim, and it is bounded to THIS surface: a
 guest that escapes the microVM lands with NO root authority, NO Linux
