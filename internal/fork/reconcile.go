@@ -82,6 +82,9 @@ func (e *Engine) adoptSandbox(rec sandboxRecord) {
 		netID:       rec.Network.toIdentity(),
 		hasVolumes:  rec.HasVolumes,
 		adopted:     true,
+		// Carry the recorded binary so reapAdopted can RE-VERIFY the pid against
+		// it before killing (the adoption-then-kill TOCTOU guard).
+		firecrackerBin: rec.FirecrackerBin,
 	}
 	sb.MemoryUnique, sb.MemoryShared = readMemoryStats(sb.Pid)
 
@@ -92,9 +95,15 @@ func (e *Engine) adoptSandbox(rec sandboxRecord) {
 		e.jailer.Allocator.MarkInUse(rec.JailedUID)
 	}
 	// Re-mark the network identity as in use so a fresh fork cannot collide on the
-	// adopted VM's tap/IP. Acquire is idempotent per id and reserves the slot.
+	// adopted VM's tap/IP. The in-memory allocator is empty after a restart, so
+	// Acquire would hand out the FIRST free /30, almost never the block this live
+	// VM actually holds (the guest IP derives from the block index). MarkInUse
+	// pins the EXACT recorded block from the recorded guest IP, so a later fresh
+	// fork cannot be handed the same /30 and Release frees the right block.
 	if sb.netID.TapName != "" && e.netAlloc != nil {
-		_, _ = e.netAlloc.Acquire(rec.ID)
+		if err := e.netAlloc.MarkInUse(rec.ID, sb.netID); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: mark adopted network in use for %s: %v\n", rec.ID, err)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "forkd: re-adopted pre-crash sandbox %s (pid %d, template %s)\n", rec.ID, rec.Pid, rec.TemplateID)
@@ -140,14 +149,34 @@ func (e *Engine) reapArtifacts(rec sandboxRecord) {
 }
 
 // reapAdopted reaps a sandbox that was re-adopted from the journal (no live
-// firecracker.Client) when the controller GC later terminates it. It kills the
-// recorded pid (this VM IS ours: the PID-recycle guard adopted it), reaps the
+// firecracker.Client) when the controller GC later terminates it. It reaps the
 // leaked filesystem artifacts and the jailer uid, then leaves network/volume
-// teardown to Terminate, which already runs it for every sandbox. The kill is
-// best-effort: the process may have exited between adoption and termination.
+// teardown to Terminate, which already runs it for every sandbox.
+//
+// The kill is the single most dangerous operation in the codebase: an adopted
+// firecracker is re-parented to init across the forkd crash (it is NOT a child
+// of this restarted forkd), so killing its bare recorded pid is unconditional.
+// Adoption happens at startup but Terminate runs a full GC interval later;
+// between the two the adopted VM can exit on its own (guest poweroff, OOM, FC
+// crash), init reaps it, the kernel frees the pid, and on a busy node that pid
+// can be RECYCLED to an unrelated process. To avoid SIGKILLing that unrelated
+// process we RE-RUN the SAME PID-recycle guard used at adoption, against the
+// recorded firecracker binary, and skip the kill when the pid no longer
+// resolves to OUR firecracker. Artifacts are still reaped and state still
+// dropped (by Terminate) in that case: a recycled pid means our VM is long
+// gone, so its leaked host artifacts must go regardless.
 func (e *Engine) reapAdopted(sb *Sandbox) {
 	if sb.Pid > 0 {
-		if proc, err := os.FindProcess(sb.Pid); err == nil {
+		verify := e.verifyPID
+		if verify == nil {
+			verify = procfsVerifier
+		}
+		if !verify(sb.Pid, sb.firecrackerBin) {
+			// The recorded pid is dead or recycled to an unrelated process. Do NOT
+			// signal it: a dead pid has nothing to kill, and a recycled pid is not
+			// ours to kill. Fall through to artifact reaping below.
+			fmt.Fprintf(os.Stderr, "forkd: skip kill of adopted sandbox %s (pid %d no longer our firecracker)\n", sb.ID, sb.Pid)
+		} else if proc, err := os.FindProcess(sb.Pid); err == nil {
 			if kerr := proc.Kill(); kerr != nil && !isProcessGone(kerr) {
 				fmt.Fprintf(os.Stderr, "forkd: kill adopted sandbox %s (pid %d): %v\n", sb.ID, sb.Pid, kerr)
 			}
@@ -235,6 +264,17 @@ func procfsVerifier(pid int, firecrackerBin string) bool {
 	// /proc/<pid>/exe unreadable (e.g. the jailed VM runs under a different uid
 	// and forkd is not root, or a kernel that hides it). Fall back to comm, whose
 	// basename the kernel sets to the executable name.
+	//
+	// RESIDUAL RISK (accepted): comm is weaker than exe. An attacker (or sheer
+	// bad luck) could in principle win a recycle race onto our exact recorded pid
+	// AND have that unrelated process named "firecracker" (renamed comm), which
+	// this fallback would then accept as ours. That requires hitting a specific
+	// pid in the narrow adoption/Terminate window AND a matching comm, so it is a
+	// far weaker hazard than the exe path it backstops. We keep the fallback
+	// because the common deployment (jailed VM under a non-root uid, forkd not
+	// root) makes /proc/<pid>/exe genuinely unreadable, and refusing to adopt
+	// there would leak every jailed VM across a restart. reapAdopted runs this
+	// SAME verifier before killing, so the kill path is no weaker than adoption.
 	comm, cerr := os.ReadFile(filepath.Join(procDir, "comm"))
 	if cerr != nil {
 		return false

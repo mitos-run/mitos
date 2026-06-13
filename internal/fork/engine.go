@@ -573,6 +573,12 @@ type Sandbox struct {
 	// Terminate reaps it directly from the recorded pid + paths + identity rather
 	// than through the client.
 	adopted bool
+	// firecrackerBin is the firecracker binary the adopted VM was launched with,
+	// carried from the journal record so reapAdopted can RE-VERIFY the recorded
+	// pid against it before killing. This closes the adoption-then-kill TOCTOU: a
+	// pid recycled to an unrelated process between adoption and Terminate must not
+	// be SIGKILLed. Set only on adopted sandboxes.
+	firecrackerBin string
 }
 
 type ForkResult struct {

@@ -1,9 +1,11 @@
 package fork
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/paperclipinc/mitos/internal/firecracker"
@@ -62,6 +64,62 @@ func TestReconcileAdoptsLivePid(t *testing.T) {
 	left, _ := j.load()
 	if len(left) != 1 {
 		t.Fatalf("live record must be kept, got %d", len(left))
+	}
+}
+
+// TestAdoptSandboxPinsRecordedNetworkBlock checks that re-adopting a live VM
+// reserves the EXACT /30 block its recorded guest IP derives from, not the
+// first free block. After adoption a fresh Acquire must get a DIFFERENT guest
+// IP, and TapForGuestIP must resolve the adopted VM's recorded tap.
+func TestAdoptSandboxPinsRecordedNetworkBlock(t *testing.T) {
+	dir := t.TempDir()
+	j := newJournal(dir)
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	livePid := cmd.Process.Pid
+
+	rec := sampleRecord("sbx-net")
+	rec.Pid = livePid
+	rec.JailedUID = 0
+	rec.HasVolumes = false
+	// Block index 5: 10.200.0.0 + 4*5 + 2 = 10.200.0.22, NOT the first free block.
+	rec.Network = networkIdentity{
+		TapName: "sbtap-recorded",
+		HostIP:  "10.200.0.21",
+		GuestIP: "10.200.0.22",
+	}
+	if err := j.write(rec); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	alloc, err := netconf.NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e := &Engine{
+		dataDir:   dir,
+		sandboxes: make(map[string]*Sandbox),
+		journal:   j,
+		verifyPID: fakeVerifier(map[int]bool{livePid: true}),
+		netAlloc:  alloc,
+	}
+	e.reconcile()
+
+	// The exact recorded block is pinned: TapForGuestIP resolves the recorded tap.
+	if got := alloc.TapForGuestIP(net.ParseIP("10.200.0.22")); got != "sbtap-recorded" {
+		t.Fatalf("adopted block not pinned: TapForGuestIP = %q", got)
+	}
+	// A fresh fork must NOT be handed the adopted VM's /30.
+	fresh, err := alloc.Acquire("fresh")
+	if err != nil {
+		t.Fatalf("Acquire fresh: %v", err)
+	}
+	if fresh.GuestIP.Equal(net.ParseIP("10.200.0.22").To4()) {
+		t.Fatalf("fresh fork collided with adopted block: %v", fresh.GuestIP)
 	}
 }
 
@@ -237,6 +295,114 @@ func TestTerminateAdoptedReapsProcessAndArtifacts(t *testing.T) {
 	// uid returned to the pool: MarkInUse it again must succeed without panic and
 	// Acquire should be able to hand out 100007 again now it is free.
 	uidAlloc.MarkInUse(100007) // re-reserve to prove Release happened (idempotent)
+}
+
+// TestReapAdoptedSkipsKillWhenPidNoLongerOurs is the TOCTOU guard: between
+// adoption at startup and the GC-driven Terminate a full GC interval later, the
+// adopted VM may have exited on its own and its pid been RECYCLED to an
+// unrelated process. reapAdopted must RE-VERIFY the pid against the recorded
+// firecracker binary and, when it no longer resolves to OUR firecracker, NOT
+// send a signal (the recycled pid is not ours to kill), while STILL reaping the
+// artifacts and dropping state. Here the injected verifier reports the live pid
+// as NOT ours; the real child process must survive Terminate.
+func TestReapAdoptedSkipsKillWhenPidNoLongerOurs(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real, live child standing in for an unrelated process that recycled the
+	// adopted VM's pid. It must still be alive after Terminate.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	recycledPid := cmd.Process.Pid
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+
+	jailerVMDir := filepath.Join(dir, "jail", "firecracker", "sbx-toctou")
+	if err := os.MkdirAll(jailerVMDir, 0o755); err != nil {
+		t.Fatalf("mkdir jailer dir: %v", err)
+	}
+
+	uidAlloc := firecracker.NewUIDAllocator(100000, 100010)
+	uidAlloc.MarkInUse(100007)
+	e := &Engine{
+		dataDir:   dir,
+		sandboxes: make(map[string]*Sandbox),
+		journal:   newJournal(dir),
+		// The pid is live but NOT our firecracker (recycled): never kill it.
+		verifyPID: fakeVerifier(map[int]bool{}),
+		jailer:    firecracker.JailerConfig{JailerBin: "/usr/bin/jailer", Allocator: uidAlloc},
+	}
+	e.sandboxes["sbx-toctou"] = &Sandbox{
+		ID:             "sbx-toctou",
+		Pid:            recycledPid,
+		jailerVMDir:    jailerVMDir,
+		jailedUID:      100007,
+		firecrackerBin: "/usr/bin/firecracker",
+		adopted:        true,
+	}
+
+	if err := e.Terminate("sbx-toctou"); err != nil {
+		t.Fatalf("Terminate adopted: %v", err)
+	}
+
+	// The recycled, unrelated process must be UNHARMED: no signal sent.
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("reapAdopted killed an unrelated recycled pid: %v", err)
+	}
+	// Artifacts are still reaped and state dropped even though no kill happened.
+	if _, err := os.Stat(jailerVMDir); !os.IsNotExist(err) {
+		t.Fatalf("artifacts not reaped on skipped kill: %v", err)
+	}
+	if recs := e.ListSandboxes(); len(recs) != 0 {
+		t.Fatalf("adopted state not dropped: %+v", recs)
+	}
+}
+
+// TestReapAdoptedKillsWhenStillOurs is the positive half of the TOCTOU guard:
+// when re-verification confirms the pid is STILL our firecracker, reapAdopted
+// must kill it (the normal reap path is not weakened by the new guard).
+func TestReapAdoptedKillsWhenStillOurs(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+
+	uidAlloc := firecracker.NewUIDAllocator(100000, 100010)
+	uidAlloc.MarkInUse(100007)
+	e := &Engine{
+		dataDir:   dir,
+		sandboxes: make(map[string]*Sandbox),
+		journal:   newJournal(dir),
+		// The pid re-verifies as still ours: it must be killed.
+		verifyPID: fakeVerifier(map[int]bool{pid: true}),
+		jailer:    firecracker.JailerConfig{JailerBin: "/usr/bin/jailer", Allocator: uidAlloc},
+	}
+	e.sandboxes["sbx-ours"] = &Sandbox{
+		ID:             "sbx-ours",
+		Pid:            pid,
+		jailedUID:      100007,
+		firecrackerBin: "/usr/bin/firecracker",
+		adopted:        true,
+	}
+
+	if err := e.Terminate("sbx-ours"); err != nil {
+		t.Fatalf("Terminate adopted: %v", err)
+	}
+
+	// The process must have been killed. Reap it and confirm the signal landed.
+	state, werr := cmd.Process.Wait()
+	if werr != nil {
+		t.Fatalf("wait after terminate: %v", werr)
+	}
+	if state.ExitCode() != -1 && !state.Exited() {
+		// Killed-by-signal processes report ExitCode -1; an Exited() process that
+		// returned on its own would be a test bug (sleep 30 has not finished).
+		t.Fatalf("process did not appear killed: %+v", state)
+	}
 }
 
 // TestReconcileFailsOpen checks that a single malformed journal record does not
