@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
+	"github.com/paperclipinc/mitos/internal/apierr"
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
@@ -74,6 +75,18 @@ func (api *SandboxAPI) handlePty(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err.Error(), http.StatusNotFound)
 		return
 	}
+
+	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): a PTY
+	// holds a dedicated vsock connection for the session lifetime, so it counts
+	// against the same per-sandbox ceiling as streaming exec and run_code. Check
+	// the cap BEFORE the WebSocket upgrade so a rejection is a clean 429 envelope
+	// rather than a post-upgrade close; existing streams are never touched.
+	release, ok := api.acquireStream(sandbox)
+	if !ok {
+		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", sandbox)))
+		return
+	}
+	defer release()
 
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols: []string{ptySubprotocol},

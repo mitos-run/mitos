@@ -30,37 +30,38 @@ import (
 
 func main() {
 	var (
-		listenAddr        string
-		httpAddr          string
-		dataDir           string
-		firecrackerBin    string
-		kernelPath        string
-		mockMode          bool
-		tlsCert           string
-		tlsKey            string
-		tlsCA             string
-		jailerBin         string
-		chrootBase        string
-		uidRange          string
-		casDir            string
-		allowUnverified   bool
-		allowIncompatible bool
-		enableNet         bool
-		sandboxSubnet     string
-		uplink            string
-		dnsResolver       string
-		enableDNSEgress   bool
-		dnsUpstream       string
-		agentBin          string
-		busyboxBin        string
-		enableVolumes     bool
-		enableEncryption  bool
-		kekFile           string
-		auditLog          string
-		otlpEndpoint      string
-		memReserveBytes   int64
-		maxSandboxes      int
-		casListen         string
+		listenAddr           string
+		httpAddr             string
+		dataDir              string
+		firecrackerBin       string
+		kernelPath           string
+		mockMode             bool
+		tlsCert              string
+		tlsKey               string
+		tlsCA                string
+		jailerBin            string
+		chrootBase           string
+		uidRange             string
+		casDir               string
+		allowUnverified      bool
+		allowIncompatible    bool
+		enableNet            bool
+		sandboxSubnet        string
+		uplink               string
+		dnsResolver          string
+		enableDNSEgress      bool
+		dnsUpstream          string
+		agentBin             string
+		busyboxBin           string
+		enableVolumes        bool
+		enableEncryption     bool
+		kekFile              string
+		auditLog             string
+		otlpEndpoint         string
+		memReserveBytes      int64
+		maxSandboxes         int
+		maxStreamsPerSandbox int
+		casListen            string
 	)
 	// peerToken is read from the environment, NOT a flag: a flag is visible in
 	// /proc/<pid>/cmdline, and the token is a credential. The controller already
@@ -97,6 +98,7 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
 	flag.IntVar(&maxSandboxes, "max-sandboxes", 0, "Per-node host-DoS ceiling (production-blocker #2): the maximum number of live sandboxes this forkd admits. Fork refuses with RESOURCE_EXHAUSTED once the live count reaches this, BEFORE allocating or booting anything (an O(1) admission check off the fork hot path), so a runaway tenant cannot exhaust the node by opening forks. 0 disables the ceiling (the prior behavior). GetCapacity reports it so the controller sees the cap.")
+	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the activate path. 0 disables the cap (unbounded, the prior behavior).")
 	flag.StringVar(&casListen, "cas-listen", ":9092", "Listen address for the DEDICATED token-gated TLS CAS listener used for peer template distribution. The CAS surface is served here, on its OWN port, NOT on the sandbox HTTP port (--http): the sandbox exec/files/metrics/healthz API keeps its existing scheme so SDK clients are unaffected. Effective only when CAS distribution is enabled (FORKD_PEER_TOKEN set together with mTLS). The controller derives this port to build each holder's CAS source URL")
 	// peerToken (FORKD_PEER_TOKEN env) is the shared bearer token a peer forkd
 	// (driven by the controller) must present to pull templates from this node's
@@ -291,6 +293,7 @@ func main() {
 	}
 
 	sandboxAPI := daemon.NewSandboxAPI(dataDir)
+	sandboxAPI.SetMaxStreamsPerSandbox(maxStreamsPerSandbox)
 	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
