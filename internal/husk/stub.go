@@ -82,6 +82,15 @@ type guestReady func(vsockPath string, timeout time.Duration) error
 // logged by any implementation.
 type notifier func(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
 
+// chrootPreparer hard-links (or copies on EXDEV) the per-activate snapshot files
+// into the jailed VM's chroot before the VMM loads them. It is the husk analog
+// of the fork engine's ChrootFiles handling: the snapshot mem/vmstate paths are
+// known only at Activate (from the request's SnapshotDir), so they cannot be set
+// in the Prepare-time VMConfig.ChrootFiles. The production seam calls
+// firecracker.PrepareChrootForVM; tests inject a fake. It is a no-op for an
+// unjailed (direct-exec) stub. The file paths carry no secrets.
+type chrootPreparer func(vmID string, files []string) error
+
 // productionNotifier connects the vsock client to the guest agent at vsockPath
 // (the same AgentPort productionGuestReady pings) and runs the handshake in the
 // same order the daemon's deliverConfig does: NotifyForkedWithConfig first
@@ -206,6 +215,11 @@ type Options struct {
 	// never log it. Nil disables the hook (the control-socket CI driver and unit
 	// tests that do not need the sandbox API leave it nil).
 	OnActivated func(vsockPath, token string) error
+	// PrepareChroot hard-links the per-activate snapshot files into the jailed
+	// VM's chroot before load. Nil uses the production seam
+	// (firecracker.PrepareChrootForVM) when the VMConfig is jailed, and is unused
+	// when the stub runs direct-exec. Tests inject a fake to assert the files.
+	PrepareChroot chrootPreparer
 	// PrepareSnapshotDir and PrepareExpectedDigest, when both set, move the
 	// fail-closed snapshot verification (the ~680 MiB mem+rootfs re-hash) OFF the
 	// Activate hot path and INTO Prepare, where it runs during the pre-paid
@@ -228,13 +242,14 @@ const DefaultReadyTimeout = 10 * time.Second
 // snapshot into it in place, and Serve dispatches one activate request from a
 // control socket. It owns exactly one VM for its lifetime.
 type Stub struct {
-	start        starter
-	ready        guestReady
-	notify       notifier
-	verify       snapshotVerifier
-	onActivated  func(vsockPath, token string) error
-	cfg          firecracker.VMConfig
-	readyTimeout time.Duration
+	start         starter
+	ready         guestReady
+	notify        notifier
+	verify        snapshotVerifier
+	onActivated   func(vsockPath, token string) error
+	prepareChroot chrootPreparer
+	cfg           firecracker.VMConfig
+	readyTimeout  time.Duration
 
 	// prepareSnapshotDir / prepareExpectedDigest are the snapshot the dormant
 	// pod verified at Prepare; prepareVerified records that the re-hash passed.
@@ -253,14 +268,15 @@ type Stub struct {
 // starter and guest-readiness seam; opts may inject fakes for tests.
 func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	s := &Stub{
-		start:        opts.Start,
-		ready:        opts.Ready,
-		notify:       opts.Notify,
-		verify:       opts.Verify,
-		onActivated:  opts.OnActivated,
-		cfg:          cfg,
-		readyTimeout: opts.ReadyTimeout,
-		state:        StateNew,
+		start:         opts.Start,
+		ready:         opts.Ready,
+		notify:        opts.Notify,
+		verify:        opts.Verify,
+		onActivated:   opts.OnActivated,
+		prepareChroot: opts.PrepareChroot,
+		cfg:           cfg,
+		readyTimeout:  opts.ReadyTimeout,
+		state:         StateNew,
 
 		prepareSnapshotDir:    opts.PrepareSnapshotDir,
 		prepareExpectedDigest: opts.PrepareExpectedDigest,
@@ -273,6 +289,11 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.notify == nil {
 		s.notify = productionNotifier
+	}
+	if s.prepareChroot == nil {
+		s.prepareChroot = func(vmID string, files []string) error {
+			return firecracker.PrepareChrootForVM(s.cfg, vmID, files)
+		}
 	}
 	if s.verify == nil {
 		s.verify = productionVerifier(verifyConfig{
@@ -376,6 +397,20 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	if !(s.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest) {
 		if err := s.verify(req); err != nil {
 			werr := fmt.Errorf("husk: snapshot verification failed: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	// Jailed VMs: the snapshot files live on the read-only node mount, OUTSIDE
+	// the per-VM chroot. Hard-link (or copy on EXDEV) them into the chroot at
+	// their mirrored host paths before the jailed Firecracker loads them, exactly
+	// as the fork engine does (internal/fork/engine.go ChrootFiles). A direct-exec
+	// stub has no chroot, so the seam is a no-op there. FAIL CLOSED: if the files
+	// cannot be placed in the chroot, the load would fail with an opaque
+	// Firecracker error, so we surface the prepare error here instead.
+	if s.cfg.Jailer.Enabled() {
+		if err := s.prepareChroot(s.cfg.ID, []string{memFile, vmStateFile}); err != nil {
+			werr := fmt.Errorf("husk: prepare snapshot files in jailer chroot: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 	}

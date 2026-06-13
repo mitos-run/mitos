@@ -573,3 +573,78 @@ func TestCloseTearsDownVMM(t *testing.T) {
 		t.Fatalf("after close state = %s, want new", s.State())
 	}
 }
+
+func TestActivatePreparesSnapshotChrootFilesWhenJailed(t *testing.T) {
+	// When the stub is configured with a jailer, Activate must prepare the
+	// snapshot mem+vmstate into the per-VM chroot (via the injected prepare seam)
+	// BEFORE loading them, so the jailed Firecracker can open them inside its
+	// chroot. We assert the seam is called with the snapshot files and the VM id.
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "snap")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"mem", "vmstate"} {
+		if err := os.WriteFile(filepath.Join(snapDir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var preparedFiles []string
+	cfg := firecracker.VMConfig{ID: "husk"}
+	cfg.Jailer.JailerBin = "/usr/local/bin/jailer" // marks the config jailed
+
+	stub := New(cfg, Options{
+		Start:  func(firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:  func(string, time.Duration) error { return nil },
+		Notify: func(string, uint64, []byte, ActivateRequest) error { return nil },
+		Verify: func(ActivateRequest) error { return nil },
+		PrepareChroot: func(vmID string, files []string) error {
+			preparedFiles = append([]string(nil), files...)
+			if vmID != "husk" {
+				t.Errorf("PrepareChroot vmID = %q, want husk", vmID)
+			}
+			return nil
+		},
+	})
+	if err := stub.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := stub.Activate(context.Background(), ActivateRequest{SnapshotDir: snapDir}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	wantMem := filepath.Join(snapDir, "mem")
+	wantState := filepath.Join(snapDir, "vmstate")
+	if len(preparedFiles) != 2 || preparedFiles[0] != wantMem || preparedFiles[1] != wantState {
+		t.Fatalf("PrepareChroot files = %v, want [%s %s]", preparedFiles, wantMem, wantState)
+	}
+}
+
+func TestActivateSkipsChrootPrepareWhenDirectExec(t *testing.T) {
+	// With NO jailer configured the stub must NOT call the chroot-prepare seam:
+	// direct-exec needs no chroot. This keeps the development path unchanged.
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "snap")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	stub := New(firecracker.VMConfig{ID: "husk"}, Options{
+		Start:         func(firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:         func(string, time.Duration) error { return nil },
+		Notify:        func(string, uint64, []byte, ActivateRequest) error { return nil },
+		Verify:        func(ActivateRequest) error { return nil },
+		PrepareChroot: func(string, []string) error { called = true; return nil },
+	})
+	if err := stub.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := stub.Activate(context.Background(), ActivateRequest{SnapshotDir: snapDir}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if called {
+		t.Fatal("PrepareChroot was called for a direct-exec (unjailed) stub")
+	}
+}
