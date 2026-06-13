@@ -152,11 +152,12 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// snapshot build so a build that does not complete never blocks the warm
 		// pool. A reconcileHuskPods error (an API failure listing/creating pods)
 		// requeues; the build is then skipped this pass and retried on the requeue.
-		warm, err := r.reconcileHuskPods(ctx, &pool, &template)
+		res, err := r.reconcileHuskPods(ctx, &pool, &template, pool.Spec.Replicas)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
+		warm := res.dormant
 
 		// Build the snapshot the husk pods activate against, BEST-EFFORT. A build
 		// error is logged and reported in status, and we requeue to keep trying,

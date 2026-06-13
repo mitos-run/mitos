@@ -1,13 +1,33 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+// newAutoscaleFakeClient builds an in-memory client seeded with objs and the
+// scheme the controller needs (corev1 + mitos), for the pure-logic autoscale
+// tests that do not need envtest.
+func newAutoscaleFakeClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 to scheme: %v", err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1alpha1 to scheme: %v", err)
+	}
+	return fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
 
 func autoPool(min, max, spare, cooldownSec int32) *v1alpha1.SandboxPool {
 	return &v1alpha1.SandboxPool{
@@ -178,4 +198,44 @@ func TestWarmPoolMetricsSetters(t *testing.T) {
 	// Histograms: observe once each (no panic, registered).
 	observeRefillLatency(0.5)
 	observeClaimWaitForWarm(0.02)
+}
+
+func TestReconcileHuskPodsDesiredArg(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "pool-uid"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "t"}, Replicas: 2},
+	}
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "img"},
+	}
+	cl := newAutoscaleFakeClient(t, pool, tmpl)
+	r := &SandboxPoolReconciler{Client: cl, EnableHuskPods: true, HuskStubImage: "stub:latest"}
+
+	// desired=3 creates 3 dormant pods (existence-counting under no kubelet).
+	res, err := r.reconcileHuskPods(context.Background(), pool, tmpl, 3)
+	if err != nil {
+		t.Fatalf("reconcileHuskPods: %v", err)
+	}
+	if res.dormant != 3 {
+		t.Fatalf("dormant = %d, want 3", res.dormant)
+	}
+	if res.inUse != 0 {
+		t.Fatalf("inUse = %d, want 0", res.inUse)
+	}
+	if !res.scaledUp {
+		t.Fatalf("scaledUp = false, want true on a create")
+	}
+
+	// desired=1 deletes the surplus down to 1.
+	res, err = r.reconcileHuskPods(context.Background(), pool, tmpl, 1)
+	if err != nil {
+		t.Fatalf("reconcileHuskPods scale down: %v", err)
+	}
+	if res.dormant != 1 {
+		t.Fatalf("dormant after scale down = %d, want 1", res.dormant)
+	}
+	if !res.scaledDn {
+		t.Fatalf("scaledDn = false, want true on a delete")
+	}
 }
