@@ -381,19 +381,52 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		ForkSourceRootfsPath: huskSourceRootfsInPodPath(source.Status.SandboxID),
 	}
 
-	needed := fork.Spec.Replicas - fork.Status.ReadyForks
-	for i := int32(0); i < needed; i++ {
-		childName := fmt.Sprintf("%s-fork-%d", fork.Name, fork.Status.TotalForks+i)
+	// Fixed-slot, idempotent child set. The child pods are EXACTLY Replicas, with
+	// STABLE names ("<fork>-fork-<i>" for i in [0, Replicas)) that never change
+	// across reconcile passes. The previous count-driven loop derived the name from
+	// (TotalForks + i) and the iteration count from (Replicas - ReadyForks): once a
+	// child in a pass became Ready it bumped TotalForks mid-loop, so the next i
+	// produced a NEW name (fork-2, fork-3, ...) and ensureForkChildPod created an
+	// EXTRA pod instead of reusing an existing slot, overcommitting the node. With
+	// fixed names the number of child pods can never exceed Replicas regardless of
+	// how many passes run or how slowly children become Ready: ensureForkChildPod
+	// is get-or-create by the stable name, so each slot maps to exactly one pod.
+	//
+	// ReadyForks is recomputed from scratch each pass (counting Ready slots) rather
+	// than incremented, so a slow or transient child does not permanently inflate
+	// the count.
+	//
+	// A slot already recorded Ready (and so already activated with its token Secret
+	// written) is carried forward as-is and NOT re-activated: re-activating a live
+	// child VM each pass would mint a fresh token and thrash the restored VM.
+	recorded := make(map[string]v1alpha1.ForkInfo, len(fork.Status.Forks))
+	for _, f := range fork.Status.Forks {
+		recorded[f.Name] = f
+	}
 
-		// Create the child pod if absent (idempotent across requeues).
+	var ready int32
+	var forks []v1alpha1.ForkInfo
+	for i := int32(0); i < fork.Spec.Replicas; i++ {
+		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
+
+		// Get-or-create the child pod for this slot (idempotent by the stable name).
 		child, err := r.ensureForkChildPod(ctx, fork, childName, opts)
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
 			continue
 		}
-		// The child must be Running+Ready before it can be activated.
+
+		// Already activated in a prior pass: carry the recorded info forward and
+		// skip re-activation (idempotent per slot).
+		if info, ok := recorded[childName]; ok {
+			forks = append(forks, info)
+			ready++
+			continue
+		}
+
+		// The child must be Running+Ready before it can be activated. Not ready yet:
+		// requeue this slot next pass WITHOUT creating any extra pod.
 		if child.Status.PodIP == "" || !huskPodReady(child) {
-			// Not ready yet; requeue and try again next pass.
 			continue
 		}
 
@@ -422,16 +455,18 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 			continue
 		}
 
-		fork.Status.Forks = append(fork.Status.Forks, v1alpha1.ForkInfo{
+		forks = append(forks, v1alpha1.ForkInfo{
 			Name:      childName,
 			SandboxID: child.Name,
 			Endpoint:  endpoint,
 			Node:      child.Spec.NodeName,
 			Phase:     v1alpha1.SandboxReady,
 		})
-		fork.Status.ReadyForks++
-		fork.Status.TotalForks++
+		ready++
 	}
+	fork.Status.Forks = forks
+	fork.Status.ReadyForks = ready
+	fork.Status.TotalForks = ready
 
 	now := metav1.Now()
 	fork.Status.CheckpointTime = &now

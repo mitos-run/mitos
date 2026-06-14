@@ -205,6 +205,88 @@ func TestHuskForkSnapshotTakenExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestHuskForkNeverOverCreatesChildren is the regression for the live KVM
+// over-creation bug: a SandboxFork with Replicas=2 driven through MANY reconcile
+// passes while its children stay NOT Ready must create EXACTLY 2 child pods, never
+// 3+. The old loop derived child names from (TotalForks + i) and the iteration
+// count from (Replicas - ReadyForks); once a child became Ready mid-loop it bumped
+// TotalForks, shifting the next index to a NEW name (fork-2, fork-3, ...) so
+// ensureForkChildPod created an EXTRA pod instead of reusing a slot, overcommitting
+// the single node. The fixed-slot loop uses stable names ("<fork>-fork-<i>" for i
+// in [0, Replicas)) so the child count can never exceed Replicas. Children are kept
+// pending across passes here to exercise the many-pass path that produced fork-2.
+func TestHuskForkNeverOverCreatesChildren(t *testing.T) {
+	srcPod := makeDormantHuskPod(t, "pool-noover", "10.0.0.11")
+	makeForkSourceClaim(t, "src-claim-noover", "pool-noover", srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	fork := &v1alpha1.SandboxFork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "noover-1",
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-noover"}, Replicas: 2},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	// Wait until both slots exist, then let many requeue passes elapse with the
+	// children deliberately LEFT not-Ready (forceHuskPodReady is never called), so
+	// the reconciler runs the full slot loop repeatedly.
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren("noover-1"))
+		return len(pods.Items) >= 2
+	})
+	time.Sleep(3 * time.Second)
+
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, listForkChildren("noover-1")); err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		names := make([]string, 0, len(pods.Items))
+		for i := range pods.Items {
+			names = append(names, pods.Items[i].Name)
+		}
+		t.Fatalf("expected EXACTLY 2 child pods for Replicas=2, got %d: %v", len(pods.Items), names)
+	}
+
+	// Now drive them Ready and confirm the fork completes at exactly 2, still
+	// without spawning a third pod.
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var p corev1.PodList
+		_ = k8sClient.List(ctx, &p, listForkChildren("noover-1"))
+		for i := range p.Items {
+			forceHuskPodReady(t, &p.Items[i])
+		}
+		var got v1alpha1.SandboxFork
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "noover-1", Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyForks == 2
+	})
+
+	var after corev1.PodList
+	if err := k8sClient.List(ctx, &after, listForkChildren("noover-1")); err != nil {
+		t.Fatalf("list children after ready: %v", err)
+	}
+	if len(after.Items) != 2 {
+		t.Fatalf("expected EXACTLY 2 child pods after completion, got %d", len(after.Items))
+	}
+}
+
 func TestHuskForkRemovesSnapshotOnDelete(t *testing.T) {
 	srcPod := makeDormantHuskPod(t, "pool-hd", "10.0.0.6")
 	makeForkSourceClaim(t, "src-claim-d", "pool-hd", srcPod)
