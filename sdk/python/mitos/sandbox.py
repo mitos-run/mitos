@@ -581,8 +581,14 @@ class Sandbox:
             _done=done,
         )
 
-    def fork(self, n: int = 1, pause_source: bool = False) -> list[Sandbox]:
-        """Fork this sandbox into n independent copies."""
+    def fork(self, n: int = 1, pause_source: bool = False, timeout: float = 30.0) -> list[Sandbox]:
+        """Fork this sandbox into n independent copies.
+
+        timeout bounds how long to wait for all n fork children to become Ready.
+        On a single node each child is a fresh husk pod that must Prepare and
+        activate (roughly 10 to 15s each), so a wide fan-out needs a larger
+        timeout than the 30.0s default; raise it accordingly.
+        """
         fork_name = f"{self.name}-fork-{uuid.uuid4().hex[:6]}"
 
         fork_obj = {
@@ -607,7 +613,7 @@ class Sandbox:
             body=fork_obj,
         )
 
-        return self._wait_forks(fork_name, n)
+        return self._wait_forks(fork_name, n, timeout=timeout)
 
     def _wait_forks(self, fork_name: str, expected: int, timeout: float = 30.0) -> list[Sandbox]:
         deadline = time.time() + timeout
