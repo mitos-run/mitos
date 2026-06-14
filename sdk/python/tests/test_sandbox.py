@@ -134,6 +134,32 @@ def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     assert forks[1]._sandbox_id == "f2"
 
 
+def test_sandbox_fork_threads_timeout(ready_sandbox):
+    """fork(timeout=...) must thread the value into _wait_forks so a wide
+    single-node fan-out is not capped at the 30.0s default."""
+    from unittest.mock import patch
+
+    with patch.object(
+        type(ready_sandbox), "_wait_forks", return_value=[]
+    ) as wait_forks:
+        ready_sandbox.fork(n=2, timeout=180.0)
+
+    wait_forks.assert_called_once()
+    assert wait_forks.call_args.kwargs.get("timeout") == 180.0
+
+
+def test_sandbox_fork_default_timeout_back_compat(ready_sandbox):
+    """fork() with no timeout keeps the 30.0s default for back-compat."""
+    from unittest.mock import patch
+
+    with patch.object(
+        type(ready_sandbox), "_wait_forks", return_value=[]
+    ) as wait_forks:
+        ready_sandbox.fork()
+
+    assert wait_forks.call_args.kwargs.get("timeout") == 30.0
+
+
 def test_sandbox_wait_ready_polls(pending_sandbox, mock_api):
     mock_api.get_namespaced_custom_object.side_effect = [
         {"status": {"phase": "Pending"}},
