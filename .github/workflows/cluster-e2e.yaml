@@ -96,8 +96,13 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a maintainer PAT with write:packages (repo secret
+          # GHCR_WRITE_TOKEN) when present; this is the deterministic path if the
+          # org restricts the default GITHUB_TOKEN from writing org packages or
+          # the package Actions-access grant is not Write. Falls back to
+          # GITHUB_TOKEN (which works once the package grants this repo Write).
+          username: ${{ secrets.GHCR_WRITE_USER || github.actor }}
+          password: ${{ secrets.GHCR_WRITE_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Build and push the e2e image for this commit
         uses: docker/build-push-action@v6
         with:
