@@ -873,3 +873,25 @@ func TestBuildHuskPodForkChildActivatesFromForkSnapshot(t *testing.T) {
 		t.Fatalf("fork child must be pinned to the source node via affinity")
 	}
 }
+
+func TestBuildForkChildPodOwnedByFork(t *testing.T) {
+	fork := &v1alpha1.SandboxFork{ObjectMeta: metav1.ObjectMeta{Name: "f1", Namespace: "default", UID: "uid-f1"}}
+	pod := controller.BuildForkChildPodForTest(fork, "child-0", controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "f1",
+		ForkSourceNode: "kvm-node-1",
+	}, scheme)
+
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil || owner.UID != "uid-f1" {
+		t.Fatalf("fork child not owned by the SandboxFork: %+v", owner)
+	}
+	if pod.Labels["mitos.run/fork"] != "f1" {
+		t.Fatalf("fork child missing fork label, labels=%+v", pod.Labels)
+	}
+	if _, ok := pod.Labels["mitos.run/pool"]; ok {
+		t.Fatalf("fork child must NOT carry the pool warm-slot label, labels=%+v", pod.Labels)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -52,6 +53,12 @@ const (
 	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
 	// Selection skips any pod carrying it: one claim activates one husk pod.
 	huskClaimLabel = "mitos.run/claim"
+
+	// huskForkLabel marks a husk pod as a fork CHILD and carries the owning
+	// SandboxFork name, so a reconcile can list exactly this fork's children and
+	// they are never counted as warm-pool slots (the pool selector requires
+	// huskPoolLabel, which fork children do not carry).
+	huskForkLabel = "mitos.run/fork"
 
 	// huskKVMNodeLabel is the node label the KVM device plugin / node bootstrap
 	// sets on a node that has /dev/kvm (deploy/talos). A husk pod is pinned to
@@ -696,7 +703,43 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
 	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is
 	// missing a type and is a programming error; the caller logs and skips.
-	_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
+	// buildForkChildPod reuses this shape with a Client-less throwaway reconciler
+	// and sets its OWN owner ref (to the SandboxFork) afterward, so skip the
+	// pool owner ref when no Client (hence no scheme) is available.
+	if r.Client != nil {
+		_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
+	}
+	return pod
+}
+
+// buildForkChildPod builds a husk pod that activates from a fork snapshot. It
+// reuses the same pod shape buildHuskPod emits (buildHuskPod needs a pool for
+// GenerateName/namespace; a fork child is owned by the SandboxFork, not a pool),
+// then rewrites the ownership, labels, and name for the fork. The pod is pinned
+// to the source node (opts.ForkSourceNode) and activates from
+// <DataDir>/forks/<ForkSnapshotID> (opts.ForkSnapshotID), both set by the caller.
+func buildForkChildPod(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	// buildHuskPod only reads r.Scheme() (for the owner ref we overwrite) and the
+	// opts, so a zero reconciler is sufficient to build the spec. A synthetic pool
+	// carrier supplies GenerateName/namespace; ownership and labels are overwritten
+	// below.
+	r := &SandboxPoolReconciler{}
+	carrier := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
+	pod := r.buildHuskPod(carrier, &v1alpha1.SandboxTemplate{}, opts)
+
+	// Rewrite identity: owned by the SandboxFork (GC with it), labeled as a fork
+	// child (never a warm-pool slot), deterministic name so re-reconcile is
+	// idempotent.
+	pod.OwnerReferences = nil
+	pod.GenerateName = ""
+	pod.Name = childName
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	delete(pod.Labels, huskPoolLabel)
+	pod.Labels[huskLabel] = "true"
+	pod.Labels[huskForkLabel] = fork.Name
+	_ = controllerutil.SetControllerReference(fork, pod, scheme)
 	return pod
 }
 

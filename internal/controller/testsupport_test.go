@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -42,6 +43,12 @@ func TraceIDAnnotationsForTest(ctx context.Context) map[string]string {
 // package so the husk pod spec can be unit-tested.
 func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
 	return r.buildHuskPod(pool, template, opts)
+}
+
+// BuildForkChildPodForTest exposes buildForkChildPod to the external
+// controller_test package so the fork child pod spec can be unit-tested.
+func BuildForkChildPodForTest(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	return buildForkChildPod(fork, childName, opts, scheme)
 }
 
 // HuskTestClaimLabel marks a claim as owned by the husk-activation tests. The
