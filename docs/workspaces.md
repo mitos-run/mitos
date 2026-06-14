@@ -174,6 +174,59 @@ the dehydrate is passed an explicit exclude list
 `.aws`, `.config/gh`, `.npmrc`) so a careless agent that wrote a token to one of
 those conventional paths still does not leak it into a committed revision.
 
+## SDK and CLI surface
+
+A user creates, binds, logs, diffs, forks, reverts, and terminates-with-outputs
+a workspace through the SDKs and the `mitos ws` CLI without hand-writing a CRD.
+The verbs are git-shaped and map onto the revision DAG: a fork is a new
+`WorkspaceRevision` whose `source.fromWorkspaceRevision` points at the parent, in
+a (possibly new) workspace; a revert is a new tip in the same workspace that
+shares a past revision's content. Refusals carry an LLM-legible
+`{code, cause, remediation}` (issue #28): forking an uncommitted revision is
+`revision_not_committed`.
+
+Python:
+
+```python
+from mitos import AgentRun
+
+run = AgentRun(namespace="team-a")
+ws = run.create_workspace("proj-x")
+
+# Bind a sandbox to the workspace: the controller hydrates the head into
+# /workspace on start and dehydrates a new committed revision on terminate.
+sb = run.sandbox(image="python", workspace="proj-x", ready=True)
+sb.files.write("/workspace/data.txt", "hello")
+
+# Terminate with outputs: keep only a subtree, record a diff, push repo paths.
+sb.terminate(outputs=["/workspace", {"diff": True}], checkpoint=False)
+
+for rev in ws.log():            # newest first
+    print(rev.name, rev.phase, rev.lineage)
+ws.diff(ws.log()[0].name)       # path-level content-hash diff
+branch_rev = ws.fork(ws.log()[0].name, "proj-x-branch")  # content-addressed branch
+ws.revert("proj-x-1")           # new tip sharing a past revision's content
+```
+
+TypeScript:
+
+```typescript
+import { AgentRun, KubeConfigApi } from "@mitos/sdk";
+
+const run = new AgentRun({ k8s: new KubeConfigApi(), namespace: "team-a" });
+const ws = await run.createWorkspace("proj-x");
+
+const sb = await run.create("python-pool", { workspace: "proj-x" });
+await sb.files.write("/workspace/data.txt", "hello");
+await sb.terminate({ outputs: ["/workspace", { diff: true }] });
+
+const revs = await ws.log();    // newest first
+await ws.fork(revs[0].name, "proj-x-branch");
+await ws.revert("proj-x-1");
+```
+
+CLI: `mitos ws create|ls|log|diff|fork|revert|rm|bind` (see `docs/cli.md`).
+
 ## Proven vs open
 
 PROVEN:
@@ -197,6 +250,12 @@ PROVEN:
   (`internal/workspace/git_test.go`); an envtest proves a `{git}` output renders
   the branch, calls the rendezvous push with the resolved repo files, and records
   the push on the revision status.
+- The SDK/CLI surface: the controller-side fork/revert verbs with LLM-legible
+  rejection (`internal/controller/workspace_verbs.go`), the `mitos ws` CLI over a
+  cluster `WorkspaceBackend` (`internal/agentcli/workspace_{backend,cmd}.go`,
+  `clusterbackend.go`), the Python `Workspace` handle plus
+  `terminate(outputs=..., checkpoint=...)` (`sdk/python/mitos/workspace.py`), and
+  the TypeScript parity (`sdk/typescript/src/workspace.ts`), each unit-tested.
 
 OPEN (later W4 slices):
 
@@ -205,8 +264,6 @@ OPEN (later W4 slices):
 - A real external rendezvous server and its credentials (a referenced Secret,
   principal-bound); this slice proves the push against a local bare repo with no
   auth. There is no auto-merge by design: git is the merge layer.
-- The SDK/CLI `terminate(outputs=...)` surface and the `mitos ws
-  log|diff|revert|branch` verbs (a separate workstream surface).
 - The CloudEvents revision change feed and the memory-snapshot pairing that
   produces a resumable head from a real checkpoint (slice 4).
 - A streaming (non-buffered) tar for very large workspaces (this slice caps and

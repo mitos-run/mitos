@@ -304,12 +304,14 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   human/CI merges them, the engine never merges working trees. PROVEN: the path
   filter + content-hash diff in unit + envtest, and the git push against a local
   bare repo + an envtest push wiring; a `{git}` output is a new egress noted in
-  docs/threat-model.md. OPEN: the CloudEvents revision change feed and the
-  memory-snapshot pairing producing a resumable head from a real checkpoint
-  (slice 4); a real external rendezvous server + credentials (a referenced
-  Secret); the SDK/CLI `terminate(outputs=...)` surface; the per-workspace
-  encryption key (#31); the per-node toolchain cache via Share; the S3
-  object-store backend (this slice uses the node CAS).
+  docs/threat-model.md. The SDK/CLI surface is DONE: the Python and TypeScript
+  `Workspace` handles, `terminate(outputs=..., checkpoint=...)`, and the
+  `mitos ws` verbs over a cluster `WorkspaceBackend`, with LLM-legible rejection
+  (#28). OPEN: the CloudEvents revision change feed and the memory-snapshot
+  pairing producing a resumable head from a real checkpoint (slice 4); a real
+  external rendezvous server + credentials (a referenced Secret); the
+  per-workspace encryption key (#31); the per-node toolchain cache via Share; the
+  S3 object-store backend (this slice uses the node CAS).
 
 **Compliance & observability addendum (amends W1/W4):** permitted claim
 language is limited to what a CI job proves (CNCF-conformant clusters, PSA
@@ -745,8 +747,9 @@ verified. In rough order of leverage:
   --disable-pki-bootstrap`, forkd `--mock`, no KVM) from `deploy/dev/`. PROVEN in
   the kind CI smoke: `dev up` + `sandbox create` reaches Ready + `ls` + `terminate`
   on the mock engine; real in-VM exec is proven by the KVM CI of the API. See
-  docs/cli.md. OPEN: workspace verbs (`mitos ws ...`) deferred to Workspace
-  (#21).
+  docs/cli.md. The workspace verbs (`mitos ws create|ls|log|diff|fork|revert|rm|bind`)
+  are DONE: dispatched over a cluster `WorkspaceBackend` that reuses the
+  controller-side fork/revert helpers, unit-tested in `internal/agentcli`.
 - 🔨 Streaming exec and background processes: forkd serves an incremental
   stdout/stderr stream over the sandbox API (vsock-bridged to the guest agent),
   backgrounded processes detach from the request, and both SDKs expose a
