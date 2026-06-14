@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -63,7 +64,18 @@ var _ ChunkStore = plainStore{}
 // at-rest dedup skip ("file already exists at this digest path") still holds and
 // re-dehydrating an unchanged tree writes zero new chunks.
 type EncryptedStore struct {
+	*envelope
 	root string
+}
+
+var _ blobCASManifest = (*EncryptedStore)(nil)
+
+// envelope holds the AES-256-GCM cipher and the deterministic-nonce derivation
+// keyed by the DEK. It is the reusable seal/open core shared by the filesystem
+// EncryptedStore and the EncryptedS3Store, so both encrypt at rest identically
+// (same nonce scheme, same digest-as-AAD integrity gate) over different blob
+// backends.
+type envelope struct {
 	aead cipher.AEAD
 	// nonceKey is a separate HMAC key derived from the DEK, used only to derive
 	// the deterministic per-chunk nonce from the plaintext digest. Deriving it
@@ -72,12 +84,10 @@ type EncryptedStore struct {
 	nonceKey []byte
 }
 
-// NewEncryptedStore opens (creating the skeleton) an encrypted chunk store at
-// root, using dek (a 32-byte AES-256 DEK) for at-rest encryption. The DEK is a
-// secret value: the store copies what it needs into the AES-GCM cipher and the
-// nonce-derivation key and does not retain the caller's slice, so the caller may
-// Zeroize the passed key after this returns.
-func NewEncryptedStore(root string, dek storecrypt.Key) (*EncryptedStore, error) {
+// newEnvelope builds the AES-256-GCM envelope from a 32-byte DEK. The DEK is a
+// secret value the caller may Zeroize after this returns: newEnvelope retains
+// only the derived cipher and nonce key, not the caller's slice.
+func newEnvelope(dek storecrypt.Key) (*envelope, error) {
 	if len(dek) != 32 {
 		return nil, fmt.Errorf("workspace DEK must be 32 bytes (AES-256); got %d", len(dek))
 	}
@@ -92,14 +102,25 @@ func NewEncryptedStore(root string, dek storecrypt.Key) (*EncryptedStore, error)
 	// Domain-separate the nonce-derivation key from the GCM key.
 	mac := hmac.New(sha256.New, dek)
 	mac.Write([]byte("mitos/workspace/nonce-derivation/v1"))
-	nonceKey := mac.Sum(nil)
+	return &envelope{aead: aead, nonceKey: mac.Sum(nil)}, nil
+}
 
+// NewEncryptedStore opens (creating the skeleton) an encrypted chunk store at
+// root, using dek (a 32-byte AES-256 DEK) for at-rest encryption. The DEK is a
+// secret value: the store copies what it needs into the AES-GCM cipher and the
+// nonce-derivation key and does not retain the caller's slice, so the caller may
+// Zeroize the passed key after this returns.
+func NewEncryptedStore(root string, dek storecrypt.Key) (*EncryptedStore, error) {
+	env, err := newEnvelope(dek)
+	if err != nil {
+		return nil, err
+	}
 	for _, sub := range []string{"chunks", "manifests"} {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
 			return nil, fmt.Errorf("mkdir %s: %w", sub, err)
 		}
 	}
-	return &EncryptedStore{root: root, aead: aead, nonceKey: nonceKey}, nil
+	return &EncryptedStore{envelope: env, root: root}, nil
 }
 
 // chunkRoot is the chunks directory, exposed for tests that assert ciphertext at
@@ -122,7 +143,7 @@ func (e *EncryptedStore) manifestPath(d cas.Digest) string {
 // dedup. A digest is unique per distinct plaintext chunk (sha256), so each
 // distinct chunk gets a distinct nonce: there is no GCM nonce reuse across
 // distinct plaintexts under one key.
-func (e *EncryptedStore) nonceFor(d cas.Digest) []byte {
+func (e *envelope) nonceFor(d cas.Digest) []byte {
 	mac := hmac.New(sha256.New, e.nonceKey)
 	mac.Write([]byte(d))
 	return mac.Sum(nil)[:e.aead.NonceSize()]
@@ -132,7 +153,7 @@ func (e *EncryptedStore) nonceFor(d cas.Digest) []byte {
 // nonce-prefixed ciphertext (nonce || ciphertext+tag). The nonce is
 // deterministic in (DEK, digest) so the output is byte-identical for identical
 // plaintext, preserving at-rest dedup.
-func (e *EncryptedStore) seal(d cas.Digest, plaintext []byte) []byte {
+func (e *envelope) seal(d cas.Digest, plaintext []byte) []byte {
 	nonce := e.nonceFor(d)
 	return e.aead.Seal(append([]byte(nil), nonce...), nonce, plaintext, []byte(d))
 }
@@ -141,7 +162,7 @@ func (e *EncryptedStore) seal(d cas.Digest, plaintext []byte) []byte {
 // plaintext hashes back to that digest. The GCM tag plus the digest re-check is
 // the integrity gate: a wrong DEK fails the GCM Open (fail closed), and any
 // tampering fails either GCM or the digest check.
-func (e *EncryptedStore) open(d cas.Digest, atRest []byte) ([]byte, error) {
+func (e *envelope) open(d cas.Digest, atRest []byte) ([]byte, error) {
 	ns := e.aead.NonceSize()
 	if len(atRest) < ns {
 		return nil, fmt.Errorf("encrypted chunk %s too short: %d bytes", d, len(atRest))
@@ -177,55 +198,10 @@ func (e *EncryptedStore) hasChunk(d cas.Digest) bool {
 // skip), and returns the plaintext-addressed manifest, which it also stores
 // encrypted. The returned manifest digest equals what a plaintext *cas.Store
 // would produce for the same files, so content addressing and dedup are
-// preserved across the encryption boundary.
+// preserved across the encryption boundary. It shares the content-addressing
+// driver with the S3 backends so all backends behave identically.
 func (e *EncryptedStore) PutSnapshot(files map[string]string, meta cas.Metadata) (cas.Manifest, error) {
-	m, err := cas.BuildManifest(files, meta)
-	if err != nil {
-		return cas.Manifest{}, err
-	}
-	for _, fe := range m.Files {
-		if err := e.putFileChunks(files[fe.Name], fe); err != nil {
-			return cas.Manifest{}, fmt.Errorf("store encrypted chunks for %s: %w", fe.Name, err)
-		}
-	}
-	if err := e.putManifest(m); err != nil {
-		return cas.Manifest{}, err
-	}
-	return m, nil
-}
-
-// putFileChunks reads the file in cas.ChunkSize blocks and writes each chunk's
-// ciphertext at rest under its plaintext digest, skipping chunks already present
-// (dedup). The manifest's chunk refs (computed by BuildManifest) drive the read
-// so the at-rest digest names match the manifest exactly.
-func (e *EncryptedStore) putFileChunks(path string, fe cas.FileEntry) error {
-	f, err := os.Open(path) //nolint:gosec // internal snapshot file from the controller-owned temp dir
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close() //nolint:errcheck // read-only file
-
-	buf := make([]byte, cas.ChunkSize)
-	for _, c := range fe.Chunks {
-		block := buf[:c.Size]
-		if _, err := readFull(f, block); err != nil {
-			return fmt.Errorf("read chunk for %s: %w", fe.Name, err)
-		}
-		if e.hasChunk(c.Digest) {
-			continue
-		}
-		if err := e.writeAtRest(e.chunkPath(c.Digest), e.seal(c.Digest, block)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// putManifest stores the canonical manifest bytes encrypted at rest under the
-// manifest digest.
-func (e *EncryptedStore) putManifest(m cas.Manifest) error {
-	d := m.Digest()
-	return e.writeAtRest(e.manifestPath(d), e.seal(d, m.Canonical()))
+	return putSnapshotBlobs(files, meta, e)
 }
 
 // GetManifest loads, decrypts, and verifies the manifest for a digest. A wrong
@@ -250,61 +226,74 @@ func (e *EncryptedStore) GetManifest(d cas.Digest) (cas.Manifest, error) {
 }
 
 // MaterializeFileTo reconstructs a single named plaintext file from the manifest
-// to dstPath, decrypting and verifying each chunk. Parent directories are
-// created. A wrong key fails the GCM Open per chunk (fail closed).
+// to dstPath, decrypting and verifying each chunk. A wrong key fails the GCM Open
+// per chunk (fail closed).
 func (e *EncryptedStore) MaterializeFileTo(manifestDigest cas.Digest, name, dstPath string) error {
-	m, err := e.GetManifest(manifestDigest)
-	if err != nil {
-		return err
-	}
-	for _, fe := range m.Files {
-		if fe.Name != name {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-			return fmt.Errorf("mkdir for %s: %w", dstPath, err)
-		}
-		out, err := os.Create(dstPath) //nolint:gosec // dstPath is caller-validated (safeJoin)
-		if err != nil {
-			return fmt.Errorf("create %s: %w", dstPath, err)
-		}
-		writeErr := e.streamFile(out, fe)
-		closeErr := out.Close()
-		if writeErr != nil {
-			_ = os.Remove(dstPath) //nolint:errcheck // best-effort partial-output cleanup
-			return writeErr
-		}
-		if closeErr != nil {
-			_ = os.Remove(dstPath) //nolint:errcheck // best-effort partial-output cleanup
-			return fmt.Errorf("close %s: %w", dstPath, closeErr)
-		}
-		return nil
-	}
-	return fmt.Errorf("manifest %s has no file %q", manifestDigest, name)
+	return materializeBlobFile(manifestDigest, name, dstPath, e)
 }
 
-// streamFile decrypts and verifies each chunk of fe and writes the plaintext to
-// out in order.
-func (e *EncryptedStore) streamFile(out *os.File, fe cas.FileEntry) error {
-	for _, c := range fe.Chunks {
-		atRest, err := os.ReadFile(e.chunkPath(c.Digest)) //nolint:gosec // path derived from a validated digest
-		if err != nil {
-			return fmt.Errorf("read encrypted chunk %s for file %s: %w", c.Digest, fe.Name, err)
-		}
-		pt, err := e.open(c.Digest, atRest)
-		if err != nil {
-			return fmt.Errorf("file %s: %w", fe.Name, err)
-		}
-		if _, err := out.Write(pt); err != nil {
-			return fmt.Errorf("write chunk %s for file %s: %w", c.Digest, fe.Name, err)
-		}
+// --- blobCAS implementation backed by the encrypted filesystem layout -------
+
+func (e *EncryptedStore) hasBlob(d cas.Digest) bool { return e.hasChunk(d) }
+
+func (e *EncryptedStore) sealChunk(d cas.Digest, block []byte) []byte { return e.seal(d, block) }
+
+func (e *EncryptedStore) sealManifest(d cas.Digest, canonical []byte) []byte {
+	return e.seal(d, canonical)
+}
+
+func (e *EncryptedStore) openChunk(d cas.Digest, atRest []byte) ([]byte, error) {
+	return e.open(d, atRest)
+}
+
+func (e *EncryptedStore) putChunkBlob(d cas.Digest, atRest []byte) error {
+	return writeAtRest(e.chunkPath(d), atRest)
+}
+
+func (e *EncryptedStore) putManifestBlob(d cas.Digest, atRest []byte) error {
+	return writeAtRest(e.manifestPath(d), atRest)
+}
+
+func (e *EncryptedStore) getChunkBlob(d cas.Digest) ([]byte, error) {
+	return os.ReadFile(e.chunkPath(d)) //nolint:gosec // path derived from a validated digest
+}
+
+// readFull reads exactly len(buf) bytes from r, returning an error on a short
+// read. It exists so the chunk reader reads precisely the chunk size
+// BuildManifest recorded.
+func readFull(r io.Reader, buf []byte) (int, error) {
+	return io.ReadFull(r, buf)
+}
+
+// openForRead opens a snapshot file for reading.
+func openForRead(p string) (*os.File, error) {
+	f, err := os.Open(p) //nolint:gosec // internal snapshot file from the controller-owned temp dir
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", p, err)
 	}
-	return nil
+	return f, nil
+}
+
+// createForWrite creates a destination file, making its parent dir.
+func createForWrite(dst string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir for %s: %w", dst, err)
+	}
+	f, err := os.Create(dst) //nolint:gosec // dst is caller-validated (safeJoin)
+	if err != nil {
+		return nil, fmt.Errorf("create %s: %w", dst, err)
+	}
+	return f, nil
+}
+
+// removePartial best-effort removes a partially written destination on error.
+func removePartial(dst string) {
+	_ = os.Remove(dst) //nolint:errcheck // best-effort partial-output cleanup
 }
 
 // writeAtRest writes data atomically (temp + rename) under dst, creating the
 // parent shard directory. Readers never observe a partial ciphertext file.
-func (e *EncryptedStore) writeAtRest(dst string, data []byte) error {
+func writeAtRest(dst string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("mkdir at-rest shard: %w", err)
 	}
@@ -328,20 +317,3 @@ func (e *EncryptedStore) writeAtRest(dst string, data []byte) error {
 	}
 	return nil
 }
-
-// readFull reads exactly len(buf) bytes from f, returning an error on a short
-// read. It exists so putFileChunks reads precisely the chunk size BuildManifest
-// recorded.
-func readFull(f *os.File, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := f.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
-}
-
-var _ ChunkStore = (*EncryptedStore)(nil)
