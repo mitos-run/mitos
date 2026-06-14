@@ -165,6 +165,97 @@ The push uses the host `git` CLI via exec, so it adds no new dependency. CI's
 Linux runner has git; the controller image must ship git for the production path
 (the tests skip gracefully when git is absent so the unit suite is not flaky).
 
+### Authenticating the push to an external remote
+
+A push to a real external rendezvous remote (not a local bare repo) needs
+credentials. Set them on the workspace:
+
+```yaml
+spec:
+  git:
+    paths: ["/workspace/repo"]
+    credentialsUsername: x-access-token   # not a secret; defaults to x-access-token
+    credentialsSecretRef:
+      name: rendezvous-creds              # a Secret in the workspace namespace
+      key: token                          # the key holding the push token
+```
+
+The controller resolves the Secret at push time and hands the token to git. The
+token is a SECRET VALUE and is handled accordingly:
+
+- It NEVER appears on the git argv (so it cannot show up in a process table), in
+  a log line, in an error, in a status condition, or in a committed revision.
+- It reaches git ONLY through a mode `0o600` `.git-credentials` file written into
+  an ephemeral, isolated `HOME` that is created per push and removed when the push
+  returns (`credential.helper=store` reads only that file).
+- Any git output that is surfaced in an error has the token scrubbed defensively
+  before it is returned.
+- A missing or empty key is reported with an LLM-legible error that names only
+  the Secret and the key, never the value.
+
+Credentials require an `https://` (or `http://`) remote that can carry basic
+auth; a `file://` or scp-like remote with credentials is rejected.
+
+The matching server side is `cmd/rendezvous-server` (package
+`internal/rendezvous`): a minimal authenticated git-http server that wraps the
+stock `git http-backend` CGI behind HTTP basic auth, with its token mounted from
+a Secret. It creates a bare repo on first push and enables `receive-pack` only
+after the auth check passes. Deploy it as the `remote` the `{git}` output targets,
+or point the output at any standard authenticated git remote (a forge or an
+internal git server). An end-to-end test
+(`internal/rendezvous/server_test.go:TestRendezvousCredentialedPushLandsOnServer`)
+proves the credentialed push authenticates to this server and lands the branch.
+
+Cluster-gated: the unit and envtest suites prove the credentialed push logic and
+the token redaction against a local authenticated server. The push to a REAL
+external rendezvous server on a live cluster is the gated tail; see
+`test/cluster-e2e/workspace-e2e.sh` (run with
+`gh workflow run cluster-e2e.yaml -f suite=workspace`).
+
+This `{git}` egress with Secret credentials is a security-surface move; see
+docs/threat-model.md section 3.
+
+## The revision change feed for external indexers
+
+The controller emits a CloudEvents 1.0 feed so an external indexer (a vector DB,
+a search index, an audit sink) can react to workspace changes WITHOUT mitos
+embedding any indexer of its own. There is no built-in vector store by design
+(ROADMAP.md, EPIC W4): indexing is the consumer's job, fed by this event.
+
+A `dev.mitos.workspace.revision.created` event is emitted when a
+`WorkspaceRevision` is created. The envelope is a structured-mode CloudEvent
+(`internal/eventfeed/event.go`); the `data` payload is `RevisionCreatedData`:
+
+```json
+{
+  "specversion": "1.0",
+  "type": "dev.mitos.workspace.revision.created",
+  "source": "mitos.run/controller",
+  "subject": "<namespace>/<revision-name>",
+  "id": "<stable-dedupe-id>",
+  "time": "2026-06-14T00:00:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "workspace": "<workspace-name>",
+    "revision": "<revision-name>",
+    "contentManifest": "<lowercase-hex-sha256-digest>",
+    "lineage": "fromClaim:<claim> | fromWorkspaceRevision:<revision> | root",
+    "memorySnapshotRef": "<snapshot-id-when-resumable>",
+    "traceId": "<orchestrator-trace-id-when-enabled>"
+  }
+}
+```
+
+The payload carries content-addressed POINTERS and lineage NAMES only: a
+manifest digest, not content; a snapshot id, not snapshot bytes; never a secret
+value. An indexer materializes the revision's files itself from the content store
+using the `contentManifest`, then indexes them.
+
+Delivery is via the existing `WebhookSink` (`internal/eventfeed/sink.go`), which
+POSTs each event to an operator-configured webhook URL. The `id` is a stable
+dedupe key so a re-emit of the same logical event reproduces the same envelope,
+letting the consumer dedupe idempotently.
+
 ## Secrets are never captured into a revision
 
 Secret values live only in the guest's in-memory configured env (delivered over
@@ -305,6 +396,22 @@ PROVEN:
   (`internal/workspace/git_test.go`); an envtest proves a `{git}` output renders
   the branch, calls the rendezvous push with the resolved repo files, and records
   the push on the revision status.
+- Credentialed git rendezvous: a workspace `spec.git.credentialsSecretRef` is
+  resolved and the token delivered to git only through an ephemeral, mode
+  `0o600` `.git-credentials` file in an isolated `HOME`, never on argv, in a log,
+  in an error, in a condition, or in a revision; redaction on the failure path is
+  asserted in unit tests and the token-never-in-conditions invariant in an
+  envtest (`internal/workspace/git_test.go`,
+  `internal/controller/workspace_binding_test.go`).
+- The authenticated rendezvous server: `internal/rendezvous` wraps
+  `git http-backend` behind HTTP basic auth (constant-time token compare); a
+  unit test rejects an unauthenticated push with 401, accepts an authenticated
+  one, and an end-to-end test proves the engine's credentialed push lands the
+  branch on the server (`internal/rendezvous/server_test.go`).
+- The revision change feed: the `dev.mitos.workspace.revision.created` CloudEvent
+  with pointers-and-names-only payload, delivered via `WebhookSink`
+  (`internal/eventfeed`, `internal/controller/eventfeed.go`); documented above
+  for external indexers (no built-in vector store by design).
 - The SDK/CLI surface: the controller-side fork/revert verbs with LLM-legible
   rejection (`internal/controller/workspace_verbs.go`), the `mitos ws` CLI over a
   cluster `WorkspaceBackend` (`internal/agentcli/workspace_{backend,cmd}.go`,
@@ -316,10 +423,10 @@ OPEN (later W4 slices):
 
 - The per-workspace encryption key (#31).
 - The S3 / object-storage store backend (this slice uses the node CAS).
-- A real external rendezvous server and its credentials (a referenced Secret,
-  principal-bound); this slice proves the push against a local bare repo with no
-  auth. There is no auto-merge by design: git is the merge layer.
-- The CloudEvents revision change feed (later W4 slice).
+- The push to a REAL external rendezvous server on a LIVE cluster is the gated
+  tail (`test/cluster-e2e/workspace-e2e.sh`); the credentialed-push logic, the
+  token redaction, and the authenticated server are proven in unit + envtest
+  above. There is no auto-merge by design: git is the merge layer.
 - The memory-snapshot pairing that produces a resumable head is DONE: the
   disk+memory pairing, the resumable status, and the principal-binding refusal are
   envtest-proven and wired behind `--workspace-memory-snapshots` (see "Resumable
