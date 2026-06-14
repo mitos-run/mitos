@@ -160,6 +160,8 @@ func run() error {
 		vcpus           = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB          = flag.Int("mem-mib", 512, "guest memory in MiB")
 		activate        = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket (or --control-addr over mTLS), send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		forkSnapshot    = flag.Bool("fork-snapshot", false, "act as a control CLIENT: connect to --control-addr over mTLS, send one fork-snapshot op for --fork-id writing into the source pod's forks dir, print the result, and exit (spawns no VMM)")
+		forkID          = flag.String("fork-id", "", "fork-snapshot client mode: the node-local fork id (the forks dir leaf the source stub writes the snapshot under)")
 		controlAddr     = flag.String("control-addr", "", "activate client mode: TCP address (host:port) of a husk pod's mTLS NETWORK control to activate over; uses ActivateHuskPod and requires --tls-cert/--tls-key/--tls-ca. Mutually exclusive with --control-socket")
 		snapshotDir     = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
 		secretFile      = flag.String("secret-file", "", "activate client mode: path to a KEY=VALUE secret file (one per line) delivered to the guest; values are never logged")
@@ -207,6 +209,49 @@ func run() error {
 			return runNetworkActivateClient(*controlAddr, *snapshotDir, *expectedDigest, *tlsCert, *tlsKey, *tlsCA, envFlag.orNil(), secrets, token)
 		}
 		return runActivateClient(*controlSocket, *snapshotDir, *expectedDigest, envFlag.orNil(), secrets, token)
+	}
+
+	if *forkSnapshot {
+		if *controlAddr == "" {
+			return fmt.Errorf("--fork-snapshot requires --control-addr")
+		}
+		if *forkID == "" {
+			return fmt.Errorf("--fork-snapshot requires --fork-id")
+		}
+		if *tlsCert == "" || *tlsKey == "" || *tlsCA == "" {
+			return fmt.Errorf("--fork-snapshot requires --tls-cert, --tls-key, and --tls-ca")
+		}
+		certPEM, err := os.ReadFile(*tlsCert)
+		if err != nil {
+			return fmt.Errorf("read --tls-cert: %w", err)
+		}
+		keyPEM, err := os.ReadFile(*tlsKey)
+		if err != nil {
+			return fmt.Errorf("read --tls-key: %w", err)
+		}
+		caPEM, err := os.ReadFile(*tlsCA)
+		if err != nil {
+			return fmt.Errorf("read --tls-ca: %w", err)
+		}
+		tlsConf, err := pki.ClientTLSConfig(certPEM, keyPEM, caPEM)
+		if err != nil {
+			return fmt.Errorf("build controller client TLS config: %w", err)
+		}
+		res, err := controller.ForkSnapshotOnHusk(context.Background(), *controlAddr, tlsConf, husk.ForkSnapshotRequest{
+			ForkID:      *forkID,
+			SnapshotDir: filepath.Join("/var/lib/mitos/forks", *forkID),
+		})
+		if err != nil {
+			return fmt.Errorf("fork-snapshot over network control: %w", err)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		if err := enc.Encode(res); err != nil {
+			return fmt.Errorf("encode fork-snapshot result: %w", err)
+		}
+		if !res.OK {
+			return fmt.Errorf("fork-snapshot failed: %s", res.Error)
+		}
+		return nil
 	}
 
 	if *workdir == "" {
