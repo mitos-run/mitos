@@ -1,0 +1,183 @@
+package agentcli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+)
+
+const wsUsage = `mitos ws: durable, forkable agent workspaces (git verbs)
+
+Usage:
+  mitos ws create <name>                  create an empty workspace
+  mitos ws ls [-n namespace]              list workspaces
+  mitos ws log <workspace>                list revisions, newest first
+  mitos ws diff <workspace> <revision>    content-hash diff vs the parent head
+  mitos ws fork <src-ws> <revision> <dst-ws>
+                                          branch a committed revision into dst-ws
+  mitos ws revert <workspace> <revision>  set the workspace head to a past revision
+  mitos ws rm <name>                      delete a workspace and its revisions
+  mitos ws bind <sandbox-id> <workspace>  bind a running sandbox to a workspace
+`
+
+// cmdWorkspace is the production entry: it is wired from Run with a cluster
+// WorkspaceBackend. runWs is the testable core.
+func cmdWorkspace(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.Writer) int {
+	return runWs(ctx, args, b, out, errw)
+}
+
+func runWs(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(errw, wsUsage)
+		return 2
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Fprint(out, wsUsage)
+		return 0
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprint(errw, "ws create: a workspace name is required\n\n"+wsUsage)
+			return 2
+		}
+		if err := b.CreateWorkspace(ctx, args[1]); err != nil {
+			fmt.Fprintf(errw, "ws create: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(out, args[1])
+		return 0
+	case "ls":
+		ns := parseNamespace(args[1:])
+		infos, err := b.ListWorkspaces(ctx, ns)
+		if err != nil {
+			fmt.Fprintf(errw, "ws ls: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(out, formatWorkspaceList(infos))
+		return 0
+	case "log":
+		if len(args) < 2 {
+			fmt.Fprint(errw, "ws log: a workspace is required\n\n"+wsUsage)
+			return 2
+		}
+		revs, err := b.Log(ctx, args[1])
+		if err != nil {
+			fmt.Fprintf(errw, "ws log: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(out, formatRevisionLog(revs))
+		return 0
+	case "diff":
+		if len(args) < 3 {
+			fmt.Fprint(errw, "ws diff: a workspace and a revision are required\n\n"+wsUsage)
+			return 2
+		}
+		d, err := b.Diff(ctx, args[1], args[2])
+		if err != nil {
+			fmt.Fprintf(errw, "ws diff: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(out, formatDiff(d))
+		return 0
+	case "fork":
+		if len(args) < 4 {
+			fmt.Fprint(errw, "ws fork: src-workspace, revision, and dst-workspace are required\n\n"+wsUsage)
+			return 2
+		}
+		rev, err := b.Fork(ctx, args[1], args[2], args[3])
+		if err != nil {
+			fmt.Fprintf(errw, "ws fork: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(out, rev)
+		return 0
+	case "revert":
+		if len(args) < 3 {
+			fmt.Fprint(errw, "ws revert: a workspace and a revision are required\n\n"+wsUsage)
+			return 2
+		}
+		rev, err := b.Revert(ctx, args[1], args[2])
+		if err != nil {
+			fmt.Fprintf(errw, "ws revert: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(out, rev)
+		return 0
+	case "rm":
+		if len(args) < 2 {
+			fmt.Fprint(errw, "ws rm: a workspace name is required\n\n"+wsUsage)
+			return 2
+		}
+		if err := b.RemoveWorkspace(ctx, args[1]); err != nil {
+			fmt.Fprintf(errw, "ws rm: %v\n", err)
+			return 1
+		}
+		return 0
+	case "bind":
+		if len(args) < 3 {
+			fmt.Fprint(errw, "ws bind: a sandbox id and a workspace are required\n\n"+wsUsage)
+			return 2
+		}
+		if err := b.Bind(ctx, args[1], args[2]); err != nil {
+			fmt.Fprintf(errw, "ws bind: %v\n", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(errw, "unknown ws subcommand %q\n\n%s", args[0], wsUsage)
+		return 2
+	}
+}
+
+// parseNamespace pulls -n/--namespace out of the remaining args.
+func parseNamespace(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "-n" || args[i] == "--namespace") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func formatWorkspaceList(infos []WorkspaceInfo) string {
+	if len(infos) == 0 {
+		return "no workspaces\n"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%-24s %-24s %-9s %s\n", "NAME", "HEAD", "REVISIONS", "RESUMABLE")
+	for _, w := range infos {
+		fmt.Fprintf(&sb, "%-24s %-24s %-9d %t\n", w.Name, w.Head, w.Revisions, w.Resumable)
+	}
+	return sb.String()
+}
+
+func formatRevisionLog(revs []RevisionInfo) string {
+	if len(revs) == 0 {
+		return "no revisions\n"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%-24s %-10s %-9s %s\n", "REVISION", "PHASE", "RESUMABLE", "LINEAGE")
+	for _, r := range revs {
+		fmt.Fprintf(&sb, "%-24s %-10s %-9t %s\n", r.Name, r.Phase, r.Resumable, r.Lineage)
+	}
+	return sb.String()
+}
+
+func formatDiff(d DiffInfo) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "parent: %s\n", d.Parent)
+	for _, a := range d.Added {
+		fmt.Fprintf(&sb, "+ %s\n", a)
+	}
+	for _, m := range d.Modified {
+		fmt.Fprintf(&sb, "~ %s\n", m)
+	}
+	for _, r := range d.Removed {
+		fmt.Fprintf(&sb, "- %s\n", r)
+	}
+	if len(d.Added)+len(d.Modified)+len(d.Removed) == 0 {
+		sb.WriteString("(no changes)\n")
+	}
+	return sb.String()
+}

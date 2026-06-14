@@ -17,6 +17,8 @@ Usage:
   mitos sandbox exec <id> <command...>           run a command in a sandbox
   mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
   mitos sandbox terminate <id>                   destroy a sandbox
+  mitos ws create|ls|log|diff|fork|revert|rm     workspace lifecycle (git verbs)
+  mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
   mitos dev up | down                            bring a local kind dev
                                                     cluster up or down
 
@@ -53,6 +55,12 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 		return cmdRun(ctx, args[1:], backend, out, errw)
 	case "sandbox":
 		return cmdSandbox(ctx, args[1:], backend, out, errw)
+	case "ws":
+		if backend == nil || backend.Workspace() == nil {
+			fmt.Fprint(errw, "ws: this backend does not support workspaces\n")
+			return 2
+		}
+		return cmdWorkspace(ctx, args[1:], backend.Workspace(), out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
 	default:
