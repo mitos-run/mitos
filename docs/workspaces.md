@@ -99,13 +99,19 @@ node CAS (`<dataDir>/cas`) read-write. The stub serves two control ops over the
 SAME mTLS control channel that already carries `activate` and the fork-snapshot
 ops:
 
-- `dehydrate-workspace(excludePaths, capturePaths)`: runs the guest vsock `TarDir`
-  over `/workspace`, stores the content-addressed chunks plus manifest into the
-  node CAS, and returns the manifest digest. It reuses
+- `dehydrate-workspace(excludePaths, capturePaths, parentManifestDigest)`: runs the
+  guest vsock `TarDir` over `/workspace`, stores the content-addressed chunks plus
+  manifest into the node CAS, and returns the manifest digest. It reuses
   `internal/workspace.Dehydrate` (the KVM-proven tar round trip); it does not
   reimplement tar or CAS. Secret/credential paths are excluded per the
-  no-secrets-in-revisions policy. Fail-closed: it requires an active VM and a
-  configured node CAS, and never returns content bytes or secrets in an error.
+  no-secrets-in-revisions policy. When `parentManifestDigest` is set (a `{diff: true}`
+  terminate) it ALSO computes the content-hash diff of the new revision against that
+  parent and returns it alongside the digest: the diff is computed from the two
+  MANIFESTS (path -> chunk-digest lists) in the node CAS, not the chunk bytes,
+  reusing `internal/workspace.DiffManifests`. The diff must run here because the
+  controller is off-node and cannot read either node-CAS manifest. Fail-closed: it
+  requires an active VM and a configured node CAS, and never returns content bytes
+  or secrets in an error.
 - `hydrate-workspace(manifestDigest)`: reads the manifest plus chunks from the
   node CAS and runs `internal/workspace.Hydrate` to `UntarDir` it into
   `/workspace`.
@@ -113,11 +119,23 @@ ops:
 The controller dials the claim's husk pod control channel
 (`DehydrateWorkspaceOnHusk` / `HydrateWorkspaceOnHusk`, mirroring the fork
 `ForkSnapshotOnHusk` path) and STILL owns the `WorkspaceRevision` commit + head
-advance once the stub returns the manifest digest. The delegation is gated by
-`EnableHuskPods`; the default hydrate/dehydrate path self-wires to the husk
-control op, so the previous "transport is not wired" seam no longer fires in husk
-mode. The raw-forkd path has no in-controller transport and keeps the documented
-seam.
+advance once the stub returns the manifest digest (and the optional diff
+summary). The delegation is gated by `EnableHuskPods`; the default
+hydrate/dehydrate path AND the `{diff: true}` path self-wire to the husk control
+op, so the previous "transport is not wired" seam no longer fires in husk mode for
+hydrate, dehydrate, or diff. The raw-forkd path has no in-controller transport and
+keeps the documented seam (it reads the manifests in-controller for the diff).
+
+The `{git}` rendezvous push is currently BEST-EFFORT on the husk path: reading the
+`spec.git.paths` content out of the node CAS to the controller is not yet wired, so
+in husk mode the push is logged and skipped rather than failing the terminate, and
+the CRITICAL path (revision commit + head advance + fork-sees-state) is never
+blocked. The cluster e2e treats git push as best-effort. Fully wiring the husk
+`{git}` push (a node-CAS read op that returns the repo-paths content to the
+controller, which does the credentialed push so the credential stays in the
+controller and never reaches the pod) is tracked in
+`docs/superpowers/plans/2026-06-14-w4-workspace-prodgrade.md`. The raw-forkd
+`{git}` path is fully wired.
 
 ## Single-writer-per-workspace
 

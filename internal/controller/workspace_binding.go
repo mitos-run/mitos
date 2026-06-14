@@ -47,6 +47,16 @@ type dehydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, exclu
 // (the first revision) is the whole child as additions.
 type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
 
+// huskDehydrateDiffFunc is the husk-mode terminate seam that captures the
+// sandbox /workspace into the node CAS AND, when wantDiff is set, computes the
+// content-hash diff of the new revision against parentManifest in the same
+// node-CAS-side op. It returns the new manifest digest and the optional diff (nil
+// when wantDiff is false). The diff is computed on the node because the controller
+// cannot read either node-CAS manifest, so the husk path never touches the
+// in-controller workspaceTransport seam for the diff. The production value dials
+// the claim's husk pod (defaultHuskDehydrateWithDiff); envtest injects a fake.
+type huskDehydrateDiffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error)
+
 // rendezvousFunc is the seam the claim reconciler pushes the workspace repo
 // paths to a git rendezvous remote through. The production value calls
 // workspace.Rendezvous (the git CLI); envtest and unit tests inject a fake.
@@ -287,6 +297,16 @@ func (r *SandboxClaimReconciler) huskDehydrate() dehydrateFunc {
 	return r.defaultHuskDehydrate
 }
 
+// huskDehydrateDiff returns the configured husk dehydrate+diff delegate or the
+// default real path that dials the claim's husk pod control op and asks it to
+// capture the workspace and (when wanted) compute the diff in one node-CAS-side op.
+func (r *SandboxClaimReconciler) huskDehydrateDiff() huskDehydrateDiffFunc {
+	if r.WorkspaceDehydrateDiffDelegate != nil {
+		return r.WorkspaceDehydrateDiffDelegate
+	}
+	return r.defaultHuskDehydrateWithDiff
+}
+
 // huskWorkspaceTransferTimeout bounds a single hydrate/dehydrate control op
 // against a husk pod. A workspace tar over vsock plus a node-CAS write is bounded
 // but can be large; this is generous enough for a real transfer and short enough
@@ -325,6 +345,52 @@ func (r *SandboxClaimReconciler) defaultHuskDehydrate(ctx context.Context, claim
 		return "", fmt.Errorf("husk dehydrate for claim %s returned an invalid content digest: %w", claim.Name, err)
 	}
 	return d, nil
+}
+
+// defaultHuskDehydrateWithDiff is the production husk terminate path that both
+// captures the sandbox /workspace into the node CAS and (when wantDiff is set)
+// computes the content-hash diff of the new revision against parentManifest, in a
+// SINGLE dehydrate-workspace control op against the claim's husk pod. The diff is
+// computed on the node, where both manifests live in the node CAS, because the
+// controller is not on the node and cannot read either manifest: this is why the
+// husk path never falls back to the in-controller workspaceTransport seam for the
+// diff. It returns the new manifest digest and the optional diff (nil when
+// wantDiff is false). It fails closed: an unreachable pod or a not-OK result is an
+// error, so the terminate retries rather than committing a revision the node never
+// produced or a diff it could not compute.
+func (r *SandboxClaimReconciler) defaultHuskDehydrateWithDiff(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
+	addr, err := r.huskPodControlAddr(ctx, claim)
+	if err != nil {
+		return "", nil, err
+	}
+	req := husk.DehydrateWorkspaceRequest{
+		ExcludePaths: excludePaths,
+		CapturePaths: capturePaths,
+	}
+	// Only ask the node to compute a diff when an output requested it. A valid
+	// parent manifest is the head before this revision; an empty/invalid parent on
+	// the first revision means "diff against an empty manifest", which the stub
+	// records as the whole child being added. The parent manifest digest is a
+	// content address, not a secret.
+	if wantDiff {
+		req.ParentManifestDigest = string(parentManifest)
+	}
+	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
+	defer cancel()
+	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, req)
+	if err != nil {
+		return "", nil, fmt.Errorf("dehydrate workspace on husk pod %s: %w", claim.Status.SandboxID, err)
+	}
+	if !res.OK {
+		// res.Error carries actionable remediation from the stub; it never carries
+		// secrets or content bytes.
+		return "", nil, fmt.Errorf("dehydrate workspace on husk pod %s: %s", claim.Status.SandboxID, res.Error)
+	}
+	d := cas.Digest(res.ManifestDigest)
+	if err := d.Validate(); err != nil {
+		return "", nil, fmt.Errorf("husk dehydrate for claim %s returned an invalid content digest: %w", claim.Name, err)
+	}
+	return d, res.Diff, nil
 }
 
 // defaultHuskHydrate is the production husk hydrate path: it dials the claim's
@@ -405,7 +471,25 @@ func (r *SandboxClaimReconciler) defaultDiff(ctx context.Context, claim *v1alpha
 // that fall under the workspace spec.git.paths prefixes, and materializes their
 // content into a name -> content map for the git rendezvous push. See
 // defaultHydrate for the transport requirement.
+//
+// In husk mode the node-CAS-resident manifest is not readable from the
+// controller, so the {git} rendezvous push is currently BEST-EFFORT: this returns
+// an empty file set with a logged note rather than hitting the in-controller
+// workspaceTransport seam, so the dehydrate-on-terminate commit (the CRITICAL
+// path: commit + head advance + fork-sees-state) is never blocked by the git
+// push. The cluster e2e treats git push as best-effort. Fully wiring the husk
+// {git} push (a node-CAS read op that returns the spec.git.paths content to the
+// controller, which then does the credentialed push so the credential stays in
+// the controller, never the pod) is tracked in
+// docs/superpowers/plans/2026-06-14-w4-workspace-prodgrade.md. The raw-forkd path
+// keeps the documented in-controller seam below.
 func (r *SandboxClaimReconciler) defaultRepoFiles(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+	if r.EnableHuskPods {
+		log.FromContext(ctx).Info(
+			"husk mode: git rendezvous repo-paths read from the node CAS is not yet wired; skipping the {git} push (best-effort) so the workspace commit is not blocked",
+			"claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name)
+		return nil, nil
+	}
 	_, store, err := r.workspaceTransport(claim)
 	if err != nil {
 		return nil, err
@@ -692,9 +776,39 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 
 	span.SetAttributes(attribute.Int("captured.path.count", len(capturePaths)))
 
-	digest, err := r.dehydrate()(ctx, claim, WorkspaceSecretExcludePaths, capturePaths)
-	if err != nil {
-		return finish(fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err))
+	wantDiff := outputsWantDiff(claim.Spec.Outputs)
+
+	// Capture the sandbox /workspace into a content-addressed revision and, when a
+	// {diff: true} output requested it, compute the content-hash diff against the
+	// parent head.
+	//
+	// In husk mode BOTH the capture and the diff run on the node, where the guest
+	// vsock and the node CAS (with both manifests) live: the controller is not on
+	// the node and cannot read either manifest, so the diff is computed in the same
+	// husk-stub dehydrate op and returned alongside the digest. This is why the husk
+	// path never touches the in-controller workspaceTransport seam. The raw-forkd
+	// path keeps the documented in-controller seam (dehydrate then diff).
+	var (
+		digest cas.Digest
+		diff   *workspace.Diff
+	)
+	if r.EnableHuskPods {
+		digest, diff, err = r.huskDehydrateDiff()(ctx, claim, WorkspaceSecretExcludePaths, capturePaths, parentManifest, wantDiff)
+		if err != nil {
+			return finish(fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err))
+		}
+	} else {
+		digest, err = r.dehydrate()(ctx, claim, WorkspaceSecretExcludePaths, capturePaths)
+		if err != nil {
+			return finish(fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err))
+		}
+		if wantDiff {
+			d, derr := r.diff()(ctx, claim, parentManifest, digest)
+			if derr != nil {
+				return finish(fmt.Errorf("diff claim %s revision against parent %s: %w", claim.Name, parentRev, derr))
+			}
+			diff = &d
+		}
 	}
 	if err := digest.Validate(); err != nil {
 		return finish(fmt.Errorf("dehydrate claim %s produced an invalid content digest: %w", claim.Name, err))
@@ -705,19 +819,15 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	// A {diff: true} output records the content-hash diff of this revision against
 	// the parent head, so an indexer or a human can see what changed.
 	var diffSummary *v1alpha1.RevisionDiffSummary
-	if outputsWantDiff(claim.Spec.Outputs) {
-		d, derr := r.diff()(ctx, claim, parentManifest, digest)
-		if derr != nil {
-			return finish(fmt.Errorf("diff claim %s revision against parent %s: %w", claim.Name, parentRev, derr))
-		}
+	if wantDiff && diff != nil {
 		diffSummary = &v1alpha1.RevisionDiffSummary{
 			ParentRevision: parentRev,
-			Added:          d.Added,
-			Removed:        d.Removed,
-			Modified:       d.Modified,
-			AddedCount:     int32(len(d.Added)),
-			RemovedCount:   int32(len(d.Removed)),
-			ModifiedCount:  int32(len(d.Modified)),
+			Added:          diff.Added,
+			Removed:        diff.Removed,
+			Modified:       diff.Modified,
+			AddedCount:     int32(len(diff.Added)),
+			RemovedCount:   int32(len(diff.Removed)),
+			ModifiedCount:  int32(len(diff.Modified)),
 		}
 	}
 

@@ -774,12 +774,56 @@ func (s *Stub) DehydrateWorkspace(ctx context.Context, req DehydrateWorkspaceReq
 		werr := fmt.Errorf("husk: dehydrate workspace produced an invalid content digest: %w", err)
 		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
 	}
+
+	// Optional content-hash diff against the parent head. The controller is not on
+	// the node and cannot read either manifest, so it asks the stub (which owns the
+	// node CAS) to compute the diff here from the two manifests, reusing the same
+	// internal/workspace.DiffManifests helper the in-controller path used. An empty
+	// ParentManifestDigest skips the diff (a {diff: false} terminate); an empty-but-
+	// requested parent (the first revision in a workspace) diffs the child against an
+	// empty manifest, so the whole child records as additions. The diff carries
+	// content path names only, never chunk bytes; an error names manifests/digests
+	// (content addresses), never content.
+	var diff *workspace.Diff
+	if req.ParentManifestDigest != "" {
+		parent := cas.Digest(req.ParentManifestDigest)
+		if err := parent.Validate(); err != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: invalid parent manifest digest: %w", err)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		d, derr := s.diffManifests(parent, digest)
+		if derr != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: compute diff against parent: %w", derr)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		diff = &d
+	}
+
 	latency := time.Since(start)
 	return DehydrateWorkspaceResult{
 		OK:             true,
 		ManifestDigest: string(digest),
+		Diff:           diff,
 		LatencyMs:      float64(latency.Microseconds()) / 1000.0,
 	}, nil
+}
+
+// diffManifests reads the parent and child manifests from the node CAS and
+// computes the content-hash diff between them with internal/workspace.DiffManifests
+// (the same helper the in-controller diff path used). It works from the manifests
+// (path -> chunk-digest lists), never the chunk bytes, so it is cheap and never
+// materializes content. The caller holds s.mu and has already validated both
+// digests.
+func (s *Stub) diffManifests(parent, child cas.Digest) (workspace.Diff, error) {
+	parentManifest, err := s.casStore.GetManifest(parent)
+	if err != nil {
+		return workspace.Diff{}, fmt.Errorf("read parent manifest %s: %w", parent, err)
+	}
+	childManifest, err := s.casStore.GetManifest(child)
+	if err != nil {
+		return workspace.Diff{}, fmt.Errorf("read child manifest %s: %w", child, err)
+	}
+	return workspace.DiffManifests(parentManifest, childManifest), nil
 }
 
 // HydrateWorkspace restores a node-CAS manifest into the active VM's guest

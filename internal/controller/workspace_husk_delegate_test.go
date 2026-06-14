@@ -24,6 +24,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/cas"
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -165,6 +166,97 @@ func TestHuskClaimWorkspaceDehydrateDelegates(t *testing.T) {
 	if head.Spec.ContentManifest != string(revDigest) {
 		t.Fatalf("head revision contentManifest = %q, want the husk dehydrate digest %q", head.Spec.ContentManifest, revDigest)
 	}
+}
+
+// TestHuskClaimWorkspaceDiffDelegates proves the W4 husk-mode DIFF path: a
+// {diff: true} terminate on a claim bound to a workspace with a parent head
+// commits a WorkspaceRevision WITH a content-hash diff summary, the head
+// advances, and NO not-wired (workspaceTransport) error fires. The diff is
+// computed on the node (the husk-stub op), not via the in-controller seam, so the
+// installed diff fake stands in for the husk-stub's manifest diff.
+func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
+	rec := &huskWSDelegateRecorder{}
+	revDigest := cas.Digest(testManifest(0x8d))
+	rec.install(t, revDigest)
+
+	// The husk diff fake stands in for the diff the husk-stub computes from the two
+	// node-CAS manifests: it must be handed the parent head's manifest as parent.
+	parentManifest := testManifest(0x9e)
+	var (
+		diffMu    sync.Mutex
+		gotParent cas.Digest
+		gotChild  cas.Digest
+		diffCalls int
+	)
+	setHuskWSDiff(func(_ context.Context, _ *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+		diffMu.Lock()
+		defer diffMu.Unlock()
+		diffCalls++
+		gotParent, gotChild = parent, child
+		return workspace.Diff{Added: []string{"new.txt"}, Modified: []string{"main.go"}}, nil
+	})
+	t.Cleanup(func() { setHuskWSDiff(nil) })
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: true, VsockPath: "/run/husk/vm/vsock", LatencyMs: 1.0}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	// A committed parent head: the diff's parent manifest and the lineage tip.
+	makeWorkspace(t, "hw-diff-ws", v1alpha1.WorkspaceRetention{})
+	makeRevision(t, "hw-diff-ws-r1", "hw-diff-ws", parentManifest, nil, nil)
+	waitWorkspace(t, "hw-diff-ws", func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head == "hw-diff-ws-r1"
+	}, "parent head committed")
+
+	claim := makeHuskWorkspaceClaim(t, "hw-diff", "hw-diff-ws", "10.20.0.3", v1alpha1.SandboxClaimSpec{
+		Timeout: &metav1.Duration{Duration: 2 * time.Second},
+		Outputs: []v1alpha1.OutputSpec{{Diff: true}},
+	})
+	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
+	waitBoundPhase(t, claim.Name, v1alpha1.SandboxTerminated)
+
+	// The head advanced to a NEW revision (the dehydrated child) carrying the diff
+	// summary; the not-wired error never fired (else terminate would not commit).
+	ws := waitWorkspace(t, "hw-diff-ws", func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head != "" && ws.Status.Head != "hw-diff-ws-r1"
+	}, "head advanced past the parent after husk diff dehydrate")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var head v1alpha1.WorkspaceRevision
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
+			if head.Status.DiffSummary != nil {
+				ds := head.Status.DiffSummary
+				if ds.ParentRevision != "hw-diff-ws-r1" {
+					t.Fatalf("diff summary parentRevision = %q, want hw-diff-ws-r1", ds.ParentRevision)
+				}
+				if len(ds.Added) != 1 || ds.Added[0] != "new.txt" || ds.AddedCount != 1 {
+					t.Fatalf("diff summary added = %v (count %d), want [new.txt]", ds.Added, ds.AddedCount)
+				}
+				if len(ds.Modified) != 1 || ds.Modified[0] != "main.go" || ds.ModifiedCount != 1 {
+					t.Fatalf("diff summary modified = %v (count %d), want [main.go]", ds.Modified, ds.ModifiedCount)
+				}
+				if head.Spec.ContentManifest != string(revDigest) {
+					t.Fatalf("head contentManifest = %q, want husk dehydrate digest %q", head.Spec.ContentManifest, revDigest)
+				}
+				diffMu.Lock()
+				calls, parent, child := diffCalls, gotParent, gotChild
+				diffMu.Unlock()
+				if calls < 1 {
+					t.Fatal("husk diff fake was never invoked")
+				}
+				if string(parent) != parentManifest {
+					t.Fatalf("husk diff parent manifest = %q, want the parent head manifest %q", parent, parentManifest)
+				}
+				if string(child) != string(revDigest) {
+					t.Fatalf("husk diff child manifest = %q, want the dehydrated digest %q", child, revDigest)
+				}
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("husk diff terminate did not commit a revision with a diff summary within 10s")
 }
 
 func TestHuskClaimWorkspaceHydrateDelegates(t *testing.T) {

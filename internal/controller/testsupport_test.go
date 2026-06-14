@@ -173,6 +173,18 @@ func (r *SandboxClaimReconciler) SetWorkspaceDelegateForTest(
 	r.WorkspaceDehydrateDelegate = dehydrate
 }
 
+// SetWorkspaceDehydrateDiffDelegateForTest injects the husk-mode combined
+// dehydrate+diff delegate (the single node-CAS-side op that captures the workspace
+// and, when wantDiff is set, computes the diff against the parent head). It lets
+// envtest prove the husk terminate path commits a revision WITH a diff summary
+// without a real husk pod or node CAS, and that the diff never routes through the
+// in-controller workspaceTransport seam.
+func (r *SandboxClaimReconciler) SetWorkspaceDehydrateDiffDelegateForTest(
+	fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error),
+) {
+	r.WorkspaceDehydrateDiffDelegate = fn
+}
+
 // MemSnapshotResultForTest is the exported alias of the unexported
 // memSnapshotResult so the external controller_test package can name the
 // checkpoint fake's return type.

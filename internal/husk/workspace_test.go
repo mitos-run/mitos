@@ -114,6 +114,66 @@ func TestDehydrateWorkspaceTarToCASRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDehydrateWorkspaceComputesDiffAgainstParent(t *testing.T) {
+	// Seed a parent revision in the node CAS by dehydrating one tree.
+	parentAgent := &fakeWorkspaceAgent{tar: tarOf(t, map[string]string{
+		"main.go": "package main",
+		"old.txt": "gone",
+	})}
+	s, store := newWorkspaceStub(t, parentAgent)
+	pres, err := s.DehydrateWorkspace(context.Background(), DehydrateWorkspaceRequest{})
+	if err != nil || !pres.OK {
+		t.Fatalf("seed parent dehydrate: err=%v res=%+v", err, pres)
+	}
+	if pres.Diff != nil {
+		t.Fatalf("no parent requested means no diff; got %+v", pres.Diff)
+	}
+
+	// Now dehydrate a CHILD tree that adds new.txt, modifies main.go, and removes
+	// old.txt, asking for the diff against the parent manifest. The diff must be
+	// computed from the two manifests in the node CAS, not the chunk bytes.
+	childAgent := &fakeWorkspaceAgent{tar: tarOf(t, map[string]string{
+		"main.go": "package main // changed",
+		"new.txt": "fresh",
+	})}
+	s.wsTransport = func(string) (workspace.VsockTransport, error) { return childAgent, nil }
+	_ = store
+
+	cres, err := s.DehydrateWorkspace(context.Background(), DehydrateWorkspaceRequest{
+		ParentManifestDigest: pres.ManifestDigest,
+	})
+	if err != nil {
+		t.Fatalf("child DehydrateWorkspace: %v", err)
+	}
+	if !cres.OK {
+		t.Fatalf("child DehydrateWorkspace not OK: %+v", cres)
+	}
+	if cres.Diff == nil {
+		t.Fatalf("expected a diff when ParentManifestDigest is set, got nil")
+	}
+	d := cres.Diff
+	if len(d.Added) != 1 || d.Added[0] != "new.txt" {
+		t.Fatalf("diff added = %v, want [new.txt]", d.Added)
+	}
+	if len(d.Removed) != 1 || d.Removed[0] != "old.txt" {
+		t.Fatalf("diff removed = %v, want [old.txt]", d.Removed)
+	}
+	if len(d.Modified) != 1 || d.Modified[0] != "main.go" {
+		t.Fatalf("diff modified = %v, want [main.go]", d.Modified)
+	}
+}
+
+func TestDehydrateWorkspaceDiffFailsClosedOnInvalidParent(t *testing.T) {
+	agent := &fakeWorkspaceAgent{tar: tarOf(t, map[string]string{"main.go": "package main"})}
+	s, _ := newWorkspaceStub(t, agent)
+	res, err := s.DehydrateWorkspace(context.Background(), DehydrateWorkspaceRequest{
+		ParentManifestDigest: "not-a-digest",
+	})
+	if err == nil || res.OK {
+		t.Fatalf("dehydrate with an invalid parent digest must fail closed: err=%v res=%+v", err, res)
+	}
+}
+
 func TestHydrateWorkspaceReadsCASIntoGuest(t *testing.T) {
 	// First dehydrate to get a manifest in the node CAS.
 	src := &fakeWorkspaceAgent{tar: tarOf(t, map[string]string{"main.go": "package main"})}

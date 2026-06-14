@@ -16,6 +16,7 @@ import (
 
 	"github.com/paperclipinc/mitos/internal/firecracker"
 	"github.com/paperclipinc/mitos/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/workspace"
 )
 
 // ActivateRequest is the control message asking the dormant VMM to load a
@@ -277,9 +278,20 @@ func ReadRemoveForkSnapshotRequest(r io.Reader) (RemoveForkSnapshotRequest, erro
 // narrows the capture to the listed /workspace subtrees (nil captures the whole
 // workspace). Neither carries a secret VALUE: they are path lists, safe to move
 // on the wire. The request itself carries no secret.
+//
+// ParentManifestDigest, when set, asks the stub to ALSO compute the content-hash
+// diff of the just-captured revision against that parent manifest and return it
+// in the result. The diff is computed from the two MANIFESTS (path -> chunk-digest
+// lists) in the node CAS, never the chunk bytes, reusing the same
+// internal/workspace.DiffManifests helper the in-controller path used. The
+// controller is not on the node and cannot read either manifest, so the diff must
+// run here where the node CAS lives. It is a content address, NOT a secret. Empty
+// skips the diff (a {diff: false} terminate, or the first revision in a workspace
+// with no parent head).
 type DehydrateWorkspaceRequest struct {
-	ExcludePaths []string `json:"exclude_paths,omitempty"`
-	CapturePaths []string `json:"capture_paths,omitempty"`
+	ExcludePaths         []string `json:"exclude_paths,omitempty"`
+	CapturePaths         []string `json:"capture_paths,omitempty"`
+	ParentManifestDigest string   `json:"parent_manifest_digest,omitempty"`
 }
 
 // DehydrateWorkspaceResult is the control reply for a dehydrate-workspace op. OK
@@ -288,11 +300,18 @@ type DehydrateWorkspaceRequest struct {
 // content address (NOT a secret); the controller records it as the new
 // WorkspaceRevision's ContentManifest. Error carries actionable remediation text
 // when OK is false; it never carries secrets or content bytes.
+//
+// Diff, when non-nil, is the content-hash diff of the captured revision against
+// the request's ParentManifestDigest (the added/removed/modified workspace-
+// relative file names). It is only set when ParentManifestDigest was supplied; a
+// {diff: false} terminate leaves it nil. The path names are content identifiers,
+// not secrets, and no chunk bytes ride the result.
 type DehydrateWorkspaceResult struct {
-	OK             bool    `json:"ok"`
-	ManifestDigest string  `json:"manifest_digest,omitempty"`
-	LatencyMs      float64 `json:"latency_ms"`
-	Error          string  `json:"error,omitempty"`
+	OK             bool            `json:"ok"`
+	ManifestDigest string          `json:"manifest_digest,omitempty"`
+	Diff           *workspace.Diff `json:"diff,omitempty"`
+	LatencyMs      float64         `json:"latency_ms"`
+	Error          string          `json:"error,omitempty"`
 }
 
 // HydrateWorkspaceRequest asks a husk stub holding a RUNNING (active) VM to

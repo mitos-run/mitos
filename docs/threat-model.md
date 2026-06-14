@@ -238,16 +238,23 @@ the controller identity ONLY (`internal/husk.ServeTLS` plus
 the guest vsock or the node CAS, so it DELEGATES the transfer to the husk-stub
 that owns both:
 
-- `dehydrate-workspace(excludePaths, capturePaths)`: the stub runs the guest vsock
-  `TarDir` over `/workspace`, stores the content-addressed chunks plus manifest
-  into the node CAS (a `<dataDir>/cas` hostPath mounted read-write into the pod),
-  and returns the manifest digest. It reuses `internal/workspace.Dehydrate` (the
-  KVM-proven tar round trip), not a reimplementation.
+- `dehydrate-workspace(excludePaths, capturePaths, parentManifestDigest)`: the stub
+  runs the guest vsock `TarDir` over `/workspace`, stores the content-addressed
+  chunks plus manifest into the node CAS (a `<dataDir>/cas` hostPath mounted
+  read-write into the pod), and returns the manifest digest. It reuses
+  `internal/workspace.Dehydrate` (the KVM-proven tar round trip), not a
+  reimplementation. When `parentManifestDigest` is set (a `{diff: true}` terminate)
+  it ALSO computes the content-hash diff of the new revision against that parent and
+  returns it: the diff is computed on the node from the two MANIFESTS (path ->
+  chunk-digest lists) in the node CAS via `internal/workspace.DiffManifests`, never
+  the chunk bytes, because the off-node controller cannot read either node-CAS
+  manifest. The diff carries content path NAMES only; no chunk bytes ride the result.
 - `hydrate-workspace(manifestDigest)`: the stub reads the manifest plus chunks
   from the node CAS and `UntarDir`s them into the guest `/workspace`.
 
-The ops carry NO secrets: the request is path lists / a content-address manifest
-digest, and the result is a manifest digest plus latency. Secret/credential paths
+The ops carry NO secrets: the request is path lists / content-address manifest
+digests, and the result is a manifest digest plus an optional content-path diff and
+latency. Secret/credential paths
 are stripped from the captured tree by the dehydrate exclude list
 (`WorkspaceSecretExcludePaths`), so a committed revision is content only. Workspace
 CONTENT bytes never appear in a log line or an error on either side. The ops FAIL
