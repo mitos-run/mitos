@@ -55,6 +55,15 @@ type SandboxForkReconciler struct {
 	HuskStubImage   string
 	DataDir         string
 	KVMResourceName string
+	// HuskTLSSecretName / HuskCASecretName are the husk PKI Secrets every husk
+	// pod mounts for its mTLS control channel: the leaf (tls.crt, tls.key) at
+	// /etc/husk/tls and the CA (ca.crt) at /etc/husk/ca. They are the SAME
+	// Secrets the warm-pool reconciler threads into HuskPodOptions; a fork child
+	// is a husk pod and its stub reads --tls-cert/--tls-key/--tls-ca from these
+	// mounts at start, so both MUST be set or the child crash-loops on the first
+	// missing PEM (open /etc/husk/tls/tls.crt: no such file or directory).
+	HuskTLSSecretName string
+	HuskCASecretName  string
 
 	// forkSnapshot / activate / removeForkSnapshot are the husk control seams.
 	// Nil defaults to ForkSnapshotOnHusk / ActivateHuskPod / RemoveForkSnapshotOnHusk.
@@ -357,6 +366,13 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		DataDir:         r.DataDir,
 		ForkSnapshotID:  forkID,
 		ForkSourceNode:  source.Status.Node,
+		// The husk PKI Secrets the child stub mounts for its --control-listen mTLS
+		// channel (leaf at /etc/husk/tls, CA at /etc/husk/ca). buildHuskPod only
+		// adds the TLS/CA volumes when these are set; omitting them (the previous
+		// bug) leaves the child without its TLS material and the stub crash-loops
+		// reading --tls-cert. They are the SAME Secrets the warm-pool path uses.
+		TLSSecretName: r.HuskTLSSecretName,
+		CASecretName:  r.HuskCASecretName,
 		// BUG 1 fix: the child's per-activation rootfs CoW clone must be sourced
 		// from the SOURCE sandbox's live rootfs (the disk the fork snapshot's
 		// vmstate was baked against), NOT the pristine template rootfs. The source

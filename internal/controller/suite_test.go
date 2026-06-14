@@ -556,12 +556,14 @@ func TestMain(m *testing.M) {
 	// A husk-enabled fork reconciler that handles ONLY husk-fork-test forks, with
 	// swappable fork-snapshot / activate / remove seams.
 	huskFork := &controller.SandboxForkReconciler{
-		Client:         mgr.GetClient(),
-		NodeRegistry:   nodeRegistry,
-		EnableHuskPods: true,
-		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; fakes ignore it
-		HuskStubImage:  "mitos-husk-stub:test",
-		DataDir:        "/var/lib/mitos",
+		Client:            mgr.GetClient(),
+		NodeRegistry:      nodeRegistry,
+		EnableHuskPods:    true,
+		HuskTLS:           &tls.Config{}, //nolint:gosec // test stub; fakes ignore it
+		HuskStubImage:     "mitos-husk-stub:test",
+		DataDir:           "/var/lib/mitos",
+		HuskTLSSecretName: controller.ForkdTLSSecretName,
+		HuskCASecretName:  controller.CASecretName,
 	}
 	huskFork.OnlyForkLabel(controller.HuskForkTestLabel)
 	huskFork.SetForkSnapshotForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {

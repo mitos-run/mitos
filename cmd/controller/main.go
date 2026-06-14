@@ -227,13 +227,15 @@ func main() {
 	// snapshot it) is the SAME config EnsurePKI returns; it is assigned below
 	// after bootstrap, exactly like the claim reconciler.
 	forkReconciler := &controller.SandboxForkReconciler{
-		Client:          mgr.GetClient(),
-		NodeRegistry:    nodeRegistry,
-		EnableHuskPods:  enableHuskPods,
-		HuskControlPort: huskControlPort,
-		HuskStubImage:   huskStubImage,
-		DataDir:         huskDataDir,
-		KVMResourceName: "mitos.run/kvm",
+		Client:            mgr.GetClient(),
+		NodeRegistry:      nodeRegistry,
+		EnableHuskPods:    enableHuskPods,
+		HuskControlPort:   huskControlPort,
+		HuskStubImage:     huskStubImage,
+		DataDir:           huskDataDir,
+		KVMResourceName:   "mitos.run/kvm",
+		HuskTLSSecretName: controller.ForkdTLSSecretName,
+		HuskCASecretName:  controller.CASecretName,
 	}
 	if err := forkReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxFork")
