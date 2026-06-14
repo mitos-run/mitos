@@ -11,6 +11,7 @@ from kubernetes.client.rest import ApiException
 from mitos.errors import AgentRunError
 from mitos.sandbox import Sandbox
 from mitos.types import PoolStatus, SandboxPhase
+from mitos.workspace import Workspace
 
 
 API_GROUP = "mitos.run"
@@ -64,6 +65,7 @@ class AgentRun:
         env: Optional[dict[str, str]] = None,
         secrets: Optional[dict[str, tuple[str, str]]] = None,
         timeout: Optional[str] = None,
+        workspace: Optional[str] = None,
         ready: bool = False,
     ) -> Sandbox:
         """The one-liner entry point (docs/api/v2-spec.md section 1.2).
@@ -99,6 +101,7 @@ class AgentRun:
             env=env,
             secrets=secrets,
             timeout=timeout,
+            workspace=workspace,
         )
         if ready:
             sb.wait_until_ready()
@@ -214,6 +217,7 @@ class AgentRun:
         env: Optional[dict[str, str]] = None,
         secrets: Optional[dict[str, tuple[str, str]]] = None,
         timeout: Optional[str] = None,
+        workspace: Optional[str] = None,
     ) -> Sandbox:
         """Create a sandbox from a pool.
 
@@ -223,6 +227,9 @@ class AgentRun:
             env: Environment variables to inject.
             secrets: Map of env var name to (secret_name, secret_key) tuples.
             timeout: Maximum lifetime, e.g. "30m", "1h".
+            workspace: Bind the sandbox to a durable Workspace by name. On
+                activation the controller hydrates the workspace head into
+                /workspace; on terminate it dehydrates a new committed revision.
         """
         if name is None:
             name = f"sandbox-{uuid.uuid4().hex[:8]}"
@@ -256,6 +263,9 @@ class AgentRun:
 
         if timeout:
             claim["spec"]["timeout"] = timeout
+
+        if workspace:
+            claim["spec"]["workspaceRef"] = {"name": workspace}
 
         self._api.create_namespaced_custom_object(
             group=API_GROUP,
@@ -323,6 +333,37 @@ class AgentRun:
                 _phase=SandboxPhase(status.get("phase", "Pending")),
             ))
         return sandboxes
+
+    def create_workspace(self, name: str) -> Workspace:
+        """Create an empty durable Workspace."""
+        body = {
+            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "Workspace",
+            "metadata": {"name": name, "namespace": self._namespace}, "spec": {},
+        }
+        self._api.create_namespaced_custom_object(
+            group=API_GROUP, version=API_VERSION, namespace=self._namespace,
+            plural="workspaces", body=body,
+        )
+        return Workspace(name, self._namespace, self._api)
+
+    def workspace(self, name: str) -> Workspace:
+        """Lazy handle to a workspace (create_workspace if it must exist)."""
+        return Workspace(name, self._namespace, self._api)
+
+    def get_workspace(self, name: str) -> Workspace:
+        """Reconnect to an existing workspace, raising if it is absent."""
+        ws = Workspace(name, self._namespace, self._api)
+        ws._get()  # raises workspace_not_found if absent
+        return ws
+
+    def list_workspaces(self) -> list[Workspace]:
+        """List the workspaces in the client's namespace."""
+        objs = self._api.list_namespaced_custom_object(
+            group=API_GROUP, version=API_VERSION, namespace=self._namespace,
+            plural="workspaces",
+        )
+        return [Workspace(o["metadata"]["name"], self._namespace, self._api)
+                for o in objs.get("items", [])]
 
     def pool_status(self, name: str) -> PoolStatus:
         """Get the status of a SandboxPool."""

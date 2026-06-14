@@ -677,8 +677,42 @@ class Sandbox:
             pool=self.pool,
         )
 
-    def terminate(self) -> None:
-        """Terminate this sandbox."""
+    def terminate(self, outputs=None, checkpoint: bool = False) -> Optional[str]:
+        """Terminate the sandbox. When bound to a workspace, the controller
+        dehydrates /workspace into a new committed WorkspaceRevision on the way
+        out; outputs narrow and enrich that capture (a path string keeps only
+        that subtree; {'diff': True} records a content-hash diff; {'git': {...}}
+        pushes repo paths to a rendezvous remote). checkpoint=True pairs the
+        revision with a VM memory snapshot (resumable head). Returns the workspace
+        name (the new revision is discoverable with workspace.log()) or None when
+        the sandbox is unbound."""
+        spec_outputs = []
+        for o in outputs or []:
+            if isinstance(o, str):
+                spec_outputs.append({"path": o})
+            elif isinstance(o, dict):
+                spec_outputs.append(o)
+            else:
+                raise AgentRunError(
+                    "invalid output", code="invalid_output",
+                    cause=f"output {o!r} is neither a path string nor a dict",
+                    remediation="Pass a '/workspace/...' path string or a {'diff': True}/{'git': {...}} dict.",
+                )
+        patch = {"spec": {}}
+        if spec_outputs:
+            patch["spec"]["outputs"] = spec_outputs
+        if checkpoint:
+            patch["spec"]["checkpointOnTerminate"] = True
+        if patch["spec"]:
+            self._api.patch_namespaced_custom_object(
+                group=API_GROUP, version=API_VERSION, namespace=self.namespace,
+                plural="sandboxclaims", name=self.name, body=patch,
+            )
+        obj = self._api.get_namespaced_custom_object(
+            group=API_GROUP, version=API_VERSION, namespace=self.namespace,
+            plural="sandboxclaims", name=self.name,
+        )
+        ws_ref = obj.get("spec", {}).get("workspaceRef", {}).get("name")
         self._api.delete_namespaced_custom_object(
             group=API_GROUP,
             version=API_VERSION,
@@ -688,6 +722,7 @@ class Sandbox:
         )
         self._phase = SandboxPhase.TERMINATING
         self._http.close()
+        return ws_ref
 
     def __enter__(self) -> Sandbox:
         return self
