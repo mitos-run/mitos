@@ -138,9 +138,34 @@ type SandboxClaimReconciler struct {
 	HydrateWorkspace   hydrateFunc
 	DehydrateWorkspace dehydrateFunc
 
+	// WorkspaceHydrateDelegate and WorkspaceDehydrateDelegate are the husk-mode
+	// transport delegates the default hydrate/dehydrate paths route through when
+	// EnableHuskPods is set. The controller is not on the node and cannot reach the
+	// guest vsock or the node CAS, so it delegates the actual transfer to the
+	// husk-stub control op that owns both (dial the claim's husk pod, like the fork
+	// path). Nil defaults to the real path that dials the husk pod
+	// (defaultHuskHydrate / defaultHuskDehydrate); envtest injects a recording
+	// delegate. Only used when EnableHuskPods is true; the controller still owns the
+	// WorkspaceRevision commit + head advance once the delegate returns the digest.
+	WorkspaceHydrateDelegate   hydrateFunc
+	WorkspaceDehydrateDelegate dehydrateFunc
+
+	// WorkspaceDehydrateDiffDelegate is the husk-mode terminate delegate that
+	// captures the sandbox /workspace into the node CAS AND, when a {diff: true}
+	// output requested it, computes the content-hash diff of the new revision
+	// against the parent head in the SAME node-CAS-side op (the controller is not on
+	// the node and cannot read either manifest, so the diff must run where the node
+	// CAS lives). It returns the new manifest digest and the optional diff. Nil
+	// defaults to the real path that dials the husk pod (defaultHuskDehydrateWithDiff);
+	// envtest injects a recording delegate. Only used when EnableHuskPods is true.
+	WorkspaceDehydrateDiffDelegate huskDehydrateDiffFunc
+
 	// DiffWorkspace computes a new revision's content-hash diff against the
-	// workspace head before it, for a terminate {diff: true} output. Nil defaults
-	// to the real store-backed path; envtest injects a fake.
+	// workspace head before it, for a terminate {diff: true} output on the
+	// raw-forkd path (the documented in-controller seam). Nil defaults to the real
+	// store-backed path; envtest injects a fake. The husk path computes the diff on
+	// the node via WorkspaceDehydrateDiffDelegate instead, since the controller
+	// cannot read the node-CAS manifests.
 	DiffWorkspace diffFunc
 
 	// RendezvousGit pushes the workspace repo paths to a git rendezvous remote on

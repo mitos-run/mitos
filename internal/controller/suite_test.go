@@ -127,6 +127,21 @@ var (
 	huskTestActivatorMu sync.Mutex
 	huskTestActivator   func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
 
+	// huskWSDelegateMu guards the swappable husk-mode workspace transport delegates
+	// (the dial-the-husk-pod hydrate/dehydrate ops) the suite's husk claim
+	// reconciler routes its default hydrate/dehydrate through. Tests set them via
+	// setHuskWSDelegate to prove the husk reconciler delegates and the controller
+	// still commits the revision + advances the head, without a real husk pod.
+	huskWSDelegateMu sync.Mutex
+	huskWSHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
+	huskWSDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+	// huskWSDiff is the optional husk-mode diff fake the suite's
+	// WorkspaceDehydrateDiffDelegate consults when an output requested a diff. nil
+	// records no diff (the node returned none). A test that exercises the husk diff
+	// path installs it via setHuskWSDiff; it stands in for the diff the husk-stub
+	// computes from the two node-CAS manifests.
+	huskWSDiff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error)
+
 	// huskTestCheckpointerMu guards the swappable live-VM checkpointer the
 	// suite's husk reconciler routes a Checkpoint drain policy through.
 	huskTestCheckpointerMu sync.Mutex
@@ -145,7 +160,7 @@ var (
 	wsHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
 	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
 	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
-	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error
 	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
 
 	// memSnapshotMu guards the swappable memory-snapshot pairing fakes (W4 Task
@@ -216,7 +231,7 @@ func setWSDiff(diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, pare
 
 // setWSRendezvous installs the git rendezvous fake; nil falls back to the
 // production default (workspace.Rendezvous via the git CLI).
-func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string) error) {
+func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsRendezvous = rv
@@ -254,7 +269,7 @@ func currentWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, par
 	return wsDiff
 }
 
-func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsRendezvous
@@ -294,6 +309,49 @@ func currentHuskTestActivator() func(ctx context.Context, addr string, tlsConf *
 		}
 	}
 	return huskTestActivator
+}
+
+// setHuskWSDelegate installs the husk-mode workspace transport delegates the
+// suite husk claim reconciler routes its default hydrate/dehydrate through. nil
+// for either leaves it unset; the delegate seam then defaults to the real
+// dial-the-husk-pod path (which has no pod in envtest), so a test that exercises
+// the workspace path must install both.
+func setHuskWSDelegate(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	huskWSHydrate = hydrate
+	huskWSDehydrate = dehydrate
+}
+
+func currentHuskWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	return huskWSHydrate
+}
+
+func currentHuskWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	return huskWSDehydrate
+}
+
+// setHuskWSDiff installs the husk-mode diff fake the suite's combined
+// dehydrate+diff delegate consults when an output requested a diff. It stands in
+// for the diff the husk-stub computes from the two node-CAS manifests. nil clears
+// it (no diff returned).
+func setHuskWSDiff(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error)) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	huskWSDiff = fn
+}
+
+func currentHuskWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	return huskWSDiff
 }
 
 // setForkSnapshotter / currentForkSnapshotter swap the fork-snapshot seam the
@@ -501,9 +559,9 @@ func TestMain(m *testing.M) {
 			}
 			return workspace.Diff{}, nil
 		},
-		func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+		func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error {
 			if fn := currentWSRendezvous(); fn != nil {
-				return fn(ctx, repoFiles, remote, branch)
+				return fn(ctx, repoFiles, remote, branch, creds)
 			}
 			return nil
 		},
@@ -538,6 +596,55 @@ func TestMain(m *testing.M) {
 		}
 		return false, nil
 	})
+	// Route the husk-mode workspace transport delegates through the per-test
+	// swappable fakes so the husk reconciler's default hydrate/dehydrate path
+	// (which delegates to the husk-stub control op in husk mode) is exercised
+	// without a real husk pod. A test that uses a workspaceRef installs both via
+	// setHuskWSDelegate.
+	huskClaim.SetWorkspaceDelegateForTest(
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+			if fn := currentHuskWSHydrate(); fn != nil {
+				return fn(ctx, claim, manifest)
+			}
+			return fmt.Errorf("no husk workspace hydrate delegate installed")
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+			if fn := currentHuskWSDehydrate(); fn != nil {
+				return fn(ctx, claim, excludePaths, capturePaths)
+			}
+			return "", fmt.Errorf("no husk workspace dehydrate delegate installed")
+		},
+	)
+	// The husk-mode combined dehydrate+diff delegate stands in for the husk-stub op
+	// that captures the workspace into the node CAS and (when wantDiff) computes the
+	// diff from the two node-CAS manifests. It routes the digest through the same
+	// dehydrate recorder and, when a diff is requested, through the installed diff
+	// fake. This proves the husk terminate path commits a revision WITH a diff
+	// summary without ever touching the in-controller workspaceTransport seam.
+	huskClaim.SetWorkspaceDehydrateDiffDelegateForTest(
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
+			dehydrate := currentHuskWSDehydrate()
+			if dehydrate == nil {
+				return "", nil, fmt.Errorf("no husk workspace dehydrate delegate installed")
+			}
+			digest, err := dehydrate(ctx, claim, excludePaths, capturePaths)
+			if err != nil {
+				return "", nil, err
+			}
+			if !wantDiff {
+				return digest, nil, nil
+			}
+			diffFn := currentHuskWSDiff()
+			if diffFn == nil {
+				return digest, nil, nil
+			}
+			d, derr := diffFn(ctx, claim, parentManifest, digest)
+			if derr != nil {
+				return "", nil, derr
+			}
+			return digest, &d, nil
+		},
+	)
 	if err := huskClaim.SetupWithManager(mgr); err != nil {
 		panic(err)
 	}

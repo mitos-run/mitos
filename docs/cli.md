@@ -20,10 +20,45 @@ mitos sandbox ls [-n namespace] [-A]           list sandboxes
 mitos sandbox exec <id> <command...>           run a command in a sandbox
 mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
 mitos sandbox terminate <id>                   destroy a sandbox
+mitos ws create <name>                         create an empty workspace
+mitos ws ls [-n namespace]                     list workspaces
+mitos ws log <workspace>                       list revisions, newest first
+mitos ws diff <workspace> <revision>           content-hash diff vs the parent
+mitos ws fork <src-ws> <revision> <dst-ws>     branch a committed revision
+mitos ws revert <workspace> <revision>         set the head to a past revision
+mitos ws rm <name>                             delete a workspace and revisions
+mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
 mitos dev up [--skip-cluster-create]           bring a local kind dev cluster
                                                   up with a mock control plane
 mitos dev down                                 delete the local kind dev cluster
 ```
+
+### Workspace verbs (git-shaped)
+
+A `Workspace` is durable, forkable agent state independent of any single
+sandbox. Its revisions form a DAG, and the verbs are git-shaped:
+
+- `mitos ws create <name>` creates an empty `Workspace`.
+- `mitos ws ls` lists workspaces with their head revision, revision count, and
+  whether the head is resumable (paired with a memory snapshot).
+- `mitos ws log <workspace>` lists the workspace's revisions newest first, each
+  with its phase, resumable flag, and lineage (`fromClaim:<n>`,
+  `fromWorkspaceRevision:<n>`, or `root`).
+- `mitos ws diff <workspace> <revision>` prints the path-level content-hash diff
+  recorded for a revision (captured when a sandbox terminates with a
+  `{diff: true}` output).
+- `mitos ws fork <src-ws> <revision> <dst-ws>` branches a committed revision
+  into an existing destination workspace. A fork is a content-addressed branch:
+  the new revision shares the parent's content manifest, so no bytes are copied.
+  Forking an uncommitted revision is refused with an LLM-legible error.
+- `mitos ws revert <workspace> <revision>` sets a workspace head back to a past
+  revision by creating a new tip that shares that revision's content. Revisions
+  are immutable, so a revert is a new tip, never a history rewrite.
+- `mitos ws rm <name>` deletes a workspace; its revisions are garbage-collected
+  by owner reference.
+- `mitos ws bind <sandbox-id> <workspace>` binds a running sandbox to a
+  workspace. A sandbox binds one workspace for its lifetime; re-binding to a
+  different workspace is refused.
 
 Global flags `--namespace`/`-n` and `--pool` may appear before the subcommand.
 `mitos run` exits with the executed command's exit code so it chains in shell

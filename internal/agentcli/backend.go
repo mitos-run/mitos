@@ -61,6 +61,9 @@ type Backend interface {
 	// List returns the sandboxes in namespace. An empty namespace means the
 	// backend default (all namespaces, or its configured default).
 	List(ctx context.Context, namespace string) ([]SandboxInfo, error)
+	// Workspace returns the workspace lifecycle surface, or nil if the backend
+	// does not support workspaces (the dev mock backend).
+	Workspace() WorkspaceBackend
 }
 
 // FakeCall records a single backend invocation for assertions in tests.
@@ -94,6 +97,20 @@ type FakeBackend struct {
 	// "read_file", "write_file", "fork", "terminate", "list"). When set for a
 	// method, that method returns the error instead of its canned response.
 	Errors map[string]error
+
+	// WS is the workspace backend returned by Workspace(); lazily created on
+	// first access so tests that never touch workspaces pay nothing.
+	WS *FakeWorkspaceBackend
+}
+
+// Workspace implements Backend, returning a lazily created FakeWorkspaceBackend.
+func (f *FakeBackend) Workspace() WorkspaceBackend {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.WS == nil {
+		f.WS = NewFakeWorkspaceBackend()
+	}
+	return f.WS
 }
 
 // NewFakeBackend returns a FakeBackend with sensible default canned responses.

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -52,16 +53,101 @@ type WorkspaceSpec struct {
 
 type WorkspaceStore struct {
 	// ObjectStorageRef names the S3-compatible, content-addressed object store
-	// that holds the workspace's chunked revision artifacts. This slice resolves
-	// it against the existing content-addressed store; the S3 backend is a later
-	// W4 slice.
+	// that holds the workspace's chunked revision artifacts. When set, the
+	// workspace's hydrate/dehydrate artifacts live in the referenced S3 bucket
+	// (an alternative to the node CAS), with the same content-addressed,
+	// byte-identical, deduplicated semantics. The bucket and credentials are
+	// resolved from S3 below; unset keeps the default node CAS.
 	ObjectStorageRef string `json:"objectStorageRef,omitempty"`
+
+	// S3 configures the S3-compatible object-store backend that holds the
+	// workspace's revision artifacts when ObjectStorageRef selects it. Credentials
+	// are taken from a referenced Secret and are never logged.
+	// +optional
+	S3 *WorkspaceS3Store `json:"s3,omitempty"`
+
+	// EncryptionKeyRef names a Secret key holding the wrapped at-rest
+	// data-encryption key (DEK). When set, every revision chunk and manifest is
+	// encrypted at rest with AES-256-GCM under that DEK before it reaches the
+	// store (node CAS or S3), and decrypted on hydrate. The DEK the controller
+	// generates is keyed per-template (by templateID), so a template's workspaces
+	// share its DEK; per-workspace crypto-shred is a future option if finer
+	// granularity is wanted. The DEK is a secret VALUE
+	// delivered wrapped (envelope encryption via internal/kms): it is unwrapped
+	// only in node memory for the duration of a hydrate/dehydrate and is never
+	// logged, never placed in an error or condition, and never written to a host
+	// path. The encrypted round trip stays byte-identical and content-addressed
+	// dedup is preserved because the manifest digest is computed over plaintext.
+	// The key is principal-bound, mirroring the memory-snapshot policy. Unset
+	// keeps today's plaintext store path (backward compatible).
+	// +optional
+	EncryptionKeyRef *corev1.SecretKeySelector `json:"encryptionKeyRef,omitempty"`
+}
+
+// WorkspaceS3Store configures the S3-compatible object-store backend for a
+// workspace's content-addressed revision artifacts.
+type WorkspaceS3Store struct {
+	// Bucket is the S3 bucket that holds the workspace's chunks and manifests.
+	Bucket string `json:"bucket"`
+
+	// Endpoint is the S3 endpoint URL. Empty uses the AWS default for the region;
+	// set it for S3-compatible stores (MinIO, Ceph RGW, etc).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Region is the S3 region. Defaults to us-east-1 when unset (the path-style
+	// default many S3-compatible stores accept).
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Prefix is an optional key prefix under which the chunks/ and manifests/
+	// object keys are written, so several workspaces can share one bucket without
+	// colliding. The content-addressed layout under the prefix is unchanged.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// CredentialsSecretRef names a Secret holding the S3 access-key id and
+	// secret-access-key used to authenticate to the bucket. The secret values are
+	// resolved at use time, passed to the S3 client only in memory, and never
+	// logged, never put in an error, and never written to a host path. The
+	// conventional keys are "accessKeyId" and "secretAccessKey" unless overridden
+	// by AccessKeyIDKey / SecretAccessKeyKey.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+
+	// AccessKeyIDKey is the Secret key holding the S3 access-key id. Defaults to
+	// "accessKeyId".
+	// +optional
+	AccessKeyIDKey string `json:"accessKeyIdKey,omitempty"`
+
+	// SecretAccessKeyKey is the Secret key holding the S3 secret-access-key.
+	// Defaults to "secretAccessKey".
+	// +optional
+	SecretAccessKeyKey string `json:"secretAccessKeyKey,omitempty"`
 }
 
 type WorkspaceGit struct {
 	// Paths are the repo paths inside the workspace that get version history and
 	// the rendezvous remote.
 	Paths []string `json:"paths,omitempty"`
+
+	// CredentialsSecretRef names a Secret key holding the credential token used to
+	// authenticate the {git} rendezvous push to an external remote. The token is a
+	// secret VALUE: it is resolved at push time, delivered to git only through an
+	// ephemeral credentials file in an isolated HOME, and never logged, never put
+	// on the git argv, and never recorded in a condition or revision. The username
+	// is taken from CredentialsUsername (or defaults to "x-access-token", the
+	// token-only forge convention). Unset means an unauthenticated push (a local
+	// bare repo or an already-credentialed remote helper on the host).
+	// +optional
+	CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
+
+	// CredentialsUsername is the basic-auth username paired with the token from
+	// CredentialsSecretRef. It is not a secret. Defaults to "x-access-token" when
+	// unset, which most token-based forges accept. Ignored when CredentialsSecretRef
+	// is unset.
+	// +optional
+	CredentialsUsername string `json:"credentialsUsername,omitempty"`
 }
 
 type WorkspaceRetention struct {

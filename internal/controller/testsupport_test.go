@@ -149,7 +149,7 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
 	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
 	diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error),
-	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error,
+	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error,
 	repoFiles func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error),
 ) {
 	r.HydrateWorkspace = hydrate
@@ -157,6 +157,32 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	r.DiffWorkspace = diff
 	r.RendezvousGit = rendezvous
 	r.RepoFilesForGit = repoFiles
+}
+
+// SetWorkspaceDelegateForTest injects the husk-mode workspace transport
+// delegates (the dial-the-husk-pod hydrate/dehydrate ops) so envtest can prove
+// the husk reconciler routes its default hydrate/dehydrate through the delegate
+// (and the controller still commits the revision + advances the head) without a
+// real husk pod or vsock. hydrate records the manifest it was asked to restore;
+// dehydrate returns a scripted digest and records the excludes/captures.
+func (r *SandboxClaimReconciler) SetWorkspaceDelegateForTest(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+) {
+	r.WorkspaceHydrateDelegate = hydrate
+	r.WorkspaceDehydrateDelegate = dehydrate
+}
+
+// SetWorkspaceDehydrateDiffDelegateForTest injects the husk-mode combined
+// dehydrate+diff delegate (the single node-CAS-side op that captures the workspace
+// and, when wantDiff is set, computes the diff against the parent head). It lets
+// envtest prove the husk terminate path commits a revision WITH a diff summary
+// without a real husk pod or node CAS, and that the diff never routes through the
+// in-controller workspaceTransport seam.
+func (r *SandboxClaimReconciler) SetWorkspaceDehydrateDiffDelegateForTest(
+	fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error),
+) {
+	r.WorkspaceDehydrateDiffDelegate = fn
 }
 
 // MemSnapshotResultForTest is the exported alias of the unexported

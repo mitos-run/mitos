@@ -90,6 +90,53 @@ content-addressed store (`internal/cas`):
 - `Hydrate(ctx, agent, store, manifest)`: materializes the manifest, tars it, and
   `UntarDir`s it into `/workspace`.
 
+## Wiring the transport: husk delegation
+
+The controller is NOT on the node and cannot reach the guest vsock or the node
+CAS, so in husk mode it DELEGATES the hydrate/dehydrate to the node component that
+owns both: the husk-stub. The husk pod runs the VM, owns its vsock, and mounts the
+node CAS (`<dataDir>/cas`) read-write. The stub serves two control ops over the
+SAME mTLS control channel that already carries `activate` and the fork-snapshot
+ops:
+
+- `dehydrate-workspace(excludePaths, capturePaths, parentManifestDigest)`: runs the
+  guest vsock `TarDir` over `/workspace`, stores the content-addressed chunks plus
+  manifest into the node CAS, and returns the manifest digest. It reuses
+  `internal/workspace.Dehydrate` (the KVM-proven tar round trip); it does not
+  reimplement tar or CAS. Secret/credential paths are excluded per the
+  no-secrets-in-revisions policy. When `parentManifestDigest` is set (a `{diff: true}`
+  terminate) it ALSO computes the content-hash diff of the new revision against that
+  parent and returns it alongside the digest: the diff is computed from the two
+  MANIFESTS (path -> chunk-digest lists) in the node CAS, not the chunk bytes,
+  reusing `internal/workspace.DiffManifests`. The diff must run here because the
+  controller is off-node and cannot read either node-CAS manifest. Fail-closed: it
+  requires an active VM and a configured node CAS, and never returns content bytes
+  or secrets in an error.
+- `hydrate-workspace(manifestDigest)`: reads the manifest plus chunks from the
+  node CAS and runs `internal/workspace.Hydrate` to `UntarDir` it into
+  `/workspace`.
+
+The controller dials the claim's husk pod control channel
+(`DehydrateWorkspaceOnHusk` / `HydrateWorkspaceOnHusk`, mirroring the fork
+`ForkSnapshotOnHusk` path) and STILL owns the `WorkspaceRevision` commit + head
+advance once the stub returns the manifest digest (and the optional diff
+summary). The delegation is gated by `EnableHuskPods`; the default
+hydrate/dehydrate path AND the `{diff: true}` path self-wire to the husk control
+op, so the previous "transport is not wired" seam no longer fires in husk mode for
+hydrate, dehydrate, or diff. The raw-forkd path has no in-controller transport and
+keeps the documented seam (it reads the manifests in-controller for the diff).
+
+The `{git}` rendezvous push is currently BEST-EFFORT on the husk path: reading the
+`spec.git.paths` content out of the node CAS to the controller is not yet wired, so
+in husk mode the push is logged and skipped rather than failing the terminate, and
+the CRITICAL path (revision commit + head advance + fork-sees-state) is never
+blocked. The cluster e2e treats git push as best-effort. Fully wiring the husk
+`{git}` push (a node-CAS read op that returns the repo-paths content to the
+controller, which does the credentialed push so the credential stays in the
+controller and never reaches the pod) is tracked in
+`docs/superpowers/plans/2026-06-14-w4-workspace-prodgrade.md`. The raw-forkd
+`{git}` path is fully wired.
+
 ## Single-writer-per-workspace
 
 A `Workspace` is bound to at most one active claim at a time. A claim referencing
@@ -165,6 +212,97 @@ The push uses the host `git` CLI via exec, so it adds no new dependency. CI's
 Linux runner has git; the controller image must ship git for the production path
 (the tests skip gracefully when git is absent so the unit suite is not flaky).
 
+### Authenticating the push to an external remote
+
+A push to a real external rendezvous remote (not a local bare repo) needs
+credentials. Set them on the workspace:
+
+```yaml
+spec:
+  git:
+    paths: ["/workspace/repo"]
+    credentialsUsername: x-access-token   # not a secret; defaults to x-access-token
+    credentialsSecretRef:
+      name: rendezvous-creds              # a Secret in the workspace namespace
+      key: token                          # the key holding the push token
+```
+
+The controller resolves the Secret at push time and hands the token to git. The
+token is a SECRET VALUE and is handled accordingly:
+
+- It NEVER appears on the git argv (so it cannot show up in a process table), in
+  a log line, in an error, in a status condition, or in a committed revision.
+- It reaches git ONLY through a mode `0o600` `.git-credentials` file written into
+  an ephemeral, isolated `HOME` that is created per push and removed when the push
+  returns (`credential.helper=store` reads only that file).
+- Any git output that is surfaced in an error has the token scrubbed defensively
+  before it is returned.
+- A missing or empty key is reported with an LLM-legible error that names only
+  the Secret and the key, never the value.
+
+Credentials require an `https://` (or `http://`) remote that can carry basic
+auth; a `file://` or scp-like remote with credentials is rejected.
+
+The matching server side is `cmd/rendezvous-server` (package
+`internal/rendezvous`): a minimal authenticated git-http server that wraps the
+stock `git http-backend` CGI behind HTTP basic auth, with its token mounted from
+a Secret. It creates a bare repo on first push and enables `receive-pack` only
+after the auth check passes. Deploy it as the `remote` the `{git}` output targets,
+or point the output at any standard authenticated git remote (a forge or an
+internal git server). An end-to-end test
+(`internal/rendezvous/server_test.go:TestRendezvousCredentialedPushLandsOnServer`)
+proves the credentialed push authenticates to this server and lands the branch.
+
+Cluster-gated: the unit and envtest suites prove the credentialed push logic and
+the token redaction against a local authenticated server. The push to a REAL
+external rendezvous server on a live cluster is the gated tail; see
+`test/cluster-e2e/workspace-e2e.sh` (run with
+`gh workflow run cluster-e2e.yaml -f suite=workspace`).
+
+This `{git}` egress with Secret credentials is a security-surface move; see
+docs/threat-model.md section 3.
+
+## The revision change feed for external indexers
+
+The controller emits a CloudEvents 1.0 feed so an external indexer (a vector DB,
+a search index, an audit sink) can react to workspace changes WITHOUT mitos
+embedding any indexer of its own. There is no built-in vector store by design
+(ROADMAP.md, EPIC W4): indexing is the consumer's job, fed by this event.
+
+A `dev.mitos.workspace.revision.created` event is emitted when a
+`WorkspaceRevision` is created. The envelope is a structured-mode CloudEvent
+(`internal/eventfeed/event.go`); the `data` payload is `RevisionCreatedData`:
+
+```json
+{
+  "specversion": "1.0",
+  "type": "dev.mitos.workspace.revision.created",
+  "source": "mitos.run/controller",
+  "subject": "<namespace>/<revision-name>",
+  "id": "<stable-dedupe-id>",
+  "time": "2026-06-14T00:00:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "workspace": "<workspace-name>",
+    "revision": "<revision-name>",
+    "contentManifest": "<lowercase-hex-sha256-digest>",
+    "lineage": "fromClaim:<claim> | fromWorkspaceRevision:<revision> | root",
+    "memorySnapshotRef": "<snapshot-id-when-resumable>",
+    "traceId": "<orchestrator-trace-id-when-enabled>"
+  }
+}
+```
+
+The payload carries content-addressed POINTERS and lineage NAMES only: a
+manifest digest, not content; a snapshot id, not snapshot bytes; never a secret
+value. An indexer materializes the revision's files itself from the content store
+using the `contentManifest`, then indexes them.
+
+Delivery is via the existing `WebhookSink` (`internal/eventfeed/sink.go`), which
+POSTs each event to an operator-configured webhook URL. The `id` is a stable
+dedupe key so a re-emit of the same logical event reproduces the same envelope,
+letting the consumer dedupe idempotently.
+
 ## Secrets are never captured into a revision
 
 Secret values live only in the guest's in-memory configured env (delivered over
@@ -173,6 +311,114 @@ the dehydrate is passed an explicit exclude list
 (`controller.WorkspaceSecretExcludePaths`: `.netrc`, `.git-credentials`, `.ssh`,
 `.aws`, `.config/gh`, `.npmrc`) so a careless agent that wrote a token to one of
 those conventional paths still does not leak it into a committed revision.
+
+## SDK and CLI surface
+
+A user creates, binds, logs, diffs, forks, reverts, and terminates-with-outputs
+a workspace through the SDKs and the `mitos ws` CLI without hand-writing a CRD.
+The verbs are git-shaped and map onto the revision DAG: a fork is a new
+`WorkspaceRevision` whose `source.fromWorkspaceRevision` points at the parent, in
+a (possibly new) workspace; a revert is a new tip in the same workspace that
+shares a past revision's content. Refusals carry an LLM-legible
+`{code, cause, remediation}` (issue #28): forking an uncommitted revision is
+`revision_not_committed`.
+
+Python:
+
+```python
+from mitos import AgentRun
+
+run = AgentRun(namespace="team-a")
+ws = run.create_workspace("proj-x")
+
+# Bind a sandbox to the workspace: the controller hydrates the head into
+# /workspace on start and dehydrates a new committed revision on terminate.
+sb = run.sandbox(image="python", workspace="proj-x", ready=True)
+sb.files.write("/workspace/data.txt", "hello")
+
+# Terminate with outputs: keep only a subtree, record a diff, push repo paths.
+sb.terminate(outputs=["/workspace", {"diff": True}], checkpoint=False)
+
+for rev in ws.log():            # newest first
+    print(rev.name, rev.phase, rev.lineage)
+ws.diff(ws.log()[0].name)       # path-level content-hash diff
+branch_rev = ws.fork(ws.log()[0].name, "proj-x-branch")  # content-addressed branch
+ws.revert("proj-x-1")           # new tip sharing a past revision's content
+```
+
+TypeScript:
+
+```typescript
+import { AgentRun, KubeConfigApi } from "@mitos/sdk";
+
+const run = new AgentRun({ k8s: new KubeConfigApi(), namespace: "team-a" });
+const ws = await run.createWorkspace("proj-x");
+
+const sb = await run.create("python-pool", { workspace: "proj-x" });
+await sb.files.write("/workspace/data.txt", "hello");
+await sb.terminate({ outputs: ["/workspace", { diff: true }] });
+
+const revs = await ws.log();    // newest first
+await ws.fork(revs[0].name, "proj-x-branch");
+await ws.revert("proj-x-1");
+```
+
+CLI: `mitos ws create|ls|log|diff|fork|revert|rm|bind` (see `docs/cli.md`).
+
+## Resumable head: pairing the workspace with a VM memory snapshot
+
+A plain terminate dehydrates `/workspace` into a content-only revision. A
+`terminate(checkpoint=True)` additionally pairs the new revision with the
+sandbox's VM MEMORY snapshot, so the workspace head becomes RESUMABLE: a later
+claim bound to the workspace resumes MID-EXECUTION from the captured VM state
+(memory image + filesystem state, restored together) instead of a cold start.
+This is the "sleep / wake" of the reversible sleep-consolidation demo
+(`examples/sleep-consolidation/`).
+
+The pairing is two refs on the committed `WorkspaceRevision`:
+
+- `memorySnapshotRef`: the snapshot pointer (a content address / snapshot id,
+  never the memory bytes);
+- `memorySnapshotPrincipal`: the principal the image is BOUND to (the capturing
+  claim's `ServiceAccount`).
+
+On a new claim's activation the controller resumes the head's memory image ONLY
+when (a) the head pairs a snapshot, (b) the snapshot still exists (a GC'd
+snapshot degrades to a content-only hydrate), AND (c) the activating claim's
+principal MATCHES `memorySnapshotPrincipal`. A principal MISMATCH is REFUSED,
+fail-closed (an error, never a silent cold-start downgrade): a memory image
+carries secrets-in-RAM and is never served across principals. A resume reseeds
+the guest CRNG and steps the wall clock exactly like a fork (see
+`docs/fork-correctness.md`); the principal binding is a threat-model row (see
+`docs/threat-model.md`).
+
+The disk+memory pairing logic, the resumable status, and the principal-binding
+refusal are proven END TO END in envtest behind the checkpoint/resume/exists
+seams (`internal/controller/resumable_envtest_test.go`,
+`TestResumableHeadFromMemorySnapshot`, including the cross-principal `sa-b`
+intruder case). The seams are bound to the husk live-VM snapshot path behind the
+controller `--workspace-memory-snapshots` flag
+(`internal/controller/workspace_memory_snapshot.go`); off by default a
+checkpoint-on-terminate fails loud rather than producing a falsely-resumable
+revision.
+
+CLUSTER-GATED: the real bare-metal VM-memory image (a live Firecracker memory
+snapshot resuming mid-execution) needs a KVM-capable node, the same gate as the
+husk e2e (`.github/workflows/cluster-e2e.yaml`). Cluster-verify:
+
+```bash
+# Controller deployed with the flag:
+kubectl -n mitos get deploy mitos-controller -o yaml | grep workspace-memory-snapshots
+# Run the demo on the KVM cluster, then confirm the head is resumable:
+examples/sleep-consolidation/run.sh mitos-e2e ~/.kube/kvm-cluster
+mitos -n mitos-e2e ws log sleep-demo   # head row RESUMABLE = true
+```
+
+Without the gate the filesystem state still round-trips (hydrate/dehydrate is
+KVM-proven), so the head is content-only and a wake restores disk state but not
+the live memory image. Timing for the sleep (checkpoint+dehydrate) and wake
+(resume+hydrate) phases is reproducible from `bench/sleep-consolidation.sh`; no
+number is published until it is recorded from that script (no-unverified-claims).
 
 ## Proven vs open
 
@@ -197,21 +443,84 @@ PROVEN:
   (`internal/workspace/git_test.go`); an envtest proves a `{git}` output renders
   the branch, calls the rendezvous push with the resolved repo files, and records
   the push on the revision status.
+- Credentialed git rendezvous: a workspace `spec.git.credentialsSecretRef` is
+  resolved and the token delivered to git only through an ephemeral, mode
+  `0o600` `.git-credentials` file in an isolated `HOME`, never on argv, in a log,
+  in an error, in a condition, or in a revision; redaction on the failure path is
+  asserted in unit tests and the token-never-in-conditions invariant in an
+  envtest (`internal/workspace/git_test.go`,
+  `internal/controller/workspace_binding_test.go`).
+- The authenticated rendezvous server: `internal/rendezvous` wraps
+  `git http-backend` behind HTTP basic auth (constant-time token compare); a
+  unit test rejects an unauthenticated push with 401, accepts an authenticated
+  one, and an end-to-end test proves the engine's credentialed push lands the
+  branch on the server (`internal/rendezvous/server_test.go`).
+- The revision change feed: the `dev.mitos.workspace.revision.created` CloudEvent
+  with pointers-and-names-only payload, delivered via `WebhookSink`
+  (`internal/eventfeed`, `internal/controller/eventfeed.go`); documented above
+  for external indexers (no built-in vector store by design).
+- The SDK/CLI surface: the controller-side fork/revert verbs with LLM-legible
+  rejection (`internal/controller/workspace_verbs.go`), the `mitos ws` CLI over a
+  cluster `WorkspaceBackend` (`internal/agentcli/workspace_{backend,cmd}.go`,
+  `clusterbackend.go`), the Python `Workspace` handle plus
+  `terminate(outputs=..., checkpoint=...)` (`sdk/python/mitos/workspace.py`), and
+  the TypeScript parity (`sdk/typescript/src/workspace.ts`), each unit-tested.
+- Workspace store encryption at rest (#31): when `spec.store.encryptionKeyRef` is
+  set, every revision chunk and manifest is encrypted with AES-256-GCM under a
+  data-encryption key (DEK). The DEK the controller generates is keyed
+  per-template (by templateID, `internal/controller/enc_key_secret.go`), so a
+  template's workspaces share its DEK; the nonce scheme is digest-keyed and safe
+  under a shared key, but isolation granularity is the template. Per-workspace
+  crypto-shred is a future option if finer granularity is wanted. It uses the same
+  KMS envelope custody as templates; the DEK is unwrapped only in node memory and
+  never logged. The manifest digest stays
+  computed over plaintext, so an encrypted dehydrate yields the SAME content
+  identifier as a plaintext dehydrate (dedup preserved) and the round trip is
+  byte-identical with chunks ciphertext at rest; a wrong key fails closed. All
+  asserted in `internal/workspace/encryption_test.go`.
+- The S3 object-store backend: an S3-compatible bucket
+  (`spec.store.s3` + `objectStorageRef`) as an alternative to the node CAS, with
+  the same content-addressed interface, the same revision digest for a tree
+  (drop-in), byte-identical round trip, dedup by chunk-digest object key, and
+  composition with per-workspace encryption (ciphertext at rest in the bucket).
+  Credentials come from a referenced Secret; the secret-access-key derives only
+  the SigV4 signing key and never appears on the wire in cleartext. Proven in
+  `internal/workspace/s3store_test.go` and `s3client_test.go`.
+- Workspace benchmarks: `bench/workspace-hydrate-latency.sh` (hydrate /
+  dehydrate wall clock, recording the store mode) and
+  `bench/workspace-fork-latency.sh` (fork wall clock plus an O(0)-new-bytes
+  assertion: the forked revision shares the parent content manifest). Method-only;
+  numbers live in `bench/results/` only when reproducible from the scripts.
 
 OPEN (later W4 slices):
 
-- The per-workspace encryption key (#31).
-- The S3 / object-storage store backend (this slice uses the node CAS).
-- A real external rendezvous server and its credentials (a referenced Secret,
-  principal-bound); this slice proves the push against a local bare repo with no
-  auth. There is no auto-merge by design: git is the merge layer.
-- The SDK/CLI `terminate(outputs=...)` surface and the `mitos ws
-  log|diff|revert|branch` verbs (a separate workstream surface).
-- The CloudEvents revision change feed and the memory-snapshot pairing that
-  produces a resumable head from a real checkpoint (slice 4).
+- The push to a REAL external rendezvous server on a LIVE cluster is the gated
+  tail (`test/cluster-e2e/workspace-e2e.sh`); the credentialed-push logic, the
+  token redaction, and the authenticated server are proven in unit + envtest
+  above. There is no auto-merge by design: git is the merge layer.
+- The fork-sees-committed-state path and the S3 / encrypted round trip on a LIVE
+  cluster are the gated tail (`test/cluster-e2e/workspace-e2e.sh`); the round
+  trip, the dedup, and the encryption are proven offline in unit tests above.
+- The memory-snapshot pairing that produces a resumable head is DONE: the
+  disk+memory pairing, the resumable status, and the principal-binding refusal are
+  envtest-proven and wired behind `--workspace-memory-snapshots` (see "Resumable
+  head" above). OPEN tail: the real bare-metal live-VM memory image resuming
+  mid-execution, which is cluster-gated on a KVM node.
 - A streaming (non-buffered) tar for very large workspaces (this slice caps and
   buffers; see `vsock.MaxTarBytes`).
-- The production controller-to-guest transport wiring for the default
-  hydrate/dehydrate path: the lifecycle is proven behind a transfer seam in
-  envtest and the helpers are proven on KVM; binding the node-side transport into
-  the controller default is the integration follow-up.
+- The REAL vsock + node-CAS + VM round trip behind the husk control ops on a LIVE
+  cluster (the workspace e2e commit/fork/fork-sees-state stages,
+  `test/cluster-e2e/workspace-e2e.sh`) is the gated KVM tail. The husk-stub ops
+  (`dehydrate-workspace` / `hydrate-workspace`) and their tar -> CAS -> manifest
+  round trip are unit-proven with a fake vsock + temp node CAS
+  (`internal/husk/workspace_test.go`, `internal/husk/netcontrol_test.go`), and the
+  controller delegation + commit + head advance is envtest-proven
+  (`internal/controller/workspace_husk_delegate_test.go`).
+
+DONE in this slice:
+
+- The husk-mode controller-to-node transport wiring for the default
+  hydrate/dehydrate path: the controller delegates to the husk-stub control op
+  that owns the VM vsock and the node CAS, and still owns the revision commit +
+  head advance (see "Wiring the transport: husk delegation" above). The raw-forkd
+  path keeps the documented seam.
