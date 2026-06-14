@@ -29,6 +29,23 @@ clock within 2s of the runner, and a delivered env var plus secret readable in
 each guest with the secret value absent from the host-side logs. See
 [docs/husk-pods.md](husk-pods.md).
 
+### Husk fork children
+
+A husk live fork (`internal/controller/sandboxfork_controller.go` `reconcileHuskFork`)
+produces children by SNAPSHOTTING the source pod's running VM (the husk stub
+`ForkSnapshot` op: pause, Full snapshot to `<dataDir>/forks/<fork-id>/{mem,vmstate}`,
+resume unless `pauseSource`) and ACTIVATING each child husk pod from that fork
+snapshot. Each child activates through the SAME `Activate` path a warm pod uses,
+so it runs the identical RNG-reseed + clock-step `NotifyForked` fork-correctness
+handshake (`internal/husk` `productionNotifier` -> `guest/agent/notifyforked.go`
+`handleNotifyForked`): every child reseeds its kernel CRNG with fresh host entropy
+and steps its wall clock, and a child whose guest does not report `ReseededRNG` is
+left unserved (fail closed). So a husk fork child is NOT a CRNG/clock clone of the
+source or its siblings; it inherits exactly the per-fork reseed an engine fork
+gets. Each child is its own husk pod + VM + per-activation rootfs CoW clone, so
+guest writes never cross between children or back to the source. The Python-level
+PRNG caveat in section 1 applies to husk fork children identically.
+
 ## 1. RNG and entropy after restore
 
 Every VM restored from the same snapshot wakes up with byte-identical kernel
