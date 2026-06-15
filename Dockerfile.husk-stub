@@ -14,7 +14,14 @@ FROM ubuntu:22.04
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        iproute2 \
+        nftables \
     && rm -rf /var/lib/apt/lists/*
+# iproute2 (ip) and nftables (nft) are REQUIRED by the in-pod egress filter the
+# stub programs at activation (internal/husk/netfilter.go + internal/netconf):
+# it shells out to `ip tuntap add` / `ip addr`/`ip link` to create the VM tap and
+# `nft -f` to install the default-deny + metadata-block chain in the pod netns.
+# Without them activation fails with `exec: "ip": executable file not found`.
 
 # Install Firecracker, mirroring Dockerfile.forkd: the stub spawns a dormant
 # Firecracker VMM, so the firecracker binary ships in the image at the same
