@@ -146,6 +146,12 @@ func poolKey(pool *v1alpha1.SandboxPool) string {
 // +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// The controller emits a best-effort husk NetworkPolicy (ensureHuskNetworkPolicy)
+// via the CACHED client, which lazily starts a NetworkPolicy informer; without
+// list/watch that informer never syncs and the cached Get BLOCKS the reconcile
+// before it ever creates husk pods. get;list;watch are load-bearing for liveness,
+// not just create. (Found by kind-e2e-husk: 0 husk pods created.)
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
