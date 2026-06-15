@@ -1,9 +1,13 @@
 # ADR 0006: the husk-pod NET_ADMIN capability for in-pod egress firewalling
 
-Status: accepted (2026-06-15)
+Status: accepted, implementation KVM-verification pending (2026-06-15). The
+control is CODED and unit/envtest-tested, but the husk-network KVM cluster e2e
+does not yet pass (see Consequences/Status below), so the egress guarantee is not
+yet proven end to end on a real VM.
 Issue: #18 (W1 husk pods), #3 (network identity and egress policy), #30 (residual
 ADRs). Related: docs/threat-model.md section 0 surface 5 (was the top
-must-fix-first blocker, now mitigated), section 4 (per-mode egress enforcement)
+must-fix-first blocker; the control is now IMPLEMENTED but the KVM e2e is not yet
+passing, so it stays OPEN), section 4 (per-mode egress enforcement)
 and the K8s NetworkPolicy row, section 3 (default-SA-token note);
 docs/husk-pods.md section 6d; the enforcement model is
 docs/superpowers/plans/2026-06-15-husk-network-isolation.md
@@ -105,19 +109,32 @@ control channel; the guest never gains `NET_ADMIN`.
 
 ## Consequences
 
-- This ADR is `accepted`: the control is SHIPPED. The husk-stub programs the
-  in-pod nftables default-deny egress filter in the pod's own netns at activation
-  (`internal/husk/netfilter.go`, `internal/husk/stub.go`), the unconditional
-  cloud-metadata block is rendered before any allow (`netconf.RenderMetadataBlock`),
-  the per-template allowlist is threaded through
-  (`internal/controller/sandboxclaim_controller.go`,
+- This ADR is `accepted, implementation KVM-verification pending`: the control is
+  CODED and unit/envtest-tested, but it is NOT yet proven end to end on a real VM.
+  The husk-stub programs the in-pod nftables default-deny egress filter in the
+  pod's own netns at activation (`internal/husk/netfilter.go`,
+  `internal/husk/stub.go`), the unconditional cloud-metadata block is rendered
+  before any allow (`netconf.RenderMetadataBlock`), the per-template allowlist is
+  threaded through (`internal/controller/sandboxclaim_controller.go`,
   `husk.ActivateRequest.Egress`/`Allow`), and the controller emits a best-effort
   NetworkPolicy as defense in depth (`internal/controller/husknetworkpolicy.go`).
-  The threat-model surface-5 status is moved from open to mitigated in the same
-  change. In-VM proof on a KVM-capable kubelet (default-deny enforced, metadata
-  blocked, allowlist honored) is the gated cluster e2e
-  `test/cluster-e2e/husk-network-e2e.sh` (the `cluster-husk-network-e2e` suite),
-  run by the maintainer on the live KVM cluster per the no-unverified-claims rule.
+  STATUS / KVM-verification pending: the in-VM proof on a KVM-capable kubelet
+  (default-deny enforced, metadata blocked, allowlist honored) is the gated
+  cluster e2e `test/cluster-e2e/husk-network-e2e.sh` (the
+  `cluster-husk-network-e2e` suite), and that e2e does NOT yet pass. It fails
+  BEFORE the enforcement assertions run: the network husk pods do not hold the
+  pool's dormant-Ready count (the controller logs `dormant:0 desired:1 creating:1`
+  repeatedly, the pods churn and one crash-loops), so the claim never reaches
+  Ready, never activates, and the three enforcement curls (metadata-blocked,
+  default-deny, allowlist-allowed) never execute. The in-pod filter applies only
+  at activation, which the e2e never reaches, so the default-deny and metadata
+  block are DESIGN claims that have NOT been observed working inside a real VM.
+  Two real bugs found while debugging this are tracked OPEN in the threat model
+  (the dehydrate-on-delete finalizer hot-loop on a deleted workspace, and the husk
+  warm pool over-creating dormant pods when claims cannot be satisfied). The
+  threat-model surface-5 status is therefore "IMPLEMENTED, KVM end-to-end
+  verification IN PROGRESS / NOT yet passing", and husk egress stays OPEN for the
+  untrusted-code claim until this e2e is green.
 - The PSA exception accounting (ADR 0003) gains a THIRD documented item for the
   husk pod: the single `capabilities.add: [NET_ADMIN]`. The threat model exception
   list now names it, so "drop ALL capabilities" reads "drop ALL except the one
