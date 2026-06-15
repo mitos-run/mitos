@@ -8,7 +8,10 @@ without KVM:
   no-op on the controller today (mock mode lives in forkd), but it documents the
   intent; `--disable-pki-bootstrap` skips the control plane CA and TLS Secrets so
   the controller dials forkd over insecure gRPC.
-- **forkd** DaemonSet with `--mock` and no TLS flags. It uses the no-KVM mock fork
+- **forkd** DaemonSet with `--mock` and no TLS flags. forkd fails closed without
+  mTLS by default, so the dev manifest passes `--allow-insecure-grpc` to opt in to
+  the unauthenticated listener (dev only; the production base always sets TLS). It
+  uses the no-KVM mock fork
   engine (`internal/fork/mock.go`), mounts no `/dev/kvm`, and carries no
   `mitos.run/kvm` nodeSelector so it schedules on the plain kind node. The
   controller discovers it by the `app.kubernetes.io/component: forkd` pod label,
