@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/dnsproxy"
 	"github.com/paperclipinc/mitos/internal/netconf"
 )
 
@@ -89,3 +91,44 @@ func teardownEgressFilter(ctx context.Context, run netfilterRunner, tap string) 
 	}
 	return firstErr
 }
+
+// buildEgressDNSRegistry parses the name entries from the allowlist and returns
+// a dnsproxy.Registry with this VM's guest IP registered for them, plus the raw
+// name->ports map (returned for logging/assertion). IP:port entries are ignored
+// here (the chain enforces them statically). An invalid name or wildcard fails
+// the whole call (fail-closed: a bad allowlist never yields a partially
+// enforced resolver). An empty name set is valid: the proxy still runs and
+// resolves nothing, which is the documented IP-only allowlist mode.
+func buildEgressDNSRegistry(guestIP string, allow []string) (*dnsproxy.Registry, map[string][]int, error) {
+	names, err := netconf.ParseNameAllowList(allow)
+	if err != nil {
+		return nil, nil, fmt.Errorf("husk netfilter: parse name allowlist: %w", err)
+	}
+	reg := dnsproxy.NewRegistry()
+	ip := net.ParseIP(guestIP)
+	if ip == nil {
+		return nil, nil, fmt.Errorf("husk netfilter: invalid guest ip %q", guestIP)
+	}
+	reg.Register(ip, names)
+	return reg, names, nil
+}
+
+// newEgressDNSProxy builds the per-pod DNS proxy: it resolves only registered
+// names and pins each resolved address into THIS tap's dynamic allow set via an
+// nft pinner, the same model raw-forkd uses (cmd/forkd buildDNSProxy). tap is
+// fixed (one VM per pod), so tapFor always returns it. upstream is the real
+// resolver the proxy forwards allowed queries to. The returned server is
+// started by the caller with ListenAndServe on the resolver address.
+//
+//nolint:unused // wired into Stub.Activate in the following commit (same branch).
+func newEgressDNSProxy(reg *dnsproxy.Registry, tap, upstream string, run func(argv []string) error) *dnsproxy.Server {
+	pinner := dnsproxy.NewNftPinner(run)
+	tapFor := func(net.IP) string { return tap }
+	return dnsproxy.NewServer(reg, pinner, upstream, dnsProxyTTLFloor, tapFor, nil)
+}
+
+// dnsProxyTTLFloor matches the raw-forkd proxy's TTL floor so a pinned address
+// lives at least this long even when the record's TTL is shorter.
+//
+//nolint:unused // consumed by newEgressDNSProxy, wired into Stub.Activate next.
+const dnsProxyTTLFloor = 30 * time.Second

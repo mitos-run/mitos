@@ -51,6 +51,30 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	}
 }
 
+func TestBuildDNSProxyRegistersNamesOnly(t *testing.T) {
+	reg, names, err := buildEgressDNSRegistry("10.200.0.2", []string{"api.example.com:443", "10.0.0.5:5432"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg == nil {
+		t.Fatal("nil registry")
+	}
+	// The IP:port entry is enforced by the chain, not the resolver: only the name
+	// entry is registered.
+	if len(names) != 1 {
+		t.Fatalf("registered names = %v, want only api.example.com", names)
+	}
+	if _, ok := names["api.example.com"]; !ok {
+		t.Errorf("api.example.com not registered: %v", names)
+	}
+}
+
+func TestBuildDNSProxyRejectsBadWildcard(t *testing.T) {
+	if _, _, err := buildEgressDNSRegistry("10.200.0.2", []string{"a.*.com:443"}); err == nil {
+		t.Fatal("expected error on invalid wildcard, got nil")
+	}
+}
+
 func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 	rr := &recordingRunner{}
 	cfg := NetfilterConfig{
