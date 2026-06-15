@@ -2,8 +2,11 @@
 # --mock selects internal/fork/mock.go (KVMAvailable=false). No /dev/kvm mount
 # and no mitos.run/kvm nodeSelector, so it schedules on the plain kind node.
 # No --tls-* flags, so the gRPC listener is insecure; the controller dials it
-# insecure because PKI bootstrap is disabled. The controller discovers this pod
-# by the app.kubernetes.io/component: forkd label.
+# insecure because PKI bootstrap is disabled. forkd fails closed without mTLS by
+# default, so this dev-only manifest passes --allow-insecure-grpc to opt in to
+# the unauthenticated listener; the production base (deploy/) always sets TLS and
+# never needs it. The controller discovers this pod by the
+# app.kubernetes.io/component: forkd label.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -40,6 +43,7 @@ spec:
             - --http=:9091
             - --data-dir=/var/lib/mitos
             - --mock
+            - --allow-insecure-grpc
           ports:
             - name: grpc
               containerPort: 9090
