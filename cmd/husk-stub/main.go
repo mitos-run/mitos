@@ -40,6 +40,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -175,6 +176,8 @@ func run() error {
 		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
 		forksDir        = flag.String("forks-dir", "", "directory the node forks dir is mounted at, where a fork-snapshot op writes <forks-dir>/<fork-id>/{mem,vmstate}. When set, the serving stub confines fork-snapshot and remove-fork-snapshot writes to within it (fail-closed: a request naming a path outside it is refused). Empty leaves the prior behavior (the request's snapshot dir is used as-is). A node-local path, not a secret")
 		casDir          = flag.String("cas-dir", "", "directory the node content-addressed store is mounted at (read-write). When set, the dehydrate-workspace control op captures the active VM's /workspace into it and returns the manifest digest, and the hydrate-workspace op restores a manifest back into the VM. Empty disables the workspace ops (they fail closed). A node-local path, not a secret; workspace content is never logged")
+		dnsUpstream     = flag.String("dns-upstream", "", "Real DNS resolver (host:port) the per-pod egress proxy forwards allowlisted queries to. Empty disables name-based egress (IP-only allowlist mode).")
+		enableEgress    = flag.Bool("enable-egress-filter", true, "Program the in-pod nftables egress filter (default-deny + metadata block) for the activated VM. Requires NET_ADMIN in the pod netns. Default true (the husk isolation guarantee).")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -377,6 +380,27 @@ func run() error {
 		// from it. Empty disables the workspace ops (fail-closed).
 		CASDir: *casDir,
 	})
+
+	// In-pod egress filter wiring (the husk isolation guarantee). When enabled,
+	// the stub programs the VM's tap + default-deny nftables egress chain in THIS
+	// pod's network namespace at activate via an exec-based runner. nft and the
+	// ip link commands need NET_ADMIN, which the husk pod has scoped to its own
+	// netns. The combined stdout+stderr is folded into the error so a failed nft
+	// apply carries actionable remediation text; no secret is on these argvs.
+	if *enableEgress {
+		stub.SetNetRunner(func(ctx context.Context, argv []string, stdin string) error {
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			if stdin != "" {
+				cmd.Stdin = strings.NewReader(stdin)
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("run %v: %w: %s", argv, err, string(out))
+			}
+			return nil
+		})
+		stub.SetDNSUpstream(*dnsUpstream)
+	}
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")
 	if err := stub.Prepare(ctx); err != nil {

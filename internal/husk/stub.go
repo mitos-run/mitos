@@ -380,6 +380,20 @@ type Stub struct {
 	prepareVerified bool
 }
 
+// NetRunner is the exported alias for the host-command runner type so callers
+// in other packages (cmd/husk-stub) can construct one. It must run argv in the
+// husk pod's network namespace; the production wiring uses an exec-based runner.
+type NetRunner = netfilterRunner
+
+// SetNetRunner wires the host-command runner the stub uses to program the
+// in-pod egress filter. It must run argv in the pod netns; cmd/husk-stub wires
+// an exec-based runner. Nil disables in-pod filtering.
+func (s *Stub) SetNetRunner(run NetRunner) { s.netRunner = run }
+
+// SetDNSUpstream sets the real resolver the per-pod DNS proxy forwards
+// allowlisted queries to. Empty disables name-based egress.
+func (s *Stub) SetDNSUpstream(addr string) { s.dnsUpstream = addr }
+
 // New builds a Stub for the given VMConfig. By default it uses the production
 // starter and guest-readiness seam; opts may inject fakes for tests.
 func New(cfg firecracker.VMConfig, opts Options) *Stub {
