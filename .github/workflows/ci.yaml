@@ -690,6 +690,11 @@ jobs:
           done
           if [ "$created" -ne 1 ]; then
             echo "HUSK-FAILED: the pool reconcile created no husk pods (controller husk mode did not place the warm pool)"
+            # trap ... ERR does NOT fire on an explicit `exit`, so dump the
+            # controller + forkd logs here so the reconcile error is captured.
+            dump
+            kubectl -n default describe sandboxpool husk-e2e || true
+            kubectl -n default get sandboxpool,sandboxtemplate -o yaml || true
             exit 1
           fi
 
