@@ -135,7 +135,7 @@ metadata:
 spec:
   image: ${E2E_IMAGE}
   resources:
-    cpu: "1"
+    cpu: "250m"
     memory: "512Mi"
 ---
 apiVersion: mitos.run/v1alpha1

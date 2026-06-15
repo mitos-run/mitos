@@ -587,8 +587,8 @@ func TestBuildHuskPodDefaultSizing(t *testing.T) {
 	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("default kvm request = %s, want 1", got.String())
 	}
-	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("1")) != 0 {
-		t.Errorf("default cpu request = %s, want 1", got.String())
+	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("250m")) != 0 {
+		t.Errorf("default cpu request = %s, want 250m", got.String())
 	}
 	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
 		t.Errorf("default memory request = %s, want 512Mi", got.String())

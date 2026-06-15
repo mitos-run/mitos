@@ -124,7 +124,7 @@ metadata:
 spec:
   image: ${E2E_IMAGE}
   resources:
-    cpu: "1"
+    cpu: "250m"
     memory: "512Mi"
   networkPolicy:
     egress: deny
