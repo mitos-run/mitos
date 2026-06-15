@@ -8,6 +8,40 @@ import (
 	"github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
+// TestRenderMetadataBlock asserts the metadata-block fragment drops the cloud
+// IMDS endpoints (v4 + v6) for the given chain, saddr-pinned for v4.
+func TestRenderMetadataBlock(t *testing.T) {
+	out := RenderMetadataBlock("mitos_egress", "sb_sbtap0", net.ParseIP("10.200.0.2"))
+	for _, want := range []string{
+		"ip saddr 10.200.0.2 ip daddr 169.254.169.254 drop",
+		"ip saddr 10.200.0.2 ip daddr 169.254.0.0/16 drop",
+		"ip6 daddr fd00:ec2::254 drop",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metadata block missing %q\ngot:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderSandboxChainMetadataBeforeAllow asserts the metadata drop appears
+// BEFORE any allowlisted accept AND is present even under EgressAllow, so the
+// allowlist can never override the IMDS block.
+func TestRenderSandboxChainMetadataBeforeAllow(t *testing.T) {
+	allow := []HostPort{{IP: net.ParseIP("169.254.169.254"), Port: 80}}
+	for _, policy := range []v1alpha1.EgressPolicy{v1alpha1.EgressDeny, v1alpha1.EgressAllow} {
+		out := RenderSandboxChain("sbtap0", net.ParseIP("10.200.0.2"), policy, allow, net.ParseIP("169.254.1.1"))
+		dropIdx := strings.Index(out, "ip daddr 169.254.169.254 drop")
+		if dropIdx < 0 {
+			t.Fatalf("policy %s: metadata drop absent\n%s", policy, out)
+		}
+		// An allow for 169.254.169.254:80 must NOT appear before the drop.
+		acceptIdx := strings.Index(out, "ip daddr 169.254.169.254 tcp dport 80 accept")
+		if acceptIdx >= 0 && acceptIdx < dropIdx {
+			t.Errorf("policy %s: metadata accept precedes the drop (allowlist overrides IMDS block)", policy)
+		}
+	}
+}
+
 func TestParseAllowEntryIPPort(t *testing.T) {
 	hp, isName, err := ParseAllowEntry("10.0.0.5:443")
 	if err != nil {

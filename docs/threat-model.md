@@ -9,9 +9,11 @@ code in this repository, not the README. Statuses: **mitigated**, **partial**,
 project in production yet.** The KVM/Firecracker boundary is real, but almost
 every defense-in-depth layer around it is open, and an extended security review
 (recorded in this document) found several controls that the code does NOT yet
-implement, including, most seriously, that the husk default path has NO egress
-enforcement and NO cloud-metadata block today. No external security review has
-happened.
+implement. The most serious of those, the husk default path having NO egress
+enforcement and NO cloud-metadata block, is now CLOSED: the husk default path
+enforces in-pod default-deny egress with an unconditional cloud-metadata block
+and the threaded per-template allowlist (item 1 below, surface 5). No external
+security review has happened.
 
 ## Running untrusted code: what is and is NOT warranted today
 
@@ -23,10 +25,24 @@ below. Until the following are all true, do not run untrusted multi-tenant
 workloads in production on this project, and do not claim it is safe to:
 
 1. **Husk egress default-deny plus a cloud-metadata (169.254.169.254) block.**
-   This is the top blocker. Today the husk default path enforces NO egress and
-   does NOT block the cloud metadata endpoint (see section 4 and section 0
-   surface 5). A guest can reach `169.254.169.254` and steal the node's cloud
-   IAM credentials. This MUST ship before any untrusted-code claim.
+   This was the top blocker; it is now CLOSED. The husk default path enforces
+   default-deny egress via the in-pod nftables filter the husk-stub programs in
+   the pod's own netns at activation (`internal/husk/netfilter.go`, applied in
+   `internal/husk/stub.go`, reusing `internal/netconf` and `internal/dnsproxy`).
+   The cloud metadata endpoints (`169.254.169.254`, the `169.254.0.0/16`
+   link-local range, and IPv6 `fd00:ec2::254`) are an UNCONDITIONAL hard drop
+   rendered before any allow (`netconf.RenderMetadataBlock`), so the allowlist
+   can never reach them and a guest cannot steal the node's cloud IAM
+   credentials. The per-template egress allowlist is threaded husk-side
+   (`huskNotifyNetwork` + `huskEgressConfig` in
+   `internal/controller/sandboxclaim_controller.go`, carried in
+   `husk.ActivateRequest.Egress`/`Allow`). A best-effort Kubernetes
+   NetworkPolicy (`internal/controller/husknetworkpolicy.go`) adds defense in
+   depth; HONEST CNI caveat: it enforces only on a CNI that implements
+   NetworkPolicy, so the in-pod nft filter is the guarantee that holds with no
+   CNI policy at all. The control is proven on the KVM cluster e2e
+   (`test/cluster-e2e/husk-network-e2e.sh`): metadata blocked, default-deny
+   holds, allowlist works. See section 4 and section 0 surface 5.
 2. **Fork-correctness fail-closed on ALL engines.** The raw-forkd and
    sandbox-server paths do NOT fail closed on an un-reseeded fork; only the husk
    path does (section 6, `docs/fork-correctness.md` row 1).
@@ -48,7 +64,9 @@ workloads in production on this project, and do not claim it is safe to:
 7. **An EXTERNAL security audit** (none has happened; see the review gate).
 
 Must-fix-first set (the items that make the current posture actively unsafe, not
-merely incomplete): item 1 (husk egress default-open + metadata reachable),
+merely incomplete): item 1 (husk egress default-open + metadata reachable) is now
+CLOSED (in-pod default-deny + unconditional metadata block + threaded allowlist;
+best-effort NetworkPolicy is defense in depth); the remaining must-fix items are
 item 2 (fork-correctness not fail-closed off the husk path), the raw-forkd
 privileged-no-jailer DaemonSet (item 4, which is why raw-forkd is NOT for
 untrusted multi-tenant, even now that its shared-rootfs cross-fork write channel
@@ -61,7 +79,7 @@ open, with a severity on the review rows) is preserved throughout.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd / husk stub treat its output as data only |
-| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, `seccomp: RuntimeDefault`, read-only snapshot mount | controller (mTLS control channel) | controller |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), `seccomp: RuntimeDefault`, read-only snapshot mount | controller (mTLS control channel) | controller |
 | forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | root DaemonSet pod with `privileged: true` and `/dev/kvm`; the jailer is currently DISABLED in the shipped DaemonSet (`deploy/daemon/daemonset.yaml`, jailer-in-pod follow-up) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
@@ -89,9 +107,12 @@ privileged process and RUN many times by unprivileged pods.
 - **New default (husk pods).** A sandbox VM runs inside an UNPRIVILEGED husk pod:
   `privileged: false`, `allowPrivilegeEscalation: false`, drop ALL capabilities,
   `seccompProfile: RuntimeDefault`, `/dev/kvm` injected by the device plugin
-  (not a hostPath or privilege), and the template snapshot mounted READ-ONLY. The
-  two documented exceptions are `runAsNonRoot: false` (the device exception) and
-  the read-only snapshot hostPath (surfaces 1 and 3 below).
+  (not a hostPath or privilege), and the template snapshot mounted READ-ONLY. It
+  adds exactly one capability, `NET_ADMIN`, scoped to the pod's own netns, so the
+  stub can program the in-pod egress firewall (surface 5). The three documented
+  PSA exceptions are `runAsNonRoot: false` (the device exception), the read-only
+  snapshot hostPath (surfaces 1 and 3 below), and `NET_ADMIN` (the in-pod
+  firewall, surface 5).
 - **forkd-the-builder stays privileged.** Building a template snapshot still
   needs `/dev/kvm` and the jailer, so forkd remains the privileged BUILDER on the
   KVM nodes (and the `--enable-raw-forkd` fork-per-claim engine). The privileged
@@ -139,22 +160,33 @@ load-bearing:
 
 - `privileged: false`,
 - `allowPrivilegeEscalation: false` (no setuid path regains privilege),
-- `capabilities.drop: [ALL]`, none added back,
+- `capabilities.drop: [ALL]`, with exactly `NET_ADMIN` added back so the stub can
+  program the in-pod egress firewall (surface 5) in the pod's OWN netns; this is
+  scoped to the pod netns (not hostNetwork, not privileged) and cannot reach the
+  host netns or another pod,
 - `seccompProfile: RuntimeDefault` at BOTH the pod and the container level,
 - the ONLY host mount is the READ-ONLY snapshot dir plus the read-only kernel
   file (surface 3),
 - the ONLY device is `/dev/kvm` (and `/dev/net/tun`) via the device plugin, not a
   hostPath or privilege (surface 4).
 
-This securityContext satisfies EVERY PSA `restricted` control; the husk pod is
-kept out of a `restricted` namespace by EXACTLY two documented exceptions, both
-intrinsic to the model (recorded as docs/adr/0003-kvm-device-plugin-psa-exception.md):
-the read-only snapshot hostPath, and `runAsNonRoot: false`
-(uid 0 so Firecracker can open the injected `/dev/kvm` without `privileged`). The
-SAME securityContext minus those two exceptions IS admitted into a restricted
-namespace, and a genuinely privileged pod IS rejected in the same namespace
-(PSA is enforcing); both are asserted on `kind-e2e-husk` (slice 4, section 6e of
-`docs/husk-pods.md`).
+This securityContext satisfies EVERY PSA `restricted` control except three
+documented exceptions; the husk pod is kept out of a `restricted` namespace by
+EXACTLY those three, each intrinsic to the model: the read-only snapshot hostPath
+and `runAsNonRoot: false` (uid 0 so Firecracker can open the injected `/dev/kvm`
+without `privileged`), both recorded as
+docs/adr/0003-kvm-device-plugin-psa-exception.md, plus `NET_ADMIN` (forbidden
+under PSA baseline/restricted "Capabilities") for the in-pod egress firewall,
+recorded as docs/adr/0006-husk-netadmin-egress-firewall.md. Justification: the
+capability is scoped to the pod's own netns (not hostNetwork, not privileged,
+`allowPrivilegeEscalation: false`, `seccomp: RuntimeDefault`), so it cannot reach
+the host netns or other pods; the net security change is strongly positive: it
+trades one scoped capability in an already-unprivileged pod for closing
+default-open egress and node IAM-credential theft. The husk pod is thus
+"restricted EXCEPT the read-only snapshot hostPath, `runAsNonRoot: false`, and
+`NET_ADMIN` (for in-pod firewalling)". A genuinely privileged pod IS rejected in
+the same namespace (PSA is enforcing), asserted on `kind-e2e-husk` (slice 4,
+section 6e of `docs/husk-pods.md`).
 
 This is the core "provably better" claim, and it is bounded to THIS surface: a
 guest that escapes the microVM lands with NO root authority, NO Linux
@@ -339,42 +371,56 @@ device-plugins dir is root-owned, but it is `privileged: false`,
 device-plugins dir (to serve and register its socket) and a read-only `/dev`
 (to `stat /dev/kvm`); it creates NO device nodes and starts NO VMs.
 
-**Surface 5: the POD NETNS (egress). OPEN, HIGH severity. This is the top
-must-fix-first blocker.** In the husk default the VM's tap lives inside the HUSK
-POD's network namespace, so the sandbox's traffic IS the pod's traffic. The
-CORRECTION the extended review forced: this project ships NO egress enforcement
-on the husk default path. Specifically:
+**Surface 5: the POD NETNS (egress). MITIGATED (in-pod default-deny + metadata
+block enforced on husk; raw-forkd unchanged).** In the husk default the VM's tap
+lives inside the HUSK POD's network namespace, so the sandbox's traffic IS the
+pod's traffic. This was the top must-fix-first blocker (default-open egress); it
+is now closed by an in-pod nftables filter the husk-stub programs in the pod's
+own netns at activation:
 
-- The product creates NO `NetworkPolicy` anywhere. No Go code imports
-  `networking.k8s.io/v1` or constructs a `NetworkPolicy`;
-  `internal/controller/sandboxclaim_controller.go` `huskNotifyNetwork` returns
-  `nil` (the template-to-guest network mapping is an explicit follow-up); the
-  per-template egress allowlist is NEVER threaded into the husk guest network.
-- The bespoke host-nftables dataplane (section 4) is NOT installed for husk
-  pods. So neither layer governs a husk sandbox's egress.
-- The earlier "CI-proven object-level" claim was FALSE in substance. The CI step
-  (`.github/workflows/ci.yaml`, "Conformance 3") merely `kubectl apply`s a
-  hand-written `husk-egress` `NetworkPolicy` whose egress is `ipBlock`
-  `0.0.0.0/0` (allow-ALL) and then asserts only that the `podSelector` matches a
-  husk pod. It proves a hand-applied allow-all object can select the pod; it
-  proves NOTHING about egress being restricted, and the object is not something
-  the product creates.
+- **The in-pod nftables filter is the guarantee (CNI-independent).** The
+  husk-stub brings up the VM's tap and installs a default-deny egress chain in
+  the husk pod netns at activation (`internal/husk/netfilter.go`, applied in
+  `internal/husk/stub.go`), reusing the raw-forkd dataplane rendering
+  (`internal/netconf`: per-tap chain, `ip saddr` anti-spoof) and the controlled
+  DNS proxy (`internal/dnsproxy`: name-allowlist resolution + IP pinning).
+  Because the tap is in the POD's netns, this holds regardless of the cluster
+  CNI. It needs exactly `NET_ADMIN` scoped to the pod netns (surface 1, ADR
+  0006).
+- **The cloud-metadata block is unconditional.** `netconf.RenderMetadataBlock`
+  emits a hard drop for `169.254.169.254`, the `169.254.0.0/16` link-local range
+  (covers ECS task metadata), and IPv6 `fd00:ec2::254` BEFORE any allow rule and
+  regardless of the template policy (even `EgressAllow`), so the allowlist can
+  never reach the metadata endpoint and a guest cannot steal the node's cloud IAM
+  credentials.
+- **The per-template allowlist is threaded husk-side.** `huskNotifyNetwork`
+  delivers the fixed in-pod /30 plus the in-pod resolver, and `huskEgressConfig`
+  carries the template egress policy + allowlist in the activate request
+  (`internal/controller/sandboxclaim_controller.go`,
+  `husk.ActivateRequest.Egress`/`Allow`). IP:port entries become static chain
+  accepts; name entries are resolved + pinned by the in-pod DNS proxy.
+- **A best-effort Kubernetes NetworkPolicy adds defense in depth.** The
+  controller now creates one `networking.k8s.io/v1` NetworkPolicy per pool
+  selecting `mitos.run/husk=true` with default-deny egress, a DNS allow, and one
+  egress rule per enforceable IP:port allow, owner-referenced to the pool for GC
+  (`internal/controller/husknetworkpolicy.go`). HONEST CNI caveat: a
+  NetworkPolicy only enforces on a CNI that implements it, so it is defense in
+  depth ONLY; the in-pod nft filter above is the guarantee that holds with no CNI
+  policy at all.
 
-Consequence, stated bluntly: on the husk default path egress is default-OPEN.
-The cloud metadata endpoint `169.254.169.254` is reachable from a guest, so a
-guest (untrusted code, by design) can fetch the node's cloud IAM credentials.
-The only thing that can restrict husk egress today is a CLUSTER-WIDE CNI
-default-deny that the OPERATOR installs; this project does NOT provide one, does
-not require one, and does not detect its absence. The per-template egress
-allowlist is enforced ONLY on the opt-in raw-forkd path with
-`--enable-networking` (the host-nftables dataplane plus the controlled DNS
-proxy, section 4), never on husk. Status: **open (high)**. Required fix: a
-default-deny husk-pod egress baseline with an explicit `169.254.169.254` block
-and the per-template allowlist actually threaded through, plus in-VM CI proof on
-a KVM-capable kubelet. The planned control (one scoped `NET_ADMIN` capability in
-the pod's own netns) is recorded as docs/adr/0006-husk-netadmin-egress-firewall.md
-(status proposed until it ships). The raw-forkd nftables egress IS CI-proven in-VM on KVM
-(section 4), but raw-forkd is the opt-in fallback, not the default.
+Status: **mitigated.** Proven on the KVM cluster e2e
+(`test/cluster-e2e/husk-network-e2e.sh`, the new `cluster-husk-network-e2e`
+suite): from inside a husk sandbox, `169.254.169.254` is blocked, a
+non-allowlisted host is blocked (default-deny), and an allowlisted host is
+reachable (the in-pod filter, DNS proxy, and the controller-to-stub NIC binding
+are all correct). The raw-forkd nftables egress remains CI-proven in-VM on KVM
+(section 4) and is unchanged; it gains the same unconditional metadata block for
+free because the rendering is shared. The earlier hand-applied allow-all
+`husk-egress` NetworkPolicy in `.github/workflows/ci.yaml` "Conformance 3" proved
+nothing about restriction and is superseded by the controller-emitted object plus
+the in-pod filter. Residual: NET_ADMIN is a documented PSA exception (surface 1,
+ADR 0006); the trade is strongly positive (closing default-open egress + IAM
+theft for one scoped capability in an already-unprivileged pod).
 
 **Surface 6: the IN-POD SANDBOX API (exec and files).** After activation the husk
 stub serves the SAME `internal/daemon.SandboxAPI` forkd serves, IN the pod, on
@@ -437,24 +483,28 @@ is discussed separately below the table.
 | Capabilities | `privileged: true` grants ALL capabilities in the shipped DaemonSet | `drop: [ALL]`, none added | husk MUCH BETTER |
 | Host FS access | hostPath to the node data dir (RW) | the snapshot mem/vmstate mount and kernel file are READ-ONLY, but the husk pod ALSO has WRITABLE node hostPaths: its per-pod rootfs CoW dir, the fork-snapshot dir, and (W4) the node CAS mounted READ-WRITE (`huskCASMountPath`, `internal/controller/huskpod.go`) so the stub can persist a revision | husk BETTER on the base image (read-only) but NOT read-only-only: a compromised husk pod can write the node CAS and its CoW dirs, bounded to the node data dir (see the W4 CAS row in section 3) |
 | Device access (`/dev/kvm` + kernel) | `/dev/kvm` via hostPath | `/dev/kvm` via device plugin (no privilege) | EQUAL on the inherent KVM/kernel escape surface; husk removes only the privileged REQUIREMENT, not the device surface |
-| Network governance | host-nftables in forkd's netns (default-deny egress allowlist, CI-proven in-VM on KVM, but only on opt-in `--enable-networking`) | pod netns with NO egress enforcement: the product creates no NetworkPolicy, the nftables engine is not installed, egress is default-OPEN and metadata is reachable (surface 5) | raw-forkd BETTER on egress today; husk egress is an OPEN high-severity gap, NOT a shipped control |
+| Network governance | host-nftables in forkd's netns (default-deny egress allowlist, CI-proven in-VM on KVM, but only on opt-in `--enable-networking`) | in-pod nftables default-deny in the pod's OWN netns, applied by the husk-stub at activation (CNI-independent), with an unconditional cloud-metadata block and the threaded per-template allowlist, plus a best-effort controller-emitted NetworkPolicy; KVM-cluster-e2e-proven (surface 5) | EQUAL: husk now enforces default-deny egress in-pod regardless of CNI, the same posture as raw-forkd, and additionally blocks the metadata endpoint unconditionally |
 | Secret + key delivery | mTLS gRPC to forkd | tenant secrets + token over the mTLS control channel to the pod (controller-identity authz, never on disk); the per-template ENCRYPTION KEY never reaches the husk pod at all (it goes to forkd, which serves the pre-decrypted snapshot via dm-crypt) | EQUAL/BETTER (same mTLS anchor; enc key never enters the husk pod, in-memory-window residual is on forkd only) |
 
 Honest conclusion: on the privilege and capabilities axes the husk model is
 clearly BETTER. On the host-FS axis it is better for the BASE IMAGE (read-only)
 but it still holds writable node hostPaths (the CoW dirs and the read-write node
 CAS), so it is not the read-only-only surface earlier claimed. On the NETWORK
-axis the husk default is currently WORSE than opt-in raw-forkd: it ships NO
-egress enforcement (open, high; surface 5 and section 4), while raw-forkd with
-`--enable-networking` has a CI-proven in-VM default-deny allowlist. The residuals
-named (shared read-only snapshot mount, in-memory key window) stand; the husk
-egress gap is an OPEN control, not a residual.
+axis the husk default now MATCHES opt-in raw-forkd: it enforces an in-pod
+default-deny egress filter in the pod's own netns (CNI-independent), plus an
+unconditional cloud-metadata block and the threaded per-template allowlist
+(surface 5, section 4), the same posture raw-forkd has with
+`--enable-networking`, and it adds the metadata block raw-forkd now also gains
+because the rendering is shared. It costs one scoped capability (`NET_ADMIN` in
+the pod netns, ADR 0006). The residuals named (shared read-only snapshot mount,
+in-memory key window) stand.
 On the inherent `/dev/kvm`-and-kernel axis the two are EQUAL: a KVM or host-kernel
 bug reachable from a `/dev/kvm`-holder is the same risk in both models, and the
 device plugin removes the privileged requirement, NOT that attack surface. The
 per-sandbox EXECUTION surface is therefore IMPROVED on privilege and
-capabilities, while the inherent microVM-host-escape risk is UNCHANGED and the
-husk EGRESS surface is currently WORSE (no enforcement). Separately,
+capabilities, the inherent microVM-host-escape risk is UNCHANGED, and the husk
+EGRESS surface now matches raw-forkd (in-pod default-deny + metadata block).
+Separately,
 forkd-the-builder remains a
 PRIVILEGED control-plane surface (root, `CAP_SYS_ADMIN`, `/dev/kvm`, the jailer),
 but it is SMALLER than the old per-sandbox surface: it runs the BUILD path once
@@ -464,9 +514,11 @@ serves. Removing forkd's privilege entirely (a builder redesign) is out of scope
 
 OPEN gaps the review surfaced (must-fix-first, NOT accepted residuals):
 
-- HUSK EGRESS is default-OPEN with the cloud metadata endpoint reachable: no
-  NetworkPolicy is created and the nftables engine is not installed for husk
-  pods (open, high; surface 5, section 4). This is the top blocker.
+- HUSK EGRESS is now CLOSED (was the top blocker): the husk-stub enforces an
+  in-pod default-deny egress filter in the pod's own netns with an unconditional
+  cloud-metadata block and the threaded per-template allowlist, plus a
+  best-effort controller-emitted NetworkPolicy (mitigated; surface 5, section 4;
+  KVM-cluster-e2e-proven). It is no longer a must-fix-first gap.
 
 The husk default-SA-token automount, the fail-open gRPC default, and the missing
 host-side vsock read deadline that this list previously carried are now SHIPPED
@@ -540,7 +592,7 @@ hostPath `/var/lib/mitos`, on every KVM node.
 | Husk pod default ServiceAccount token automount | **mitigated (shipped)** | The husk pod spec now sets `AutomountServiceAccountToken: false` (`internal/controller/huskpod.go` `buildHuskPod`), so the kubelet does NOT mount the namespace default ServiceAccount token into a husk pod. The stub speaks vsock + mTLS and never calls the Kubernetes API (verified: no client-go, no `InClusterConfig`, no SA token read in `cmd/husk-stub` or `internal/husk`), so the token was dead weight; a guest that escapes into the stub no longer inherits a free `system:authenticated` token. The opt-out applies to BOTH warm pods and fork-child pods, which share the builder, proven in `TestBuildHuskPodDisablesSATokenAutomount`. |
 | forkd gRPC fails OPEN without TLS flags | **mitigated (shipped)** | `grpcServerOptions` (`cmd/forkd/main.go`) now FAILS CLOSED: with no TLS flags it returns a fatal error naming the missing `--tls-cert/--tls-key/--tls-ca` flags and the opt-in, so forkd refuses to start unauthenticated. The legacy insecure-with-loud-warning behavior is reachable only behind an explicit `--allow-insecure-grpc` opt-in (default false) for local development. A partial TLS triple is still a configuration error. The shipped DaemonSet always sets TLS, so production is unaffected; this only stops a silent-insecure misconfig. Proven in `TestGRPCServerOptionsFailClosed` (refuses with no TLS and no opt-in; allowed with the opt-in; allowed with a full TLS triple; partial is an error). |
 | Host-side vsock read has no deadline | **mitigated (shipped)** | The host-side `vsock.Client` now applies a per-request read deadline in `send` (`internal/vsock/client.go`), defaulting to `DefaultRequestTimeout` (60s) and overridable via `SetRequestTimeout`. The CONNECT preamble reads in `Connect`/`DialStream`/`DialStreamUnix` are likewise bounded (then cleared so the long-lived streaming reads stay ctx/`conn.Close`-cancelled). A malicious or wedged guest that connects then stalls (or dribbles a partial line under the `MaxMessageBytes` cap) now causes the one-shot call to return a timeout error rather than hang the host caller goroutine, vsock fd, and (for the husk stub) stream slot indefinitely. Proven in `TestSendReadDeadlineUnblocksOnStall` (a fake agent that connects then never responds makes `Ping` return rather than hang). |
-| Husk egress enforcement | **open (high)** | See section 0 surface 5 and section 4: the husk default path ships NO egress enforcement, default-OPEN, with the cloud metadata endpoint reachable. This is the top must-fix-first blocker for running untrusted code. |
+| Husk egress enforcement | **mitigated** | See section 0 surface 5 and section 4: the husk default path enforces an in-pod nftables default-deny egress filter in the pod's own netns (CNI-independent, the guarantee), an unconditional cloud-metadata block (`169.254.169.254`, `169.254.0.0/16`, IPv6 `fd00:ec2::254`, before any allow), and the threaded per-template allowlist; a best-effort controller-emitted NetworkPolicy adds defense in depth (CNI-dependent). KVM-cluster-e2e-proven (`test/cluster-e2e/husk-network-e2e.sh`). Costs one scoped `NET_ADMIN` capability (ADR 0006). |
 
 ### Code interpreter (run_code) surface
 
@@ -621,20 +673,22 @@ absence. With it on, each fork gets its own tap and a host-side default-deny
 egress ruleset.
 
 PER-MODE ENFORCEMENT (reconciled with the husk default, section 0 surface 5).
-The host-nftables egress dataplane described in the rows below applies ONLY to
-the RAW-FORKD mode (`--enable-raw-forkd`) with `--enable-networking` on, where
-there is no pod and this host-nftables engine IS the enforcement; those rows are
-CI-proven in-VM on KVM. On the HUSK DEFAULT path (the shipped default) there is
-currently NO egress enforcement at all: the product creates no `NetworkPolicy`
-(`huskNotifyNetwork` returns nil, no Go code constructs one, the per-template
-allowlist is never threaded into the guest network) and the host-nftables engine
-below is NOT installed for husk pods, so a husk sandbox's egress is default-OPEN
-and `169.254.169.254` is reachable (section 0 surface 5, status open/high). The
-earlier "exactly ONE layer governs, the husk layer is a NetworkPolicy" claim was
-WRONG: no such NetworkPolicy is created, and the CI step that "proved" it merely
-applies a hand-written allow-all (`0.0.0.0/0`) policy and checks the selector.
-Husk egress must default-deny with a metadata block before this project runs
-untrusted code. See `docs/husk-pods.md` section 6d.
+The nftables egress dataplane described in the rows below is the SAME rendering
+(`internal/netconf`) used in both modes. In RAW-FORKD mode (`--enable-raw-forkd`)
+with `--enable-networking` on, it is applied host-side in forkd's netns; those
+rows are CI-proven in-VM on KVM. On the HUSK DEFAULT path (the shipped default)
+the SAME rendering is applied IN-POD by the husk-stub in the pod's OWN netns at
+activation (`internal/husk/netfilter.go`, `internal/husk/stub.go`), so a husk
+sandbox now gets a CNI-independent default-deny egress chain, the unconditional
+cloud-metadata block, and the threaded per-template allowlist; `169.254.169.254`
+(and the v4 link-local range and IPv6 IMDS) is dropped before any allow. The
+controller additionally emits a best-effort `networking.k8s.io/v1` NetworkPolicy
+selecting `mitos.run/husk=true` (`internal/controller/husknetworkpolicy.go`);
+HONEST CNI caveat: a NetworkPolicy enforces only on a CNI that implements it, so
+the in-pod nft filter is the guarantee and the NetworkPolicy is defense in depth.
+The earlier CI step that hand-applied an allow-all (`0.0.0.0/0`) policy proved no
+restriction and is superseded. KVM-cluster-e2e-proven
+(`test/cluster-e2e/husk-network-e2e.sh`). See `docs/husk-pods.md` section 6d.
 
 | Control | Status | Detail |
 |---|---|---|
@@ -647,7 +701,7 @@ untrusted code. See `docs/husk-pods.md` section 6d.
 | Name egress: DoH/DoT and DNS tunneling | **mitigated** | A guest cannot bypass the controlled resolver. Only `udp/tcp 53` to the resolver IP is permitted by the egress chain, so a guest cannot reach an arbitrary external DoH/DoT server (its `IP:port` is not allowlisted and was never pinned). The resolver answers only A and AAAA queries for allowlisted names and REFUSES every other qtype, so it cannot be used as a covert DNS tunnel: only A/AAAA records are forwarded and the resolved IPs are constrained to the allowlist (and pinned into the v4 or v6 set by address family). |
 | Name egress: source attribution | **enforced** | The proxy attributes each query to a sandbox by the query's source guest IP (each sandbox has a unique /30 from the identity allocator) and pins into THAT sandbox's set. A guest cannot grant itself another sandbox's reach by spoofing a source IP: the per-tap dispatch sends a tap's traffic only into its own chain, and every v4 accept (including the dynamic v4 pin-set accept) is `ip saddr`-pinned to the sandbox's guest IP, so a spoofed-source query cannot land a pin that the spoofing guest can use. A query whose source has no live tap mapping is REFUSED and pins nothing. The v6 accept is not `ip saddr`-pinned because the guest has no v6 source address to spoof from today; the v6 default-deny in each chain remains the boundary there. |
 | Layering: host netns vs per-VM netns | **host-netns today** | The tap and nftables ruleset live in forkd's (the host's) network namespace; isolation between sandboxes is by per-tap dispatch + per-/30 addressing + saddr anti-spoof, not by a kernel netns boundary per VM. Moving each VM into its own pod netns (husk pods, #18) adds a second, defense-in-depth layer and is where snapshot-fork-under-netns is resolved. Live-fork (`ForkRunning`) of a networked sandbox fails closed today (#18): a live fork would restore the source's baked NIC and collide on tap/MAC/IP. |
-| K8s NetworkPolicy | **open (high) on the husk default** | In RAW-FORKD mode sandboxes are not pods: NetworkPolicy does not govern them and our nftables egress layer is ours and documented as ours (CI-proven in-VM on KVM, opt-in). In the HUSK default the VM's tap is in the husk pod's netns, so a NetworkPolicy COULD govern it, but the product creates NONE: `huskNotifyNetwork` returns nil, no Go code imports `networking.k8s.io/v1` or constructs a NetworkPolicy, and the nftables engine is not installed for husk pods. So husk egress is default-OPEN and `169.254.169.254` is reachable. The CI "Conformance 3" step hand-applies an allow-all (`0.0.0.0/0`) NetworkPolicy and asserts only that the `mitos.run/husk=true` selector matches a pod; it proves NO egress restriction and the object is not created by the product. Required fix: a controller-created default-deny husk egress baseline with a metadata block plus the per-template allowlist threaded through, and in-VM CI proof on a KVM kubelet. |
+| K8s NetworkPolicy | **mitigated (in-pod nft is the guarantee; NetworkPolicy is best-effort defense in depth)** | In RAW-FORKD mode sandboxes are not pods: NetworkPolicy does not govern them and our nftables egress layer is ours and documented as ours (CI-proven in-VM on KVM, opt-in). In the HUSK default the VM's tap is in the husk pod's netns, and the husk-stub now programs an in-pod nftables default-deny egress filter there (the CNI-independent GUARANTEE, with the unconditional metadata block and the threaded allowlist). The controller additionally creates one `networking.k8s.io/v1` NetworkPolicy per pool (`internal/controller/husknetworkpolicy.go`) selecting `mitos.run/husk=true` with default-deny egress, a DNS allow, and one egress rule per enforceable IP:port allow, owner-referenced to the pool for GC. HONEST CNI caveat: the NetworkPolicy enforces only on a CNI that implements it, so it is defense in depth ONLY; the in-pod nft filter holds with no CNI policy at all. The superseded CI "Conformance 3" allow-all step proved no restriction. KVM-cluster-e2e-proven (`test/cluster-e2e/husk-network-e2e.sh`). |
 
 ## 5. Snapshot integrity and supply chain
 

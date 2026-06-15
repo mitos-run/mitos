@@ -9,6 +9,29 @@ import (
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
+func TestActivateRequestCarriesEgressConfig(t *testing.T) {
+	in := ActivateRequest{
+		SnapshotDir: "/snap",
+		Egress:      "deny",
+		Allow:       []string{"api.example.com:443", "10.0.0.5:5432"},
+		Network:     &vsock.NotifyForkedNetwork{GuestIP: "10.200.0.2", GatewayIP: "10.200.0.1", PrefixLen: 30, ResolverIP: "169.254.1.1"},
+	}
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadRequest(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Egress != "deny" || len(out.Allow) != 2 || out.Allow[0] != "api.example.com:443" {
+		t.Errorf("egress config did not round-trip: %+v", out)
+	}
+	if out.Network == nil || out.Network.ResolverIP != "169.254.1.1" {
+		t.Errorf("network did not round-trip: %+v", out.Network)
+	}
+}
+
 func TestActivateRequestRoundTrip(t *testing.T) {
 	want := ActivateRequest{
 		SnapshotDir: "/data/templates/tmpl-a/snapshot",
