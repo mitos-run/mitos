@@ -60,6 +60,15 @@ type ActivateRequest struct {
 	Network          *vsock.NotifyForkedNetwork    `json:"network,omitempty"`
 	Volumes          []vsock.VolumeMountEntry      `json:"volumes,omitempty"`
 	Token            string                        `json:"token,omitempty"`
+	// Egress is the template's egress policy ("deny" or "allow") the stub uses
+	// to render the in-pod nftables chain's final verdict. Empty defaults to the
+	// fail-closed "deny". It is config, not a secret, and is safe to log.
+	Egress string `json:"egress,omitempty"`
+	// Allow is the template's raw egress allowlist (host:port entries, IP or
+	// name) the stub splits into static IP:port chain accepts (SplitAllowList)
+	// and name entries the in-pod DNS proxy enforces (ParseNameAllowList). It is
+	// config, not a secret, and is safe to log.
+	Allow []string `json:"allow,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded
