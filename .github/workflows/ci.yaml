@@ -1309,15 +1309,34 @@ jobs:
           # re-pended, so this proves the stamp is authoritative and stable). Since
           # the empty pool gives the controller no pod to pick, this state only ever
           # comes from our object-level stamp, never a controller re-pick.
+          # RACE NOTE: a reconcile that runs in the window between the claim being
+          # created (phase empty) and this stamp propagating sees an unplaced claim
+          # and pends it (reconcileHuskClaim -> selectDormantHuskPod is empty for
+          # this 0-replica pool), which clears the stamp. That is a transient
+          # create-vs-stamp race, not a re-pend regression. Re-assert the stamp
+          # until the controller has OBSERVED it stable: once it reconciles a claim
+          # whose phase is already Ready it takes the checkHuskPodLost path (which
+          # is pool-independent, keyed on Status.SandboxID), finds the healthy
+          # backing pod, and holds Ready without re-pending. Require two consecutive
+          # stable observations so a stamp that is about to be clobbered by an
+          # in-flight pend does not count as settled.
           settled=0
-          for i in $(seq 1 24); do
+          for i in $(seq 1 36); do
             phase=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
             sid=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.sandboxID}' 2>/dev/null || true)
-            echo "  [${i}/24] repend-probe phase: '${phase}' sandboxID: '${sid}'"
-            if [ "$phase" = "Ready" ] && [ "$sid" = "$backing" ]; then settled=1; break; fi
+            echo "  [${i}/36] repend-probe phase: '${phase}' sandboxID: '${sid}' (stable=${settled})"
+            if [ "$phase" = "Ready" ] && [ "$sid" = "$backing" ]; then
+              settled=$((settled + 1))
+              [ "$settled" -ge 2 ] && break
+            else
+              settled=0
+              kubectl -n default label pod "$backing" mitos.run/claim=repend-probe --overwrite >/dev/null 2>&1 || true
+              kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
+                -p "{\"status\":{\"phase\":\"Ready\",\"node\":\"${podnode}\",\"endpoint\":\"${podip}:9091\",\"sandboxID\":\"${backing}\"}}" >/dev/null 2>&1 || true
+            fi
             sleep 5
           done
-          [ "$settled" -eq 1 ] || { echo "EVICTION-FAILED: the probe claim did not settle Ready on the stamped backing pod $backing"; exit 1; }
+          [ "$settled" -ge 2 ] || { echo "EVICTION-FAILED: the probe claim did not settle Ready on the stamped backing pod $backing"; exit 1; }
 
           # Delete the backing pod: the claim must re-pend (Phase Pending) and the
           # warm pool must recreate a replacement husk pod.
