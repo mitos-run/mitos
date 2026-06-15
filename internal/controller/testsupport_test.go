@@ -221,6 +221,17 @@ func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *
 	return r.ensureHuskPDB(ctx, pool)
 }
 
+// EnsureHuskNetworkPolicyForTest exposes ensureHuskNetworkPolicy to the external
+// controller_test package so the best-effort NetworkPolicy create-or-update can
+// be envtested directly.
+func (r *SandboxPoolReconciler) EnsureHuskNetworkPolicyForTest(ctx context.Context, pool *v1alpha1.SandboxPool, allow []string) error {
+	return r.ensureHuskNetworkPolicy(ctx, pool, allow)
+}
+
+// HuskNetworkPolicyNameForTest exposes huskNetworkPolicyName so the external
+// controller_test package can look the object up by name.
+func HuskNetworkPolicyNameForTest(pool string) string { return huskNetworkPolicyName(pool) }
+
 // ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
 // controller_test package so the warm-pool lifecycle can be envtested.
 func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {

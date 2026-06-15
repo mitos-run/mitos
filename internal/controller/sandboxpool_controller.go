@@ -222,6 +222,16 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		desiredWarm := r.desiredWarm(&pool, dormantNow, inUseNow)
 
+		// Best-effort Kubernetes NetworkPolicy (default-deny egress) for this
+		// pool's husk pods. CNI-dependent; the in-pod nft filter the husk-stub
+		// programs is the guarantee. A failure is logged but does NOT block husk
+		// pod creation, so a CNI without NetworkPolicy support never stalls the
+		// warm pool.
+		_, npAllow := huskEgressConfig(&template)
+		if err := r.ensureHuskNetworkPolicy(ctx, &pool, npAllow); err != nil {
+			logger.Error(err, "ensure husk network policy (best effort; in-pod filter is the guarantee)")
+		}
+
 		res, err := r.reconcileHuskPods(ctx, &pool, &template, desiredWarm)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
