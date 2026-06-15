@@ -323,12 +323,16 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	//     privileged: true; KVM access comes from the device plugin slot, not
 	//     from a privileged container.
 	//   - AllowPrivilegeEscalation: false. No setuid path can regain privilege.
-	//   - Capabilities Drop ALL, add NONE. The dormant stub only Prepares a
+	//   - Capabilities Drop ALL, add NET_ADMIN. The dormant stub Prepares a
 	//     Firecracker VMM (open /dev/kvm via the device plugin, create files
 	//     under the pod-local workdir, bind a unix socket); none of that needs a
-	//     Linux capability. Networking capabilities (e.g. NET_ADMIN for tap
-	//     setup) arrive with the networking slice, not here; we add back none so
-	//     this slice stays minimal.
+	//     Linux capability. NET_ADMIN is added because the stub programs the
+	//     in-pod nftables egress filter and the VM's tap in the pod's OWN network
+	//     namespace at activation (the load-bearing isolation control). It is the
+	//     minimal capability for that and is scoped to the pod netns: the pod is
+	//     not hostNetwork and not privileged, so it cannot reach the host netns,
+	//     another pod's netns, or the node routing tables. Recorded as a PSA
+	//     exception in docs/threat-model.md.
 	//   - SeccompProfile RuntimeDefault, set at BOTH the pod and the container
 	//     securityContext level. restricted checks the profile at the pod OR the
 	//     container level; setting both keeps the pod-level control satisfied even
@@ -765,6 +769,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						RunAsNonRoot:             ptrBool(runAsNonRoot),
 						Capabilities: &corev1.Capabilities{
 							Drop: []corev1.Capability{"ALL"},
+							// NET_ADMIN is the MINIMAL capability for in-pod
+							// firewalling: the husk-stub programs nftables and the
+							// VM's tap in the pod's OWN network namespace (not the
+							// host's). The pod is not hostNetwork and not
+							// privileged, so NET_ADMIN cannot reach the host netns,
+							// another pod's netns, or the node routing tables. It is
+							// the load-bearing control that gives the husk guest VM
+							// CNI-independent default-deny egress + the unconditional
+							// cloud-metadata block. Documented as a PSA exception in
+							// docs/threat-model.md.
+							Add: []corev1.Capability{"NET_ADMIN"},
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,

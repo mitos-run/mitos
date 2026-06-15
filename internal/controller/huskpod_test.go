@@ -124,11 +124,36 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("Capabilities.Drop = %+v, want [ALL]", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 0 {
-		t.Errorf("Capabilities.Add = %+v, want none (networking caps come with the networking slice)", sc.Capabilities.Add)
+	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Errorf("Capabilities.Add = %+v, want [NET_ADMIN] (in-pod egress firewall)", sc.Capabilities.Add)
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("SeccompProfile = %+v, want RuntimeDefault", sc.SeccompProfile)
+	}
+}
+
+// TestHuskPodHasNetAdminForInPodFirewall asserts the husk container adds
+// exactly NET_ADMIN (and nothing else) so the stub can program the in-pod
+// nftables egress filter and tap in the pod's OWN netns. This is the documented
+// capability exception for in-pod firewalling; it does NOT grant host network
+// access (the pod is not hostNetwork and not privileged).
+func TestHuskPodHasNetAdminForInPodFirewall(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1alpha1.SandboxTemplate{}
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
+	sc := pod.Spec.Containers[0].SecurityContext
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("Capabilities.Drop = %+v, want [ALL]", sc.Capabilities)
+	}
+	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Errorf("Capabilities.Add = %+v, want [NET_ADMIN]", sc.Capabilities.Add)
+	}
+	if sc.Privileged != nil && *sc.Privileged {
+		t.Error("husk pod must not be privileged")
+	}
+	if pod.Spec.HostNetwork {
+		t.Error("husk pod must not use hostNetwork; NET_ADMIN is scoped to the pod netns")
 	}
 }
 
@@ -196,8 +221,8 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("container Capabilities.Drop = %+v, want [ALL] (restricted control)", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 0 {
-		t.Errorf("container Capabilities.Add = %+v, want none (restricted forbids adding back)", sc.Capabilities.Add)
+	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Errorf("container Capabilities.Add = %+v, want [NET_ADMIN] (documented PSA exception for in-pod firewalling)", sc.Capabilities.Add)
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("container SeccompProfile = %+v, want RuntimeDefault (restricted control)", sc.SeccompProfile)
