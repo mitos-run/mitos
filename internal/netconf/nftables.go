@@ -30,6 +30,34 @@ func BaseChainName() string {
 	return "forward"
 }
 
+// MetadataAddrs are the cloud instance-metadata endpoints that are an
+// UNCONDITIONAL hard drop on every sandbox chain, even under EgressAllow: the
+// IPv4 IMDS address (shared by AWS, GCP metadata.google.internal, and Azure
+// IMDS), the IPv4 link-local /16 (covers ECS task metadata 169.254.170.2 and
+// any other link-local metadata service), and the IPv6 IMDS address. Reaching
+// these lets a guest steal the node's cloud IAM credentials, which is never an
+// intended egress; the allowlist cannot override it because RenderMetadataBlock
+// is emitted BEFORE any allow rule in the chain.
+const (
+	metadataV4Addr = "169.254.169.254"
+	metadataV4Net  = "169.254.0.0/16"
+	metadataV6Addr = "fd00:ec2::254"
+)
+
+// RenderMetadataBlock renders the unconditional cloud-metadata drops for one
+// sandbox chain. The v4 drops are saddr-pinned to the guest as defense in depth
+// (same anti-spoof posture as every other rule); the v6 drop is family-scoped.
+// The caller MUST emit this block before any allow rule so the allowlist can
+// never reach a metadata endpoint.
+func RenderMetadataBlock(table, chain string, guestIP net.IP) string {
+	saddr := fmt.Sprintf("ip saddr %s", guestIP.String())
+	var b strings.Builder
+	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s drop\n", table, chain, saddr, metadataV4Addr)
+	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s drop\n", table, chain, saddr, metadataV4Net)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr %s drop\n", table, chain, metadataV6Addr)
+	return b.String()
+}
+
 // DispatchMapName returns the verdict map keyed by interface name. The base
 // chain looks up the inbound interface (the tap) in this map and jumps to that
 // sandbox's regular chain. Adding/removing a sandbox is a single map element
@@ -307,6 +335,12 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 
 	// Anti-spoof: pin the accepts to this sandbox's guest source IP.
 	saddr := fmt.Sprintf("ip saddr %s", guestIP.String())
+
+	// Unconditional cloud-metadata block: emitted BEFORE every accept (including
+	// established/related and the final EgressAllow accept) so a guest can never
+	// reach the IMDS endpoint and steal the node IAM credentials, regardless of
+	// the template's egress policy or allowlist.
+	b.WriteString(RenderMetadataBlock(table, chain, guestIP))
 
 	fmt.Fprintf(&b, "add rule inet %s %s %s ct state established,related accept\n", table, chain, saddr)
 
