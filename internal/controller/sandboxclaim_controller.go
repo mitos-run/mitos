@@ -737,12 +737,15 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	}
 
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
+	egress, allow := huskEgressConfig(template)
 	req := husk.ActivateRequest{
 		SnapshotDir:    HuskSnapshotDir,
 		ExpectedDigest: expectedDigest,
 		Env:            env,
 		Secrets:        secretVals,
 		Network:        huskNotifyNetwork(template),
+		Egress:         egress,
+		Allow:          allow,
 		Token:          apiToken,
 	}
 	res, err := activate(ctx, addr, r.HuskTLS, req)
@@ -812,13 +815,50 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	return ctrl.Result{}, nil
 }
 
+// huskInPodResolverIP is the fixed pod-local address the husk-stub binds the
+// per-pod DNS proxy on and points the guest at via NotifyForkedNetwork. It is a
+// link-local address inside the pod netns, the same default the raw-forkd path
+// uses (cmd/forkd defaultDNSResolverIP).
+const huskInPodResolverIP = "169.254.1.1"
+
+// huskGuestIP and huskGatewayIP are the fixed point-to-point /30 the husk VM
+// uses inside its OWN pod netns. Because each VM is alone in its pod netns there
+// is no cross-VM collision, so a single fixed pair is correct (unlike raw-forkd,
+// which carves a shared subnet). The stub derives the tap from huskGuestIP via
+// netconf.DeriveTapName, assigns huskGatewayIP to that tap, and the guest keeps
+// its baked huskGuestIP; that is the NIC-binding contract both sides agree on.
+const (
+	huskGuestIP   = "10.200.0.2"
+	huskGatewayIP = "10.200.0.1"
+)
+
 // huskNotifyNetwork maps the template's network policy to the guest
-// NotifyForkedNetwork delivered in the activate handshake. The husk slice
-// threads the template network through for parity with the engine fork path; the
-// detailed mapping is a follow-up, so this returns nil (no overrides) until the
-// guest networking slice lands.
+// NotifyForkedNetwork delivered in the activate handshake. It always returns a
+// config (never nil now): the guest is pinned to the fixed in-pod /30 and
+// pointed at the in-pod DNS proxy resolver, so the in-pod egress filter and DNS
+// proxy enforce the template allowlist. A template with no NetworkPolicy still
+// gets the fail-closed default-deny config (the stub defaults Egress to deny).
 func huskNotifyNetwork(_ *v1alpha1.SandboxTemplate) *vsock.NotifyForkedNetwork {
-	return nil
+	return &vsock.NotifyForkedNetwork{
+		GuestIP:    huskGuestIP,
+		GatewayIP:  huskGatewayIP,
+		PrefixLen:  30,
+		ResolverIP: huskInPodResolverIP,
+	}
+}
+
+// huskEgressConfig extracts the egress policy string and raw allowlist from the
+// template, defaulting to fail-closed deny with no allows when the template
+// carries no NetworkPolicy. Egress and Allow are config, not secrets.
+func huskEgressConfig(template *v1alpha1.SandboxTemplate) (egress string, allow []string) {
+	if template == nil || template.Spec.Network == nil {
+		return string(v1alpha1.EgressDeny), nil
+	}
+	e := template.Spec.Network.Egress
+	if e == "" {
+		e = v1alpha1.EgressDeny
+	}
+	return string(e), template.Spec.Network.Allow
 }
 
 // reconcileNoCapacity handles a placement that no node admits under the
