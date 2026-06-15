@@ -72,9 +72,7 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, cfg NetfilterCo
 
 // teardownEgressFilter removes this VM's tap and per-tap egress state. It is
 // best-effort and returns the first error so a partial teardown does not leak
-// the rest. Called by the stub on Close (wired in the stub Close hook).
-//
-//nolint:unused // wired into Stub.Close in the following commit (same branch).
+// the rest. Called by the stub on Close.
 func teardownEgressFilter(ctx context.Context, run netfilterRunner, tap string) error {
 	var firstErr error
 	if err := run(ctx, netconf.LinkDelArgs(tap), ""); err != nil && firstErr == nil {
@@ -119,8 +117,6 @@ func buildEgressDNSRegistry(guestIP string, allow []string) (*dnsproxy.Registry,
 // fixed (one VM per pod), so tapFor always returns it. upstream is the real
 // resolver the proxy forwards allowed queries to. The returned server is
 // started by the caller with ListenAndServe on the resolver address.
-//
-//nolint:unused // wired into Stub.Activate in the following commit (same branch).
 func newEgressDNSProxy(reg *dnsproxy.Registry, tap, upstream string, run func(argv []string) error) *dnsproxy.Server {
 	pinner := dnsproxy.NewNftPinner(run)
 	tapFor := func(net.IP) string { return tap }
@@ -129,6 +125,4 @@ func newEgressDNSProxy(reg *dnsproxy.Registry, tap, upstream string, run func(ar
 
 // dnsProxyTTLFloor matches the raw-forkd proxy's TTL floor so a pinned address
 // lives at least this long even when the record's TTL is shorter.
-//
-//nolint:unused // consumed by newEgressDNSProxy, wired into Stub.Activate next.
 const dnsProxyTTLFloor = 30 * time.Second

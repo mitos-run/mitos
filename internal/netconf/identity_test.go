@@ -239,3 +239,18 @@ func TestMarkInUseIdempotentAndAcquireConsistent(t *testing.T) {
 		t.Fatalf("MarkInUse accepted an out-of-subnet guest IP")
 	}
 }
+
+func TestDeriveTapNameStableAndShort(t *testing.T) {
+	a := DeriveTapName("10.200.0.2")
+	b := DeriveTapName("10.200.0.2")
+	c := DeriveTapName("10.200.0.6")
+	if a != b {
+		t.Errorf("not deterministic: %q != %q", a, b)
+	}
+	if a == c {
+		t.Errorf("collision for distinct IPs: %q", a)
+	}
+	if len(a) > 15 {
+		t.Errorf("tap name too long for IFNAMSIZ: %q (%d)", a, len(a))
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // fakeVMM records the snapshot-load arguments and returns a canned error.
@@ -942,5 +943,46 @@ func TestCloseTearsDownVMM(t *testing.T) {
 	}
 	if s.State() != StateNew {
 		t.Fatalf("after close state = %s, want new", s.State())
+	}
+}
+
+func TestActivateAppliesEgressFilter(t *testing.T) {
+	rr := &recordingRunner{}
+	vm := &fakeVMM{}
+	s := newTestStub(t, vm, readyOK)
+	s.netRunner = rr.run
+	s.dnsUpstream = "1.1.1.1:53"
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	req := ActivateRequest{
+		SnapshotDir: "/data/templates/x/snapshot",
+		Egress:      "deny",
+		Allow:       []string{"10.0.0.5:5432"},
+		Network: &vsock.NotifyForkedNetwork{
+			GuestIP: "10.200.0.2", GatewayIP: "10.200.0.1", PrefixLen: 30, ResolverIP: "169.254.1.1",
+		},
+	}
+	res, err := s.Activate(context.Background(), req)
+	if err != nil || !res.OK {
+		t.Fatalf("activate failed: %v res=%+v", err, res)
+	}
+	var sawChain bool
+	for _, c := range rr.calls {
+		if c.stdin != "" && strings.Contains(c.stdin, "ip daddr 169.254.169.254 drop") {
+			sawChain = true
+		}
+	}
+	if !sawChain {
+		t.Errorf("activate did not apply the egress chain with metadata block; calls=%+v", rr.calls)
+	}
+
+	// The tap the filter created MUST be the tap the snapshot NIC is remapped to,
+	// or the restored VM has a NIC with no backing tap. Assert the override binds
+	// the baked NIC (eth0) to the derived tap.
+	wantTap := "sbt" // DeriveTapName prefix
+	if len(vm.gotOverr) != 1 || !strings.HasPrefix(vm.gotOverr[0].HostDevName, wantTap) {
+		t.Errorf("NIC override not bound to the derived tap: %+v", vm.gotOverr)
 	}
 }

@@ -218,6 +218,20 @@ func (a *Allocator) tapName(sandboxID string) string {
 	return fmt.Sprintf("%s%08x", a.prefix, sum[:4])
 }
 
+// DeriveTapName returns a deterministic, IFNAMSIZ-safe tap device name for a
+// guest IP. The husk single-VM-per-pod path derives the tap from the VM's guest
+// IP so the stub's filter and any external reference agree without a shared
+// allocator. It is "sbt" + the first 12 hex chars of sha256(guestIP), which is
+// 15 bytes (the Linux limit, maxIfaceName).
+func DeriveTapName(guestIP string) string {
+	sum := sha256.Sum256([]byte(guestIP))
+	name := "sbt" + fmt.Sprintf("%x", sum)[:12]
+	if len(name) > maxIfaceName {
+		name = name[:maxIfaceName]
+	}
+	return name
+}
+
 // deriveMAC builds a locally-administered unicast MAC deterministically from
 // the sandboxID. The first octet has bit 0x02 set (locally administered) and
 // bit 0x01 cleared (unicast); the remaining five octets come from the hash.

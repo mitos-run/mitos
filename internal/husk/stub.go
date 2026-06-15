@@ -13,8 +13,11 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/dnsproxy"
 	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/netconf"
 	"github.com/paperclipinc/mitos/internal/snapcompat"
 	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/paperclipinc/mitos/internal/vsock"
@@ -353,6 +356,23 @@ type Stub struct {
 	wsTransport  wsTransporter
 	vsockRelPath string
 
+	// netRunner, when non-nil, executes host networking commands in the pod
+	// netns so Activate can program the in-pod egress filter. Nil (unit and
+	// control-socket paths) skips all network setup. Injected so the filter is
+	// testable without root.
+	netRunner netfilterRunner
+	// nftRunner runs a single nft argv for the DNS proxy pinner. Nil reuses
+	// netRunner with empty stdin.
+	nftRunner func(argv []string) error
+	// dnsUpstream is the real resolver the per-pod DNS proxy forwards allowed
+	// queries to (host:port). Empty disables name-based egress (IP-only mode).
+	dnsUpstream string
+	// dnsProxy is the running per-pod DNS proxy for the active VM, stopped on
+	// Close. Nil when no VM is active or name egress is disabled.
+	dnsProxy *dnsproxy.Server
+	// activeTap records the active VM's tap so Close can tear the filter down.
+	activeTap string
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -543,13 +563,74 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		}
 	}
 
+	// In-pod egress filter (the load-bearing isolation control). This MUST run
+	// BEFORE LoadSnapshotWithOverrides: Firecracker requires the host tap to exist
+	// at restore time, and the snapshot's baked NIC is remapped to THIS tap. So we
+	// create the tap + install the default-deny egress chain (with the
+	// unconditional metadata block) here, then bind the baked NIC (NetIfaceID) to
+	// the SAME tap the filter created, so the restored VM comes up on a tap that
+	// already exists and is already governed by the egress chain. Deriving the tap
+	// from the guest IP keeps the stub's filter and the NIC remap in agreement
+	// without a shared allocator (the NIC/tap binding risk: a mismatch here is a
+	// VM with a NIC backed by no tap). FAIL CLOSED: a filter error means the VM
+	// would have UNFILTERED egress (or a broken NIC), so we never load it. The
+	// guest IP and tap carry no secrets.
+	overrides := req.NetworkOverrides
+	if s.netRunner != nil && req.Network != nil {
+		tap := netconf.DeriveTapName(req.Network.GuestIP)
+		cfg := NetfilterConfig{
+			Tap:        tap,
+			GuestIP:    net.ParseIP(req.Network.GuestIP),
+			HostIP:     net.ParseIP(req.Network.GatewayIP),
+			Egress:     v1alpha1.EgressPolicy(req.Egress),
+			Allow:      req.Allow,
+			ResolverIP: net.ParseIP(req.Network.ResolverIP),
+		}
+		if cfg.Egress == "" {
+			cfg.Egress = v1alpha1.EgressDeny
+		}
+		if err := applyEgressFilter(ctx, s.netRunner, cfg); err != nil {
+			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		// Bind the snapshot's baked NIC to the tap the filter just created, so the
+		// restored VM's NIC has a backing tap governed by the egress chain. This
+		// override pins HostDevName regardless of what the caller passed, which is
+		// what keeps the tap-vs-NIC binding correct.
+		overrides = []firecracker.NetworkOverride{{
+			IfaceID:     firecracker.NetIfaceID,
+			HostDevName: tap,
+		}}
+		s.activeTap = tap
+
+		// Per-pod DNS proxy for name-based egress: resolve only allowlisted names
+		// and pin each resolved IP into this tap's dynamic set. It binds the
+		// resolver socket only (independent of VM state), so starting it here is
+		// safe. IP-only allowlists (empty name set) still run with an empty
+		// registry. FAIL CLOSED on a bad registry: do not load the VM.
+		if req.Network.ResolverIP != "" && s.dnsUpstream != "" {
+			reg, _, derr := buildEgressDNSRegistry(req.Network.GuestIP, req.Allow)
+			if derr != nil {
+				werr := fmt.Errorf("husk: build dns registry: %w", derr)
+				return ActivateResult{OK: false, Error: werr.Error()}, werr
+			}
+			nftRun := s.nftRunner
+			if nftRun == nil {
+				nftRun = func(argv []string) error { return s.netRunner(ctx, argv, "") }
+			}
+			proxy := newEgressDNSProxy(reg, tap, s.dnsUpstream, nftRun)
+			go func() { _ = proxy.ListenAndServe(net.JoinHostPort(req.Network.ResolverIP, "53")) }()
+			s.dnsProxy = proxy
+		}
+	}
+
 	// Load the snapshot PAUSED (resume=false). The rootfs drive rebind below MUST
 	// happen before the guest runs, and PATCH /drives on the ROOT device of an
 	// already-RESUMED VM both leaves a write window (any writeback between resume
 	// and the rebind hits the SHARED template rootfs) and may be rejected by
 	// Firecracker. Loading paused lets us rebind while the guest is frozen, then
 	// resume explicitly. nil overrides restores exactly as before.
-	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, req.NetworkOverrides); err != nil {
+	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		// Fail closed: the snapshot did not load; the VM is not usable. Leave
 		// state dormant so a retry (or teardown) can decide what to do.
 		werr := fmt.Errorf("husk: load snapshot from %s: %w", req.SnapshotDir, err)
@@ -988,6 +1069,19 @@ func (s *Stub) Close() error {
 			fmt.Fprintf(os.Stderr, "husk: remove per-activation rootfs clone %s: %v\n", s.rootfsClonePath, rmErr)
 		}
 		s.rootfsClonePath = ""
+	}
+
+	// Stop the per-pod DNS proxy and tear down the in-pod egress filter (tap +
+	// per-tap nft state) for the VM this stub held. Best effort: a teardown error
+	// must not block VMM close. Done before the vm == nil early return so a
+	// filter applied during a failed activate is still reaped.
+	if s.dnsProxy != nil {
+		_ = s.dnsProxy.Shutdown(context.Background())
+		s.dnsProxy = nil
+	}
+	if s.netRunner != nil && s.activeTap != "" {
+		_ = teardownEgressFilter(context.Background(), s.netRunner, s.activeTap)
+		s.activeTap = ""
 	}
 
 	if s.vm == nil {
