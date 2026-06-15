@@ -220,10 +220,15 @@ const defaultDataDir = "/var/lib/mitos"
 
 // defaultHuskCPU and defaultHuskMemory size a husk pod when the template
 // carries no Resources. They make the sandbox visible to the scheduler as
-// ordinary pod requests (scheduler truth). Documented defaults: 1 cpu, 512Mi,
-// matching the dormant stub's --mem-mib default.
+// ordinary pod requests (scheduler truth). The CPU default is a small RESERVATION
+// (250m), not a cap: the husk container has NO CPU limit, so the microVM bursts
+// freely up to node capacity when the agent runs, while the modest request packs
+// many mostly-idle sandboxes per node (agent sandboxes spend most time waiting on
+// the model, not on CPU). The k8s CPU request is decoupled from the guest vCPU
+// count (firecracker.VMConfig.VcpuCount); a template can raise the request for a
+// CPU-heavy workload, or memory becomes the binding density constraint first.
 var (
-	defaultHuskCPU    = resource.MustParse("1")
+	defaultHuskCPU    = resource.MustParse("250m")
 	defaultHuskMemory = resource.MustParse("512Mi")
 )
 
