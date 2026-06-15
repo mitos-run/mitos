@@ -1,34 +1,38 @@
 # ADR 0006: the husk-pod NET_ADMIN capability for in-pod egress firewalling
 
-Status: proposed (2026-06-15)
+Status: accepted (2026-06-15)
 Issue: #18 (W1 husk pods), #3 (network identity and egress policy), #30 (residual
-ADRs). Related: docs/threat-model.md section 0 surface 5 (the top must-fix-first
-blocker), section 4 (per-mode egress enforcement) and the K8s NetworkPolicy row,
-section 3 (default-SA-token note); docs/husk-pods.md section 6d; the host-side
-enforcement model is docs/superpowers/plans/2026-06-11-guest-networking.md
-(`internal/netconf`, `internal/network`, `internal/dnsproxy`); the husk wiring
-point is `internal/controller/sandboxclaim_controller.go` `huskNotifyNetwork`
-(returns nil today) and `internal/controller/huskpod.go`.
+ADRs). Related: docs/threat-model.md section 0 surface 5 (was the top
+must-fix-first blocker, now mitigated), section 4 (per-mode egress enforcement)
+and the K8s NetworkPolicy row, section 3 (default-SA-token note);
+docs/husk-pods.md section 6d; the enforcement model is
+docs/superpowers/plans/2026-06-15-husk-network-isolation.md
+(`internal/netconf`, `internal/dnsproxy`); the shipped mechanism is the in-pod
+filter `internal/husk/netfilter.go` applied in `internal/husk/stub.go`, the
+threaded allowlist in `internal/controller/sandboxclaim_controller.go`
+(`huskNotifyNetwork` + `huskEgressConfig`), the `NET_ADMIN` add in
+`internal/controller/huskpod.go`, and the best-effort NetworkPolicy in
+`internal/controller/husknetworkpolicy.go`.
 
 ## Context
 
 In the husk default the VM's tap lives inside the HUSK POD's network namespace,
 so the sandbox's egress IS the pod's egress (docs/threat-model.md section 0
-surface 5). The extended security review found, and the threat model now records,
-that this project ships NO egress enforcement on the husk default path:
+surface 5). Before this change the extended security review found that the
+project shipped NO egress enforcement on the husk default path:
 
-- The product creates NO `NetworkPolicy`; no Go code imports
-  `networking.k8s.io/v1` or constructs one, and `huskNotifyNetwork` returns nil
-  (the per-template allowlist is never threaded into the husk guest network).
-- The host-nftables egress dataplane (docs/threat-model.md section 4) is NOT
-  installed for husk pods; it runs only on the opt-in raw-forkd path with
+- The product created NO `NetworkPolicy`; no Go code imported
+  `networking.k8s.io/v1` or constructed one, and `huskNotifyNetwork` returned nil
+  (the per-template allowlist was never threaded into the husk guest network).
+- The host-nftables egress dataplane (docs/threat-model.md section 4) was NOT
+  installed for husk pods; it ran only on the opt-in raw-forkd path with
   `--enable-networking`.
 
-Consequence, stated bluntly in the threat model: husk egress is default-OPEN, the
-cloud metadata endpoint `169.254.169.254` is reachable from a guest, and a guest
-(untrusted code, by design) can fetch the node's cloud IAM credentials. This is
-the TOP must-fix-first blocker for running untrusted code (docs/threat-model.md
-section 0 surface 5 and section 4, status open/high).
+Consequence, before the fix: husk egress was default-OPEN, the cloud metadata
+endpoint `169.254.169.254` was reachable from a guest, and a guest (untrusted
+code, by design) could fetch the node's cloud IAM credentials. This was the TOP
+must-fix-first blocker for running untrusted code, now closed by the decision
+below.
 
 The enforcement model mitos already proved on the raw-forkd path is host-side
 nftables on the tap: a per-tap default-deny egress ruleset, accept
@@ -101,20 +105,24 @@ control channel; the guest never gains `NET_ADMIN`.
 
 ## Consequences
 
-- This ADR records the DECISION; it is `proposed` because the control is NOT yet
-  shipped. Until it merges, husk egress remains default-OPEN with the metadata
-  endpoint reachable (docs/threat-model.md section 0 surface 5, status open/high),
-  and that open status must remain truthfully stated. When the control lands, the
-  threat-model surface-5 status moves from open to mitigated IN THE SAME PR, this
-  ADR's status moves to `accepted`, and in-VM CI proof on a KVM-capable kubelet
-  (default-deny enforced, metadata blocked, allowlist honored) is required before
-  any "husk egress is enforced" claim per the no-unverified-claims rule.
+- This ADR is `accepted`: the control is SHIPPED. The husk-stub programs the
+  in-pod nftables default-deny egress filter in the pod's own netns at activation
+  (`internal/husk/netfilter.go`, `internal/husk/stub.go`), the unconditional
+  cloud-metadata block is rendered before any allow (`netconf.RenderMetadataBlock`),
+  the per-template allowlist is threaded through
+  (`internal/controller/sandboxclaim_controller.go`,
+  `husk.ActivateRequest.Egress`/`Allow`), and the controller emits a best-effort
+  NetworkPolicy as defense in depth (`internal/controller/husknetworkpolicy.go`).
+  The threat-model surface-5 status is moved from open to mitigated in the same
+  change. In-VM proof on a KVM-capable kubelet (default-deny enforced, metadata
+  blocked, allowlist honored) is the gated cluster e2e
+  `test/cluster-e2e/husk-network-e2e.sh` (the `cluster-husk-network-e2e` suite),
+  run by the maintainer on the live KVM cluster per the no-unverified-claims rule.
 - The PSA exception accounting (ADR 0003) gains a THIRD documented item for the
-  husk pod when this ships: the single `capabilities.add: [NET_ADMIN]`. The
-  compliance claim language (docs/compliance-claims.md) and the threat model must
-  update the exception list to name it, so "drop ALL capabilities" becomes "drop
-  ALL except the one scoped `NET_ADMIN` for in-netns egress firewalling", stated
-  honestly rather than omitted.
+  husk pod: the single `capabilities.add: [NET_ADMIN]`. The threat model exception
+  list now names it, so "drop ALL capabilities" reads "drop ALL except the one
+  scoped `NET_ADMIN` for in-netns egress firewalling", stated honestly rather than
+  omitted.
 - The capability is bounded to the pod's own netns; it does not grant host
   network control. This bound is the load-bearing justification and must be
   preserved: any future use of `NET_ADMIN` that reached beyond the pod netns would
