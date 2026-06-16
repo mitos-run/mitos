@@ -69,6 +69,14 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.LinkUpArgs(cfg.Tap), ""); err != nil {
 		return fmt.Errorf("husk netfilter: bring tap %s up: %w", cfg.Tap, err)
 	}
+	// Bind the in-pod DNS resolver address to the tap so the per-pod DNS proxy can
+	// listen on it and the guest's queries (sent to it via the tap gateway) are
+	// delivered locally instead of being forwarded out (now that ip_forward is on).
+	if cfg.ResolverIP != nil {
+		if err := run(ctx, netconf.ResolverAddrAddArgs(cfg.ResolverIP, cfg.Tap), ""); err != nil {
+			return fmt.Errorf("husk netfilter: bind resolver %s to tap %s: %w", cfg.ResolverIP, cfg.Tap, err)
+		}
+	}
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedTable()); err != nil {
 		return fmt.Errorf("husk netfilter: apply shared egress table: %w", err)
 	}

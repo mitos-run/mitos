@@ -40,12 +40,18 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	if !forwardingEnabled {
 		t.Error("applyEgressFilter did not enable IPv4 forwarding")
 	}
-	// Expect: tap add, addr add, link up, shared table apply, sandbox chain apply,
-	// masquerade apply.
-	if len(rr.calls) != 6 {
-		t.Fatalf("got %d calls, want 6: %+v", len(rr.calls), rr.calls)
+	// Expect: tap add, addr add, link up, resolver addr add, shared table apply,
+	// sandbox chain apply, masquerade apply.
+	if len(rr.calls) != 7 {
+		t.Fatalf("got %d calls, want 7: %+v", len(rr.calls), rr.calls)
 	}
-	chainStdin := rr.calls[4].stdin
+	// The resolver IP is bound to the tap as a /32 so the per-pod DNS proxy can
+	// listen on it and the guest's queries are delivered locally.
+	resolverArgv := strings.Join(rr.calls[3].argv, " ")
+	if !strings.Contains(resolverArgv, "169.254.1.1/32") || !strings.Contains(resolverArgv, "sbtap0") {
+		t.Errorf("resolver IP not bound to tap as /32: %v", rr.calls[3].argv)
+	}
+	chainStdin := rr.calls[5].stdin
 	if !strings.Contains(chainStdin, "ip daddr 169.254.169.254 drop") {
 		t.Errorf("chain missing metadata block:\n%s", chainStdin)
 	}
@@ -55,7 +61,7 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	if !strings.Contains(chainStdin, netconf.SandboxChainName("sbtap0")) {
 		t.Errorf("chain not named for tap:\n%s", chainStdin)
 	}
-	masqStdin := rr.calls[5].stdin
+	masqStdin := rr.calls[6].stdin
 	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
 		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
 	}
