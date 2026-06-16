@@ -979,6 +979,10 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		owned = append(owned, p)
 	}
 
+	// Record refill latency (create -> first Ready dormant) for any warm pod not
+	// yet observed, then mark it so it is counted exactly once.
+	r.observeRefillForReadyPods(ctx, owned)
+
 	// Count only UNCLAIMED (dormant) pods toward the warm target. A pod carrying
 	// the claim label has been consumed by a SandboxClaim: it is activating or
 	// active, holding tenant state, and is NOT a warm slot. Counting it would
@@ -1042,6 +1046,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 				result.dormant = existing
 				return result, fmt.Errorf("create husk pod for pool %s: %w", pool.Name, err)
 			}
+			recordHuskPodCreated(poolKey(pool))
 			existing++
 		}
 		result.scaledUp = true
@@ -1070,6 +1075,39 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+// refillObservedAnnotation marks a husk pod whose create-to-Ready refill latency
+// has already been recorded, so the histogram counts each pod exactly once.
+const refillObservedAnnotation = "mitos.run/refill-observed"
+
+// observeRefillForReadyPods records, once per pod, the wall-clock from a husk
+// pod's creation to it first being seen Ready and dormant (a warm slot), the
+// refill cost an operator watches after a scale-up. The pod is patched with the
+// observed marker BEFORE the histogram is observed, so a patch failure means the
+// metric is recorded late on a later reconcile rather than double-counted. Best
+// effort: a patch failure is logged at low verbosity and retried next reconcile.
+func (r *SandboxPoolReconciler) observeRefillForReadyPods(ctx context.Context, owned []corev1.Pod) {
+	logger := log.FromContext(ctx)
+	for i := range owned {
+		p := owned[i]
+		if p.Labels[huskClaimLabel] != "" || !huskPodReady(&p) {
+			continue
+		}
+		if p.Annotations[refillObservedAnnotation] != "" {
+			continue
+		}
+		patch := client.MergeFrom(p.DeepCopy())
+		if p.Annotations == nil {
+			p.Annotations = map[string]string{}
+		}
+		p.Annotations[refillObservedAnnotation] = "true"
+		if err := r.Patch(ctx, &p, patch); err != nil {
+			logger.V(1).Info("mark husk pod refill-observed failed; will retry", "pod", p.Name, "err", err.Error())
+			continue
+		}
+		observeRefillLatency(r.now().Sub(p.CreationTimestamp.Time).Seconds())
+	}
+}
 
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
