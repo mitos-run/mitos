@@ -51,6 +51,7 @@ func main() {
 	var enableHuskPods bool
 	var enableRawForkd bool
 	var huskStubImage string
+	var huskDNSUpstream string
 	var huskControlPort int
 	var huskDataDir string
 	var huskMemoryHeadroom string
@@ -67,6 +68,7 @@ func main() {
 	flag.BoolVar(&enableHuskPods, "enable-husk-pods", true, "Pod-native default (issue #18): each SandboxPool builds the template snapshot AND maintains a warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes; claims activate a dormant husk pod in place. This is the default; pass --enable-raw-forkd to fall back to the fork-per-claim path. Ignored when --enable-raw-forkd or --mock is set (both force raw-forkd).")
 	flag.BoolVar(&enableRawForkd, "enable-raw-forkd", false, "Fallback run path: build the snapshot and fork per claim on a holder node (no husk pods). Off by default (the husk pod-native path runs). --mock implies this. husk-pods needs real KVM nodes; raw-forkd is the path the mock/dev overlay uses.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
+	flag.StringVar(&huskDNSUpstream, "husk-dns-upstream", "", "Comma-separated DNS resolver list (host:port) the husk-stub per-pod DNS proxy forwards allowlisted name queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty leaves name-based egress off (IP:port allowlists still enforced). Use a public resolver, not cluster DNS, so untrusted sandboxes cannot resolve internal service names.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/mitos", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
 	flag.StringVar(&huskMemoryHeadroom, "husk-memory-headroom", "256Mi", "Fixed-floor memory headroom added on top of a husk pod's memory request to size its memory LIMIT (production-blocker #2, cap 1). The limit must exceed the request because the cgroup holds MORE than the guest RAM: the Firecracker VMM, the husk-stub, and copy-on-write dirty-page slack. The effective headroom is max(this floor, --husk-memory-headroom-percent% of the request), so a large VM gets proportional slack and a small VM gets at least this floor. A too-tight limit OOM-kills a normal VM and destroys the activate latency; raise this if pods are OOM-killed at their configured RAM. Only used with --enable-husk-pods.")
@@ -182,6 +184,7 @@ func main() {
 		PeerToken:                 peerToken,
 		EnableHuskPods:            enableHuskPods,
 		HuskStubImage:             huskStubImage,
+		HuskDNSUpstream:           huskDNSUpstream,
 		KVMResourceName:           "mitos.run/kvm",
 		DataDir:                   huskDataDir,
 		HuskMemoryHeadroom:        huskHeadroomQty,
@@ -272,6 +275,7 @@ func main() {
 		EnableHuskPods:    enableHuskPods,
 		HuskControlPort:   huskControlPort,
 		HuskStubImage:     huskStubImage,
+		HuskDNSUpstream:   huskDNSUpstream,
 		DataDir:           huskDataDir,
 		KVMResourceName:   "mitos.run/kvm",
 		HuskTLSSecretName: controller.ForkdTLSSecretName,

@@ -30,6 +30,39 @@ func BaseChainName() string {
 	return "forward"
 }
 
+// NatTableName returns the nft ip-family table that holds the per-pod source
+// NAT for the guest subnet. It is separate from the inet filter table so the
+// masquerade rule can never disturb the egress filter chains.
+func NatTableName() string {
+	return "mitos_nat"
+}
+
+// RenderMasquerade renders the nft ruleset that source-NATs the guest's traffic
+// to the pod's address as it leaves the pod network namespace. The husk VM's
+// source is a private /30 (huskGuestIP) that is unroutable beyond the tap, so
+// without this SNAT every allowed egress connection sends but never receives
+// return traffic. The rule is scoped to the guest source IP so only VM traffic
+// is masqueraded, and the postrouting chain is flushed before the rule is
+// (re)added so re-delivery is idempotent. Pairs with IPv4 forwarding enabled in
+// the pod netns (the kernel will not route tap to uplink otherwise).
+func RenderMasquerade(guestIP net.IP) string {
+	table := NatTableName()
+	var b strings.Builder
+	fmt.Fprintf(&b, "add table ip %s\n", table)
+	fmt.Fprintf(&b, "add chain ip %s postrouting { type nat hook postrouting priority 100 ; policy accept ; }\n", table)
+	fmt.Fprintf(&b, "flush chain ip %s postrouting\n", table)
+	fmt.Fprintf(&b, "add rule ip %s postrouting ip saddr %s masquerade\n", table, guestIP.String())
+	return b.String()
+}
+
+// RenderMasqueradeDelete renders the teardown of the per-pod NAT table. The
+// table is added before being deleted so the delete is idempotent (nft errors
+// on deleting an absent table).
+func RenderMasqueradeDelete() string {
+	table := NatTableName()
+	return fmt.Sprintf("add table ip %s\ndelete table ip %s\n", table, table)
+}
+
 // MetadataAddrs are the cloud instance-metadata endpoints that are an
 // UNCONDITIONAL hard drop on every sandbox chain, even under EgressAllow: the
 // IPv4 IMDS address (shared by AWS, GCP metadata.google.internal, and Azure

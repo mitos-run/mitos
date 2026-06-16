@@ -46,10 +46,19 @@ type netfilterRunner func(ctx context.Context, argv []string, stdin string) erro
 // assign the host IP, bring it up, apply the idempotent shared table, then this
 // VM's per-tap chain. A malformed allowlist fails the whole call (fail-closed:
 // a VM never comes up with a half-applied filter).
-func applyEgressFilter(ctx context.Context, run netfilterRunner, cfg NetfilterConfig) error {
+func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) error {
 	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
 	if err != nil {
 		return fmt.Errorf("husk netfilter: parse allowlist: %w", err)
+	}
+	// IPv4 forwarding in the pod netns: the kernel will not route the guest /30
+	// between the tap and the pod uplink without it, so the SNAT below would have
+	// nothing to NAT. Nil seam (tests) skips it. Done first so a failure aborts
+	// before any tap/chain state is created (fail-closed: no half-open datapath).
+	if enableForwarding != nil {
+		if err := enableForwarding(); err != nil {
+			return fmt.Errorf("husk netfilter: enable ipv4 forwarding: %w", err)
+		}
 	}
 	if err := run(ctx, netconf.TapAddArgs(cfg.Tap), ""); err != nil {
 		return fmt.Errorf("husk netfilter: create tap %s: %w", cfg.Tap, err)
@@ -66,6 +75,12 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, cfg NetfilterCo
 	chain := netconf.RenderSandboxChain(cfg.Tap, cfg.GuestIP, cfg.Egress, enforceable, cfg.ResolverIP)
 	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
 		return fmt.Errorf("husk netfilter: apply egress chain for tap %s: %w", cfg.Tap, err)
+	}
+	// Source-NAT the guest's allowed egress to the pod address so return traffic
+	// for an allowed connection can find its way back; without it the private /30
+	// source is unroutable beyond the tap and every allowed connection hangs.
+	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderMasquerade(cfg.GuestIP)); err != nil {
+		return fmt.Errorf("husk netfilter: apply masquerade for guest %s: %w", cfg.GuestIP, err)
 	}
 	return nil
 }
@@ -86,6 +101,9 @@ func teardownEgressFilter(ctx context.Context, run netfilterRunner, tap string) 
 	}
 	if err := run(ctx, netconf.NftDeleteSandboxAllowSetArgs(tap), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("husk netfilter: delete allow set for tap %s: %w", tap, err)
+	}
+	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderMasqueradeDelete()); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("husk netfilter: delete masquerade table: %w", err)
 	}
 	return firstErr
 }
@@ -114,13 +132,13 @@ func buildEgressDNSRegistry(guestIP string, allow []string) (*dnsproxy.Registry,
 // newEgressDNSProxy builds the per-pod DNS proxy: it resolves only registered
 // names and pins each resolved address into THIS tap's dynamic allow set via an
 // nft pinner, the same model raw-forkd uses (cmd/forkd buildDNSProxy). tap is
-// fixed (one VM per pod), so tapFor always returns it. upstream is the real
-// resolver the proxy forwards allowed queries to. The returned server is
-// started by the caller with ListenAndServe on the resolver address.
-func newEgressDNSProxy(reg *dnsproxy.Registry, tap, upstream string, run func(argv []string) error) *dnsproxy.Server {
+// fixed (one VM per pod), so tapFor always returns it. upstreams are the real
+// resolvers the proxy forwards allowed queries to, tried in order. The returned
+// server is started by the caller with ListenAndServe on the resolver address.
+func newEgressDNSProxy(reg *dnsproxy.Registry, tap string, upstreams []string, run func(argv []string) error) *dnsproxy.Server {
 	pinner := dnsproxy.NewNftPinner(run)
 	tapFor := func(net.IP) string { return tap }
-	return dnsproxy.NewServer(reg, pinner, upstream, dnsProxyTTLFloor, tapFor, nil)
+	return dnsproxy.NewServer(reg, pinner, upstreams, dnsProxyTTLFloor, tapFor, nil)
 }
 
 // dnsProxyTTLFloor matches the raw-forkd proxy's TTL floor so a pinned address

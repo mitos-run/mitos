@@ -52,7 +52,10 @@ type SandboxForkReconciler struct {
 	HuskControlPort int
 	HuskSandboxPort int
 	// HuskStubImage / DataDir / KVMResourceName configure the fork child pods.
-	HuskStubImage   string
+	HuskStubImage string
+	// HuskDNSUpstream is the comma-separated resolver list (failover order) the
+	// fork child stub's per-pod DNS proxy forwards allowlisted name queries to.
+	HuskDNSUpstream string
 	DataDir         string
 	KVMResourceName string
 	// HuskTLSSecretName / HuskCASecretName are the husk PKI Secrets every husk
@@ -361,6 +364,7 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 
 	opts := HuskPodOptions{
 		StubImage:       r.HuskStubImage,
+		DNSUpstream:     r.HuskDNSUpstream,
 		KVMResourceName: r.KVMResourceName,
 		SnapshotID:      source.Spec.PoolRef.Name, // template id, for resource/kernel mounts
 		DataDir:         r.DataDir,

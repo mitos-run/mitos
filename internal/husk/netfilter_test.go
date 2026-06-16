@@ -32,12 +32,18 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 		Allow:      []string{"10.0.0.5:5432"},
 		ResolverIP: net.ParseIP("169.254.1.1"),
 	}
-	if err := applyEgressFilter(context.Background(), rr.run, cfg); err != nil {
+	var forwardingEnabled bool
+	enable := func() error { forwardingEnabled = true; return nil }
+	if err := applyEgressFilter(context.Background(), rr.run, enable, cfg); err != nil {
 		t.Fatal(err)
 	}
-	// Expect: tap add, addr add, link up, shared table apply, sandbox chain apply.
-	if len(rr.calls) != 5 {
-		t.Fatalf("got %d calls, want 5: %+v", len(rr.calls), rr.calls)
+	if !forwardingEnabled {
+		t.Error("applyEgressFilter did not enable IPv4 forwarding")
+	}
+	// Expect: tap add, addr add, link up, shared table apply, sandbox chain apply,
+	// masquerade apply.
+	if len(rr.calls) != 6 {
+		t.Fatalf("got %d calls, want 6: %+v", len(rr.calls), rr.calls)
 	}
 	chainStdin := rr.calls[4].stdin
 	if !strings.Contains(chainStdin, "ip daddr 169.254.169.254 drop") {
@@ -48,6 +54,10 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	}
 	if !strings.Contains(chainStdin, netconf.SandboxChainName("sbtap0")) {
 		t.Errorf("chain not named for tap:\n%s", chainStdin)
+	}
+	masqStdin := rr.calls[5].stdin
+	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
+		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
 	}
 }
 
@@ -84,7 +94,7 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 		Egress:  v1alpha1.EgressDeny,
 		Allow:   []string{"not-a-valid-entry"},
 	}
-	if err := applyEgressFilter(context.Background(), rr.run, cfg); err == nil {
+	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err == nil {
 		t.Fatal("expected error on malformed allow entry, got nil")
 	}
 }

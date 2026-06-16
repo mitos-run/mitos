@@ -41,6 +41,10 @@ type SandboxPoolReconciler struct {
 	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
 	// pod. Only used when EnableHuskPods is true.
 	HuskStubImage string
+	// HuskDNSUpstream is the comma-separated resolver list (failover order) the
+	// husk-stub's per-pod DNS proxy forwards allowlisted name queries to. Empty
+	// leaves name-based egress off (IP-only allowlists still enforced).
+	HuskDNSUpstream string
 	// KVMResourceName is the extended resource a husk pod requests for KVM
 	// access (the device plugin slot, not privileged: true). Empty defaults to
 	// mitos.run/kvm. Only used when EnableHuskPods is true.

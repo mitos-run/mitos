@@ -396,12 +396,18 @@ type Stub struct {
 	// nftRunner runs a single nft argv for the DNS proxy pinner. Nil reuses
 	// netRunner with empty stdin.
 	nftRunner func(argv []string) error
-	// dnsUpstream is the real resolver the per-pod DNS proxy forwards allowed
-	// queries to (host:port). Empty disables name-based egress (IP-only mode).
+	// dnsUpstream is the real resolver(s) the per-pod DNS proxy forwards allowed
+	// queries to: a comma-separated host:port list tried in failover order. Empty
+	// disables name-based egress (IP-only mode).
 	dnsUpstream string
 	// dnsProxy is the running per-pod DNS proxy for the active VM, stopped on
 	// Close. Nil when no VM is active or name egress is disabled.
 	dnsProxy *dnsproxy.Server
+	// enableForwarding turns on IPv4 forwarding in the pod netns before the egress
+	// datapath is programmed (the kernel will not route the guest /30 to the pod
+	// uplink otherwise). Nil skips it (tests, or a deployment that enables
+	// forwarding out of band); cmd/husk-stub wires the real /proc writer.
+	enableForwarding func() error
 	// activeTap records the active VM's tap so Close can tear the filter down.
 	activeTap string
 
@@ -425,6 +431,11 @@ func (s *Stub) SetNetRunner(run NetRunner) { s.netRunner = run }
 // SetDNSUpstream sets the real resolver the per-pod DNS proxy forwards
 // allowlisted queries to. Empty disables name-based egress.
 func (s *Stub) SetDNSUpstream(addr string) { s.dnsUpstream = addr }
+
+// SetForwardingEnabler wires the function the stub calls to enable IPv4
+// forwarding in the pod netns before programming the egress datapath. Nil (the
+// default) skips it. cmd/husk-stub wires the production /proc writer.
+func (s *Stub) SetForwardingEnabler(fn func() error) { s.enableForwarding = fn }
 
 // New builds a Stub for the given VMConfig. By default it uses the production
 // starter and guest-readiness seam; opts may inject fakes for tests.
@@ -645,7 +656,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		if cfg.Egress == "" {
 			cfg.Egress = v1alpha1.EgressDeny
 		}
-		if err := applyEgressFilter(ctx, s.netRunner, cfg); err != nil {
+		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
@@ -674,7 +685,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 			if nftRun == nil {
 				nftRun = func(argv []string) error { return s.netRunner(ctx, argv, "") }
 			}
-			proxy := newEgressDNSProxy(reg, tap, s.dnsUpstream, nftRun)
+			proxy := newEgressDNSProxy(reg, tap, dnsproxy.ParseUpstreams(s.dnsUpstream), nftRun)
 			go func() { _ = proxy.ListenAndServe(net.JoinHostPort(req.Network.ResolverIP, "53")) }()
 			s.dnsProxy = proxy
 		}

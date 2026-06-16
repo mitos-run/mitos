@@ -176,7 +176,7 @@ func run() error {
 		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
 		forksDir        = flag.String("forks-dir", "", "directory the node forks dir is mounted at, where a fork-snapshot op writes <forks-dir>/<fork-id>/{mem,vmstate}. When set, the serving stub confines fork-snapshot and remove-fork-snapshot writes to within it (fail-closed: a request naming a path outside it is refused). Empty leaves the prior behavior (the request's snapshot dir is used as-is). A node-local path, not a secret")
 		casDir          = flag.String("cas-dir", "", "directory the node content-addressed store is mounted at (read-write). When set, the dehydrate-workspace control op captures the active VM's /workspace into it and returns the manifest digest, and the hydrate-workspace op restores a manifest back into the VM. Empty disables the workspace ops (they fail closed). A node-local path, not a secret; workspace content is never logged")
-		dnsUpstream     = flag.String("dns-upstream", "", "Real DNS resolver (host:port) the per-pod egress proxy forwards allowlisted queries to. Empty disables name-based egress (IP-only allowlist mode).")
+		dnsUpstream     = flag.String("dns-upstream", "", "Comma-separated real DNS resolver list (host:port) the per-pod egress proxy forwards allowlisted queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty disables name-based egress (IP-only allowlist mode).")
 		enableEgress    = flag.Bool("enable-egress-filter", true, "Program the in-pod nftables egress filter (default-deny + metadata block) for the activated VM. Requires NET_ADMIN in the pod netns. Default true (the husk isolation guarantee).")
 	)
 	var envFlag, secretFlag kvFlag
@@ -400,6 +400,12 @@ func run() error {
 			return nil
 		})
 		stub.SetDNSUpstream(*dnsUpstream)
+		// Enable IPv4 forwarding in THIS pod's netns so the kernel routes the guest
+		// /30 between the tap and the pod uplink; the activate-time masquerade then
+		// SNATs it out. Needs the pod's NET_ADMIN, scoped to its own netns.
+		stub.SetForwardingEnabler(func() error {
+			return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
+		})
 	}
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")

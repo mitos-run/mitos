@@ -97,11 +97,42 @@ func queryFor(name string, qtype uint16) *dns.Msg {
 	return m
 }
 
-func newProxy(t *testing.T, reg *Registry, pinner Pinner, upstream string) *Server {
+func newProxy(t *testing.T, reg *Registry, pinner Pinner, upstreams ...string) *Server {
 	t.Helper()
-	return NewServer(reg, pinner, upstream, 60*time.Second, func(ip net.IP) string {
+	return NewServer(reg, pinner, upstreams, 60*time.Second, func(ip net.IP) string {
 		return "sb" + ip.String()
 	}, nil)
+}
+
+// TestServeDNSFailsOverToSecondUpstream proves a dead first upstream does not
+// blind egress: the proxy tries each configured upstream in order and answers
+// from the first that responds. This is the resilience contract of a
+// multi-upstream forwarder; a single resolver outage must not break name-based
+// allowlists.
+func TestServeDNSFailsOverToSecondUpstream(t *testing.T) {
+	good, stop := startUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"egress.test": {443}})
+	pinner := NewFakePinner()
+	// 127.0.0.1:1 is not listening; the proxy must fall over to the good upstream.
+	s := newProxy(t, reg, pinner, "127.0.0.1:1", good)
+
+	rw := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rw, queryFor("egress.test", dns.TypeA))
+
+	out := rw.written()
+	if out == nil || out.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR via failover, got %#v", out)
+	}
+	if len(out.Answer) != 1 {
+		t.Fatalf("expected 1 answer via failover, got %d", len(out.Answer))
+	}
+	if len(pinner.Pins()) != 1 {
+		t.Fatalf("expected the failover answer to be pinned, got %d pins", len(pinner.Pins()))
+	}
 }
 
 func TestServeDNSAllowlistedResolvesAndPins(t *testing.T) {
@@ -334,7 +365,7 @@ func TestServeDNSEmptyTapRefusedNoPin(t *testing.T) {
 	// tapFor returns "" for this guest: a registry/allocator desync, or a query
 	// from an IP that has already been released. The proxy must not pin into a
 	// bogus set and must not hand the guest an answer it cannot use.
-	s := NewServer(reg, pinner, upstream, 60*time.Second, func(net.IP) string {
+	s := NewServer(reg, pinner, []string{upstream}, 60*time.Second, func(net.IP) string {
 		return ""
 	}, nil)
 

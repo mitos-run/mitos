@@ -144,6 +144,10 @@ func huskSourceRootfsInPodPath(sourcePodName string) string {
 type HuskPodOptions struct {
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
+	// DNSUpstream is the comma-separated host:port resolver list (failover order)
+	// the stub's per-pod DNS proxy forwards allowlisted name queries to. Empty
+	// leaves name-based egress off (IP-only allowlists still enforced).
+	DNSUpstream string
 	// KVMResourceName is the extended resource the husk pod requests for KVM
 	// access. Empty defaults to mitos.run/kvm.
 	KVMResourceName string
@@ -381,6 +385,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// node, so each pod gets its own clone. $(POD_NAME) is substituted by the
 		// kubelet from the env var, not the shell.
 		"--vm-id", "$(POD_NAME)",
+	}
+
+	// Name-based egress: when the operator configured DNS upstream(s), pass them
+	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
+	// Empty leaves name-based egress off (IP-only allowlists still work); the
+	// value is a comma-separated host:port failover list, config not a secret.
+	if opts.DNSUpstream != "" {
+		args = append(args, "--dns-upstream", opts.DNSUpstream)
 	}
 
 	// Snapshot verify gate (fail-closed): when the pool has a recorded template
@@ -983,6 +995,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		}
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
+			DNSUpstream:     r.HuskDNSUpstream,
 			KVMResourceName: r.KVMResourceName,
 			SnapshotID:      pool.Spec.TemplateRef.Name,
 			DataDir:         r.DataDir,

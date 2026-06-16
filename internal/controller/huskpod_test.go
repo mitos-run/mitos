@@ -132,6 +132,40 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	}
 }
 
+// TestBuildHuskPodThreadsDNSUpstream proves the controller passes a configured
+// DNS upstream list to the husk-stub as --dns-upstream (the wiring that turns on
+// name-based egress), and omits the flag entirely when no upstream is configured
+// so the stub stays in IP-only allowlist mode.
+func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1alpha1.SandboxTemplate{}
+
+	withDNS := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage:   "img",
+		DNSUpstream: "1.1.1.1:53,8.8.8.8:53",
+	})
+	if !argsContainPair(withDNS.Spec.Containers[0].Args, "--dns-upstream", "1.1.1.1:53,8.8.8.8:53") {
+		t.Errorf("husk args missing --dns-upstream pair: %v", withDNS.Spec.Containers[0].Args)
+	}
+
+	withoutDNS := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
+	for _, a := range withoutDNS.Spec.Containers[0].Args {
+		if a == "--dns-upstream" {
+			t.Errorf("husk args must omit --dns-upstream when unset: %v", withoutDNS.Spec.Containers[0].Args)
+		}
+	}
+}
+
+func argsContainPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
+
 // TestHuskPodHasNetAdminForInPodFirewall asserts the husk container adds
 // exactly NET_ADMIN (and nothing else) so the stub can program the in-pod
 // nftables egress filter and tap in the pod's OWN netns. This is the documented

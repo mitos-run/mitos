@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -22,9 +23,11 @@ import (
 type Server struct {
 	registry *Registry
 	pinner   Pinner
-	// upstream is the host:port of the real resolver to forward allowed queries
-	// to (for example 1.1.1.1:53).
-	upstream string
+	// upstreams are the host:port real resolvers allowed queries are forwarded
+	// to, tried in order until one responds (for example 1.1.1.1:53 then
+	// 8.8.8.8:53). Multiple independent resolvers keep name-based egress working
+	// through a single resolver outage.
+	upstreams []string
 	// ttlFloor is the minimum pin lifetime. A record's TTL is raised to this
 	// floor so a very short TTL does not expire the pin before the guest
 	// connects.
@@ -42,19 +45,38 @@ type Server struct {
 
 // NewServer builds a Server. logger may be nil, in which case a discarding
 // logger is used.
-func NewServer(registry *Registry, pinner Pinner, upstream string, ttlFloor time.Duration, tapFor func(net.IP) string, logger *slog.Logger) *Server {
+func NewServer(registry *Registry, pinner Pinner, upstreams []string, ttlFloor time.Duration, tapFor func(net.IP) string, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discard{}, nil))
 	}
 	return &Server{
-		registry: registry,
-		pinner:   pinner,
-		upstream: upstream,
-		ttlFloor: ttlFloor,
-		tapFor:   tapFor,
-		client:   &dns.Client{},
-		logger:   logger,
+		registry:  registry,
+		pinner:    pinner,
+		upstreams: upstreams,
+		ttlFloor:  ttlFloor,
+		tapFor:    tapFor,
+		// A bounded per-query timeout so a dead upstream fails fast and the next
+		// one is tried, rather than hanging the guest's resolution.
+		client: &dns.Client{Timeout: upstreamQueryTimeout},
+		logger: logger,
 	}
+}
+
+// upstreamQueryTimeout bounds each forward to a single upstream so failover to
+// the next configured resolver is prompt.
+const upstreamQueryTimeout = 3 * time.Second
+
+// ParseUpstreams splits a comma-separated upstream list (for example
+// "1.1.1.1:53,8.8.8.8:53") into trimmed, non-empty host:port entries. The order
+// is preserved so the first entry is the primary resolver.
+func ParseUpstreams(csv string) []string {
+	var out []string
+	for _, part := range strings.Split(csv, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ServeDNS implements dns.Handler. It is the whole enforcement path: attribute
@@ -100,10 +122,21 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	resp, _, err := s.client.Exchange(r, s.upstream)
-	if err != nil || resp == nil {
-		s.logger.Debug("dns upstream failure",
-			"guest", clientIP.String(), "name", q.Name, "err", err)
+	var resp *dns.Msg
+	var lastErr error
+	for _, up := range s.upstreams {
+		r2, _, err := s.client.Exchange(r, up)
+		if err == nil && r2 != nil {
+			resp = r2
+			break
+		}
+		lastErr = err
+		s.logger.Debug("dns upstream failure, trying next",
+			"guest", clientIP.String(), "name", q.Name, "upstream", up, "err", err)
+	}
+	if resp == nil {
+		s.logger.Debug("all dns upstreams failed",
+			"guest", clientIP.String(), "name", q.Name, "err", lastErr)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		_ = w.WriteMsg(m)

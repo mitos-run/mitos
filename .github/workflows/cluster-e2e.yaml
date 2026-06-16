@@ -515,6 +515,13 @@ jobs:
             controller="${CONTROLLER_IMG}"
           kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
             -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--husk-stub-image=${HUSK_IMG}\"}]"
+          # Enable name-based egress for THIS job (the live cluster controller is
+          # image-patched, not re-applied, so the manifest's --husk-dns-upstream
+          # does not reach it): the per-pod DNS proxy forwards allowlisted queries
+          # to a public resolver pair (failover) so the allowlist-works probe
+          # (example.com) can resolve and connect. The teardown pops both args.
+          kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+            -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--husk-dns-upstream=1.1.1.1:53,8.8.8.8:53\"}]"
           kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=300s
 
       - name: Run the cluster husk network-isolation e2e
@@ -554,14 +561,19 @@ jobs:
           if [ -n "${PREV}" ]; then
             kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
               controller="${PREV}"
-            LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
-              -o jsonpath='{.spec.template.spec.containers[0].args}' \
-              | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
-            if [ -n "${LAST_IDX}" ]; then
-              kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
-                -p="[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/${LAST_IDX}\"}]" \
-                || true
-            fi
+            # Pop the two args this job appended (--husk-stub-image then
+            # --husk-dns-upstream): remove the last index twice, recomputing
+            # between removes since indices shift.
+            for _ in 1 2; do
+              LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+                -o jsonpath='{.spec.template.spec.containers[0].args}' \
+                | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
+              if [ -n "${LAST_IDX}" ] && [ "${LAST_IDX}" -ge 0 ]; then
+                kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+                  -p="[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/${LAST_IDX}\"}]" \
+                  || true
+              fi
+            done
             kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=180s
           else
             echo "no previous controller image recorded; leaving controller as-is"
