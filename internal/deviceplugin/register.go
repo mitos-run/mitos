@@ -101,26 +101,20 @@ func (r *Registrar) serveAndRegister(ctx context.Context) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(lis) }()
 
-	// Register with the kubelet only after the server is listening (the socket
-	// is bound above, so the kubelet can dial it as soon as we register).
-	if err := r.register(ctx); err != nil {
-		server.Stop()
-		_ = os.Remove(socket)
-		return fmt.Errorf("register with kubelet: %w", err)
-	}
-	r.logger.Info("device plugin registered with kubelet",
-		"resource", r.plugin.ResourceName(), "endpoint", socketName)
-
 	defer func() {
 		server.Stop()
 		_ = os.Remove(socket)
 	}()
 
-	// Watch the kubelet device-plugins directory: when the kubelet restarts it
-	// recreates kubelet.sock and forgets every registered plugin. Our gRPC server
-	// keeps serving its own socket, so without this we would block here forever
-	// while the node silently advertises ZERO devices. On kubelet.sock recreation
-	// we return so Run re-serves and re-registers against the new kubelet.
+	// Watch the kubelet device-plugins directory BEFORE registering: when the
+	// kubelet restarts it recreates kubelet.sock and forgets every registered
+	// plugin. Our gRPC server keeps serving its own socket, so without this we
+	// would block forever while the node silently advertises ZERO devices. On
+	// kubelet.sock recreation we return so Run re-serves and re-registers. The
+	// watch is started before register() so a kubelet.sock that is recreated in
+	// the window right after registration is not missed (existing files do not
+	// fire events, so the kubelet.sock we are about to dial is not a false
+	// trigger).
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("create kubelet socket watcher: %w", err)
@@ -129,6 +123,14 @@ func (r *Registrar) serveAndRegister(ctx context.Context) error {
 	if err := watcher.Add(r.kubeletDir); err != nil {
 		return fmt.Errorf("watch kubelet dir %s: %w", r.kubeletDir, err)
 	}
+
+	// Register with the kubelet only after the server is listening (the socket
+	// is bound above, so the kubelet can dial it as soon as we register).
+	if err := r.register(ctx); err != nil {
+		return fmt.Errorf("register with kubelet: %w", err)
+	}
+	r.logger.Info("device plugin registered with kubelet",
+		"resource", r.plugin.ResourceName(), "endpoint", socketName)
 
 	for {
 		select {
