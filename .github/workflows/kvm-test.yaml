@@ -35,7 +35,7 @@ jobs:
   firecracker-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check KVM availability
         run: |
@@ -101,7 +101,7 @@ jobs:
 
           ls -lh /tmp/mitos-test/
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
 
@@ -1209,7 +1209,7 @@ jobs:
       # artifact for the regenerated-every-run distributions.
       - name: Upload bench JSON artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-results
           path: |
@@ -1367,7 +1367,7 @@ jobs:
 
       - name: Upload metering report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metering-report
           path: /tmp/metering.json
@@ -1563,7 +1563,7 @@ jobs:
 
       - name: Upload husk-probe report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: husk-probe-report
           path: /tmp/husk.json
@@ -1771,7 +1771,7 @@ jobs:
 
       - name: Upload husk-stub activation results artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: husk-stub-activation
           path: |
@@ -2021,7 +2021,7 @@ jobs:
 
       - name: Upload husk activate-correctness artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: husk-activate-correctness
           path: |
@@ -2332,7 +2332,7 @@ jobs:
 
       - name: Upload husk network-activation artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: husk-net-activation
           path: |
