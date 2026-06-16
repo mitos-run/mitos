@@ -401,3 +401,91 @@ func TestServeDNSUpstreamFailureServfailNoPin(t *testing.T) {
 		t.Errorf("expected no pins on upstream failure, got %d", got)
 	}
 }
+
+func TestIsBlockedPinAddr(t *testing.T) {
+	blocked := []string{
+		"10.0.0.5", "172.16.0.1", "192.168.1.1", // RFC1918 (covers most cluster pod/service CIDRs)
+		"100.64.0.1",         // RFC6598 CGNAT
+		"127.0.0.1",          // loopback
+		"169.254.169.254",    // link-local (cloud metadata)
+		"0.0.0.0",            // unspecified
+		"224.0.0.1",          // multicast
+		"::1",                // v6 loopback
+		"fc00::1", "fd00::1", // v6 ULA
+		"fe80::1", // v6 link-local
+	}
+	for _, s := range blocked {
+		if !isBlockedPinAddr(net.ParseIP(s)) {
+			t.Errorf("isBlockedPinAddr(%s) = false, want true (non-public range)", s)
+		}
+	}
+	allowed := []string{"198.51.100.2", "93.184.216.34", "8.8.8.8", "2001:db8::7", "2606:4700:4700::1111"}
+	for _, s := range allowed {
+		if isBlockedPinAddr(net.ParseIP(s)) {
+			t.Errorf("isBlockedPinAddr(%s) = true, want false (public)", s)
+		}
+	}
+}
+
+// startPrivateUpstream answers internal.test A with a PRIVATE 10.0.0.5 (and a
+// public 198.51.100.9 for split.test, alongside a private one) to test pin
+// filtering.
+func startPrivateUpstream(t *testing.T) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		q := r.Question[0]
+		switch {
+		case q.Qtype == dns.TypeA && canonicalName(q.Name) == "internal.test":
+			rr, _ := dns.NewRR("internal.test. " + itoa(upstreamTTL) + " IN A 10.0.0.5")
+			m.Answer = append(m.Answer, rr)
+		case q.Qtype == dns.TypeA && canonicalName(q.Name) == "split.test":
+			pub, _ := dns.NewRR("split.test. " + itoa(upstreamTTL) + " IN A 198.51.100.9")
+			priv, _ := dns.NewRR("split.test. " + itoa(upstreamTTL) + " IN A 10.0.0.6")
+			m.Answer = append(m.Answer, pub, priv)
+		default:
+			m.SetRcode(r, dns.RcodeNameError)
+		}
+		_ = w.WriteMsg(m)
+	})
+	srv := &dns.Server{PacketConn: pc, Handler: handler}
+	go func() { _ = srv.ActivateAndServe() }()
+	return pc.LocalAddr().String(), func() { _ = srv.Shutdown() }
+}
+
+// TestServeDNSDoesNotPinPrivateAddresses proves an allowlisted name that
+// resolves to a private/internal address is NOT pinned (so the guest cannot
+// reach it) and the private answer is stripped from the response, blocking
+// DNS-rebinding to internal cluster targets.
+func TestServeDNSDoesNotPinPrivateAddresses(t *testing.T) {
+	upstream, stop := startPrivateUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"internal.test": {443}, "split.test": {443}})
+	pinner := NewFakePinner()
+	s := newProxy(t, reg, pinner, upstream)
+
+	rw := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rw, queryFor("internal.test", dns.TypeA))
+	if len(pinner.Pins()) != 0 {
+		t.Errorf("private address was pinned: %+v", pinner.Pins())
+	}
+	if out := rw.written(); out != nil && len(out.Answer) != 0 {
+		t.Errorf("private answer not stripped from response: %+v", out.Answer)
+	}
+
+	// split.test: only the public answer should be pinned and returned.
+	rw2 := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5301}}
+	s.ServeDNS(rw2, queryFor("split.test", dns.TypeA))
+	pins := pinner.Pins()
+	if len(pins) != 1 || !pins[0].IP.Equal(net.ParseIP("198.51.100.9")) {
+		t.Errorf("split.test pins = %+v, want only the public 198.51.100.9", pins)
+	}
+}
