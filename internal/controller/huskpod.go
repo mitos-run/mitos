@@ -829,6 +829,20 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		},
 	}
 
+	// Name-based egress needs the kernel to route the guest /30 out the pod
+	// uplink, which requires net.ipv4.ip_forward=1 in the POD network namespace.
+	// In Kubernetes the app container joins the pod netns (it does not create it),
+	// so the runtime leaves /proc/sys/net read-only and the stub cannot write the
+	// sysctl itself; the kubelet must set it as a pod sysctl before the container
+	// starts. Added only when name egress is configured (opts.DNSUpstream set), so
+	// clusters not using name egress need no node change. This is an UNSAFE sysctl:
+	// the node's kubelet must list it in allowedUnsafeSysctls (see
+	// deploy/talos/worker-kvm.yaml) or the pod is rejected with SysctlForbidden.
+	if opts.DNSUpstream != "" {
+		pod.Spec.SecurityContext.Sysctls = append(pod.Spec.SecurityContext.Sysctls,
+			corev1.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
+	}
+
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
 	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is

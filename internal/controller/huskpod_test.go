@@ -148,6 +148,11 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 	if !argsContainPair(withDNS.Spec.Containers[0].Args, "--dns-upstream", "1.1.1.1:53,8.8.8.8:53") {
 		t.Errorf("husk args missing --dns-upstream pair: %v", withDNS.Spec.Containers[0].Args)
 	}
+	// Name egress also needs ip_forward in the pod netns, set as a pod sysctl the
+	// kubelet applies (the container cannot write the read-only /proc/sys/net).
+	if !hasSysctl(withDNS.Spec.SecurityContext, "net.ipv4.ip_forward", "1") {
+		t.Errorf("husk pod missing net.ipv4.ip_forward=1 sysctl when name egress on: %+v", withDNS.Spec.SecurityContext.Sysctls)
+	}
 
 	withoutDNS := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
 	for _, a := range withoutDNS.Spec.Containers[0].Args {
@@ -155,6 +160,22 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 			t.Errorf("husk args must omit --dns-upstream when unset: %v", withoutDNS.Spec.Containers[0].Args)
 		}
 	}
+	// No name egress => no unsafe sysctl, so clusters not using it need no node change.
+	if hasSysctl(withoutDNS.Spec.SecurityContext, "net.ipv4.ip_forward", "1") {
+		t.Errorf("husk pod must not set ip_forward sysctl when name egress off: %+v", withoutDNS.Spec.SecurityContext.Sysctls)
+	}
+}
+
+func hasSysctl(sc *corev1.PodSecurityContext, name, val string) bool {
+	if sc == nil {
+		return false
+	}
+	for _, s := range sc.Sysctls {
+		if s.Name == name && s.Value == val {
+			return true
+		}
+	}
+	return false
 }
 
 func argsContainPair(args []string, flag, val string) bool {

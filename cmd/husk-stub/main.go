@@ -400,11 +400,27 @@ func run() error {
 			return nil
 		})
 		stub.SetDNSUpstream(*dnsUpstream)
-		// Enable IPv4 forwarding in THIS pod's netns so the kernel routes the guest
-		// /30 between the tap and the pod uplink; the activate-time masquerade then
-		// SNATs it out. Needs the pod's NET_ADMIN, scoped to its own netns.
+		// Enable IPv4 forwarding so the kernel routes the guest /30 between the tap
+		// and the pod uplink; the activate-time masquerade then SNATs it out.
+		//
+		// BEST EFFORT: in Kubernetes the app container JOINS the pod (pause)
+		// network namespace rather than creating it, so the runtime leaves
+		// /proc/sys/net read-only even with NET_ADMIN; the write then fails. We log
+		// and continue instead of failing activation: with forwarding off the guest
+		// simply cannot route out, so egress stays fully denied (fail closed) while
+		// the VM and exec (vsock) still work. To turn on egress allowlists the node
+		// must set net.ipv4.ip_forward=1 in the pod netns, delivered as the husk
+		// pod sysctl (see deploy/talos/worker-kvm.yaml allowedUnsafeSysctls). The
+		// non-k8s sandbox-server path, which owns its netns, can still write it here.
 		stub.SetForwardingEnabler(func() error {
-			return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
+			const p = "/proc/sys/net/ipv4/ip_forward"
+			if cur, rerr := os.ReadFile(p); rerr == nil && strings.TrimSpace(string(cur)) == "1" {
+				return nil // already enabled (kubelet pod sysctl or host default)
+			}
+			if werr := os.WriteFile(p, []byte("1\n"), 0o644); werr != nil {
+				fmt.Fprintf(os.Stderr, "husk-stub: could not enable ip_forward (%v); egress allowlists need net.ipv4.ip_forward=1 in the pod netns (node sysctl). Egress stays fully denied until then.\n", werr)
+			}
+			return nil
 		})
 	}
 
