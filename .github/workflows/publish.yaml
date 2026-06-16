@@ -35,6 +35,8 @@ jobs:
             dockerfile: Dockerfile.forkd
           - name: mitos-husk-stub
             dockerfile: Dockerfile.husk-stub
+          - name: mitos-kvm-device-plugin
+            dockerfile: Dockerfile.kvm-device-plugin
     env:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
