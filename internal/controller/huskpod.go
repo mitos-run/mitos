@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -736,6 +737,27 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						ContainerPort: huskSandboxPort,
 						Protocol:      corev1.ProtocolTCP,
 					}},
+					// Readiness gates on the dormant control listener (:9443), which
+					// the stub serves only AFTER it reaches StateDormant (Prepare
+					// done: per-activation rootfs cloned, Firecracker VMM prepared).
+					// Without it the pod reports Ready the instant the container
+					// starts, so the pool counts it warm and a claim activates it
+					// before the stub is dormant-serving; that activate fails, the pod
+					// is consumed, and the warm pool churns (over-creates). The probe
+					// has no liveness counterpart, so a not-yet-dormant pod is held
+					// out of the pool but never restarted by it; the bounded rootfs
+					// wait inside Prepare governs the genuine startup ceiling.
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							TCPSocket: &corev1.TCPSocketAction{
+								Port: intstr.FromInt(HuskControlPort),
+							},
+						},
+						InitialDelaySeconds: 2,
+						PeriodSeconds:       3,
+						TimeoutSeconds:      2,
+						FailureThreshold:    6,
+					},
 					VolumeMounts: mounts,
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
