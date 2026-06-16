@@ -15,7 +15,16 @@ RUN apt-get update -qq && \
         ca-certificates \
         curl \
         btrfs-progs \
+        iproute2 \
+        nftables \
     && rm -rf /var/lib/apt/lists/*
+# iproute2 (ip) and nftables (nft) are REQUIRED when forkd runs with
+# --enable-networking: it shells out to `ip tuntap add` to create the build-time
+# placeholder tap that bakes the eth0 NIC into the template snapshot (so husk
+# activation can network_override it onto each pod's tap), and to the per-fork
+# tap + egress chain on the raw-forkd path. Without them, template builds abort
+# with `exec: "ip": executable file not found` and produce empty snapshots. Same
+# tooling the husk-stub image carries for its in-pod egress filter.
 
 # Install Firecracker
 ARG FC_VERSION=v1.15.0

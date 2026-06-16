@@ -30,7 +30,7 @@
 # Env knobs:
 #   READY_TIMEOUT   per-stage wait budget, seconds (default 180)
 #   POLL_INTERVAL   poll interval, seconds (default 1)
-#   E2E_IMAGE       template image (default python:3.12-slim)
+#   E2E_IMAGE       template image (default mirror.gcr.io/library/python:3.12-slim)
 #   ALLOW_HOST      allowlisted host:port to prove reachable (default example.com:443)
 #   DENY_HOST       non-allowlisted host to prove blocked (default 1.1.1.1)
 #
@@ -44,7 +44,7 @@ fi
 
 READY_TIMEOUT="${READY_TIMEOUT:-180}"
 POLL_INTERVAL="${POLL_INTERVAL:-1}"
-E2E_IMAGE="${E2E_IMAGE:-python:3.12-slim}"
+E2E_IMAGE="${E2E_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 ALLOW_HOST="${ALLOW_HOST:-example.com:443}"
 DENY_HOST="${DENY_HOST:-1.1.1.1}"
 ALLOW_NAME="${ALLOW_HOST%%:*}"
