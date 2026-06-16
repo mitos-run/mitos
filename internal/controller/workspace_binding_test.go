@@ -24,6 +24,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -228,6 +229,54 @@ func TestClaimWorkspaceDehydrateOnTerminate(t *testing.T) {
 	if head.Spec.ContentManifest != string(revDigest) {
 		t.Fatalf("head revision contentManifest = %q, want the dehydrate digest %q", head.Spec.ContentManifest, revDigest)
 	}
+}
+
+// TestClaimDeletionTerminatesWhenBoundWorkspaceGone proves a claim whose bound
+// Workspace has already been deleted is still garbage-collected on delete: the
+// dehydrate-on-terminate step treats a missing workspace as a terminal no-op
+// (nothing left to capture) and drops the finalizer, rather than retrying the
+// dehydrate forever and wedging the claim (the failure-GC finalizer hot-loop).
+func TestClaimDeletionTerminatesWhenBoundWorkspaceGone(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x5a)))
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-ghost-node", "wsg-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, "ws-bind-ghost", v1alpha1.WorkspaceRetention{})
+
+	claim := makeBoundClaim(t, "wsg", "ws-bind-ghost", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-ghost-node",
+	})
+	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
+
+	// Delete the bound workspace out from under the still-active claim and wait
+	// until it is truly gone (Workspace carries no finalizer, so Get returns
+	// NotFound). This is the state that triggered the hot-loop.
+	var ws v1alpha1.Workspace
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "ws-bind-ghost"}, &ws); err != nil {
+		t.Fatalf("get workspace before delete: %v", err)
+	}
+	if err := k8sClient.Delete(ctx, &ws); err != nil {
+		t.Fatalf("delete workspace: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "ws-bind-ghost"}, &ws)
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Deleting the claim must finalize cleanly despite the missing workspace.
+	if err := k8sClient.Delete(ctx, claim); err != nil {
+		t.Fatalf("delete claim: %v", err)
+	}
+	waitClaimGone(t, "wsg-claim")
 }
 
 func TestClaimWorkspaceSingleWriterBusy(t *testing.T) {

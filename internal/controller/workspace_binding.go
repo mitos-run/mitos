@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -735,6 +736,18 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		return nil
 	}
 	logger := log.FromContext(ctx)
+
+	// A bound workspace that has already been deleted leaves nothing to capture:
+	// the dehydrate target is gone. Treat it as a TERMINAL no-op so the finalizer
+	// is dropped and the claim is garbage-collected, rather than retrying the
+	// dehydrate forever (the finalizer hot-loop: a NotFound workspace returned as
+	// a retryable error wedges the claim and starves the reconcile queue).
+	var ws v1alpha1.Workspace
+	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); apierrors.IsNotFound(err) {
+		logger.Info("bound workspace already deleted; skipping dehydrate on terminate",
+			"claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name)
+		return nil
+	}
 
 	// workspace.dehydrate is a child of controller.reconcileClaim (it starts from
 	// the reconcile ctx), so the captured revision resolves to the request that
