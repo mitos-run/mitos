@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.0](https://github.com/paperclipinc/mitos/compare/v0.3.0...v0.4.0) (2026-06-16)
+
+
+### Features
+
+* **controller:** add NET_ADMIN to husk pod for in-pod egress firewall ([23ffe77](https://github.com/paperclipinc/mitos/commit/23ffe7772e7254ce8bdef81e6372e92bdd3250cc))
+* **controller:** emit best-effort husk NetworkPolicy (default-deny egress) ([4e52c2b](https://github.com/paperclipinc/mitos/commit/4e52c2bb4d3b6194eb757064ee9182fd23e89541))
+* **controller:** ensure husk NetworkPolicy during pool reconcile ([795000f](https://github.com/paperclipinc/mitos/commit/795000ffa38a646df62f5cd580e3d661ad52502b))
+* **controller:** thread template egress policy + allowlist into husk activate ([1954a03](https://github.com/paperclipinc/mitos/commit/1954a03372b28a2d60395e87e06afa7991f94f53))
+* **husk-network:** complete name-based egress datapath (DNS upstream + SNAT) ([8a39a74](https://github.com/paperclipinc/mitos/commit/8a39a742bbb99eb48ab9ec9000f5b89acd8ec717))
+* **husk-network:** set pod-netns ip_forward via a scoped init container, no node change ([a203c6f](https://github.com/paperclipinc/mitos/commit/a203c6f535b56bbe2513b33a7d357c3c64091632))
+* **husk-stub:** wire exec netfilter runner + dns upstream flags ([aa34340](https://github.com/paperclipinc/mitos/commit/aa34340e116fb61fe335a38cbb72af72000d82dd))
+* **husk:** apply in-pod egress filter + DNS proxy at activate ([0fd8929](https://github.com/paperclipinc/mitos/commit/0fd8929dce7e4891d270562fbb8f22f824eb71e6))
+* **husk:** carry egress policy + allowlist in the activate control message ([347cc26](https://github.com/paperclipinc/mitos/commit/347cc265e3448bb19cd22e520e9833874a6178dc))
+* **husk:** in-pod egress filter orchestration reusing netconf ([5640778](https://github.com/paperclipinc/mitos/commit/5640778968a06fd12c90fd5525eea5120722169d))
+* **husk:** per-pod DNS proxy for name-allowlist egress ([4b98c6e](https://github.com/paperclipinc/mitos/commit/4b98c6e36162028e057723c962019602151a7263))
+* **netconf:** unconditional cloud-metadata drop in every sandbox chain ([381a88f](https://github.com/paperclipinc/mitos/commit/381a88fd35bedae20321e3527f1a239afbcab4a6))
+
+
+### Bug Fixes
+
+* **ci-runner:** grant runner networkpolicies read for the husk-network e2e ([db950fa](https://github.com/paperclipinc/mitos/commit/db950fa347423e6e554265fd8677f1c789578679))
+* **ci-runner:** grant runner networkpolicies read for the husk-network e2e ([6d95158](https://github.com/paperclipinc/mitos/commit/6d951582a68b21e79acceacbd52d33bdc82ca2fd))
+* **controller:** drop the terminate finalizer when the bound workspace is gone ([8e5e772](https://github.com/paperclipinc/mitos/commit/8e5e772dd7dc0be3243f5ad8d28c764e40f6a27e))
+* **deviceplugin:** re-register with the kubelet after it restarts ([5bc2d93](https://github.com/paperclipinc/mitos/commit/5bc2d93e86711fcd5a6554eaf641d0879f35ba39))
+* **deviceplugin:** start the kubelet.sock watch before registering ([08a4045](https://github.com/paperclipinc/mitos/commit/08a404510bd561ec6192233151ee1815b906b872))
+* **dnsproxy:** refuse to pin non-public resolved addresses (DNS-rebind defense) ([6b43bcf](https://github.com/paperclipinc/mitos/commit/6b43bcf125212c2510d4e5d9fe1e21aacc1ea588))
+* **dnsproxy:** refuse to pin non-public resolved addresses (DNS-rebind defense) ([b916d75](https://github.com/paperclipinc/mitos/commit/b916d75721269c8621dc33d5aa3f68e6c046777f))
+* **husk-network:** bind the in-pod DNS resolver IP to the tap ([9febb1a](https://github.com/paperclipinc/mitos/commit/9febb1a4ebbdaa4bdb145ef3b2af8a397ee81390))
+* **husk-network:** enable pod-netns ip_forward via kubelet sysctl, fail open-safe ([c9c1616](https://github.com/paperclipinc/mitos/commit/c9c161691df82d2d38b3cedf3f8da6bdca93a12d))
+* **husk-network:** guest configures eth0 via rtnetlink, not the missing ip binary ([a4a0271](https://github.com/paperclipinc/mitos/commit/a4a02714f40e79282b70c2a1026b76d7eaa3fa66))
+* **husk:** enable forkd networking so the template bakes the eth0 NIC ([#150](https://github.com/paperclipinc/mitos/issues/150)) ([200e348](https://github.com/paperclipinc/mitos/commit/200e348230fd67740ceae35613ee3e7dd33acda9))
+* **husk:** forkd image needs iproute2 + nftables; re-enable networking; mirror base image ([66bacb3](https://github.com/paperclipinc/mitos/commit/66bacb39a34f37e5b7b3873525dc94ab8b193e51))
+* **husk:** husk-stub image needs iproute2 + nftables for the in-pod egress filter ([22254e5](https://github.com/paperclipinc/mitos/commit/22254e50699ea7078c5a30af186da47bc62b2074))
+* **husk:** husk-stub image needs iproute2 + nftables for the in-pod egress filter ([1feb8f8](https://github.com/paperclipinc/mitos/commit/1feb8f804812f62f3261e21dc0fe9079712e958b))
+* **husk:** readiness probe gates the pod on the dormant control listener ([96c5dcc](https://github.com/paperclipinc/mitos/commit/96c5dcc0f646bbeeaaa0fe8c13aad001421d1445))
+* **husk:** wait for the template rootfs at Prepare instead of crash-looping ([04c0f42](https://github.com/paperclipinc/mitos/commit/04c0f42b7d81726afbac7278df8202156e0a79c1))
+* **security:** fail closed when a forked VM does not reseed its RNG ([#137](https://github.com/paperclipinc/mitos/issues/137)) ([92a04eb](https://github.com/paperclipinc/mitos/commit/92a04eb88ee5e8bebac43c649cba0453fc4f1508))
+* **security:** four hardening fixes (husk SA token, gRPC fail-closed, vsock read deadline, clock residual) ([#136](https://github.com/paperclipinc/mitos/issues/136)) ([8977aed](https://github.com/paperclipinc/mitos/commit/8977aedc77b5654d6452b7b730f666d2b8be8a04))
+* **security:** per-fork rootfs CoW on raw-forkd to stop cross-fork write bleed ([#138](https://github.com/paperclipinc/mitos/issues/138)) ([e72bd34](https://github.com/paperclipinc/mitos/commit/e72bd34cd7a313590de8e2da1094a59f7e44ed64))
+
 ## [0.3.0](https://github.com/paperclipinc/mitos/compare/v0.2.0...v0.3.0) (2026-06-14)
 
 
