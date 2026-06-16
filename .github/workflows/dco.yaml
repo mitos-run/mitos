@@ -17,7 +17,7 @@ jobs:
   dco-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Need the full PR commit range, not just the merge commit.
           fetch-depth: 0

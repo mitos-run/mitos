@@ -10,8 +10,8 @@ jobs:
   go-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - run: go build ./...
@@ -23,8 +23,8 @@ jobs:
   go-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - name: golangci-lint
@@ -47,8 +47,8 @@ jobs:
     # or, only for a provably unreachable advisory, a documented exclusion.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - name: govulncheck
@@ -66,7 +66,7 @@ jobs:
     # definitions themselves (kind: CustomResourceDefinition) ARE validated.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install kubeconform
         run: |
           set -euo pipefail
@@ -114,7 +114,7 @@ jobs:
     # in either patch fails the merge or the validate.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install talosctl
         run: |
           set -euo pipefail
@@ -145,8 +145,8 @@ jobs:
       run:
         working-directory: sdk/python
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
@@ -158,8 +158,8 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       - run: npm ci
@@ -171,7 +171,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: docker build -f Dockerfile.controller -t mitos-controller:ci .
       - run: docker build -f Dockerfile.forkd -t mitos-forkd:ci .
       # The husk-stub image runs the dormant VMM inside each husk pod (the
@@ -211,8 +211,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - uses: helm/kind-action@v1
@@ -487,8 +487,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - name: Check KVM availability on the runner
@@ -1603,8 +1603,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - uses: helm/kind-action@v1

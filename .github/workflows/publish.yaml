@@ -41,7 +41,7 @@ jobs:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # On a tag push this is the tag ref; on manual workflow_dispatch check
           # out the requested tag so the build matches it. release-please pushes
@@ -50,7 +50,7 @@ jobs:
           # with the tag input.
           ref: ${{ github.event.inputs.tag || github.ref }}
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           # Prefer a maintainer PAT with write:packages (repo secret
@@ -62,7 +62,7 @@ jobs:
           password: ${{ secrets.GHCR_WRITE_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Image metadata (tags and labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -71,7 +71,7 @@ jobs:
             type=sha
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -102,7 +102,7 @@ jobs:
             --type spdxjson \
             "${IMAGE}@${DIGEST}"
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ matrix.name }}
           path: sbom-${{ matrix.name }}.spdx.json
