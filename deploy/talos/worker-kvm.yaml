@@ -31,6 +31,10 @@ machine:
   # nodeSelector mitos.run/kvm: "true" in deploy/daemon/daemonset.yaml).
   nodeLabels:
     mitos.run/kvm: "true"
+  # No kubelet allowed-unsafe-sysctls is needed for husk name-based egress: the
+  # required net.ipv4.ip_forward is set in the pod network namespace by a
+  # short-lived privileged init container on the husk pod (see
+  # internal/controller/huskpod.go), so the feature needs no node change.
   # No extra sysctls are required: /dev/kvm comes from the kvm modules, the
   # guest-agent vsock from vhost_vsock, and tap devices from tun. Add
   # machine.sysctls here only if a future networking change needs one.

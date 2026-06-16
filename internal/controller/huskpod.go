@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -143,6 +144,10 @@ func huskSourceRootfsInPodPath(sourcePodName string) string {
 type HuskPodOptions struct {
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
+	// DNSUpstream is the comma-separated host:port resolver list (failover order)
+	// the stub's per-pod DNS proxy forwards allowlisted name queries to. Empty
+	// leaves name-based egress off (IP-only allowlists still enforced).
+	DNSUpstream string
 	// KVMResourceName is the extended resource the husk pod requests for KVM
 	// access. Empty defaults to mitos.run/kvm.
 	KVMResourceName string
@@ -380,6 +385,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// node, so each pod gets its own clone. $(POD_NAME) is substituted by the
 		// kubelet from the env var, not the shell.
 		"--vm-id", "$(POD_NAME)",
+	}
+
+	// Name-based egress: when the operator configured DNS upstream(s), pass them
+	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
+	// Empty leaves name-based egress off (IP-only allowlists still work); the
+	// value is a comma-separated host:port failover list, config not a secret.
+	if opts.DNSUpstream != "" {
+		args = append(args, "--dns-upstream", opts.DNSUpstream)
 	}
 
 	// Snapshot verify gate (fail-closed): when the pool has a recorded template
@@ -736,6 +749,27 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						ContainerPort: huskSandboxPort,
 						Protocol:      corev1.ProtocolTCP,
 					}},
+					// Readiness gates on the dormant control listener (:9443), which
+					// the stub serves only AFTER it reaches StateDormant (Prepare
+					// done: per-activation rootfs cloned, Firecracker VMM prepared).
+					// Without it the pod reports Ready the instant the container
+					// starts, so the pool counts it warm and a claim activates it
+					// before the stub is dormant-serving; that activate fails, the pod
+					// is consumed, and the warm pool churns (over-creates). The probe
+					// has no liveness counterpart, so a not-yet-dormant pod is held
+					// out of the pool but never restarted by it; the bounded rootfs
+					// wait inside Prepare governs the genuine startup ceiling.
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							TCPSocket: &corev1.TCPSocketAction{
+								Port: intstr.FromInt(HuskControlPort),
+							},
+						},
+						InitialDelaySeconds: 2,
+						PeriodSeconds:       3,
+						TimeoutSeconds:      2,
+						FailureThreshold:    6,
+					},
 					VolumeMounts: mounts,
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -793,6 +827,31 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				},
 			},
 		},
+	}
+
+	// Name-based egress needs the kernel to route the guest /30 out the pod
+	// uplink, which requires net.ipv4.ip_forward=1 in the POD network namespace.
+	// In Kubernetes the app container joins the pod netns (it does not create it),
+	// so the runtime leaves /proc/sys/net read-only and the stub cannot write it.
+	// A SHORT-LIVED privileged init container (privileged unmasks /proc/sys rw)
+	// sets it in the shared netns and exits before the workload runs; the setting
+	// persists for the pod's life. This needs NO node change (vs an unsafe kubelet
+	// sysctl), and the privilege is bounded to a one-shot init container, not the
+	// long-lived stub. It runs in the privileged-PSA namespace husk already
+	// requires (NET_ADMIN + hostPath). Added only when name egress is configured
+	// (opts.DNSUpstream set); clusters not using it get no init container.
+	if opts.DNSUpstream != "" {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:    "enable-ip-forward",
+			Image:   opts.StubImage,
+			Command: []string{"sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"},
+			SecurityContext: &corev1.SecurityContext{
+				Privileged: ptrBool(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
+		})
 	}
 
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods
@@ -961,6 +1020,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		}
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
+			DNSUpstream:     r.HuskDNSUpstream,
 			KVMResourceName: r.KVMResourceName,
 			SnapshotID:      pool.Spec.TemplateRef.Name,
 			DataDir:         r.DataDir,

@@ -59,17 +59,17 @@ spec:
             # Guest agent injected as /init for OCI image template builds. The
             # binary ships in the forkd image at this path (Dockerfile.forkd).
             - --agent-bin=/usr/local/bin/agent
-            # HUSK NETWORK DATAPATH (open, tracked): the husk activation remaps the
-            # snapshot's baked eth0 NIC to each pod's tap via network_overrides, so
-            # the template MUST bake a NIC at snapshot time (Firecracker cannot add
-            # one on restore). CreateTemplate bakes it only when forkd networking is
-            # enabled, but enabling --enable-networking here regressed the template
-            # build to empty snapshots on the KVM cluster (the build-time placeholder
-            # NIC path needs work before it is safe). Until that is fixed, forkd
-            # builds husk templates WITHOUT a NIC, so husk egress isolation is not
-            # yet active end to end (activation hits "Unknown Network Device"). Do
-            # NOT re-add --enable-networking until the build-time placeholder NIC is
-            # proven on the KVM cluster. See docs/threat-model.md (husk egress).
+            # Networking enabled so forkd bakes the eth0 placeholder NIC into every
+            # husk template snapshot: husk activation network_overrides that NIC onto
+            # each pod's own tap (Firecracker cannot add a NIC on restore), and the
+            # in-pod egress filter governs it. forkd creates the build-time
+            # placeholder tap with `ip tuntap add`, so the forkd IMAGE must carry
+            # iproute2 + nftables (Dockerfile.forkd); without them the build aborted
+            # with `exec: "ip": executable file not found` and produced empty
+            # snapshots (the earlier regression). The runtime per-pod tap + egress
+            # chain are programmed IN the husk pod by the husk-stub (NET_ADMIN in the
+            # pod netns), not by forkd.
+            - --enable-networking
             # JAILER FOLLOW-UP: the per-VM jailer (uid/gid, chroot, cgroup) is
             # disabled here. forkd runs privileged: true (below) on the husk
             # path until jailer-in-pod lands. Re-add --jailer / --chroot-base /

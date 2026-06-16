@@ -159,6 +159,38 @@ func productionNotifier(vsockPath string, generation uint64, entropy []byte, req
 // dst carry no secrets.
 type reflinker func(src, dst string) error
 
+// rootfsTemplateWait bounds how long Prepare waits for forkd to finish writing
+// the node template rootfs.ext4 before cloning it for this activation. The pool
+// builds the template snapshot on the node before creating husk pods, but the
+// build is slower with networking enabled (a placeholder tap + NIC boot before
+// the snapshot), so a freshly scheduled husk pod can briefly observe the source
+// rootfs missing. Waiting (rather than crashing into CrashLoopBackOff) keeps the
+// pod recoverable within a claim's readiness window.
+const rootfsTemplateWait = 180 * time.Second
+
+// waitForFile polls until path exists, the context is cancelled, or the timeout
+// elapses. It is the bounded tolerance for the pool creating a husk pod before
+// forkd has finished materializing the template rootfs on the shared node dir.
+func waitForFile(ctx context.Context, path string, timeout time.Duration) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s did not appear within %s: %w", path, timeout, ctx.Err())
+		case <-ticker.C:
+			if _, err := os.Stat(path); err == nil {
+				return nil
+			}
+		}
+	}
+}
+
 // wsTransporter resolves a workspace.VsockTransport (the bulk tar TarDir/UntarDir
 // slice of the guest agent) for the active VM at vsockPath. The dehydrate and
 // hydrate workspace ops run the KVM-proven internal/workspace round trip through
@@ -364,12 +396,18 @@ type Stub struct {
 	// nftRunner runs a single nft argv for the DNS proxy pinner. Nil reuses
 	// netRunner with empty stdin.
 	nftRunner func(argv []string) error
-	// dnsUpstream is the real resolver the per-pod DNS proxy forwards allowed
-	// queries to (host:port). Empty disables name-based egress (IP-only mode).
+	// dnsUpstream is the real resolver(s) the per-pod DNS proxy forwards allowed
+	// queries to: a comma-separated host:port list tried in failover order. Empty
+	// disables name-based egress (IP-only mode).
 	dnsUpstream string
 	// dnsProxy is the running per-pod DNS proxy for the active VM, stopped on
 	// Close. Nil when no VM is active or name egress is disabled.
 	dnsProxy *dnsproxy.Server
+	// enableForwarding turns on IPv4 forwarding in the pod netns before the egress
+	// datapath is programmed (the kernel will not route the guest /30 to the pod
+	// uplink otherwise). Nil skips it (tests, or a deployment that enables
+	// forwarding out of band); cmd/husk-stub wires the real /proc writer.
+	enableForwarding func() error
 	// activeTap records the active VM's tap so Close can tear the filter down.
 	activeTap string
 
@@ -393,6 +431,11 @@ func (s *Stub) SetNetRunner(run NetRunner) { s.netRunner = run }
 // SetDNSUpstream sets the real resolver the per-pod DNS proxy forwards
 // allowlisted queries to. Empty disables name-based egress.
 func (s *Stub) SetDNSUpstream(addr string) { s.dnsUpstream = addr }
+
+// SetForwardingEnabler wires the function the stub calls to enable IPv4
+// forwarding in the pod netns before programming the egress datapath. Nil (the
+// default) skips it. cmd/husk-stub wires the production /proc writer.
+func (s *Stub) SetForwardingEnabler(fn func() error) { s.enableForwarding = fn }
 
 // New builds a Stub for the given VMConfig. By default it uses the production
 // starter and guest-readiness seam; opts may inject fakes for tests.
@@ -516,6 +559,16 @@ func (s *Stub) Prepare(ctx context.Context) error {
 			s.vm = nil
 			return fmt.Errorf("husk: create per-activation rootfs dir: %w", err)
 		}
+		// Wait (bounded, ctx-aware) for forkd to finish writing the template
+		// rootfs on the node before cloning it. The pool can schedule this husk
+		// pod a moment before the build's rootfs.ext4 is visible on the shared
+		// hostPath dir; crashing here would drop the pod into CrashLoopBackOff and
+		// keep it out of the warm pool past a claim's deadline.
+		if err := waitForFile(ctx, s.rootfsTemplatePath, rootfsTemplateWait); err != nil {
+			_ = s.vm.Close()
+			s.vm = nil
+			return fmt.Errorf("husk: per-activation rootfs template %s not ready: %w", s.rootfsTemplatePath, err)
+		}
 		if err := s.reflink(s.rootfsTemplatePath, clonePath); err != nil {
 			_ = s.vm.Close()
 			s.vm = nil
@@ -603,7 +656,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		if cfg.Egress == "" {
 			cfg.Egress = v1alpha1.EgressDeny
 		}
-		if err := applyEgressFilter(ctx, s.netRunner, cfg); err != nil {
+		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
@@ -632,7 +685,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 			if nftRun == nil {
 				nftRun = func(argv []string) error { return s.netRunner(ctx, argv, "") }
 			}
-			proxy := newEgressDNSProxy(reg, tap, s.dnsUpstream, nftRun)
+			proxy := newEgressDNSProxy(reg, tap, dnsproxy.ParseUpstreams(s.dnsUpstream), nftRun)
 			go func() { _ = proxy.ListenAndServe(net.JoinHostPort(req.Network.ResolverIP, "53")) }()
 			s.dnsProxy = proxy
 		}

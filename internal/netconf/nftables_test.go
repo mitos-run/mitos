@@ -447,3 +447,22 @@ func TestParseNameAllowListInvalidWildcard(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderMasqueradeNatsGuestSource asserts the per-pod NAT ruleset source-NATs
+// only the guest's traffic as it leaves the pod netns, in its own ip-family
+// table, idempotently (flush before the single rule). Without this SNAT the
+// guest's private /30 source is unroutable beyond the tap and allowed
+// connections never get return traffic.
+func TestRenderMasqueradeNatsGuestSource(t *testing.T) {
+	out := RenderMasquerade(net.ParseIP("10.200.0.2"))
+	for _, want := range []string{
+		"add table ip " + NatTableName(),
+		"type nat hook postrouting",
+		"flush chain ip " + NatTableName() + " postrouting",
+		"ip saddr 10.200.0.2 masquerade",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("masquerade ruleset missing %q:\n%s", want, out)
+		}
+	}
+}

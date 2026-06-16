@@ -344,7 +344,7 @@ func runSetupNameEgress(args []string) error {
 		return ""
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server := dnsproxy.NewServer(registry, pinner, *upstream, 30*time.Second, tapFor, logger)
+	server := dnsproxy.NewServer(registry, pinner, []string{*upstream}, 30*time.Second, tapFor, logger)
 
 	addr := net.JoinHostPort(resolverIP.String(), "53")
 	fmt.Printf("net-smoke: controlled resolver listening on %s (upstream %s)\n", addr, *upstream)

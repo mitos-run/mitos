@@ -32,14 +32,26 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 		Allow:      []string{"10.0.0.5:5432"},
 		ResolverIP: net.ParseIP("169.254.1.1"),
 	}
-	if err := applyEgressFilter(context.Background(), rr.run, cfg); err != nil {
+	var forwardingEnabled bool
+	enable := func() error { forwardingEnabled = true; return nil }
+	if err := applyEgressFilter(context.Background(), rr.run, enable, cfg); err != nil {
 		t.Fatal(err)
 	}
-	// Expect: tap add, addr add, link up, shared table apply, sandbox chain apply.
-	if len(rr.calls) != 5 {
-		t.Fatalf("got %d calls, want 5: %+v", len(rr.calls), rr.calls)
+	if !forwardingEnabled {
+		t.Error("applyEgressFilter did not enable IPv4 forwarding")
 	}
-	chainStdin := rr.calls[4].stdin
+	// Expect: tap add, addr add, link up, resolver addr add, shared table apply,
+	// sandbox chain apply, masquerade apply.
+	if len(rr.calls) != 7 {
+		t.Fatalf("got %d calls, want 7: %+v", len(rr.calls), rr.calls)
+	}
+	// The resolver IP is bound to the tap as a /32 so the per-pod DNS proxy can
+	// listen on it and the guest's queries are delivered locally.
+	resolverArgv := strings.Join(rr.calls[3].argv, " ")
+	if !strings.Contains(resolverArgv, "169.254.1.1/32") || !strings.Contains(resolverArgv, "sbtap0") {
+		t.Errorf("resolver IP not bound to tap as /32: %v", rr.calls[3].argv)
+	}
+	chainStdin := rr.calls[5].stdin
 	if !strings.Contains(chainStdin, "ip daddr 169.254.169.254 drop") {
 		t.Errorf("chain missing metadata block:\n%s", chainStdin)
 	}
@@ -48,6 +60,10 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	}
 	if !strings.Contains(chainStdin, netconf.SandboxChainName("sbtap0")) {
 		t.Errorf("chain not named for tap:\n%s", chainStdin)
+	}
+	masqStdin := rr.calls[6].stdin
+	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
+		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
 	}
 }
 
@@ -84,7 +100,7 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 		Egress:  v1alpha1.EgressDeny,
 		Allow:   []string{"not-a-valid-entry"},
 	}
-	if err := applyEgressFilter(context.Background(), rr.run, cfg); err == nil {
+	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err == nil {
 		t.Fatal("expected error on malformed allow entry, got nil")
 	}
 }

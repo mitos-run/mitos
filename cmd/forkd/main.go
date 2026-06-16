@@ -523,7 +523,13 @@ func buildDNSProxy(registry *dnsproxy.Registry, alloc *netconf.Allocator, resolv
 		return nil
 	})
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return dnsproxy.NewServer(registry, pinner, resolvedUpstream(upstream), dnsProxyTTLFloor, alloc.TapForGuestIP, logger)
+	// An explicit --dns-upstream may be a comma-separated list (failover order);
+	// an empty value derives a single upstream from /etc/resolv.conf.
+	upstreams := dnsproxy.ParseUpstreams(upstream)
+	if len(upstreams) == 0 {
+		upstreams = []string{resolvedUpstream("")}
+	}
+	return dnsproxy.NewServer(registry, pinner, upstreams, dnsProxyTTLFloor, alloc.TapForGuestIP, logger)
 }
 
 // resolvedUpstream returns the upstream resolver address for the proxy. An

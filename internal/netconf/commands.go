@@ -26,6 +26,16 @@ func LinkUpArgs(tap string) []string {
 	return []string{"ip", "link", "set", tap, "up"}
 }
 
+// ResolverAddrAddArgs builds the argv to bind the in-pod DNS resolver address to
+// the tap as a /32: ip addr add <resolverIP>/32 dev <tap>. The husk per-pod DNS
+// proxy listens on this address, and the guest's queries (routed to it via the
+// tap gateway) must be delivered LOCALLY rather than forwarded out, so the
+// address has to be local in the pod netns. Binding it on the tap (the interface
+// the guest's packets arrive on) achieves both.
+func ResolverAddrAddArgs(resolverIP net.IP, tap string) []string {
+	return []string{"ip", "addr", "add", fmt.Sprintf("%s/32", resolverIP.String()), "dev", tap}
+}
+
 // LinkDelArgs builds the argv to remove the tap: ip link del <tap>.
 func LinkDelArgs(tap string) []string {
 	return []string{"ip", "link", "del", tap}
