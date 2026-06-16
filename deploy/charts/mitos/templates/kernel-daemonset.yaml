@@ -1,0 +1,70 @@
+{{- if .Values.kernelProvisioner.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mitos-kernel-stage
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kernel-stage
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "kernel-stage") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "kernel-stage") | nindent 8 }}
+    spec:
+      # Stage the guest kernel only on KVM nodes; that is exactly where forkd and
+      # husk pods read the staged vmlinux.
+      {{- with .Values.forkd.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forkd.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # An init container downloads the kernel into the node hostPath ONCE
+      # (idempotent), then the main container idles so the DaemonSet stays Ready.
+      initContainers:
+        - name: stage-kernel
+          image: curlimages/curl:8.11.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              dest={{ .Values.forkd.dataDir }}/vmlinux
+              if [ -s "$dest" ]; then
+                echo "kernel already staged at $dest; skipping download"
+                exit 0
+              fi
+              echo "staging guest kernel to $dest"
+              curl -fsSL -o "$dest.tmp" "$KERNEL_URL"
+              mv "$dest.tmp" "$dest"
+              echo "kernel staged"
+          env:
+            # The guest kernel image URL. Override per cluster to host your own.
+            - name: KERNEL_URL
+              value: {{ .Values.kernelProvisioner.kernelUrl }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.forkd.dataDir }}
+      containers:
+        - name: idle
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              memory: "8Mi"
+              cpu: "10m"
+            limits:
+              memory: "16Mi"
+              cpu: "50m"
+      volumes:
+        - name: data
+          hostPath:
+            path: {{ .Values.forkd.dataDir }}
+            type: DirectoryOrCreate
+{{- end }}

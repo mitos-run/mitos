@@ -1,0 +1,15 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    # PodSecurity admission. forkd and the kvm-device-plugin run with hostPath
+    # volumes and host devices, and forkd runs privileged; none is admissible
+    # under baseline or restricted. enforce=privileged so the DaemonSets are
+    # admitted without a manual namespace patch.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+{{- end }}

@@ -1,0 +1,38 @@
+name: Helm chart
+
+# Lint and render the mitos Helm chart so it cannot drift from deploy/ or ship
+# broken. Runs on changes to the chart or the manifests it mirrors.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/charts/**"
+      - ".github/workflows/helm.yaml"
+  pull_request:
+    paths:
+      - "deploy/charts/**"
+      - ".github/workflows/helm.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Lint
+        run: helm lint deploy/charts/mitos
+      - name: Render with defaults
+        run: helm template mitos deploy/charts/mitos --namespace mitos --kube-version 1.31.0 > /dev/null
+      - name: Render with all features enabled
+        run: |
+          helm template mitos deploy/charts/mitos --namespace mitos --kube-version 1.31.0 \
+            --set monitoring.enabled=true \
+            --set facade.enabled=true \
+            --set imagePullSecret.create=true \
+            --set imagePullSecret.dockerconfigjson=e30= > /dev/null

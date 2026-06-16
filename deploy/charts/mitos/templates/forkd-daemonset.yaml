@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mitos-forkd
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forkd
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "forkd") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "forkd") | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.forkd.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forkd.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: forkd
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.forkd.image) }}
+          imagePullPolicy: {{ .Values.forkd.image.pullPolicy }}
+          args:
+            - --listen=:9090
+            - --data-dir={{ .Values.forkd.dataDir }}
+            - --firecracker=/usr/local/bin/firecracker
+            - --kernel={{ .Values.forkd.dataDir }}/vmlinux
+            - --http=:9091
+            # Dedicated token-gated TLS listener for peer template distribution.
+            # The CAS surface is served here over TLS, while the sandbox
+            # exec/files/metrics/healthz API on :9091 keeps its scheme unchanged.
+            - --cas-listen=:9092
+            - --tls-cert=/etc/forkd/tls/tls.crt
+            - --tls-key=/etc/forkd/tls/tls.key
+            - --tls-ca=/etc/forkd/ca/ca.crt
+            # Guest agent injected as /init for OCI image template builds.
+            - --agent-bin=/usr/local/bin/agent
+            {{- if .Values.forkd.enableNetworking }}
+            # Networking enabled so forkd bakes the eth0 placeholder NIC into
+            # every husk template snapshot. The forkd image carries iproute2 +
+            # nftables; without them the build aborts and produces empty snapshots.
+            - --enable-networking
+            {{- end }}
+            # JAILER FOLLOW-UP: the per-VM jailer is disabled here. forkd runs
+            # privileged: true (below) on the husk path until jailer-in-pod lands.
+          env:
+            # forkd authenticates to private registries when pulling OCI template
+            # images. DOCKER_CONFIG points at the mounted docker-config secret.
+            - name: DOCKER_CONFIG
+              value: /etc/forkd/docker
+          ports:
+            - name: grpc
+              containerPort: 9090
+            - name: metrics
+              containerPort: 9091
+            # Dedicated token-gated TLS CAS listener (--cas-listen).
+            - name: cas
+              containerPort: 9092
+          # PRIVILEGED until jailer-in-pod lands. Without the jailer, forkd needs
+          # unrestricted access to /dev/kvm, /dev/net/tun, cgroups, and chroot to
+          # launch each VM. The honest regression is documented in
+          # docs/threat-model.md.
+          securityContext:
+            privileged: true
+          resources:
+            {{- toYaml .Values.forkd.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.forkd.dataDir }}
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: tls
+              mountPath: /etc/forkd/tls
+              readOnly: true
+            - name: ca
+              mountPath: /etc/forkd/ca
+              readOnly: true
+            - name: docker-config
+              mountPath: /etc/forkd/docker
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: data
+          hostPath:
+            path: {{ .Values.forkd.dataDir }}
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
+        - name: tls
+          secret:
+            secretName: mitos-forkd-tls
+        # Only the CA certificate is projected; the CA private key in this secret
+        # must never reach forkd.
+        - name: ca
+          secret:
+            secretName: mitos-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+        # forkd's registry credentials for OCI template pulls. Reuses the pull
+        # dockerconfigjson secret, projected to the config.json name the auth
+        # resolver reads under DOCKER_CONFIG.
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.imagePullSecret.name }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json

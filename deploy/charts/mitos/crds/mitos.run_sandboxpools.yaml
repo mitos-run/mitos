@@ -1,0 +1,246 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: sandboxpools.mitos.run
+spec:
+  group: mitos.run
+  names:
+    kind: SandboxPool
+    listKind: SandboxPoolList
+    plural: sandboxpools
+    singular: sandboxpool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.readySnapshots
+      name: Ready
+      type: integer
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              autoscale:
+                description: |-
+                  Autoscale turns the warm pool from a fixed Replicas pre-fill into a
+                  demand-driven autoscaler: it scales the number of DORMANT husk pods up
+                  under claim pressure and back down to a floor after an idle cooldown.
+                  When nil the pool keeps exactly the legacy behavior (the warm pool is held
+                  at Replicas). When set, the desired dormant count is
+                  clamp(inUse + targetSpare, minWarm, maxWarm) and Replicas is ignored for
+                  warm-pool sizing (it stays the scale-subresource target for back-compat).
+                properties:
+                  maxWarm:
+                    description: |-
+                      MaxWarm is the ceiling: the dormant pod count is never driven above this,
+                      regardless of demand, so a burst cannot create unbounded pods. Required
+                      when autoscaling is enabled.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minWarm:
+                    default: 0
+                    description: |-
+                      MinWarm is the floor: the dormant pod count the pool holds when fully idle.
+                      Operators who want the legacy fixed pool set MinWarm equal to Replicas.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  scaleDownCooldownSeconds:
+                    default: 300
+                    description: |-
+                      ScaleDownCooldownSeconds is the anti-thrash window: after the pool reduces
+                      the dormant count it will not reduce it again until this many seconds have
+                      elapsed with NO claim arrival. Scale UP is never delayed. Default 300.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  targetSpare:
+                    default: 2
+                    description: |-
+                      TargetSpare is the headroom kept on top of the current in-use count: the
+                      pool aims to always have this many SPARE dormant pods ready, so a claim
+                      burst up to TargetSpare within one reconcile interval hits a ready dormant
+                      pod instead of cold-starting. Default 2.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - maxWarm
+                type: object
+              drainPolicy:
+                default: Kill
+                description: |-
+                  DrainPolicy governs an active sandbox (a claim that activated a husk pod)
+                  when that husk pod is lost (drain, eviction, deletion). Kill (the default)
+                  re-pends the claim onto a replacement dormant slot. Checkpoint attempts a
+                  live-VM snapshot first where the VMM still runs, then re-pends. Only used
+                  in husk mode.
+                enum:
+                - Kill
+                - Checkpoint
+                type: string
+              replicas:
+                format: int32
+                type: integer
+              scaleDownAfterSnapshot:
+                description: Whether to scale down the source sandbox after snapshot.
+                type: boolean
+              snapshotAfter:
+                type: string
+              snapshotDelay:
+                description: |-
+                  Delay after the trigger condition before taking the snapshot.
+                  Allows init scripts to finish.
+                type: string
+              snapshotStorage:
+                description: Where to store snapshot artifacts on the node.
+                type: string
+              templateRef:
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - replicas
+            - templateRef
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              desiredWarm:
+                description: |-
+                  DesiredWarm is the autoscaler's computed desired dormant pod count as of
+                  the last reconcile. Equal to Replicas when autoscaling is off. Observability
+                  only; mirrors the mitos_pool_desired_warm gauge.
+                format: int32
+                type: integer
+              lastScaleDownTime:
+                description: |-
+                  LastScaleDownTime records when the pool last reduced its dormant pod count,
+                  so an operator can see the scale-down cooldown state.
+                format: date-time
+                type: string
+              lastSnapshotTime:
+                format: date-time
+                type: string
+              nodeDistribution:
+                additionalProperties:
+                  format: int32
+                  type: integer
+                type: object
+              readySnapshots:
+                format: int32
+                type: integer
+              restoringCount:
+                format: int32
+                type: integer
+              templateDigest:
+                description: |-
+                  TemplateDigest is the content-addressed manifest digest of the pool's
+                  snapshot, as reported by the node(s) holding it. It makes the snapshot
+                  identity visible in the CRD so integrity can be audited. A content
+                  address, safe to log.
+                type: string
+              totalSnapshots:
+                format: int32
+                type: integer
+            required:
+            - readySnapshots
+            - restoringCount
+            - totalSnapshots
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.readySnapshots
+      status: {}

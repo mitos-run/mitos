@@ -1,0 +1,20 @@
+{{- if .Values.monitoring.enabled }}
+# Grafana dashboard for the mitos.run control plane, wrapped in a ConfigMap. The
+# grafana_dashboard: "1" label is the Grafana sidecar convention: a Grafana
+# deployment running the kiwigrid/k8s-sidecar watches for ConfigMaps with this
+# label and loads the JSON under data as a dashboard. Opt-in via
+# monitoring.enabled. The dashboard JSON is read verbatim from files/ so its
+# Grafana variable syntax is not interpreted by Helm.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mitos-grafana-dashboard
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    grafana_dashboard: "1"
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+data:
+  mitos-control-plane.json: |-
+    {{- .Files.Get "files/dashboard.json" | nindent 4 }}
+{{- end }}

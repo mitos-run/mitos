@@ -1,0 +1,24 @@
+apiVersion: v2
+name: mitos
+# Snapshot-fork sandboxes for AI agents on Kubernetes. Boots Firecracker
+# microVMs, forks them via copy-on-write snapshots, and drives the whole
+# lifecycle through the mitos.run CRDs.
+description: Snapshot-fork sandboxes for AI agents on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "v0.4.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - sandbox
+  - firecracker
+  - microvm
+  - snapshot
+  - fork
+  - ai-agents
+  - operator
+home: https://github.com/paperclipinc/mitos
+sources:
+  - https://github.com/paperclipinc/mitos
+maintainers:
+  - name: paperclipinc
+    url: https://github.com/paperclipinc/mitos
