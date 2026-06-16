@@ -90,6 +90,30 @@ var (
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 12, 20, 30},
 	})
 
+	// huskPodCreatedTotal counts husk pods the controller created to fill the warm
+	// pool, by pool. With the warm gauges it shows pool churn: a high create rate
+	// against a flat dormant gauge means pods are being lost as fast as made.
+	huskPodCreatedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mitos_husk_pod_created_total",
+		Help: "Number of husk pods the controller created to fill the warm pool, by pool.",
+	}, []string{"pool"})
+
+	// huskPodLostTotal counts times an active claim re-pended because its backing
+	// husk pod was lost (node drain, eviction, deletion), by pool. A sustained
+	// nonzero rate is fleet instability the warm pool is absorbing.
+	huskPodLostTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mitos_husk_pod_lost_total",
+		Help: "Number of times an active claim re-pended because its backing husk pod was lost, by pool.",
+	}, []string{"pool"})
+
+	// nodeLostTotal counts Ready claims marked NodeLost because their node became
+	// unhealthy or left the registry (raw-forkd path; the husk path re-pends and
+	// is counted by huskPodLostTotal instead). Labeled by node, never a secret.
+	nodeLostTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mitos_node_lost_total",
+		Help: "Number of Ready claims marked NodeLost after their node went unhealthy (raw-forkd path), by node.",
+	}, []string{"node"})
+
 	// claimWaitForWarmSeconds measures, per claim, the wall-clock the claim waited
 	// for a ready dormant pod from its creation to a successful husk activate. A
 	// burst absorbed by warm capacity shows up near the activate cost (~27 ms);
@@ -112,6 +136,9 @@ func init() {
 		poolDesiredWarm,
 		warmScaleUpTotal,
 		warmScaleDownTotal,
+		huskPodCreatedTotal,
+		huskPodLostTotal,
+		nodeLostTotal,
 		refillLatencySeconds,
 		claimWaitForWarmSeconds,
 	)
@@ -151,6 +178,18 @@ func setWarmPoolGauges(pool string, dormant, inUse, desired int32) {
 func recordWarmScaleUp(pool string)   { warmScaleUpTotal.WithLabelValues(pool).Inc() }
 func recordWarmScaleDown(pool string) { warmScaleDownTotal.WithLabelValues(pool).Inc() }
 
+// recordHuskPodCreated bumps the per-pool husk-pod-created counter (once per pod
+// the controller creates to fill the warm pool).
+func recordHuskPodCreated(pool string) { huskPodCreatedTotal.WithLabelValues(pool).Inc() }
+
+// recordHuskPodLost bumps the per-pool counter for a claim re-pended because its
+// backing husk pod was lost.
+func recordHuskPodLost(pool string) { huskPodLostTotal.WithLabelValues(pool).Inc() }
+
+// recordNodeLost bumps the per-node counter for a Ready claim marked NodeLost.
+// node is a hostname (never a secret).
+func recordNodeLost(node string) { nodeLostTotal.WithLabelValues(node).Inc() }
+
 // forgetPoolMetrics drops every per-pool warm-pool label series for the given
 // pool key. It is called only when a SandboxPool is genuinely deleted (the
 // reconcile saw NotFound), so the controller does not accumulate one stale
@@ -167,6 +206,8 @@ func forgetPoolMetrics(pool string) {
 	poolDesiredWarm.DeleteLabelValues(pool)
 	warmScaleUpTotal.DeleteLabelValues(pool)
 	warmScaleDownTotal.DeleteLabelValues(pool)
+	huskPodCreatedTotal.DeleteLabelValues(pool)
+	huskPodLostTotal.DeleteLabelValues(pool)
 }
 
 // observeRefillLatency records seconds from husk pod create to ready dormant.

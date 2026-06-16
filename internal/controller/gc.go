@@ -243,6 +243,7 @@ func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger,
 			logger.Error(err, "mark claim NodeLost", "claim", c.Name, "node", c.Status.Node)
 			continue
 		}
+		recordNodeLost(c.Status.Node)
 		logger.Info("claim transitioned to NodeLost", "claim", c.Name, "node", c.Status.Node)
 	}
 }
