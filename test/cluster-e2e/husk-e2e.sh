@@ -36,7 +36,7 @@
 # Env knobs:
 #   READY_TIMEOUT   per-stage wait budget, seconds (default 180)
 #   POLL_INTERVAL   poll interval, seconds (default 1)
-#   E2E_IMAGE       template image (default python:3.12-slim)
+#   E2E_IMAGE       template image (default mirror.gcr.io/library/python:3.12-slim)
 #
 set -euo pipefail
 
@@ -48,7 +48,7 @@ fi
 
 READY_TIMEOUT="${READY_TIMEOUT:-180}"
 POLL_INTERVAL="${POLL_INTERVAL:-1}"
-E2E_IMAGE="${E2E_IMAGE:-python:3.12-slim}"
+E2E_IMAGE="${E2E_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 
 RUN_ID="$(date +%s)-$$"
 TEMPLATE="e2e-tmpl-${RUN_ID}"

@@ -40,7 +40,7 @@
 # Env knobs:
 #   READY_TIMEOUT       per-stage wait budget, seconds (default 240)
 #   POLL_INTERVAL       poll interval, seconds (default 1)
-#   E2E_IMAGE           template image (default python:3.12-slim)
+#   E2E_IMAGE           template image (default mirror.gcr.io/library/python:3.12-slim)
 #   WORKSPACE_MEMORY    set to "1" to run stage 7 (the controller must run with
 #                       --workspace-memory-snapshots on a KVM node)
 #
@@ -54,7 +54,7 @@ fi
 
 READY_TIMEOUT="${READY_TIMEOUT:-240}"
 POLL_INTERVAL="${POLL_INTERVAL:-1}"
-E2E_IMAGE="${E2E_IMAGE:-python:3.12-slim}"
+E2E_IMAGE="${E2E_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 WORKSPACE_MEMORY="${WORKSPACE_MEMORY:-0}"
 
 RUN_ID="$(date +%s)-$$"
