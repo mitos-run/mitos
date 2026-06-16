@@ -405,13 +405,13 @@ func run() error {
 		//
 		// BEST EFFORT: in Kubernetes the app container JOINS the pod (pause)
 		// network namespace rather than creating it, so the runtime leaves
-		// /proc/sys/net read-only even with NET_ADMIN; the write then fails. We log
-		// and continue instead of failing activation: with forwarding off the guest
-		// simply cannot route out, so egress stays fully denied (fail closed) while
-		// the VM and exec (vsock) still work. To turn on egress allowlists the node
-		// must set net.ipv4.ip_forward=1 in the pod netns, delivered as the husk
-		// pod sysctl (see deploy/talos/worker-kvm.yaml allowedUnsafeSysctls). The
-		// non-k8s sandbox-server path, which owns its netns, can still write it here.
+		// /proc/sys/net read-only even with NET_ADMIN; the write then fails. In the
+		// husk pod a short-lived privileged init container already set ip_forward=1
+		// in the shared netns, so the read below sees "1" and this is a no-op. We
+		// log and continue (never fail activation): with forwarding off the guest
+		// cannot route out, so egress stays fully denied (fail closed) while the VM
+		// and exec (vsock) still work. The non-k8s sandbox-server path, which owns
+		// its netns, writes it here directly.
 		stub.SetForwardingEnabler(func() error {
 			const p = "/proc/sys/net/ipv4/ip_forward"
 			if cur, rerr := os.ReadFile(p); rerr == nil && strings.TrimSpace(string(cur)) == "1" {

@@ -31,19 +31,10 @@ machine:
   # nodeSelector mitos.run/kvm: "true" in deploy/daemon/daemonset.yaml).
   nodeLabels:
     mitos.run/kvm: "true"
-  # Allow the husk pods to set net.ipv4.ip_forward as a pod sysctl. Husk
-  # name-based egress routes the guest /30 out the pod uplink, which needs IPv4
-  # forwarding enabled in the POD network namespace. The app container joins the
-  # pod netns (it does not create it), so /proc/sys/net is read-only to it and
-  # the stub cannot write the sysctl; the kubelet sets it from the pod's
-  # securityContext.sysctls instead, but net.ipv4.ip_forward is an "unsafe"
-  # (non-namespaced-by-default) sysctl and must be allowlisted here. Only husk
-  # pools with a configured DNS upstream request it (controller adds the sysctl
-  # only when --husk-dns-upstream is set), so this is required only when running
-  # name-based egress. Without it those pods are rejected with SysctlForbidden.
-  kubelet:
-    extraArgs:
-      allowed-unsafe-sysctls: net.ipv4.ip_forward
+  # No kubelet allowed-unsafe-sysctls is needed for husk name-based egress: the
+  # required net.ipv4.ip_forward is set in the pod network namespace by a
+  # short-lived privileged init container on the husk pod (see
+  # internal/controller/huskpod.go), so the feature needs no node change.
   # No extra sysctls are required: /dev/kvm comes from the kvm modules, the
   # guest-agent vsock from vhost_vsock, and tap devices from tun. Add
   # machine.sysctls here only if a future networking change needs one.

@@ -832,15 +832,26 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// Name-based egress needs the kernel to route the guest /30 out the pod
 	// uplink, which requires net.ipv4.ip_forward=1 in the POD network namespace.
 	// In Kubernetes the app container joins the pod netns (it does not create it),
-	// so the runtime leaves /proc/sys/net read-only and the stub cannot write the
-	// sysctl itself; the kubelet must set it as a pod sysctl before the container
-	// starts. Added only when name egress is configured (opts.DNSUpstream set), so
-	// clusters not using name egress need no node change. This is an UNSAFE sysctl:
-	// the node's kubelet must list it in allowedUnsafeSysctls (see
-	// deploy/talos/worker-kvm.yaml) or the pod is rejected with SysctlForbidden.
+	// so the runtime leaves /proc/sys/net read-only and the stub cannot write it.
+	// A SHORT-LIVED privileged init container (privileged unmasks /proc/sys rw)
+	// sets it in the shared netns and exits before the workload runs; the setting
+	// persists for the pod's life. This needs NO node change (vs an unsafe kubelet
+	// sysctl), and the privilege is bounded to a one-shot init container, not the
+	// long-lived stub. It runs in the privileged-PSA namespace husk already
+	// requires (NET_ADMIN + hostPath). Added only when name egress is configured
+	// (opts.DNSUpstream set); clusters not using it get no init container.
 	if opts.DNSUpstream != "" {
-		pod.Spec.SecurityContext.Sysctls = append(pod.Spec.SecurityContext.Sysctls,
-			corev1.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:    "enable-ip-forward",
+			Image:   opts.StubImage,
+			Command: []string{"sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"},
+			SecurityContext: &corev1.SecurityContext{
+				Privileged: ptrBool(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
+		})
 	}
 
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods

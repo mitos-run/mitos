@@ -148,10 +148,11 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 	if !argsContainPair(withDNS.Spec.Containers[0].Args, "--dns-upstream", "1.1.1.1:53,8.8.8.8:53") {
 		t.Errorf("husk args missing --dns-upstream pair: %v", withDNS.Spec.Containers[0].Args)
 	}
-	// Name egress also needs ip_forward in the pod netns, set as a pod sysctl the
-	// kubelet applies (the container cannot write the read-only /proc/sys/net).
-	if !hasSysctl(withDNS.Spec.SecurityContext, "net.ipv4.ip_forward", "1") {
-		t.Errorf("husk pod missing net.ipv4.ip_forward=1 sysctl when name egress on: %+v", withDNS.Spec.SecurityContext.Sysctls)
+	// Name egress also needs ip_forward in the pod netns, set by a short-lived
+	// privileged init container (the workload container cannot write the read-only
+	// /proc/sys/net). No node/kubelet change required.
+	if !hasForwardInit(withDNS.Spec.InitContainers) {
+		t.Errorf("husk pod missing the ip_forward init container when name egress on: %+v", withDNS.Spec.InitContainers)
 	}
 
 	withoutDNS := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
@@ -160,18 +161,18 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 			t.Errorf("husk args must omit --dns-upstream when unset: %v", withoutDNS.Spec.Containers[0].Args)
 		}
 	}
-	// No name egress => no unsafe sysctl, so clusters not using it need no node change.
-	if hasSysctl(withoutDNS.Spec.SecurityContext, "net.ipv4.ip_forward", "1") {
-		t.Errorf("husk pod must not set ip_forward sysctl when name egress off: %+v", withoutDNS.Spec.SecurityContext.Sysctls)
+	// No name egress => no init container, so clusters not using it are unaffected.
+	if hasForwardInit(withoutDNS.Spec.InitContainers) {
+		t.Errorf("husk pod must not add the ip_forward init container when name egress off: %+v", withoutDNS.Spec.InitContainers)
 	}
 }
 
-func hasSysctl(sc *corev1.PodSecurityContext, name, val string) bool {
-	if sc == nil {
-		return false
-	}
-	for _, s := range sc.Sysctls {
-		if s.Name == name && s.Value == val {
+// hasForwardInit reports whether a privileged init container enabling IPv4
+// forwarding is present.
+func hasForwardInit(inits []corev1.Container) bool {
+	for _, c := range inits {
+		if c.Name == "enable-ip-forward" && c.SecurityContext != nil &&
+			c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
 			return true
 		}
 	}
