@@ -229,12 +229,16 @@ except Exception as exc:  # noqa: BLE001
 result("claim", True, "sandbox Ready")
 
 
-def curl_exit(target, extra_timeout=5):
-    # Return the curl exit code from inside the sandbox. A non-zero exit means
-    # the connection was blocked/refused/timed out. -m bounds the wait so a
-    # silent default-deny drop does not hang the check.
-    cmd = f"curl -s -m {extra_timeout} -o /dev/null {target}; echo EXIT:$?"
-    res = sb.exec(cmd, timeout=extra_timeout + 15)
+def connect_exit(host, port, timeout=5):
+    # Probe TCP connectivity from INSIDE the sandbox with Python: the base image
+    # (python:3.x) ships python3 but NOT curl, so a curl probe returns exit 127
+    # (command-not-found) for EVERY target and silently turns the egress checks
+    # into false verdicts. socket.create_connection also performs the DNS resolve,
+    # so a name target exercises the in-pod DNS proxy + pin path. A non-zero exit
+    # means the connection was blocked/refused/timed out by the in-pod egress
+    # filter; 0 means it opened. The timeout bounds a silent default-deny drop.
+    cmd = f"""python3 -c 'import socket; socket.create_connection(("{host}", {port}), timeout={timeout}).close()'; echo EXIT:$?"""
+    res = sb.exec(cmd, timeout=timeout + 15)
     out = (res.stdout or "")
     for line in out.splitlines():
         if line.startswith("EXIT:"):
@@ -246,21 +250,21 @@ def curl_exit(target, extra_timeout=5):
     return res.exit_code if res.exit_code is not None else 1
 
 
-# 1. Metadata MUST be blocked (curl must FAIL: non-zero exit).
+# 1. Metadata MUST be blocked (the connect must FAIL: non-zero exit).
 try:
-    rc = curl_exit("http://169.254.169.254/latest/meta-data/")
+    rc = connect_exit("169.254.169.254", 80)
     if rc != 0:
-        result("metadata-blocked", True, f"curl exit={rc} (blocked, no IAM theft)")
+        result("metadata-blocked", True, f"connect exit={rc} (blocked, no IAM theft)")
     else:
         result("metadata-blocked", False, "169.254.169.254 REACHABLE from the sandbox (IAM theft possible)")
 except Exception as exc:  # noqa: BLE001
     result("metadata-blocked", False, f"{type(exc).__name__}: {exc}")
 
-# 2. A non-allowlisted host MUST be blocked (curl must FAIL).
+# 2. A non-allowlisted host MUST be blocked (the connect must FAIL).
 try:
-    rc = curl_exit(f"https://{DENY_HOST}/")
+    rc = connect_exit(DENY_HOST, 443)
     if rc != 0:
-        result("default-deny", True, f"curl exit={rc} (non-allowlisted host blocked)")
+        result("default-deny", True, f"connect exit={rc} (non-allowlisted host blocked)")
     else:
         result("default-deny", False, f"non-allowlisted host {DENY_HOST} REACHABLE (default-deny not enforced)")
 except Exception as exc:  # noqa: BLE001
@@ -269,11 +273,11 @@ except Exception as exc:  # noqa: BLE001
 # 3. The allowlisted host MUST be reachable (name-based egress via the in-pod DNS
 #    proxy + pin, proving the NIC binding and allowlist threading are correct).
 try:
-    rc = curl_exit(f"https://{ALLOW_NAME}/", extra_timeout=10)
+    rc = connect_exit(ALLOW_NAME, 443, timeout=10)
     if rc == 0:
-        result("allowlist-works", True, f"allowlisted host {ALLOW_NAME} reachable (curl exit=0)")
+        result("allowlist-works", True, f"allowlisted host {ALLOW_NAME} reachable (connect exit=0)")
     else:
-        result("allowlist-works", False, f"allowlisted host {ALLOW_NAME} NOT reachable (curl exit={rc})")
+        result("allowlist-works", False, f"allowlisted host {ALLOW_NAME} NOT reachable (connect exit={rc})")
 except Exception as exc:  # noqa: BLE001
     result("allowlist-works", False, f"{type(exc).__name__}: {exc}")
 PYEOF
