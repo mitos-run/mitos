@@ -48,12 +48,15 @@ spec:
             - --enable-husk-pods
             - --husk-stub-image=ghcr.io/paperclipinc/mitos-husk-stub:latest
             - --husk-data-dir=/var/lib/mitos
-            # Name-based egress allowlists: the per-pod DNS proxy forwards
-            # allowlisted name queries to these public resolvers (failover order).
-            # A public resolver pair, not cluster DNS, so untrusted sandboxes
-            # cannot resolve internal service names. Remove this flag to leave
-            # name-based egress off (IP:port allowlists are still enforced).
-            - --husk-dns-upstream=1.1.1.1:53,8.8.8.8:53
+            # Name-based egress allowlists are OPT-IN: uncomment to enable. The
+            # per-pod DNS proxy forwards allowlisted name queries to these public
+            # resolvers (failover order); use a public pair, not cluster DNS, so
+            # untrusted sandboxes cannot resolve internal service names. IP:port
+            # allowlists work without this flag. PREREQUISITE: enabling it makes
+            # husk pods request the net.ipv4.ip_forward sysctl, so the node kubelet
+            # must allowlist it (deploy/talos/worker-kvm.yaml allowed-unsafe-sysctls)
+            # or the pods are rejected with SysctlForbidden.
+            # - --husk-dns-upstream=1.1.1.1:53,8.8.8.8:53
           ports:
             - name: metrics
               containerPort: 8080
