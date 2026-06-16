@@ -143,6 +143,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	kept := make([]dns.RR, 0, len(resp.Answer))
 	for _, ans := range resp.Answer {
 		// Pin each A and AAAA answer. The pinner routes a v4 address into the v4
 		// set and a v6 address into the v6 set so the element type matches.
@@ -153,6 +154,20 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		case *dns.AAAA:
 			addr = rr.AAAA
 		default:
+			// Preserve non-address records (e.g. CNAME) in the response chain.
+			kept = append(kept, ans)
+			continue
+		}
+		// Refuse to pin a non-publicly-routable address: an allowlisted name whose
+		// authoritative DNS an attacker influences could otherwise be steered at
+		// internal cluster services, node-local, or other private targets (DNS
+		// rebinding to internal). Strip it from the response too so the guest
+		// neither learns nor (since it is not pinned, the default-deny chain drops
+		// it) can reach it. The nft metadata block covers IMDS; this is the
+		// resolver-side complement for the broader private ranges.
+		if isBlockedPinAddr(addr) {
+			s.logger.Warn("refusing to pin non-public resolved address (possible DNS rebinding to internal)",
+				"guest", clientIP.String(), "name", q.Name, "addr", addr.String())
 			continue
 		}
 		ttl := time.Duration(ans.Header().Ttl) * time.Second
@@ -165,11 +180,37 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					"guest", clientIP.String(), "name", q.Name, "port", port, "err", perr)
 			}
 		}
+		kept = append(kept, ans)
 	}
+	resp.Answer = kept
 
 	if werr := w.WriteMsg(resp); werr != nil {
 		s.logger.Debug("dns write failed", "guest", clientIP.String(), "err", werr)
 	}
+}
+
+// cgnatNet is the RFC6598 shared address space (100.64.0.0/10), used by some
+// Kubernetes and cloud networks and not covered by net.IP.IsPrivate.
+var cgnatNet = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// isBlockedPinAddr reports whether a resolved address must NOT be pinned into a
+// guest's egress allow set (and must be stripped from the answer). It blocks
+// every non-globally-routable range: RFC1918 and IPv6 ULA (net.IP.IsPrivate),
+// loopback, link-local uni/multicast, multicast, the unspecified address, and
+// RFC6598 CGNAT. This stops an allowlisted name whose DNS an attacker controls
+// from being rebound at internal cluster services, node-local addresses, or
+// other private targets. Globally-routable addresses (the legitimate egress
+// targets) are unaffected.
+func isBlockedPinAddr(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
+		ip.IsPrivate() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && cgnatNet.Contains(v4) {
+		return true
+	}
+	return false
 }
 
 func (s *Server) refuse(w dns.ResponseWriter, r *dns.Msg) {

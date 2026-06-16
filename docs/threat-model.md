@@ -439,7 +439,13 @@ husk-network KVM cluster e2e (see the status note below). The datapath is:
   into the per-tap nftables allow set, forwarding to a comma-separated upstream
   resolver list tried in failover order. The recommended value is the public pair
   `1.1.1.1:53,8.8.8.8:53`, deliberately NOT cluster DNS, so an untrusted sandbox
-  cannot resolve internal service names.
+  cannot resolve internal service names. The proxy also REFUSES to pin a resolved
+  address in any non-publicly-routable range (RFC1918, IPv6 ULA, loopback,
+  link-local, multicast, unspecified, RFC6598 CGNAT) and strips it from the
+  answer, so an allowlisted name whose authoritative DNS an attacker influences
+  cannot be rebound at internal cluster services or node-local targets
+  (DNS-rebinding-to-internal defense in depth, complementing the unconditional
+  IMDS block).
 - **The per-template allowlist is threaded husk-side.** `huskNotifyNetwork`
   delivers the fixed in-pod /30 plus the in-pod resolver, and `huskEgressConfig`
   carries the template egress policy + allowlist in the activate request
