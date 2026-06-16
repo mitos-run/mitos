@@ -205,6 +205,18 @@ reason codes only.
 | `mitos_orphan_sweeps_total` | counter | Orphan sandbox VMs terminated by the garbage collector. |
 | `mitos_claim_errors_total{pool,reason}` | counter | Claims that failed terminally, by pool and coarse reason (`fork`, `secret`, `volume`, `token`). |
 | `mitos_pool_ready_snapshots{pool}` | gauge | Ready snapshots per pool, as of the last pool reconcile. |
+| `mitos_pool_warm_dormant{pool}` | gauge | Dormant (unclaimed, warm) husk pods per pool, as of the last reconcile. |
+| `mitos_pool_warm_in_use{pool}` | gauge | Claimed/active husk pods per pool (the demand the autoscaler sizes against). |
+| `mitos_pool_desired_warm{pool}` | gauge | Autoscaler target dormant count per pool. |
+| `mitos_pool_warm_scale_up_total{pool}` | counter | Times the autoscaler raised the dormant target, by pool. |
+| `mitos_pool_warm_scale_down_total{pool}` | counter | Times the autoscaler lowered the dormant target, by pool. |
+| `mitos_pool_refill_latency_seconds` | histogram | Seconds from creating a husk pod to it becoming a ready dormant warm slot (warm-pool refill cost). |
+| `mitos_claim_wait_for_warm_seconds` | histogram | Seconds a claim waited from creation to activating a warm husk pod. |
+| `mitos_husk_pod_created_total{pool}` | counter | Husk pods the controller created to fill the warm pool, by pool. |
+| `mitos_husk_pod_lost_total{pool}` | counter | Times an active claim re-pended because its backing husk pod was lost (drain, eviction, deletion), by pool. |
+| `mitos_node_lost_total{node}` | counter | Ready claims marked NodeLost after their node went unhealthy (raw-forkd path), by node. |
+
+Fleet health: `mitos_husk_pod_created_total` against a flat `mitos_pool_warm_dormant` reveals churn (pods lost as fast as created); `mitos_husk_pod_lost_total` and `mitos_node_lost_total` are the disruption signals the warm pool absorbs; `mitos_pool_refill_latency_seconds` is how fast a scaled-up or drained pool refills.
 
 Counter versus gauge for pending: `mitos_claim_pending_total` is a counter of
 pending-requeue EVENTS, not a live gauge of currently-pending claims. A counter

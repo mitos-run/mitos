@@ -180,6 +180,7 @@ func (r *SandboxClaimReconciler) rependOnHuskPodLost(ctx context.Context, claim 
 	claim.Status.Node = ""
 	claim.Status.SandboxID = ""
 	recordClaimPending()
+	recordHuskPodLost(poolKey(pool))
 	setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
