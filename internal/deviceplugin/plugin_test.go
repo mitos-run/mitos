@@ -240,3 +240,85 @@ func TestRegistrarRegistersWithKubelet(t *testing.T) {
 		t.Fatal("Run did not return after context cancel")
 	}
 }
+
+// countingKubelet is a Registration server that reports every Register call on a
+// channel, so a test can assert re-registration after a kubelet restart.
+type countingKubelet struct {
+	v1beta1.UnimplementedRegistrationServer
+	calls chan *v1beta1.RegisterRequest
+}
+
+func (f *countingKubelet) Register(_ context.Context, req *v1beta1.RegisterRequest) (*v1beta1.Empty, error) {
+	f.calls <- req
+	return &v1beta1.Empty{}, nil
+}
+
+// serveKubelet binds a Registration gRPC server on kubelet.sock in dir and
+// returns a stop func that fully tears it down (server + listener + socket
+// file), simulating a kubelet going away.
+func serveKubelet(t *testing.T, dir string, fake *countingKubelet) func() {
+	t.Helper()
+	sock := filepath.Join(dir, "kubelet.sock")
+	_ = os.Remove(sock)
+	lis, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen kubelet socket: %v", err)
+	}
+	srv := grpc.NewServer()
+	v1beta1.RegisterRegistrationServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	return func() {
+		srv.Stop()
+		_ = lis.Close()
+		_ = os.Remove(sock)
+	}
+}
+
+// TestRegistrarReRegistersAfterKubeletRestart proves the plugin re-registers
+// when the kubelet restarts (recreates kubelet.sock). Without that, a kubelet
+// restart silently drops the plugin's devices (node advertises zero) until the
+// pod is manually restarted.
+func TestRegistrarReRegistersAfterKubeletRestart(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dp")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	fake := &countingKubelet{calls: make(chan *v1beta1.RegisterRequest, 8)}
+	stop := serveKubelet(t, dir, fake)
+
+	plugin := NewPlugin(testResource, 5, []string{"/dev/kvm"}, func() bool { return true })
+	registrar := NewRegistrar(plugin, dir, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- registrar.Run(ctx) }()
+
+	// First registration.
+	select {
+	case <-fake.calls:
+	case <-time.After(10 * time.Second):
+		t.Fatal("plugin did not register initially")
+	}
+
+	// Simulate a kubelet restart: tear the registry down and bring it back, which
+	// recreates kubelet.sock.
+	stop()
+	stop2 := serveKubelet(t, dir, fake)
+	defer stop2()
+
+	// The plugin must re-register against the restarted kubelet.
+	select {
+	case <-fake.calls:
+	case <-time.After(20 * time.Second):
+		t.Fatal("plugin did not re-register after kubelet restart")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after context cancel")
+	}
+}
