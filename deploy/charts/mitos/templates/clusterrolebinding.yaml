@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mitos-controller
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+subjects:
+  - kind: ServiceAccount
+    name: mitos-controller
+    namespace: {{ include "mitos.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mitos-controller

@@ -1,0 +1,171 @@
+# Controller ClusterRole. This is the surfaced copy of config/rbac/role.yaml,
+# which mirrors the // +kubebuilder:rbac markers in internal/controller. Every
+# rule below is justified by a client call in the controller code; nothing is
+# granted speculatively.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-controller
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  # The owned CRDs. The reconcilers read/watch them and write progress; the
+  # garbage collector deletes finished claims and forks on TTL expiry; the
+  # claim reconciler writes the terminate finalizer so no Ready object can
+  # disappear without forkd reaping its VM. The Workspace reconciler (W4)
+  # reconciles workspaces and their owner-referenced workspacerevisions: it
+  # prunes revisions past the retention policy (delete) and stamps the workspace
+  # label / owner ref on revisions it adopts (patch). The claim reconciler (W4
+  # slice 2) also reads workspaces (get, to resolve a bound workspace's head for
+  # hydrate) and creates workspacerevisions (create, to commit a dehydrated
+  # revision on terminate); both verbs are already in the combined rule below.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxclaims
+      - sandboxforks
+      - sandboxpools
+      - workspacerevisions
+      - workspaces
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # SandboxTemplate is a read-only input to pool/claim/fork placement.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  # Adding or removing the terminate finalizer touches the finalizers
+  # subresource, which some apiservers gate separately from the parent update.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxclaims/finalizers
+      - sandboxforks/finalizers
+    verbs:
+      - update
+  # status writes phase, conditions (NodeLost, Rejected, Terminated), warmed
+  # counts, and FinishedAt. The Workspace reconciler writes head/revisions/
+  # resumable and the Ready condition on workspaces, and the phase + condition
+  # on workspacerevisions. The claim reconciler (W4 outputs) also writes the
+  # diffSummary and gitPushes on a revision status it created on terminate; the
+  # update verb on workspacerevisions/status is already covered here.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxclaims/status
+      - sandboxforks/status
+      - sandboxpools/status
+      - workspacerevisions/status
+      - workspaces/status
+    verbs:
+      - get
+      - patch
+      - update
+  # ForkdDiscovery lists the labeled forkd Pods to learn each node's pod IP
+  # (get/list/watch). The husk pod warm-pool path (issue #18, slice 1) also
+  # creates and deletes husk Pods owned by a SandboxPool, so create;delete are
+  # added here.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Secrets: get/list/watch to read sandbox-referenced mounted Secrets and to
+  # reconcile the per-sandbox token Secret; create/update to mint and heal that
+  # token Secret and the control plane PKI Secrets (EnsurePKI: mitos-ca,
+  # mitos-forkd-tls, mitos-controller-tls). Token and CA-key VALUES are
+  # never logged. delete crypto-shreds a template's at-rest encryption key
+  # Secret on teardown (DeleteEncKey); owned Secrets are otherwise reaped by
+  # owner-reference GC.
+  # create/update ALSO replicate the husk PKI Secrets (mitos-ca ca.crt only,
+  # mitos-forkd-tls) FROM the controller namespace INTO each pool namespace
+  # where husk pods run (ReplicateHuskSecrets); the CA private key is never
+  # replicated. This is why the grant is cluster-wide rather than namespaced.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
+  # The workspace revision change feed (W4) mirrors every feed event as a
+  # Kubernetes Event on the source object (the always-on channel, on top of the
+  # opt-in CloudEvents webhook). The EventRecorder needs create;patch on events
+  # to record and aggregate them. Event messages carry names, content digests,
+  # lineage, and phases only; never secret values.
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # The husk warm pool is bounded against voluntary disruption (node drain,
+  # eviction) by a PodDisruptionBudget the pool reconciler creates-or-updates
+  # per pool (issue #18, slice 4b), so a drain disrupts at most a bounded number
+  # of warm husk pods at once. Owner-referenced to the pool (GC'd with it).
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Best-effort husk NetworkPolicy (ensureHuskNetworkPolicy). get;list;watch are
+  # load-bearing for LIVENESS, not just create: the controller reads the policy
+  # through the CACHED client, which lazily starts a NetworkPolicy informer; without
+  # list;watch that informer never syncs and the cached Get BLOCKS the pool reconcile
+  # before it creates any husk pods (found by kind-e2e-husk: 0 husk pods created).
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Leader election: the controller Deployment runs multiple replicas for HA but
+  # exactly one may reconcile at a time. controller-runtime coordinates that with
+  # a Lease in the controller's namespace, so it needs leases create/get/update
+  # (+ events, already granted above, to record leader transitions).
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch

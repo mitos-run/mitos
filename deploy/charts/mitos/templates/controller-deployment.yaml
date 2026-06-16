@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-controller
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 8 }}
+    spec:
+      serviceAccountName: mitos-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.controller.image) }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          # Production runs the pod-native default: metrics on :8080, health on
+          # :8081, PKI bootstrap ENABLED (mTLS to forkd AND to the husk control
+          # channel). --disable-pki-bootstrap is deliberately omitted so the
+          # control plane refuses to dial forkd or activate a husk pod over an
+          # unauthenticated channel.
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            {{- if .Values.controller.enableHuskPods }}
+            - --enable-husk-pods
+            {{- end }}
+            - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
+            - --husk-data-dir={{ .Values.controller.huskDataDir }}
+            {{- if .Values.controller.huskDnsUpstream }}
+            - --husk-dns-upstream={{ .Values.controller.huskDnsUpstream }}
+            {{- end }}
+            {{- with .Values.controller.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20

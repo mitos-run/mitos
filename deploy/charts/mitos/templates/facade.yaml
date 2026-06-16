@@ -1,0 +1,161 @@
+{{- if .Values.facade.enabled }}
+# agents.x-k8s.io conformance facade: opt-in via facade.enabled. Maps each
+# upstream agents.x-k8s.io/v1alpha1 Sandbox onto a husk-backed SandboxClaim. It
+# assumes the upstream agents.x-k8s.io Sandbox CRD is installed out of band.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mitos-facade
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: facade
+---
+# Facade ClusterRole. Every rule is justified by a client call in
+# internal/facade; nothing is granted speculatively.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-facade
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: facade
+rules:
+  # The upstream Sandbox the facade watches and whose status it mirrors.
+  - apiGroups:
+      - agents.x-k8s.io
+    resources:
+      - sandboxes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - agents.x-k8s.io
+    resources:
+      - sandboxes/status
+    verbs:
+      - get
+      - patch
+      - update
+  # The upstream extension kinds the facade watches and whose status it mirrors.
+  - apiGroups:
+      - extensions.agents.x-k8s.io
+    resources:
+      - sandboxtemplates
+      - sandboxwarmpools
+      - sandboxclaims
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions.agents.x-k8s.io
+    resources:
+      - sandboxtemplates/status
+      - sandboxwarmpools/status
+      - sandboxclaims/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Our run-path objects the facade creates, owns, and terminates.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxclaims
+      - sandboxtemplates
+      - sandboxpools
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxpools/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mitos-facade
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: facade
+subjects:
+  - kind: ServiceAccount
+    name: mitos-facade
+    namespace: {{ include "mitos.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mitos-facade
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-facade
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: facade
+spec:
+  # Single instance: leader election is off in cmd/facade for now. Raise replicas
+  # only after enabling leader election.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "facade") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "facade") | nindent 8 }}
+    spec:
+      serviceAccountName: mitos-facade
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: facade
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.facade.image) }}
+          imagePullPolicy: {{ .Values.facade.image.pullPolicy }}
+          # --default-pool is the mitos.run pool a Sandbox binds to when it carries
+          # no mitos.run/pool bridge annotation.
+          args:
+            - --metrics-bind-address=:8082
+            - --health-probe-bind-address=:8083
+            - --default-pool={{ .Values.facade.defaultPool }}
+            - --cluster-domain={{ .Values.facade.clusterDomain }}
+          ports:
+            - name: metrics
+              containerPort: 8082
+            - name: health
+              containerPort: 8083
+          resources:
+            {{- toYaml .Values.facade.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+{{- end }}

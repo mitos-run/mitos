@@ -1,0 +1,46 @@
+mitos has been installed into namespace {{ include "mitos.namespace" . }}.
+
+Components rendered:
+  - controller Deployment (replicas: {{ .Values.controller.replicas }})
+  - forkd DaemonSet (privileged snapshot builder; KVM nodes only)
+{{- if .Values.devicePlugin.enabled }}
+  - kvm-device-plugin DaemonSet (advertises {{ .Values.controller.kvmResourceName }})
+{{- end }}
+{{- if .Values.kernelProvisioner.enabled }}
+  - kernel-stage DaemonSet (stages the guest kernel on KVM nodes)
+{{- end }}
+{{- if .Values.facade.enabled }}
+  - agents.x-k8s.io facade Deployment
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+  - PrometheusRule and Grafana dashboard ConfigMap
+{{- end }}
+
+IMPORTANT: forkd and the husk pods only schedule on nodes labeled
+mitos.run/kvm=true. Until a matching KVM worker joins, the forkd and
+kernel-stage DaemonSets stay Pending by design. Label a KVM-capable node:
+
+  kubectl label node <node-name> mitos.run/kvm=true
+
+{{- if not .Values.imagePullSecret.create }}
+
+The chart did NOT render the {{ .Values.imagePullSecret.name }} pull secret
+(imagePullSecret.create is false). Create it in the {{ include "mitos.namespace" . }}
+namespace before the images can pull, or set imagePullSecret.create=true with a
+real imagePullSecret.dockerconfigjson:
+
+  kubectl create secret docker-registry {{ .Values.imagePullSecret.name }} \
+    --namespace {{ include "mitos.namespace" . }} \
+    --docker-server=ghcr.io \
+    --docker-username=<github-username> \
+    --docker-password=<ghcr-read-packages-PAT>
+{{- end }}
+
+Verify the control plane:
+
+  kubectl get pods -n {{ include "mitos.namespace" . }}
+  kubectl get crds | grep mitos.run
+
+The CRDs (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork, Workspace,
+WorkspaceRevision) install from the chart crds/ directory. Helm does not upgrade
+or delete CRDs on chart upgrade or uninstall; manage CRD changes out of band.

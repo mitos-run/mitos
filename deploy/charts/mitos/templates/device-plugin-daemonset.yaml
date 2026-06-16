@@ -1,0 +1,81 @@
+{{- if .Values.devicePlugin.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mitos-kvm-device-plugin
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kvm-device-plugin
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "kvm-device-plugin") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "kvm-device-plugin") | nindent 8 }}
+    spec:
+      # No nodeSelector ON PURPOSE: the plugin runs on EVERY node and advertises
+      # mitos.run/kvm slots only where /dev/kvm exists and zero elsewhere.
+      priorityClassName: system-node-critical
+      tolerations:
+        # Tolerate everything so the plugin lands on every node; it is a
+        # node-local daemon with no scheduling preferences of its own.
+        - operator: Exists
+      containers:
+        - name: kvm-device-plugin
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.devicePlugin.image) }}
+          imagePullPolicy: {{ .Values.devicePlugin.image.pullPolicy }}
+          args:
+            - --resource-name=mitos.run/kvm
+            # 0 = auto: advertise a sane slot count (100) where /dev/kvm exists.
+            - --device-count=0
+            - --device-paths=/dev/kvm,/dev/net/tun
+            - --kubelet-dir=/var/lib/kubelet/device-plugins
+            # Probe the host /dev/kvm at /host-dev/kvm: the host /dev is mounted
+            # read-only at /host-dev, NOT over the container's own /dev.
+            - --kvm-device-path=/host-dev/kvm
+          # Minimal privileges. This is NOT the privileged forkd: it runs as root
+          # only because the kubelet device-plugins dir is root-owned, but it is
+          # unprivileged with ALL capabilities dropped.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          volumeMounts:
+            # The kubelet device-plugins dir: the plugin serves its socket here
+            # and dials the kubelet registry socket here.
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+            # Host /dev mounted read-only at /host-dev so the plugin can stat
+            # /host-dev/kvm to decide whether KVM is present.
+            - name: dev
+              mountPath: /host-dev
+              readOnly: true
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+{{- end }}
