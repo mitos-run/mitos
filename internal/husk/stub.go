@@ -159,6 +159,38 @@ func productionNotifier(vsockPath string, generation uint64, entropy []byte, req
 // dst carry no secrets.
 type reflinker func(src, dst string) error
 
+// rootfsTemplateWait bounds how long Prepare waits for forkd to finish writing
+// the node template rootfs.ext4 before cloning it for this activation. The pool
+// builds the template snapshot on the node before creating husk pods, but the
+// build is slower with networking enabled (a placeholder tap + NIC boot before
+// the snapshot), so a freshly scheduled husk pod can briefly observe the source
+// rootfs missing. Waiting (rather than crashing into CrashLoopBackOff) keeps the
+// pod recoverable within a claim's readiness window.
+const rootfsTemplateWait = 180 * time.Second
+
+// waitForFile polls until path exists, the context is cancelled, or the timeout
+// elapses. It is the bounded tolerance for the pool creating a husk pod before
+// forkd has finished materializing the template rootfs on the shared node dir.
+func waitForFile(ctx context.Context, path string, timeout time.Duration) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s did not appear within %s: %w", path, timeout, ctx.Err())
+		case <-ticker.C:
+			if _, err := os.Stat(path); err == nil {
+				return nil
+			}
+		}
+	}
+}
+
 // wsTransporter resolves a workspace.VsockTransport (the bulk tar TarDir/UntarDir
 // slice of the guest agent) for the active VM at vsockPath. The dehydrate and
 // hydrate workspace ops run the KVM-proven internal/workspace round trip through
@@ -515,6 +547,16 @@ func (s *Stub) Prepare(ctx context.Context) error {
 			_ = s.vm.Close()
 			s.vm = nil
 			return fmt.Errorf("husk: create per-activation rootfs dir: %w", err)
+		}
+		// Wait (bounded, ctx-aware) for forkd to finish writing the template
+		// rootfs on the node before cloning it. The pool can schedule this husk
+		// pod a moment before the build's rootfs.ext4 is visible on the shared
+		// hostPath dir; crashing here would drop the pod into CrashLoopBackOff and
+		// keep it out of the warm pool past a claim's deadline.
+		if err := waitForFile(ctx, s.rootfsTemplatePath, rootfsTemplateWait); err != nil {
+			_ = s.vm.Close()
+			s.vm = nil
+			return fmt.Errorf("husk: per-activation rootfs template %s not ready: %w", s.rootfsTemplatePath, err)
 		}
 		if err := s.reflink(s.rootfsTemplatePath, clonePath); err != nil {
 			_ = s.vm.Close()
