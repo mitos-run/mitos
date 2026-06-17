@@ -69,6 +69,25 @@ func handleNotifyForked(req *vsock.NotifyForkedRequest) vsock.Response {
 // (0x40085203 on amd64/arm64); we use the package constant rather than a
 // hardcoded request number so cross-arch builds stay correct.
 func reseedCRNG(entropy []byte) bool {
+	return reseedCRNGAt(entropy, "/dev/urandom")
+}
+
+// reseedCRNGAt credits the kernel CRNG at path (production: /dev/urandom) with
+// the host-supplied entropy via RNDADDENTROPY, which adds the bytes AND credits
+// the entropy count. It reports success ONLY when that credited ioctl succeeds.
+//
+// FAIL CLOSED: if RNDADDENTROPY fails it returns false rather than reporting
+// success. The previous behavior fell back to a plain write to /dev/urandom and
+// still returned true, but an uncredited write mixes the bytes into the input
+// pool WITHOUT crediting entropy and does NOT guarantee the CRNG output diverges
+// from a sibling fork that restored the same snapshot. The host fork-correctness
+// gate keys entirely on this boolean, so over-reporting here silently defeated
+// it: a fork that could not be credibly reseeded would be served sharing its
+// siblings' CRNG output (duplicate keys/tokens/nonces). Returning false makes
+// the host reap such a fork. The guest agent runs as PID 1 with full
+// capabilities on our shipped kernel, where RNDADDENTROPY is available, so the
+// credited path is the normal path; the fallback was the unsafe one.
+func reseedCRNGAt(entropy []byte, path string) bool {
 	if len(entropy) == 0 {
 		return false
 	}
@@ -79,9 +98,9 @@ func reseedCRNG(entropy []byte) bool {
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(entropy)))
 	copy(buf[8:], entropy)
 
-	f, err := os.OpenFile("/dev/urandom", os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox-agent: open /dev/urandom: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sandbox-agent: open %s: %v\n", path, err)
 		return false
 	}
 	defer f.Close()
@@ -95,15 +114,8 @@ func reseedCRNG(entropy []byte) bool {
 	if errno == 0 {
 		return true
 	}
-	fmt.Fprintf(os.Stderr, "sandbox-agent: RNDADDENTROPY failed (errno %d), falling back to write\n", int(errno))
-
-	// Fallback: writing to /dev/urandom mixes the bytes into the pool without
-	// crediting entropy. Worse than the ioctl, but still perturbs CRNG state.
-	if _, err := f.Write(entropy); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox-agent: write /dev/urandom: %v\n", err)
-		return false
-	}
-	return true
+	fmt.Fprintf(os.Stderr, "sandbox-agent: RNDADDENTROPY failed (errno %d); reseed NOT credited, reporting failure so the host reaps this fork\n", int(errno))
+	return false
 }
 
 // stepClock reads CLOCK_REALTIME, compares it to the host wall clock delivered
