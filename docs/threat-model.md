@@ -454,6 +454,27 @@ husk-network KVM cluster e2e (see the status note below). The datapath is:
   prefix (other than the well-known `64:ff9b::/96`) is not yet decoded; clusters
   using a custom NAT64 prefix should set it via the resolver config once that
   knob lands.
+- **Guest-to-pod-local traffic is filtered on the INPUT hook (husk path).** The
+  per-tap forward chain governs transit egress, but a packet the guest sends to
+  an address LOCAL to the pod netns (the tap gateway, the resolver, the
+  husk-stub sandbox API on :9091 and mTLS control on :9443) is delivered on the
+  kernel input hook, which a forward-only filter never evaluates. So without an
+  input rule a guest could reach those pod-local listeners regardless of egress
+  policy (their own auth gates limited impact, but the egress allowlist offered
+  no protection and any future in-pod listener was exposed). `applyEgressFilter`
+  now also installs an input-hooked base chain plus a per-tap input chain
+  (`netconf.RenderSharedInputTable` / `RenderSandboxInputChain`) that accepts
+  the guest only to the resolver on udp/tcp 53 and drops every other
+  guest-sourced packet to a pod-local address. The base chain policy is accept
+  so non-sandbox input (kubelet probes, the controller's mTLS dial arriving on
+  the pod uplink) is untouched; isolation is via the per-tap dispatch jump. This
+  is on the HUSK path only: the filter lives in the isolated pod netns, whereas
+  the raw-forkd path runs in the node netns where a node-wide input hook is not
+  added (raw-forkd's host-local exposure is tracked separately). Renderer and
+  wiring are unit-tested (`TestRenderSandboxInputChainBlocksGuestToPodLocal`,
+  `TestApplyEgressFilterInstallsInputGuard`); end-to-end enforcement inside a
+  real restored VM is gated by the husk-network KVM e2e
+  (`test/cluster-e2e/husk-network-e2e.sh`) which MUST be green before merge.
 - **The per-template allowlist is threaded husk-side.** `huskNotifyNetwork`
   delivers the fixed in-pod /30 plus the in-pod resolver, and `huskEgressConfig`
   carries the template egress policy + allowlist in the activate request

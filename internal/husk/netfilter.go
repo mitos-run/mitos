@@ -90,6 +90,18 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderMasquerade(cfg.GuestIP)); err != nil {
 		return fmt.Errorf("husk netfilter: apply masquerade for guest %s: %w", cfg.GuestIP, err)
 	}
+	// Input-path guard: the forward chain above governs transit traffic, but a
+	// packet the guest sends to a pod-LOCAL address (the tap gateway, the resolver,
+	// the husk-stub sandbox API and mTLS control listeners) is delivered on the
+	// input hook, which the forward chain never sees. Install the input base chain
+	// and this tap's input chain so the guest can reach ONLY the resolver on 53 and
+	// nothing else pod-local, regardless of egress policy.
+	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedInputTable()); err != nil {
+		return fmt.Errorf("husk netfilter: apply shared input table: %w", err)
+	}
+	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSandboxInputChain(cfg.Tap, cfg.GuestIP, cfg.ResolverIP)); err != nil {
+		return fmt.Errorf("husk netfilter: apply input chain for tap %s: %w", cfg.Tap, err)
+	}
 	return nil
 }
 
@@ -109,6 +121,12 @@ func teardownEgressFilter(ctx context.Context, run netfilterRunner, tap string) 
 	}
 	if err := run(ctx, netconf.NftDeleteSandboxAllowSetArgs(tap), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("husk netfilter: delete allow set for tap %s: %w", tap, err)
+	}
+	if err := run(ctx, netconf.NftDeleteInputDispatchElementArgs(tap), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("husk netfilter: delete input dispatch element for tap %s: %w", tap, err)
+	}
+	if err := run(ctx, netconf.NftDeleteSandboxInputChainArgs(tap), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("husk netfilter: delete input chain for tap %s: %w", tap, err)
 	}
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderMasqueradeDelete()); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("husk netfilter: delete masquerade table: %w", err)

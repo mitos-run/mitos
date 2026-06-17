@@ -41,9 +41,10 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 		t.Error("applyEgressFilter did not enable IPv4 forwarding")
 	}
 	// Expect: tap add, addr add, link up, resolver addr add, shared table apply,
-	// sandbox chain apply, masquerade apply.
-	if len(rr.calls) != 7 {
-		t.Fatalf("got %d calls, want 7: %+v", len(rr.calls), rr.calls)
+	// sandbox chain apply, masquerade apply, shared input table apply, sandbox
+	// input chain apply.
+	if len(rr.calls) != 9 {
+		t.Fatalf("got %d calls, want 9: %+v", len(rr.calls), rr.calls)
 	}
 	// The resolver IP is bound to the tap as a /32 so the per-pod DNS proxy can
 	// listen on it and the guest's queries are delivered locally.
@@ -64,6 +65,40 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	masqStdin := rr.calls[6].stdin
 	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
 		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
+	}
+}
+
+// TestApplyEgressFilterInstallsInputGuard proves the per-pod filter also guards
+// the INPUT path: the guest may reach the in-pod resolver on 53 but every other
+// guest-sourced packet to a pod-local address (the husk-stub sandbox API and
+// mTLS control listeners) is dropped, closing the gap that forward-only
+// filtering leaves open.
+func TestApplyEgressFilterInstallsInputGuard(t *testing.T) {
+	rr := &recordingRunner{}
+	cfg := NetfilterConfig{
+		Tap:        "sbtap0",
+		GuestIP:    net.ParseIP("10.200.0.2"),
+		HostIP:     net.ParseIP("10.200.0.1"),
+		Egress:     v1alpha1.EgressDeny,
+		ResolverIP: net.ParseIP("169.254.1.1"),
+	}
+	if err := applyEgressFilter(context.Background(), rr.run, func() error { return nil }, cfg); err != nil {
+		t.Fatal(err)
+	}
+	// The last two applies are the shared input table and this tap's input chain.
+	inputTable := rr.calls[7].stdin
+	if !strings.Contains(inputTable, "type filter hook input") {
+		t.Errorf("shared input table not applied:\n%s", inputTable)
+	}
+	inputChain := rr.calls[8].stdin
+	if !strings.Contains(inputChain, "ip saddr 10.200.0.2 ip daddr 169.254.1.1 udp dport 53 accept") {
+		t.Errorf("input chain missing resolver allow:\n%s", inputChain)
+	}
+	if !strings.Contains(inputChain, "ip saddr 10.200.0.2 drop") {
+		t.Errorf("input chain missing guest-to-pod-local drop:\n%s", inputChain)
+	}
+	if !strings.Contains(inputChain, netconf.SandboxInputChainName("sbtap0")) {
+		t.Errorf("input chain not named for tap:\n%s", inputChain)
 	}
 }
 
