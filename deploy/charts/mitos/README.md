@@ -94,6 +94,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `devicePlugin.image.pullPolicy` | `IfNotPresent` | Device plugin image pull policy. |
 | `kernelProvisioner.enabled` | `true` | Render the kernel-stage DaemonSet. |
 | `kernelProvisioner.kernelUrl` | Firecracker CI x86_64 5.10 vmlinux | Guest kernel download URL. |
+| `kernelProvisioner.kernelSha256` | `""` | Expected SHA256 of the kernel. When set, the staged kernel is verified and the init container fails closed on mismatch. Strongly recommended; compute with `curl -fsSL <kernelUrl> \| sha256sum`. |
 | `facade.enabled` | `false` | Render the agents.x-k8s.io facade. |
 | `facade.image.repository` | `mitos-facade` | Facade image repository. |
 | `facade.image.tag` | `v0.4.0` | Facade image tag. |

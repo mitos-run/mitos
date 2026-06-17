@@ -108,6 +108,13 @@ kernelProvisioner:
   # The guest kernel image URL the init container downloads. Override to host
   # your own kernel.
   kernelUrl: https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
+  # Expected SHA256 (hex) of the kernel at kernelUrl. STRONGLY RECOMMENDED: when
+  # set, the kernel-stage init container verifies the staged file and fails
+  # closed on mismatch, so a swapped upstream object or a MITMed download cannot
+  # boot a backdoored kernel into every microVM. Left empty the kernel is staged
+  # WITHOUT verification (a warning is logged). Compute with:
+  #   curl -fsSL <kernelUrl> | sha256sum
+  kernelSha256: ""
 
 # Facade (Deployment): the agents.x-k8s.io conformance facade. Opt-in.
 facade:

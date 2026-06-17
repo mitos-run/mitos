@@ -16,6 +16,8 @@ spec:
       labels:
         {{- include "mitos.selectorLabels" (dict "root" . "component" "kernel-stage") | nindent 8 }}
     spec:
+      # This pod makes no Kubernetes API calls; do not mount a SA token.
+      automountServiceAccountToken: false
       # Stage the guest kernel only on KVM nodes; that is exactly where forkd and
       # husk pods read the staged vmlinux.
       {{- with .Values.forkd.nodeSelector }}
@@ -37,18 +39,43 @@ spec:
             - |
               set -eu
               dest={{ .Values.forkd.dataDir }}/vmlinux
+              # When KERNEL_SHA256 is set, verify the file against it and FAIL
+              # CLOSED on mismatch. This covers both a fresh download and a file
+              # already staged on the node (the previous skip-if-present check
+              # was content-blind, so a once-poisoned cache would persist).
+              verify() {
+                [ -z "${KERNEL_SHA256:-}" ] && return 0
+                echo "${KERNEL_SHA256}  $1" | sha256sum -c -
+              }
               if [ -s "$dest" ]; then
-                echo "kernel already staged at $dest; skipping download"
-                exit 0
+                if [ -n "${KERNEL_SHA256:-}" ]; then
+                  if verify "$dest"; then
+                    echo "kernel already staged at $dest and matches pinned digest; skipping"
+                    exit 0
+                  fi
+                  echo "staged kernel at $dest FAILED the pinned digest check; restaging" >&2
+                else
+                  echo "kernel already staged at $dest; skipping download (KERNEL_SHA256 unset, integrity NOT verified)" >&2
+                  exit 0
+                fi
               fi
               echo "staging guest kernel to $dest"
               curl -fsSL -o "$dest.tmp" "$KERNEL_URL"
+              if [ -n "${KERNEL_SHA256:-}" ]; then
+                verify "$dest.tmp"
+              else
+                echo "WARNING: kernelProvisioner.kernelSha256 is unset; the staged guest kernel is booted into every microVM WITHOUT integrity verification. Pin the expected digest to fail closed on a swapped or MITMed kernel." >&2
+              fi
               mv "$dest.tmp" "$dest"
               echo "kernel staged"
           env:
             # The guest kernel image URL. Override per cluster to host your own.
             - name: KERNEL_URL
               value: {{ .Values.kernelProvisioner.kernelUrl }}
+            # Expected SHA256 of the kernel at KERNEL_URL. When set, the init
+            # container fails closed unless the staged file matches it.
+            - name: KERNEL_SHA256
+              value: {{ .Values.kernelProvisioner.kernelSha256 | quote }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.forkd.dataDir }}
