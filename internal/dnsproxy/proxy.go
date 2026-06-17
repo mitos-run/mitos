@@ -193,22 +193,63 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 // Kubernetes and cloud networks and not covered by net.IP.IsPrivate.
 var cgnatNet = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
+// IPv6 ranges that either embed an IPv4 target or are otherwise non-public but
+// are NOT caught by net.IP's predicates:
+//   - nat64WellKnown: RFC6052 NAT64 well-known prefix; the embedded IPv4 is the
+//     last 32 bits. A DNS64/NAT64 gateway translates these to that IPv4.
+//   - sixToFourNet: RFC3056 6to4; the embedded IPv4 is bits 16..47.
+//   - siteLocalNet: deprecated RFC3879 site-local unicast (no embedded IPv4).
+var (
+	nat64WellKnown = &net.IPNet{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)}
+	sixToFourNet   = &net.IPNet{IP: net.ParseIP("2002::"), Mask: net.CIDRMask(16, 128)}
+	siteLocalNet   = &net.IPNet{IP: net.ParseIP("fec0::"), Mask: net.CIDRMask(10, 128)}
+)
+
+// embeddedIPv4 returns the IPv4 address an IPv6 address carries inside a
+// well-known IPv4-embedding prefix (NAT64 64:ff9b::/96 or 6to4 2002::/16), or
+// nil when ip uses neither. Pinning such an address lets a NAT64/6to4 gateway
+// reach the embedded IPv4, so the embedded target must be policy-checked, not
+// the v6 wrapper.
+func embeddedIPv4(ip net.IP) net.IP {
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return nil
+	}
+	switch {
+	case nat64WellKnown.Contains(ip):
+		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15])
+	case sixToFourNet.Contains(ip):
+		return net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5])
+	}
+	return nil
+}
+
 // isBlockedPinAddr reports whether a resolved address must NOT be pinned into a
 // guest's egress allow set (and must be stripped from the answer). It blocks
 // every non-globally-routable range: RFC1918 and IPv6 ULA (net.IP.IsPrivate),
-// loopback, link-local uni/multicast, multicast, the unspecified address, and
-// RFC6598 CGNAT. This stops an allowlisted name whose DNS an attacker controls
-// from being rebound at internal cluster services, node-local addresses, or
-// other private targets. Globally-routable addresses (the legitimate egress
-// targets) are unaffected.
+// loopback, link-local uni/multicast, multicast, the unspecified address,
+// RFC6598 CGNAT, deprecated site-local (fec0::/10), and IPv6 addresses that
+// embed a blocked IPv4 target inside the NAT64 or 6to4 prefixes (decoded and
+// re-checked, so a public IPv4 reached via NAT64/6to4 stays allowed). This
+// stops an allowlisted name whose DNS an attacker controls from being rebound
+// at internal cluster services, node-local addresses, cloud metadata, or other
+// private targets. Globally-routable addresses (the legitimate egress targets)
+// are unaffected.
 func isBlockedPinAddr(ip net.IP) bool {
 	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
 		ip.IsPrivate() {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil && cgnatNet.Contains(v4) {
+	if v4 := ip.To4(); v4 != nil {
+		return cgnatNet.Contains(v4)
+	}
+	// Pure IPv6 from here (To4 == nil).
+	if siteLocalNet.Contains(ip) {
 		return true
+	}
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		return isBlockedPinAddr(embedded)
 	}
 	return false
 }

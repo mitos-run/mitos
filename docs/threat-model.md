@@ -441,11 +441,19 @@ husk-network KVM cluster e2e (see the status note below). The datapath is:
   `1.1.1.1:53,8.8.8.8:53`, deliberately NOT cluster DNS, so an untrusted sandbox
   cannot resolve internal service names. The proxy also REFUSES to pin a resolved
   address in any non-publicly-routable range (RFC1918, IPv6 ULA, loopback,
-  link-local, multicast, unspecified, RFC6598 CGNAT) and strips it from the
-  answer, so an allowlisted name whose authoritative DNS an attacker influences
-  cannot be rebound at internal cluster services or node-local targets
-  (DNS-rebinding-to-internal defense in depth, complementing the unconditional
-  IMDS block).
+  link-local, multicast, unspecified, RFC6598 CGNAT, deprecated site-local
+  fec0::/10) and strips it from the answer, so an allowlisted name whose
+  authoritative DNS an attacker influences cannot be rebound at internal cluster
+  services or node-local targets (DNS-rebinding-to-internal defense in depth,
+  complementing the unconditional IMDS block). The check also decodes IPv6
+  addresses that embed an IPv4 target inside the NAT64 well-known prefix
+  (`64:ff9b::/96`) or the 6to4 prefix (`2002::/16`) and applies the same policy
+  to the embedded IPv4, so on a DNS64/NAT64 cluster a wrapper such as
+  `64:ff9b::a9fe:a9fe` (NAT64 of `169.254.169.254`) is refused while a wrapper of
+  a public IPv4 stays allowed. RESIDUAL: a non-default, operator-configured NAT64
+  prefix (other than the well-known `64:ff9b::/96`) is not yet decoded; clusters
+  using a custom NAT64 prefix should set it via the resolver config once that
+  knob lands.
 - **The per-template allowlist is threaded husk-side.** `huskNotifyNetwork`
   delivers the fixed in-pod /30 plus the in-pod resolver, and `huskEgressConfig`
   carries the template egress policy + allowlist in the activate request
