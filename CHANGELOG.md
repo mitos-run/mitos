@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0](https://github.com/paperclipinc/mitos/compare/v0.4.0...v0.5.0) (2026-06-16)
+
+
+### Features
+
+* **controller:** fleet-observability metrics (husk pod created/lost, node lost, refill latency) ([d1629e3](https://github.com/paperclipinc/mitos/commit/d1629e380ebf27941390db7c668049fa312c79d9))
+* **controller:** fleet-observability metrics (husk pod created/lost, node lost, refill latency) ([6b79a92](https://github.com/paperclipinc/mitos/commit/6b79a92475923c3d90d3a899d80ca602a304611a))
+* **deploy:** Helm chart for the mitos control plane ([#37](https://github.com/paperclipinc/mitos/issues/37)) ([28b6e8a](https://github.com/paperclipinc/mitos/commit/28b6e8a4674fbe3779ff18325b2068f73cb9de42))
+* **deploy:** Helm chart for the mitos control plane ([#37](https://github.com/paperclipinc/mitos/issues/37)) ([fa95761](https://github.com/paperclipinc/mitos/commit/fa957611b51c97ea4e61d7cd88df00aeb92bdd11))
+
 ## [0.4.0](https://github.com/paperclipinc/mitos/compare/v0.3.0...v0.4.0) (2026-06-16)
 
 
