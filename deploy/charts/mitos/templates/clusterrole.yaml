@@ -169,3 +169,15 @@ rules:
       - list
       - update
       - watch
+  {{- if .Values.admissionWebhook.enabled }}
+  # Principal admission webhook: the validator creates a SubjectAccessReview to
+  # check the claim creator may impersonate the named ServiceAccount. create on
+  # subjectaccessreviews is the only verb the SAR API supports. Granted only when
+  # the webhook is enabled.
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+  {{- end }}
