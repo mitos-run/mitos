@@ -1109,6 +1109,31 @@ func (r *SandboxPoolReconciler) observeRefillForReadyPods(ctx context.Context, o
 	}
 }
 
+// huskPodOwnedByPool reports whether pod carries the controller owner reference
+// reconcileHuskPods stamps for this pool: a controller reference (Controller=true)
+// of Kind SandboxPool naming this pool with BlockOwnerDeletion set. It is the
+// unforgeable provenance signal the warm slot selector requires before treating
+// a pod as an activation target, so a tenant who can only create pods (and set
+// arbitrary labels) in the pool namespace cannot plant a decoy the controller
+// would hand secrets to.
+//
+// The forgery barrier is BlockOwnerDeletion=true: the
+// OwnerReferencesPermissionEnforcement admission plugin refuses to let a
+// principal set it on an owner whose finalizers subresource they cannot update,
+// so a tenant cannot reference THIS named pool with that bit. The owner UID is
+// deliberately NOT compared: it adds no forgery resistance (anyone who could
+// forge BlockOwnerDeletion could also read and copy the pool UID), and in
+// production GC already deletes husk pods whose owner UID drifts from the pool.
+func huskPodOwnedByPool(pod *corev1.Pod, pool *v1alpha1.SandboxPool) bool {
+	ref := metav1.GetControllerOf(pod)
+	if ref == nil {
+		return false
+	}
+	return ref.Kind == "SandboxPool" &&
+		ref.Name == pool.Name &&
+		ref.BlockOwnerDeletion != nil && *ref.BlockOwnerDeletion
+}
+
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
 // dial its control channel and set a reachable endpoint).
@@ -1153,6 +1178,18 @@ func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool 
 			continue
 		}
 		if !huskPodReady(&p) {
+			continue
+		}
+		// Provenance gate: activation delivers the claim's resolved secrets and
+		// per-sandbox bearer token to the pod's self-reported IP, so the pod must
+		// be one the controller actually created, not merely something carrying
+		// the husk labels (which any tenant with pod-create in this namespace can
+		// set). reconcileHuskPods stamps a controller owner reference to the pool;
+		// requiring it here means a tenant-planted decoy is never an activation
+		// target. The BlockOwnerDeletion bit it carries is protected by the
+		// OwnerReferencesPermissionEnforcement admission plugin: a tenant cannot
+		// forge it without update on this pool's finalizers subresource.
+		if !huskPodOwnedByPool(&p, pool) {
 			continue
 		}
 		candidates = append(candidates, p)
