@@ -72,6 +72,28 @@ rules:
       - list
       - update
       - watch
+  # Secrets RBAC narrowing: bind the controller to the mitos-pool-secrets
+  # ClusterRole per pool namespace (EnsurePoolSecretsRoleBinding). bind is scoped
+  # by resourceNames; plus rolebindings management. Mirrors the Helm chart.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+    verbs:
+      - bind
+    resourceNames:
+      - mitos-pool-secrets
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - rolebindings
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
   - apiGroups:
       - ""
     resources:

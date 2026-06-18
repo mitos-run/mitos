@@ -85,6 +85,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `forkd.image.pullPolicy` | `IfNotPresent` | forkd image pull policy. |
 | `forkd.resources` | requests 1Gi/500m, limits 16Gi/8 | forkd resources. |
 | `forkd.dataDir` | `/var/lib/mitos` | forkd `--data-dir` and the data hostPath. |
+| `controller.namespacedSecretsRBAC` | `false` | When true, remove the controller's cluster-wide Secrets grant; it instead binds itself to the `mitos-pool-secrets` ClusterRole per adopted pool namespace (+ a RoleBinding in its own namespace). Leave false until per-pool bindings have reconciled, then flip to narrow Secrets access. Multi-tenancy hardening. |
 | `forkd.enableNetworking` | `true` | Render `--enable-networking`. |
 | `forkd.nodeSelector` | `mitos.run/kvm: "true"` | forkd and kernel-stage nodeSelector. |
 | `forkd.tolerations` | `mitos.run/dedicated` NoSchedule | forkd and kernel-stage tolerations. |

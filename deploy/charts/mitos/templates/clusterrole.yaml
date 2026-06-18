@@ -99,10 +99,37 @@ rules:
   # mitos-forkd-tls) FROM the controller namespace INTO each pool namespace
   # where husk pods run (ReplicateHuskSecrets); the CA private key is never
   # replicated. This is why the grant is cluster-wide rather than namespaced.
+  {{- if not .Values.controller.namespacedSecretsRBAC }}
   - apiGroups:
       - ""
     resources:
       - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
+  {{- end }}
+  # Secrets RBAC narrowing (multi-tenancy): the controller binds itself to the
+  # mitos-pool-secrets ClusterRole in each pool namespace it adopts
+  # (EnsurePoolSecretsRoleBinding), so the cluster-wide Secrets grant above can be
+  # removed (controller.namespacedSecretsRBAC=true). It needs `bind` scoped to
+  # that one ClusterRole (the escalation-prevention bypass: bind a fixed role
+  # without holding its verbs) plus rolebindings management in pool namespaces.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+    verbs:
+      - bind
+    resourceNames:
+      - {{ .Values.controller.poolSecretsClusterRoleName | default "mitos-pool-secrets" }}
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - rolebindings
     verbs:
       - create
       - delete
