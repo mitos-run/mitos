@@ -55,10 +55,20 @@ permissions:
   contents: read
 
 concurrency:
-  # One cluster e2e at a time; a newer run cancels an in-flight one so the
-  # single-node cluster is never driven by two jobs at once.
-  group: cluster-e2e
-  cancel-in-progress: true
+  # Group PER REF, and only cancel in-progress runs for PRs. The single
+  # self-hosted runner already serializes execution (one job at a time), so this
+  # group governs CANCELLATION policy, not concurrency:
+  #   * A PR run lives in its own per-ref group, so it can NEVER cancel a main
+  #     (push) post-merge validation, and two PRs never cancel each other.
+  #   * A new push to a PR cancels that PR's own superseded run (cancel-in-progress
+  #     is true only for pull_request), so the node is not wasted on stale commits.
+  #   * push to main and workflow_dispatch never cancel an in-flight run
+  #     (cancel-in-progress false), so every merged commit gets its own validation;
+  #     concurrent main runs simply queue on the single runner.
+  # The previous shared static group with cancel-in-progress:true let a skipped PR
+  # run cancel an in-flight main run, leaving merged code unvalidated on the cluster.
+  group: cluster-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # -------------------------------------------------------------------------
