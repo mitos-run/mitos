@@ -1032,11 +1032,15 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			// Grant the controller namespaced Secrets access here via a RoleBinding
 			// to the mitos-pool-secrets ClusterRole, so the cluster-wide Secrets
 			// grant can be removed (the controller reaches Secrets only in adopted
-			// pool namespaces). Additive and idempotent; harmless while the
-			// cluster-wide grant is still present during rollout.
+			// pool namespaces). This is ADDITIVE groundwork: it is load-bearing only
+			// once namespacedSecretsRBAC is enabled (which by construction also
+			// grants the controller the `bind`/`rolebindings` permission). While the
+			// cluster-wide grant is still present (the default, and any deploy that
+			// has not surfaced the new RBAC) the controller works without it, so a
+			// failure here is NON-FATAL: log and keep creating husk pods rather than
+			// breaking the warm pool on a rollout-ordering or RBAC-mirror gap.
 			if err := EnsurePoolSecretsRoleBinding(ctx, r.Client, r.ControllerNamespace, pool.Namespace); err != nil {
-				result.dormant = existing
-				return result, fmt.Errorf("ensure pool secrets rolebinding in %s: %w", pool.Namespace, err)
+				logger.V(1).Info("pool secrets RoleBinding not ensured; continuing (needed only when namespacedSecretsRBAC is enabled)", "namespace", pool.Namespace, "err", err.Error())
 			}
 		}
 		opts := HuskPodOptions{

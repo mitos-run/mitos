@@ -110,6 +110,28 @@ rules:
       - list
       - update
       - watch
+  # Secrets RBAC narrowing (multi-tenancy): the controller binds itself to the
+  # mitos-pool-secrets ClusterRole per pool namespace (EnsurePoolSecretsRoleBinding)
+  # so the cluster-wide Secrets grant can be removed in the Helm path
+  # (controller.namespacedSecretsRBAC). bind is scoped by resourceNames to that one
+  # ClusterRole (the escalation-prevention bypass); plus rolebindings management.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+    verbs:
+      - bind
+    resourceNames:
+      - mitos-pool-secrets
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - rolebindings
+    verbs:
+      - create
+      - delete
+      - get
+      - update
   # The workspace revision change feed (W4) mirrors every feed event as a
   # Kubernetes Event on the source object (the always-on channel, on top of the
   # opt-in CloudEvents webhook). The EventRecorder needs create;patch on events
