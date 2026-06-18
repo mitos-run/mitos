@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0](https://github.com/paperclipinc/mitos/compare/v0.5.0...v0.6.0) (2026-06-18)
+
+
+### Features
+
+* **controller:** dial husk pods pinning the per-namespace identity ([326533d](https://github.com/paperclipinc/mitos/commit/326533db8bd3a9d897e18fd884a4f9deca345ddb))
+* **controller:** husk pods serve the per-namespace leaf; stop replicating the forkd key ([63bc29e](https://github.com/paperclipinc/mitos/commit/63bc29e1cfabc3303c7ce7cc0a8298fd66dd303a))
+* **controller:** issue a per-namespace husk server leaf (mitos-husk-tls) ([3f11ed2](https://github.com/paperclipinc/mitos/commit/3f11ed2ddf482e48aaf162aa1cd73eb73c52db13))
+* **pki:** ClientTLSConfigFor pins an arbitrary server name; ClientTLSConfig delegates ([3654541](https://github.com/paperclipinc/mitos/commit/3654541857d3a5594f8ac6b119938e301dff3557))
+* **pki:** issue per-namespace husk server leaves (husk.&lt;ns&gt;.mitos, server-auth) ([d1cac0c](https://github.com/paperclipinc/mitos/commit/d1cac0c25b667b9306a9745668ab788695d8ada2))
+
+
+### Bug Fixes
+
+* **controller:** bind claim spec.serviceAccount to authorization via admission webhook ([5d80d2a](https://github.com/paperclipinc/mitos/commit/5d80d2a6e163e2f7c932096568310ab5d4c15936))
+* **controller:** require controller owner ref before activating a husk pod ([8682306](https://github.com/paperclipinc/mitos/commit/86823068598eca2ff00826ddf45a5ade521f5dc5))
+* **deploy:** verify guest kernel integrity and drop SA tokens on privileged pods ([9e0ee4c](https://github.com/paperclipinc/mitos/commit/9e0ee4c4ac073cdcd8260c10f81c3165fc8cea18))
+* **dnsproxy:** block IPv6-embedded private targets in rebind filter (NAT64/6to4/site-local) ([f50fc03](https://github.com/paperclipinc/mitos/commit/f50fc035e4926b90aafbbd8bf955455c442b1473))
+* **guest:** fail closed when the fork RNG reseed is not credited (§1) ([58614d6](https://github.com/paperclipinc/mitos/commit/58614d6ae8972ce8884e08e529fee2f3eb499a93))
+* **husk:** filter guest-to-pod-local traffic on the nftables input hook ([52eb1bf](https://github.com/paperclipinc/mitos/commit/52eb1bf14f64572bf5deaf4033af9e2a623c0026))
+* security audit remediation (6 findings) + fork-correctness reseed fail-closed ([835f457](https://github.com/paperclipinc/mitos/commit/835f4576bc1b1e98350bf4f3b7530120c8955b21))
+
 ## [0.5.0](https://github.com/paperclipinc/mitos/compare/v0.4.0...v0.5.0) (2026-06-16)
 
 
