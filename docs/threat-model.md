@@ -904,8 +904,10 @@ arbitrary code at sandbox privilege.
      OwnerReferencesPermissionEnforcement plugin, so it is the durable control on
      clusters where control (1) is weaker. End-to-end verified by the husk KVM
      e2e (the controller-pins-vs-husk-serves handshake).
-  RESIDUAL: per-namespace husk cert ROTATION (reissue before NotAfter) is not yet
-  automated; tracked with the multi-tenant work in section 7.
+  ROTATION: EnsureHuskTLS now reissues the per-namespace leaf when it is within
+  HuskCertRenewBefore (30 days) of NotAfter, so a long-lived pool rotates its
+  husk serving cert ahead of expiry across reconciles rather than serving an
+  aging leaf until the control channel breaks.
 
 ## 7. Multi-tenancy statement
 

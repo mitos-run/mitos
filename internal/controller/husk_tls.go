@@ -3,11 +3,22 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"time"
 
 	"github.com/paperclipinc/mitos/internal/pki"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// HuskCertRenewBefore is how long before a per-namespace husk leaf's NotAfter
+// EnsureHuskTLS reissues it. pki leaves are valid for 2 years, so a 30-day
+// window rotates well ahead of expiry across reconciles. A package var so tests
+// can widen it to force the renewal path deterministically.
+var HuskCertRenewBefore = 30 * 24 * time.Hour
 
 // HuskTLSSecretName is the per-pool-namespace husk control-channel server cert
 // (SAN husk.<namespace>.mitos), keys tls.crt/tls.key. Each pool namespace gets
@@ -33,10 +44,49 @@ func EnsureHuskTLS(ctx context.Context, c client.Client, controllerNamespace, po
 	if err != nil {
 		return fmt.Errorf("load CA to issue husk leaf for %s: %w", poolNamespace, err)
 	}
-	if _, err := ensureLeaf(ctx, c, poolNamespace, HuskTLSSecretName, pki.HuskServerName(poolNamespace), ca); err != nil {
+	leaf, err := ensureLeaf(ctx, c, poolNamespace, HuskTLSSecretName, pki.HuskServerName(poolNamespace), ca)
+	if err != nil {
 		return fmt.Errorf("ensure husk tls for %s: %w", poolNamespace, err)
 	}
+	// Rotate ahead of expiry: ensureLeaf only heals an unusable leaf (wrong keys,
+	// tampered, wrong CA), not a valid-but-aging one. Without this a long-lived
+	// pool would keep serving a leaf until it expired and the control channel
+	// broke. Reissue when the current leaf is within HuskCertRenewBefore of
+	// NotAfter; a parse failure is treated as needs-renew (fail toward a fresh,
+	// verifiable leaf).
+	if huskLeafNeedsRenew(leaf.CertPEM, time.Now()) {
+		fresh, err := ca.Issue(pki.HuskServerName(poolNamespace))
+		if err != nil {
+			return fmt.Errorf("reissue husk leaf for %s: %w", poolNamespace, err)
+		}
+		var sec corev1.Secret
+		if err := c.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: HuskTLSSecretName}, &sec); err != nil {
+			return fmt.Errorf("read husk tls secret %s for rotation: %w", poolNamespace, err)
+		}
+		if sec.Data == nil {
+			sec.Data = map[string][]byte{}
+		}
+		sec.Data["tls.crt"] = fresh.CertPEM
+		sec.Data["tls.key"] = fresh.KeyPEM
+		if err := c.Update(ctx, &sec); err != nil {
+			return fmt.Errorf("rotate husk tls secret %s: %w", poolNamespace, err)
+		}
+	}
 	return nil
+}
+
+// huskLeafNeedsRenew reports whether the PEM leaf is unparseable or within
+// HuskCertRenewBefore of its NotAfter as of now.
+func huskLeafNeedsRenew(certPEM []byte, now time.Time) bool {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true
+	}
+	return now.Add(HuskCertRenewBefore).After(cert.NotAfter)
 }
 
 // HuskDialTLSConfig builds the controller client mTLS config for dialing a husk
