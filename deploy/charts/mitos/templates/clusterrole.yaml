@@ -132,9 +132,11 @@ rules:
       - rolebindings
     verbs:
       - create
-      - get
-      - update
       - delete
+      - get
+      - list
+      - update
+      - watch
   # The workspace revision change feed (W4) mirrors every feed event as a
   # Kubernetes Event on the source object (the always-on channel, on top of the
   # opt-in CloudEvents webhook). The EventRecorder needs create;patch on events
