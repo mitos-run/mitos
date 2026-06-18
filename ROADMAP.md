@@ -754,6 +754,15 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   survives scale-down). The legacy fixed pool is `minWarm == replicas`.
 - ⬜ NUMA pinning + hugepage-backed guest memory; KSM same-page-merging
   tuning; per-node max density config (needs hardware)
+- ⬜ Snapshot-resume page-fault prefetch: hugepage-backed guest memory plus a
+  userfaultfd handler that preloads a captured hot-page working set before
+  resume, to cut the lazy-fault tail (the "0.8ms restore + ~40ms lazy faults"
+  in BENCHMARKS.md). Externally validated technique (Browser Use cut
+  resume-to-ready 9.8s to 3.1s, page faults ~100k to ~1.1k). Tracked in #167.
+- ⬜ Dynamic CPU pinning: pin a fork's vCPU threads AFTER guest-ready (not at
+  launch), unpinned during the activate burst, sibling hyperthreads together,
+  with an optional launch-window RT scheduling priority (Browser Use: launch
+  loss 17% to 0%). Tracked in #168.
 - ⬜ Multi-resource bin-packing (disk, CPU, and the cold-start
   snapshot-distribution cost, which ties into #14); preemption/eviction under
   pressure; predictive prewarming
