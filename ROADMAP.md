@@ -514,8 +514,13 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
   `--allow-unverified-snapshots`). Proven by unit tests and the KVM CI
   tamper-detection phase on a real snapshot; residual (verify-once, not
   per-fork) tracked in the threat model. See docs/snapshot-distribution.md.
-- ⬜ Lifetime memory accounting (`mitos_memory_unique_bytes` over time,
-  not just T=0)
+- 🔨 Lifetime memory accounting (`mitos_memory_unique_bytes` over time,
+  not just T=0): `Engine.Metering` now RE-SAMPLES each live sandbox's
+  `/proc/<pid>/smaps_rollup` on every metering scrape (off the GetCapacity hot
+  path), so the metering report reflects current lifetime memory instead of the
+  fork-time figure; unit-proven via an injected stat seam
+  (`TestMeteringResamplesLiveMemory`). Remaining: a KVM assertion that the metric
+  tracks growth after a real workload (pip-install-and-run)
 - ⬜ External security review scheduled before any 1.0 claim
 
 ## 2. Failure and GC semantics

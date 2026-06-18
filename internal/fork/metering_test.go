@@ -99,3 +99,27 @@ func TestMeteringDiskFreshIsAllUnique(t *testing.T) {
 		t.Errorf("Fresh DiskCoWSavings = %d, want 0", report.DiskCoWSavings)
 	}
 }
+
+// TestMeteringResamplesLiveMemory proves Metering re-reads each live sandbox's
+// memory (a lifetime sample) rather than returning the stale T=0 value recorded
+// at fork time. The sandbox's stored MemoryUnique is the fork-time figure; the
+// injected memStat reports the (larger) current footprint, and the report must
+// reflect the current value. This is the lifetime-memory-accounting fix (#3 / G1).
+func TestMeteringResamplesLiveMemory(t *testing.T) {
+	const mib = int64(1024 * 1024)
+	e := &Engine{
+		sandboxes: map[string]*Sandbox{
+			"s1": {ID: "s1", TemplateID: "tmpl-A", Pid: 4242, MemoryUnique: 1 * mib, MemoryShared: 20 * mib},
+		},
+		memStat: func(pid int) (int64, int64) {
+			if pid == 4242 {
+				return 9 * mib, 20 * mib // grew since fork
+			}
+			return 0, 0
+		},
+	}
+	report := e.Metering()
+	if report.TotalUnique != 9*mib {
+		t.Errorf("TotalUnique = %d, want %d (the live re-sampled value, not the T=0 fork-time 1MiB)", report.TotalUnique, 9*mib)
+	}
+}

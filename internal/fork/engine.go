@@ -43,6 +43,10 @@ type Engine struct {
 	jailer         firecracker.JailerConfig
 	sandboxes      map[string]*Sandbox
 	nextPort       int32
+	// memStat reads a live process's (unique, shared) resident memory. Nil uses
+	// readMemoryStats (/proc/<pid>/smaps_rollup); a seam so Metering's lifetime
+	// re-sample is unit-testable without a real VM.
+	memStat func(pid int) (unique, shared int64)
 
 	// casStore content-addresses every template snapshot for integrity
 	// verification (issue #9) and incremental transfer (Task 4). Rooted at
@@ -1513,10 +1517,20 @@ func (e *Engine) memorySamplesLocked() []metering.Sample {
 type meteringSnapshot struct {
 	id           string
 	template     string
+	pid          int
 	memoryUnique int64
 	memoryShared int64
 	hasVolumes   bool
 	volumes      []volume.Spec
+}
+
+// memStatFn returns the engine's memory-stat reader (the seam tests inject).
+// Production reads /proc/<pid>/smaps_rollup via readMemoryStats.
+func (e *Engine) memStatFn() func(pid int) (unique, shared int64) {
+	if e.memStat != nil {
+		return e.memStat
+	}
+	return readMemoryStats
 }
 
 // Metering returns the full CoW-aware node metering report (per-sandbox and
@@ -1551,6 +1565,7 @@ func (e *Engine) Metering() metering.Report {
 		snaps = append(snaps, meteringSnapshot{
 			id:           s.ID,
 			template:     s.TemplateID,
+			pid:          s.Pid,
 			memoryUnique: s.MemoryUnique,
 			memoryShared: s.MemoryShared,
 			hasVolumes:   s.hasVolumes,
@@ -1559,14 +1574,21 @@ func (e *Engine) Metering() metering.Report {
 	}
 	e.mu.RUnlock()
 
+	// Re-sample each live sandbox's memory now (outside the lock, like the disk
+	// stat below) so the report reflects LIFETIME memory, not the T=0 footprint
+	// recorded at fork time. A dead/recycled pid reads back zero (readMemoryStats
+	// guards pid<=0 and a missing /proc), which is correct for a sandbox going
+	// away. This is off the GetCapacity hot path, so the per-sandbox stat is fine.
+	stat := e.memStatFn()
 	samples := make([]metering.Sample, 0, len(snaps))
 	for _, sn := range snaps {
 		du, ds := e.diskFootprint(sn)
+		mu, ms := stat(sn.pid)
 		samples = append(samples, metering.Sample{
 			ID:           sn.id,
 			Template:     sn.template,
-			MemoryUnique: sn.memoryUnique,
-			MemoryShared: sn.memoryShared,
+			MemoryUnique: mu,
+			MemoryShared: ms,
 			DiskUnique:   du,
 			DiskShared:   ds,
 		})
