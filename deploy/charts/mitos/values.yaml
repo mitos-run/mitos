@@ -108,6 +108,27 @@ kernelProvisioner:
   # The guest kernel image URL the init container downloads. Override to host
   # your own kernel.
   kernelUrl: https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
+  # Expected SHA256 (hex) of the kernel at kernelUrl. STRONGLY RECOMMENDED: when
+  # set, the kernel-stage init container verifies the staged file and fails
+  # closed on mismatch, so a swapped upstream object or a MITMed download cannot
+  # boot a backdoored kernel into every microVM. Left empty the kernel is staged
+  # WITHOUT verification (a warning is logged). Compute with:
+  #   curl -fsSL <kernelUrl> | sha256sum
+  kernelSha256: ""
+
+# Validating admission webhook that binds SandboxClaim.spec.serviceAccount to
+# RBAC (the creator must be able to impersonate the named ServiceAccount).
+# spec.serviceAccount is the principal a workspace memory-snapshot resume is
+# bound to, so without this it is self-asserted. STRONGLY RECOMMENDED to enable
+# alongside controller.workspaceMemorySnapshots in a multi-tenant cluster. Off by
+# default so single-tenant and webhook-less installs are unaffected.
+admissionWebhook:
+  enabled: false
+  # Container/Service port the controller serves the webhook on.
+  port: 9443
+  # Fail closed: reject a claim if the webhook is unreachable. Set to Ignore only
+  # if availability outranks the principal guarantee.
+  failurePolicy: Fail
 
 # Facade (Deployment): the agents.x-k8s.io conformance facade. Opt-in.
 facade:

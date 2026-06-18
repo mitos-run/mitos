@@ -137,18 +137,24 @@ reports `ReseededRNG:false`), and sandbox-server real-mode
 (`cmd/sandbox-server/main.go` `reseedFork`) all refuse to serve an un-reseeded
 fork rather than emitting duplicate CRNG output. See row 1.
 
-**Write-fallback over-reports (review finding).** When `RNDADDENTROPY` fails,
-`reseedCRNG` falls back to writing the bytes to `/dev/urandom`
-(`guest/agent/notifyforked.go`). That write MIXES the bytes into the pool but
-does NOT credit entropy, yet the function still returns `reseeded=true`. So the
-reseed signal can report success on a path that did not actually credit fresh
-entropy (low severity: the pool is still perturbed, but the success signal is
-optimistic).
+**Write-fallback over-report: FIXED.** Previously, when `RNDADDENTROPY` failed,
+`reseedCRNG` fell back to writing the bytes to `/dev/urandom` (which mixes them
+into the pool but does NOT credit entropy) and still returned `reseeded=true`.
+Because the host fail-closed gate keys entirely on that boolean, the over-report
+silently defeated the gate: a fork that could not be credibly reseeded would be
+served sharing its siblings' CRNG output. `reseedCRNG` (now `reseedCRNGAt`,
+`guest/agent/notifyforked.go`) returns `false` when the credited ioctl fails, so
+the host reaps such a fork. The guest agent runs as PID 1 with full capabilities
+on our shipped kernel, where `RNDADDENTROPY` succeeds, so the credited path is
+the normal path; the fallback was the unsafe one. The reseed contract is now
+"credited or refused" end to end.
 
 Tests. go (`internal/daemon`): `TestForkNotifiesAgentWithFreshEntropy` asserts
 forkd sends entropy, `TestForkGenerationIncrementsAcrossForks` asserts distinct
 generations across forks, `TestForkFailsWhenNotifyForkedErrors` asserts a
-real-engine fork fails closed when the guest cannot reseed.
+real-engine fork fails closed when the guest cannot reseed. guest
+(`guest/agent`, linux): `TestReseedCRNGFailsClosedWhenNotCredited` asserts the
+uncredited path reports failure (the host then reaps the fork).
 
 KVM (`kvm-test.yaml`): one snapshot is taken after the agent is up, two VMs are
 restored from it, and `test-agent --mode notify` runs against each. The phase

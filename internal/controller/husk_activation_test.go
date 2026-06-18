@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // fakeActivator records the requests it is asked to send and returns a scripted
@@ -92,6 +93,29 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 				Image: "mitos-husk-stub:test",
 			}},
 		},
+	}
+	// reconcileHuskPods stamps a controller owner reference to the pool on every
+	// husk pod it creates, and selectDormantHuskPod now REQUIRES it before a pod
+	// is an activation target (a tenant-planted decoy carrying only the labels
+	// must never be selected). Mirror that here so the warm slot is selectable.
+	// When the pool object exists, use its real UID; otherwise stamp a
+	// pool-named reference with a placeholder UID (used by decoy-style fixtures
+	// for pools that are never reconciled).
+	var pool v1alpha1.SandboxPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: poolName, Namespace: "default"}, &pool); err == nil {
+		if err := controllerutil.SetControllerReference(&pool, pod, k8sClient.Scheme()); err != nil {
+			t.Fatalf("set husk pod owner reference: %v", err)
+		}
+	} else {
+		yes := true
+		pod.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion:         v1alpha1.GroupVersion.String(),
+			Kind:               "SandboxPool",
+			Name:               poolName,
+			UID:                types.UID("placeholder-" + poolName),
+			Controller:         &yes,
+			BlockOwnerDeletion: &yes,
+		}}
 	}
 	if err := k8sClient.Create(ctx, pod); err != nil {
 		t.Fatal(err)

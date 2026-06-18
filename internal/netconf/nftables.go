@@ -99,6 +99,32 @@ func DispatchMapName() string {
 	return "tapdispatch"
 }
 
+// InputBaseChainName returns the base chain hooked on the INPUT path. The
+// forward chain governs traffic transiting the pod (guest to the internet); the
+// input chain governs traffic the guest sends to an address that is LOCAL to the
+// pod network namespace (the tap gateway, the resolver address, any in-pod
+// listener). Forward-only filtering never sees that traffic, so without this a
+// guest could reach pod-local listeners (the husk-stub sandbox API and mTLS
+// control) regardless of egress policy.
+func InputBaseChainName() string {
+	return "input"
+}
+
+// InputDispatchMapName returns the interface-keyed verdict map the input base
+// chain dispatches through, the input-path analog of DispatchMapName. It is
+// distinct so the input and forward dispatch never collide.
+func InputDispatchMapName() string {
+	return "tapdispatch_in"
+}
+
+// SandboxInputChainName returns the per-sandbox regular chain on the input path
+// for a tap. It holds the guest's only allowed pod-local destination (the
+// resolver on 53) and a drop for everything else, reached only via the input
+// dispatch jump for this tap.
+func SandboxInputChainName(tap string) string {
+	return "sbin_" + tap
+}
+
 // SandboxChainName returns the per-sandbox regular chain name for a tap. The
 // chain holds that sandbox's accepts and a final drop; because it is reached
 // only via the dispatch jump for this tap, its drop is a verdict for this
@@ -339,6 +365,71 @@ func RenderSharedTable() string {
 	// per-sandbox chains).
 	fmt.Fprintf(&b, "flush chain inet %s %s\n", table, base)
 	fmt.Fprintf(&b, "add rule inet %s %s iifname vmap @%s\n", table, base, dispatch)
+	return b.String()
+}
+
+// RenderSharedInputTable renders the idempotent skeleton for the INPUT path: the
+// shared table (same table as the forward filter), an input-hooked base chain
+// with policy accept, and an interface-keyed verdict map the base chain
+// dispatches through. Like RenderSharedTable every statement is an idempotent
+// `add` of a named object, so re-applying it never disturbs an existing input
+// chain or dispatch element.
+//
+// The base chain's policy is ACCEPT so non-sandbox input (kubelet probes to the
+// pod, the controller's mTLS dial to the husk control port, which arrive on the
+// pod uplink, not the tap) is unaffected; guest isolation on the input path is
+// enforced entirely by each tap's own regular chain (RenderSandboxInputChain),
+// reached only via the per-tap dispatch jump. It is applied only on the husk
+// path, where the filter lives in the isolated pod network namespace; the
+// raw-forkd path runs in the node netns and does not install an input hook.
+func RenderSharedInputTable() string {
+	table := SharedTableName()
+	base := InputBaseChainName()
+	dispatch := InputDispatchMapName()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "add table inet %s\n", table)
+	fmt.Fprintf(&b, "add chain inet %s %s { type filter hook input priority 0 ; policy accept ; }\n", table, base)
+	fmt.Fprintf(&b, "add map inet %s %s { type ifname : verdict ; }\n", table, dispatch)
+	// Flush only this base chain's rules before re-adding the single dispatch
+	// rule (the base chain holds no per-tap state; that lives in the map and the
+	// per-tap chains), so the skeleton stays strictly idempotent.
+	fmt.Fprintf(&b, "flush chain inet %s %s\n", table, base)
+	fmt.Fprintf(&b, "add rule inet %s %s iifname vmap @%s\n", table, base, dispatch)
+	return b.String()
+}
+
+// RenderSandboxInputChain renders the per-tap input chain `sbin_<tap>` and the
+// input dispatch element routing this tap into it. Applied with `nft -f -` after
+// RenderSharedInputTable on the husk path.
+//
+// The input hook processes packets the guest sends to a pod-LOCAL address. The
+// only legitimate such destination is the in-pod DNS resolver on port 53; every
+// other pod-local destination (the tap gateway, the husk-stub sandbox API, the
+// mTLS control listener) is dropped. Accepts are emitted before the drop so DNS
+// keeps working, and are saddr-pinned to the guest as anti-spoof defense in
+// depth (consistent with the forward chain). Because the chain is reached only
+// through this tap's dispatch jump and the input hook implies a local
+// destination, the trailing drop denies guest-to-pod-local for this sandbox only.
+func RenderSandboxInputChain(tap string, guestIP net.IP, resolverIP net.IP) string {
+	table := SharedTableName()
+	chain := SandboxInputChainName(tap)
+	dispatch := InputDispatchMapName()
+	saddr := fmt.Sprintf("ip saddr %s", guestIP.String())
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "add chain inet %s %s\n", table, chain)
+	if resolverIP != nil {
+		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s udp dport 53 accept\n",
+			table, chain, saddr, resolverIP.String())
+		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s tcp dport 53 accept\n",
+			table, chain, saddr, resolverIP.String())
+	}
+	// Drop every other guest-sourced packet. Reaching this chain means the packet
+	// arrived on this tap and (input hook) is destined to a pod-local address, so
+	// this denies the guest all pod-local services except the resolver above.
+	fmt.Fprintf(&b, "add rule inet %s %s %s drop\n", table, chain, saddr)
+	fmt.Fprintf(&b, "add element inet %s %s { %q : jump %s }\n", table, dispatch, tap, chain)
 	return b.String()
 }
 

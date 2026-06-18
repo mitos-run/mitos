@@ -4,10 +4,36 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
+
+// TestReseedCRNGFailsClosedWhenNotCredited proves the guest reseed reports
+// FAILURE when the credited RNDADDENTROPY ioctl cannot run, instead of
+// over-reporting success on the uncredited write fallback. A regular file is not
+// a char device, so the ioctl returns ENOTTY (the same shape as a kernel that
+// cannot credit entropy); reseedCRNGAt must return false so the host
+// fork-correctness gate reaps a fork whose CRNG could not be credibly reseeded
+// rather than serve one that may share its siblings' CRNG output.
+func TestReseedCRNGFailsClosedWhenNotCredited(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "fake-urandom")
+	if err := os.WriteFile(fake, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entropy := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	if reseedCRNGAt(entropy, fake) {
+		t.Fatal("reseedCRNGAt reported success on an uncredited path; the fail-closed reseed gate is defeated")
+	}
+}
+
+// TestReseedCRNGEmptyEntropyIsFalse keeps the empty-input contract.
+func TestReseedCRNGEmptyEntropyIsFalse(t *testing.T) {
+	if reseedCRNGAt(nil, filepath.Join(t.TempDir(), "unused")) {
+		t.Fatal("empty entropy must report false")
+	}
+}
 
 // TestMountVolumesEmpty proves an empty mount table mounts nothing.
 func TestMountVolumesEmpty(t *testing.T) {

@@ -487,9 +487,14 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 `internal/firecracker/`, `guest/`.
 
 - 🔨 RNG reseed on every fork (guest-agent NotifyForked hook delivers host
-  entropy over vsock + userspace signal; virtio-rng device NOT wired);
-  go tests assert forkd sends entropy and fails closed; kvm-test asserts two
-  forks of one snapshot produce distinct urandom (UUID/TLS-randoms follow-up)
+  entropy over vsock + userspace signal; virtio-rng device NOT wired). Reseed is
+  fail-closed on EVERY engine (raw-forkd, sandbox-server, husk all reap a fork
+  whose guest reports `ReseededRNG:false`), and the guest reports success only on
+  a CREDITED `RNDADDENTROPY`: the uncredited write fallback now returns false, so
+  the gate cannot be defeated by a false positive. go tests assert forkd sends
+  entropy and fails closed; kvm-test asserts two forks of one snapshot produce
+  distinct urandom. Remaining for done: distinct UUID/TLS-randoms assertion in
+  the KVM gate, and the continuous virtio-rng device (follow-ups)
 - 🔨 Clock resync after restore (NotifyForked steps CLOCK_REALTIME from the
   host wall clock, 500ms tolerance); kvm-test asserts each fork wall clock
   within 2s of the runner (post-snapshot TLS cert validation follow-up)

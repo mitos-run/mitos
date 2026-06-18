@@ -20,6 +20,9 @@ spec:
       labels:
         {{- include "mitos.selectorLabels" (dict "root" . "component" "kvm-device-plugin") | nindent 8 }}
     spec:
+      # This plugin talks only to the kubelet device-plugin socket, never the
+      # Kubernetes API; do not mount a SA token.
+      automountServiceAccountToken: false
       # No nodeSelector ON PURPOSE: the plugin runs on EVERY node and advertises
       # mitos.run/kvm slots only where /dev/kvm exists and zero elsewhere.
       priorityClassName: system-node-critical

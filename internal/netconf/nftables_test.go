@@ -466,3 +466,60 @@ func TestRenderMasqueradeNatsGuestSource(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderSharedInputTableShape(t *testing.T) {
+	out := RenderSharedInputTable()
+	wants := []string{
+		"add table inet mitos_egress",
+		"type filter hook input priority 0 ; policy accept ;",
+		"add map inet mitos_egress " + InputDispatchMapName() + " { type ifname : verdict ; }",
+		"iifname vmap @" + InputDispatchMapName(),
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("RenderSharedInputTable missing %q:\n%s", w, out)
+		}
+	}
+}
+
+// TestRenderSandboxInputChainBlocksGuestToPodLocal proves the per-tap input
+// chain allows the guest to reach ONLY the in-pod resolver on port 53 and drops
+// every other guest-sourced packet to a pod-local address (the husk-stub sandbox
+// API and mTLS control listeners bind there). The drop must come AFTER the
+// resolver accepts so DNS still works.
+func TestRenderSandboxInputChainBlocksGuestToPodLocal(t *testing.T) {
+	guest := net.ParseIP("10.200.0.2")
+	resolver := net.ParseIP("10.200.0.1")
+	out := RenderSandboxInputChain("sbtap0", guest, resolver)
+
+	chain := SandboxInputChainName("sbtap0")
+	udp := "add rule inet mitos_egress " + chain + " ip saddr 10.200.0.2 ip daddr 10.200.0.1 udp dport 53 accept"
+	tcp := "add rule inet mitos_egress " + chain + " ip saddr 10.200.0.2 ip daddr 10.200.0.1 tcp dport 53 accept"
+	drop := "add rule inet mitos_egress " + chain + " ip saddr 10.200.0.2 drop"
+	elem := "add element inet mitos_egress " + InputDispatchMapName() + " { \"sbtap0\" : jump " + chain + " }"
+
+	for _, w := range []string{udp, tcp, drop, elem} {
+		if !strings.Contains(out, w) {
+			t.Errorf("RenderSandboxInputChain missing %q:\n%s", w, out)
+		}
+	}
+	if di := strings.Index(out, drop); di >= 0 {
+		if ui := strings.Index(out, udp); ui < 0 || ui > di {
+			t.Errorf("resolver udp accept must precede the drop:\n%s", out)
+		}
+		if ti := strings.Index(out, tcp); ti < 0 || ti > di {
+			t.Errorf("resolver tcp accept must precede the drop:\n%s", out)
+		}
+	}
+}
+
+func TestRenderSandboxInputChainNoResolverDropsAll(t *testing.T) {
+	guest := net.ParseIP("10.200.0.2")
+	out := RenderSandboxInputChain("sbtap0", guest, nil)
+	if strings.Contains(out, "dport 53") {
+		t.Errorf("no resolver should mean no DNS accept rule:\n%s", out)
+	}
+	if !strings.Contains(out, "ip saddr 10.200.0.2 drop") {
+		t.Errorf("guest-to-local drop absent with no resolver:\n%s", out)
+	}
+}

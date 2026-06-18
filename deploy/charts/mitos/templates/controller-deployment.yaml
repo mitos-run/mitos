@@ -41,6 +41,9 @@ spec:
             {{- if .Values.controller.huskDnsUpstream }}
             - --husk-dns-upstream={{ .Values.controller.huskDnsUpstream }}
             {{- end }}
+            {{- if .Values.admissionWebhook.enabled }}
+            - --enable-principal-webhook
+            {{- end }}
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -49,6 +52,10 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+            {{- if .Values.admissionWebhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.admissionWebhook.port }}
+            {{- end }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           securityContext:
@@ -57,6 +64,12 @@ spec:
             capabilities:
               drop:
                 - ALL
+          {{- if .Values.admissionWebhook.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -69,3 +82,9 @@ spec:
               port: health
             initialDelaySeconds: 15
             periodSeconds: 20
+      {{- if .Values.admissionWebhook.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: mitos-principal-webhook-cert
+      {{- end }}

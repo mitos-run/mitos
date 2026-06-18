@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/admission"
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/eventfeed"
 	"github.com/paperclipinc/mitos/internal/kms"
@@ -20,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 var scheme = runtime.NewScheme()
@@ -59,6 +62,7 @@ func main() {
 	var eventSinkURL string
 	var kekFile string
 	var workspaceMemorySnapshots bool
+	var enablePrincipalWebhook bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -76,6 +80,7 @@ func main() {
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
 	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to WRAP each Encrypted template's per-template DEK (envelope encryption). REQUIRED when any reconciled template sets Encrypted: true; without it EnsureEncKey fails closed. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
+	flag.BoolVar(&enablePrincipalWebhook, "enable-principal-webhook", false, "Register the validating admission webhook that requires a SandboxClaim's creator to be authorized to impersonate the ServiceAccount named in spec.serviceAccount (RBAC verb 'impersonate' on 'serviceaccounts'). spec.serviceAccount is the principal a memory-snapshot resume is bound to, so without this gate it is self-asserted. STRONGLY RECOMMENDED whenever --workspace-memory-snapshots is enabled in a multi-tenant cluster. Requires the webhook server certs and a ValidatingWebhookConfiguration (see the Helm chart admissionWebhook values). Off by default so single-tenant and webhook-less deployments are unaffected.")
 	flag.BoolVar(&workspaceMemorySnapshots, "workspace-memory-snapshots", false, "Bind the workspace memory-snapshot seams (checkpoint-on-terminate, resume-on-activate, principal-bound existence) to the husk live-VM snapshot path so a checkpointed workspace head becomes RESUMABLE: a later claim with the SAME principal resumes the VM memory image paired with the workspace content. A memory image carries secrets-in-RAM and is bound to the capturing claim's ServiceAccount; it is NEVER served across principals (fail-closed refusal). Off by default: a checkpoint-on-terminate then fails loud rather than producing a falsely-resumable revision. The real bare-metal VM-memory image requires a KVM-capable kubelet and is cluster-gated; see docs/workspaces.md.")
 	flag.Parse()
 
@@ -361,6 +366,23 @@ func main() {
 	}); err != nil {
 		logger.Error(err, "unable to add garbage collector")
 		os.Exit(1)
+	}
+
+	// Validating admission webhook: bind spec.serviceAccount to authorization so
+	// the memory-snapshot principal field cannot be self-asserted. Opt-in: it
+	// needs the webhook server certs (mgr default cert dir) and a
+	// ValidatingWebhookConfiguration. Warn if memory snapshots are on without it,
+	// because the principal gate is only an authorization boundary when this runs.
+	if enablePrincipalWebhook {
+		mgr.GetWebhookServer().Register("/validate-mitos-run-v1alpha1-sandboxclaim", &webhook.Admission{
+			Handler: &admission.ClaimServiceAccountValidator{
+				Client:  mgr.GetClient(),
+				Decoder: ctrladmission.NewDecoder(scheme),
+			},
+		})
+		logger.Info("principal admission webhook: enabled (spec.serviceAccount requires impersonate authorization)")
+	} else if workspaceMemorySnapshots {
+		logger.Info("WARNING: --workspace-memory-snapshots is on but --enable-principal-webhook is off; spec.serviceAccount is self-asserted, so the memory-snapshot principal gate is NOT an authorization boundary in a multi-tenant cluster. Enable the webhook.")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

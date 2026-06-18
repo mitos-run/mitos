@@ -64,6 +64,24 @@ func NftDeleteSandboxChainArgs(tap string) []string {
 	return []string{"nft", "delete", "chain", "inet", SharedTableName(), SandboxChainName(tap)}
 }
 
+// NftDeleteInputDispatchElementArgs builds the argv to remove this tap's element
+// from the INPUT dispatch map: nft delete element inet <table> <inmap>
+// { "<tap>" }. After this no input traffic jumps into the sandbox input chain,
+// so that chain can be removed. The husk-path counterpart of
+// NftDeleteDispatchElementArgs.
+func NftDeleteInputDispatchElementArgs(tap string) []string {
+	return []string{"nft", "delete", "element", "inet", SharedTableName(), InputDispatchMapName(),
+		fmt.Sprintf("{ %q }", tap)}
+}
+
+// NftDeleteSandboxInputChainArgs builds the argv to remove this sandbox's input
+// chain: nft delete chain inet <table> sbin_<tap>. Run after the input dispatch
+// element is deleted. The shared table, input base chain, and input map are left
+// intact.
+func NftDeleteSandboxInputChainArgs(tap string) []string {
+	return []string{"nft", "delete", "chain", "inet", SharedTableName(), SandboxInputChainName(tap)}
+}
+
 // NftDeleteSandboxAllowSetArgs builds the argv to remove this sandbox's dynamic
 // allow set from the shared table: nft delete set inet <table> sb_<tap>_dyn.
 // This must run after the per-sandbox chain is deleted, because the chain's

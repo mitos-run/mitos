@@ -427,6 +427,37 @@ func TestIsBlockedPinAddr(t *testing.T) {
 	}
 }
 
+// TestIsBlockedPinAddr_IPv6EmbeddedPrivate proves the rebind filter also rejects
+// IPv6 addresses that smuggle a private or link-local IPv4 target inside a
+// well-known embedding prefix (NAT64 64:ff9b::/96, 6to4 2002::/16) and the
+// deprecated site-local range (fec0::/10). On a DNS64/NAT64 cluster these would
+// otherwise be pinned as "public" and translated by the NAT64 gateway to the
+// embedded private/metadata address, defeating the rebind defense.
+func TestIsBlockedPinAddr_IPv6EmbeddedPrivate(t *testing.T) {
+	blocked := []string{
+		"64:ff9b::a9fe:a9fe", // NAT64 well-known prefix wrapping 169.254.169.254 (IMDS)
+		"64:ff9b::a00:1",     // NAT64 wrapping 10.0.0.1 (RFC1918)
+		"2002:a00:1::1",      // 6to4 wrapping 10.0.0.1
+		"fec0::1",            // deprecated site-local (RFC3879)
+	}
+	for _, s := range blocked {
+		if !isBlockedPinAddr(net.ParseIP(s)) {
+			t.Errorf("isBlockedPinAddr(%s) = false, want true (IPv6-embedded private / site-local)", s)
+		}
+	}
+	// A NAT64/6to4 wrapper of a PUBLIC IPv4 must stay allowed: a NAT64 cluster
+	// legitimately reaches public IPv4 through the well-known prefix.
+	allowed := []string{
+		"64:ff9b::5db8:d822", // NAT64 wrapping 93.184.216.34 (public)
+		"2002:5db8:d822::1",  // 6to4 wrapping 93.184.216.34 (public)
+	}
+	for _, s := range allowed {
+		if isBlockedPinAddr(net.ParseIP(s)) {
+			t.Errorf("isBlockedPinAddr(%s) = true, want false (public via embedding prefix)", s)
+		}
+	}
+}
+
 // startPrivateUpstream answers internal.test A with a PRIVATE 10.0.0.5 (and a
 // public 198.51.100.9 for split.test, alongside a private one) to test pin
 // filtering.
