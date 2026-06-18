@@ -142,6 +142,38 @@ func TestIssueSplitsExtKeyUsagePerIdentity(t *testing.T) {
 	}
 }
 
+func TestIssueHuskServerLeaf(t *testing.T) {
+	ca, err := NewCA("mitos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := ca.Issue(HuskServerName("tenant-a"))
+	if err != nil {
+		t.Fatalf("issue husk leaf: %v", err)
+	}
+	cert := parseLeafCert(t, leaf.CertPEM)
+	if got := cert.Subject.CommonName; got != "husk.tenant-a.mitos" {
+		t.Errorf("CN = %q, want husk.tenant-a.mitos", got)
+	}
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "husk.tenant-a.mitos" {
+		t.Errorf("SANs = %v, want [husk.tenant-a.mitos]", cert.DNSNames)
+	}
+	// A husk serving leaf is server-auth only, like the forkd leaf.
+	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Errorf("EKU = %v, want [ServerAuth]", cert.ExtKeyUsage)
+	}
+}
+
+func TestIssueRejectsBadNamespace(t *testing.T) {
+	ca, err := NewCA("mitos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.Issue(HuskServerName("Bad_NS")); err == nil {
+		t.Fatal("expected rejection of a non-DNS-label namespace in the husk SAN")
+	}
+}
+
 func TestPeerDNSNameIgnoresUnverifiedPeerCertificates(t *testing.T) {
 	ca, err := NewCA("mitos")
 	if err != nil {

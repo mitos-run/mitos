@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/credentials"
@@ -29,6 +30,48 @@ const (
 	// ControllerName is the DNS SAN of the controller client certificate.
 	ControllerName = "controller.mitos"
 )
+
+// HuskServerName is the DNS SAN of a pool namespace's husk control-channel
+// server leaf. Each pool namespace gets its own leaf (distinct key) so the
+// shared forkd server key is never replicated into a tenant namespace; the
+// controller pins this name when dialing a husk pod in that namespace, so a
+// per-namespace key leaked in one namespace cannot impersonate a husk in
+// another (the names differ).
+func HuskServerName(namespace string) string {
+	return "husk." + namespace + ".mitos"
+}
+
+// isDNSLabel reports whether s is a single RFC1123 DNS label (a valid k8s
+// namespace), so a crafted namespace cannot inject extra SAN structure into a
+// husk leaf.
+func isDNSLabel(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i != 0 && i != len(s)-1:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// huskNamespaceFromSAN returns the namespace encoded in a husk.<ns>.mitos SAN
+// and whether dnsName is a well-formed husk SAN (a valid DNS-label namespace).
+func huskNamespaceFromSAN(dnsName string) (string, bool) {
+	if !strings.HasPrefix(dnsName, "husk.") || !strings.HasSuffix(dnsName, ".mitos") {
+		return "", false
+	}
+	ns := strings.TrimSuffix(strings.TrimPrefix(dnsName, "husk."), ".mitos")
+	if !isDNSLabel(ns) {
+		return "", false
+	}
+	return ns, true
+}
 
 // CA is a self-signed certificate authority for the control plane.
 type CA struct {
@@ -156,13 +199,20 @@ func encodeECKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
 // handshake; the interceptor's SAN check stays as the second layer.
 func (ca *CA) Issue(dnsName string) (*Leaf, error) {
 	var eku x509.ExtKeyUsage
-	switch dnsName {
-	case ServerName:
+	switch {
+	case dnsName == ServerName:
 		eku = x509.ExtKeyUsageServerAuth
-	case ControllerName:
+	case dnsName == ControllerName:
 		eku = x509.ExtKeyUsageClientAuth
 	default:
-		return nil, fmt.Errorf("issue %q: only %q and %q may be issued", dnsName, ServerName, ControllerName)
+		// A per-namespace husk control-channel server leaf (husk.<ns>.mitos),
+		// server-auth only like the forkd leaf. The namespace must be a valid DNS
+		// label so a crafted name cannot inject SAN structure.
+		if _, ok := huskNamespaceFromSAN(dnsName); ok {
+			eku = x509.ExtKeyUsageServerAuth
+			break
+		}
+		return nil, fmt.Errorf("issue %q: only %q, %q, and husk.<namespace>.mitos may be issued", dnsName, ServerName, ControllerName)
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
