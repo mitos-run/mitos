@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/paperclipinc/mitos/compare/v0.6.0...v0.7.0) (2026-06-18)
+
+
+### Features
+
+* **controller:** narrow controller Secrets RBAC to adopted pool namespaces ([6a57b63](https://github.com/paperclipinc/mitos/commit/6a57b63c0f0a4e3d9dad3a003c2f98072ea0c23a))
+* **controller:** rotate the per-namespace husk server leaf before expiry ([9d3addd](https://github.com/paperclipinc/mitos/commit/9d3adddae4c57c3114b2749387ed5547bdd6c96b))
+* **fork:** re-sample live memory in Metering for lifetime accounting ([bfb725b](https://github.com/paperclipinc/mitos/commit/bfb725b0c7b66bc8e0dfecfff9d99f897b9c58af))
+
+
+### Bug Fixes
+
+* **controller:** mirror pool-secrets RBAC to kustomize + make the binding non-fatal ([8abe700](https://github.com/paperclipinc/mitos/commit/8abe70087c38f308e7d8644689b47fd9c593f754))
+* **rbac:** grant list+watch on rolebindings so the cached informer syncs ([8d60504](https://github.com/paperclipinc/mitos/commit/8d60504997c81f8ee1e0aca22979488b6e766f99))
+
 ## [0.6.0](https://github.com/paperclipinc/mitos/compare/v0.5.0...v0.6.0) (2026-06-18)
 
 
