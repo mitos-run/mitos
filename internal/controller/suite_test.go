@@ -669,7 +669,7 @@ func TestMain(m *testing.M) {
 		HuskTLS:           &tls.Config{}, //nolint:gosec // test stub; fakes ignore it
 		HuskStubImage:     "mitos-husk-stub:test",
 		DataDir:           "/var/lib/mitos",
-		HuskTLSSecretName: controller.ForkdTLSSecretName,
+		HuskTLSSecretName: controller.HuskTLSSecretName,
 		HuskCASecretName:  controller.CASecretName,
 	}
 	huskFork.OnlyForkLabel(controller.HuskForkTestLabel)

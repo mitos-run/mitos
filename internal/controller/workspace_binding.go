@@ -329,7 +329,11 @@ func (r *SandboxClaimReconciler) defaultHuskDehydrate(ctx context.Context, claim
 	}
 	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
 	defer cancel()
-	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, husk.DehydrateWorkspaceRequest{
+	tlsConf, err := r.huskDialTLS(opCtx, claim.Namespace)
+	if err != nil {
+		return "", fmt.Errorf("husk dial config for claim %s: %w", claim.Name, err)
+	}
+	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, tlsConf, husk.DehydrateWorkspaceRequest{
 		ExcludePaths: excludePaths,
 		CapturePaths: capturePaths,
 	})
@@ -378,7 +382,11 @@ func (r *SandboxClaimReconciler) defaultHuskDehydrateWithDiff(ctx context.Contex
 	}
 	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
 	defer cancel()
-	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, req)
+	tlsConf, err := r.huskDialTLS(opCtx, claim.Namespace)
+	if err != nil {
+		return "", nil, fmt.Errorf("husk dial config for claim %s: %w", claim.Name, err)
+	}
+	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, tlsConf, req)
 	if err != nil {
 		return "", nil, fmt.Errorf("dehydrate workspace on husk pod %s: %w", claim.Status.SandboxID, err)
 	}
@@ -409,7 +417,11 @@ func (r *SandboxClaimReconciler) defaultHuskHydrate(ctx context.Context, claim *
 	}
 	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
 	defer cancel()
-	res, err := HydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, husk.HydrateWorkspaceRequest{
+	tlsConf, err := r.huskDialTLS(opCtx, claim.Namespace)
+	if err != nil {
+		return fmt.Errorf("husk dial config for claim %s: %w", claim.Name, err)
+	}
+	res, err := HydrateWorkspaceOnHusk(opCtx, addr, tlsConf, husk.HydrateWorkspaceRequest{
 		ManifestDigest: string(manifest),
 	})
 	if err != nil {

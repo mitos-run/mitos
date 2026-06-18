@@ -11,17 +11,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ReplicateHuskSecrets copies the control plane PKI material husk pods mount
-// from the controller namespace (src) into a pool namespace (dst). Husk pods
-// run in the pool namespace (e.g. default), not the controller namespace, but
-// EnsurePKI only materializes mitos-ca and mitos-forkd-tls in the controller
-// namespace; this bridges that gap so `kubectl apply -k deploy/` needs no
-// manual secret copy.
+// ReplicateHuskSecrets projects the CA certificate husk pods mount from the
+// controller namespace (src) into a pool namespace (dst). Husk pods run in the
+// pool namespace (e.g. default), not the controller namespace, and mount the CA
+// to verify the controller's client certificate on the mTLS control channel.
 //
-// The CA copy projects ONLY ca.crt: the CA private key (ca.key) must never
-// leave the controller namespace, matching the husk pod's CA mount in
-// huskpod.go (Items ca.crt only). The forkd leaf (tls.crt, tls.key) is copied
-// whole because the husk stub serves the mTLS control with it.
+// It projects ONLY ca.crt: the CA private key (ca.key) must never leave the
+// controller namespace. The husk control-channel SERVING cert is NOT replicated
+// here; EnsureHuskTLS issues a per-namespace leaf (mitos-husk-tls, SAN
+// husk.<ns>.mitos) into the pool namespace instead, so the shared forkd server
+// private key is never copied into a tenant namespace (a key leaked in one
+// namespace cannot impersonate a husk in another).
 //
 // Replication is idempotent and heals drift: a destination copy whose data
 // differs from the source is updated in place (so a CA rotation propagates).
@@ -30,13 +30,12 @@ func ReplicateHuskSecrets(ctx context.Context, c client.Client, src, dst string)
 	if src == dst {
 		return nil
 	}
-	if err := replicateControlPlaneSecret(ctx, c, src, dst, CASecretName, []string{"ca.crt"}); err != nil {
-		return err
-	}
-	if err := replicateControlPlaneSecret(ctx, c, src, dst, ForkdTLSSecretName, []string{"tls.crt", "tls.key"}); err != nil {
-		return err
-	}
-	return nil
+	// Only ca.crt is projected into a pool namespace. The husk control-channel
+	// serving cert is a PER-NAMESPACE leaf (mitos-husk-tls, SAN husk.<ns>.mitos)
+	// issued by EnsureHuskTLS, so the shared forkd server private key is never
+	// replicated into a tenant namespace: a key leaked in one namespace cannot
+	// impersonate a husk in another.
+	return replicateControlPlaneSecret(ctx, c, src, dst, CASecretName, []string{"ca.crt"})
 }
 
 // replicateControlPlaneSecret copies exactly the named keys of secret `name`

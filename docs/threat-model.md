@@ -867,34 +867,45 @@ arbitrary code at sandbox privilege.
 | Live-fork secret inheritance | **mitigated (default-deny)** | Forks of secret-holding sandboxes are rejected by the fork controller without explicit `allowSecretInheritance: true`; opt-ins are recorded as an audit condition (`sandboxfork_controller.go`). Per-fork credential reissue remains the end state (open). See `docs/fork-correctness.md` §3. |
 | Controller RBAC for Secrets | **partial** | ClusterRole grants cluster-wide `get,list` on all Secrets. Must be narrowed (label-selected or per-namespace Role aggregation) before multi-tenant use. |
 
-- Cross-namespace secret replication. The controller copies mitos-ca (ca.crt
-  only) and mitos-forkd-tls from its namespace into every pool namespace where
-  it creates husk pods (ReplicateHuskSecrets). The CA private key (ca.key) is
-  never copied. Scope: the cluster-wide secrets grant is the enabling
-  privilege; mitigation is that only the two named control plane Secrets are
-  projected and only ca.crt of the CA, so a pool namespace never holds the CA
-  signing key. Status: accepted; a namespaced grant scoped to pool namespaces
-  is a follow-up once pool namespaces are enumerable at install time.
-- Husk activation target authenticity (warm-slot impersonation). The replicated
-  mitos-forkd-tls includes the forkd server leaf private key, and activation
+- Cross-namespace secret replication. The controller projects ONLY mitos-ca
+  (ca.crt) from its namespace into every pool namespace where it creates husk
+  pods (ReplicateHuskSecrets). The CA private key (ca.key) is never copied, and
+  the forkd server leaf is no longer copied either: the husk control channel
+  serves a per-namespace leaf (mitos-husk-tls, issued in-namespace by
+  EnsureHuskTLS), so a pool namespace holds only the public CA cert and its own
+  husk server key, never the CA signing key and never the shared forkd key.
+  Scope: the cluster-wide secrets grant is the enabling privilege for writing
+  ca.crt into pool namespaces; a namespaced grant scoped to pool namespaces is a
+  follow-up once pool namespaces are enumerable at install time.
+- Husk activation target authenticity (warm-slot impersonation). Activation
   delivers the claim's resolved secrets plus the per-sandbox bearer token to the
-  husk pod's self-reported PodIP over mTLS pinned to the shared `forkd.mitos`
-  SAN. So if pod selection trusted only the husk LABELS (which any principal
-  with pod-create in the pool namespace can set), a tenant who could read the
-  replicated leaf could stand up a decoy pod pointing at their own listener,
-  present the leaf, and receive another claim's secrets and token. MITIGATED:
-  `selectDormantHuskPod` now requires the controller owner reference
-  reconcileHuskPods stamps (a controller reference of Kind SandboxPool naming
-  the pool with BlockOwnerDeletion=true), so only pods the controller actually
-  created are activation targets. The forgery barrier is BlockOwnerDeletion: the
-  OwnerReferencesPermissionEnforcement admission plugin refuses to let a tenant
-  set it referencing a pool whose finalizers subresource they cannot update.
-  RESIDUAL: defense in depth would also stop replicating the forkd server
-  private key into tenant namespaces (a per-namespace husk server identity with
-  a namespace-scoped SAN the controller pins per dial); tracked with the
-  multi-tenant work in section 7. On a cluster without
-  OwnerReferencesPermissionEnforcement the owner-reference signal is weaker, so
-  the per-namespace identity remains the durable fix.
+  husk pod's self-reported PodIP over the mTLS control channel. So if pod
+  selection trusted only the husk LABELS (which any principal with pod-create in
+  the pool namespace can set), a tenant could stand up a decoy pod pointing at
+  their own listener and receive another claim's secrets and token. Mitigated by
+  two independent, composing controls:
+  1. PROVENANCE: `selectDormantHuskPod` requires the controller owner reference
+     reconcileHuskPods stamps (a controller reference of Kind SandboxPool naming
+     the pool with BlockOwnerDeletion=true), so only pods the controller actually
+     created are activation targets. The forgery barrier is BlockOwnerDeletion:
+     the OwnerReferencesPermissionEnforcement admission plugin refuses to let a
+     tenant set it referencing a pool whose finalizers subresource they cannot
+     update.
+  2. PER-NAMESPACE IDENTITY (now implemented): the husk control channel no longer
+     uses the shared forkd server key. Each pool namespace gets its OWN server
+     leaf, `husk.<namespace>.mitos` with a distinct key, issued by EnsureHuskTLS
+     into a namespace-local `mitos-husk-tls` Secret; the controller pins
+     `husk.<namespace>.mitos` when dialing a pod in that namespace
+     (`HuskDialTLSConfig`), and ReplicateHuskSecrets projects only `ca.crt` into a
+     pool namespace, never the forkd server key. So even a per-namespace key
+     leaked in namespace A cannot impersonate a husk in namespace B (the controller
+     dials B pinning `husk.B.mitos`, which A's leaf does not satisfy); within A,
+     impersonation yields only A's own tenant secrets. This does not depend on the
+     OwnerReferencesPermissionEnforcement plugin, so it is the durable control on
+     clusters where control (1) is weaker. End-to-end verified by the husk KVM
+     e2e (the controller-pins-vs-husk-serves handshake).
+  RESIDUAL: per-namespace husk cert ROTATION (reissue before NotAfter) is not yet
+  automated; tracked with the multi-tenant work in section 7.
 
 ## 7. Multi-tenancy statement
 

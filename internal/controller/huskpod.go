@@ -1021,6 +1021,14 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 				result.dormant = existing
 				return result, fmt.Errorf("replicate husk secrets into %s: %w", pool.Namespace, err)
 			}
+			// Issue this namespace's own husk control-channel server leaf
+			// (husk.<ns>.mitos) so the husk pod serves the control channel with a
+			// per-namespace identity and the shared forkd server key is never
+			// replicated here. Fail-closed: a husk pod is not created without it.
+			if err := EnsureHuskTLS(ctx, r.Client, r.ControllerNamespace, pool.Namespace); err != nil {
+				result.dormant = existing
+				return result, fmt.Errorf("ensure husk tls in %s: %w", pool.Namespace, err)
+			}
 		}
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,

@@ -55,6 +55,19 @@ const capacityPendingRequeue = 5 * time.Second
 // record requests without a real mTLS server.
 type huskActivator func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
 
+// huskDialTLS resolves the controller client mTLS config to dial a husk pod in
+// namespace ns, pinning the per-namespace husk identity (husk.<ns>.mitos) when a
+// builder is configured; otherwise it falls back to the prebuilt HuskTLS. Every
+// husk control-channel dial in this reconciler (activate, dehydrate, hydrate)
+// must go through it so the dial pins the namespace whose leaf the husk pod
+// serves.
+func (r *SandboxClaimReconciler) huskDialTLS(ctx context.Context, ns string) (*tls.Config, error) {
+	if r.HuskTLSFor != nil {
+		return r.HuskTLSFor(ctx, ns)
+	}
+	return r.HuskTLS, nil
+}
+
 type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
@@ -109,6 +122,14 @@ type SandboxClaimReconciler struct {
 	// leaf). Required when EnableHuskPods is true; a nil config makes
 	// ActivateHuskPod refuse to send secrets.
 	HuskTLS *tls.Config
+
+	// HuskTLSFor, when set, builds the controller client mTLS config to dial a
+	// husk pod in a given pool namespace, pinning that namespace's husk identity
+	// (husk.<ns>.mitos). Production sets it to a closure over
+	// controller.HuskDialTLSConfig bound to the controller namespace; when nil the
+	// reconciler falls back to HuskTLS (the forkd.mitos-pinned config) so tests
+	// that inject a fake activator are unaffected.
+	HuskTLSFor func(ctx context.Context, poolNamespace string) (*tls.Config, error)
 
 	// HuskControlPort is the TCP port the husk stub serves the mTLS control on.
 	// Zero defaults to HuskControlPort. Only used when EnableHuskPods is true.
@@ -748,7 +769,11 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		Allow:          allow,
 		Token:          apiToken,
 	}
-	res, err := activate(ctx, addr, r.HuskTLS, req)
+	tlsConf, err := r.huskDialTLS(ctx, pod.Namespace)
+	var res husk.ActivateResult
+	if err == nil {
+		res, err = activate(ctx, addr, tlsConf, req)
+	}
 	if err != nil || !res.OK {
 		// FAIL CLOSED: do not go Ready. Pend so a transient husk can recover.
 		msg := "husk activation did not complete"
