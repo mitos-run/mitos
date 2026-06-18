@@ -27,6 +27,16 @@ import (
 // defaults to ForkSnapshotOnHusk; tests inject a fake.
 type huskForkSnapshotter func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)
 
+// huskDialTLS resolves the controller client mTLS config to dial a husk pod in
+// namespace ns, pinning the per-namespace husk identity (husk.<ns>.mitos) when a
+// builder is configured; otherwise it falls back to the prebuilt HuskTLS.
+func (r *SandboxForkReconciler) huskDialTLS(ctx context.Context, ns string) (*tls.Config, error) {
+	if r.HuskTLSFor != nil {
+		return r.HuskTLSFor(ctx, ns)
+	}
+	return r.HuskTLS, nil
+}
+
 // huskForkSnapshotRemover is the controller->husk remove-fork-snapshot seam. Nil
 // defaults to RemoveForkSnapshotOnHusk; tests inject a fake.
 type huskForkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
@@ -48,6 +58,11 @@ type SandboxForkReconciler struct {
 	// control channel (the SAME config the claim reconciler uses). Required when
 	// EnableHuskPods is true.
 	HuskTLS *tls.Config
+	// HuskTLSFor, when set, builds the controller client mTLS config to dial a
+	// husk pod in a given namespace, pinning that namespace's husk identity
+	// (husk.<ns>.mitos). Nil falls back to HuskTLS (the forkd.mitos-pinned config)
+	// so tests with a fake snapshotter/activator are unaffected.
+	HuskTLSFor func(ctx context.Context, poolNamespace string) (*tls.Config, error)
 	// HuskControlPort / HuskSandboxPort default to HuskControlPort / huskSandboxPort.
 	HuskControlPort int
 	HuskSandboxPort int
@@ -337,11 +352,15 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		// The source stub writes the snapshot inside its OWN in-pod forks dir mount
 		// (huskForksMountPath/<fork-id>); the child reads the same node dir mounted
 		// read-only at HuskSnapshotDir.
-		snapRes, err := forkSnap(snapCtx, srcAddr, r.HuskTLS, husk.ForkSnapshotRequest{
-			ForkID:      forkID,
-			SnapshotDir: huskForksInPodDir(forkID),
-			PauseSource: fork.Spec.PauseSource,
-		})
+		tlsConf, err := r.huskDialTLS(snapCtx, fork.Namespace)
+		var snapRes husk.ForkSnapshotResult
+		if err == nil {
+			snapRes, err = forkSnap(snapCtx, srcAddr, tlsConf, husk.ForkSnapshotRequest{
+				ForkID:      forkID,
+				SnapshotDir: huskForksInPodDir(forkID),
+				PauseSource: fork.Spec.PauseSource,
+			})
+		}
 		if err != nil || !snapRes.OK {
 			msg := "fork snapshot did not complete"
 			if err != nil {
@@ -441,13 +460,17 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		}
 
 		addr := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(controlPort))
-		actRes, err := activate(ctx, addr, r.HuskTLS, husk.ActivateRequest{
-			// The child reads the FORK snapshot here (its <dataDir>/forks/<fork-id>
-			// hostPath is mounted at HuskSnapshotDir). No ExpectedDigest: the fork
-			// snapshot is node-local, not content-addressed.
-			SnapshotDir: HuskSnapshotDir,
-			Token:       apiToken,
-		})
+		tlsConf, err := r.huskDialTLS(ctx, fork.Namespace)
+		var actRes husk.ActivateResult
+		if err == nil {
+			actRes, err = activate(ctx, addr, tlsConf, husk.ActivateRequest{
+				// The child reads the FORK snapshot here (its <dataDir>/forks/<fork-id>
+				// hostPath is mounted at HuskSnapshotDir). No ExpectedDigest: the fork
+				// snapshot is node-local, not content-addressed.
+				SnapshotDir: HuskSnapshotDir,
+				Token:       apiToken,
+			})
+		}
 		if err != nil || !actRes.OK {
 			logger.Info("fork child activation failed, will retry", "child", childName)
 			continue
@@ -552,7 +575,10 @@ func (r *SandboxForkReconciler) finalizeHuskFork(ctx context.Context, fork *v1al
 			addr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
 			rmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			if _, err := remove(rmCtx, addr, r.HuskTLS, husk.RemoveForkSnapshotRequest{
+			tlsConf, derr := r.huskDialTLS(rmCtx, fork.Namespace)
+			if derr != nil {
+				logger.Info("remove fork snapshot skipped; husk dial config unavailable", "fork", fork.Name, "detail", derr.Error())
+			} else if _, err := remove(rmCtx, addr, tlsConf, husk.RemoveForkSnapshotRequest{
 				ForkID:      fork.Name,
 				SnapshotDir: huskForksInPodDir(fork.Name),
 			}); err != nil {

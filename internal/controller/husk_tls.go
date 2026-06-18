@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"github.com/paperclipinc/mitos/internal/pki"
@@ -36,4 +37,23 @@ func EnsureHuskTLS(ctx context.Context, c client.Client, controllerNamespace, po
 		return fmt.Errorf("ensure husk tls for %s: %w", poolNamespace, err)
 	}
 	return nil
+}
+
+// HuskDialTLSConfig builds the controller client mTLS config for dialing a husk
+// pod in poolNamespace, pinning the per-namespace husk server identity
+// (husk.<poolNamespace>.mitos). It loads the controller client leaf and the CA
+// from the controller namespace (re-read each dial so a cert rotation is picked
+// up). Because the pinned name encodes the namespace, a husk serving leaf from
+// one namespace cannot satisfy a dial aimed at another, so a per-namespace key
+// leak is contained to that namespace.
+func HuskDialTLSConfig(ctx context.Context, c client.Client, controllerNamespace, poolNamespace string) (*tls.Config, error) {
+	ca, err := ensureCA(ctx, c, controllerNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("load CA for husk dial to %s: %w", poolNamespace, err)
+	}
+	leaf, err := ensureLeaf(ctx, c, controllerNamespace, ControllerTLSSecretName, pki.ControllerName, ca)
+	if err != nil {
+		return nil, fmt.Errorf("load controller leaf for husk dial to %s: %w", poolNamespace, err)
+	}
+	return pki.ClientTLSConfigFor(leaf.CertPEM, leaf.KeyPEM, ca.CertPEM(), pki.HuskServerName(poolNamespace))
 }

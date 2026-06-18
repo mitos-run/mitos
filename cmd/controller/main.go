@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"os"
 	"time"
@@ -346,10 +347,19 @@ func main() {
 		}
 		nodeRegistry.TLS = tlsConf
 		discovery.TLS = tlsConf
-		// The husk control channel uses the SAME controller client config.
+		// The husk control channel uses the SAME controller client config as a
+		// fallback, but dials each husk pod pinning its PER-NAMESPACE identity
+		// (husk.<ns>.mitos) so the shared forkd server key is never needed in a
+		// tenant namespace. The controller leaf + CA are read from the controller
+		// namespace at dial time (so a cert rotation is picked up).
 		claimReconciler.HuskTLS = tlsConf
 		forkReconciler.HuskTLS = tlsConf
-		logger.Info("PKI bootstrap complete; dialing forkd with mTLS", "namespace", discoveryNamespace)
+		huskDial := func(dialCtx context.Context, poolNamespace string) (*tls.Config, error) {
+			return controller.HuskDialTLSConfig(dialCtx, mgr.GetClient(), discoveryNamespace, poolNamespace)
+		}
+		claimReconciler.HuskTLSFor = huskDial
+		forkReconciler.HuskTLSFor = huskDial
+		logger.Info("PKI bootstrap complete; dialing forkd with mTLS and husk pods with per-namespace identity", "namespace", discoveryNamespace)
 	}
 
 	if err := mgr.Add(discovery); err != nil {

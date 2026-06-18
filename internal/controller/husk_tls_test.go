@@ -34,6 +34,28 @@ func TestEnsureHuskTLSWritesPerNamespaceLeaf(t *testing.T) {
 	verifyLeaf(t, sec.Data["tls.crt"], ca.Data["ca.crt"], pki.HuskServerName(poolNs), x509.ExtKeyUsageServerAuth)
 }
 
+// TestHuskDialTLSConfigPinsNamespaceIdentity proves the controller builds its
+// husk dial config pinning husk.<poolNamespace>.mitos (from the controller leaf
+// and CA in the controller namespace), so a per-namespace husk leaf in one
+// namespace cannot satisfy a dial aimed at another namespace.
+func TestHuskDialTLSConfigPinsNamespaceIdentity(t *testing.T) {
+	c := newCoreClient(t)
+	ctrlNs := newPKINamespace(t, c)
+	if _, err := controller.EnsurePKI(ctx, c, ctrlNs); err != nil {
+		t.Fatalf("EnsurePKI: %v", err)
+	}
+	cfg, err := controller.HuskDialTLSConfig(ctx, c, ctrlNs, "tenant-a")
+	if err != nil {
+		t.Fatalf("HuskDialTLSConfig: %v", err)
+	}
+	if cfg.ServerName != pki.HuskServerName("tenant-a") {
+		t.Errorf("dial ServerName = %q, want %q", cfg.ServerName, pki.HuskServerName("tenant-a"))
+	}
+	if len(cfg.Certificates) != 1 {
+		t.Errorf("dial config has %d client certs, want 1 (the controller leaf)", len(cfg.Certificates))
+	}
+}
+
 // TestEnsureHuskTLSIsIdempotent proves a second call leaves the existing leaf
 // untouched (no churn of running husk pods' mounted cert).
 func TestEnsureHuskTLSIsIdempotent(t *testing.T) {
