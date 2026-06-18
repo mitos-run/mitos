@@ -24,17 +24,30 @@ kubectl label node <node-name> mitos.run/kvm=true
 
 ## Install
 
+forkd, the husk pods, and the device plugin are privileged and the install
+namespace MUST carry `pod-security.kubernetes.io/enforce: privileged`. Helm
+cannot both create its release namespace AND apply those labels (it needs the
+namespace to exist before it can store the release), and `--create-namespace`
+makes an UNLABELED namespace that PSA `restricted` then rejects. So create the
+labeled namespace first, then install with `namespace.create=false`:
+
 ```
-helm install mitos deploy/charts/mitos -n mitos --create-namespace
+kubectl create namespace mitos
+kubectl label namespace mitos \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  pod-security.kubernetes.io/audit=privileged
+helm install mitos deploy/charts/mitos -n mitos --set namespace.create=false
 ```
 
 The `crds/` directory installs the CRDs before the templated resources. Helm does
 not upgrade or delete CRDs on chart upgrade or uninstall; manage CRD schema
 changes out of band.
 
-If you let the chart manage the namespace (the default, `namespace.create=true`),
-you can drop `--create-namespace`; the chart renders the Namespace with the
-required PodSecurity labels.
+`namespace.create=true` renders a Namespace object with the PodSecurity labels
+for the case where the chart is installed into a DIFFERENT namespace than the one
+it creates; do not combine it with `--create-namespace` for the release namespace
+(see above).
 
 ## Uninstall
 

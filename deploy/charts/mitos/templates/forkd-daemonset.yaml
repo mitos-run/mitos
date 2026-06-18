@@ -136,6 +136,10 @@ spec:
         - name: docker-config
           secret:
             secretName: {{ .Values.imagePullSecret.name }}
+            # Optional so forkd starts even when no pull secret exists (public
+            # base images need none). Without this a missing imagePullSecret is a
+            # FailedMount that blocks forkd indefinitely (issue #173).
+            optional: true
             items:
               - key: .dockerconfigjson
                 path: config.json
