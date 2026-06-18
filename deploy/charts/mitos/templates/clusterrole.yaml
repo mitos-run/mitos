@@ -99,6 +99,7 @@ rules:
   # mitos-forkd-tls) FROM the controller namespace INTO each pool namespace
   # where husk pods run (ReplicateHuskSecrets); the CA private key is never
   # replicated. This is why the grant is cluster-wide rather than namespaced.
+  {{- if not .Values.controller.namespacedSecretsRBAC }}
   - apiGroups:
       - ""
     resources:
@@ -110,6 +111,30 @@ rules:
       - list
       - update
       - watch
+  {{- end }}
+  # Secrets RBAC narrowing (multi-tenancy): the controller binds itself to the
+  # mitos-pool-secrets ClusterRole in each pool namespace it adopts
+  # (EnsurePoolSecretsRoleBinding), so the cluster-wide Secrets grant above can be
+  # removed (controller.namespacedSecretsRBAC=true). It needs `bind` scoped to
+  # that one ClusterRole (the escalation-prevention bypass: bind a fixed role
+  # without holding its verbs) plus rolebindings management in pool namespaces.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+    verbs:
+      - bind
+    resourceNames:
+      - {{ .Values.controller.poolSecretsClusterRoleName | default "mitos-pool-secrets" }}
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - rolebindings
+    verbs:
+      - create
+      - get
+      - update
+      - delete
   # The workspace revision change feed (W4) mirrors every feed event as a
   # Kubernetes Event on the source object (the always-on channel, on top of the
   # opt-in CloudEvents webhook). The EventRecorder needs create;patch on events

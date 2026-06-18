@@ -49,6 +49,17 @@ controller:
   # The extended resource name husk pods request for KVM scheduling. Reproduced
   # for documentation; the controller passes it through to the husk pod spec.
   kvmResourceName: mitos.run/kvm
+  # Secrets RBAC narrowing (multi-tenancy). When true, the controller's
+  # cluster-wide Secrets grant is REMOVED; it instead reaches Secrets only in its
+  # own namespace and in pool namespaces it has adopted (it binds itself to the
+  # mitos-pool-secrets ClusterRole per namespace). ROLLOUT: leave false until the
+  # per-pool RoleBindings have reconciled across all live pool namespaces (the
+  # controller creates them while it still holds the cluster-wide grant), then
+  # flip to true. Default false so upgrades do not lose Secrets access mid-flight.
+  namespacedSecretsRBAC: false
+  # Name of the chart-provisioned ClusterRole the controller binds per pool
+  # namespace for Secrets access. Must match the controller's expectation.
+  poolSecretsClusterRoleName: mitos-pool-secrets
   # Extra args appended verbatim to the controller container args.
   extraArgs: []
 

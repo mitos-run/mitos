@@ -1029,6 +1029,15 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 				result.dormant = existing
 				return result, fmt.Errorf("ensure husk tls in %s: %w", pool.Namespace, err)
 			}
+			// Grant the controller namespaced Secrets access here via a RoleBinding
+			// to the mitos-pool-secrets ClusterRole, so the cluster-wide Secrets
+			// grant can be removed (the controller reaches Secrets only in adopted
+			// pool namespaces). Additive and idempotent; harmless while the
+			// cluster-wide grant is still present during rollout.
+			if err := EnsurePoolSecretsRoleBinding(ctx, r.Client, r.ControllerNamespace, pool.Namespace); err != nil {
+				result.dormant = existing
+				return result, fmt.Errorf("ensure pool secrets rolebinding in %s: %w", pool.Namespace, err)
+			}
 		}
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
