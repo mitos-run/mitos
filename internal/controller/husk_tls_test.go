@@ -1,12 +1,47 @@
 package controller_test
 
 import (
+	"bytes"
 	"crypto/x509"
 	"testing"
+	"time"
 
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/pki"
 )
+
+// TestEnsureHuskTLSRotatesNearExpiryLeaf proves the per-namespace husk leaf is
+// reissued before it expires: with the renew-before window set wide enough that
+// a freshly issued leaf already counts as near expiry, a second EnsureHuskTLS
+// replaces the cert rather than leaving the soon-to-expire one in place.
+func TestEnsureHuskTLSRotatesNearExpiryLeaf(t *testing.T) {
+	c := newCoreClient(t)
+	ctrlNs := newPKINamespace(t, c)
+	if _, err := controller.EnsurePKI(ctx, c, ctrlNs); err != nil {
+		t.Fatal(err)
+	}
+	poolNs := newPKINamespace(t, c)
+	if err := controller.EnsureHuskTLS(ctx, c, ctrlNs, poolNs); err != nil {
+		t.Fatal(err)
+	}
+	first := getSecret(t, c, poolNs, controller.HuskTLSSecretName).Data["tls.crt"]
+
+	// Force the renewal path: a fresh ~2y leaf is "near expiry" under a 100y window.
+	orig := controller.HuskCertRenewBefore
+	controller.HuskCertRenewBefore = 100 * 365 * 24 * time.Hour
+	defer func() { controller.HuskCertRenewBefore = orig }()
+
+	if err := controller.EnsureHuskTLS(ctx, c, ctrlNs, poolNs); err != nil {
+		t.Fatal(err)
+	}
+	second := getSecret(t, c, poolNs, controller.HuskTLSSecretName).Data["tls.crt"]
+	if bytes.Equal(first, second) {
+		t.Fatal("expected the near-expiry husk leaf to be rotated, but the cert is unchanged")
+	}
+	// The rotated leaf must still chain to the CA with the per-namespace SAN.
+	ca := getSecret(t, c, ctrlNs, controller.CASecretName)
+	verifyLeaf(t, second, ca.Data["ca.crt"], pki.HuskServerName(poolNs), x509.ExtKeyUsageServerAuth)
+}
 
 // TestEnsureHuskTLSWritesPerNamespaceLeaf proves the controller issues a
 // husk.<ns>.mitos server leaf signed by the control-plane CA and writes it to a
