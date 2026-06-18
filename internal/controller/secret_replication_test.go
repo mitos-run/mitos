@@ -6,10 +6,12 @@ import (
 
 	"github.com/paperclipinc/mitos/internal/controller"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestReplicateHuskSecretsCopiesCAcrtAndForkdTLS(t *testing.T) {
+func TestReplicateHuskSecretsCopiesOnlyCAcrt(t *testing.T) {
 	c := newCoreClient(t)
 	src := newPKINamespace(t, c)
 	dst := newPKINamespace(t, c)
@@ -44,9 +46,13 @@ func TestReplicateHuskSecretsCopiesCAcrtAndForkdTLS(t *testing.T) {
 	if _, leaked := gotCA.Data["ca.key"]; leaked {
 		t.Error("dst CA secret leaked ca.key; the CA private key must never be replicated")
 	}
-	gotTLS := getSecret(t, c, dst, controller.ForkdTLSSecretName)
-	if !bytes.Equal(gotTLS.Data["tls.crt"], []byte("LEAF-CERT")) || !bytes.Equal(gotTLS.Data["tls.key"], []byte("LEAF-KEY")) {
-		t.Errorf("dst forkd-tls not copied: %v", gotTLS.Data)
+	// The forkd server leaf (and its private key) must NOT be replicated into a
+	// pool namespace anymore: the husk control channel serves a per-namespace
+	// leaf (mitos-husk-tls) issued by EnsureHuskTLS instead.
+	var forkd corev1.Secret
+	err := c.Get(ctx, types.NamespacedName{Namespace: dst, Name: controller.ForkdTLSSecretName}, &forkd)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("forkd-tls must not be replicated into a pool namespace; Get err = %v", err)
 	}
 }
 
@@ -122,6 +128,7 @@ func TestReconcileHuskPodsReplicatesSecretsIntoPoolNamespace(t *testing.T) {
 	if err := controller.ReplicateHuskSecrets(ctx, c, ctrlNS, poolNS); err != nil {
 		t.Fatal(err)
 	}
+	// Only ca.crt is bridged; the per-namespace husk serving cert is issued by
+	// EnsureHuskTLS, not replicated from the controller namespace.
 	_ = getSecret(t, c, poolNS, controller.CASecretName)
-	_ = getSecret(t, c, poolNS, controller.ForkdTLSSecretName)
 }

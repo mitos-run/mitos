@@ -194,7 +194,7 @@ func main() {
 		DataDir:                   huskDataDir,
 		HuskMemoryHeadroom:        huskHeadroomQty,
 		HuskMemoryHeadroomPercent: huskMemoryHeadroomPercent,
-		HuskTLSSecretName:         controller.ForkdTLSSecretName,
+		HuskTLSSecretName:         controller.HuskTLSSecretName,
 		HuskCASecretName:          controller.CASecretName,
 		ControllerNamespace:       poolControllerNamespace,
 		KMS:                       encKMS,
@@ -283,7 +283,7 @@ func main() {
 		HuskDNSUpstream:   huskDNSUpstream,
 		DataDir:           huskDataDir,
 		KVMResourceName:   "mitos.run/kvm",
-		HuskTLSSecretName: controller.ForkdTLSSecretName,
+		HuskTLSSecretName: controller.HuskTLSSecretName,
 		HuskCASecretName:  controller.CASecretName,
 	}
 	if err := forkReconciler.SetupWithManager(mgr); err != nil {

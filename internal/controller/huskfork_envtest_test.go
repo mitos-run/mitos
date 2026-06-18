@@ -418,8 +418,8 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 	// The husk PKI TLS Secret volumes + mounts (the crash). The leaf Secret backs
 	// /etc/husk/tls (tls.crt + tls.key); the CA Secret backs /etc/husk/ca (ca.crt).
 	tlsVol, ok := vols["husk-tls"]
-	if !ok || tlsVol.Secret == nil || tlsVol.Secret.SecretName != "mitos-forkd-tls" {
-		t.Fatalf("fork child missing husk-tls leaf Secret volume (mitos-forkd-tls): %+v", child.Spec.Volumes)
+	if !ok || tlsVol.Secret == nil || tlsVol.Secret.SecretName != "mitos-husk-tls" {
+		t.Fatalf("fork child missing husk-tls leaf Secret volume (mitos-husk-tls): %+v", child.Spec.Volumes)
 	}
 	if m, ok := mounts["husk-tls"]; !ok || !m.ReadOnly || m.MountPath != "/etc/husk/tls" {
 		t.Fatalf("fork child husk-tls mount missing/wrong (want RO /etc/husk/tls): %+v", mounts)
