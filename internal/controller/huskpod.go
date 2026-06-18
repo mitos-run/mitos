@@ -1051,18 +1051,47 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			DataDir:         r.DataDir,
 			TLSSecretName:   r.HuskTLSSecretName,
 			CASecretName:    r.HuskCASecretName,
-			// The recorded snapshot manifest digest, so the husk pod mounts the
-			// manifest and the stub verifies the snapshot before loading
-			// (fail-closed). Empty (no node has reported it yet) falls back to the
-			// stub's development escape hatch so the warm pool still activates.
-			ExpectedDigest: r.huskTemplateDigest(pool.Spec.TemplateRef.Name),
-			// Pin husk pods to the nodes the pool built the snapshot on, so the
-			// read-only snapshot hostPath resolves. Empty (no registry, or no node
-			// holds it yet) falls back to the kvm nodeSelector alone.
-			SnapshotNodes: r.snapshotNodeNames(pool.Spec.TemplateRef.Name),
+			// ExpectedDigest and SnapshotNodes are assigned PER POD below. Each node
+			// builds its template snapshot independently, so the recorded
+			// content-addressed digests differ per node. A husk pod must be pinned to
+			// exactly ONE snapshot node and verify against THAT node's digest;
+			// handing every pod a single cluster-wide digest makes pods that land on
+			// any other node fail prepare-time snapshot verification (issue #175).
+		}
+		// Snapshot holders with their own per-node digests, balanced across so a
+		// pool spreads its warm pods (and so a lost node's slots refill onto the
+		// survivors, where the digest is correct for that node).
+		var holders []SnapshotHolder
+		if r.NodeRegistry != nil {
+			holders = r.NodeRegistry.SnapshotHolders(pool.Spec.TemplateRef.Name)
+		}
+		assigned := map[string]int{}
+		for i := range owned {
+			if n := owned[i].Spec.NodeName; n != "" {
+				assigned[n]++
+			}
 		}
 		for i := int32(0); i < deficit; i++ {
-			pod := r.buildHuskPod(pool, template, opts)
+			podOpts := opts
+			if len(holders) > 0 {
+				// Pick the least-loaded holder so the deficit spreads evenly.
+				pick := holders[0]
+				for _, h := range holders {
+					if assigned[h.Name] < assigned[pick.Name] {
+						pick = h
+					}
+				}
+				assigned[pick.Name]++
+				podOpts.SnapshotNodes = []string{pick.Name}
+				podOpts.ExpectedDigest = pick.Digest
+			} else {
+				// No registry, or no node has reported holding the snapshot yet: fall
+				// back to the kvm nodeSelector alone and the stub's unverified escape
+				// hatch so a pre-digest pool still warms.
+				podOpts.SnapshotNodes = r.snapshotNodeNames(pool.Spec.TemplateRef.Name)
+				podOpts.ExpectedDigest = r.huskTemplateDigest(pool.Spec.TemplateRef.Name)
+			}
+			pod := r.buildHuskPod(pool, template, podOpts)
 			if err := r.Create(ctx, pod); err != nil {
 				result.dormant = existing
 				return result, fmt.Errorf("create husk pod for pool %s: %w", pool.Name, err)

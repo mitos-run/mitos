@@ -282,6 +282,31 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 	return out
 }
 
+// SnapshotHolder is a healthy node that holds a template snapshot, paired with
+// the content-addressed digest THAT node recorded for it. Each node builds its
+// template snapshot independently, so these digests differ per node; a husk pod
+// pinned to a node must verify against this node's digest, never another's.
+type SnapshotHolder struct {
+	Name   string
+	Digest string
+}
+
+// SnapshotHolders returns every healthy node holding templateID with its own
+// recorded digest (empty string if the node has not reported one yet). The
+// name/digest pairs are copied out under the lock so callers never read
+// NodeInfo concurrently.
+func (r *NodeRegistry) SnapshotHolders(templateID string) []SnapshotHolder {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []SnapshotHolder
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.hasSnapshot(templateID) {
+			out = append(out, SnapshotHolder{Name: n.Name, Digest: n.TemplateDigests[templateID]})
+		}
+	}
+	return out
+}
+
 // TemplateSource picks a healthy node that holds the template AND reports a
 // content-addressed digest for it, and returns the holder, its CAS-serving base
 // URL, and the digest. It is the source the pool reconciler distributes from:
