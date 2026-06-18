@@ -269,9 +269,11 @@ func ServerTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
 	}, nil
 }
 
-// ClientTLSConfig builds the controller client side of the mTLS pair:
-// TLS 1.3 only, server identity pinned to ServerName, roots from caPEM.
-func ClientTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
+// ClientTLSConfigFor builds the controller client side of the mTLS pair pinning
+// the server identity to serverName: TLS 1.3 only, roots from caPEM. The forkd
+// gRPC path uses ServerName; the husk control path uses HuskServerName(namespace)
+// so a per-namespace husk leaf cannot impersonate a husk in another namespace.
+func ClientTLSConfigFor(certPEM, keyPEM, caPEM []byte, serverName string) (*tls.Config, error) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("client TLS keypair: %w", err)
@@ -283,9 +285,16 @@ func ClientTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      pool,
-		ServerName:   ServerName,
+		ServerName:   serverName,
 		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+// ClientTLSConfig builds the controller client side of the mTLS pair pinning the
+// forkd gRPC server identity (ServerName). Unchanged behavior for the raw-forkd
+// path.
+func ClientTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
+	return ClientTLSConfigFor(certPEM, keyPEM, caPEM, ServerName)
 }
 
 // PeerDNSName extracts the TLS peer's first DNS SAN from gRPC peer

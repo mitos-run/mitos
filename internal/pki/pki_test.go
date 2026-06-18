@@ -174,6 +174,32 @@ func TestIssueRejectsBadNamespace(t *testing.T) {
 	}
 }
 
+func TestClientTLSConfigForPinsGivenName(t *testing.T) {
+	ca, err := NewCA("mitos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl, err := ca.Issue(ControllerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ClientTLSConfigFor(ctrl.CertPEM, ctrl.KeyPEM, ca.CertPEM(), HuskServerName("tenant-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerName != "husk.tenant-a.mitos" {
+		t.Errorf("ServerName = %q, want husk.tenant-a.mitos", cfg.ServerName)
+	}
+	// The default ClientTLSConfig still pins the forkd gRPC identity.
+	def, err := ClientTLSConfig(ctrl.CertPEM, ctrl.KeyPEM, ca.CertPEM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.ServerName != ServerName {
+		t.Errorf("ClientTLSConfig ServerName = %q, want %q", def.ServerName, ServerName)
+	}
+}
+
 func TestPeerDNSNameIgnoresUnverifiedPeerCertificates(t *testing.T) {
 	ca, err := NewCA("mitos")
 	if err != nil {
