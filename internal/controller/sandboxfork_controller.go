@@ -453,9 +453,18 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 			continue
 		}
 
-		apiToken, err := mintAPIToken()
+		endpoint := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(sandboxPort))
+		// Persist a STABLE token BEFORE activating (issue #183). Activation is not
+		// transactional: the activate ack can be lost, or the post-activate
+		// bookkeeping below can fail, leaving the VM ACTIVE while the controller
+		// did not record it. If the token were minted fresh per pass and written
+		// only AFTER activate, the next pass would re-activate an already-active VM
+		// (the stub refuses: "must be dormant") with a different token, forever.
+		// Persisting first and reusing the same token means a re-drive activates
+		// with the token the VM already holds, and AlreadyActive lets us adopt it.
+		apiToken, err := ensureForkChildToken(ctx, r.Client, fork, childName+tokenSecretSuffix, endpoint)
 		if err != nil {
-			logger.Error(err, "token minting failed", "child", childName)
+			logger.Error(err, "fork child token secret write failed", "child", childName)
 			continue
 		}
 
@@ -471,23 +480,20 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 				Token:       apiToken,
 			})
 		}
-		if err != nil || !actRes.OK {
+		if err != nil {
+			logger.Info("fork child activation failed, will retry", "child", childName, "detail", err.Error())
+			continue
+		}
+		if !actRes.OK && !actRes.AlreadyActive {
 			// Surface WHY (issue #28 LLM-legible errors): the bare "will retry" hid
-			// the cause of stuck fork children. Log the transport error or the
-			// stub's activation error so an operator can act.
-			detail := actRes.Error
-			if err != nil {
-				detail = err.Error()
-			}
-			logger.Info("fork child activation failed, will retry", "child", childName, "detail", detail)
+			// the cause of stuck fork children.
+			logger.Info("fork child activation failed, will retry", "child", childName, "detail", actRes.Error)
 			continue
 		}
-
-		endpoint := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(sandboxPort))
-		if err := ensureSandboxTokenSecret(ctx, r.Client, fork, childName+tokenSecretSuffix, apiToken, endpoint); err != nil {
-			logger.Error(err, "token secret write failed", "child", childName)
-			continue
-		}
+		// OK, or AlreadyActive: a prior Activate brought this child up but its ack
+		// or bookkeeping was lost (issue #183). Either way the VM is active with the
+		// stable token persisted above, so ADOPT it as ready rather than retrying a
+		// non-dormant VM forever.
 
 		forks = append(forks, v1alpha1.ForkInfo{
 			Name:      childName,

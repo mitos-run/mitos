@@ -593,7 +593,10 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	defer s.mu.Unlock()
 
 	if s.state != StateDormant {
-		return ActivateResult{OK: false, Error: fmt.Sprintf("activate in state %s: must be dormant", s.state)},
+		// AlreadyActive lets an idempotent caller adopt a VM that a prior Activate
+		// already brought up but whose ack/bookkeeping was lost (issue #183),
+		// instead of retrying a non-dormant VM forever.
+		return ActivateResult{OK: false, AlreadyActive: s.state == StateActive, Error: fmt.Sprintf("activate in state %s: must be dormant", s.state)},
 			fmt.Errorf("husk: activate in state %s: must be dormant", s.state)
 	}
 	if err := ctx.Err(); err != nil {

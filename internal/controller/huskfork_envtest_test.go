@@ -506,3 +506,52 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 		t.Fatalf("fork child --template-rootfs must be the source pod rootfs; args=%v", stub.Args)
 	}
 }
+
+// TestHuskForkAdoptsAlreadyActiveChild is the #183 regression. Activation is not
+// transactional: a prior Activate can succeed (VM active) while its ack or the
+// controller's post-activate bookkeeping is lost, so the child is never recorded.
+// On the next pass the stub refuses to re-activate a non-dormant VM and returns
+// AlreadyActive (OK=false). Before the fix the controller logged "will retry" and
+// looped forever (ReadyForks stuck below Replicas); the fix ADOPTS an
+// AlreadyActive child (the VM is up with the stable, persisted token) so the fork
+// converges. The fake activator below ALWAYS reports AlreadyActive, so without the
+// adoption this test times out.
+func TestHuskForkAdoptsAlreadyActiveChild(t *testing.T) {
+	srcPod := makeDormantHuskPod(t, "pool-hfaa", "10.0.2.5")
+	makeForkSourceClaim(t, "src-claim-aa", "pool-hfaa", srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: false, AlreadyActive: true, Error: "activate in state active: must be dormant"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	fork := &v1alpha1.SandboxFork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hfaa-1",
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-aa"}, Replicas: 2},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren("hfaa-1"))
+		for i := range pods.Items {
+			forceHuskPodReady(t, &pods.Items[i])
+		}
+		var got v1alpha1.SandboxFork
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hfaa-1", Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyForks == 2
+	})
+}
