@@ -81,6 +81,12 @@ type ActivateResult struct {
 	VsockPath string  `json:"vsock_path,omitempty"`
 	LatencyMs float64 `json:"latency_ms"`
 	Error     string  `json:"error,omitempty"`
+	// AlreadyActive is set when Activate was refused because the stub is ALREADY
+	// in the active state (a prior Activate succeeded). It is not OK, but it tells
+	// an idempotent caller that the VM is in fact activated, so a re-drive that
+	// lost its ack (or whose post-activate bookkeeping failed) can ADOPT the VM
+	// instead of retrying forever (issue #183).
+	AlreadyActive bool `json:"already_active,omitempty"`
 }
 
 // WriteRequest writes an ActivateRequest as one line of JSON followed by a

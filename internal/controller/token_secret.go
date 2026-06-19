@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -15,6 +16,32 @@ import (
 // tokenSecretSuffix is appended to the claim or fork sandbox name to form
 // the name of the Secret carrying the sandbox API bearer token.
 const tokenSecretSuffix = "-sandbox-token"
+
+// ensureForkChildToken returns a STABLE bearer token for a fork child, persisted
+// BEFORE activation so a lost activate-ack (or a later bookkeeping failure) never
+// leaves the VM active with a token the controller forgot (issue #183). If the
+// owned token Secret already exists it REUSES that token, so a re-drive activates
+// with the same token the VM already holds; otherwise it mints one and writes the
+// Secret. The token value is never logged.
+func ensureForkChildToken(ctx context.Context, c client.Client, owner client.Object, name, endpoint string) (string, error) {
+	var existing corev1.Secret
+	err := c.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, &existing)
+	if err == nil {
+		if tok := string(existing.Data["token"]); tok != "" {
+			return tok, nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("read token secret %s/%s: %w", owner.GetNamespace(), name, err)
+	}
+	token, err := mintAPIToken()
+	if err != nil {
+		return "", err
+	}
+	if err := ensureSandboxTokenSecret(ctx, c, owner, name, token, endpoint); err != nil {
+		return "", err
+	}
+	return token, nil
+}
 
 // mintAPIToken returns 32 bytes of crypto/rand entropy hex-encoded
 // (64 chars). The value is a bearer credential: never log it and never put
