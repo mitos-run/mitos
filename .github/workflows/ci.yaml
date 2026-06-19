@@ -1571,6 +1571,124 @@ jobs:
           kubectl -n default delete sandboxtemplate.mitos.run husk-e2e --ignore-not-found=true || true
           kubectl get pods -A -l mitos.run/husk=true -o wide || true
 
+  kind-e2e-placement:
+    # The dedicatedNodes placement proof on a MULTI-NODE kind cluster (issue
+    # #172, gate G3). It stands up the same husk-default stack as kind-e2e-husk
+    # but on a THREE-node cluster (control plane + two KVM workers, exactly one
+    # labeled mitos.run/tenant=a), then runs test/cluster-e2e/placement-e2e.sh to
+    # assert that a placed SandboxPool confines BOTH its husk pods AND its
+    # snapshot build to the dedicated worker, never the shared one.
+    #
+    # SCOPE: this is a SCHEDULING proof (which node each husk pod binds to and
+    # which node holds the snapshot), decided by the controller + kube-scheduler
+    # BEFORE the in-pod VMM comes up, so it does NOT depend on the nested-VMM tail
+    # kind cannot guarantee (gated in kvm-test.yaml). Both workers advertise
+    # mitos.run/kvm (the runner has /dev/kvm), so a pod on the shared worker can
+    # only be a placement bug, not a capacity artifact.
+    runs-on: ubuntu-latest
+    needs: [go-test, docker-build]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - name: Check KVM availability on the runner
+        run: |
+          set -euo pipefail
+          ls -la /dev/kvm || { echo "PLACEMENT-SETUP: no /dev/kvm on this runner"; exit 1; }
+          sudo chmod 666 /dev/kvm || true
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: mitos-placement
+          config: hack/kind-config-placement.yaml
+      - name: Build and load all four images
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.controller -t mitos-controller:ci .
+          docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+          docker build -f Dockerfile.kvm-device-plugin -t mitos-kvm-device-plugin:ci .
+          docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
+          for img in mitos-controller mitos-forkd mitos-kvm-device-plugin mitos-husk-stub; do
+            kind load docker-image "$img:ci" --name mitos-placement
+          done
+      - name: Assert the node labels the placement proof keys off
+        # The kind-config already labels both workers mitos.run/kvm=true and ONE
+        # of them mitos.run/tenant=a. A missing/extra tenant label would make the
+        # proof vacuous, so assert exactly one dedicated node.
+        run: |
+          set -euo pipefail
+          kubectl get nodes -L mitos.run/kvm,mitos.run/tenant
+          kvm=$(kubectl get nodes -l 'mitos.run/kvm=true' -o name | wc -l | tr -d ' ')
+          ded=$(kubectl get nodes -l 'mitos.run/tenant=a' -o name | wc -l | tr -d ' ')
+          echo "kvm nodes=$kvm dedicated=$ded"
+          [ "$kvm" -ge 2 ] || { echo "PLACEMENT-SETUP: need >= 2 kvm nodes"; exit 1; }
+          [ "$ded" -eq 1 ] || { echo "PLACEMENT-SETUP: need exactly 1 tenant=a node, got $ded"; exit 1; }
+      - name: Deploy the husk-default stack and retarget images to the local :ci tags
+        run: |
+          set -euo pipefail
+          kubectl apply -k deploy/
+          kubectl -n mitos set image deployment/mitos-controller controller=mitos-controller:ci
+          kubectl -n mitos set image daemonset/mitos-forkd forkd=mitos-forkd:ci
+          kubectl -n mitos set image daemonset/mitos-kvm-device-plugin kvm-device-plugin=mitos-kvm-device-plugin:ci
+          for obj in deployment/mitos-controller daemonset/mitos-forkd daemonset/mitos-kvm-device-plugin; do
+            kubectl -n mitos patch "$obj" --type=json \
+              -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
+          done
+          kubectl -n mitos patch deployment/mitos-controller --type=json -p='[
+            {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--husk-stub-image=mitos-husk-stub:ci"}
+          ]'
+          kubectl -n mitos scale deployment/mitos-controller --replicas=1
+      - name: Stack rolls out and PKI Secrets exist
+        run: |
+          set -euo pipefail
+          dump() {
+            kubectl -n mitos get pods -o wide || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=80 || true
+          }
+          trap dump ERR
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-kvm-device-plugin --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-forkd --timeout=240s
+          for s in mitos-ca mitos-forkd-tls mitos-controller-tls; do
+            kubectl -n mitos get secret "$s" >/dev/null || { echo "PLACEMENT-SETUP: PKI Secret $s missing"; exit 1; }
+          done
+      - name: Both KVM workers advertise mitos.run/kvm
+        # Both workers must advertise the resource so the shared worker is a
+        # VALID home capacity-wise; only placement may keep pods off it.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            n=$(kubectl get nodes -o jsonpath='{range .items[?(@.status.allocatable.mitos\.run/kvm)]}{.status.allocatable.mitos\.run/kvm}{" "}{end}' 2>/dev/null || true)
+            advertising=0
+            for v in $n; do [ -n "$v" ] && [ "$v" != "0" ] && advertising=$((advertising + 1)); done
+            echo "  [$i/30] nodes advertising mitos.run/kvm: $advertising"
+            [ "$advertising" -ge 2 ] && { echo "PASS: $advertising nodes advertise mitos.run/kvm"; break; }
+            sleep 2
+            [ "$i" -eq 30 ] && { echo "PLACEMENT-SETUP: fewer than 2 nodes advertise mitos.run/kvm"; exit 1; }
+          done
+      - name: Stage a guest kernel into BOTH KVM workers
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          KERNEL_VERSION=6.1.155
+          curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
+          for worker in $(docker ps --format '{{.Names}}' | grep 'mitos-placement-worker'); do
+            docker exec "$worker" mkdir -p /var/lib/mitos
+            docker cp /tmp/vmlinux "$worker:/var/lib/mitos/vmlinux"
+          done
+      - name: Run the placement e2e
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/placement-e2e.sh
+          READY_TIMEOUT=240 test/cluster-e2e/placement-e2e.sh default
+      - name: Placement e2e diagnostics
+        if: failure()
+        run: |
+          kubectl get nodes -L mitos.run/kvm,mitos.run/tenant || true
+          kubectl -n default get sandboxpools -o wide || true
+          kubectl -n default get pods -l mitos.run/husk=true -o wide || true
+          kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
+
   facade-conformance:
     # The agents.x-k8s.io conformance harness (issue #19): apply the UPSTREAM
     # example Sandbox manifest UNCHANGED against our facade and assert
