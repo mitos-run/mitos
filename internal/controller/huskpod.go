@@ -211,6 +211,15 @@ type HuskPodOptions struct {
 	// When empty the pod falls back to the kvm nodeSelector alone (the
 	// build-on-all-kvm-nodes coupling: the snapshot is on every kvm node).
 	SnapshotNodes []string
+
+	// PlacementNodeSelector and PlacementTolerations come from the pool's
+	// spec.placement (dedicatedNodes, issue #172). The selector is MERGED onto the
+	// husk pod's KVM nodeSelector (so the VM runs only on the tenant's dedicated
+	// nodes); the tolerations are appended so the pod schedules onto tainted
+	// dedicated nodes. Both empty/nil leave the pod unconstrained beyond KVM +
+	// snapshot-node affinity.
+	PlacementNodeSelector map[string]string
+	PlacementTolerations  []corev1.Toleration
 }
 
 // hostnameNodeLabel is the well-known node label carrying the node's hostname.
@@ -713,8 +722,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			},
 			// Pin to a KVM node: the dormant VMM needs /dev/kvm AND the pod must
 			// land where the template snapshot hostPath exists. The nodeAffinity
-			// above narrows further to the snapshot-holding nodes when known.
-			NodeSelector: map[string]string{huskKVMNodeLabel: "true"},
+			// above narrows further to the snapshot-holding nodes when known. The
+			// pool's spec.placement nodeSelector (dedicatedNodes, #172) is MERGED in
+			// so the VM runs only on the tenant's dedicated nodes.
+			NodeSelector: mergedHuskNodeSelector(opts),
 			Affinity:     affinity,
 			// Evict a husk pod from a NotReady/unreachable node well before the
 			// Kubernetes default 300s, so node-loss FAILOVER (re-pend of an active
@@ -723,11 +734,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// ridden out: the node returns within the node-monitor grace + this
 			// window, so the pod is not evicted and the readiness reflection
 			// (reflectHuskBackingReadiness) covers the brief unreachable window.
-			Tolerations: []corev1.Toleration{
-				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
-				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
-			},
-			Volumes: volumes,
+			// The pool's spec.placement tolerations (#172) are appended so the pod
+			// schedules onto tainted dedicated nodes.
+			Tolerations: huskTolerations(opts),
+			Volumes:     volumes,
 			Containers: []corev1.Container{
 				{
 					Name:  huskContainerName,
@@ -1062,6 +1072,11 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			DataDir:         r.DataDir,
 			TLSSecretName:   r.HuskTLSSecretName,
 			CASecretName:    r.HuskCASecretName,
+			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
+			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
+			// affinity below.
+			PlacementNodeSelector: huskPlacementNodeSelector(pool),
+			PlacementTolerations:  huskPlacementTolerations(pool),
 			// ExpectedDigest and SnapshotNodes are assigned PER POD below. Each node
 			// builds its template snapshot independently, so the recorded
 			// content-addressed digests differ per node. A husk pod must be pinned to
@@ -1138,6 +1153,44 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 func ptrBool(b bool) *bool { return &b }
 
 func ptrInt64(i int64) *int64 { return &i }
+
+// mergedHuskNodeSelector is the KVM node label plus the pool's spec.placement
+// nodeSelector (dedicatedNodes, #172), so a husk pod (and its VM) runs only on
+// the tenant's dedicated KVM nodes. Placement keys win on a collision.
+func mergedHuskNodeSelector(opts HuskPodOptions) map[string]string {
+	sel := map[string]string{huskKVMNodeLabel: "true"}
+	for k, v := range opts.PlacementNodeSelector {
+		sel[k] = v
+	}
+	return sel
+}
+
+// huskTolerations is the fast node-loss eviction tolerations (#177) plus the
+// pool's spec.placement tolerations (#172) so a husk pod schedules onto tainted
+// dedicated nodes.
+func huskTolerations(opts HuskPodOptions) []corev1.Toleration {
+	tol := []corev1.Toleration{
+		{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
+		{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
+	}
+	return append(tol, opts.PlacementTolerations...)
+}
+
+// huskPlacementNodeSelector / huskPlacementTolerations read the pool's
+// spec.placement (dedicatedNodes, #172), nil-safe.
+func huskPlacementNodeSelector(pool *v1alpha1.SandboxPool) map[string]string {
+	if pool.Spec.Placement == nil {
+		return nil
+	}
+	return pool.Spec.Placement.NodeSelector
+}
+
+func huskPlacementTolerations(pool *v1alpha1.SandboxPool) []corev1.Toleration {
+	if pool.Spec.Placement == nil {
+		return nil
+	}
+	return pool.Spec.Placement.Tolerations
+}
 
 // huskNodeLossTolerationSeconds is how long a husk pod tolerates its node being
 // NotReady/unreachable before Kubernetes evicts it (vs the 300s default). Chosen

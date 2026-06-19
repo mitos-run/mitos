@@ -1090,3 +1090,38 @@ func TestBuildHuskPodFastNodeLossEviction(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHuskPodPlacement asserts a pool's spec.placement (dedicatedNodes #172)
+// is threaded onto the husk pod: the nodeSelector is merged with the KVM label
+// and the tolerations are appended to the node-loss tolerations.
+func TestBuildHuskPodPlacement(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ded-pool", Namespace: "default", UID: "ded-uid"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "ded-tmpl"}, Replicas: 1,
+			Placement: &v1alpha1.PoolPlacement{
+				NodeSelector: map[string]string{"mitos.run/tenant": "acme"},
+				Tolerations:  []corev1.Toleration{{Key: "mitos.run/tenant", Operator: corev1.TolerationOpEqual, Value: "acme", Effect: corev1.TaintEffectNoSchedule}},
+			},
+		},
+	}
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "ded-tmpl", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"}}
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage: "mitos-husk-stub:test", KVMResourceName: "mitos.run/kvm",
+		PlacementNodeSelector: pool.Spec.Placement.NodeSelector,
+		PlacementTolerations:  pool.Spec.Placement.Tolerations,
+	})
+	if pod.Spec.NodeSelector["mitos.run/kvm"] != "true" || pod.Spec.NodeSelector["mitos.run/tenant"] != "acme" {
+		t.Errorf("nodeSelector = %v, want kvm=true + tenant=acme", pod.Spec.NodeSelector)
+	}
+	found := false
+	for _, tol := range pod.Spec.Tolerations {
+		if tol.Key == "mitos.run/tenant" && tol.Value == "acme" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("placement toleration mitos.run/tenant=acme not appended: %v", pod.Spec.Tolerations)
+	}
+}

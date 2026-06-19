@@ -198,6 +198,28 @@ type SandboxPoolSpec struct {
 	// warm-pool sizing (it stays the scale-subresource target for back-compat).
 	// +optional
 	Autoscale *PoolAutoscaleSpec `json:"autoscale,omitempty"`
+
+	// Placement pins this pool's husk pods (and therefore the sandbox VMs they
+	// run) to a dedicated set of nodes, for hard tenant separation (issue #172).
+	// It is a generic nodeSelector + tolerations: an operator labels/taints a node
+	// pool for a tenant and sets the matching Placement here. The selector is
+	// ANDed onto the husk pod's existing KVM nodeSelector and snapshot-node
+	// affinity, so the dedicated nodes MUST be KVM nodes that hold the pool's
+	// template snapshot. Kubernetes provides the scheduling; the operator provides
+	// the physically dedicated nodes (see docs/superpowers/plans/2026-06-18-dedicated-nodes.md).
+	// +optional
+	Placement *PoolPlacement `json:"placement,omitempty"`
+}
+
+// PoolPlacement pins a pool's husk pods to a dedicated node set (issue #172).
+type PoolPlacement struct {
+	// NodeSelector is ANDed onto the husk pod so its sandbox VMs run only on
+	// nodes carrying these labels.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Tolerations let the husk pods schedule onto tainted dedicated nodes.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // PoolAutoscaleSpec configures demand-driven warm-pool autoscaling for a husk
