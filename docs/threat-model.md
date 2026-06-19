@@ -917,12 +917,24 @@ else. Pools, claims, and forks are namespace-scoped objects, but:
 - Snapshots on a node are a flat directory shared by all tenants; no
   per-namespace separation, no enforcement that a claim only forks snapshots
   its namespace published. **open**
-- VMs of different namespaces share nodes, host kernel, and forkd. **open**
-- `dedicatedNodes: true` pool option (hard tenant separation via node
-  pools/taints) is planned, not implemented. **open**
+- VMs of different namespaces share nodes, host kernel, and forkd BY DEFAULT. **open**
+- A pool MAY opt into node separation via `.spec.placement` (`PoolPlacement`: a
+  `nodeSelector` ANDed onto the husk pods plus `tolerations` for tainted dedicated
+  nodes). The controller pins the pool's husk pods to the matching nodes AND
+  constrains the template snapshot build/distribution to that same node set
+  (`placementFilter` / `createSnapshotsOnNodes`,
+  `internal/controller/sandboxpool_controller.go`, issue #172), so a placed pool's
+  VMs and their snapshot never land on a node outside its dedicated set. This is
+  SCHEDULING-enforced separation (Kubernetes `nodeSelector` / taints), NOT a
+  hardware or hypervisor isolation guarantee: it depends on the operator labeling
+  and tainting the dedicated nodes and not co-scheduling other tenants there.
+  Node-side taint enforcement and per-tenant node-pool provisioning remain the
+  operator's responsibility. **partial**
 
-Until the above are closed, treat the whole cluster as one trust domain. This
-posture is recorded as a residual decision in docs/adr/0004-node-flat-snapshot-trust-domain.md.
+Until the above are closed, treat the whole cluster as one trust domain unless an
+operator has provisioned dedicated, tainted node pools and placed each tenant's
+pools onto them. This posture is recorded as a residual decision in
+docs/adr/0004-node-flat-snapshot-trust-domain.md.
 
 ## 8. What we explicitly do NOT claim
 

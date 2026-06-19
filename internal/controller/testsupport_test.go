@@ -244,7 +244,11 @@ func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, po
 // be envtested without driving the full Reconcile (which would race the
 // manager's pool reconciler on the pool status subresource).
 func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) error {
-	return r.ensureTemplateBuilt(ctx, pool, template)
+	nodeFilter, err := r.placementFilter(ctx, pool)
+	if err != nil {
+		return err
+	}
+	return r.ensureTemplateBuilt(ctx, pool, template, nodeFilter)
 }
 
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake

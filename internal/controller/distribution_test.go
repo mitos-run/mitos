@@ -128,7 +128,7 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
 	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 1)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 1, nil)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -166,6 +166,67 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	}
 }
 
+// TestDistributeRespectsPlacementNodeFilter is the dedicatedNodes (#172) build
+// constraint: a placed pool's husk pods are pinned to its placement nodes, so
+// the template snapshot MUST be built only on those nodes. A snapshot on a node
+// outside the placement set can never back a placement-pinned pod, so the build
+// loop must skip non-placement nodes even when they are healthy and would
+// otherwise satisfy the deficit. node-a is OUTSIDE the filter and node-b is
+// INSIDE it; with a deficit of 2 the build must still land only on node-b.
+func TestDistributeRespectsPlacementNodeFilter(t *testing.T) {
+	registry := NewNodeRegistry()
+	r := &SandboxPoolReconciler{NodeRegistry: registry, PeerToken: "peer-secret"}
+
+	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092")
+	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
+
+	// Deficit 2, but only node-b is in the placement set.
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 2, map[string]bool{"node-b": true})
+	if err != nil {
+		t.Fatalf("createSnapshotsOnNodes: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("added = %d, want 1 (only the placement node is eligible)", added)
+	}
+	// node-a is outside the placement set: it must NOT have built T.
+	if got := engineA.GetCapacity().TemplateIDs; len(got) != 0 {
+		t.Fatalf("node-a (outside placement) built %v, want nothing", got)
+	}
+	// node-b is the dedicated node: it must hold T.
+	heldB := false
+	for _, tid := range engineB.GetCapacity().TemplateIDs {
+		if tid == "T" {
+			heldB = true
+		}
+	}
+	if !heldB {
+		t.Fatalf("node-b (placement node) did not build T; templates=%v", engineB.GetCapacity().TemplateIDs)
+	}
+}
+
+// TestReadySnapshotCountOnExcludesNonPlacementNodes proves the readiness count
+// is placement-aware (#172): a snapshot held on a node OUTSIDE the placement set
+// must not count toward a placed pool's ready snapshots, otherwise the
+// readySnapshots>=desired gate would report the deficit met while no dedicated
+// node holds the snapshot, and the placement-pinned husk pods would never get an
+// eligible holder. A nil filter (unplaced pool) counts every healthy holder.
+func TestReadySnapshotCountOnExcludesNonPlacementNodes(t *testing.T) {
+	registry := NewNodeRegistry()
+	r := &SandboxPoolReconciler{NodeRegistry: registry}
+
+	// node-a holds T but is outside the placement set; node-b is inside it but
+	// holds nothing.
+	startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
+	startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
+
+	if got := r.readySnapshotCountOn("T", map[string]bool{"node-b": true}); got != 0 {
+		t.Fatalf("placement-aware count = %d, want 0 (the only holder is outside placement)", got)
+	}
+	if got := r.readySnapshotCountOn("T", nil); got != 1 {
+		t.Fatalf("unfiltered count = %d, want 1", got)
+	}
+}
+
 // TestDistributeNoHolderBuildsThenPulls proves that when NO node holds T, one
 // node builds it (CreateTemplate) and the remaining deficit nodes pull from the
 // freshly built holder in the same pass.
@@ -181,7 +242,7 @@ func TestDistributeNoHolderBuildsThenPulls(t *testing.T) {
 		"node-c": startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091", "10.0.0.3:9092"),
 	}
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 3)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 3, nil)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -229,7 +290,7 @@ func TestDistributeEncryptedBuildsEverywhere(t *testing.T) {
 	engineB := startFakeForkdNodeTLSDist(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092", serverTLS, clientTLS)
 	_ = engineA
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), "local:test", 1)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), "local:test", 1, nil)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
