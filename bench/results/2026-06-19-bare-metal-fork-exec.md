@@ -25,11 +25,24 @@ Component (from the Firecracker logs during the run):
   agent servicing the first exec (the "0.8 ms restore + lazy faults" tail
   documented in BENCHMARKS.md, here measured end to end).
 
+## Contention-free validation (N=50, quiesced node, #16)
+
+To check whether co-location with forkd inflated the number, the run was repeated
+on a QUIESCED node: all pools/forks deleted (only the idle forkd daemon left) and
+the node cordoned, then `cmd/bench -iterations 50 -warmup 5`:
+
+| count | min | p50 | p90 | p99 | max | mean |
+| --- | --- | --- | --- | --- | --- | --- |
+| 50 | 77.91 ms | 104.04 ms | 109.75 ms | 112.12 ms | 112.12 ms | 103.68 ms |
+
+The p50/mean are within noise of the co-located run (103.9/103.65 ms), so the
+co-location caveat is IMMATERIAL: ~104 ms fork-to-first-exec is a robust,
+contention-independent floor on this hardware, not an artifact. (The wider sample
+surfaces a faster 77.9 ms best case.) A dedicated reference node would not move
+the p50; the lazy page-fault tail (#167), not contention, is what dominates.
+
 ## Caveats (honest scope)
 
-- The bench ran CO-LOCATED with the live forkd DaemonSet on the same node, so the
-  numbers carry some contention noise (a dedicated, idle reference node per #16
-  would tighten them). They are a real floor, not a tuned best case.
 - Single template (python:3.12-slim), single node, 2015-era CPU. The
   page-fault-prefetch + hugepage work (#167) targets the lazy-fault tail that
   dominates this ~104 ms (vs the ~16 ms restore).
