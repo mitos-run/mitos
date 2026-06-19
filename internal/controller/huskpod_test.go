@@ -1060,3 +1060,33 @@ func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
 		t.Errorf("fork-child husk pod AutomountServiceAccountToken = %v, want false", child.Spec.AutomountServiceAccountToken)
 	}
 }
+
+// TestBuildHuskPodFastNodeLossEviction asserts husk pods carry a short NoExecute
+// toleration (60s) for not-ready/unreachable instead of the Kubernetes default
+// 300s, so a node loss evicts the pod and fails an active claim over (or refills
+// the warm pool) in ~a minute, not ~5 (#177).
+func TestBuildHuskPodFastNodeLossEviction(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "tol-pool", Namespace: "default", UID: "tol-uid"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "tol-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tol-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{StubImage: "mitos-husk-stub:test", KVMResourceName: "mitos.run/kvm"})
+
+	want := map[string]int64{"node.kubernetes.io/not-ready": 60, "node.kubernetes.io/unreachable": 60}
+	got := map[string]int64{}
+	for _, tol := range pod.Spec.Tolerations {
+		if tol.Effect == corev1.TaintEffectNoExecute && tol.TolerationSeconds != nil {
+			got[tol.Key] = *tol.TolerationSeconds
+		}
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("husk pod NoExecute toleration %s tolerationSeconds = %d, want %d (#177 fast node-loss eviction)", k, got[k], v)
+		}
+	}
+}

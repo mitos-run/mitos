@@ -716,7 +716,18 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// above narrows further to the snapshot-holding nodes when known.
 			NodeSelector: map[string]string{huskKVMNodeLabel: "true"},
 			Affinity:     affinity,
-			Volumes:      volumes,
+			// Evict a husk pod from a NotReady/unreachable node well before the
+			// Kubernetes default 300s, so node-loss FAILOVER (re-pend of an active
+			// claim onto a surviving node via checkHuskPodLost) and warm-pool refill
+			// happen in ~a minute instead of ~5 (#177). A transient reboot is still
+			// ridden out: the node returns within the node-monitor grace + this
+			// window, so the pod is not evicted and the readiness reflection
+			// (reflectHuskBackingReadiness) covers the brief unreachable window.
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
+			},
+			Volumes: volumes,
 			Containers: []corev1.Container{
 				{
 					Name:  huskContainerName,
@@ -1125,6 +1136,15 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+func ptrInt64(i int64) *int64 { return &i }
+
+// huskNodeLossTolerationSeconds is how long a husk pod tolerates its node being
+// NotReady/unreachable before Kubernetes evicts it (vs the 300s default). Chosen
+// longer than a typical node reboot (~40-60s, ridden out without eviction) but
+// far below 5min so a real node loss fails an active claim over and refills the
+// warm pool in ~a minute (#177).
+const huskNodeLossTolerationSeconds int64 = 60
 
 // refillObservedAnnotation marks a husk pod whose create-to-Ready refill latency
 // has already been recorded, so the histogram counts each pod exactly once.
