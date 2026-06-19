@@ -224,14 +224,26 @@ subjects:
     name: mitos-ci-runner
     namespace: mitos-ci
 ---
-# Cluster-scoped READ ONLY: the controller places husk pods on nodes labeled
-# mitos.run/kvm=true and the e2e asserts the node is KVM-capable, so the runner
-# needs to read nodes (get/list). Nodes are cluster-scoped, so this is the one
-# unavoidable ClusterRole; it grants READ on nodes ONLY and binds the same SA.
+# Cluster-scoped node access: READ for the KVM-capability assertions (the
+# controller places husk pods on nodes labeled mitos.run/kvm=true and the e2e
+# asserts the node is KVM-capable), plus CORDON (patch/update) so the chaos suite
+# can exercise CROSS-NODE failover on the multi-node KVM CI cluster: stage 5 of
+# test/cluster-e2e/chaos-e2e.sh cordons a claim's node and asserts the claim
+# recovers on another node (issue #163, gate G2). Nodes are cluster-scoped, so
+# this is the one unavoidable ClusterRole.
+#
+# SECURITY: patch/update on nodes lets this SA cordon any node, a cluster-wide
+# capability. It is contained by the cluster-e2e workflow's trigger gate, which
+# is the ONLY thing that drives this runner: push to main (already-reviewed code),
+# or a labeled SAME-REPO PR behind the `cluster` Environment approval. A fork PR
+# can never reach the runner (see .github/workflows/cluster-e2e.yaml), so no
+# untrusted code ever exercises this grant. The suite uncordons every node it
+# cordons. (Renamed from mitos-ci-runner-nodes-read; delete that stale ClusterRole
+# and its binding after applying.)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: mitos-ci-runner-nodes-read
+  name: mitos-ci-runner-nodes
   labels:
     app.kubernetes.io/name: mitos
     app.kubernetes.io/component: ci-runner
@@ -243,18 +255,23 @@ rules:
     verbs:
       - get
       - list
+      # cordon/uncordon for the cross-node chaos stage (#163). kubectl cordon
+      # patches node.spec.unschedulable; update is included so `kubectl auth
+      # can-i update nodes` (the stage's capability probe) reports true.
+      - patch
+      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: mitos-ci-runner-nodes-read
+  name: mitos-ci-runner-nodes
   labels:
     app.kubernetes.io/name: mitos
     app.kubernetes.io/component: ci-runner
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: mitos-ci-runner-nodes-read
+  name: mitos-ci-runner-nodes
 subjects:
   - kind: ServiceAccount
     name: mitos-ci-runner

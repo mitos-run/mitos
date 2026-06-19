@@ -103,10 +103,19 @@ TRUSTED triggers ONLY. There are three independent layers:
      ReplicaSets/Pods/Pod logs (rollout + diagnostics), read Secrets presence.
      It CANNOT create or delete Deployments, write Secrets, or touch the
      controller's own RBAC.
-   - cluster-scoped: `get/list nodes` ONLY (nodes are cluster-scoped and the
-     e2e checks for a KVM-capable node).
+   - cluster-scoped: `get/list nodes` (the e2e checks for a KVM-capable node)
+     plus `patch/update nodes` for CORDON, so the chaos suite can exercise
+     cross-node failover on the multi-node KVM cluster (issue #163: cordon a
+     node, assert the claim recovers elsewhere, uncordon). This is the
+     `mitos-ci-runner-nodes` ClusterRole (renamed from `mitos-ci-runner-nodes-read`).
 
-   There is deliberately NO `ClusterRole` granting writes and NO `cluster-admin`.
+   `patch/update nodes` is a cluster-wide capability (the SA can cordon any
+   node), so it is justified ONLY by the workflow's trigger gate: this runner is
+   driven exclusively by push-to-main (reviewed code) or a labeled same-repo PR
+   behind the `cluster` Environment approval, never by fork code. Apart from node
+   cordon there is NO `ClusterRole` granting writes and NO `cluster-admin`. When
+   upgrading an existing deployment, delete the old `mitos-ci-runner-nodes-read`
+   ClusterRole and ClusterRoleBinding after applying.
 
 4. **Ephemeral runner.** The runner is registered with `--ephemeral`: it runs
    one job, exits, and the Deployment restarts it, re-registering a fresh
