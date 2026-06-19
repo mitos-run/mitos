@@ -1,0 +1,58 @@
+# Formal fork-to-first-exec benchmark Job (#15). Runs cmd/bench against a built
+# template on a real KVM node and prints the fork_to_first_exec percentile table
+# to the pod log.
+#
+# Build the image (cmd/bench on top of the forkd image, which carries Firecracker
+# + ip/nft):
+#   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bench ./cmd/bench/
+#   cat > Dockerfile <<EOF
+#   FROM ghcr.io/paperclipinc/mitos-forkd:<tag>
+#   COPY bench /usr/local/bin/bench
+#   ENTRYPOINT ["/usr/local/bin/bench"]
+#   EOF
+#   docker buildx build --platform linux/amd64 -t <registry>/mitos-bench:<tag> --push .
+#
+# Then set BENCH_IMAGE, TEMPLATE, and (optionally) a node, and apply into a
+# privileged namespace on a cluster where forkd has already built the template.
+# Read the result: kubectl logs -n <ns> job/mitos-bench
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mitos-bench
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      # Pin to a KVM node that holds the template snapshot. For a clean number use
+      # a dedicated/idle reference node (issue #16); co-locating with a busy forkd
+      # adds contention noise.
+      nodeSelector:
+        mitos.run/kvm: "true"
+      containers:
+        - name: bench
+          image: REPLACE_WITH_BENCH_IMAGE
+          args:
+            - "-mode"
+            - "fork-exec"
+            - "-template"
+            - "REPLACE_WITH_TEMPLATE_ID"
+            - "-data-dir"
+            - "/var/lib/mitos"
+            - "-kernel"
+            - "/var/lib/mitos/vmlinux"
+            - "-iterations"
+            - "20"
+            - "-warmup"
+            - "3"
+            - "-summary"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mitos }
+            - { name: kvm, mountPath: /dev/kvm }
+      volumes:
+        - name: data
+          hostPath: { path: /var/lib/mitos }
+        - name: kvm
+          hostPath: { path: /dev/kvm, type: CharDevice }
