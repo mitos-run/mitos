@@ -192,8 +192,14 @@ The following remain OPEN and are tracked in epic #12:
   pool self-heals a lost node's dormant slots, but a raw-forkd claim on a dead
   node fails (NodeLost) with no automatic replacement (acceptable for ephemeral
   sandboxes; the caller re-claims).
-- status-update rate-limiting and batching: status writes are not yet
-  rate-limited or batched.
+- status-update rate-limiting and batching: PARTIAL. The SandboxPool reconcile
+  now elides a no-op status write: it writes (and stamps LastSnapshotTime) only
+  when a field an operator or the autoscaler reads actually changed
+  (`writePoolStatusIfChanged` / `poolStatusUnchanged`,
+  `internal/controller/sandboxpool_controller.go`), so the steady-state 30s
+  requeue no longer churns etcd or re-triggers the pool's own watch. The
+  SandboxClaim and SandboxFork reconcilers, and true rate-limiting/batching of
+  genuine transitions, are not yet done.
 - chaos CI suite: kill -9 of components under load is not yet exercised in CI;
   the in-cluster self-hosted runner (issue #16) plus the cluster-e2e workflow are
   the substrate a chaos suite would build on.
