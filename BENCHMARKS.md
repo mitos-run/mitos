@@ -165,6 +165,7 @@ reproducible source in `bench/`.
 | --- | --- | --- | --- |
 | warm-claim activate latency | P50 ~27 ms (N=11: min 21.45, P50 26.53, P95 46.66, max 46.66 ms) | husk-stub-reported snapshot load + fork-correctness handshake + guest-ready, parsed from the claim's Ready condition message ("activated ... in X ms") | `bench/husk-activate-latency.sh`, results in `bench/results/2026-06-13-bare-metal-husk.md` |
 | snapshot restore (`/snapshot/load`) | ~6-16 ms | the Firecracker engine restore step alone | `bench/results/2026-06-13-bare-metal-husk.md` (forkd / husk-stub logs) |
+| fork-to-first-exec | P50 ~104 ms (N=20: min 97.5, P50 103.9, P90 107.3, P99 109.4 ms) | `cmd/bench` fork-exec: fork from snapshot, restore, first exec result; ~16 ms is `/snapshot/load`, the rest is lazy page-fault-in + guest agent (the tail #167 targets). Co-located with a busy forkd (a dedicated idle node per #16 would tighten it). | `bench/fork-exec-job.yaml`, results in `bench/results/2026-06-19-bare-metal-fork-exec.md` |
 | marginal memory per forked sandbox | ~3 MiB | per-VM unique (private-dirty) cost via CoW page sharing; the shared snapshot page set is counted once across cgroup v2 memcgs (per-VM dirty ~5 MiB, not overstated) | husk-probe CI proof; `docs/metering.md` for the accounting rules |
 
 ### Honest scope of the activate number
