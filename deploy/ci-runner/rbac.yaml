@@ -191,6 +191,13 @@ rules:
       - get
       - list
       - watch
+      # delete for the chaos kill -9 stage (#163): force-delete the controller
+      # and a forkd pod (--grace-period=0 --force = immediate SIGKILL, an
+      # ungraceful process crash) under a claim storm, and assert the claims
+      # still converge and the components recover. Contained by the cluster-e2e
+      # trigger gate (reviewed code / approved same-repo PR only); the Deployment
+      # and DaemonSet recreate the killed pods.
+      - delete
   - apiGroups:
       - ""
     resources:

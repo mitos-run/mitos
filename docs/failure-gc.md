@@ -202,8 +202,10 @@ The following remain OPEN and are tracked in epic #12:
   genuine transitions, are not yet done.
 - chaos CI suite: PARTIAL. test/cluster-e2e/chaos-e2e.sh runs on the multi-node
   self-hosted KVM cluster via the cluster-e2e workflow and exercises pod-loss
-  recovery, warm-pool self-heal, AND cross-node failover (stage 5: cordon a
-  claim's node, assert the claim recovers on another node, uncordon) now that the
-  runner holds node cordon (mitos-ci-runner-nodes). Still open: kill -9 of the
-  controller/forkd/guest processes under a claim storm (process-crash injection,
-  distinct from pod deletion and node cordon).
+  recovery, warm-pool self-heal, cross-node failover (stage 5: cordon a claim's
+  node, assert the claim recovers on another node, uncordon), AND component
+  kill -9 under load (stage 6: SIGKILL the controller + forkd with
+  --grace-period=0 --force while a 3-claim storm activates, assert every claim
+  still converges, the pre-existing claim is undisturbed, and the components
+  recover). Still open: kill -9 of the GUEST agent process inside the VM (harder
+  to reach from the runner), and process-crash variants beyond SIGKILL.
