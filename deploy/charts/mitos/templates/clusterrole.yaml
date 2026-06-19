@@ -88,6 +88,17 @@ rules:
       - patch
       - update
       - watch
+  # Nodes: get/list/watch to resolve which nodes a pool's placement nodeSelector
+  # matches, so husk pods are pinned only to the tenant's dedicated nodes
+  # (dedicatedNodes, #172). list/watch are load-bearing for the cached informer.
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
   # Secrets: get/list/watch to read sandbox-referenced mounted Secrets and to
   # reconcile the per-sandbox token Secret; create/update to mint and heal that
   # token Secret and the control plane PKI Secrets (EnsurePKI: mitos-ca,

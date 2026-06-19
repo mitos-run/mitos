@@ -1091,6 +1091,26 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		if r.NodeRegistry != nil {
 			holders = r.NodeRegistry.SnapshotHolders(pool.Spec.TemplateRef.Name)
 		}
+		// dedicatedNodes (#172): a placed pool may only run on its dedicated nodes,
+		// so restrict the snapshot-holders we pin pods to (the #175 per-node-digest
+		// assignment) to holders that ALSO match the placement nodeSelector.
+		// Otherwise a pod assigned to a holder outside the placement set gets a
+		// node affinity that conflicts with the placement nodeSelector and stays
+		// Pending forever.
+		if sel := huskPlacementNodeSelector(pool); len(sel) > 0 && len(holders) > 0 {
+			matching, err := r.nodesMatchingSelector(ctx, sel)
+			if err != nil {
+				result.dormant = existing
+				return result, fmt.Errorf("list placement nodes for pool %s: %w", pool.Name, err)
+			}
+			filtered := holders[:0:0]
+			for _, h := range holders {
+				if matching[h.Name] {
+					filtered = append(filtered, h)
+				}
+			}
+			holders = filtered
+		}
 		assigned := map[string]int{}
 		for i := range owned {
 			if n := owned[i].Spec.NodeName; n != "" {
@@ -1190,6 +1210,22 @@ func huskPlacementTolerations(pool *v1alpha1.SandboxPool) []corev1.Toleration {
 		return nil
 	}
 	return pool.Spec.Placement.Tolerations
+}
+
+// nodesMatchingSelector returns the set of node names whose labels match sel
+// (a pool's placement nodeSelector), so husk-pod placement can be restricted to a
+// tenant's dedicated nodes (#172). The cached client lazily starts a Node
+// informer (cluster-wide get;list;watch RBAC, granted in the controller role).
+func (r *SandboxPoolReconciler) nodesMatchingSelector(ctx context.Context, sel map[string]string) (map[string]bool, error) {
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes, client.MatchingLabels(sel)); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(nodes.Items))
+	for i := range nodes.Items {
+		out[nodes.Items[i].Name] = true
+	}
+	return out, nil
 }
 
 // huskNodeLossTolerationSeconds is how long a husk pod tolerates its node being

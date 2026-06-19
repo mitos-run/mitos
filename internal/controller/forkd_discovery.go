@@ -38,6 +38,7 @@ type ForkdDiscovery struct {
 // ForkdDiscovery lists the labeled forkd Pods in the control plane namespace to
 // learn each node's pod IP and feed the NodeRegistry. Read-only.
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 func (d *ForkdDiscovery) Start(ctx context.Context) error {
 	if d.Interval == 0 {
 		d.Interval = 15 * time.Second
