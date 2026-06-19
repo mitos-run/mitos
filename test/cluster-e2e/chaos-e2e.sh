@@ -8,14 +8,21 @@
 #                        re-pends and recovers to Ready (rependOnHuskPodLost +
 #                        re-activate on a dormant slot), verified by an exec
 #   4. warm-pool heal    DELETE a dormant pod -> the pool refills to replicas
-#   5. cross-node (best effort) cordon the claim's node + delete its husk pods
-#                        -> the claim recovers on ANOTHER node. SKIPPED when the
-#                        runner cannot cordon nodes (the least-privilege in-cluster
-#                        runner has read-only nodes) or the cluster has one node.
+#   5. cross-node       cordon the claim's node + delete its husk pods -> the
+#                        claim recovers on ANOTHER node. Self-skips on a one-node
+#                        cluster or without node cordon permission.
+#   6. kill -9 storm    SIGKILL the controller + forkd (--grace-period=0 --force,
+#                        no graceful shutdown) WHILE a 3-claim burst activates ->
+#                        every claim still converges, the pre-existing claim is
+#                        undisturbed, and the components recover. The headline G2
+#                        crash-injection proof, distinct from the graceful
+#                        pod-loss of stage 3. Self-skips without delete on mitos
+#                        pods.
 #
-# Runner-compatible: stages 1-4 use only pod ops in the e2e namespace. Stage 5
-# needs node-write, so it self-skips under the least-privilege runner and runs
-# only for a maintainer/admin context.
+# Runner permissions: stages 1-4 use only pod ops in the e2e namespace; stage 5
+# needs node cordon; stage 6 needs delete on mitos pods. The CI runner is granted
+# both (deploy/ci-runner/rbac.yaml); each stage self-skips otherwise, so an
+# unprivileged manual run still exercises 1-4.
 set -u
 
 NAMESPACE="${1:-mitos-e2e}"
@@ -43,6 +50,8 @@ diagnostics() {
 }
 cleanup() {
   k delete sandboxclaim "${CLAIM}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Sweep any storm claims the kill -9 stage created (by run label).
+  k delete sandboxclaims -l "mitos.run/chaos-storm=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "${POOL}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxtemplate "${TEMPLATE}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
@@ -91,7 +100,7 @@ else
 fi
 
 # Stage 3: pod-loss recovery. Delete the claim's backing pod; it must recover.
-victim="$(claim_pod)"; victim_node="$(claim_node)"
+victim="$(claim_pod)"
 info "deleting active backing pod ${victim} (pod-loss)"
 k delete pod "${victim}" --wait=false >/dev/null 2>&1 || true
 # It recovers when Ready again on a DIFFERENT pod than the deleted one.
@@ -134,6 +143,64 @@ else
     fail "claim did not fail over off the cordoned node within ${READY_TIMEOUT}s"; diagnostics
   fi
   kubectl uncordon "${cn}" >/dev/null 2>&1 || true
+fi
+
+# Stage 6: kill -9 of components under a claim storm. The headline G2 proof
+# (#163): force-delete (--grace-period=0 --force = immediate SIGKILL, no graceful
+# shutdown) the controller AND the forkd builder WHILE a burst of claims is
+# activating, then assert every claim still converges to Ready (no stuck claims),
+# the pre-existing Ready claim is undisturbed, and the killed components recover.
+# This exercises controller-restart reconciliation (desired state rebuilt from
+# CRDs) and forkd self-recovery under load, distinct from the GRACEFUL pod-loss
+# of stage 3. Needs delete on mitos pods (granted to the CI runner via the
+# mitos-ci-runner-deploy Role); self-skips for an unprivileged manual run.
+if ! kubectl -n mitos auth can-i delete pods >/dev/null 2>&1; then
+  info "no delete on mitos pods; skipping kill -9 component-crash stage (the CI runner has it)"
+else
+  storm="chaos-storm-${RUN_ID}"
+  info "launching a 3-claim storm, then SIGKILLing the controller + forkd mid-activation"
+  for i in 1 2 3; do
+    k apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: mitos.run/v1alpha1
+kind: SandboxClaim
+metadata: {name: ${storm}-${i}, labels: {mitos.run/e2e-run: "${RUN_ID}", mitos.run/chaos-storm: "${RUN_ID}"}}
+spec: {poolRef: {name: ${POOL}}}
+EOF
+  done
+  # Immediate SIGKILL (no SIGTERM grace) of the controller (Deployment recreates)
+  # and forkd (DaemonSet recreates). Husk pods hold their own VMs, so a forkd
+  # death does not kill running sandboxes; this proves it does not wedge them.
+  kubectl -n mitos delete pod -l app.kubernetes.io/component=controller --grace-period=0 --force >/dev/null 2>&1 || true
+  kubectl -n mitos delete pod -l app.kubernetes.io/component=forkd --grace-period=0 --force >/dev/null 2>&1 || true
+
+  storm_ok=yes
+  for i in 1 2 3; do
+    if ! wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${storm}-${i} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null)\" = True ]"; then
+      storm_ok=""; info "storm claim ${storm}-${i} did not reach Ready"
+    fi
+  done
+  if [ -n "$storm_ok" ]; then
+    pass "all 3 storm claims reached Ready despite controller+forkd SIGKILL (no stuck claims)"
+  else
+    fail "a storm claim did not converge after the component kill -9 within ${READY_TIMEOUT}s"; diagnostics
+  fi
+
+  # The pre-existing Ready claim must be UNDISTURBED by the controller crash: its
+  # VM lives in its husk pod, independent of the controller process.
+  if claim_ready; then
+    pass "pre-existing claim stayed Ready across the controller+forkd SIGKILL"
+  else
+    fail "pre-existing claim lost Ready after the component kill -9"; diagnostics
+  fi
+
+  # The killed components recover.
+  if wait_until "$READY_TIMEOUT" sh -c "kubectl -n mitos rollout status deployment/mitos-controller --timeout=10s >/dev/null 2>&1"; then
+    pass "controller recovered (rollout Ready) after SIGKILL"
+  else
+    fail "controller did not recover after SIGKILL within ${READY_TIMEOUT}s"; diagnostics
+  fi
+
+  for i in 1 2 3; do k delete sandboxclaim "${storm}-${i}" --ignore-not-found --wait=false >/dev/null 2>&1 || true; done
 fi
 
 echo "=== chaos summary: ${PASS_COUNT} passed, ${FAIL_COUNT} failed ==="
