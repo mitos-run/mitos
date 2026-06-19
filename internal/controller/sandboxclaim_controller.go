@@ -50,6 +50,12 @@ const pendingSinceAnnotation = "mitos.run/capacity-pending-since"
 // once a node frees up or a new node joins.
 const capacityPendingRequeue = 5 * time.Second
 
+// huskHealthRequeue is how often a Ready husk claim re-checks its backing pod's
+// readiness so its Ready condition reflects a node/pod outage (the endpoint is
+// unreachable) instead of falsely staying Ready (#177). A pod watch would detect
+// it sooner; this bounded poll is the contained fix.
+const huskHealthRequeue = 15 * time.Second
+
 // huskActivator is the seam the claim reconciler dials a husk stub through. The
 // production value is ActivateHuskPod (huskclient.go); tests inject a fake to
 // record requests without a real mTLS server.
@@ -345,6 +351,16 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				}
 				return r.rependOnHuskPodLost(ctx, &claim, &pool, lostPod)
 			}
+			// The pod is not lost, but it may be NotReady (its node is rebooting or
+			// unreachable): the sandbox endpoint is then unreachable, so the claim
+			// must not keep reporting Ready. Reflect the backing pod's readiness in
+			// the Ready condition (flips back to True when the pod recovers). Actual
+			// loss/eviction is still handled by checkHuskPodLost above (#177).
+			if reflectHuskBackingReadiness(&claim, lostPod, r.now()) {
+				if err := r.Status().Update(ctx, &claim); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 		}
 		// A Ready claim bound to a workspace hydrates its head into the sandbox
 		// exactly once (idempotent via the hydrated annotation). A transient
@@ -354,7 +370,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			logger.Error(err, "hydrate workspace into sandbox; will retry", "claim", claim.Name)
 			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
-		return r.reconcileLifetime(ctx, &claim)
+		res, err := r.reconcileLifetime(ctx, &claim)
+		// Re-check backing-pod health periodically even when the claim has no
+		// lifetime/idle timeout (reconcileLifetime returns no requeue then), so a
+		// node/pod outage is reflected within huskHealthRequeue (#177).
+		if r.EnableHuskPods && err == nil && res.RequeueAfter == 0 {
+			res.RequeueAfter = huskHealthRequeue
+		}
+		return res, err
 	}
 
 	// Terminal phases: don't retry.
