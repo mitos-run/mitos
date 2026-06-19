@@ -340,6 +340,15 @@ func main() {
 	// scheme stays unchanged so SDK clients are unaffected.
 	go daemon.ServeHTTP(httpAddr, engine, sandboxAPI, casServing)
 
+	// Periodically refresh the metering gauges /metrics serves so they report
+	// LIFETIME memory, not the fork-time footprint (fork-correctness Row 5, issue
+	// #3). Without this the mitos_memory_unique_bytes gauge is never populated.
+	// Bound to a cancelable context cancelled on shutdown below. interval 0 uses
+	// the daemon default.
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	defer metricsCancel()
+	go server.SampleMetrics(metricsCtx, 0)
+
 	// Start the controlled DNS resolver (node-level Runnable) when enabled. It
 	// binds the resolver IP on port 53 (udp + tcp); a listen failure is fatal
 	// because name-based egress would silently not work otherwise.

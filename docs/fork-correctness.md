@@ -15,7 +15,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 | 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial; CLOCK_MONOTONIC residual documented (no step possible)** (guest wall-clock step done, 500ms tolerance; KVM proof is guest-only. The review finding on CLOCK_MONOTONIC is assessed and DOCUMENTED rather than "fixed": Linux rejects `clock_settime(CLOCK_MONOTONIC)` with EINVAL so a literal step is impossible, and a PAUSED-across-restore VM resumes the monotonic clock continuously so clean-restore monotonic timers do not mis-fire. The narrow residual is mixed wall/monotonic-derived deadlines, handled by the existing SIGUSR2 userspace reset signal. See section 2 for the full assessment; `guest/agent/notifyforked.go` `stepClock` carries the rationale inline.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
-| 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
+| 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestUpdateMetricsPopulatesMemoryGauge`, `TestSampleMetricsTicksAndStopsOnContextCancel`; KVM growth assertion pending | **partial** (lifetime re-sampling wired: `Engine.Metering` re-stats `smaps_rollup` each pass and `Server.SampleMetrics` refreshes the gauge periodically; per-sandbox labels + KVM growth assertion open) |
 | 6 | Incompatible snapshot restored (crash/corruption) | Refuse on load: the manifest records the producing environment (format version, Firecracker version, CPU model, kernel, config hash); require exact VMM match, exact CPU-model match, format version in the supported set (kernel informational); `--allow-incompatible-snapshots` dev escape hatch | go: `internal/snapcompat` `TestCheck*`, `internal/fork/compat_test.go`; KVM: record a real manifest, assert compatible passes and a VMM / format-version mismatch is refused | **done** (load-gate enforcement after the digest verify, before any Firecracker launch; CPU templates + live cross-version restore open) |
 | 7 | forkd crash orphans its own VMs (in-memory map lost on restart) | Persist a per-VM journal (`<dataDir>/sandboxes/<id>.json`, atomic write) on create, remove on clean terminate; `NewEngine` reconciles it before serving: re-adopt a still-running pre-crash VM into the live map (PID-recycle-guarded: `/proc/<pid>/exe` must resolve to the recorded firecracker binary, else comm is `firecracker`) so the GC can reconcile it, or reap a dead/recycled VM's leaked artifacts (jailer chroot, rootfs CoW clone, fork network, jailer uid, volume backings) and drop the record. The adopted VM's exact /30 network block is pinned from its recorded guest IP (`netconf.Allocator.MarkInUse`), not re-Acquired, so a later fresh fork cannot be handed the same /30 and Release frees the right block. Fail-open; the startup reap never kills (only adoption enables a later GC-driven kill). That GC-driven kill (`reapAdopted`) RE-RUNS the same PID-recycle guard against the recorded firecracker binary immediately before signalling, so a pid recycled to an unrelated process between adoption and Terminate is never SIGKILLed (its artifacts are still reaped). Journal holds ids/pids/paths/uids/IPs only, never secrets | go: `internal/fork/journal_test.go`, `internal/fork/reconcile_engine_test.go` (live-pid adopt, dead-pid reap, recycled-pid reject, fail-open, adopted-terminate reap, reap-adopted skips kill on recycled pid + kills when still ours, adopted network block pinned) and `internal/netconf/identity_test.go` (`TestMarkInUse*`) with injected pid/verifier seams; `internal/firecracker` `TestJailerState`, `TestUIDAllocatorMarkInUse` | **partial** (journal + reconcile + reap + TOCTOU re-verification + block pinning done and unit-verified on darwin; real-VM reap on KVM, start a sandbox, kill -9 forkd, restart forkd, assert the orphan FC is reaped (dead) or re-adopted + GC-terminated with no leaked process/chroot/uid, is a TARGET pending a kvm-test.yaml crash-reap phase (issue #12); typed claim condition for a GC'd re-adopted orphan open) |
 
@@ -310,15 +310,22 @@ makes pages unique.
 
 Required implementation:
 
-- `mitos_memory_unique_bytes` (per-sandbox label) sampled periodically over
-  the sandbox lifetime, not only at fork time. The current implementation
-  samples `/proc/<pid>/smaps_rollup` once, at fork (`readMemoryStats`).
+- `mitos_memory_unique_bytes` sampled periodically over the sandbox lifetime,
+  not only at fork time. DONE for the aggregate gauge: `Engine.Metering`
+  re-samples each live sandbox's `/proc/<pid>/smaps_rollup` on every pass, and
+  `Server.SampleMetrics` (started by `cmd/forkd`) refreshes the gauge on an
+  interval, so `/metrics` reports lifetime unique bytes rather than the T=0
+  footprint recorded by `readMemoryStats` at fork. Per-sandbox-labeled series
+  remain a follow-up (the gauge is the node aggregate today).
 - Published density numbers must include unique-memory-after-representative-
   workload (e.g., after `pip install numpy && python -c "import numpy"`)
   alongside the T=0 number, produced by `bench/`.
 
-Test: fork, record T=0 unique bytes; run a write-heavy workload; assert the
-exported metric grows accordingly and that `GetCapacity` reflects it.
+Test: `TestUpdateMetricsPopulatesMemoryGauge` and
+`TestSampleMetricsTicksAndStopsOnContextCancel` cover the periodic wiring
+locally. The KVM variant (fork, record T=0 unique bytes, run a write-heavy
+workload, assert the exported metric grows and `GetCapacity` reflects it)
+remains for the fork-correctness KVM phase.
 
 ## 6. Snapshot compatibility on restore
 

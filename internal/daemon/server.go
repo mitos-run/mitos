@@ -470,6 +470,36 @@ func volumeSpecs(mounts []*forkdpb.VolumeMount) ([]volume.Spec, error) {
 	return specs, nil
 }
 
+// defaultMetricsSampleInterval bounds how often SampleMetrics refreshes the
+// metering gauges. The metering report stats each live sandbox's
+// /proc/<pid>/smaps_rollup and backing files, so it is sampled on an interval
+// rather than on every Prometheus scrape.
+const defaultMetricsSampleInterval = 15 * time.Second
+
+// SampleMetrics periodically refreshes the metering gauges (UpdateMetrics) until
+// ctx is cancelled. The engine re-samples each live sandbox's memory on every
+// metering pass, so the gauges report LIFETIME unique memory, not the T=0
+// fork-time footprint (fork-correctness Row 5, issue #3). Without this loop the
+// gauges UpdateMetrics sets are never populated and /metrics serves a stale zero.
+// It samples once immediately so the first scrape after startup is already
+// populated; interval <= 0 selects defaultMetricsSampleInterval.
+func (s *Server) SampleMetrics(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultMetricsSampleInterval
+	}
+	s.UpdateMetrics()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.UpdateMetrics()
+		}
+	}
+}
+
 // UpdateMetrics refreshes capacity and metering gauges. Memory gauges are
 // CoW-aware: shared is each template's shared set counted once, unique is the
 // per-fork dirty total. The disk gauge reflects CoW-aware metered backing
