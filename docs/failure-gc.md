@@ -200,6 +200,10 @@ The following remain OPEN and are tracked in epic #12:
   requeue no longer churns etcd or re-triggers the pool's own watch. The
   SandboxClaim and SandboxFork reconcilers, and true rate-limiting/batching of
   genuine transitions, are not yet done.
-- chaos CI suite: kill -9 of components under load is not yet exercised in CI;
-  the in-cluster self-hosted runner (issue #16) plus the cluster-e2e workflow are
-  the substrate a chaos suite would build on.
+- chaos CI suite: PARTIAL. test/cluster-e2e/chaos-e2e.sh runs on the multi-node
+  self-hosted KVM cluster via the cluster-e2e workflow and exercises pod-loss
+  recovery, warm-pool self-heal, AND cross-node failover (stage 5: cordon a
+  claim's node, assert the claim recovers on another node, uncordon) now that the
+  runner holds node cordon (mitos-ci-runner-nodes). Still open: kill -9 of the
+  controller/forkd/guest processes under a claim storm (process-crash injection,
+  distinct from pod deletion and node cordon).

@@ -120,7 +120,7 @@ kvm_nodes=$(kubectl get nodes -l 'mitos.run/kvm=true' --no-headers 2>/dev/null |
 if [ "${kvm_nodes:-0}" -lt 2 ]; then
   info "only ${kvm_nodes} KVM node(s); skipping cross-node failover stage"
 elif ! kubectl auth can-i update nodes >/dev/null 2>&1; then
-  info "no node-write permission (least-privilege runner); skipping cross-node failover stage (run as admin to exercise it)"
+  info "no node cordon permission; skipping cross-node failover (the CI runner has it via the mitos-ci-runner-nodes ClusterRole; this branch is for an unprivileged manual run)"
 else
   cn="$(claim_node)"
   info "cordoning ${cn} + deleting its husk pods to force cross-node failover"
