@@ -10,6 +10,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/kms"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -288,6 +289,10 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 		setPoolReadySnapshots(pool.Name, readySnapshots)
+		// Snapshot the stored status before mutating so a no-op reconcile can skip
+		// the status write (issue #163). Captured AFTER the metric setter (which
+		// does not touch status) and BEFORE any pool.Status mutation.
+		before := pool.Status.DeepCopy()
 		pool.Status.ReadySnapshots = readySnapshots
 		pool.Status.TotalSnapshots = readySnapshots
 		pool.Status.NodeDistribution = r.nodeDistribution(templateID)
@@ -298,7 +303,6 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 		now := metav1.Now()
-		pool.Status.LastSnapshotTime = &now
 		if res.scaledDn {
 			pool.Status.LastScaleDownTime = &now
 		}
@@ -309,7 +313,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Reason:             "HuskPodsReady",
 			Message:            fmt.Sprintf("%d/%d warm husk pods (%d in use), %d snapshot node(s)", warm, desiredWarm, res.inUse, readySnapshots),
 		})
-		if err := r.Status().Update(ctx, &pool); err != nil {
+		if err := r.writePoolStatusIfChanged(ctx, &pool, before, now); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Bounded periodic requeue so the warm pool re-converges to Replicas even
@@ -338,6 +342,8 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Update status
 	setPoolReadySnapshots(pool.Name, readySnapshots)
+	// Snapshot before mutating so a no-op reconcile skips the status write (#163).
+	before := pool.Status.DeepCopy()
 	pool.Status.ReadySnapshots = readySnapshots
 	pool.Status.TotalSnapshots = readySnapshots
 	pool.Status.NodeDistribution = r.nodeDistribution(templateID)
@@ -346,7 +352,6 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	now := metav1.Now()
-	pool.Status.LastSnapshotTime = &now
 	setCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus(readySnapshots >= desired),
@@ -355,7 +360,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Message:            fmt.Sprintf("%d/%d snapshots ready", readySnapshots, desired),
 	})
 
-	if err := r.Status().Update(ctx, &pool); err != nil {
+	if err := r.writePoolStatusIfChanged(ctx, &pool, before, now); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -402,6 +407,39 @@ func (r *SandboxPoolReconciler) placementFilter(ctx context.Context, pool *v1alp
 		return nil, fmt.Errorf("list placement nodes for pool %s: %w", pool.Name, err)
 	}
 	return matching, nil
+}
+
+// poolStatusUnchanged reports whether two pool statuses are equal for the purpose
+// of skipping a redundant status write. LastSnapshotTime is excluded: it is a
+// reconcile heartbeat that would otherwise change every pass and defeat the
+// comparison. Every field an operator or the autoscaler reads (counts, digest,
+// node distribution, desiredWarm, conditions, scale-down time) IS compared, and
+// setCondition carries an unchanged condition's LastTransitionTime forward, so a
+// steady-state reconcile compares equal. apiequality.Semantic compares metav1.Time
+// by value (handling the monotonic-clock and location pitfalls of DeepEqual).
+func poolStatusUnchanged(a, b *v1alpha1.SandboxPoolStatus) bool {
+	x, y := a.DeepCopy(), b.DeepCopy()
+	x.LastSnapshotTime, y.LastSnapshotTime = nil, nil
+	return apiequality.Semantic.DeepEqual(x, y)
+}
+
+// writePoolStatusIfChanged writes the pool status only when it differs from the
+// before snapshot (ignoring the LastSnapshotTime heartbeat), stamping
+// LastSnapshotTime to now on a real change. This elides the redundant status
+// write the periodic 30s requeue would otherwise issue every pass even when
+// nothing changed: the dominant source of pool status-write churn against etcd
+// (issue #163, failure/GC status-update rate-limiting). On a no-op it leaves the
+// stored object untouched (no write, no heartbeat bump), so the object's own
+// watch is not re-triggered.
+func (r *SandboxPoolReconciler) writePoolStatusIfChanged(ctx context.Context, pool *v1alpha1.SandboxPool, before *v1alpha1.SandboxPoolStatus, now metav1.Time) error {
+	if poolStatusUnchanged(before, &pool.Status) {
+		// Keep the in-memory heartbeat consistent with what is stored (we did not
+		// write), then skip the API call.
+		pool.Status.LastSnapshotTime = before.LastSnapshotTime
+		return nil
+	}
+	pool.Status.LastSnapshotTime = &now
+	return r.Status().Update(ctx, pool)
 }
 
 // snapshotNodeNames returns the hostnames of the healthy nodes that hold the
