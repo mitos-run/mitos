@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.1](https://github.com/paperclipinc/mitos/compare/v0.8.0...v0.8.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **controller:** adopt an already-active fork child instead of looping forever ([#183](https://github.com/paperclipinc/mitos/issues/183)) ([4b5ef38](https://github.com/paperclipinc/mitos/commit/4b5ef384f230721172c1d79c32bf726167d2404f))
+* **controller:** adopt an already-active fork child instead of looping forever ([#183](https://github.com/paperclipinc/mitos/issues/183)) ([d11812e](https://github.com/paperclipinc/mitos/commit/d11812ea03fb68022d3493dea8402a4eb3212fb3))
+* **controller:** constrain template snapshot build to a pool's placement nodes ([#172](https://github.com/paperclipinc/mitos/issues/172)) ([3fc1652](https://github.com/paperclipinc/mitos/commit/3fc1652e0190ea29754bc7b65803f5a537624774))
+* **controller:** constrain template snapshot build to a pool's placement nodes ([#172](https://github.com/paperclipinc/mitos/issues/172)) ([c78ba53](https://github.com/paperclipinc/mitos/commit/c78ba53e817a1540e3fa894ea8e7ad0d2766059e))
+* **controller:** elide no-op SandboxPool status writes ([#163](https://github.com/paperclipinc/mitos/issues/163)) ([3de2122](https://github.com/paperclipinc/mitos/commit/3de212278023fff9625042f6967ddb4c91c522f5))
+* **controller:** elide no-op SandboxPool status writes ([#163](https://github.com/paperclipinc/mitos/issues/163)) ([815b54a](https://github.com/paperclipinc/mitos/commit/815b54a3852bc781318cfbe0969c0150fb6bb4a4))
+* **forkd:** sample lifetime memory metrics periodically ([#3](https://github.com/paperclipinc/mitos/issues/3) fork-correctness Row 5) ([979318c](https://github.com/paperclipinc/mitos/commit/979318c263df03c0ad1be3d86d08b09fd5fcbb73))
+* **forkd:** sample lifetime memory metrics periodically ([#3](https://github.com/paperclipinc/mitos/issues/3) fork-correctness Row 5) ([40492ba](https://github.com/paperclipinc/mitos/commit/40492ba7f7326c67577183dcb9e971d564897335))
+
 ## [0.8.0](https://github.com/paperclipinc/mitos/compare/v0.7.0...v0.8.0) (2026-06-19)
 
 
