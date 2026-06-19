@@ -270,14 +270,23 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 // gate). The digest is a content address, not a secret.
 func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 	const wantDigest = "1111111111111111111111111111111111111111111111111111111111111111"
-	// Register a healthy node holding the template with a recorded digest, so
-	// TemplateDigest resolves it for the claim reconciler.
+	const otherDigest = "2222222222222222222222222222222222222222222222222222222222222222"
+	// Nodes build snapshots independently, so digests differ per node (#175): the
+	// activation must verify against the digest of the node the chosen pod runs on
+	// (kvm-node-1, per makeDormantHuskPod), NOT a cluster-wide pick. Register a
+	// DECOY node with a different digest FIRST so a cluster-wide lookup would
+	// resolve the wrong one; the pod's node carries wantDigest (#177).
 	testRegistry.Register(&controller.NodeInfo{
-		Name:            "digest-node",
+		Name:            "other-node",
+		TemplateIDs:     []string{"husk-d-tmpl"},
+		TemplateDigests: map[string]string{"husk-d-tmpl": otherDigest},
+	})
+	testRegistry.Register(&controller.NodeInfo{
+		Name:            "kvm-node-1",
 		TemplateIDs:     []string{"husk-d-tmpl"},
 		TemplateDigests: map[string]string{"husk-d-tmpl": wantDigest},
 	})
-	t.Cleanup(func() { testRegistry.Unregister("digest-node") })
+	t.Cleanup(func() { testRegistry.Unregister("other-node"); testRegistry.Unregister("kvm-node-1") })
 
 	pod := makeDormantHuskPod(t, "husk-d-pool", "10.1.2.9")
 	_ = pod

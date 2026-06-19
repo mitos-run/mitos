@@ -307,6 +307,22 @@ func (r *NodeRegistry) SnapshotHolders(templateID string) []SnapshotHolder {
 	return out
 }
 
+// TemplateDigestOnNode returns the content-addressed digest THAT node recorded
+// for templateID. Nodes build snapshots independently so digests differ per
+// node; a husk pod activation must verify against the digest of the node the pod
+// runs on, never a cluster-wide pick (issue #177). Returns false if the node is
+// unknown or has not reported a digest.
+func (r *NodeRegistry) TemplateDigestOnNode(nodeName, templateID string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if n, ok := r.nodes[nodeName]; ok {
+		if d, ok := n.TemplateDigests[templateID]; ok && d != "" {
+			return d, true
+		}
+	}
+	return "", false
+}
+
 // TemplateSource picks a healthy node that holds the template AND reports a
 // content-addressed digest for it, and returns the holder, its CAS-serving base
 // URL, and the digest. It is the source the pool reconciler distributes from:

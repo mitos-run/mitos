@@ -1274,3 +1274,24 @@ func (r *SandboxClaimReconciler) markHuskPodClaimed(ctx context.Context, pod *co
 	}
 	return nil
 }
+
+// unmarkHuskPodClaimed removes the mitos.run/claim label so a husk pod returns
+// to the dormant pool after a FAILED activation. The claim path stamps the label
+// BEFORE activating (the mutual-exclusion commit); without releasing it on
+// failure, a pod that was claimed but never finished activating (a transient
+// transport error, or a per-node-digest mismatch when failing over to another
+// node) keeps the label forever and is excluded from selectDormantHuskPod
+// permanently, leaking warm capacity and blocking cross-node failover (#177). It
+// is the claim that stamped the label releasing it, so no optimistic lock is
+// needed; a no-op when the label is already absent.
+func (r *SandboxClaimReconciler) unmarkHuskPodClaimed(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Labels[huskClaimLabel] == "" {
+		return nil
+	}
+	patch := client.MergeFrom(pod.DeepCopy())
+	delete(pod.Labels, huskClaimLabel)
+	if err := r.Patch(ctx, pod, patch); err != nil {
+		return fmt.Errorf("release husk pod %s claim label: %w", pod.Name, err)
+	}
+	return nil
+}

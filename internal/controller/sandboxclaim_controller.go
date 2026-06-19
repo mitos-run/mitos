@@ -752,7 +752,12 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	// hatch, which is exactly the fail-closed behavior we want in production.
 	expectedDigest := ""
 	if r.NodeRegistry != nil {
-		if d, ok := r.NodeRegistry.TemplateDigest(pool.Spec.TemplateRef.Name); ok {
+		// Verify against THIS pod's node's digest, not a cluster-wide pick: nodes
+		// build their template snapshots independently, so the recorded digests
+		// differ per node (#175). Using another node's digest fails the stub's
+		// prepare-time verification, which is what blocked cross-node failover
+		// (the claim could only ever re-activate on its origin node) (#177).
+		if d, ok := r.NodeRegistry.TemplateDigestOnNode(pod.Spec.NodeName, pool.Spec.TemplateRef.Name); ok {
 			expectedDigest = d
 		}
 	}
@@ -784,6 +789,13 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		}
 		logger.Info("husk activation failed, pending", "pod", pod.Name, "node", pod.Spec.NodeName, "detail", msg)
 		recordClaimError(claim.Spec.PoolRef.Name, "activate")
+		// Release the claim label stamped before activation so this pod returns to
+		// the dormant pool and can be retried (by this claim or another). Without
+		// this a stamped-but-not-activated pod is orphaned forever, leaking warm
+		// capacity and blocking failover (#177).
+		if uerr := r.unmarkHuskPodClaimed(ctx, pod); uerr != nil {
+			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
+		}
 		claim.Status.Phase = v1alpha1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
