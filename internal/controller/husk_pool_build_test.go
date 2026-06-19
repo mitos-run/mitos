@@ -127,3 +127,87 @@ func TestHuskPoolBuildsSnapshotAndPlacesPods(t *testing.T) {
 		t.Fatalf("nodeAffinity values = %v, want [kvm-node-A] (the snapshot holder)", expr.Values)
 	}
 }
+
+// TestHuskPoolBuildRespectsDedicatedNodes is the dedicatedNodes (#172) build
+// constraint end to end: a pool with Placement.NodeSelector must build its
+// template snapshot ONLY on nodes matching that selector. It registers two fake
+// forkd nodes, one matching the placement label and one not, and creates the
+// matching corev1.Node objects so the controller's nodesMatchingSelector resolves
+// the placement set against real labels. The build must land on the dedicated
+// node and skip the shared node; otherwise the snapshot would sit on a node the
+// placement-pinned husk pods can never schedule onto, and the pool would never
+// converge.
+func TestHuskPoolBuildRespectsDedicatedNodes(t *testing.T) {
+	c := k8sClient
+	const dedicated, shared = "ded-node-172", "shared-node-172"
+	const tenantLabel = "mitos.run/tenant"
+
+	// Real k8s Node objects so nodesMatchingSelector (a label List) sees them. The
+	// dedicated node carries the placement label; the shared node does not.
+	dedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: dedicated, Labels: map[string]string{tenantLabel: "acme"}}}
+	sharedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: shared}}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "ded172-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ded172-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "ded172-tmpl"},
+			Replicas:    1,
+			Placement:   &v1alpha1.PoolPlacement{NodeSelector: map[string]string{tenantLabel: "acme"}},
+		},
+	}
+	for _, obj := range []client.Object{dedNode, sharedNode, template, pool} {
+		if err := c.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = c.Delete(ctx, pool)
+		_ = c.Delete(ctx, template)
+		_ = c.Delete(ctx, dedNode)
+		_ = c.Delete(ctx, sharedNode)
+	})
+
+	// Two fake forkd nodes named to match the k8s Nodes; neither holds the template.
+	reg := controller.NewNodeRegistry()
+	stopD, engineD, _, err := controller.StartFakeForkdNodeRecording(reg, dedicated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stopD)
+	stopS, engineS, _, err := controller.StartFakeForkdNodeRecording(reg, shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stopS)
+
+	r := &controller.SandboxPoolReconciler{
+		Client:          c,
+		NodeRegistry:    reg,
+		EnableHuskPods:  true,
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
+	}
+
+	var live v1alpha1.SandboxPool
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.EnsureTemplateBuiltForTest(ctx, &live, template); err != nil {
+		t.Fatalf("ensureTemplateBuilt: %v", err)
+	}
+
+	// The dedicated node built the snapshot; the shared node did not.
+	if got := engineD.GetCapacity().TemplateIDs; len(got) != 1 || got[0] != "ded172-tmpl" {
+		t.Fatalf("dedicated node templates = %v, want [ded172-tmpl]", got)
+	}
+	if got := engineS.GetCapacity().TemplateIDs; len(got) != 0 {
+		t.Fatalf("shared node (outside placement) built %v, want nothing", got)
+	}
+	holders := reg.NodesWithTemplate("ded172-tmpl")
+	if len(holders) != 1 || holders[0].Name != dedicated {
+		t.Fatalf("snapshot holders = %v, want [%s]", holders, dedicated)
+	}
+}

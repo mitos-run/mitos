@@ -190,6 +190,15 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	templateID := pool.Spec.TemplateRef.Name
 	desired := pool.Spec.Replicas
 
+	// dedicatedNodes (#172): resolve the pool's placement node set once so every
+	// snapshot readiness count and the template build below are scoped to the
+	// dedicated nodes. nil for an unplaced pool (no placement => any node).
+	nodeFilter, err := r.placementFilter(ctx, &pool)
+	if err != nil {
+		logger.Error(err, "resolve placement nodes for pool")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	// Husk pod warm-pool path (issue #18, the pod-native default). When enabled,
 	// the pool does TWO INDEPENDENT things: it maintains a warm pool of
 	// pre-scheduled DORMANT husk pods, AND it builds the template snapshot on the
@@ -264,7 +273,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// node that cannot snapshot (the documented nested-VMM boundary on kind)
 		// the build never completes, yet the warm pool above is still maintained
 		// and self-heals.
-		buildErr := r.ensureTemplateBuilt(ctx, &pool, &template)
+		buildErr := r.ensureTemplateBuilt(ctx, &pool, &template, nodeFilter)
 		if buildErr != nil {
 			logger.Error(buildErr, "failed to build template snapshot for husk pool (warm pool still maintained)")
 		}
@@ -277,7 +286,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			logger.Error(err, "failed to ensure husk PDB")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		readySnapshots := r.readySnapshotCount(templateID)
+		readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 		setPoolReadySnapshots(pool.Name, readySnapshots)
 		pool.Status.ReadySnapshots = readySnapshots
 		pool.Status.TotalSnapshots = readySnapshots
@@ -318,14 +327,14 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Raw-forkd path (the --enable-raw-forkd fallback): build the snapshot on the
 	// target nodes and let each claim fork on a holder. No husk pods.
-	if r.readySnapshotCount(templateID) < desired {
-		logger.Info("snapshot deficit", "ready", r.readySnapshotCount(templateID), "desired", desired)
-		if err := r.ensureTemplateBuilt(ctx, &pool, &template); err != nil {
+	if rawReady := r.readySnapshotCountOn(templateID, nodeFilter); rawReady < desired {
+		logger.Info("snapshot deficit", "ready", rawReady, "desired", desired)
+		if err := r.ensureTemplateBuilt(ctx, &pool, &template, nodeFilter); err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
-	readySnapshots := r.readySnapshotCount(templateID)
+	readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 
 	// Update status
 	setPoolReadySnapshots(pool.Name, readySnapshots)
@@ -357,7 +366,42 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // snapshot. One snapshot per node per template, so replicas are capped by
 // node count.
 func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
-	return int32(len(r.NodeRegistry.NodesWithTemplate(templateID)))
+	return r.readySnapshotCountOn(templateID, nil)
+}
+
+// readySnapshotCountOn counts healthy nodes holding templateID, restricted to
+// nodeFilter when non-nil (dedicatedNodes, #172). A snapshot on a node outside a
+// placed pool's placement set cannot back its placement-pinned husk pods, so it
+// must not count toward readiness; otherwise the readySnapshots>=desired gate
+// would report the deficit met while no dedicated node holds the snapshot. A nil
+// filter counts every healthy holder (unplaced pool).
+func (r *SandboxPoolReconciler) readySnapshotCountOn(templateID string, nodeFilter map[string]bool) int32 {
+	nodes := r.NodeRegistry.NodesWithTemplate(templateID)
+	if nodeFilter == nil {
+		return int32(len(nodes))
+	}
+	var n int32
+	for _, node := range nodes {
+		if nodeFilter[node.Name] {
+			n++
+		}
+	}
+	return n
+}
+
+// placementFilter resolves a pool's dedicatedNodes placement (#172) to the set
+// of node names its snapshots may live on. It returns nil when the pool declares
+// no placement (every node is eligible), so callers treat nil as "unconstrained".
+func (r *SandboxPoolReconciler) placementFilter(ctx context.Context, pool *v1alpha1.SandboxPool) (map[string]bool, error) {
+	sel := huskPlacementNodeSelector(pool)
+	if len(sel) == 0 {
+		return nil, nil
+	}
+	matching, err := r.nodesMatchingSelector(ctx, sel)
+	if err != nil {
+		return nil, fmt.Errorf("list placement nodes for pool %s: %w", pool.Name, err)
+	}
+	return matching, nil
 }
 
 // snapshotNodeNames returns the hostnames of the healthy nodes that hold the
@@ -399,9 +443,12 @@ func (r *SandboxPoolReconciler) huskTemplateDigest(templateID string) string {
 // node, so the snapshot must exist there first. A no-op when the deficit is
 // already met. The encrypted-template key handling matches the raw path: the
 // per-template key Secret is owned here and delivered over mTLS, never logged.
-func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) error {
+func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, nodeFilter map[string]bool) error {
 	templateID := pool.Spec.TemplateRef.Name
-	readySnapshots := r.readySnapshotCount(templateID)
+	// dedicatedNodes (#172): nodeFilter restricts the snapshot to a placed pool's
+	// placement nodes for BOTH the deficit count and the build targets, so a
+	// snapshot is never built off the dedicated set. nil => unconstrained.
+	readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 	if readySnapshots >= pool.Spec.Replicas {
 		return nil
 	}
@@ -418,7 +465,7 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
 		}
 	}
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, wrappedDEK, kekID, deficit); err != nil {
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil
@@ -442,7 +489,15 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 // The pull token is the shared peer credential the controller is configured
 // with; it is delivered to the deficit node over its mTLS gRPC and is never
 // logged.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32) (int32, error) {
+//
+// nodeFilter constrains which nodes may build or pull (dedicatedNodes, #172):
+// when non-nil only nodes whose name is in the set are eligible, so a placed
+// pool's snapshot lands ONLY on its dedicated nodes (a snapshot built elsewhere
+// could never back a placement-pinned husk pod). A nil filter places on any
+// healthy node, preserving the unplaced behavior. The pull SOURCE is not
+// constrained: the digest is content-addressed, so pulling from any holder into
+// a dedicated node is safe.
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool) (int32, error) {
 	var added int32
 	var errs []error
 
@@ -454,6 +509,11 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 	for _, node := range r.NodeRegistry.ListNodes() {
 		if added >= deficit {
 			break
+		}
+		// dedicatedNodes (#172): skip a node outside the pool's placement set so
+		// the snapshot is only built where the placement-pinned husk pods can run.
+		if nodeFilter != nil && !nodeFilter[node.Name] {
+			continue
 		}
 		if !node.isHealthy() || node.hasSnapshot(templateID) {
 			continue
