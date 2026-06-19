@@ -250,6 +250,12 @@ jobs:
           chmod +x test/cluster-e2e/husk-e2e.sh
           READY_TIMEOUT=240 test/cluster-e2e/husk-e2e.sh "${E2E_NAMESPACE}"
 
+      - name: Run the cluster chaos e2e (failure/GC semantics, issue #163)
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/chaos-e2e.sh
+          READY_TIMEOUT=240 test/cluster-e2e/chaos-e2e.sh "${E2E_NAMESPACE}"
+
       - name: Diagnostics on failure
         if: failure()
         run: |
