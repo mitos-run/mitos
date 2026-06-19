@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0](https://github.com/paperclipinc/mitos/compare/v0.7.0...v0.8.0) (2026-06-19)
+
+
+### Features
+
+* **controller:** dedicatedNodes pool placement for hard tenant separation ([#172](https://github.com/paperclipinc/mitos/issues/172)) ([10b74ad](https://github.com/paperclipinc/mitos/commit/10b74ad2668c29c866b17ec7a0f331c23f178a8a))
+* **controller:** restrict husk-pod placement to placement-matching snapshot holders ([#172](https://github.com/paperclipinc/mitos/issues/172)) ([de13d95](https://github.com/paperclipinc/mitos/commit/de13d95351ba24def937b992beef4aed99bd5596))
+
+
+### Bug Fixes
+
+* **chart:** make a fresh helm install come up out of the box ([#173](https://github.com/paperclipinc/mitos/issues/173)) ([0ee5ccc](https://github.com/paperclipinc/mitos/commit/0ee5cccf0f47e5ceda55772fe0dbe200e54271b2))
+* **controller:** cross-node husk failover (per-node activation digest + release label on failure) ([#177](https://github.com/paperclipinc/mitos/issues/177)) ([d3ed0a7](https://github.com/paperclipinc/mitos/commit/d3ed0a7e6c1f6034aeebab83db3fd7f44507d44b))
+* **controller:** evict husk pods from a lost node in ~60s, not 300s ([#177](https://github.com/paperclipinc/mitos/issues/177)) ([ec7cc72](https://github.com/paperclipinc/mitos/commit/ec7cc72228fdf4a6f0a0a142098a95d1678ad7f4))
+* **controller:** log the cause of a failed fork-child activation ([#28](https://github.com/paperclipinc/mitos/issues/28)) ([91769f2](https://github.com/paperclipinc/mitos/commit/91769f29a0de8a3412218287d6bb78610b3a867b))
+* **controller:** pin each husk pod to one snapshot node + its own digest ([#175](https://github.com/paperclipinc/mitos/issues/175)) ([873f182](https://github.com/paperclipinc/mitos/commit/873f182690a5b2656cf5555644688cf3748d9c3e))
+* **controller:** reflect backing-pod readiness in a Ready husk claim ([#177](https://github.com/paperclipinc/mitos/issues/177)) ([e72c088](https://github.com/paperclipinc/mitos/commit/e72c088d660dbdfd6680c707fa897b24ee83c0e3))
+
 ## [0.7.0](https://github.com/paperclipinc/mitos/compare/v0.6.0...v0.7.0) (2026-06-18)
 
 
