@@ -472,7 +472,14 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 			})
 		}
 		if err != nil || !actRes.OK {
-			logger.Info("fork child activation failed, will retry", "child", childName)
+			// Surface WHY (issue #28 LLM-legible errors): the bare "will retry" hid
+			// the cause of stuck fork children. Log the transport error or the
+			// stub's activation error so an operator can act.
+			detail := actRes.Error
+			if err != nil {
+				detail = err.Error()
+			}
+			logger.Info("fork child activation failed, will retry", "child", childName, "detail", detail)
 			continue
 		}
 
