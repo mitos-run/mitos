@@ -1,0 +1,25 @@
+# Multi-node kind cluster for the dedicatedNodes placement e2e (issue #172).
+#
+# Three nodes: a control plane and TWO KVM workers labeled distinctly so a
+# placed SandboxPool (spec.placement.nodeSelector) can be proven to land its husk
+# pods AND its template snapshot build ONLY on the dedicated worker:
+#
+#   - worker "a": mitos.run/kvm=true + mitos.run/tenant=a  (the DEDICATED node)
+#   - worker "b": mitos.run/kvm=true                       (a SHARED node)
+#
+# Both workers carry mitos.run/kvm so the device plugin advertises the KVM
+# resource on each (the e2e runner has /dev/kvm); the ONLY difference is the
+# tenant label, so a pod landing on worker b can only be a placement bug, not a
+# capacity artifact. The mock/real engine split is identical to hack/kind-config.yaml;
+# this file only adds the second worker and the tenant label.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      mitos.run/kvm: "true"
+      mitos.run/tenant: "a"
+  - role: worker
+    labels:
+      mitos.run/kvm: "true"
