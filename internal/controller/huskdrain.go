@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -209,4 +210,47 @@ func huskPodToClaim(_ context.Context, obj client.Object) []ctrl.Request {
 		return nil
 	}
 	return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: claimName}}}
+}
+
+// reflectHuskBackingReadiness flips a Ready husk claim's Ready condition to match
+// its backing pod's readiness. A pod whose node is rebooting or unreachable is
+// NotReady (but not yet lost), so the sandbox endpoint is unreachable and the
+// claim must NOT keep reporting Ready (#177). It flips back to True when the pod
+// recovers. Actual loss/eviction (re-pend) is owned by checkHuskPodLost; this
+// only reflects transient unreachability in the condition. Returns whether it
+// changed the condition (so the caller writes status only when needed).
+func reflectHuskBackingReadiness(claim *v1alpha1.SandboxClaim, pod *corev1.Pod, now time.Time) bool {
+	ready := pod != nil && huskPodReady(pod)
+	var cur *metav1.Condition
+	for i := range claim.Status.Conditions {
+		if claim.Status.Conditions[i].Type == "Ready" {
+			cur = &claim.Status.Conditions[i]
+			break
+		}
+	}
+	if !ready {
+		// Already reflected as a backing-pod outage: leave it (avoid churn).
+		if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == "BackingPodNotReady" {
+			return false
+		}
+		return setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.NewTime(now),
+			Reason:             "BackingPodNotReady",
+			Message:            fmt.Sprintf("backing husk pod %s on node %s is not Ready; the sandbox is temporarily unreachable (node outage or pod restart)", claim.Status.SandboxID, claim.Status.Node),
+		})
+	}
+	// Healthy again: only act if we previously flipped it to NotReady, so a poll
+	// never clobbers the original activation condition.
+	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == "BackingPodNotReady" {
+		return setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.NewTime(now),
+			Reason:             "HuskActivated",
+			Message:            "backing husk pod recovered to Ready",
+		})
+	}
+	return false
 }
