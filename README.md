@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/paperclipinc/mitos/actions/workflows/ci.yaml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/paperclipinc/mitos/ci.yaml?branch=main&label=CI"></a>
-  <a href="https://github.com/paperclipinc/mitos/releases"><img alt="Release" src="https://img.shields.io/github/v/release/paperclipinc/mitos?include_prereleases&label=release"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/paperclipinc/mitos?label=license"></a>
-  <a href="https://github.com/paperclipinc/mitos"><img alt="Go" src="https://img.shields.io/github/go-mod/go-version/paperclipinc/mitos?label=go"></a>
+  <a href="https://github.com/mitos-run/mitos/actions/workflows/ci.yaml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/mitos-run/mitos/ci.yaml?branch=main&label=CI"></a>
+  <a href="https://github.com/mitos-run/mitos/releases"><img alt="Release" src="https://img.shields.io/github/v/release/mitos-run/mitos?include_prereleases&label=release"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/mitos-run/mitos?label=license"></a>
+  <a href="https://github.com/mitos-run/mitos"><img alt="Go" src="https://img.shields.io/github/go-mod/go-version/mitos-run/mitos?label=go"></a>
   <a href="https://goreportcard.com/report/github.com/paperclipinc/mitos"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/paperclipinc/mitos"></a>
   <a href="docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-mitos-blue"></a>
 </p>
@@ -111,7 +111,7 @@ for r in ex.results:      # rich multi-MIME display artifacts (tables, images, .
 sb.exec_background("python train.py > /workspace/train.log 2>&1")
 ```
 
-Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require the raw-forkd path or a husk template snapshot rebuilt with the current guest agent: the agent baked into today's husk template snapshot predates the vsock streaming/PTY frame protocol, so on the husk default the stream and the PTY WebSocket close early. Blocking exec (`/v1/exec`) is unaffected and works on the husk default. The husk template guest-agent rebuild is a tracked follow-up ([#24](https://github.com/paperclipinc/mitos/issues/24)).
+Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require the raw-forkd path or a husk template snapshot rebuilt with the current guest agent: the agent baked into today's husk template snapshot predates the vsock streaming/PTY frame protocol, so on the husk default the stream and the PTY WebSocket close early. Blocking exec (`/v1/exec`) is unaffected and works on the husk default. The husk template guest-agent rebuild is a tracked follow-up ([#24](https://github.com/mitos-run/mitos/issues/24)).
 
 ### On a cluster
 
@@ -119,7 +119,7 @@ Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require t
 kubectl apply -k deploy/
 ```
 
-The self-contained kustomize base installs the CRDs, the controller in the default husk mode, the forkd builder DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`; the controller discovers forkd pods automatically. A Helm chart is planned ([#37](https://github.com/paperclipinc/mitos/issues/37)).
+The self-contained kustomize base installs the CRDs, the controller in the default husk mode, the forkd builder DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`; the controller discovers forkd pods automatically. A Helm chart is planned ([#37](https://github.com/mitos-run/mitos/issues/37)).
 
 ```yaml
 apiVersion: mitos.run/v1alpha1
@@ -199,9 +199,9 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Capability | What you get | Docs |
 |---|---|---|
 | Blocking exec | Correct stdout and exit code over the sandbox API; works on the husk default | [docs/cli.md](docs/cli.md) |
-| Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (engine path; husk wiring tracked [#24](https://github.com/paperclipinc/mitos/issues/24)) | [#24](https://github.com/paperclipinc/mitos/issues/24) |
+| Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (engine path; husk wiring tracked [#24](https://github.com/mitos-run/mitos/issues/24)) | [#24](https://github.com/mitos-run/mitos/issues/24) |
 | Code interpreter | `run_code` with a stateful kernel and rich multi-MIME results, in both SDKs and the MCP server; fail-closed `KernelUnavailable` until the kernel ships in the husk base image | [docs/mcp.md](docs/mcp.md) |
-| LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by both SDKs into a structured `AgentRunError` | [#28](https://github.com/paperclipinc/mitos/issues/28) |
+| LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by both SDKs into a structured `AgentRunError` | [#28](https://github.com/mitos-run/mitos/issues/28) |
 | SDKs and surfaces | Python and TypeScript SDKs with a one-liner `sandbox(image)`, lazy default pool, `from_name` reconnect, and async Python client; plus the `mitos` CLI and an MCP server | [docs/cli.md](docs/cli.md) |
 
 ### Kubernetes-native
@@ -220,7 +220,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 |---|---|---|
 | Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox; `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Verified end to end on a real KVM cluster: create -> commit -> fork, where the forked sandbox reads the committed state | [docs/workspaces.md](docs/workspaces.md) |
 | Outputs and diff | A claim `spec.outputs` narrows the dehydrate to listed subtrees; a `{diff: true}` output records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
-| Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (git is the merge layer; the engine pushes, a human/CI merges). On the husk path the push is currently best-effort; fully wiring it is tracked | [#21](https://github.com/paperclipinc/mitos/issues/21) |
+| Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (git is the merge layer; the engine pushes, a human/CI merges). On the husk path the push is currently best-effort; fully wiring it is tracked | [#21](https://github.com/mitos-run/mitos/issues/21) |
 
 ### Operable
 
@@ -292,9 +292,9 @@ The local dev cluster uses the mock fork engine (no KVM): claims reconcile to `R
 
 ## Comparison
 
-A numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/paperclipinc/mitos/issues/15). The differentiator is not a single fastest-number claim: `mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, with a warm-claim activate in the tens-of-ms class (P50 ~27 ms, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh)).
+A numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/mitos-run/mitos/issues/15). The differentiator is not a single fastest-number claim: `mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, with a warm-claim activate in the tens-of-ms class (P50 ~27 ms, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh)).
 
-The figures below are **other vendors' published numbers, for different operations, on different hardware, measured with different methodology**; they are NOT measured by us and this is NOT a head-to-head claim. The matched-hardware comparison is [#15](https://github.com/paperclipinc/mitos/issues/15).
+The figures below are **other vendors' published numbers, for different operations, on different hardware, measured with different methodology**; they are NOT measured by us and this is NOT a head-to-head claim. The matched-hardware comparison is [#15](https://github.com/mitos-run/mitos/issues/15).
 
 | Runtime | Published figure (theirs, not ours) | Operation they describe |
 |---|---|---|
@@ -329,7 +329,7 @@ Early development, pre-1.0 (latest release `v0.3.0`). Do not run untrusted code 
 
 **Husk-default scope, verified on a real KVM cluster:** warm-claim activate, blocking exec (`/v1/exec` with correct stdout and exit code), `run_code` failing closed with a clean `KernelUnavailable` (the husk base image lacks the kernel), self-heal / re-pend, pool warming plus demand autoscaling, live `SandboxFork` (the source husk pod snapshots its running VM and N child husk pods restore it via CoW, each an independent Ready child), durable forkable workspaces (create -> commit -> fork where the forked sandbox reads the committed state, hydrate/dehydrate of `/workspace` over the content-addressed store), and pod egress isolation (an in-pod default-deny nftables filter with an unconditional cloud-metadata block and a per-template allowlist: metadata-blocked, default-deny, and an allowlisted name reachable, all proven inside a restored VM with no node prerequisite) all work end to end on the husk default.
 
-**Tracked tails not yet fully on the husk default:** streaming exec and the interactive PTY (the guest agent baked into the husk template snapshot predates the vsock streaming/PTY frame protocol and needs a template rebuild, [#24](https://github.com/paperclipinc/mitos/issues/24)); live-VM memory snapshot hooks for resumable workspace heads (gated behind `--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection (the live transport defaults to the node content-addressed store); the husk `{git}` workspace push (best-effort on husk today, [#21](https://github.com/paperclipinc/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/paperclipinc/mitos/issues/3)).
+**Tracked tails not yet fully on the husk default:** streaming exec and the interactive PTY (the guest agent baked into the husk template snapshot predates the vsock streaming/PTY frame protocol and needs a template rebuild, [#24](https://github.com/mitos-run/mitos/issues/24)); live-VM memory snapshot hooks for resumable workspace heads (gated behind `--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection (the live transport defaults to the node content-addressed store); the husk `{git}` workspace push (best-effort on husk today, [#21](https://github.com/mitos-run/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/mitos-run/mitos/issues/3)).
 
 [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated; the operating rule is that this repository never describes a system that does not exist.
 
@@ -360,7 +360,7 @@ Per-topic docs in [`docs/`](docs/):
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md) for conventions, and the [issues page](https://github.com/paperclipinc/mitos/issues) for the work tracked against [ROADMAP.md](ROADMAP.md).
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md) for conventions, and the [issues page](https://github.com/mitos-run/mitos/issues) for the work tracked against [ROADMAP.md](ROADMAP.md).
 
 ## Security
 
