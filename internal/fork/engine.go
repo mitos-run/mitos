@@ -13,16 +13,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/metering"
-	"github.com/paperclipinc/mitos/internal/netconf"
-	"github.com/paperclipinc/mitos/internal/network"
-	"github.com/paperclipinc/mitos/internal/snapcompat"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
-	"github.com/paperclipinc/mitos/internal/volume"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/network"
+	"mitos.run/mitos/internal/snapcompat"
+	"mitos.run/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/volume"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // ErrAtCapacity is returned by Fork when the engine already holds MaxSandboxes

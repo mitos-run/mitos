@@ -31,9 +31,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/vsock"
 )
 
 func main() {

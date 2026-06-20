@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/vsock"
 )
 
 func TestActivateRequestCarriesEgressConfig(t *testing.T) {

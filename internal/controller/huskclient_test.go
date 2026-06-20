@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/husk"
-	"github.com/paperclipinc/mitos/internal/pki"
+	"mitos.run/mitos/internal/husk"
+	"mitos.run/mitos/internal/pki"
 )
 
 // huskClientPKI issues the husk server (forkd identity) and controller client

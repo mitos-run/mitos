@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/pki"
+	"mitos.run/mitos/internal/pki"
 )
 
 // TestGRPCServerOptionsFailClosed proves the gRPC control surface fails CLOSED

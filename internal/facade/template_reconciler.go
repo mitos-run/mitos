@@ -14,7 +14,7 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/paperclipinc/mitos/internal/metering"
+	"mitos.run/mitos/internal/metering"
 )
 
 // TopRow is one sandbox's line in the top view. Name is the claim/fork object

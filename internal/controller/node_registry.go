@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"mitos.run/mitos/internal/observability"
 )
 
 // NodeRegistry tracks forkd instances across the cluster.

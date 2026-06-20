@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/kms"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/kms"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 // fakeContainerManager records Create/Open/Close/Shred calls and simulates a

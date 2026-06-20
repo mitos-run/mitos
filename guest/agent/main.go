@@ -19,9 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/guestenv"
-	"github.com/paperclipinc/mitos/internal/vsock"
 	"golang.org/x/sys/unix"
+	"mitos.run/mitos/internal/guestenv"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // Guest agent: runs as init (PID 1) inside the Firecracker VM.

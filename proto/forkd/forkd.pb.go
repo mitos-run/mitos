@@ -1389,6 +1389,11 @@ func (x *ExecResponse) GetExecTimeMs() float64 {
 	return 0
 }
 
+// ExecStream is reserved for a future gRPC streaming transport. Today, like
+// Exec, streaming exec is served by the forkd HTTP sandbox API
+// (POST /v1/exec/stream, application/x-ndjson) on the HTTP port, not over gRPC.
+// The message shapes below are kept aligned with the vsock ExecStreamFrame
+// (stream, data, done/exit_code) so a later gRPC binding is a thin adapter.
 type ExecStreamRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId      string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -2831,7 +2836,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\bReadFile\x12\x16.forkd.ReadFileRequest\x1a\x17.forkd.ReadFileResponse\x12>\n" +
 	"\tWriteFile\x12\x17.forkd.WriteFileRequest\x1a\x18.forkd.WriteFileResponse\x128\n" +
 	"\aListDir\x12\x15.forkd.ListDirRequest\x1a\x16.forkd.ListDirResponse\x12D\n" +
-	"\vGetCapacity\x12\x19.forkd.GetCapacityRequest\x1a\x1a.forkd.GetCapacityResponseB3Z1github.com/paperclipinc/mitos/proto/forkd;forkdpbb\x06proto3"
+	"\vGetCapacity\x12\x19.forkd.GetCapacityRequest\x1a\x1a.forkd.GetCapacityResponseB%Z#mitos.run/mitos/proto/forkd;forkdpbb\x06proto3"
 
 var (
 	file_proto_forkd_proto_rawDescOnce sync.Once

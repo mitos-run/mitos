@@ -5,13 +5,13 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/observability"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/observability"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // tracer is the forkd component tracer; no-op unless tracing is configured.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
+	"mitos.run/mitos/internal/cas"
 )
 
 // writeFakeTemplate lays down fake mem/vmstate/rootfs files for a template in a

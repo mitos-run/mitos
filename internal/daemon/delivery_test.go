@@ -21,9 +21,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/vsock"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/vsock"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,

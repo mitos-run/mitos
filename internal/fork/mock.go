@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/metering"
-	"github.com/paperclipinc/mitos/internal/volume"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/volume"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // MockEngine simulates fork operations without KVM.

@@ -10,7 +10,7 @@
   <a href="https://github.com/mitos-run/mitos/releases"><img alt="Release" src="https://img.shields.io/github/v/release/mitos-run/mitos?include_prereleases&label=release"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/mitos-run/mitos?label=license"></a>
   <a href="https://github.com/mitos-run/mitos"><img alt="Go" src="https://img.shields.io/github/go-mod/go-version/mitos-run/mitos?label=go"></a>
-  <a href="https://goreportcard.com/report/github.com/paperclipinc/mitos"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/paperclipinc/mitos"></a>
+  <a href="https://goreportcard.com/report/mitos.run/mitos"><img alt="Go Report Card" src="https://goreportcard.com/badge/mitos.run/mitos"></a>
   <a href="docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-mitos-blue"></a>
 </p>
 

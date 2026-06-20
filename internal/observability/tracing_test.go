@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/observability"
 	"go.opentelemetry.io/otel"
+	"mitos.run/mitos/internal/observability"
 )
 
 // TestSetupDisabledIsNoop asserts that with no endpoint, Setup installs no real

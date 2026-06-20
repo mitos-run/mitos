@@ -46,11 +46,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/pki"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/pki"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // peerToken is the shared bearer credential the holder gates its CAS with. It is

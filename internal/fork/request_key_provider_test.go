@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/kms"
+	"mitos.run/mitos/internal/kms"
 )
 
 func TestRequestKeyProviderUnwrapsViaKMS(t *testing.T) {

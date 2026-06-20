@@ -44,8 +44,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/snapcompat"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/snapcompat"
 )
 
 func main() {

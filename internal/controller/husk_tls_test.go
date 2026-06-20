@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/pki"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/pki"
 )
 
 // TestEnsureHuskTLSRotatesNearExpiryLeaf proves the per-namespace husk leaf is

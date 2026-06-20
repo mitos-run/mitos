@@ -29,7 +29,7 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // newSingleSandboxAPI builds a SandboxAPI in single-sandbox mode with a

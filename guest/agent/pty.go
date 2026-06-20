@@ -13,9 +13,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/paperclipinc/mitos/internal/guestenv"
-	"github.com/paperclipinc/mitos/internal/vsock"
 	"golang.org/x/sys/unix"
+	"mitos.run/mitos/internal/guestenv"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // ptyOutputChunkBytes bounds one PTY read before it is framed. 32 KiB keeps a

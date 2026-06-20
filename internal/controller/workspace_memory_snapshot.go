@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 // WorkspaceMemorySnapshotAdapter binds the workspace memory-snapshot seams

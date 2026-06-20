@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/metering"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/metering"
 )
 
 func topClaim(name, node, endpoint, sandboxID string) v1alpha1.SandboxClaim {

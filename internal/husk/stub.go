@@ -13,15 +13,15 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/dnsproxy"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/netconf"
-	"github.com/paperclipinc/mitos/internal/snapcompat"
-	"github.com/paperclipinc/mitos/internal/volume"
-	"github.com/paperclipinc/mitos/internal/vsock"
-	"github.com/paperclipinc/mitos/internal/workspace"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/snapcompat"
+	"mitos.run/mitos/internal/volume"
+	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // entropySize is the number of crypto/rand bytes generated per activation and

@@ -51,8 +51,8 @@ manifests:
 
 proto:
 	protoc \
-		--go_out=. --go_opt=module=github.com/paperclipinc/mitos \
-		--go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/mitos \
+		--go_out=. --go_opt=module=mitos.run/mitos \
+		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
 		proto/forkd.proto
 
 docker-build:

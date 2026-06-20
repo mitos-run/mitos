@@ -11,9 +11,9 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/paperclipinc/mitos/internal/guestnet"
-	"github.com/paperclipinc/mitos/internal/vsock"
 	"golang.org/x/sys/unix"
+	"mitos.run/mitos/internal/guestnet"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // clockStepThresholdNanos is the drift past which the guest steps

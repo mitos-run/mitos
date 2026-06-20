@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 // defaultScaleDownCooldown is used when ScaleDownCooldownSeconds is 0 (unset).

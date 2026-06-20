@@ -7,13 +7,13 @@ import (
 	"reflect"
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/volume"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/daemon"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/volume"
 )
 
 // startFakeForkd runs a real forkd gRPC server with a MockEngine on 127.0.0.1:0

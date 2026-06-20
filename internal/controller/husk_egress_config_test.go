@@ -3,7 +3,7 @@ package controller
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 // TestHuskNotifyNetworkMapsTemplatePolicy asserts huskNotifyNetwork always
