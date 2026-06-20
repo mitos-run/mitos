@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 const (

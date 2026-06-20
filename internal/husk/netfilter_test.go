@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/netconf"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/netconf"
 )
 
 type recordedCall struct {

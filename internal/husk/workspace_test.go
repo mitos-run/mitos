@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/workspace"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // fakeWorkspaceAgent is an in-memory workspace.VsockTransport: TarDir returns a

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/fork"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/fork"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // TestGRPCPullTemplateRecordsAndRegisters drives the PullTemplate RPC against

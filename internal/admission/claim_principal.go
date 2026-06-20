@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	authzv1 "k8s.io/api/authorization/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )

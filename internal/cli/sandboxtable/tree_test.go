@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func mkFork(name, source string, replicas, ready, total int32) v1alpha1.SandboxFork {

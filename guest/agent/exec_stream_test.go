@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // readFrames drives handleExecStream over an in-process socketpair: it writes

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/paperclipinc/mitos/internal/kms"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/kms"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 // containerManager is the narrow seam the engine uses for per-scope encrypted

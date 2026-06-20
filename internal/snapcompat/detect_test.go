@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
+	"mitos.run/mitos/internal/cas"
 )
 
 const cannedCPUInfo = `processor	: 0

@@ -1,4 +1,4 @@
-module github.com/paperclipinc/mitos
+module mitos.run/mitos
 
 go 1.26.2
 

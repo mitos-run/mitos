@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/facade"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/facade"
 )
 
 var (

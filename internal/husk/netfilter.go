@@ -6,9 +6,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/dnsproxy"
-	"github.com/paperclipinc/mitos/internal/netconf"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/netconf"
 )
 
 // NetfilterConfig is the in-pod egress filter configuration for one husk VM.

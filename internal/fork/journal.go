@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/netconf"
+	"mitos.run/mitos/internal/netconf"
 )
 
 // journalDirName is the per-VM journal subdirectory under the data dir. Each

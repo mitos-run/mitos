@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/snapcompat"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/snapcompat"
 )
 
 // testEnv is the host environment the verify tests treat as "this node".

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/volume"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/volume"
 )
 
 // recordingVolRunner captures the argv of each volume backend invocation so the

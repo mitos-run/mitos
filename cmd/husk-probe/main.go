@@ -37,9 +37,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/huskprobe"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/huskprobe"
 )
 
 type config struct {

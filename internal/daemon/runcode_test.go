@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // newRunCodeAPI wires a fake UDS stream agent that replies to the run_code

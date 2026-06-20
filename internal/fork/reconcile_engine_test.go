@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/netconf"
-	"github.com/paperclipinc/mitos/internal/network"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/network"
 )
 
 // fakeVerifier returns a pidVerifier that reports the given set of pids as live

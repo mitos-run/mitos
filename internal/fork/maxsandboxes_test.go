@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
 )
 
 // TestAdmitForkAtCapacity verifies the O(1) admission ceiling: once the live

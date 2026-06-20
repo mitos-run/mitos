@@ -23,7 +23,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/paperclipinc/mitos/internal/deviceplugin"
+	"mitos.run/mitos/internal/deviceplugin"
 )
 
 // defaultKVMDevicePath is the default container path the plugin stat(2)s to

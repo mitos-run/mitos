@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/eventfeed"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/eventfeed"
 )
 
 func TestFeedEmitsRevisionCreatedAndEvent(t *testing.T) {

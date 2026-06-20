@@ -8,8 +8,8 @@ import (
 	"io"
 	"path"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 // errObjectNotFound is the sentinel an ObjectClient returns from GetObject when

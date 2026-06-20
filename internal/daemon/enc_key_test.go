@@ -7,13 +7,13 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/kms"
-	"github.com/paperclipinc/mitos/internal/volume"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/kms"
+	"mitos.run/mitos/internal/volume"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // keyProbeEngine is a ForkEngine that, during CreateTemplate and Fork, reads the

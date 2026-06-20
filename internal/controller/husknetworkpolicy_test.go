@@ -3,8 +3,8 @@ package controller
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func TestBuildHuskNetworkPolicyDefaultDeny(t *testing.T) {

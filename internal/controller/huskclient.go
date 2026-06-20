@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	"github.com/paperclipinc/mitos/internal/husk"
+	"mitos.run/mitos/internal/husk"
 )
 
 // ActivateHuskPod dials a husk stub's network control server at addr over mTLS

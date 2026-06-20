@@ -16,16 +16,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/dnsproxy"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/kms"
-	"github.com/paperclipinc/mitos/internal/netconf"
-	"github.com/paperclipinc/mitos/internal/network"
-	"github.com/paperclipinc/mitos/internal/observability"
-	"github.com/paperclipinc/mitos/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"mitos.run/mitos/internal/daemon"
+	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/kms"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/network"
+	"mitos.run/mitos/internal/observability"
+	"mitos.run/mitos/internal/pki"
 )
 
 func main() {

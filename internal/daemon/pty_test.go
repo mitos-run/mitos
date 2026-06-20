@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // startFakePtyUDS serves the CONNECT preamble, reads the pty request line, then

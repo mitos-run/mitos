@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/observability"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/observability"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // TestForkProducesSpans drives the gRPC Fork handler against a MockEngine with

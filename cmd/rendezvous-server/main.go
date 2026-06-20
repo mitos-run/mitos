@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/rendezvous"
+	"mitos.run/mitos/internal/rendezvous"
 )
 
 func main() {

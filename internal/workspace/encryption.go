@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 // ChunkStore is the narrow content-addressed surface the workspace transfer

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 // dash is the placeholder for an empty cell (missing node, endpoint, or source).

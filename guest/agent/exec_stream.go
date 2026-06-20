@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/guestenv"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestenv"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // streamChunkBytes bounds one stdout/stderr read before it is framed. 32 KiB

@@ -14,10 +14,10 @@ package controller_test
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
 )
 
 func TestForkCommitsCrossWorkspaceRevisionAndAdvancesHead(t *testing.T) {

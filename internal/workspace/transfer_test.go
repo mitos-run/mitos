@@ -10,7 +10,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
+	"mitos.run/mitos/internal/cas"
 )
 
 // fakeAgent fakes the guest agent's bulk tar transport over a host-side

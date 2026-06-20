@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/metering"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/metering"
 )
 
 // gaugeValue reads the current value of a prometheus Gauge without pulling in the

@@ -21,9 +21,9 @@ import (
 	"os"
 	"sort"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/vsock"
-	"github.com/paperclipinc/mitos/internal/workspace"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/workspace"
 )
 
 func main() {

@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/husk"
-	"github.com/paperclipinc/mitos/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/husk"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // huskWSDelegateRecorder records what the husk-mode hydrate/dehydrate delegates

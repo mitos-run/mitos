@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/kms"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/kms"
 )
 
 func encKeySecretName(templateID string) string { return templateID + "-enc-key" }

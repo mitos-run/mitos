@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/cas"
+	"mitos.run/mitos/internal/cas"
 )
 
 func goodEnv() Environment {

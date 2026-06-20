@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // recordingAuditor captures every AuditEvent for assertions.

@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/facade"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/facade"
 )
 
 // exampleImage is the test image substituted for the upstream ${IMAGE}

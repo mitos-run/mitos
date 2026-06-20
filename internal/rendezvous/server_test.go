@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/workspace"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // requireGit skips when git is absent so the unit suite is not flaky on a

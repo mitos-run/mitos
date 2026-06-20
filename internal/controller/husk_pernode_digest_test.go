@@ -7,8 +7,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
 )
 
 // TestHuskPodsUsePerNodeDigest is the regression for issue #175. Each forkd node

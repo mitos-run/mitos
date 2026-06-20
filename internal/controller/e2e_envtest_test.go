@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
 )
 
 func TestClaimReachesReadyEndToEnd(t *testing.T) {

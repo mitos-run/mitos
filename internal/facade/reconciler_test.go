@@ -12,8 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/facade"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/facade"
 )
 
 // newSandbox builds a minimal valid upstream Sandbox: podTemplate is required,
