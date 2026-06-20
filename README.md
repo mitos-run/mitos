@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mitos-mark-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/mitos-mark-black.svg">
+    <img alt="mitos" src="docs/assets/mitos-mark-black.svg" width="120" height="120">
+  </picture>
+</p>
+
 <h1 align="center">mitos</h1>
 
 <p align="center">

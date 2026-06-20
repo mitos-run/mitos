@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="523.607" height="523.607" viewBox="0 0 523.607 523.607">
+  <title>mitos mark</title>
+  <desc>Two overlapping circles: a filled disc dividing into an open ring. Geometry derived from the golden ratio.</desc>
+  <clipPath id="leftDisc">
+    <circle cx="200" cy="261.803" r="100"/>
+  </clipPath>
+  <circle cx="200" cy="261.803" r="100" fill="#000000"/>
+  <circle cx="323.607" cy="261.803" r="100" fill="none" stroke="#000000" stroke-width="14.59"/>
+  <g clip-path="url(#leftDisc)">
+    <circle cx="323.607" cy="261.803" r="100" fill="none" stroke="#ffffff" stroke-width="14.59"/>
+  </g>
+</svg>
