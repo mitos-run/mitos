@@ -55,7 +55,7 @@ example `v0.1.0`):
 
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   ghcr.io/paperclipinc/mitos-controller:VERSION
 ```
@@ -65,7 +65,7 @@ Verify the SBOM attestation:
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   ghcr.io/paperclipinc/mitos-controller:VERSION
 ```
