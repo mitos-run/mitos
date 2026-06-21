@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/husk"
@@ -606,6 +607,46 @@ func (r *SandboxClaimReconciler) resolveWorkspaceHead(ctx context.Context, claim
 	return d, &headRev, true, nil
 }
 
+// existingClaimRevision returns the WorkspaceRevision already created by a prior
+// dehydrate attempt for THIS claim instance, or nil if none exists. It is the
+// idempotency probe for a retried terminate: the revision is created before the
+// claim's dehydrated annotation is durable, so a conflict on a later write
+// requeues the terminate; this probe lets the retry adopt the existing revision
+// instead of committing a duplicate fromClaim child. It matches on the claim UID
+// label (not the claim name) so a stale revision left by a prior, same-named
+// claim instance is never mistaken for this instance's: the UID is unique per
+// instance, name is not.
+func (r *SandboxClaimReconciler) existingClaimRevision(ctx context.Context, claim *v1alpha1.SandboxClaim) (*v1alpha1.WorkspaceRevision, error) {
+	if claim.UID == "" {
+		// No UID (a bare unit-test struct never persisted): the probe cannot scope to
+		// an instance, so report none and let the caller create a revision. The
+		// envtest and production paths always carry a UID.
+		return nil, nil
+	}
+	// Read through the uncached APIReader: a revision this reconcile created on a
+	// prior (conflicting) attempt may not yet be in the controller-runtime cache,
+	// so a cached List would miss it and the retry would commit a duplicate child.
+	// A nil APIReader (a bare unit-test struct) falls back to the cached client.
+	var reader client.Reader = r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var revs v1alpha1.WorkspaceRevisionList
+	if err := reader.List(ctx, &revs,
+		client.InNamespace(claim.Namespace),
+		client.MatchingLabels{FromClaimUIDLabel: string(claim.UID)},
+	); err != nil {
+		return nil, fmt.Errorf("list revisions for claim %s idempotency check: %w", claim.Name, err)
+	}
+	for i := range revs.Items {
+		rev := &revs.Items[i]
+		if rev.Spec.WorkspaceRef.Name == claim.Spec.WorkspaceRef.Name {
+			return rev, nil
+		}
+	}
+	return nil, nil
+}
+
 // workspaceBusyClaim returns the name of an active claim (one that holds the
 // terminate finalizer and is not in a terminal phase) other than the given claim
 // that binds the same workspace, or "" if none. It is the single-writer gate: a
@@ -749,6 +790,24 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	logger := log.FromContext(ctx)
 
+	// Idempotency probe for a retried terminate. The new revision is created before
+	// the dehydrated annotation on the claim is durable, so a conflict on a later
+	// write (the diff/git status record, or the annotation Update) requeues the
+	// terminate with the annotation still absent. If a fromClaim revision for this
+	// claim already exists, the dehydrate already committed it on a prior attempt:
+	// stamp the annotation and return rather than recomputing the head and creating
+	// a SECOND fromClaim revision. The duplicate is the diff-parent hazard: the
+	// head advances to child1, the retry resolves child1 as the new diff parent and
+	// creates child2 descending from it, so the head's diff parent resolves to the
+	// stranded child instead of the real parent the test created.
+	if existing, perr := r.existingClaimRevision(ctx, claim); perr != nil {
+		return perr
+	} else if existing != nil {
+		logger.Info("workspace already dehydrated on a prior attempt; reusing the committed revision",
+			"claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "revision", existing.Name)
+		return r.markDehydrated(ctx, claim, existing.Name)
+	}
+
 	// A bound workspace that has already been deleted leaves nothing to capture:
 	// the dehydrate target is gone. Treat it as a TERMINAL no-op so the finalizer
 	// is dropped and the claim is garbage-collected, rather than retrying the
@@ -891,8 +950,11 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: claim.Spec.WorkspaceRef.Name + "-",
 			Namespace:    claim.Namespace,
-			Labels:       map[string]string{WorkspaceLabel: claim.Spec.WorkspaceRef.Name},
-			Annotations:  annotations,
+			Labels: map[string]string{
+				WorkspaceLabel:    claim.Spec.WorkspaceRef.Name,
+				FromClaimUIDLabel: string(claim.UID),
+			},
+			Annotations: annotations,
 		},
 		Spec: v1alpha1.WorkspaceRevisionSpec{
 			WorkspaceRef:            v1alpha1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
@@ -923,26 +985,80 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	gitPushes, gitErr := r.rendezvousOnTerminate(ctx, claim, digest)
 
 	// Record the diff summary and git pushes on the revision status subresource,
-	// if either was produced.
+	// if either was produced. The Workspace reconciler adopts a fresh revision
+	// concurrently (it stamps the workspace label and owner reference, bumping the
+	// resourceVersion), so a plain status Update races and loses the optimistic
+	// lock intermittently. A lost write here would abort the terminate AFTER the
+	// revision was already created but BEFORE the dehydrated annotation is durable,
+	// so the retry would create a SECOND revision (the duplicate-child hazard).
+	// Refetch and reapply under RetryOnConflict so the status write converges
+	// against the adopt without aborting the terminate.
 	if diffSummary != nil || len(gitPushes) > 0 {
-		rev.Status.DiffSummary = diffSummary
-		rev.Status.GitPushes = gitPushes
-		if err := r.Status().Update(ctx, rev); err != nil {
-			return finish(fmt.Errorf("record revision %s diff/git status: %w", rev.Name, err))
+		revName := rev.Name
+		// Read through the uncached reader inside the retry: the revision was just
+		// created, so a cached Get can return NotFound (which RetryOnConflict does
+		// not retry) and abort the terminate. A nil APIReader (a bare unit-test
+		// struct) falls back to the cached client.
+		var reader client.Reader = r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var latest v1alpha1.WorkspaceRevision
+			if err := reader.Get(ctx, types.NamespacedName{Namespace: rev.Namespace, Name: revName}, &latest); err != nil {
+				return err
+			}
+			latest.Status.DiffSummary = diffSummary
+			latest.Status.GitPushes = gitPushes
+			return r.Status().Update(ctx, &latest)
+		}); err != nil {
+			return finish(fmt.Errorf("record revision %s diff/git status: %w", revName, err))
 		}
 	}
 
-	if claim.Annotations == nil {
-		claim.Annotations = map[string]string{}
-	}
-	claim.Annotations[workspaceDehydratedAnnotation] = rev.Name
-	if err := r.Update(ctx, claim); err != nil {
+	if err := r.markDehydrated(ctx, claim, rev.Name); err != nil {
 		return finish(err)
 	}
 	// A git push failure is surfaced (not swallowed) only after the revision and
 	// dehydrated annotation are durable, so the work is never lost and the
 	// terminate retries the push.
 	return finish(gitErr)
+}
+
+// markDehydrated stamps the dehydrated annotation on the claim so a later
+// reconcile (or a retried terminate) treats the dehydrate as already done. It
+// refetches and reapplies under RetryOnConflict because the claim is written by
+// other paths (phase/status) concurrently, and a lost annotation write would
+// leave the dehydrate non-idempotent (the duplicate-child hazard). The annotation
+// value is a generated revision name, never a secret.
+func (r *SandboxClaimReconciler) markDehydrated(ctx context.Context, claim *v1alpha1.SandboxClaim, revName string) error {
+	var reader client.Reader = r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest v1alpha1.SandboxClaim
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, &latest); err != nil {
+			return err
+		}
+		if _, done := latest.Annotations[workspaceDehydratedAnnotation]; done {
+			return nil
+		}
+		if latest.Annotations == nil {
+			latest.Annotations = map[string]string{}
+		}
+		latest.Annotations[workspaceDehydratedAnnotation] = revName
+		if err := r.Update(ctx, &latest); err != nil {
+			return err
+		}
+		// Reflect the durable annotation onto the caller's copy so the rest of this
+		// reconcile sees the dehydrate as done.
+		claim.Annotations = latest.Annotations
+		return nil
+	}); err != nil {
+		return fmt.Errorf("mark claim %s dehydrated: %w", claim.Name, err)
+	}
+	return nil
 }
 
 // rendezvousOnTerminate pushes the workspace repo paths to each {git} output's

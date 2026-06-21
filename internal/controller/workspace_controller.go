@@ -24,6 +24,16 @@ import (
 // reference (for GC) the first time it reconciles the workspace.
 const WorkspaceLabel = "mitos.run/workspace"
 
+// FromClaimUIDLabel records the UID of the SandboxClaim instance whose terminate
+// dehydrate created a WorkspaceRevision. The dehydrate is made idempotent by
+// probing for an existing revision with this label before creating another, so a
+// retried terminate (a conflict on a post-create write) does not commit a
+// duplicate fromClaim child. The UID scopes the probe to THIS claim instance,
+// not just its name: two claims that reuse the same name (a deleted-then-recreated
+// claim) have distinct UIDs, so a stale prior revision is never mistaken for this
+// instance's.
+const FromClaimUIDLabel = "mitos.run/from-claim-uid"
+
 // Workspace reason codes. These are the normative reason strings for the
 // Workspace and WorkspaceRevision Ready conditions; the catalogue lives in
 // docs/conditions.md.
