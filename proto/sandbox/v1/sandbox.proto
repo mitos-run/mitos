@@ -1,0 +1,428 @@
+syntax = "proto3";
+
+// The Sandbox runtime protocol (API v2, docs/api/v2-spec.md section 4).
+//
+// This is the NORMATIVE CONTRACT for the in-sandbox runtime surface: streaming
+// exec/PTY, file IO, directory listing, filesystem watch, archive transfer,
+// process inspection, signals, port-forward, and guest vitals; plus the
+// budget-gated self-service RPCs (Fork, Checkpoint, ExtendLifetime, Budget)
+// that the controller materializes declaratively (issue #25 capability budgets).
+//
+// One protocol is intended to ride three transports (vsock in-guest,
+// cluster-internal, browser). Today the runtime surface is served by the ad-hoc
+// JSON-over-HTTP sandbox API on forkd :9091 and the JSON-lines vsock protocol to
+// the guest agent (internal/vsock, guest/agent). Those WORK and remain in force.
+// This proto fixes the target contract so the wire migration (guest agent ->
+// this service, forkd bridge, three transports, KVM e2e) is a well-scoped set of
+// follow-up slices. See docs/api/runtime-protocol.md and ADR 0007.
+//
+// The package is versioned (sandbox.v1) so the runtime protocol can version
+// independently of the forkd control-plane proto, with a one-major-version
+// compatibility window (docs/api/runtime-protocol.md).
+package sandbox.v1;
+
+option go_package = "mitos.run/mitos/proto/sandbox/v1;sandboxv1";
+
+// Sandbox is the runtime surface a caller has against ONE sandbox: its own
+// sandbox. Every RPC is implicitly scoped to the caller's sandbox by the
+// transport credential (the per-sandbox bearer token at the forkd edge today,
+// an attenuated capability token under issue #25). Deliberately ABSENT, by
+// design, are Delete of OTHER sandboxes, pool mutation, and workspace
+// administration: those are creator-scope, declarative-only operations that the
+// controller owns. me.exit() terminates only the caller and is modeled as a
+// Signal to the caller's own init, not a cross-sandbox Delete.
+service Sandbox {
+  // --- Execution: the hot path ---
+
+  // Exec runs a command and streams its IO. The client sends one ExecRequest
+  // with the open oneof (cmd, env, cwd, pty), then zero or more ExecRequest with
+  // the stdin oneof to feed stdin and resize oneof to resize a PTY. The server
+  // streams stdout/stderr chunks and a terminal exit. This replaces both the
+  // one-shot POST /v1/exec and the streaming POST /v1/exec/stream and the PTY
+  // WebSocket GET /v1/pty: a non-PTY Exec is a streaming exec, a PTY Exec
+  // (open.pty set) is the interactive terminal, both over the one bidi stream.
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
+
+  // --- Filesystem ---
+
+  // ReadFile streams the bytes of one file. Replaces POST /v1/files/read.
+  rpc ReadFile(ReadFileRequest) returns (stream Chunk);
+
+  // WriteFile streams bytes into one file. The first WriteFileRequest carries
+  // the path and mode; subsequent messages carry content chunks. Replaces
+  // POST /v1/files/write.
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResult);
+
+  // List enumerates a directory with AIP-158 pagination and filtering. Replaces
+  // POST /v1/files/list.
+  rpc List(ListRequest) returns (ListResponse);
+
+  // Stat returns metadata for one path without reading its contents.
+  rpc Stat(StatRequest) returns (FileInfo);
+
+  // Archive tars a subtree and streams the tar bytes (download), or, when
+  // direction is UNTAR, accepts a tar to extract. Replaces the vsock tar_dir /
+  // untar_dir workspace-transfer path. For UNTAR the client uses the streaming
+  // WriteFile-style upload via ArchiveUploadRequest (see PortForward note: this
+  // download-only RPC keeps the common path simple; the symmetric upload is a
+  // follow-up streaming RPC, see docs/api/runtime-protocol.md).
+  rpc Archive(ArchiveRequest) returns (stream Chunk);
+
+  // Watch streams filesystem change events for a subtree until the client
+  // cancels. New surface in v2 (no current HTTP/vsock equivalent).
+  rpc Watch(WatchRequest) returns (stream FsEvent);
+
+  // --- Processes and network ---
+
+  // Processes lists the guest process table. New surface in v2.
+  rpc Processes(ProcessesRequest) returns (ProcessList);
+
+  // Signal delivers a POSIX signal to a process in the guest. me.exit() is a
+  // SIGTERM to the caller's own init (pid 1) and is the ONLY way a sandbox ends
+  // itself. New surface in v2.
+  rpc Signal(SignalRequest) returns (SignalResponse);
+
+  // PortForward proxies a guest TCP port over a bidirectional byte stream. Each
+  // Frame carries a slice of one direction's bytes. New surface in v2.
+  rpc PortForward(stream Frame) returns (stream Frame);
+
+  // --- Budget-gated self-service (docs/api/v2-spec.md section 3) ---
+  //
+  // These four RPCs are self-service operations a sandbox performs on its OWN
+  // lineage, each gated by a capability budget (issue #25). The runtime accepts
+  // the call, debits the budget, and MATERIALIZES a declarative object the
+  // controller reconciles; the RPC returns the handle to that object, not the
+  // finished result. The controller-materializes-objects behavior is DOCUMENTED
+  // here, not implemented in this slice (docs/api/runtime-protocol.md).
+
+  // Fork forks N sibling sandboxes from this live sandbox. Returns a
+  // long-running Operation handle the caller polls; the controller materializes
+  // the N siblings declaratively. Budget-gated by the fork allowance.
+  rpc Fork(ForkRequest) returns (Operation);
+
+  // Checkpoint captures this sandbox's live state as a workspace Revision.
+  // Returns the Revision handle. Budget-gated by the checkpoint allowance.
+  rpc Checkpoint(CheckpointRequest) returns (Revision);
+
+  // ExtendLifetime extends this sandbox's lease. Returns the new Lease.
+  // Budget-gated by the lifetime allowance.
+  rpc ExtendLifetime(ExtendRequest) returns (Lease);
+
+  // Budget reports the caller's remaining self-service allowances.
+  rpc Budget(BudgetRequest) returns (BudgetStatus);
+
+  // --- Telemetry ---
+
+  // Vitals streams guest health samples (cpu steal, memory vs balloon, process
+  // count) until the client cancels. New surface in v2.
+  rpc Vitals(VitalsRequest) returns (stream GuestVitals);
+}
+
+// --- Execution messages ---
+
+// ExecRequest is one message in the Exec bidi stream. Exactly one field of the
+// oneof is set per message. The first message MUST carry `open`; later messages
+// carry `stdin` (bytes for the process stdin) or `resize` (a PTY window resize).
+message ExecRequest {
+  oneof msg {
+    ExecOpen open = 1;
+    bytes stdin = 2;
+    WindowSize resize = 3;
+    // stdin_close signals end-of-input on stdin without closing the whole
+    // stream (the process may keep producing output).
+    bool stdin_close = 4;
+  }
+}
+
+// ExecOpen starts the command. It mirrors today's vsock ExecRequest plus the
+// PTY shape (internal/vsock PtyRequest): when `pty` is set the process runs on a
+// pseudo-terminal and the stream is the interactive terminal, otherwise it is a
+// streaming exec with separate stdout/stderr.
+message ExecOpen {
+  // command and args: when args is empty, command is run through the shell as a
+  // single string (today's behavior); when args is set, command is the argv[0]
+  // and args the rest, executed without a shell.
+  string command = 1;
+  repeated string args = 2;
+  // env entries are merged onto the sandbox environment. Values may be secret
+  // and are never logged.
+  repeated EnvVar env = 3;
+  // cwd is the working directory; empty defaults to /workspace.
+  string cwd = 4;
+  // timeout_seconds bounds one execution; <= 0 applies the guest default.
+  int32 timeout_seconds = 5;
+  // pty, when set, allocates a pseudo-terminal with the given initial window
+  // size and runs `command` (default /bin/sh) attached to it.
+  PtyOptions pty = 6;
+}
+
+message PtyOptions {
+  // term is the TERM value to export (e.g. "xterm-256color"); empty applies a
+  // guest default.
+  string term = 1;
+  WindowSize size = 2;
+}
+
+message WindowSize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+// ExecResponse is one message in the Exec reply stream. Exactly one field is
+// set. stdout/stderr carry output chunks; exit is the terminal message. For a
+// PTY exec, output arrives on stdout (the merged terminal stream).
+message ExecResponse {
+  oneof msg {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExecExit exit = 3;
+  }
+}
+
+message ExecExit {
+  int32 exit_code = 1;
+  double exec_time_ms = 2;
+  // error is set only on a transport-level spawn failure (the process never
+  // started); it is an LLM-legible remediation string, never a secret value.
+  string error = 3;
+}
+
+message EnvVar {
+  string key = 1;
+  string value = 2;
+}
+
+// --- Filesystem messages ---
+
+message ReadFileRequest {
+  string path = 1;
+}
+
+// Chunk is a generic streamed byte slice used by ReadFile and Archive. eof is
+// set true on the final, possibly empty, message.
+message Chunk {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+// WriteFileRequest is one message in the WriteFile upload stream. The first
+// message MUST carry `open`; subsequent messages carry `data`.
+message WriteFileRequest {
+  oneof msg {
+    WriteFileOpen open = 1;
+    bytes data = 2;
+  }
+}
+
+message WriteFileOpen {
+  string path = 1;
+  // mode is the file mode bits (e.g. 0o644); 0 applies a guest default.
+  uint32 mode = 2;
+}
+
+message WriteFileResult {
+  int64 bytes_written = 1;
+}
+
+// ListRequest follows AIP-158. parent is the directory to list.
+message ListRequest {
+  // parent is the directory path whose children are listed.
+  string parent = 1;
+  // page_size is the maximum number of FileInfo to return; the server may
+  // return fewer. 0 lets the server choose a default.
+  int32 page_size = 2;
+  // page_token is the next_page_token from a prior ListResponse; empty starts
+  // at the first page.
+  string page_token = 3;
+  // filter is an AIP-160 filter expression over FileInfo fields (e.g.
+  // "is_dir=true"). Empty returns all entries.
+  string filter = 4;
+}
+
+message ListResponse {
+  repeated FileInfo entries = 1;
+  // next_page_token is the token to pass as ListRequest.page_token for the next
+  // page; empty when this is the last page.
+  string next_page_token = 2;
+}
+
+message StatRequest {
+  string path = 1;
+}
+
+// FileInfo describes one filesystem entry. Mirrors the vsock FileEntry plus the
+// full path so List/Stat results are self-describing.
+message FileInfo {
+  string name = 1;
+  string path = 2;
+  bool is_dir = 3;
+  int64 size = 4;
+  uint32 mode = 5;
+  // modified_at_unix is the mtime in Unix seconds.
+  int64 modified_at_unix = 6;
+}
+
+// ArchiveRequest tars a subtree (DOWNLOAD, the default) and streams the tar as
+// Chunk. The symmetric extract (UNTAR) is documented as a follow-up streaming
+// upload RPC (docs/api/runtime-protocol.md); this slice fixes the download
+// shape that the vsock tar_dir path maps to.
+message ArchiveRequest {
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DOWNLOAD = 1;
+    UNTAR = 2;
+  }
+  // path is the subtree root. The guest restricts it to the workspace-transfer
+  // allowlist (only /workspace and below), matching today's TarDir guard.
+  string path = 1;
+  Direction direction = 2;
+}
+
+// WatchRequest subscribes to filesystem change events under a subtree.
+message WatchRequest {
+  string path = 1;
+  // recursive watches the whole subtree; false watches only direct children.
+  bool recursive = 2;
+}
+
+message FsEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    CREATE = 1;
+    MODIFY = 2;
+    DELETE = 3;
+    RENAME = 4;
+  }
+  Kind kind = 1;
+  string path = 2;
+  // new_path is set only on RENAME (the destination path).
+  string new_path = 3;
+}
+
+// --- Process and network messages ---
+
+message ProcessesRequest {}
+
+message ProcessList {
+  repeated ProcessInfo processes = 1;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  int32 ppid = 2;
+  string command = 3;
+  // state is the single-letter process state (R, S, D, Z, T).
+  string state = 4;
+  double cpu_percent = 5;
+  int64 rss_bytes = 6;
+}
+
+message SignalRequest {
+  int32 pid = 1;
+  // signal is the POSIX signal number (e.g. 15 for SIGTERM). me.exit() targets
+  // pid 1 with SIGTERM.
+  int32 signal = 2;
+}
+
+message SignalResponse {}
+
+// Frame is one bidirectional byte slice on a PortForward stream. The first
+// client Frame MUST carry `open` to select the guest port; later frames carry
+// `data`. Server frames carry `data` or `close`.
+message Frame {
+  oneof msg {
+    PortForwardOpen open = 1;
+    bytes data = 2;
+    bool close = 3;
+  }
+}
+
+message PortForwardOpen {
+  uint32 port = 1;
+}
+
+// --- Budget-gated self-service messages (issue #25) ---
+
+message ForkRequest {
+  // count is the number of sibling sandboxes to fork from this live sandbox.
+  int32 count = 1;
+  // env entries applied to each sibling (merged onto the inherited environment).
+  repeated EnvVar env = 2;
+}
+
+// Operation is a minimal long-running-operation handle (AIP-151 shaped). The
+// controller materializes the N siblings declaratively; the caller polls the
+// Operation by name on the control-plane surface. The full LRO type is defined
+// in the control-plane proto in a follow-up; this is the runtime-facing handle.
+message Operation {
+  // name is the operation resource name the controller assigns.
+  string name = 1;
+  bool done = 2;
+}
+
+message CheckpointRequest {
+  // workspace is the target workspace to record the revision under; empty uses
+  // the sandbox's bound workspace.
+  string workspace = 1;
+  // message is an optional human label for the revision.
+  string message = 2;
+}
+
+// Revision is the workspace revision handle the controller materializes from a
+// checkpoint. The full Revision type lives in the control-plane proto; this is
+// the runtime-facing handle.
+message Revision {
+  string name = 1;
+  // digest is the content-addressed identity of the captured state.
+  string digest = 2;
+}
+
+message ExtendRequest {
+  // additional_seconds extends the current lease by this many seconds.
+  int64 additional_seconds = 1;
+}
+
+// Lease is the sandbox lifetime lease after an extension.
+message Lease {
+  // expires_at_unix is the new lease expiry in Unix seconds.
+  int64 expires_at_unix = 1;
+}
+
+message BudgetRequest {}
+
+// BudgetStatus reports remaining self-service allowances. Each Allowance is a
+// remaining/limit pair so the caller can see headroom before spending it.
+message BudgetStatus {
+  Allowance fork = 1;
+  Allowance checkpoint = 2;
+  Allowance lifetime_extension = 3;
+}
+
+message Allowance {
+  int64 remaining = 1;
+  int64 limit = 2;
+}
+
+// --- Telemetry messages ---
+
+message VitalsRequest {
+  // interval_seconds is the desired sample cadence; <= 0 applies a guest
+  // default.
+  int32 interval_seconds = 1;
+}
+
+// GuestVitals is one health sample. Fields mirror the v2 spec's listed signals:
+// cpu steal, memory vs balloon, process count.
+message GuestVitals {
+  // sampled_at_unix is the sample time in Unix seconds.
+  int64 sampled_at_unix = 1;
+  double cpu_percent = 2;
+  // cpu_steal_percent is the fraction of time the guest was runnable but the
+  // host scheduled another VM (steal time).
+  double cpu_steal_percent = 3;
+  int64 mem_used_bytes = 4;
+  int64 mem_total_bytes = 5;
+  // mem_balloon_bytes is memory reclaimed by the balloon device.
+  int64 mem_balloon_bytes = 6;
+  int32 process_count = 7;
+}
