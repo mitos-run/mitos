@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,12 +17,14 @@ import (
 
 	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
 	"mitos.run/mitos/internal/snapcompat"
 	"mitos.run/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/templatebuild"
 	"mitos.run/mitos/internal/volume"
 	"mitos.run/mitos/internal/vsock"
 )
@@ -47,6 +51,21 @@ type Engine struct {
 	// readMemoryStats (/proc/<pid>/smaps_rollup); a seam so Metering's lifetime
 	// re-sample is unit-testable without a real VM.
 	memStat func(pid int) (unique, shared int64)
+
+	// egressBytes reads a sandbox's total egress bytes from its per-tap nftables
+	// egress counter (issue #219, the #211 metering seam). Nil disables the read
+	// (Metering reports zero egress bytes), which is the default when networking
+	// is off. A seam so the metering rollup is unit-testable without nft; the
+	// production reader runs `nft -j list counter` and parses it via
+	// netconf.ParseEgressCounterBytes.
+	egressBytes func(tap string) int64
+
+	// pinCtl owns dynamic post-ready CPU pinning + launch RT priority for this
+	// engine's forks (issue #168). It is created lazily on the first pinning-
+	// enabled fork over a platform applier (Linux real, darwin no-op), so engines
+	// that never pin pay nothing. The pure plan it drives is in internal/cpupin.
+	pinCtl   *cpupin.Controller
+	pinCtlMu sync.Mutex
 
 	// casStore content-addresses every template snapshot for integrity
 	// verification (issue #9) and incremental transfer (Task 4). Rooted at
@@ -81,6 +100,13 @@ type Engine struct {
 	// templateDigests caches the recorded manifest digest per template id so
 	// GetCapacity can report it to the controller without re-reading disk.
 	templateDigests map[string]cas.Digest
+
+	// buildCache, when set, is consulted by CreateTemplate to decide which
+	// declarative build steps a cached build could reuse (issue #220). Nil (the
+	// default) means no cache: every step is built, the current behavior. The
+	// actual layer reuse on a real boot is KVM gated; the engine computes and
+	// logs the plan, the firecracker suite asserts the reuse.
+	buildCache templatebuild.Cache
 
 	// Networking is opt-in. When both netMgr and netAlloc are set, a fork
 	// that carries NetworkOpts gets a distinct per-fork network identity:
@@ -424,7 +450,19 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		guestResolver = e.resolverIP.String()
 	}
 
-	if err := e.netMgr.Setup(context.Background(), id, policy, allow, e.resolverIP); err != nil {
+	sbPolicy := netconf.SandboxPolicy{
+		Egress:       policy,
+		Allow:        allow,
+		AllowCIDRs:   opts.Network.AllowCIDRs,
+		BlockNetwork: opts.Network.BlockNetwork,
+		Inbound:      v1alpha1.InboundPolicy(opts.Network.Inbound),
+		InboundCIDRs: opts.Network.InboundCIDRs,
+		// Always wire the per-sandbox egress counter so the metering pipeline
+		// (#211) can read this sandbox's egress bytes by name. It is a passive
+		// counting rule with no verdict, so it never changes enforcement.
+		Counter: true,
+	}
+	if err := e.netMgr.Setup(context.Background(), id, sbPolicy, e.resolverIP); err != nil {
 		e.netAlloc.Release(sandboxID)
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
 	}
@@ -652,6 +690,16 @@ type SandboxRecord struct {
 	CreatedAt time.Time
 }
 
+// VolumeRecord is the minimal view of one per-sandbox volume backing directory
+// an engine reports through ListVolumes: the sandbox id the directory is keyed
+// by, and the directory's age (now minus its mtime). The controller GC uses the
+// id to match the backing against its desired-alive and live-claim sets, and
+// the age to honor OrphanGrace, exactly as it does for a VM.
+type VolumeRecord struct {
+	SandboxID string
+	Age       time.Duration
+}
+
 // NewEngine builds the real KVM-backed engine. A zero jailer config
 // launches Firecracker directly (development only; flagged in the threat
 // model); with JailerBin set every VM runs through the jailer with a
@@ -660,6 +708,11 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
+	// The guest kernel is staged by the kernel-provisioner DaemonSet, which may
+	// still be running when forkd starts, so forkd must NOT fail startup on a
+	// missing kernel (that would crash-loop the builder before the kernel lands).
+	// The staged-kernel check lives in CreateTemplate, the build path that boots
+	// from the image, where the LLM-legible error (issue #174) is actionable.
 
 	if jailer.Enabled() {
 		jailer.DataDir = dataDir
@@ -766,6 +819,15 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	}
 	if e.meminfoReader == nil {
 		e.meminfoReader = procMeminfoReader
+	}
+	// Wire the production egress-byte reader when networking is enabled so the
+	// metering rollup (#211 seam) attributes per-sandbox egress bytes from the
+	// nftables counter installed in each fork's chain. It reads the counter by
+	// tap and parses the JSON; any read error reports zero (best-effort, never
+	// blocks the metering endpoint). When networking is off this stays nil and
+	// Metering reports zero egress bytes.
+	if e.networkEnabled() {
+		e.egressBytes = readEgressCounterBytes
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
@@ -907,10 +969,13 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 func validateKVM() error {
 	info, err := os.Stat("/dev/kvm")
 	if err != nil {
-		return fmt.Errorf("/dev/kvm not found: %w", err)
+		// LLM-legible remediation (issue #28 / #174): name the device, the likely
+		// cause, and the fix so the operator (or an agent reading the log) knows
+		// exactly what to do.
+		return fmt.Errorf("/dev/kvm not found: %w; this node lacks a usable KVM device. Ensure it is a KVM worker with CPU virtualization exposed to the OS (Hetzner AX bare-metal, not Cloud) and the kvm + kvm_intel/kvm_amd modules loaded at boot; run `mitos doctor` for a full preflight", err)
 	}
 	if info.Mode()&os.ModeCharDevice == 0 {
-		return fmt.Errorf("/dev/kvm is not a character device")
+		return fmt.Errorf("/dev/kvm is not a character device; the KVM device is present but unusable. Confirm forkd has access to it (the DaemonSet mounts it as a CharDevice hostPath) and that KVM is functional on this node; run `mitos doctor` for a full preflight")
 	}
 	return nil
 }
@@ -1215,6 +1280,14 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		}
 	}
 
+	// Launch-priority hook (issue #168): bump the vCPU threads to the launch
+	// scheduling priority BEFORE the resume burst, so the activate window runs
+	// elevated. The matching drop happens in the post-ready hook below. A no-op
+	// when pinning is off or off Linux. Best-effort: a failure to raise priority
+	// must not fail the fork (the fork is still correct, just unprioritized), so
+	// it is logged via the hook and the fork proceeds.
+	e.onLaunchStart(sandboxID, fcClient, opts)
+
 	// Resume the VM only AFTER the rootfs and volume drives are rebound, so the
 	// guest comes up already bound to its own per-fork rootfs clone and volume
 	// backings, never the shared template. Fail closed: a rejected resume means the
@@ -1223,6 +1296,14 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		cleanupFork()
 		return nil, fmt.Errorf("resume fork %s after drive rebind: %w", sandboxID, err)
 	}
+
+	// Post-ready pin hook (issue #168): NOW that the guest is up (resumed), pin
+	// the fork's vCPU threads per the pool policy and drop the launch priority.
+	// Pinning AFTER ready (never from startup) and leaving the launch burst
+	// unpinned is the Browser Use lesson. Best-effort: a pin failure leaves the
+	// fork unpinned (floating in the husk pod cpuset, correct just less dense),
+	// so it never fails the fork.
+	e.onGuestReady(sandboxID, fcClient, opts)
 
 	elapsed := time.Since(start)
 
@@ -1353,6 +1434,84 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{}, false)
 }
 
+// Pause snapshots a running sandbox's FULL state (memory + filesystem) to its
+// checkpoint dir and pauses the VM, so a later Resume restores it exactly
+// (issue #218). The snapshot is a Firecracker Full snapshot: the vCPU and device
+// state plus the guest memory file, paired with the copy-on-write rootfs that
+// already holds the filesystem, so repeated pause/resume cycles preserve both
+// memory AND filesystem. The CORRECTNESS of that preservation across N cycles
+// is the KVM acceptance bar (engine_pause_kvm_test.go); this method is the
+// sandboxIDPattern matches a safe sandbox id used as a single path component
+// under the data dir: 1 to 64 characters of [a-zA-Z0-9_-] starting with a
+// letter or digit, so an id can never contain a path separator, "..", or "."
+// and escape the sandboxes directory. It mirrors internal/daemon
+// validateSandboxID so the two layers agree on the id grammar.
+var sandboxIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// safeSandboxIDComponent reports whether id is a safe single path component per
+// sandboxIDPattern (no separators, no "." or "..", no traversal).
+func safeSandboxIDComponent(id string) bool {
+	return sandboxIDPattern.MatchString(id)
+}
+
+// engine primitive the daemon pause endpoint drives.
+//
+// A paused VM keeps its host resources (memory file, drives, tap) reserved; it
+// is held, not reaped. Pause is idempotent: pausing an already-paused VM is a
+// no-op success.
+func (e *Engine) Pause(sandboxID string) error {
+	e.mu.RLock()
+	sandbox, ok := e.sandboxes[sandboxID]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.fcClient == nil {
+		// An adopted or mock-backed sandbox has no live Firecracker client to
+		// pause; the daemon's API-level paused flag still holds the clock.
+		return nil
+	}
+	if err := sandbox.fcClient.Pause(); err != nil {
+		return fmt.Errorf("pause sandbox %s: %w", sandboxID, err)
+	}
+	// Defense in depth: the sandbox id reached us from the API and is used as a
+	// path component below, so reject anything that is not a safe single segment
+	// before it can escape the data dir (a path-traversal guard).
+	if !sandboxIDPattern.MatchString(sandboxID) {
+		return fmt.Errorf("invalid sandbox id %q", sandboxID)
+	}
+	checkpointDir := filepath.Join(e.dataDir, "sandboxes", sandboxID, "pause")
+	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
+		return fmt.Errorf("create pause checkpoint dir: %w", err)
+	}
+	memFile := filepath.Join(checkpointDir, "mem")
+	vmStateFile := filepath.Join(checkpointDir, "vmstate")
+	if err := sandbox.fcClient.CreateSnapshot(memFile, vmStateFile); err != nil {
+		return fmt.Errorf("checkpoint paused sandbox %s: %w", sandboxID, err)
+	}
+	return nil
+}
+
+// Resume restores a paused sandbox to RUNNING (issue #218). On the real engine
+// it resumes the paused Firecracker VM in place, so the exact memory and
+// filesystem state captured at Pause continues. Resume is idempotent: resuming
+// a running VM is a no-op success.
+func (e *Engine) Resume(sandboxID string) error {
+	e.mu.RLock()
+	sandbox, ok := e.sandboxes[sandboxID]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.fcClient == nil {
+		return nil
+	}
+	if err := sandbox.fcClient.Resume(); err != nil {
+		return fmt.Errorf("resume sandbox %s: %w", sandboxID, err)
+	}
+	return nil
+}
+
 // Terminate kills a sandbox and releases its resources.
 func (e *Engine) Terminate(sandboxID string) error {
 	e.mu.Lock()
@@ -1363,6 +1522,10 @@ func (e *Engine) Terminate(sandboxID string) error {
 	}
 	delete(e.sandboxes, sandboxID)
 	e.mu.Unlock()
+
+	// Release any CPU-pin reservation so the fork's physical core(s) free up for
+	// later forks (issue #168). No-op when the fork was never pinned.
+	e.forgetPin(sandboxID)
 
 	if sandbox.agentClient != nil {
 		sandbox.agentClient.Close()
@@ -1429,6 +1592,61 @@ func (e *Engine) ListSandboxes() []SandboxRecord {
 		records = append(records, SandboxRecord{ID: s.ID, CreatedAt: s.CreatedAt})
 	}
 	return records
+}
+
+// ListVolumes scans the on-disk per-sandbox backing layout
+// (<dataDir>/sandboxes/<id>/volumes) and reports one VolumeRecord per sandbox
+// id whose volumes dir exists. It is deliberately disk-driven, not map-driven:
+// the orphan case is exactly a backing dir whose sandbox the engine no longer
+// holds in memory (a forkd crash mid-terminate, or a missed terminate), so a
+// map walk would miss it. The id is the dir name; age is now minus the volumes
+// dir mtime, used by the controller to honor OrphanGrace. A missing sandboxes
+// root is not an error (no forks have run): it yields an empty list.
+func (e *Engine) ListVolumes() []VolumeRecord {
+	root := filepath.Join(e.dataDir, "sandboxes")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		// No sandboxes dir yet, or it cannot be read: nothing to reclaim.
+		return nil
+	}
+	now := time.Now()
+	records := make([]VolumeRecord, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		sandboxID := ent.Name()
+		volumesDir := filepath.Join(root, sandboxID, "volumes")
+		info, err := os.Stat(volumesDir)
+		if err != nil || !info.IsDir() {
+			// This sandbox dir has no volumes backing: nothing to reclaim here.
+			continue
+		}
+		records = append(records, VolumeRecord{
+			SandboxID: sandboxID,
+			Age:       now.Sub(info.ModTime()),
+		})
+	}
+	return records
+}
+
+// ReclaimVolume removes the per-sandbox volume backing for sandboxID via the
+// volume backend, then removes the sandbox dir itself, mirroring the terminate
+// cleanup path. It is the volume-orphan counterpart to Terminate and is only
+// expected to be called for a sandbox the engine no longer holds (the
+// controller GC guards on the claim object being gone). sandboxID is validated
+// at the gRPC boundary before it reaches here. A missing dir is not an error.
+func (e *Engine) ReclaimVolume(sandboxID string) error {
+	if e.volBackend != nil {
+		if err := e.volBackend.Cleanup(sandboxID); err != nil {
+			return fmt.Errorf("reclaim volume %s: %w", sandboxID, err)
+		}
+	}
+	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
+	if err := os.RemoveAll(sandboxDir); err != nil {
+		return fmt.Errorf("reclaim volume %s: remove sandbox dir: %w", sandboxID, err)
+	}
+	return nil
 }
 
 // GetCapacity returns the current node capacity. Memory is CoW-aware: forks of
@@ -1522,6 +1740,9 @@ type meteringSnapshot struct {
 	memoryShared int64
 	hasVolumes   bool
 	volumes      []volume.Spec
+	// tap is the sandbox's network tap name when networking is on (empty
+	// otherwise). Metering reads this sandbox's egress counter by tap.
+	tap string
 }
 
 // memStatFn returns the engine's memory-stat reader (the seam tests inject).
@@ -1570,6 +1791,7 @@ func (e *Engine) Metering() metering.Report {
 			memoryShared: s.MemoryShared,
 			hasVolumes:   s.hasVolumes,
 			volumes:      vols,
+			tap:          s.netID.TapName,
 		})
 	}
 	e.mu.RUnlock()
@@ -1584,6 +1806,10 @@ func (e *Engine) Metering() metering.Report {
 	for _, sn := range snaps {
 		du, ds := e.diskFootprint(sn)
 		mu, ms := stat(sn.pid)
+		var egress int64
+		if e.egressBytes != nil && sn.tap != "" {
+			egress = e.egressBytes(sn.tap)
+		}
 		samples = append(samples, metering.Sample{
 			ID:           sn.id,
 			Template:     sn.template,
@@ -1591,6 +1817,7 @@ func (e *Engine) Metering() metering.Report {
 			MemoryShared: ms,
 			DiskUnique:   du,
 			DiskShared:   ds,
+			EgressBytes:  egress,
 		})
 	}
 	return metering.Aggregate(samples)
@@ -1653,8 +1880,42 @@ func apparentSize(path string) int64 {
 // path unchanged; an OCI reference is pulled, the agent is injected, and a
 // rootfs.ext4 is built from it before boot. A nonzero init command aborts the
 // build so a broken template is never snapshotted or served.
+// logBuildPlan computes the content-addressed build plan for the init commands
+// (each treated as a run step) and logs which steps a cached build would reuse
+// (issue #220). With cache nil every step is BUILD, the unchanged default. This
+// wires the cache lookup into the build path; the real per-step skip on a live
+// boot is KVM gated and asserted in the firecracker suite. The command text is
+// NOT logged (it may carry a secret arg): only the step index and CACHED/BUILD.
+func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache) {
+	if len(initCommands) == 0 {
+		return
+	}
+	steps := make([]v1alpha1.BuildStep, len(initCommands))
+	for i, c := range initCommands {
+		steps[i] = v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: c}
+	}
+	plan := templatebuild.Plan(image, steps, cache)
+	cached := 0
+	for _, p := range plan {
+		if p.Cached {
+			cached++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "forkd: build plan for image %q: %d step(s), %d cached, %d to build\n",
+		image, len(plan), cached, len(plan)-cached)
+}
+
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
 	cfg := firecracker.DefaultVMConfig()
+
+	// Compute the content-addressed build plan (issue #220). Each init command is
+	// a run step; the chained cache keys decide which steps a cached build could
+	// reuse. The plan is computed and logged here so the cache lookup is wired
+	// into the build path; the ACTUAL layer reuse (skipping a cached step on a
+	// real boot) is engine and KVM gated and is asserted in the firecracker
+	// suite, not here. With no cache configured every step is BUILD, which is the
+	// current behavior unchanged.
+	logBuildPlan(image, initCommands, e.buildCache)
 
 	// The template rootfs runs the guest agent as PID 1 at /init: ociroot
 	// injects the agent there for image builds, and the hand-built file-path
@@ -1700,7 +1961,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 			HostIP:   placeholderHostIP,
 			GuestIP:  placeholderGuestIP,
 		}
-		if err := e.netMgr.Setup(context.Background(), placeholderID, v1alpha1.EgressDeny, nil, nil); err != nil {
+		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
 		defer func() {
@@ -1927,11 +2188,55 @@ type ForkOpts struct {
 	// engine prepares and attaches their backing drives; until that lands
 	// (Task 3) it carries them without acting on them.
 	Volumes []volume.Spec
+
+	// CPUPinning carries the pool's dynamic post-ready CPU pinning + launch RT
+	// priority config (issue #168). Nil (the default) leaves the fork unpinned,
+	// exactly the legacy behavior. When set and Enabled, the engine runs the
+	// post-ready pin hook after Resume: it bumps launch priority before the burst
+	// (a no-op stub off Linux), then pins the fork's vCPU threads and drops the
+	// bump once ready. The actual scheduler mutation is Linux-gated in
+	// internal/cpupin; on darwin every step is a no-op so this path stays
+	// honest and compiles.
+	CPUPinning *cpupin.Config
+
+	// VCPUs is the fork's vCPU count, used to size the pin plan (one physical core
+	// per vCPU). Zero means unknown and defaults to 1 in the pin hook.
+	VCPUs int
 }
 
 type NetworkOpts struct {
 	EgressPolicy string
 	AllowList    []string
+	// BlockNetwork drops ALL egress (Modal block_network=True), overriding the
+	// egress policy and the allowlists.
+	BlockNetwork bool
+	// AllowCIDRs is the egress CIDR allowlist (Modal outbound_cidr_allowlist).
+	AllowCIDRs []string
+	// Inbound governs unsolicited inbound to the guest: "deny" (the secure
+	// default, deny-by-default) or "allow". Empty means deny.
+	Inbound string
+	// InboundCIDRs narrows an inbound=allow to source CIDRs (Modal
+	// inbound_cidr_allowlist).
+	InboundCIDRs []string
+}
+
+// readEgressCounterBytes is the production egress-byte reader: it runs
+// `nft -j list counter inet <table> sb_<tap>_egress` and parses the byte total
+// (issue #219). Best-effort: any error (nft missing, counter absent, parse
+// failure) returns zero so the metering endpoint never fails on a counter read.
+// The argv and parser are unit-tested in internal/netconf; this thin wrapper
+// runs the command, so its real exercise is in KVM CI where nft exists.
+func readEgressCounterBytes(tap string) int64 {
+	argv := netconf.NftReadEgressCounterArgs(tap)
+	out, err := exec.Command(argv[0], argv[1:]...).Output()
+	if err != nil {
+		return 0
+	}
+	bytes, err := netconf.ParseEgressCounterBytes(string(out))
+	if err != nil {
+		return 0
+	}
+	return bytes
 }
 
 func readMemoryStats(pid int) (unique, shared int64) {

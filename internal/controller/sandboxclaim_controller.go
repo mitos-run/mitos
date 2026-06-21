@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1alpha1 "mitos.run/mitos/api/v1alpha1"
@@ -461,7 +462,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Pick a node with a ready snapshot
-	node, snapshotID, err := r.selectNode(ctx, &pool, claim.Spec.NodeName)
+	node, snapshotID, err := r.selectNode(ctx, &pool, &template, claim.Spec.NodeName)
 	if err != nil {
 		// No node admits the fork under the overcommit policy: this is a real
 		// capacity shortage, not a missing snapshot. Pend with backpressure and
@@ -474,11 +475,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// transient placement precondition the pool reconciler is expected to
 		// resolve. Pend and retry indefinitely (no bounded fail).
 		logger.Info("no node available for placement, pending", "error", err.Error())
+		beforeStatus := claim.Status.DeepCopy()
 		r.clearPendingSince(&claim)
 		claim.Status.Phase = v1alpha1.SandboxPending
 		recordClaimPending()
-		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		// Best-effort status write, elided on a no-op re-pend; the return below
+		// already requeues or surfaces the error.
+		_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
@@ -555,9 +558,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// that node yet; transient while the pool reconciler catches up.
 		if isNotFound(err) {
 			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
+			beforeStatus := claim.Status.DeepCopy()
 			claim.Status.Phase = v1alpha1.SandboxPending
-			// Best-effort status write; the return below already requeues or surfaces the error.
-			_ = r.Status().Update(ctx, &claim)
+			// Best-effort status write, elided on a no-op re-pend; the return below
+			// already requeues or surfaces the error.
+			_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		// The node rejected the fork on its sandbox-count cap (ResourceExhausted,
@@ -752,6 +757,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+			beforeStatus := claim.Status.DeepCopy()
 			claim.Status.Phase = v1alpha1.SandboxPending
 			setCondition(&claim.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
@@ -760,7 +766,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 				Reason:             "HuskPodRaced",
 				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
 			})
-			_ = r.Status().Update(ctx, claim)
+			_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
 		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
@@ -786,15 +792,19 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	}
 
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
-	egress, allow := huskEgressConfig(template)
+	netCfg := huskEgressConfig(template)
 	req := husk.ActivateRequest{
 		SnapshotDir:    HuskSnapshotDir,
 		ExpectedDigest: expectedDigest,
 		Env:            env,
 		Secrets:        secretVals,
 		Network:        huskNotifyNetwork(template),
-		Egress:         egress,
-		Allow:          allow,
+		Egress:         netCfg.Egress,
+		Allow:          netCfg.Allow,
+		BlockNetwork:   netCfg.BlockNetwork,
+		AllowCIDRs:     netCfg.AllowCIDRs,
+		Inbound:        netCfg.Inbound,
+		InboundCIDRs:   netCfg.InboundCIDRs,
 		Token:          apiToken,
 	}
 	tlsConf, err := r.huskDialTLS(ctx, pod.Namespace)
@@ -819,6 +829,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		if uerr := r.unmarkHuskPodClaimed(ctx, pod); uerr != nil {
 			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
 		}
+		beforeStatus := claim.Status.DeepCopy()
 		claim.Status.Phase = v1alpha1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
@@ -827,7 +838,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 			Reason:             "ActivateFailed",
 			Message:            msg + "; the claim will retry",
 		})
-		_ = r.Status().Update(ctx, claim)
+		_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 
@@ -907,18 +918,67 @@ func huskNotifyNetwork(_ *v1alpha1.SandboxTemplate) *vsock.NotifyForkedNetwork {
 	}
 }
 
-// huskEgressConfig extracts the egress policy string and raw allowlist from the
-// template, defaulting to fail-closed deny with no allows when the template
-// carries no NetworkPolicy. Egress and Allow are config, not secrets.
-func huskEgressConfig(template *v1alpha1.SandboxTemplate) (egress string, allow []string) {
+// huskNetworkConfig is the resolved per-sandbox network posture the controller
+// threads into the husk ActivateRequest: the egress default verdict, the raw
+// allowlist, the block_network total-deny, the CIDR allowlists, and the inbound
+// policy. All fields are config, not secrets, and are safe to log.
+type huskNetworkConfig struct {
+	Egress       string
+	Allow        []string
+	BlockNetwork bool
+	AllowCIDRs   []string
+	Inbound      string
+	InboundCIDRs []string
+}
+
+// huskEgressConfig extracts the full network posture from the template,
+// defaulting to the secure fail-closed posture when the template carries no
+// NetworkPolicy: egress deny with no allows, and inbound deny-by-default. The
+// inbound default is left empty (the stub and renderer treat empty as deny), so
+// an untrusted sandbox with no policy gets deny-by-default in both directions.
+func huskEgressConfig(template *v1alpha1.SandboxTemplate) huskNetworkConfig {
 	if template == nil || template.Spec.Network == nil {
-		return string(v1alpha1.EgressDeny), nil
+		return huskNetworkConfig{Egress: string(v1alpha1.EgressDeny)}
 	}
-	e := template.Spec.Network.Egress
+	n := template.Spec.Network
+	e := n.Egress
 	if e == "" {
 		e = v1alpha1.EgressDeny
 	}
-	return string(e), template.Spec.Network.Allow
+	return huskNetworkConfig{
+		Egress:       string(e),
+		Allow:        n.Allow,
+		BlockNetwork: n.BlockNetwork,
+		AllowCIDRs:   n.AllowCIDRs,
+		Inbound:      string(n.Inbound),
+		InboundCIDRs: n.InboundCIDRs,
+	}
+}
+
+// writeClaimStatusIfChanged writes the claim status only when it differs from
+// the before snapshot, eliding the redundant status write a steady-state pend
+// requeue would otherwise issue every pass. The claim reconciler re-reconciles a
+// stuck claim every 1-5s (no node, snapshot-not-yet, NoCapacity, husk-raced,
+// activate-failed), and each of those paths re-asserts an identical Phase=Pending
+// plus condition. setCondition carries an unchanged condition's
+// LastTransitionTime forward, so on a true no-op the status deep-compares equal
+// and the write (and the etcd churn and the object's own watch re-trigger) is
+// skipped. This is the claim-side counterpart to writePoolStatusIfChanged
+// (issue #163, status-update rate-limiting under churn).
+//
+// Unlike the pool status there is no per-reconcile heartbeat field to exclude:
+// the only claim status timestamps (StartedAt, FinishedAt) are stamped once on a
+// genuine transition, never per pass, so a plain deep-compare is correct.
+// apiequality.Semantic compares metav1.Time by value (handling the
+// monotonic-clock and location pitfalls of a raw DeepEqual). It is used only on
+// the best-effort pend re-assert paths; a genuine transition (Ready, a terminal
+// Failed/Terminated) flips Phase and so always compares unequal and always
+// writes.
+func (r *SandboxClaimReconciler) writeClaimStatusIfChanged(ctx context.Context, claim *v1alpha1.SandboxClaim, before *v1alpha1.SandboxClaimStatus) error {
+	if apiequality.Semantic.DeepEqual(before, &claim.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, claim)
 }
 
 // reconcileNoCapacity handles a placement that no node admits under the
@@ -980,6 +1040,7 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 	}
 
 	// Within the bounded wait: pend with backpressure and retry.
+	beforeStatus := claim.Status.DeepCopy()
 	claim.Status.Phase = v1alpha1.SandboxPending
 	recordClaimPending()
 	setCondition(&claim.Status.Conditions, metav1.Condition{
@@ -992,8 +1053,11 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 			causeClause, waited.Round(time.Second), maxWait, remediation,
 		),
 	})
-	// Best-effort status write; the return below requeues regardless.
-	_ = r.Status().Update(ctx, claim)
+	// Best-effort status write, elided on a no-op re-pend; the return below
+	// requeues regardless. The waited-duration text in the message is rounded to
+	// the second, so a re-pend within the same second compares equal and is
+	// skipped, while a real progression of the wait writes.
+	_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 }
 
@@ -1118,25 +1182,42 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 		}
 	}
 
-	// Idle check needs last-activity from forkd. An unreachable node means we
-	// cannot evaluate idle this pass; requeue and try again.
+	// Idle and live-deadline checks need the work-aware activity signal from
+	// forkd. An unreachable node means we cannot evaluate them this pass; requeue
+	// and try again. We fetch the signal once when either is in play: a live
+	// set_timeout deadline (issue #218) is honored even without Spec.IdleTimeout.
 	requeue := time.Duration(0)
 	if hasIdle {
-		_, lastActivity, ok := sandboxActivity(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
+		sig, ok := fetchActivitySignal(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
 		if !ok {
 			logger.Info("cannot evaluate idle, node unreachable; requeueing", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
-		last := startedAt
-		if lastActivity.After(last) {
-			last = lastActivity
+		// A live set_timeout deadline takes authority over the idle clock
+		// (issue #218): the caller explicitly bounded this running sandbox's TTL.
+		// A deadline in the past reaps; a deadline in the future EXTENDS the TTL,
+		// so the idle window is not consulted at all (this is how set_timeout
+		// keeps an otherwise-idle sandbox alive, the #206 shim seam).
+		if !sig.Deadline.IsZero() {
+			if deadlineExpired(sig, now) {
+				return r.terminateLifetime(ctx, claim, "TimeoutExpired",
+					"live set_timeout deadline expired")
+			}
+			requeue = time.Until(sig.Deadline)
+		} else {
+			// Work-aware idle (issue #218): a paused sandbox or one with a live
+			// background job (an open stream) is NOT idle, so an unattended job is
+			// never reaped mid-run.
+			if idleExpired(sig, startedAt, claim.Spec.IdleTimeout.Duration, now) {
+				return r.terminateLifetime(ctx, claim, "IdleTimeout",
+					fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
+			}
+			last := startedAt
+			if sig.LastActivity.After(last) {
+				last = sig.LastActivity
+			}
+			requeue = time.Until(last.Add(claim.Spec.IdleTimeout.Duration))
 		}
-		idleDeadline := last.Add(claim.Spec.IdleTimeout.Duration)
-		if now.After(idleDeadline) {
-			return r.terminateLifetime(ctx, claim, "IdleTimeout",
-				fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
-		}
-		requeue = time.Until(idleDeadline)
 	}
 
 	// Requeue at the nearest deadline.
@@ -1198,9 +1279,30 @@ type forkResult struct {
 	ForkTimeMs float64
 }
 
-func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, preferredNode string) (*NodeInfo, string, error) {
+func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, preferredNode string) (*NodeInfo, string, error) {
 	templateName := pool.Spec.TemplateRef.Name
-	node, err := r.NodeRegistry.SelectNode(templateName, preferredNode)
+	req := ForkRequest{TemplateID: templateName, PreferredNode: preferredNode}
+	// Thread the template's explicit size and GPU demand into placement (issue
+	// #221): a large memory size is admitted only on a node with the RAM, and a
+	// GPU pool is pinned to GPU-capable nodes. A zero memory size falls back to
+	// the per-template CoW estimate (the legacy behavior).
+	if template != nil {
+		if mem := template.Spec.Resources.Memory; !mem.IsZero() {
+			if v, ok := mem.AsInt64(); ok {
+				req.MemoryBytes = v
+			}
+		}
+		if gpu := template.Spec.Resources.GPU; gpu != nil {
+			req.GPUCount = gpu.Count
+			req.GPUType = gpu.Type
+		}
+		// Thread the required isolation floor into placement (issue #40): a
+		// security-sensitive template never lands on a lower-assurance node (for
+		// example a hardware-kvm floor keeps the sandbox off a PVM node). The
+		// requireHardwareKvm flag is folded in as the strongest possible floor.
+		req.MinIsolationTier = MinIsolationTierFromSpec(template.Spec.MinIsolationTier, template.Spec.RequireHardwareKvm)
+	}
+	node, err := r.NodeRegistry.SelectNodeForFork(req)
 	if err != nil {
 		return nil, "", err
 	}

@@ -49,6 +49,60 @@ Two ways to run it:
 
 ### Python
 
+The flat one-liner is the canonical hosted and standalone entry point: an API
+key plus a base URL and you have a Ready sandbox. No Kubernetes required.
+
+```python
+import mitos
+
+# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+sb = mitos.create("python")                      # Ready sandbox handle
+print(sb.exec("echo hello").stdout)              # hello
+sb.terminate()
+```
+
+`mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
+else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`), then returns
+a `DirectSandbox` that exposes `exec`, `run_code`, `files`, `pty`, `fork`, and
+`terminate` directly. The standalone `sandbox-server` runs tokenless and ignores
+the key; the hosted control plane verifies the same `Authorization: Bearer`
+header server-side ([#210](https://github.com/mitos-run/mitos/issues/210)). The
+key value is never logged. `Sandbox.create(...)` is an alias for the same call.
+
+```python
+import mitos
+
+sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+
+# Files, stateful code, and fork all work on the flat handle.
+sb.files.write("/workspace/plan.txt", "draft")
+print(sb.files.read("/workspace/plan.txt"))      # draft
+
+ex = sb.run_code("import math; math.sqrt(144)")
+print(ex.text)                                   # 12.0
+
+# Fork the sandbox into independent siblings to try two approaches at once.
+fork_a, fork_b = sb.fork(2)
+fork_a.exec("echo conservative > /workspace/plan_a.txt")
+fork_b.exec("echo aggressive > /workspace/plan_b.txt")
+
+sb.terminate()
+```
+
+The async client mirrors the flat path: `await mitos.aio.create("python")` returns
+an `AsyncDirectSandbox` with the same `exec` / `run_code` / `files` / `create_pty`
+/ `fork` / `terminate` surface over `httpx.AsyncClient`.
+
+The canonical copy-paste quickstart lives in [docs/quickstart.md](docs/quickstart.md);
+hosted signup, the free-tier credit, and the first API key come from the
+[self-serve onboarding funnel](docs/saas/onboarding.md).
+
+### Python on Kubernetes (operators)
+
+On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxTemplate,
+SandboxPool, SandboxClaim, SandboxFork) directly. Use this when you run the mitos
+operator yourself.
+
 ```python
 from mitos import AgentRun
 
@@ -60,8 +114,6 @@ result = sb.exec("python -c 'import numpy as np; print(np.mean([1,2,3,4,5]))'")
 print(result.stdout)                             # 3.0
 
 # Fork the running sandbox to try two approaches against shared warmed state.
-# Live fork runs on the husk pod-native default and the raw-forkd engine path;
-# each child is an independent Ready sandbox.
 fork_a, fork_b = sb.fork(2)
 fork_a.exec("python -c \"open('/workspace/plan_a.txt','w').write('conservative')\"")
 fork_b.exec("python -c \"open('/workspace/plan_b.txt','w').write('aggressive')\"")
@@ -71,7 +123,7 @@ sb.terminate()
 
 `c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxTemplate plus a SandboxPool) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
 
-The async client (`AsyncAgentRun`) mirrors the hot paths and adds `create_pty()` for an interactive terminal over WebSocket.
+The async cluster client (`AsyncAgentRun`) mirrors the hot paths and adds `create_pty()` for an interactive terminal over WebSocket.
 
 ### TypeScript
 
@@ -120,6 +172,18 @@ sb.exec_background("python train.py > /workspace/train.log 2>&1")
 ```
 
 Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require the raw-forkd path or a husk template snapshot rebuilt with the current guest agent: the agent baked into today's husk template snapshot predates the vsock streaming/PTY frame protocol, so on the husk default the stream and the PTY WebSocket close early. Blocking exec (`/v1/exec`) is unaffected and works on the husk default. The husk template guest-agent rebuild is a tracked follow-up ([#24](https://github.com/mitos-run/mitos/issues/24)).
+
+### Integrations
+
+Drop a mitos sandbox into the agent framework you already use; each adapter is a thin shim over the same native SDK ops (`exec`, `run_code`, `files`), with no hard dependency on the framework package.
+
+| Framework | Import | Docs |
+|---|---|---|
+| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | [#203](https://github.com/mitos-run/mitos/issues/203) |
+| OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | [#204](https://github.com/mitos-run/mitos/issues/204) |
+| E2B (self-hosting migration) | `from mitos.e2b import Sandbox` | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
+
+The E2B shim is a "change one import" migration bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface (`commands.run`, `files.*`, `run_code`, `set_timeout`, `kill`, `create` / `connect` / `list`) over the standalone sandbox-server. One method, `get_host`, depends on preview URLs ([#126](https://github.com/mitos-run/mitos/issues/126)) and is not built yet, so it raises a typed error instead of fabricating a URL. See the full support table in [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md).
 
 ### On a cluster
 
@@ -362,6 +426,7 @@ Per-topic docs in [`docs/`](docs/):
 | Threat model | [docs/threat-model.md](docs/threat-model.md) |
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
+| Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |
 | Benchmark methodology | [BENCHMARKS.md](BENCHMARKS.md) |

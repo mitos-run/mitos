@@ -649,12 +649,16 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	if s.netRunner != nil && req.Network != nil {
 		tap := netconf.DeriveTapName(req.Network.GuestIP)
 		cfg := NetfilterConfig{
-			Tap:        tap,
-			GuestIP:    net.ParseIP(req.Network.GuestIP),
-			HostIP:     net.ParseIP(req.Network.GatewayIP),
-			Egress:     v1alpha1.EgressPolicy(req.Egress),
-			Allow:      req.Allow,
-			ResolverIP: net.ParseIP(req.Network.ResolverIP),
+			Tap:          tap,
+			GuestIP:      net.ParseIP(req.Network.GuestIP),
+			HostIP:       net.ParseIP(req.Network.GatewayIP),
+			Egress:       v1alpha1.EgressPolicy(req.Egress),
+			Allow:        req.Allow,
+			BlockNetwork: req.BlockNetwork,
+			AllowCIDRs:   req.AllowCIDRs,
+			Inbound:      v1alpha1.InboundPolicy(req.Inbound),
+			InboundCIDRs: req.InboundCIDRs,
+			ResolverIP:   net.ParseIP(req.Network.ResolverIP),
 		}
 		if cfg.Egress == "" {
 			cfg.Egress = v1alpha1.EgressDeny

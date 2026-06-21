@@ -47,10 +47,25 @@ func run(args []string) int {
 		return runDev(ctx, rest[1:])
 	}
 
+	// The doctor subcommand reads node state (/dev/kvm, /proc/modules, the staged
+	// guest kernel) and, when a kubeconfig is reachable, cluster state (PKI
+	// secrets, pull secret, PSA label). The node checks must run even without a
+	// cluster, so build a best-effort client and proceed regardless.
+	if rest[0] == "doctor" {
+		return runDoctorCmd(ctx, namespace, rest[1:])
+	}
+
 	// Usage is printable without a cluster, so a developer with no kubeconfig
 	// can still discover the commands.
 	if rest[0] == "-h" || rest[0] == "--help" || rest[0] == "help" {
 		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
+	}
+
+	// The auth subcommands talk to the hosted account service, not the cluster,
+	// and must work without a kubeconfig. Wire a local account service and
+	// dispatch directly so `mitos auth login` does not require a cluster backend.
+	if rest[0] == "auth" {
+		return agentcli.Run(ctx, rest, withLocalAuth(nil), os.Stdout, os.Stderr)
 	}
 
 	backend, err := buildBackend(namespace)
@@ -123,6 +138,45 @@ func applyDefaultPool(rest []string, pool string) []string {
 	default:
 		return rest
 	}
+}
+
+// runDoctorCmd runs the `mitos doctor` preflight. It builds a best-effort
+// cluster client: if no kubeconfig is reachable the cluster checks report a
+// probe error (surfaced as failing checks) but the node checks still run, so an
+// operator on a KVM node without cluster access still gets the node verdict. A
+// -n/--namespace flag (also accepted as a global flag) selects the install
+// namespace.
+func runDoctorCmd(ctx context.Context, namespace string, args []string) int {
+	namespace = doctorNamespace(namespace, args)
+	cfg := agentcli.DoctorProbeConfig{Namespace: namespace}
+	if rc, err := ctrlconfig.GetConfig(); err == nil {
+		if c, cerr := client.New(rc, client.Options{Scheme: agentcli.Scheme()}); cerr == nil {
+			cfg.Client = c
+		} else {
+			fmt.Fprintln(os.Stderr, "doctor: cluster checks skipped: build client:", cerr)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "doctor: cluster checks skipped: no reachable kubeconfig; node checks still run")
+	}
+	probe := agentcli.NewRealProbe(cfg)
+	return agentcli.Doctor(ctx, probe, os.Stdout, os.Stderr)
+}
+
+// doctorNamespace resolves the install namespace for `mitos doctor`. A local
+// -n/--namespace flag wins over the global one; if neither is set it defaults to
+// "mitos".
+func doctorNamespace(global string, args []string) string {
+	ns := global
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "-n" || args[i] == "--namespace") && i+1 < len(args) {
+			ns = args[i+1]
+			i++
+		}
+	}
+	if ns == "" {
+		ns = "mitos"
+	}
+	return ns
 }
 
 // buildBackend resolves the kubeconfig and builds a cluster backend scoped to

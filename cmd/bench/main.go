@@ -19,9 +19,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/benchstat"
+	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
@@ -29,9 +33,13 @@ import (
 )
 
 const (
-	modeForkExec = "fork-exec"
-	modeExecRT   = "exec-rt"
-	modeMetering = "metering"
+	modeForkExec    = "fork-exec"
+	modeExecRT      = "exec-rt"
+	modeMetering    = "metering"
+	modeForkFanOut  = "fork-fanout"
+	modePrefetch    = "prefetch"
+	modePinning     = "pinning"
+	defaultFanOutNs = "1,4,16,64"
 )
 
 // config holds the parsed, validated flags. Parsing is split out so it can be
@@ -51,6 +59,11 @@ type config struct {
 	// the latency modes.
 	forks    int
 	settleMs int
+	// fanOutN is the list of fan-out widths (N) the fork-fanout mode measures:
+	// fork ONE warmed base into N children and report the per-child
+	// time-to-ready distribution plus the wall clock to all N ready. Unused by
+	// the other modes.
+	fanOutN []int
 }
 
 // parseConfig parses args (excluding the program name) into a validated config.
@@ -58,7 +71,8 @@ func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 
 	var cfg config
-	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering")
+	var fanOutNs string
+	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering|fork-fanout|prefetch|pinning")
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
 	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
@@ -69,13 +83,14 @@ func parseConfig(args []string) (config, error) {
 	fs.BoolVar(&cfg.summary, "summary", false, "print the summary table to stdout")
 	fs.IntVar(&cfg.forks, "forks", 4, "metering mode: number of sandboxes to fork from one template before reading the report")
 	fs.IntVar(&cfg.settleMs, "settle-ms", 500, "metering mode: milliseconds to let the forks settle before reading the report")
+	fs.StringVar(&fanOutNs, "fanout-n", defaultFanOutNs, "fork-fanout mode: comma-separated fan-out widths (N) to measure, e.g. 1,4,16,64")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 
-	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering {
-		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering)
+	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering && cfg.mode != modeForkFanOut && cfg.mode != modePrefetch && cfg.mode != modePinning {
+		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, %s, %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering, modeForkFanOut, modePrefetch, modePinning)
 	}
 	if cfg.template == "" {
 		return config{}, fmt.Errorf("--template is required")
@@ -94,7 +109,40 @@ func parseConfig(args []string) (config, error) {
 			return config{}, fmt.Errorf("--settle-ms must not be negative, got %d", cfg.settleMs)
 		}
 	}
+	if cfg.mode == modeForkFanOut {
+		ns, err := parseFanOutNs(fanOutNs)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.fanOutN = ns
+	}
 	return cfg, nil
+}
+
+// parseFanOutNs parses a comma-separated list of fan-out widths (for example
+// "1,4,16,64") into a slice of positive ints. Each entry must be a positive
+// integer; the list must be non-empty.
+func parseFanOutNs(s string) ([]int, error) {
+	parts := strings.Split(s, ",")
+	ns := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("--fanout-n entry is empty: %q", s)
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("--fanout-n entry %q is not an integer: %w", p, err)
+		}
+		if v < 1 {
+			return nil, fmt.Errorf("--fanout-n entries must be at least 1, got %d", v)
+		}
+		ns = append(ns, v)
+	}
+	if len(ns) == 0 {
+		return nil, fmt.Errorf("--fanout-n must list at least one width")
+	}
+	return ns, nil
 }
 
 func main() {
@@ -123,6 +171,26 @@ func run(cfg config) error {
 	// CoW-aware metering report; it does not produce a latency distribution.
 	if cfg.mode == modeMetering {
 		return runMetering(engine, cfg)
+	}
+
+	// Fork-fanout mode forks ONE warmed base into N children at several N and
+	// reports the per-child time-to-ready distribution plus the wall clock to
+	// all N ready; it produces FanOutResults, not a single latency Result.
+	if cfg.mode == modeForkFanOut {
+		return runForkFanOut(engine, cfg)
+	}
+
+	// Prefetch mode measures the snapshot-resume page-fault prefetch win (issue
+	// #167): fault count per resume and claim->first-exec, prefetch on vs off.
+	if cfg.mode == modePrefetch {
+		return runPrefetch(engine, cfg)
+	}
+
+	// Pinning mode measures the dynamic CPU pinning + launch RT priority win
+	// (issue #168): activate success rate and activate latency under a claim
+	// storm, pinning on vs off.
+	if cfg.mode == modePinning {
+		return runPinning(engine, cfg)
 	}
 
 	var result benchstat.Result
@@ -231,6 +299,193 @@ func printMeteringSummary(report metering.Report, forks int) {
 		fmt.Printf("  fork %q: unique=%.2f MiB shared=%.2f MiB\n",
 			s.ID, mib(s.MemoryUnique), mib(s.MemoryShared))
 	}
+}
+
+// runPrefetch measures the snapshot-resume page-fault prefetch win (issue #167):
+// for the prefetch-OFF arm (lazy-fault baseline) and the prefetch-ON arm
+// (the captured hot-page set preloaded by the userfaultfd handler before
+// resume), it records the page-fault count per resume and the claim->first-exec
+// latency, then reports the per-arm distributions and the fault-count reduction
+// via the pure, unit-tested benchstat.AggregatePrefetch.
+//
+// HONEST GATING: the per-resume fault count comes from the userfaultfd handler
+// (internal/fork prefetch_linux.go), which needs a live KVM host with
+// hugepage-backed guest memory and is not yet wired (the syscall-level
+// register/copy is the bare-metal follow-up). So this mode does NOT fabricate a
+// number: it returns a clear not-yet-measurable error rather than inventing
+// fault counts or latencies. On a non-KVM host the engine already failed to
+// construct in run() before this is ever reached. Once the handler lands, the
+// collection loop here forks with prefetch off then on, reads the handler's
+// fault count per resume and the claim->first-exec span, and hands both arms to
+// AggregatePrefetch; the aggregation and JSON shape are testable today.
+func runPrefetch(engine *fork.Engine, cfg config) error {
+	_ = engine
+	// Drive the real capture seam. On a KVM host the engine constructed above; the
+	// missing piece is the userfaultfd fault-count source, so CaptureHotPages
+	// returns an actionable not-yet-wired error rather than a fabricated trace. We
+	// surface that directly so the mode never invents a fault count or latency.
+	// The off-vs-on aggregation that would consume the counts is the pure,
+	// unit-tested benchstat.AggregatePrefetch.
+	memPath := filepath.Join(cfg.dataDir, "templates", cfg.template, "snapshot", "mem")
+	_, err := fork.CaptureHotPages(fork.PrefetchConfig{
+		MemPath:       memPath,
+		File:          "mem",
+		PageSizeBytes: 2 << 20,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"prefetch mode (issue #167) cannot measure yet: %w; the off-vs-on aggregation (benchstat.AggregatePrefetch) and the manifest hot-page descriptor are in place, the bare-metal userfaultfd handler is the remaining work (template=%q, iterations=%d)",
+			err, cfg.template, cfg.iterations,
+		)
+	}
+	// Unreachable until the handler is wired; kept so the aggregation type is
+	// referenced from the driver it belongs to.
+	_ = benchstat.PrefetchComparison{}
+	return nil
+}
+
+// runPinning measures the dynamic CPU pinning + launch RT priority win (issue
+// #168): activate success rate and activate latency under a claim storm,
+// pinning ON vs OFF. The headline number is the activate-success-rate lift
+// under storm; the aggregation (success rate + latency distribution per arm,
+// the on-vs-off lift) is the pure, unit-tested benchstat.AggregatePinning.
+//
+// HONEST GATING: the success-rate and latency numbers require Linux + KVM +
+// bare metal + a REAL claim storm (sched_setaffinity and the RT class are
+// Linux-only, and the density/activate-success effect only appears under real
+// contention). darwin cannot apply a pin at all (the cpupin applier is a no-op
+// stub there), so this mode refuses to emit a number off a supporting host. On
+// a non-KVM host the engine already failed to construct in run() before this is
+// reached; here we additionally refuse when the applier reports it cannot change
+// scheduler state (darwin) or when the claim-storm harness is not yet wired
+// (the bare-metal follow-up, #16). No number is fabricated.
+func runPinning(engine *fork.Engine, cfg config) error {
+	_ = engine
+	if !cpupin.NewApplier().Supported() {
+		return fmt.Errorf(
+			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM + bare metal (template=%q, iterations=%d)",
+			cfg.template, cfg.iterations,
+		)
+	}
+	// On a supporting (Linux/KVM) host the remaining piece is the claim-storm
+	// driver that forks under contention with pinning off then on, records each
+	// activation's ActivateOutcome, and hands both arms to AggregatePinning. That
+	// driver is the bare-metal follow-up (#16, tied to the chaos suite #163), so
+	// we surface a clear not-yet-wired signal rather than inventing outcomes.
+	_ = benchstat.PinningComparison{}
+	return fmt.Errorf(
+		"pinning mode (issue #168): the claim-storm activate-success driver is the bare-metal follow-up (#16, chaos suite #163); the pin-plan logic (internal/cpupin), the Linux-gated applier, and the on-vs-off aggregation (benchstat.AggregatePinning) are in place and unit-tested (template=%q, iterations=%d)",
+		cfg.template, cfg.iterations,
+	)
+}
+
+// runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork
+// ONE warmed base (the template snapshot, which already has the repo loaded and
+// deps installed when the maintainer builds it that way) into N children, and
+// for each N in cfg.fanOutN record (a) each child's time-to-ready (fork ->
+// first successful exec) and (b) the wall clock from the fan-out start to the
+// instant the LAST child is ready. The defensible mitos claim under test is
+// sub-second 1-to-N COW fan-out, so the headline number is wall-clock-to-N-ready
+// at the larger N.
+//
+// Children are forked sequentially from the one base on a single shared wall
+// clock: each child's ReadyOffset is measured from the fan-out start, so the
+// max ReadyOffset is the honest wall-clock-to-N-ready. This drives the REAL
+// engine in-process exactly like the other modes; on a host without /dev/kvm
+// the engine fails at construction in run() before this is ever reached, so
+// fork-fanout never emits a fabricated number off-KVM.
+//
+// The per-N aggregation (per-child distribution + wall-clock-to-N-ready) is the
+// pure, unit-tested benchstat.AggregateFanOut; this function only collects the
+// real samples and hands them to it.
+func runForkFanOut(engine *fork.Engine, cfg config) error {
+	results := make([]benchstat.FanOutResult, 0, len(cfg.fanOutN))
+	for _, n := range cfg.fanOutN {
+		fo, err := oneFanOut(engine, cfg.template, n)
+		if err != nil {
+			return fmt.Errorf("fan-out N=%d: %w", n, err)
+		}
+		results = append(results, benchstat.FanOutResult{N: n, Name: "fork_fanout", FanOut: fo})
+
+		if cfg.summary {
+			fmt.Printf("=== fork-fanout N=%d ===\n%s\n", n, fo.Table())
+		}
+	}
+
+	if cfg.jsonPath != "" {
+		f, err := os.Create(cfg.jsonPath)
+		if err != nil {
+			return fmt.Errorf("create json output: %w", err)
+		}
+		defer f.Close()
+		if err := benchstat.WriteFanOutJSON(f, results); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// oneFanOut forks one base into n children, measuring each child's
+// fork->first-exec time-to-ready on a shared wall clock, then tears every child
+// down. The base itself is the template snapshot, so every child is a live COW
+// fork of the same warmed state. Children are torn down only after all of them
+// have reached ready and the wall clock has been read, so teardown never
+// inflates the measured wall-clock-to-N-ready.
+func oneFanOut(engine *fork.Engine, template string, n int) (benchstat.FanOut, error) {
+	forked := make([]string, 0, n)
+	// Tear every child down on the way out, success or failure, so a fan-out
+	// run never leaks VMs on the runner.
+	defer func() {
+		for _, id := range forked {
+			_ = engine.Terminate(id)
+		}
+	}()
+
+	children := make([]benchstat.ChildReady, 0, n)
+	fanStart := time.Now()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("fanout-%d-%d", n, i)
+		childStart := time.Now()
+		ttr, err := forkToReady(engine, template, id)
+		if err != nil {
+			return benchstat.FanOut{}, fmt.Errorf("child %d of %d: %w", i+1, n, err)
+		}
+		// The child is ready; record it on the books for teardown. Its
+		// ReadyOffset is the wall-clock instant from the fan-out start; its
+		// TimeToReady is its own fork->ready span.
+		forked = append(forked, id)
+		children = append(children, benchstat.ChildReady{
+			TimeToReady: ttr,
+			ReadyOffset: childStart.Add(ttr).Sub(fanStart),
+		})
+	}
+
+	return benchstat.AggregateFanOut(children), nil
+}
+
+// forkToReady forks one child off the base and returns the time from fork start
+// to the first successful exec result (the child's time-to-ready). It does NOT
+// tear the child down: the caller keeps every child alive for the duration of
+// the fan-out so that N live COW forks coexist, which is the whole point of the
+// 1-to-N shape. The clock starts immediately before Fork and stops the instant
+// the first exec result is in.
+func forkToReady(engine *fork.Engine, template, sandboxID string) (time.Duration, error) {
+	t0 := time.Now()
+	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{})
+	if err != nil {
+		return 0, fmt.Errorf("fork: %w", err)
+	}
+	client, err := connectWithRetry(res.VsockPath)
+	if err != nil {
+		return 0, fmt.Errorf("connect: %w", err)
+	}
+	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
+		client.Close()
+		return 0, fmt.Errorf("exec: %w", err)
+	}
+	elapsed := time.Since(t0) // clock stops here
+	client.Close()
+	return elapsed, nil
 }
 
 // benchForkExec measures the time from fork start to the first successful exec

@@ -127,6 +127,113 @@ func TestManifestEnvFieldsChangeDigest(t *testing.T) {
 	}
 }
 
+func TestManifestHotPagesRoundTrip(t *testing.T) {
+	m := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 7, Chunks: []ChunkRef{{Digest: digestBytes([]byte("x")), Size: 1}}}},
+		VMMVersion:            "1.15.0",
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+		HotPages: &HotPageSet{
+			PageSizeBytes: 2 << 20,
+			File:          "mem",
+			Offsets:       []int64{0, 2 << 20, 4 << 20},
+		},
+	}
+	got, err := decodeManifest(m.Canonical())
+	if err != nil {
+		t.Fatalf("decodeManifest: %v", err)
+	}
+	if got.HotPages == nil {
+		t.Fatalf("round-trip dropped HotPages")
+	}
+	if got.HotPages.PageSizeBytes != m.HotPages.PageSizeBytes ||
+		got.HotPages.File != m.HotPages.File ||
+		len(got.HotPages.Offsets) != len(m.HotPages.Offsets) {
+		t.Fatalf("round-trip lost HotPages fields: got %+v want %+v", got.HotPages, m.HotPages)
+	}
+	for i, off := range m.HotPages.Offsets {
+		if got.HotPages.Offsets[i] != off {
+			t.Fatalf("offset %d round-trip mismatch: got %d want %d", i, got.HotPages.Offsets[i], off)
+		}
+	}
+	if got.Digest() != m.Digest() {
+		t.Fatalf("hot-page round-trip digest mismatch: %s vs %s", got.Digest(), m.Digest())
+	}
+}
+
+// TestManifestNilHotPagesPreservesLegacyDigest is the snapshot-compat (#32)
+// guard: a manifest with no hot-page set must produce the SAME canonical bytes
+// and digest as one built before the field existed. The hot-page set is purely
+// additive, so a snapshot that never captured one keeps its old identity.
+func TestManifestNilHotPagesPreservesLegacyDigest(t *testing.T) {
+	base := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 3}},
+		VMMVersion:            "1.15.0",
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+		CPUModel:              "cpuA",
+		KernelVersion:         "kA",
+		ConfigHash:            "hA",
+	}
+	withNil := base
+	withNil.HotPages = nil
+	if !bytes.Equal(base.Canonical(), withNil.Canonical()) {
+		t.Fatalf("nil hot-page set changed canonical bytes:\n base: %s\n nil:  %s", base.Canonical(), withNil.Canonical())
+	}
+	if base.Digest() != withNil.Digest() {
+		t.Fatalf("nil hot-page set changed digest: %s vs %s", base.Digest(), withNil.Digest())
+	}
+	// An empty (non-nil but zero) set is also identity-neutral: there is nothing
+	// to prefetch, so it must not perturb the digest either.
+	withEmpty := base
+	withEmpty.HotPages = &HotPageSet{}
+	if base.Digest() != withEmpty.Digest() {
+		t.Fatalf("empty hot-page set changed digest: %s vs %s", base.Digest(), withEmpty.Digest())
+	}
+}
+
+// TestManifestHotPagesChangeDigest proves the hot-page set is content-addressed:
+// a non-empty set is part of the snapshot's identity, so two snapshots that
+// prefetch different page sets get different digests. This is what lets a shared
+// prefetched set still count once across forks per the #33 CoW story: identical
+// hot-page sets collapse to one digest, divergent ones do not.
+func TestManifestHotPagesChangeDigest(t *testing.T) {
+	base := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 3}},
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+		HotPages:              &HotPageSet{PageSizeBytes: 2 << 20, File: "mem", Offsets: []int64{0, 2 << 20}},
+	}
+	for name, mut := range map[string]func(*HotPageSet){
+		"offsets":  func(h *HotPageSet) { h.Offsets = []int64{0, 4 << 20} },
+		"pagesize": func(h *HotPageSet) { h.PageSizeBytes = 4 << 20 },
+		"file":     func(h *HotPageSet) { h.File = "disk" },
+	} {
+		changed := base
+		hp := *base.HotPages
+		mut(&hp)
+		changed.HotPages = &hp
+		if base.Digest() == changed.Digest() {
+			t.Fatalf("changing hot-page %s did not change the digest", name)
+		}
+	}
+}
+
+// TestManifestHotPagesCanonicalOrderInvariant proves the canonical encoding does
+// not depend on the order offsets were appended: two sets with the same offsets
+// in different order hash identically, so a re-captured set with a stable
+// content (same pages, any discovery order) keeps the snapshot's identity.
+func TestManifestHotPagesCanonicalOrderInvariant(t *testing.T) {
+	a := Manifest{
+		Files:    []FileEntry{{Name: "mem", Size: 3}},
+		HotPages: &HotPageSet{PageSizeBytes: 2 << 20, File: "mem", Offsets: []int64{0, 2 << 20, 4 << 20}},
+	}
+	b := Manifest{
+		Files:    []FileEntry{{Name: "mem", Size: 3}},
+		HotPages: &HotPageSet{PageSizeBytes: 2 << 20, File: "mem", Offsets: []int64{4 << 20, 0, 2 << 20}},
+	}
+	if !bytes.Equal(a.Canonical(), b.Canonical()) {
+		t.Fatalf("hot-page offset order changed canonical bytes")
+	}
+}
+
 func TestManifestRoundTripEnvFields(t *testing.T) {
 	m := Manifest{
 		Files:                 []FileEntry{{Name: "mem", Size: 7, Chunks: []ChunkRef{{Digest: digestBytes([]byte("x")), Size: 1}}}},

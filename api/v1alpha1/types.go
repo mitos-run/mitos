@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,8 +20,21 @@ type SandboxTemplate struct {
 }
 
 type SandboxTemplateSpec struct {
-	Image     string           `json:"image"`
-	Init      []string         `json:"init,omitempty"`
+	Image string   `json:"image"`
+	Init  []string `json:"init,omitempty"`
+
+	// BuildSteps is an ordered, declarative recipe for the template build,
+	// authored code-first by the SDK Template builder (issue #220). Each step is
+	// one of run, env, or workdir (copy is reserved for the file-staging path and
+	// is carried as metadata only here). The build path flattens BuildSteps into
+	// the in-VM init commands, so a template may set either Init directly or
+	// BuildSteps, but BuildSteps is the recommended code-first form and is keyed
+	// for fast cached builds: a content-addressed cache key is chained over the
+	// base image and each step, so an unchanged prefix is reused and only the
+	// first changed step and everything after it rebuilds.
+	// +kubebuilder:validation:Optional
+	BuildSteps []BuildStep `json:"buildSteps,omitempty"`
+
 	Command   []string         `json:"command,omitempty"`
 	Env       []corev1.EnvVar  `json:"env,omitempty"`
 	Resources SandboxResources `json:"resources,omitempty"`
@@ -34,11 +49,151 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
 	Encrypted bool `json:"encrypted,omitempty"`
+
+	// MinIsolationTier requires the sandbox to be scheduled ONLY onto a node whose
+	// isolation assurance meets this floor (issue #40). Nodes declare their tier
+	// via the mitos.run/isolation-tier label; the controller filters node
+	// selection so a security-sensitive tenant never lands on a lower-assurance
+	// node. The tiers, strongest to weakest, are hardware-kvm (hardware
+	// virtualization microVM, the default posture), pvm (Firecracker on PVM,
+	// ring-3 pagetable isolation with no nested virt, a documented LOWER-assurance
+	// tier, evaluated not adopted, see docs/platforms/pvm-evaluation.md), and
+	// gvisor (userspace-kernel syscall interposition). A floor is a MINIMUM: a
+	// stronger node tier still satisfies a weaker floor. Empty means no floor (any
+	// healthy node), the default. See docs/threat-model.md.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
+	MinIsolationTier string `json:"minIsolationTier,omitempty"`
+
+	// RequireHardwareKvm is a convenience equivalent to
+	// minIsolationTier=hardware-kvm (issue #40): it pins the sandbox to a
+	// hardware-virtualization node and keeps it off any lower-assurance tier (PVM,
+	// gVisor). When both are set the STRONGER floor wins, so this flag can only
+	// tighten, never weaken, an explicit minIsolationTier. Defaults to false.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	RequireHardwareKvm bool `json:"requireHardwareKvm,omitempty"`
+}
+
+// BuildStepType is the kind of a declarative build step.
+type BuildStepType string
+
+const (
+	// BuildStepRun runs a shell command inside the booting template VM at build
+	// time, exactly as an Init command does.
+	BuildStepRun BuildStepType = "run"
+	// BuildStepEnv bakes an environment variable into the template by exporting it
+	// for the remaining build steps and persisting it to /etc/profile so it is
+	// present in every fork. The value is part of the cache key.
+	BuildStepEnv BuildStepType = "env"
+	// BuildStepWorkdir creates and changes into a working directory for the
+	// remaining build steps.
+	BuildStepWorkdir BuildStepType = "workdir"
+	// BuildStepCopy stages host files into the image. The actual file
+	// materialization is performed by the build path (KVM gated); the step is
+	// carried here so the cache key chains over the declared source and
+	// destination. Source is the host path, Dest the in-image path.
+	BuildStepCopy BuildStepType = "copy"
+)
+
+// BuildStep is one ordered step of a declarative template build (issue #220).
+// Exactly one shape is meaningful per Type. The build path flattens run, env,
+// and workdir steps into the in-VM init commands in order; copy steps are
+// staged by the file path. The whole ordered list feeds the chained,
+// content-addressed cache key so an unchanged prefix is reused.
+type BuildStep struct {
+	// Type selects the step kind: run, env, workdir, or copy.
+	// +kubebuilder:validation:Enum=run;env;workdir;copy
+	Type BuildStepType `json:"type"`
+
+	// Run is the shell command for a run step.
+	// +kubebuilder:validation:Optional
+	Run string `json:"run,omitempty"`
+
+	// EnvName and EnvValue are the variable name and value for an env step.
+	// +kubebuilder:validation:Optional
+	EnvName string `json:"envName,omitempty"`
+	// +kubebuilder:validation:Optional
+	EnvValue string `json:"envValue,omitempty"`
+
+	// Workdir is the directory for a workdir step.
+	// +kubebuilder:validation:Optional
+	Workdir string `json:"workdir,omitempty"`
+
+	// Source and Dest are the host source and in-image destination for a copy
+	// step.
+	// +kubebuilder:validation:Optional
+	Source string `json:"source,omitempty"`
+	// +kubebuilder:validation:Optional
+	Dest string `json:"dest,omitempty"`
+}
+
+// InitCommands returns the in-VM build-time commands that realize the spec's
+// declarative build. If BuildSteps is set its run, env, and workdir steps are
+// flattened in order (copy steps stage files outside the VM and contribute no
+// init command); otherwise the legacy Init list is returned unchanged. This is
+// the single mapping from the code-first BuildSteps form onto the existing
+// CreateTemplate init path, so a template authored either way builds the same.
+func (s *SandboxTemplateSpec) InitCommands() []string {
+	if len(s.BuildSteps) == 0 {
+		return s.Init
+	}
+	cmds := make([]string, 0, len(s.BuildSteps))
+	for i := range s.BuildSteps {
+		step := &s.BuildSteps[i]
+		switch step.Type {
+		case BuildStepRun:
+			if step.Run != "" {
+				cmds = append(cmds, step.Run)
+			}
+		case BuildStepEnv:
+			// Export for the remaining build and persist into /etc/profile so the
+			// variable is present in every fork. Single-quote the value so spaces
+			// and shell metacharacters are baked literally.
+			cmds = append(cmds, fmt.Sprintf("export %s='%s'; printf 'export %s=%%s\\n' '%s' >> /etc/profile",
+				step.EnvName, step.EnvValue, step.EnvName, step.EnvValue))
+		case BuildStepWorkdir:
+			if step.Workdir != "" {
+				cmds = append(cmds, fmt.Sprintf("mkdir -p '%s'; cd '%s'", step.Workdir, step.Workdir))
+			}
+		case BuildStepCopy:
+			// Copy is staged by the file path, not an in-VM command.
+		}
+	}
+	return cmds
 }
 
 type SandboxResources struct {
 	CPU    resource.Quantity `json:"cpu,omitempty"`
 	Memory resource.Quantity `json:"memory,omitempty"`
+
+	// GPU requests GPU passthrough for the sandbox (issue #221). When set the
+	// pool's sandboxes are scheduled ONLY onto GPU-capable nodes (the controller
+	// filters node selection by the GPU node label, mirroring the KVM node
+	// selection), and the requested device count and type are recorded for
+	// metering (GPU-seconds, internal/metering). The actual VFIO device-attach
+	// into the microVM and the fork-with-device behavior are HARDWARE-GATED and
+	// not validated here; see docs/platforms/gpu.md. A GPU sandbox is documented
+	// as NOT live-forkable while the device is attached.
+	// +optional
+	GPU *GPUResources `json:"gpu,omitempty"`
+}
+
+// GPUResources is the GPU request for a sandbox (issue #221). It is the
+// SCHEDULING and METERING shape; the device-attach + fork-with-device code is
+// hardware-gated (docs/platforms/gpu.md).
+type GPUResources struct {
+	// Count is the number of GPUs to attach, exclusively, to the sandbox. A GPU
+	// is passthrough-assigned to a single VM and is never CoW-shared across forks.
+	// +kubebuilder:validation:Minimum=1
+	Count int32 `json:"count"`
+
+	// Type names the GPU SKU the pool requires (for example "nvidia-a100",
+	// "nvidia-h100"). It is matched against the GPU node's advertised type label
+	// (mitos.run/gpu-type) during node selection. Empty means any GPU type on a
+	// GPU-capable node satisfies the request.
+	// +optional
+	Type string `json:"type,omitempty"`
 }
 
 type ForkPolicy string
@@ -107,9 +262,65 @@ const (
 	EgressAllow EgressPolicy = "allow"
 )
 
+// InboundPolicy governs unsolicited inbound connections to the guest (packets
+// that are NOT part of an egress-initiated, established connection). The secure
+// default for an untrusted sandbox is deny-by-default: nothing may dial into the
+// guest. An operator that runs a server inside the sandbox and wants to reach it
+// sets Inbound to allow, optionally scoped by InboundCIDRs.
+type InboundPolicy string
+
+const (
+	// InboundDeny drops every unsolicited inbound connection to the guest. This
+	// is the secure default; return traffic for the guest's own egress flows is
+	// still accepted via the ct established,related rule, so deny-by-default
+	// inbound never breaks the guest's outbound connections.
+	InboundDeny InboundPolicy = "deny"
+	// InboundAllow accepts unsolicited inbound connections, optionally narrowed
+	// to InboundCIDRs. Only meaningful for a sandbox that hosts a listener.
+	InboundAllow InboundPolicy = "allow"
+)
+
+// NetworkPolicy is the per-sandbox network posture, threaded from the template
+// through the Fork RPC to the per-tap nftables datapath (docs/networking.md).
+//
+// The dimensions compose as follows, in priority order:
+//   - BlockNetwork, when true, drops ALL egress unconditionally; the allowlists
+//     and Egress policy below are then inert. This is the total-deny knob (Modal
+//     block_network=True).
+//   - Otherwise Egress (deny or allow) is the default verdict for traffic that
+//     matches no allow rule. Under deny (the secure default), only the allowlists
+//     pass; under allow, everything passes except the unconditional metadata block.
+//   - Allow is the host:port allowlist: literal IP:port entries become static
+//     chain accepts; DNS-name entries are enforced via the controlled resolver.
+//   - AllowCIDRs accepts egress whose destination IP is inside one of the named
+//     CIDR blocks (the CIDR allowlist; Modal outbound_cidr_allowlist).
+//   - Inbound governs unsolicited inbound to the guest; the secure default is
+//     deny-by-default (InboundDeny). InboundCIDRs narrows an InboundAllow to
+//     source CIDRs (Modal inbound_cidr_allowlist).
 type NetworkPolicy struct {
 	Egress EgressPolicy `json:"egress,omitempty"`
 	Allow  []string     `json:"allow,omitempty"`
+
+	// BlockNetwork drops ALL egress for the sandbox, overriding Egress and the
+	// allowlists. It is the total-deny primitive (Modal block_network=True): a
+	// sandbox that must never reach the network at all.
+	BlockNetwork bool `json:"blockNetwork,omitempty"`
+
+	// AllowCIDRs is the egress CIDR allowlist: a destination IP inside any of
+	// these blocks is accepted (Modal outbound_cidr_allowlist). Entries are
+	// CIDR notation, IPv4 or IPv6 (e.g. "10.0.0.0/8", "2001:db8::/32"). Ignored
+	// when BlockNetwork is true.
+	AllowCIDRs []string `json:"allowCidrs,omitempty"`
+
+	// Inbound governs unsolicited inbound connections to the guest. Empty means
+	// the secure default, deny-by-default (InboundDeny): nothing may dial in.
+	// Return traffic for the guest's own egress is always accepted regardless.
+	Inbound InboundPolicy `json:"inbound,omitempty"`
+
+	// InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
+	// inbound_cidr_allowlist). Only meaningful when Inbound is allow; empty under
+	// InboundAllow means any source may dial in.
+	InboundCIDRs []string `json:"inboundCidrs,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -209,6 +420,114 @@ type SandboxPoolSpec struct {
 	// the physically dedicated nodes (see docs/superpowers/plans/2026-06-18-dedicated-nodes.md).
 	// +optional
 	Placement *PoolPlacement `json:"placement,omitempty"`
+
+	// CPUPinning configures dynamic (post-ready) CPU pinning and a launch-time
+	// scheduling-priority bump for this pool's sandbox VMs (issue #168). When nil
+	// the pool keeps the default unpinned behavior: vCPU threads float across the
+	// husk pod's cpuset, scheduled by the kernel. When set, after a fork's guest
+	// is ready the node pins that fork's vCPU threads to specific physical cores
+	// (pairing both hyperthread siblings per vCPU) per the chosen Policy, for
+	// higher and more predictable density. The launch burst itself is left
+	// unpinned so the kernel can spread it across cores; pinning is applied only
+	// AFTER guest-ready. The pin stays inside the husk pod's cpuset, so it never
+	// regresses the husk pod cgroup model or the CoW memcg accounting (issue #33).
+	// +optional
+	CPUPinning *CPUPinningSpec `json:"cpuPinning,omitempty"`
+}
+
+// CPUPinningSpec configures dynamic post-ready CPU pinning and launch-time
+// scheduling priority for a pool's sandbox VMs (issue #168). The lessons baked
+// into the defaults: pinning vCPUs from startup hurts, so pin only AFTER the
+// guest is ready and leave the launch burst unpinned (spread across cores);
+// assign both hyperthread siblings of a physical core to one vCPU; and bump
+// scheduling priority during the launch window to cut activate loss.
+type CPUPinningSpec struct {
+	// Enabled turns dynamic post-ready CPU pinning on for this pool. When false
+	// (the default) vCPU threads float across the husk pod cpuset and nothing is
+	// pinned, exactly the legacy behavior.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Policy is the packing strategy used when computing the pin plan after
+	// guest-ready. Pack consolidates forks onto as few physical cores as possible
+	// for maximum density, never letting two tenants share a physical core. Spread
+	// distributes forks across distinct physical cores for lower contention. Only
+	// consulted when Enabled is true.
+	// +kubebuilder:validation:Enum=spread;pack
+	// +kubebuilder:default=pack
+	// +optional
+	Policy CPUPinningPolicy `json:"policy,omitempty"`
+
+	// SiblingPairing assigns both hyperthread siblings of a physical core to the
+	// same vCPU, so a vCPU thread and its sibling never serve two different
+	// tenants. Defaults to true; set false on a node with hyperthreading disabled
+	// or to pin per-logical-CPU.
+	// +kubebuilder:default=true
+	// +optional
+	SiblingPairing *bool `json:"siblingPairing,omitempty"`
+
+	// LaunchRtPriority bumps the Firecracker vCPU threads to an elevated (real
+	// time) scheduling priority during the activate window, then drops them back
+	// after guest-ready, to cut launch loss under a claim storm. Defaults to true.
+	// +kubebuilder:default=true
+	// +optional
+	LaunchRtPriority *bool `json:"launchRtPriority,omitempty"`
+}
+
+// CPUPinningPolicy is the packing strategy for the post-ready pin plan.
+type CPUPinningPolicy string
+
+const (
+	// CPUPinningPack consolidates forks onto as few physical cores as possible,
+	// for maximum density. No two tenants share a physical core.
+	CPUPinningPack CPUPinningPolicy = "pack"
+	// CPUPinningSpread distributes forks across distinct physical cores, for lower
+	// contention.
+	CPUPinningSpread CPUPinningPolicy = "spread"
+)
+
+// Normalized returns a copy of the spec with the documented defaults filled in,
+// so callers never special-case nil or zero values. It mirrors the kubebuilder
+// +default markers (the API server applies those; this is the in-process
+// equivalent used by the controller and the pin applier). A nil receiver
+// normalizes to disabled, the safe legacy behavior. The returned value's *bool
+// fields are non-nil so SiblingPairingEnabled and LaunchRtPriorityEnabled read
+// directly.
+func (s *CPUPinningSpec) Normalized() CPUPinningSpec {
+	out := CPUPinningSpec{Policy: CPUPinningPack}
+	t := true
+	out.SiblingPairing = &t
+	rt := true
+	out.LaunchRtPriority = &rt
+	if s == nil {
+		return out
+	}
+	out.Enabled = s.Enabled
+	if s.Policy != "" {
+		out.Policy = s.Policy
+	}
+	if s.SiblingPairing != nil {
+		v := *s.SiblingPairing
+		out.SiblingPairing = &v
+	}
+	if s.LaunchRtPriority != nil {
+		v := *s.LaunchRtPriority
+		out.LaunchRtPriority = &v
+	}
+	return out
+}
+
+// SiblingPairingEnabled reports whether both hyperthread siblings of a physical
+// core are assigned to one vCPU. It treats a nil pointer as the default (true).
+func (s CPUPinningSpec) SiblingPairingEnabled() bool {
+	return s.SiblingPairing == nil || *s.SiblingPairing
+}
+
+// LaunchRtPriorityEnabled reports whether the launch-window scheduling-priority
+// bump is on. It treats a nil pointer as the default (true).
+func (s CPUPinningSpec) LaunchRtPriorityEnabled() bool {
+	return s.LaunchRtPriority == nil || *s.LaunchRtPriority
 }
 
 // PoolPlacement pins a pool's husk pods to a dedicated node set (issue #172).

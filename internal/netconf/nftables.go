@@ -412,25 +412,12 @@ func RenderSharedInputTable() string {
 // through this tap's dispatch jump and the input hook implies a local
 // destination, the trailing drop denies guest-to-pod-local for this sandbox only.
 func RenderSandboxInputChain(tap string, guestIP net.IP, resolverIP net.IP) string {
-	table := SharedTableName()
-	chain := SandboxInputChainName(tap)
-	dispatch := InputDispatchMapName()
-	saddr := fmt.Sprintf("ip saddr %s", guestIP.String())
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "add chain inet %s %s\n", table, chain)
-	if resolverIP != nil {
-		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s udp dport 53 accept\n",
-			table, chain, saddr, resolverIP.String())
-		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s tcp dport 53 accept\n",
-			table, chain, saddr, resolverIP.String())
-	}
-	// Drop every other guest-sourced packet. Reaching this chain means the packet
-	// arrived on this tap and (input hook) is destined to a pod-local address, so
-	// this denies the guest all pod-local services except the resolver above.
-	fmt.Fprintf(&b, "add rule inet %s %s %s drop\n", table, chain, saddr)
-	fmt.Fprintf(&b, "add element inet %s %s { %q : jump %s }\n", table, dispatch, tap, chain)
-	return b.String()
+	return RenderSandboxInputChainSpec(InputChainSpec{
+		Tap:        tap,
+		GuestIP:    guestIP,
+		ResolverIP: resolverIP,
+		Inbound:    v1alpha1.InboundDeny,
+	})
 }
 
 // RenderSandboxChain renders the add block for ONE sandbox: its regular chain
@@ -448,78 +435,11 @@ func RenderSandboxInputChain(tap string, guestIP net.IP, resolverIP net.IP) stri
 // applies to this sandbox's packets alone and cannot terminate another
 // sandbox's allowed traffic. The output is deterministic for the same inputs.
 func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy, allow []HostPort, resolverIP net.IP) string {
-	table := SharedTableName()
-	chain := SandboxChainName(tap)
-	dispatch := DispatchMapName()
-
-	var b strings.Builder
-	// Regular chain: no hook, no policy. A regular chain's final verdict is a
-	// verdict for the matched packet, not a hook-wide default.
-	fmt.Fprintf(&b, "add chain inet %s %s\n", table, chain)
-
-	// Anti-spoof: pin the accepts to this sandbox's guest source IP.
-	saddr := fmt.Sprintf("ip saddr %s", guestIP.String())
-
-	// Unconditional cloud-metadata block: emitted BEFORE every accept (including
-	// established/related and the final EgressAllow accept) so a guest can never
-	// reach the IMDS endpoint and steal the node IAM credentials, regardless of
-	// the template's egress policy or allowlist.
-	b.WriteString(RenderMetadataBlock(table, chain, guestIP))
-
-	fmt.Fprintf(&b, "add rule inet %s %s %s ct state established,related accept\n", table, chain, saddr)
-
-	for _, hp := range allow {
-		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s tcp dport %d accept\n",
-			table, chain, saddr, hp.IP.String(), hp.Port)
-	}
-
-	if resolverIP != nil {
-		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s udp dport 53 accept\n",
-			table, chain, saddr, resolverIP.String())
-		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s tcp dport 53 accept\n",
-			table, chain, saddr, resolverIP.String())
-	}
-
-	// Dynamic allow set: the DNS proxy pins (resolved ip . port) elements with a
-	// timeout here as it answers allowlisted name queries. Declare the set, then
-	// accept traffic whose (daddr . dport) is currently present in it. The set
-	// is declared before its accept rule so the rule's reference resolves, and
-	// the accept is placed after the static IP:port allows and the
-	// DNS-to-resolver rules but before the final verdict, so a pinned name is
-	// reachable only while its element lives and only on its allowed port. Like
-	// every other accept it is saddr-pinned to stop source spoofing on this tap.
-	set := SandboxAllowSetName(tap)
-	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service ; flags timeout ; }\n", table, set)
-	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr . tcp dport @%s accept\n", table, chain, saddr, set)
-
-	// IPv6 dynamic allow set: the DNS proxy pins resolved AAAA addresses here
-	// with a timeout, mirroring the v4 set. Accept v6 traffic whose
-	// (ip6 daddr . tcp dport) is currently present. The accept is NOT saddr
-	// pinned: the guest is assigned only a v4 /30 source identity today, so there
-	// is no v6 source address to anti-spoof against; the v6 default-deny below is
-	// the boundary. The set is declared before its accept so the reference
-	// resolves.
-	set6 := SandboxAllowSet6Name(tap)
-	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . inet_service ; flags timeout ; }\n", table, set6)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s accept\n", table, chain, set6)
-
-	// Final verdict for this sandbox's packets: drop under EgressDeny, accept
-	// under EgressAllow. Terminal within this regular chain for this packet
-	// only, so it cannot affect other taps' chains.
-	final := "drop"
-	if policy == v1alpha1.EgressAllow {
-		final = "accept"
-	}
-	fmt.Fprintf(&b, "add rule inet %s %s %s %s\n", table, chain, saddr, final)
-	// v6 final verdict, scoped to the v6 family so it cannot disturb the v4
-	// saddr-pinned verdict above. Under EgressDeny this is the v6 default-deny:
-	// any v6 destination not present in the v6 pin set is dropped, so v6 egress
-	// is enforced and not silently permitted by fall-through to the base chain's
-	// accept policy.
-	fmt.Fprintf(&b, "add rule inet %s %s meta nfproto ipv6 %s\n", table, chain, final)
-
-	// Dispatch element: route this tap into the chain. Delete is by key on
-	// teardown, so no rule handles are tracked.
-	fmt.Fprintf(&b, "add element inet %s %s { %q : jump %s }\n", table, dispatch, tap, chain)
-	return b.String()
+	return RenderSandboxChainSpec(ChainSpec{
+		Tap:        tap,
+		GuestIP:    guestIP,
+		Egress:     policy,
+		Allow:      allow,
+		ResolverIP: resolverIP,
+	})
 }

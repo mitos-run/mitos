@@ -22,6 +22,45 @@ type FileEntry struct {
 // snapshot layout or restore contract changes incompatibly.
 const CurrentSnapshotFormatVersion = 1
 
+// HotPageSet is the captured hot-page working set for snapshot-resume prefetch
+// (issue #167): the set of guest memory page offsets a userfaultfd handler
+// should preload into the restored VM before resume, so the lazy-fault tail that
+// dominates claim->first-exec is paid up front instead of as a storm of
+// post-resume faults.
+//
+// It is an OPTIONAL, content-addressed descriptor on the snapshot manifest. A
+// snapshot that never captured one carries a nil HotPageSet and is byte-identical
+// (and digest-identical) to a snapshot built before the field existed, so the
+// field is purely additive and does not break snapshot compatibility (#32). When
+// present and non-empty it IS part of the content-addressed digest: two snapshots
+// with different hot-page sets have different identities, while two forks that
+// share the SAME captured set collapse to one digest, which is what keeps a
+// prefetched shared page set counted once across forks per the #33 CoW story.
+//
+// PageSizeBytes is the unit the Offsets are expressed in (2 MiB for the
+// hugepage-backed memory file this targets, 4 KiB for a base-page file). File
+// names which manifest file the offsets index into (conventionally the memory
+// file, "mem"). Offsets are byte offsets into that file, each a multiple of
+// PageSizeBytes; the canonical encoding sorts and de-duplicates them so the
+// descriptor's identity does not depend on capture order.
+type HotPageSet struct {
+	// PageSizeBytes is the page granularity the offsets are expressed in.
+	PageSizeBytes int64
+	// File is the manifest file name the offsets index into (e.g. "mem").
+	File string
+	// Offsets are the byte offsets of the hot pages within File. The canonical
+	// encoding sorts and de-duplicates them, so order and duplicates do not
+	// affect the snapshot's identity.
+	Offsets []int64
+}
+
+// isEmpty reports whether the set carries nothing to prefetch. An empty set is
+// identity-neutral: it is omitted from the canonical encoding so it never
+// perturbs the digest, preserving compatibility with pre-field snapshots.
+func (h *HotPageSet) isEmpty() bool {
+	return h == nil || len(h.Offsets) == 0
+}
+
 // Manifest describes a complete snapshot as a set of files plus metadata.
 //
 // SnapshotFormatVersion, VMMVersion, CPUModel, and KernelVersion describe the
@@ -30,6 +69,11 @@ const CurrentSnapshotFormatVersion = 1
 // so a snapshot built under a different Firecracker or CPU never collides with
 // one built here. ConfigHash binds the snapshot to the microvm machine config it
 // was captured under.
+//
+// HotPages is the optional, additive hot-page working set for snapshot-resume
+// prefetch (issue #167). A nil or empty set is omitted from the canonical
+// encoding, so a snapshot without one keeps the exact identity it had before the
+// field existed (#32 compatibility).
 type Manifest struct {
 	Files                 []FileEntry
 	VMMVersion            string
@@ -38,6 +82,7 @@ type Manifest struct {
 	CPUModel              string
 	KernelVersion         string
 	ConfigHash            string
+	HotPages              *HotPageSet
 }
 
 // Canonical returns a deterministic byte encoding of the manifest. Files are
@@ -92,6 +137,27 @@ func (m Manifest) Canonical() []byte {
 	}
 	buf.WriteString(`],`)
 
+	// hotPages is OPTIONAL and additive. It is emitted only when the set carries
+	// pages to prefetch; an absent or empty set is omitted entirely so the bytes
+	// (and therefore the digest) are identical to a snapshot built before the
+	// field existed. When emitted, the offsets are sorted and de-duplicated so the
+	// descriptor's identity does not depend on capture order or duplicates.
+	if !m.HotPages.isEmpty() {
+		offsets := dedupeSortedInt64(m.HotPages.Offsets)
+		buf.WriteString(`"hotPages":{"file":`)
+		writeJSONString(&buf, m.HotPages.File)
+		buf.WriteString(`,"offsets":[`)
+		for i, off := range offsets {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			writeJSONInt(&buf, off)
+		}
+		buf.WriteString(`],"pageSizeBytes":`)
+		writeJSONInt(&buf, m.HotPages.PageSizeBytes)
+		buf.WriteString(`},`)
+	}
+
 	buf.WriteString(`"kernelVersion":`)
 	writeJSONString(&buf, m.KernelVersion)
 	buf.WriteByte(',')
@@ -105,6 +171,25 @@ func (m Manifest) Canonical() []byte {
 
 	buf.WriteByte('}')
 	return buf.Bytes()
+}
+
+// dedupeSortedInt64 returns the input sorted ascending with duplicates removed.
+// The input is not mutated. It is the single place the hot-page offsets are
+// normalized for the canonical encoding, so capture order and duplicate
+// discovery never change the descriptor's identity.
+func dedupeSortedInt64(in []int64) []int64 {
+	if len(in) == 0 {
+		return nil
+	}
+	cp := append([]int64(nil), in...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	out := cp[:1]
+	for _, v := range cp[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func writeJSONInt(buf *bytes.Buffer, v int64) {
@@ -135,6 +220,10 @@ type Metadata struct {
 	KernelVersion         string
 	ConfigHash            string
 	CreatedUnix           int64
+	// HotPages is the optional captured hot-page working set for snapshot-resume
+	// prefetch (issue #167). Nil when none was captured; in that case the built
+	// manifest is byte-identical to a pre-field one.
+	HotPages *HotPageSet
 }
 
 // BuildManifest chunks each file in the name to path map and assembles a
@@ -180,5 +269,6 @@ func manifestFrom(entries []FileEntry, meta Metadata) Manifest {
 		CPUModel:              meta.CPUModel,
 		KernelVersion:         meta.KernelVersion,
 		ConfigHash:            meta.ConfigHash,
+		HotPages:              meta.HotPages,
 	}
 }

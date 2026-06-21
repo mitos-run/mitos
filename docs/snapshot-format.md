@@ -37,6 +37,17 @@ content-addressed digest:
 | `CPUModel` | The host CPU model the snapshot was captured on. |
 | `KernelVersion` | The host kernel at capture (informational). |
 | `ConfigHash` | A sha256 over the microvm machine config (vcpu count, memory size, kernel and rootfs identity) the snapshot was captured under. |
+| `HotPages` | OPTIONAL hot-page working set for snapshot-resume prefetch (issue #167). Part of the digest only when present and non-empty; omitted entirely otherwise. See below. |
+
+The `HotPages` field is additive and does NOT require a format-version bump. It
+is the captured set of guest memory page offsets a userfaultfd handler preloads
+before resume (docs/perf/snapshot-prefetch.md). When absent or empty it is
+omitted from the canonical encoding, so a snapshot without one is byte-identical
+and digest-identical to a snapshot built before the field existed: the format is
+forward-compatible within the current version. An older build that does not
+understand the field simply ignores it and restores lazily. A format-version
+bump is needed only if the descriptor encoding itself changes incompatibly, at
+which point the migration policy below governs the transition.
 
 Because these fields are part of the digest, a snapshot built under a different
 Firecracker or on a different CPU never collides with one built here, and the

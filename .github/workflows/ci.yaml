@@ -38,6 +38,12 @@ jobs:
           # last v1 line and reads our v1-format .golangci.yml.
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
           "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
+      - name: apierr remediation lint (issue #28 static guarantee)
+        # STATIC guarantee that no LLM-legible error path, even an unexercised
+        # one, ships without a non-empty remediation. Complements the runtime
+        # envelope test (internal/daemon/error_envelope_test.go). See
+        # docs/api/errors.md and hack/check-apierr-remediation.sh.
+        run: ./hack/check-apierr-remediation.sh
 
   govulncheck:
     # Go-native vulnerability scan. govulncheck reports only vulnerabilities

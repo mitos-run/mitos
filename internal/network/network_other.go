@@ -8,7 +8,6 @@ import (
 	"net"
 	"runtime"
 
-	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -29,7 +28,7 @@ func NewManager(_ Options) Manager {
 	return notSupportedManager{}
 }
 
-func (notSupportedManager) Setup(_ context.Context, _ netconf.Identity, _ v1alpha1.EgressPolicy, _ []netconf.HostPort, _ net.IP) error {
+func (notSupportedManager) Setup(_ context.Context, _ netconf.Identity, _ netconf.SandboxPolicy, _ net.IP) error {
 	return fmt.Errorf("sandbox networking is not supported on %s; requires Linux", runtime.GOOS)
 }
 

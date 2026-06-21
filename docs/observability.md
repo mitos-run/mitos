@@ -215,6 +215,7 @@ reason codes only.
 | `mitos_husk_pod_created_total{pool}` | counter | Husk pods the controller created to fill the warm pool, by pool. |
 | `mitos_husk_pod_lost_total{pool}` | counter | Times an active claim re-pended because its backing husk pod was lost (drain, eviction, deletion), by pool. |
 | `mitos_node_lost_total{node}` | counter | Ready claims marked NodeLost after their node went unhealthy (raw-forkd path), by node. |
+| `mitos_snapshot_distribution_lag_seconds{template}` | histogram | Seconds to distribute a template snapshot to a deficit node by pull from a holder, by template. Populated ONLY on the multi-node distribution path (a peer token configured AND a holder exists); the series is empty on a single-node cluster, which correctly means "no pull-based distribution happened", not "zero lag". |
 
 Fleet health: `mitos_husk_pod_created_total` against a flat `mitos_pool_warm_dormant` reveals churn (pods lost as fast as created); `mitos_husk_pod_lost_total` and `mitos_node_lost_total` are the disruption signals the warm pool absorbs; `mitos_pool_refill_latency_seconds` is how fast a scaled-up or drained pool refills.
 
@@ -231,8 +232,13 @@ pending-requeue, orphan-sweep, claim-error, and pool-reconcile paths).
 
 ### OPEN
 
-- Snapshot-distribution lag is not yet exported.
-- OpenCost and Hubble layers ride on husk pods (#18).
+- `mitos_snapshot_distribution_lag_seconds` is defined, registered, observed at
+  the pull site, and alerted on (`SnapshotDistributionLagHigh`). Its VALUE is
+  populated only on the multi-node distribution path; a single-node cluster
+  leaves the series empty by design (#3).
+- OpenCost and Hubble layers ride on husk pods (#18); the per-sandbox resolution
+  and reconcile logic is implemented and unit-tested (see "Layers 1-3" below),
+  with the live integrations cluster-gated.
 
 The Grafana dashboard, PrometheusRule alerts with runbook URLs, and the
 conditions/reason-code catalogue that ride on these metrics are shipped; see
@@ -339,9 +345,76 @@ busy or virtualized node does not page on the target itself.
 ### OPEN
 
 - Per-cluster threshold tuning is left to the operator (the runbooks say to tune).
-- Helm-chart packaging of the dashboard and alerts is not done; the
-  `deploy/monitoring/` kustomize layer is the current slice.
-- Hubble flow panels and OpenCost cost-attribution need the Cilium/OpenCost
-  integrations (#18).
-- A snapshot-distribution-lag metric and its alert need the multi-node
-  distribution path (#3).
+- Hubble flow panels and OpenCost cost-attribution dashboards need the live
+  Cilium/OpenCost integrations (#18); the resolution and reconcile logic is
+  implemented and unit-tested (see "Layers 1-3" below).
+
+The dashboard and the PrometheusRule alerts are packaged BOTH as the
+`deploy/monitoring/` kustomize layer and in the Helm chart under an opt-in
+`monitoring.enabled` toggle (`deploy/charts/mitos`). The
+`SnapshotDistributionLagHigh` alert ships in both layers; its metric is
+populated only on the multi-node distribution path.
+
+## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge (#164)
+
+The observability stack is structured in layers. Layers 1 and 2 attribute
+network flows and cost to a sandbox; Layer 3 reaches inside the guest. The
+per-sandbox resolution, reconcile, and parsing logic is implemented and
+unit-tested without a cluster or KVM; the LIVE integrations are gated as noted.
+
+### Layer 1: Cilium Hubble flow logs
+
+Hubble identifies an endpoint by its pod namespace, pod name, and pod labels.
+mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
+`mitos.run/pool` labels, so `internal/observability.ResolveSandbox` maps a Hubble
+flow endpoint onto the claim it belongs to, and `ClassifyEgress` turns a flow
+into a per-sandbox egress event with a `Denied` flag (a `DROPPED` verdict is a
+policy drop). This is how a denied egress surfaces tied to its claim.
+
+Enabling it (cluster-gated): run Cilium with Hubble and flow export enabled,
+then consume the Hubble flow stream (relay gRPC or the exported JSON) and decode
+each flow into the `HubbleFlow` shape; `ClassifyEgress` does the per-sandbox
+attribution. The denied-egress-appears-in-Hubble acceptance test requires a live
+Cilium/Hubble cluster and is documented and gated; the verdict-to-claim mapping
+itself is unit-tested (`internal/observability/hubble_test.go`).
+
+### Layer 2: OpenCost cost attribution
+
+OpenCost reports allocation cost per namespace. mitos meters each claim's
+resource-seconds (cpu-core-seconds, memory-GB-seconds). `ReconcileNamespaceCost`
+prices the metered resource-seconds at the cluster rates and compares the sum
+against the OpenCost-reported namespace spend, flagging relative drift beyond a
+tolerance. This checks billing self-consistency: what mitos metered, priced at
+cluster rates, should match what OpenCost attributes to the namespace.
+
+Enabling it (cluster-gated): install OpenCost, read the cluster pricing rates and
+the per-namespace allocation from its API, and feed the namespace spend plus the
+per-claim resource-seconds (from the mitos metering pipeline) into
+`ReconcileNamespaceCost`. The namespace-spend-reconciles-within-tolerance
+acceptance test needs a live OpenCost cluster and is gated; the pricing and
+tolerance arithmetic is unit-tested (`internal/observability/opencost_test.go`).
+
+### Layer 3: guest telemetry bridge (over vsock)
+
+The guest agent samples CPU steal (`/proc/stat` steal field), memory vs balloon
+(`/proc/meminfo`), and the in-guest process table (`/proc/<pid>/stat`), and
+reports them over the existing vsock protocol on a `vitals` request. forkd
+consumes the snapshot, labels it with the sandbox's claim/pool/workspace, and
+serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
+exec). `kubectl sandbox ps <name> --processes` consumes the REAL in-guest process
+table; when the guest is unreachable (claim not running, no KVM behind it) it
+falls back to the SandboxFork object listing, so it never renders a fabricated
+table.
+
+The snapshot carries no secrets: process entries are the program name (`comm`)
+and resource counters, never argv or the process environment.
+
+PROVEN: the `/proc/stat` steal parse, the process-table snapshot, the balloon
+arithmetic, the vsock message shapes, the host-side labeling, and the `ps`
+consumer are unit-tested on darwin against fixtures (`internal/guestvitals`,
+`internal/vsock`, `internal/daemon/vitals_api_test.go`,
+`cmd/kubectl-sandbox/ps_guest_test.go`).
+
+GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest
+collector reads real `/proc` and is exercised by a linux-tagged fixture test
+(`guest/agent/vitals_test.go`) so the next KVM run drives it end to end.

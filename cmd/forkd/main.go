@@ -61,6 +61,7 @@ func main() {
 		memReserveBytes      int64
 		maxSandboxes         int
 		maxStreamsPerSandbox int
+		maxExecTimeoutSecs   int
 		casListen            string
 		allowInsecureGRPC    bool
 	)
@@ -101,6 +102,7 @@ func main() {
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
 	flag.IntVar(&maxSandboxes, "max-sandboxes", 0, "Per-node host-DoS ceiling (production-blocker #2): the maximum number of live sandboxes this forkd admits. Fork refuses with RESOURCE_EXHAUSTED once the live count reaches this, BEFORE allocating or booting anything (an O(1) admission check off the fork hot path), so a runaway tenant cannot exhaust the node by opening forks. 0 disables the ceiling (the prior behavior). GetCapacity reports it so the controller sees the cap.")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the activate path. 0 disables the cap (unbounded, the prior behavior).")
+	flag.IntVar(&maxExecTimeoutSecs, "max-exec-timeout-seconds", 86400, "Ceiling (seconds) on a requested exec or run_code timeout (issue #216). A request over the ceiling is REJECTED with the typed timeout_too_large error, never silently reduced, so a requested deadline is always honored or rejected. Default 86400 (24h) clears the SDK exec_background one-day default. 0 disables the ceiling (any timeout honored).")
 	flag.StringVar(&casListen, "cas-listen", ":9092", "Listen address for the DEDICATED token-gated TLS CAS listener used for peer template distribution. The CAS surface is served here, on its OWN port, NOT on the sandbox HTTP port (--http): the sandbox exec/files/metrics/healthz API keeps its existing scheme so SDK clients are unaffected. Effective only when CAS distribution is enabled (FORKD_PEER_TOKEN set together with mTLS). The controller derives this port to build each holder's CAS source URL")
 	// peerToken (FORKD_PEER_TOKEN env) is the shared bearer token a peer forkd
 	// (driven by the controller) must present to pull templates from this node's
@@ -307,6 +309,10 @@ func main() {
 
 	sandboxAPI := daemon.NewSandboxAPI(dataDir)
 	sandboxAPI.SetMaxStreamsPerSandbox(maxStreamsPerSandbox)
+	sandboxAPI.SetMaxExecTimeoutSeconds(maxExecTimeoutSecs)
+	// Drive the real engine's pause/resume (full memory+fs snapshot and restore)
+	// from the sandbox API's pause/resume endpoints (issue #218).
+	sandboxAPI.SetEnginePauser(engine)
 	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)

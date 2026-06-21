@@ -1714,8 +1714,20 @@ type SandboxInfo struct {
 	// zero when never accessed
 	LastActivityUnix int64 `protobuf:"varint,3,opt,name=last_activity_unix,json=lastActivityUnix,proto3" json:"last_activity_unix,omitempty"`
 	UptimeSeconds    int64 `protobuf:"varint,4,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// deadline_unix is the live TTL deadline set via set_timeout (issue #218);
+	// zero when no live timeout has been set. The controller's lifetime reaper
+	// honors it as the running-sandbox TTL.
+	DeadlineUnix int64 `protobuf:"varint,5,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"`
+	// active_streams is the count of OPEN streams (streaming exec, run_code, PTY)
+	// for this sandbox: the work-aware idle signal (issue #218). A non-zero count
+	// means a background job is running, so the idle reaper must NOT reap the
+	// sandbox even when there has been no inbound API interaction.
+	ActiveStreams int32 `protobuf:"varint,6,opt,name=active_streams,json=activeStreams,proto3" json:"active_streams,omitempty"`
+	// paused is true when the sandbox has been paused (issue #218): its clock is
+	// stopped and it must never be idle-reaped while held.
+	Paused        bool `protobuf:"varint,7,opt,name=paused,proto3" json:"paused,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SandboxInfo) Reset() {
@@ -1776,6 +1788,248 @@ func (x *SandboxInfo) GetUptimeSeconds() int64 {
 	return 0
 }
 
+func (x *SandboxInfo) GetDeadlineUnix() int64 {
+	if x != nil {
+		return x.DeadlineUnix
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetActiveStreams() int32 {
+	if x != nil {
+		return x.ActiveStreams
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
+}
+
+type ListVolumesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVolumesRequest) Reset() {
+	*x = ListVolumesRequest{}
+	mi := &file_proto_forkd_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVolumesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVolumesRequest) ProtoMessage() {}
+
+func (x *ListVolumesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVolumesRequest.ProtoReflect.Descriptor instead.
+func (*ListVolumesRequest) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{27}
+}
+
+type ListVolumesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Volumes       []*VolumeInfo          `protobuf:"bytes,1,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVolumesResponse) Reset() {
+	*x = ListVolumesResponse{}
+	mi := &file_proto_forkd_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVolumesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVolumesResponse) ProtoMessage() {}
+
+func (x *ListVolumesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVolumesResponse.ProtoReflect.Descriptor instead.
+func (*ListVolumesResponse) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ListVolumesResponse) GetVolumes() []*VolumeInfo {
+	if x != nil {
+		return x.Volumes
+	}
+	return nil
+}
+
+// VolumeInfo describes one per-sandbox volume backing directory on disk. It is
+// keyed by the sandbox id (the directory name under sandboxes/<id>/volumes), so
+// the controller can match it against the same live-claim and desired-alive
+// sets it uses for VM orphans. age_seconds is derived from the directory mtime
+// so a freshly-prepared backing whose claim status has not landed yet can be
+// protected by the same OrphanGrace the VM sweep uses.
+type VolumeInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	AgeSeconds    int64                  `protobuf:"varint,2,opt,name=age_seconds,json=ageSeconds,proto3" json:"age_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VolumeInfo) Reset() {
+	*x = VolumeInfo{}
+	mi := &file_proto_forkd_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VolumeInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VolumeInfo) ProtoMessage() {}
+
+func (x *VolumeInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VolumeInfo.ProtoReflect.Descriptor instead.
+func (*VolumeInfo) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *VolumeInfo) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *VolumeInfo) GetAgeSeconds() int64 {
+	if x != nil {
+		return x.AgeSeconds
+	}
+	return 0
+}
+
+type ReclaimVolumeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// sandbox_id names the per-sandbox volume backing dir to remove
+	// (sandboxes/<sandbox_id>/volumes and its sandbox dir). It is validated
+	// against the same path-safe pattern as a sandbox id before any path is built.
+	SandboxId     string `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReclaimVolumeRequest) Reset() {
+	*x = ReclaimVolumeRequest{}
+	mi := &file_proto_forkd_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReclaimVolumeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReclaimVolumeRequest) ProtoMessage() {}
+
+func (x *ReclaimVolumeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReclaimVolumeRequest.ProtoReflect.Descriptor instead.
+func (*ReclaimVolumeRequest) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ReclaimVolumeRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+type ReclaimVolumeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReclaimVolumeResponse) Reset() {
+	*x = ReclaimVolumeResponse{}
+	mi := &file_proto_forkd_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReclaimVolumeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReclaimVolumeResponse) ProtoMessage() {}
+
+func (x *ReclaimVolumeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReclaimVolumeResponse.ProtoReflect.Descriptor instead.
+func (*ReclaimVolumeResponse) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{31}
+}
+
 type ReadFileRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -1786,7 +2040,7 @@ type ReadFileRequest struct {
 
 func (x *ReadFileRequest) Reset() {
 	*x = ReadFileRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[27]
+	mi := &file_proto_forkd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1798,7 +2052,7 @@ func (x *ReadFileRequest) String() string {
 func (*ReadFileRequest) ProtoMessage() {}
 
 func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[27]
+	mi := &file_proto_forkd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1811,7 +2065,7 @@ func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileRequest.ProtoReflect.Descriptor instead.
 func (*ReadFileRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{27}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReadFileRequest) GetSandboxId() string {
@@ -1838,7 +2092,7 @@ type ReadFileResponse struct {
 
 func (x *ReadFileResponse) Reset() {
 	*x = ReadFileResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[28]
+	mi := &file_proto_forkd_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1850,7 +2104,7 @@ func (x *ReadFileResponse) String() string {
 func (*ReadFileResponse) ProtoMessage() {}
 
 func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[28]
+	mi := &file_proto_forkd_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1863,7 +2117,7 @@ func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileResponse.ProtoReflect.Descriptor instead.
 func (*ReadFileResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{28}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ReadFileResponse) GetContent() []byte {
@@ -1892,7 +2146,7 @@ type WriteFileRequest struct {
 
 func (x *WriteFileRequest) Reset() {
 	*x = WriteFileRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[29]
+	mi := &file_proto_forkd_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1904,7 +2158,7 @@ func (x *WriteFileRequest) String() string {
 func (*WriteFileRequest) ProtoMessage() {}
 
 func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[29]
+	mi := &file_proto_forkd_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1917,7 +2171,7 @@ func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteFileRequest.ProtoReflect.Descriptor instead.
 func (*WriteFileRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{29}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *WriteFileRequest) GetSandboxId() string {
@@ -1956,7 +2210,7 @@ type WriteFileResponse struct {
 
 func (x *WriteFileResponse) Reset() {
 	*x = WriteFileResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[30]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1968,7 +2222,7 @@ func (x *WriteFileResponse) String() string {
 func (*WriteFileResponse) ProtoMessage() {}
 
 func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[30]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1981,7 +2235,7 @@ func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteFileResponse.ProtoReflect.Descriptor instead.
 func (*WriteFileResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{30}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{35}
 }
 
 type ListDirRequest struct {
@@ -1994,7 +2248,7 @@ type ListDirRequest struct {
 
 func (x *ListDirRequest) Reset() {
 	*x = ListDirRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[31]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2006,7 +2260,7 @@ func (x *ListDirRequest) String() string {
 func (*ListDirRequest) ProtoMessage() {}
 
 func (x *ListDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[31]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2019,7 +2273,7 @@ func (x *ListDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDirRequest.ProtoReflect.Descriptor instead.
 func (*ListDirRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{31}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ListDirRequest) GetSandboxId() string {
@@ -2045,7 +2299,7 @@ type ListDirResponse struct {
 
 func (x *ListDirResponse) Reset() {
 	*x = ListDirResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[32]
+	mi := &file_proto_forkd_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2057,7 +2311,7 @@ func (x *ListDirResponse) String() string {
 func (*ListDirResponse) ProtoMessage() {}
 
 func (x *ListDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[32]
+	mi := &file_proto_forkd_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2070,7 +2324,7 @@ func (x *ListDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDirResponse.ProtoReflect.Descriptor instead.
 func (*ListDirResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{32}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListDirResponse) GetEntries() []*FileInfo {
@@ -2093,7 +2347,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_proto_forkd_proto_msgTypes[33]
+	mi := &file_proto_forkd_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2105,7 +2359,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[33]
+	mi := &file_proto_forkd_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2118,7 +2372,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{33}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *FileInfo) GetName() string {
@@ -2164,7 +2418,7 @@ type GetCapacityRequest struct {
 
 func (x *GetCapacityRequest) Reset() {
 	*x = GetCapacityRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[34]
+	mi := &file_proto_forkd_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2176,7 +2430,7 @@ func (x *GetCapacityRequest) String() string {
 func (*GetCapacityRequest) ProtoMessage() {}
 
 func (x *GetCapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[34]
+	mi := &file_proto_forkd_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2189,7 +2443,7 @@ func (x *GetCapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapacityRequest.ProtoReflect.Descriptor instead.
 func (*GetCapacityRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{34}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{39}
 }
 
 type GetCapacityResponse struct {
@@ -2218,7 +2472,7 @@ type GetCapacityResponse struct {
 
 func (x *GetCapacityResponse) Reset() {
 	*x = GetCapacityResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[35]
+	mi := &file_proto_forkd_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2230,7 +2484,7 @@ func (x *GetCapacityResponse) String() string {
 func (*GetCapacityResponse) ProtoMessage() {}
 
 func (x *GetCapacityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[35]
+	mi := &file_proto_forkd_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2243,7 +2497,7 @@ func (x *GetCapacityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapacityResponse.ProtoReflect.Descriptor instead.
 func (*GetCapacityResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{35}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *GetCapacityResponse) GetActiveSandboxes() int32 {
@@ -2334,7 +2588,7 @@ type TemplateCapacity struct {
 
 func (x *TemplateCapacity) Reset() {
 	*x = TemplateCapacity{}
-	mi := &file_proto_forkd_proto_msgTypes[36]
+	mi := &file_proto_forkd_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2346,7 +2600,7 @@ func (x *TemplateCapacity) String() string {
 func (*TemplateCapacity) ProtoMessage() {}
 
 func (x *TemplateCapacity) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[36]
+	mi := &file_proto_forkd_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2359,7 +2613,7 @@ func (x *TemplateCapacity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TemplateCapacity.ProtoReflect.Descriptor instead.
 func (*TemplateCapacity) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{36}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *TemplateCapacity) GetTemplateId() string {
@@ -2407,7 +2661,7 @@ type ResourceSpec struct {
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_proto_forkd_proto_msgTypes[37]
+	mi := &file_proto_forkd_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2419,7 +2673,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[37]
+	mi := &file_proto_forkd_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2432,7 +2686,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{37}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ResourceSpec) GetVcpus() int32 {
@@ -2459,7 +2713,7 @@ type EnvVar struct {
 
 func (x *EnvVar) Reset() {
 	*x = EnvVar{}
-	mi := &file_proto_forkd_proto_msgTypes[38]
+	mi := &file_proto_forkd_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2471,7 +2725,7 @@ func (x *EnvVar) String() string {
 func (*EnvVar) ProtoMessage() {}
 
 func (x *EnvVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[38]
+	mi := &file_proto_forkd_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2484,7 +2738,7 @@ func (x *EnvVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvVar.ProtoReflect.Descriptor instead.
 func (*EnvVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{38}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *EnvVar) GetKey() string {
@@ -2511,7 +2765,7 @@ type SecretVar struct {
 
 func (x *SecretVar) Reset() {
 	*x = SecretVar{}
-	mi := &file_proto_forkd_proto_msgTypes[39]
+	mi := &file_proto_forkd_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2523,7 +2777,7 @@ func (x *SecretVar) String() string {
 func (*SecretVar) ProtoMessage() {}
 
 func (x *SecretVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[39]
+	mi := &file_proto_forkd_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2536,7 +2790,7 @@ func (x *SecretVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretVar.ProtoReflect.Descriptor instead.
 func (*SecretVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{39}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *SecretVar) GetKey() string {
@@ -2554,16 +2808,28 @@ func (x *SecretVar) GetValue() string {
 }
 
 type NetworkConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EgressPolicy  string                 `protobuf:"bytes,1,opt,name=egress_policy,json=egressPolicy,proto3" json:"egress_policy,omitempty"`
-	AllowList     []string               `protobuf:"bytes,2,rep,name=allow_list,json=allowList,proto3" json:"allow_list,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	EgressPolicy string                 `protobuf:"bytes,1,opt,name=egress_policy,json=egressPolicy,proto3" json:"egress_policy,omitempty"`
+	AllowList    []string               `protobuf:"bytes,2,rep,name=allow_list,json=allowList,proto3" json:"allow_list,omitempty"`
+	// block_network drops ALL egress for the sandbox, overriding egress_policy and
+	// the allowlists (Modal block_network=True).
+	BlockNetwork bool `protobuf:"varint,3,opt,name=block_network,json=blockNetwork,proto3" json:"block_network,omitempty"`
+	// allow_cidrs is the egress CIDR allowlist: a destination IP inside any of
+	// these blocks is accepted (Modal outbound_cidr_allowlist). v4 or v6 CIDRs.
+	AllowCidrs []string `protobuf:"bytes,4,rep,name=allow_cidrs,json=allowCidrs,proto3" json:"allow_cidrs,omitempty"`
+	// inbound governs unsolicited inbound to the guest: "deny" (the secure
+	// default, deny-by-default) or "allow". Empty means deny.
+	Inbound string `protobuf:"bytes,5,opt,name=inbound,proto3" json:"inbound,omitempty"`
+	// inbound_cidrs narrows an inbound=allow to source CIDRs (Modal
+	// inbound_cidr_allowlist). Only meaningful when inbound is allow.
+	InboundCidrs  []string `protobuf:"bytes,6,rep,name=inbound_cidrs,json=inboundCidrs,proto3" json:"inbound_cidrs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NetworkConfig) Reset() {
 	*x = NetworkConfig{}
-	mi := &file_proto_forkd_proto_msgTypes[40]
+	mi := &file_proto_forkd_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2575,7 +2841,7 @@ func (x *NetworkConfig) String() string {
 func (*NetworkConfig) ProtoMessage() {}
 
 func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[40]
+	mi := &file_proto_forkd_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2588,7 +2854,7 @@ func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkConfig.ProtoReflect.Descriptor instead.
 func (*NetworkConfig) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{40}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *NetworkConfig) GetEgressPolicy() string {
@@ -2601,6 +2867,34 @@ func (x *NetworkConfig) GetEgressPolicy() string {
 func (x *NetworkConfig) GetAllowList() []string {
 	if x != nil {
 		return x.AllowList
+	}
+	return nil
+}
+
+func (x *NetworkConfig) GetBlockNetwork() bool {
+	if x != nil {
+		return x.BlockNetwork
+	}
+	return false
+}
+
+func (x *NetworkConfig) GetAllowCidrs() []string {
+	if x != nil {
+		return x.AllowCidrs
+	}
+	return nil
+}
+
+func (x *NetworkConfig) GetInbound() string {
+	if x != nil {
+		return x.Inbound
+	}
+	return ""
+}
+
+func (x *NetworkConfig) GetInboundCidrs() []string {
+	if x != nil {
+		return x.InboundCidrs
 	}
 	return nil
 }
@@ -2748,13 +3042,29 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds\"\x16\n" +
 	"\x14ListSandboxesRequest\"I\n" +
 	"\x15ListSandboxesResponse\x120\n" +
-	"\tsandboxes\x18\x01 \x03(\v2\x12.forkd.SandboxInfoR\tsandboxes\"\xa9\x01\n" +
+	"\tsandboxes\x18\x01 \x03(\v2\x12.forkd.SandboxInfoR\tsandboxes\"\x8d\x02\n" +
 	"\vSandboxInfo\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x12,\n" +
 	"\x12last_activity_unix\x18\x03 \x01(\x03R\x10lastActivityUnix\x12%\n" +
-	"\x0euptime_seconds\x18\x04 \x01(\x03R\ruptimeSeconds\"D\n" +
+	"\x0euptime_seconds\x18\x04 \x01(\x03R\ruptimeSeconds\x12#\n" +
+	"\rdeadline_unix\x18\x05 \x01(\x03R\fdeadlineUnix\x12%\n" +
+	"\x0eactive_streams\x18\x06 \x01(\x05R\ractiveStreams\x12\x16\n" +
+	"\x06paused\x18\a \x01(\bR\x06paused\"\x14\n" +
+	"\x12ListVolumesRequest\"B\n" +
+	"\x13ListVolumesResponse\x12+\n" +
+	"\avolumes\x18\x01 \x03(\v2\x11.forkd.VolumeInfoR\avolumes\"L\n" +
+	"\n" +
+	"VolumeInfo\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
+	"\vage_seconds\x18\x02 \x01(\x03R\n" +
+	"ageSeconds\"5\n" +
+	"\x14ReclaimVolumeRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"\x17\n" +
+	"\x15ReclaimVolumeResponse\"D\n" +
 	"\x0fReadFileRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x12\n" +
@@ -2813,11 +3123,16 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"3\n" +
 	"\tSecretVar\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"S\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xd8\x01\n" +
 	"\rNetworkConfig\x12#\n" +
 	"\regress_policy\x18\x01 \x01(\tR\fegressPolicy\x12\x1d\n" +
 	"\n" +
-	"allow_list\x18\x02 \x03(\tR\tallowList2\xd3\b\n" +
+	"allow_list\x18\x02 \x03(\tR\tallowList\x12#\n" +
+	"\rblock_network\x18\x03 \x01(\bR\fblockNetwork\x12\x1f\n" +
+	"\vallow_cidrs\x18\x04 \x03(\tR\n" +
+	"allowCidrs\x12\x18\n" +
+	"\ainbound\x18\x05 \x01(\tR\ainbound\x12#\n" +
+	"\rinbound_cidrs\x18\x06 \x03(\tR\finboundCidrs2\xe5\t\n" +
 	"\n" +
 	"ForkDaemon\x12M\n" +
 	"\x0eCreateTemplate\x12\x1c.forkd.CreateTemplateRequest\x1a\x1d.forkd.CreateTemplateResponse\x12M\n" +
@@ -2832,7 +3147,9 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
 	"ExecStream\x12\x18.forkd.ExecStreamRequest\x1a\x19.forkd.ExecStreamResponse0\x01\x12>\n" +
 	"\tTerminate\x12\x17.forkd.TerminateRequest\x1a\x18.forkd.TerminateResponse\x12J\n" +
-	"\rListSandboxes\x12\x1b.forkd.ListSandboxesRequest\x1a\x1c.forkd.ListSandboxesResponse\x12;\n" +
+	"\rListSandboxes\x12\x1b.forkd.ListSandboxesRequest\x1a\x1c.forkd.ListSandboxesResponse\x12D\n" +
+	"\vListVolumes\x12\x19.forkd.ListVolumesRequest\x1a\x1a.forkd.ListVolumesResponse\x12J\n" +
+	"\rReclaimVolume\x12\x1b.forkd.ReclaimVolumeRequest\x1a\x1c.forkd.ReclaimVolumeResponse\x12;\n" +
 	"\bReadFile\x12\x16.forkd.ReadFileRequest\x1a\x17.forkd.ReadFileResponse\x12>\n" +
 	"\tWriteFile\x12\x17.forkd.WriteFileRequest\x1a\x18.forkd.WriteFileResponse\x128\n" +
 	"\aListDir\x12\x15.forkd.ListDirRequest\x1a\x16.forkd.ListDirResponse\x12D\n" +
@@ -2851,7 +3168,7 @@ func file_proto_forkd_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_forkd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
+var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_proto_forkd_proto_goTypes = []any{
 	(ExecStreamResponse_Stream)(0), // 0: forkd.ExecStreamResponse.Stream
 	(*CreateTemplateRequest)(nil),  // 1: forkd.CreateTemplateRequest
@@ -2881,75 +3198,85 @@ var file_proto_forkd_proto_goTypes = []any{
 	(*ListSandboxesRequest)(nil),   // 25: forkd.ListSandboxesRequest
 	(*ListSandboxesResponse)(nil),  // 26: forkd.ListSandboxesResponse
 	(*SandboxInfo)(nil),            // 27: forkd.SandboxInfo
-	(*ReadFileRequest)(nil),        // 28: forkd.ReadFileRequest
-	(*ReadFileResponse)(nil),       // 29: forkd.ReadFileResponse
-	(*WriteFileRequest)(nil),       // 30: forkd.WriteFileRequest
-	(*WriteFileResponse)(nil),      // 31: forkd.WriteFileResponse
-	(*ListDirRequest)(nil),         // 32: forkd.ListDirRequest
-	(*ListDirResponse)(nil),        // 33: forkd.ListDirResponse
-	(*FileInfo)(nil),               // 34: forkd.FileInfo
-	(*GetCapacityRequest)(nil),     // 35: forkd.GetCapacityRequest
-	(*GetCapacityResponse)(nil),    // 36: forkd.GetCapacityResponse
-	(*TemplateCapacity)(nil),       // 37: forkd.TemplateCapacity
-	(*ResourceSpec)(nil),           // 38: forkd.ResourceSpec
-	(*EnvVar)(nil),                 // 39: forkd.EnvVar
-	(*SecretVar)(nil),              // 40: forkd.SecretVar
-	(*NetworkConfig)(nil),          // 41: forkd.NetworkConfig
-	nil,                            // 42: forkd.GetCapacityResponse.TemplateDigestsEntry
+	(*ListVolumesRequest)(nil),     // 28: forkd.ListVolumesRequest
+	(*ListVolumesResponse)(nil),    // 29: forkd.ListVolumesResponse
+	(*VolumeInfo)(nil),             // 30: forkd.VolumeInfo
+	(*ReclaimVolumeRequest)(nil),   // 31: forkd.ReclaimVolumeRequest
+	(*ReclaimVolumeResponse)(nil),  // 32: forkd.ReclaimVolumeResponse
+	(*ReadFileRequest)(nil),        // 33: forkd.ReadFileRequest
+	(*ReadFileResponse)(nil),       // 34: forkd.ReadFileResponse
+	(*WriteFileRequest)(nil),       // 35: forkd.WriteFileRequest
+	(*WriteFileResponse)(nil),      // 36: forkd.WriteFileResponse
+	(*ListDirRequest)(nil),         // 37: forkd.ListDirRequest
+	(*ListDirResponse)(nil),        // 38: forkd.ListDirResponse
+	(*FileInfo)(nil),               // 39: forkd.FileInfo
+	(*GetCapacityRequest)(nil),     // 40: forkd.GetCapacityRequest
+	(*GetCapacityResponse)(nil),    // 41: forkd.GetCapacityResponse
+	(*TemplateCapacity)(nil),       // 42: forkd.TemplateCapacity
+	(*ResourceSpec)(nil),           // 43: forkd.ResourceSpec
+	(*EnvVar)(nil),                 // 44: forkd.EnvVar
+	(*SecretVar)(nil),              // 45: forkd.SecretVar
+	(*NetworkConfig)(nil),          // 46: forkd.NetworkConfig
+	nil,                            // 47: forkd.GetCapacityResponse.TemplateDigestsEntry
 }
 var file_proto_forkd_proto_depIdxs = []int32{
-	38, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
+	43, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
 	15, // 1: forkd.CreateTemplateRequest.volumes:type_name -> forkd.VolumeMount
 	9,  // 2: forkd.ListTemplatesResponse.templates:type_name -> forkd.TemplateInfo
-	39, // 3: forkd.ForkRequest.env:type_name -> forkd.EnvVar
-	40, // 4: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
-	41, // 5: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
+	44, // 3: forkd.ForkRequest.env:type_name -> forkd.EnvVar
+	45, // 4: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
+	46, // 5: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
 	15, // 6: forkd.ForkRequest.volumes:type_name -> forkd.VolumeMount
-	39, // 7: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
-	39, // 8: forkd.ExecRequest.env:type_name -> forkd.EnvVar
-	39, // 9: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
+	44, // 7: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
+	44, // 8: forkd.ExecRequest.env:type_name -> forkd.EnvVar
+	44, // 9: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
 	0,  // 10: forkd.ExecStreamResponse.stream:type_name -> forkd.ExecStreamResponse.Stream
 	27, // 11: forkd.ListSandboxesResponse.sandboxes:type_name -> forkd.SandboxInfo
-	34, // 12: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
-	42, // 13: forkd.GetCapacityResponse.template_digests:type_name -> forkd.GetCapacityResponse.TemplateDigestsEntry
-	37, // 14: forkd.GetCapacityResponse.templates:type_name -> forkd.TemplateCapacity
-	1,  // 15: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
-	3,  // 16: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
-	7,  // 17: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
-	5,  // 18: forkd.ForkDaemon.PullTemplate:input_type -> forkd.PullTemplateRequest
-	10, // 19: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
-	12, // 20: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
-	14, // 21: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
-	17, // 22: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
-	19, // 23: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
-	21, // 24: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
-	23, // 25: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
-	25, // 26: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
-	28, // 27: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
-	30, // 28: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
-	32, // 29: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
-	35, // 30: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
-	2,  // 31: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
-	4,  // 32: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
-	8,  // 33: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
-	6,  // 34: forkd.ForkDaemon.PullTemplate:output_type -> forkd.PullTemplateResponse
-	11, // 35: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
-	13, // 36: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
-	16, // 37: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
-	18, // 38: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
-	20, // 39: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
-	22, // 40: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
-	24, // 41: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
-	26, // 42: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
-	29, // 43: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
-	31, // 44: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
-	33, // 45: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
-	36, // 46: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
-	31, // [31:47] is the sub-list for method output_type
-	15, // [15:31] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	30, // 12: forkd.ListVolumesResponse.volumes:type_name -> forkd.VolumeInfo
+	39, // 13: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
+	47, // 14: forkd.GetCapacityResponse.template_digests:type_name -> forkd.GetCapacityResponse.TemplateDigestsEntry
+	42, // 15: forkd.GetCapacityResponse.templates:type_name -> forkd.TemplateCapacity
+	1,  // 16: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
+	3,  // 17: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
+	7,  // 18: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
+	5,  // 19: forkd.ForkDaemon.PullTemplate:input_type -> forkd.PullTemplateRequest
+	10, // 20: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
+	12, // 21: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
+	14, // 22: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
+	17, // 23: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
+	19, // 24: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
+	21, // 25: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
+	23, // 26: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
+	25, // 27: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
+	28, // 28: forkd.ForkDaemon.ListVolumes:input_type -> forkd.ListVolumesRequest
+	31, // 29: forkd.ForkDaemon.ReclaimVolume:input_type -> forkd.ReclaimVolumeRequest
+	33, // 30: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
+	35, // 31: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
+	37, // 32: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
+	40, // 33: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
+	2,  // 34: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
+	4,  // 35: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
+	8,  // 36: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
+	6,  // 37: forkd.ForkDaemon.PullTemplate:output_type -> forkd.PullTemplateResponse
+	11, // 38: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
+	13, // 39: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
+	16, // 40: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
+	18, // 41: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
+	20, // 42: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
+	22, // 43: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
+	24, // 44: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
+	26, // 45: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
+	29, // 46: forkd.ForkDaemon.ListVolumes:output_type -> forkd.ListVolumesResponse
+	32, // 47: forkd.ForkDaemon.ReclaimVolume:output_type -> forkd.ReclaimVolumeResponse
+	34, // 48: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
+	36, // 49: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
+	38, // 50: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
+	41, // 51: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
+	34, // [34:52] is the sub-list for method output_type
+	16, // [16:34] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_proto_forkd_proto_init() }
@@ -2963,7 +3290,7 @@ func file_proto_forkd_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_forkd_proto_rawDesc), len(file_proto_forkd_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   42,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

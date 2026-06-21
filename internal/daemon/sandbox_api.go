@@ -73,21 +73,93 @@ type SandboxAPI struct {
 	// openStreams counts the currently OPEN streams per sandbox id, guarded by
 	// mu. acquireStream increments on open and the returned release decrements on
 	// close, deleting the entry at zero so the map does not grow across sandbox
-	// lifetimes.
+	// lifetimes. A non-zero count is the work-aware idle signal (issue #218): a
+	// sandbox with a live streaming exec, run_code, or PTY (a background job) is
+	// running ACTUAL work, so the idle reaper must not reap it mid-run.
 	openStreams map[string]int
+	// deadlines records a live TTL deadline per sandbox id set via set_timeout
+	// (issue #218), guarded by mu. It is the running-sandbox TTL the lifetime
+	// reaper reads through ListSandboxes; absent until the first set_timeout. The
+	// value is the absolute wall-clock instant the sandbox should be reaped.
+	deadlines map[string]time.Time
+	// paused records sandbox ids whose clock is stopped by a pause (issue #218),
+	// guarded by mu. A paused sandbox is held (full state snapshotted on a real
+	// engine) and must never be idle-reaped: its idle clock does not run while
+	// paused. resume clears the entry.
+	paused map[string]bool
+	// enginePauser, when set (forkd), drives the real engine's pause/resume
+	// (full memory+fs snapshot and restore) from the pause/resume HTTP
+	// endpoints. nil on the standalone server and in unit tests, where the
+	// endpoints record the held state only. Set via SetEnginePauser.
+	enginePauser EnginePauser
+	// maxExecTimeout is the ceiling (seconds) on a requested exec or run_code
+	// timeout (issue #216). A request over the ceiling is REJECTED with the typed
+	// timeout_too_large code, never silently reduced, so a requested deadline is
+	// always honored or rejected. Defaults to defaultMaxExecTimeoutSeconds (24h),
+	// chosen to clear the exec_background one-day default. <=0 disables the
+	// ceiling (any timeout honored). Set via SetMaxExecTimeoutSeconds.
+	maxExecTimeout int
+	// vitalsLabels records the claim/pool/workspace identity per sandbox id,
+	// guarded by mu. The forkd Fork path sets it so the /v1/vitals guest
+	// telemetry snapshot (Layer 3, issue #164) is labeled with the same identity
+	// the OTel spans and metrics carry. Absent until SetVitalsLabels is called;
+	// an unlabeled sandbox returns empty label fields, never a fabricated one.
+	// The labels are k8s object names, never secrets.
+	vitalsLabels map[string]VitalsLabels
 }
+
+// defaultMaxExecTimeoutSeconds is the default ceiling on a requested exec or
+// run_code timeout: 24 hours. It clears the SDK exec_background one-day default
+// so a long-running background command is honored, while still bounding an
+// absurd requested deadline. The determinism rule (issue #216) is that a request
+// over this ceiling is rejected with timeout_too_large, never silently reduced.
+const defaultMaxExecTimeoutSeconds = 86400
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	return &SandboxAPI{
-		agents:       make(map[string]*vsock.Client),
-		tokens:       make(map[string]string),
-		vsockDir:     vsockDir,
-		streamPaths:  make(map[string]string),
-		lastActivity: make(map[string]time.Time),
-		now:          time.Now,
-		auditor:      NopAuditor{},
-		openStreams:  make(map[string]int),
+		agents:         make(map[string]*vsock.Client),
+		tokens:         make(map[string]string),
+		vsockDir:       vsockDir,
+		streamPaths:    make(map[string]string),
+		lastActivity:   make(map[string]time.Time),
+		now:            time.Now,
+		auditor:        NopAuditor{},
+		openStreams:    make(map[string]int),
+		deadlines:      make(map[string]time.Time),
+		paused:         make(map[string]bool),
+		maxExecTimeout: defaultMaxExecTimeoutSeconds,
+		vitalsLabels:   make(map[string]VitalsLabels),
 	}
+}
+
+// SetMaxExecTimeoutSeconds sets the ceiling on a requested exec or run_code
+// timeout (issue #216). A request over the ceiling is rejected with the typed
+// timeout_too_large code, never silently reduced. n<=0 disables the ceiling.
+// Must be called before the API serves requests; the field is not synchronized.
+func (api *SandboxAPI) SetMaxExecTimeoutSeconds(n int) {
+	api.maxExecTimeout = n
+}
+
+// checkTimeout enforces the requested-timeout ceiling for sandboxID and the
+// requested timeout (seconds). It returns nil when the timeout is honored (at or
+// under the ceiling, or the ceiling is disabled). When the timeout exceeds the
+// ceiling it returns the typed timeout_too_large Error (carrying the requested
+// value and the ceiling in context) so the caller can reject the request
+// deterministically rather than silently clamp it. A nil return is the
+// honored-timeout sentinel; the error is built only on the reject path so the
+// remediation static check never sees an empty Error literal.
+func (api *SandboxAPI) checkTimeout(sandboxID string, timeout int) *apierr.Error {
+	if api.maxExecTimeout <= 0 || timeout <= api.maxExecTimeout {
+		return nil
+	}
+	e := apierr.Get(apierr.CodeTimeoutTooLarge).
+		WithCause(fmt.Sprintf("requested timeout %ds exceeds the ceiling of %ds", timeout, api.maxExecTimeout)).
+		WithContext(map[string]any{
+			"sandbox":       sandboxID,
+			"requested_s":   timeout,
+			"max_timeout_s": api.maxExecTimeout,
+		})
+	return &e
 }
 
 // SetMaxStreamsPerSandbox sets the per-sandbox ceiling on concurrent OPEN
@@ -108,11 +180,12 @@ func (api *SandboxAPI) SetMaxStreamsPerSandbox(n int) {
 // dialed; it is a single map lookup under mu and never touches the activate or
 // fork hot path. maxStreams<=0 disables the cap.
 func (api *SandboxAPI) acquireStream(sandboxID string) (release func(), ok bool) {
-	if api.maxStreams <= 0 {
-		return func() {}, true
-	}
 	api.mu.Lock()
-	if api.openStreams[sandboxID] >= api.maxStreams {
+	// Enforce the cap only when set; the open-stream count is tracked
+	// unconditionally because it is also the work-aware idle signal (issue
+	// #218): a live stream means a background job is running, so the idle reaper
+	// must not reap the sandbox even with the cap disabled.
+	if api.maxStreams > 0 && api.openStreams[sandboxID] >= api.maxStreams {
 		api.mu.Unlock()
 		return nil, false
 	}
@@ -278,6 +351,9 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	delete(api.tokens, sandboxID)
 	delete(api.lastActivity, sandboxID)
 	delete(api.streamPaths, sandboxID)
+	delete(api.deadlines, sandboxID)
+	delete(api.paused, sandboxID)
+	delete(api.vitalsLabels, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -364,6 +440,10 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
 	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
 	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
+	mux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
+	mux.HandleFunc("POST /v1/pause", api.handlePause)
+	mux.HandleFunc("POST /v1/resume", api.handleResume)
+	mux.HandleFunc("POST /v1/vitals", api.handleVitals)
 
 	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
 	// body-peeking requireBearer middleware; it authenticates itself in
@@ -500,6 +580,12 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	// Determinism (issue #216): reject an over-ceiling timeout BEFORE any work,
+	// with the typed timeout_too_large code, rather than silently reducing it.
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
+		return
+	}
 	api.touch(req.Sandbox)
 
 	if _, err := api.getAgent(req.Sandbox); err != nil {
@@ -517,7 +603,22 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["exec_failed"].WithCause(fmt.Sprintf("exec failed: %v", err)))
+		writeAPIErr(w, apierr.Get(apierr.CodeExecFailed).WithCause(fmt.Sprintf("exec failed: %v", err)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
+		return
+	}
+
+	// Execution-deadline discrimination (issue #216): the guest kills a command
+	// that ran past its deadline and reports the conventional 124 exit code. On
+	// the blocking /v1/exec path we surface that as the typed exec_timeout
+	// envelope (504), so a caller can branch on the deadline without comparing
+	// exit codes. The streaming path keeps 124 in the terminal frame (the status
+	// header is already 200), and the SDK maps that frame to the same typed
+	// error.
+	if exit.ExitCode == execTimeoutExitCode {
+		writeAPIErr(w, apierr.Get(apierr.CodeExecTimeout).
+			WithCause(fmt.Sprintf("command exceeded its %ds execution deadline and was terminated", execTimeoutSeconds(req.Timeout))).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "timeout_s": execTimeoutSeconds(req.Timeout)}))
 		return
 	}
 
@@ -545,10 +646,30 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 // invoking onChunk per chunk and returning the terminal frame. It falls back to
 // the shared connection's aggregated Exec when no stream path is registered so
 // callers still work on hosts that have not wired streaming.
+// execTimeoutExitCode is the conventional exit code the guest agent reports for
+// a command killed because it ran past its execution deadline (matching the
+// shell `timeout` utility). It is the signal handleExec maps to the typed
+// exec_timeout envelope.
+const execTimeoutExitCode = 124
+
+// defaultExecTimeoutSeconds is the per-endpoint exec default applied when the
+// request omits a timeout. Kept here so the execution-deadline error reports the
+// deadline that was actually in force.
+const defaultExecTimeoutSeconds = 30
+
+// execTimeoutSeconds resolves the deadline that was in force for a request: the
+// requested value, or the default when the request omitted one.
+func execTimeoutSeconds(requested int) int {
+	if requested == 0 {
+		return defaultExecTimeoutSeconds
+	}
+	return requested
+}
+
 func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChunk vsock.ChunkFunc) (*vsock.ExecStreamFrame, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
-		timeout = 30
+		timeout = defaultExecTimeoutSeconds
 	}
 	sc, err := api.dialStream(req.Sandbox)
 	if err != nil {
@@ -580,6 +701,12 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	// Reject an over-ceiling timeout here, BEFORE the 200 stream header is
+	// written, so it surfaces as a clean enveloped 400, not a terminal frame.
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
+		return
+	}
 	api.touch(req.Sandbox)
 
 	if _, err := api.getAgent(req.Sandbox); err != nil {
@@ -593,7 +720,8 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 	// never touched. Checked at OPEN, off the activate path.
 	release, ok := api.acquireStream(req.Sandbox)
 	if !ok {
-		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
 		return
 	}
 	defer release()
@@ -670,6 +798,12 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	// Reject an over-ceiling timeout before any work, BEFORE the 200 stream
+	// header is written, so it surfaces as a clean enveloped 400 (issue #216).
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
+		return
+	}
 	api.touch(req.Sandbox)
 
 	if _, err := api.getAgent(req.Sandbox); err != nil {
@@ -683,7 +817,8 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 	// before writing the 200 header; existing streams are never touched.
 	release, ok := api.acquireStream(req.Sandbox)
 	if !ok {
-		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
 		return
 	}
 	defer release()
@@ -764,7 +899,8 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 	content, err := agent.ReadFile(req.Path)
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -800,7 +936,8 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.WriteFile(req.Path, []byte(req.Content), mode); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -832,7 +969,8 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := agent.ListDir(req.Path)
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -861,7 +999,8 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Mkdir(req.Path); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -890,7 +1029,8 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Remove(req.Path); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -929,14 +1069,14 @@ func writeErr(w http.ResponseWriter, msg string, code int) {
 func codeForStatus(status int) apierr.Error {
 	switch status {
 	case http.StatusBadRequest:
-		return apierr.Catalogue["invalid_json"]
+		return apierr.Get(apierr.CodeInvalidJSON)
 	case http.StatusRequestEntityTooLarge:
-		return apierr.Catalogue["body_too_large"]
+		return apierr.Get(apierr.CodeBodyTooLarge)
 	case http.StatusUnauthorized:
-		return apierr.Catalogue["unauthorized"]
+		return apierr.Get(apierr.CodeUnauthorized)
 	case http.StatusNotFound:
-		return apierr.Catalogue["not_found"]
+		return apierr.Get(apierr.CodeNotFound)
 	default:
-		return apierr.Catalogue["internal"]
+		return apierr.Get(apierr.CodeInternal)
 	}
 }

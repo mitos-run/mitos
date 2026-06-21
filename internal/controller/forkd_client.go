@@ -40,35 +40,29 @@ func hasGRPCCode(err error, code codes.Code) bool {
 	return false
 }
 
-// sandboxActivity queries the forkd on nodeName via ListSandboxes for
-// sandboxID and returns its created-at and last-activity times. ok is false
-// when the node is unreachable or the sandbox is not in the listing; the
-// caller must then treat the idle check as not-yet-evaluable and requeue. The
-// dial and RPC are bounded by a short timeout so a slow or dead forkd cannot
-// block the reconcile. lastActivity is the zero time when the sandbox has
-// never been accessed.
-func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sandboxID string) (created, lastActivity time.Time, ok bool) {
+// sandboxInfo queries the forkd on nodeName via ListSandboxes and returns the
+// raw SandboxInfo for sandboxID, carrying the full work-aware lifecycle signals
+// (last-activity, live set_timeout deadline, open-stream count, paused flag).
+// ok is false when the node is unreachable or the sandbox is not in the
+// listing. The dial and RPC are bounded by a short timeout so a slow or dead
+// forkd cannot block the reconcile.
+func sandboxInfo(ctx context.Context, registry *NodeRegistry, nodeName, sandboxID string) (*forkdpb.SandboxInfo, bool) {
 	conn, err := registry.GetConnection(nodeName)
 	if err != nil {
-		return time.Time{}, time.Time{}, false
+		return nil, false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	resp, err := forkdpb.NewForkDaemonClient(conn).ListSandboxes(cctx, &forkdpb.ListSandboxesRequest{})
 	if err != nil {
-		return time.Time{}, time.Time{}, false
+		return nil, false
 	}
 	for _, s := range resp.Sandboxes {
-		if s.SandboxId != sandboxID {
-			continue
+		if s.SandboxId == sandboxID {
+			return s, true
 		}
-		var last time.Time
-		if s.LastActivityUnix != 0 {
-			last = time.Unix(s.LastActivityUnix, 0)
-		}
-		return time.Unix(s.CreatedAtUnix, 0), last, true
 	}
-	return time.Time{}, time.Time{}, false
+	return nil, false
 }
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
@@ -215,6 +209,10 @@ func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
 	return &forkdpb.NetworkConfig{
 		EgressPolicy: string(n.Egress),
 		AllowList:    n.Allow,
+		BlockNetwork: n.BlockNetwork,
+		AllowCidrs:   n.AllowCIDRs,
+		Inbound:      string(n.Inbound),
+		InboundCidrs: n.InboundCIDRs,
 	}
 }
 

@@ -311,3 +311,81 @@ func TestDistributeEncryptedBuildsEverywhere(t *testing.T) {
 		t.Fatal("node B did not build the encrypted template T")
 	}
 }
+
+// TestSnapshotRebuildsOnHolderNodeLoss is the raw-forkd pool's "rebuild
+// elsewhere after node loss" guarantee at the level it actually exists: the
+// SNAPSHOT distribution, not a pool of dormant VMs (a raw-forkd pool holds no
+// standing VMs, only the per-node template snapshot). When a snapshot-holder
+// node is lost, the deficit reconcile must redistribute the snapshot onto a
+// surviving node to restore the desired replica count, with no operator action.
+//
+// This is the mock-achievable half of issue #163 item 6. The mechanism already
+// exists (readySnapshotCountOn counts only healthy holders, so a lost holder
+// drops the count and the next createSnapshotsOnNodes pass refills the deficit);
+// this pins it with a test, which was the actual coverage gap.
+func TestSnapshotRebuildsOnHolderNodeLoss(t *testing.T) {
+	registry := NewNodeRegistry()
+	const token = "peer-secret"
+	r := &SandboxPoolReconciler{NodeRegistry: registry, PeerToken: token}
+	ctx := context.Background()
+
+	// node-a and node-b hold template T (two healthy holders); node-c is empty,
+	// the replacement target.
+	startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
+	startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092", "T")
+	engineC := startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091", "10.0.0.3:9092")
+
+	if got := r.readySnapshotCountOn("T", nil); got != 2 {
+		t.Fatalf("initial ready snapshots = %d, want 2 (node-a + node-b)", got)
+	}
+
+	// A holder node is lost. Unregister mirrors a node leaving the registry
+	// (PruneStale / heartbeat-TTL expiry routes through the same healthy-set drop).
+	registry.Unregister("node-a")
+	if got := r.readySnapshotCountOn("T", nil); got != 1 {
+		t.Fatalf("ready snapshots after node-a loss = %d, want 1", got)
+	}
+
+	// The next deficit reconcile (desired replicas 2, one holder left) must rebuild
+	// the snapshot onto the surviving empty node-c, restoring the count to 2.
+	deficit := int32(2) - r.readySnapshotCountOn("T", nil)
+	added, err := r.createSnapshotsOnNodes(ctx, "T", "img", nil, nil, nil, "", deficit, nil)
+	if err != nil {
+		t.Fatalf("createSnapshotsOnNodes after holder loss: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("snapshots added after holder loss = %d, want 1 (redistributed to node-c)", added)
+	}
+	// node-c now holds T: it pulled from the surviving holder node-b (not a rebuild
+	// from scratch), the build-once-distribute path.
+	if len(engineC.PullCalls()) != 1 {
+		t.Fatalf("node-c recorded %d pulls, want 1 (redistribute from a surviving holder)", len(engineC.PullCalls()))
+	}
+	if got := r.readySnapshotCountOn("T", nil); got != 2 {
+		t.Fatalf("ready snapshots after rebuild = %d, want 2 (restored on a replacement node)", got)
+	}
+}
+
+// TestRawForkdClaimAutoReplacementAfterNodeLossOpen documents, as an explicit
+// skipped placeholder, the part of issue #163 item 6 that is NOT a missing test
+// but a missing FEATURE and a deliberate open product decision (epic #12).
+//
+// In HUSK mode a Ready claim on a lost node re-pends onto a surviving dormant
+// warm slot (checkHuskPodLost + the husk pod watch self-heal the warm pool). In
+// RAW-FORKD mode there is no standing dormant capacity to re-pend onto: a
+// raw-forkd pool holds only template snapshots, and per-claim forks are
+// ephemeral. So a raw-forkd claim on a dead node is correctly marked NodeLost /
+// Failed (proven by TestGCMarksNodeLost) and is NOT auto-replaced; the caller
+// re-claims. This is acceptable open behavior for ephemeral sandboxes
+// (docs/failure-gc.md), not a half-built mechanism, so this is a t.Skip, not a
+// faked or failing assertion.
+//
+// Design IF a future product decision wants raw-mode auto-replacement: on a
+// NodeLost transition in raw mode, the claim reconciler would re-issue the fork
+// on a surviving snapshot-holder node (which TestSnapshotRebuildsOnHolderNodeLoss
+// guarantees still exists or is rebuilt), rather than terminally failing the
+// claim. It needs no KVM; it needs the product decision to give raw claims
+// husk-like resilience at the cost of the pure fork-per-claim model.
+func TestRawForkdClaimAutoReplacementAfterNodeLossOpen(t *testing.T) {
+	t.Skip("#12: raw-forkd claim auto-replacement after NodeLost is an open product decision; today the claim is marked NodeLost and the caller re-claims (husk mode self-heals via the warm pool instead). Snapshot rebuild-elsewhere IS covered by TestSnapshotRebuildsOnHolderNodeLoss.")
+}

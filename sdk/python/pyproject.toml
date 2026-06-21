@@ -17,6 +17,24 @@ dev = [
     "pytest-asyncio>=0.24",
     "websockets>=12.0",
 ]
+# Optional framework adapters. The SDK never hard-depends on these; the adapter
+# modules import mitos always and the framework lazily, so the base SDK and its
+# test suite run without them. Install only if you use the integration.
+langchain = [
+    "langchain>=0.3",
+]
+openai-agents = [
+    "openai-agents>=0.1",
+]
+claude-agent = [
+    "claude-agent-sdk>=0.1",
+]
+vibekit = [
+    "vibekit>=0.1",
+]
+zenml = [
+    "zenml>=0.60",
+]
 
 [build-system]
 requires = ["hatchling"]

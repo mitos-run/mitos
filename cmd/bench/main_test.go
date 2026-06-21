@@ -76,3 +76,70 @@ func TestParseConfigMeteringRejectsZeroForks(t *testing.T) {
 		t.Fatal("expected error for --forks 0 in metering mode")
 	}
 }
+
+func TestParseConfigFanOutDefaults(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modeForkFanOut {
+		t.Errorf("mode = %q, want %q", cfg.mode, modeForkFanOut)
+	}
+	want := []int{1, 4, 16, 64}
+	if len(cfg.fanOutN) != len(want) {
+		t.Fatalf("fanOutN = %v, want %v", cfg.fanOutN, want)
+	}
+	for i, v := range want {
+		if cfg.fanOutN[i] != v {
+			t.Errorf("fanOutN[%d] = %d, want %d", i, cfg.fanOutN[i], v)
+		}
+	}
+}
+
+func TestParseConfigFanOutCustomN(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t", "--fanout-n", "2,8"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if len(cfg.fanOutN) != 2 || cfg.fanOutN[0] != 2 || cfg.fanOutN[1] != 8 {
+		t.Errorf("fanOutN = %v, want [2 8]", cfg.fanOutN)
+	}
+}
+
+func TestParseConfigFanOutRejectsNonPositiveN(t *testing.T) {
+	if _, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t", "--fanout-n", "1,0"}); err == nil {
+		t.Fatal("expected error for non-positive N in --fanout-n")
+	}
+}
+
+func TestParseConfigFanOutRejectsEmptyN(t *testing.T) {
+	if _, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t", "--fanout-n", ""}); err == nil {
+		t.Fatal("expected error for empty --fanout-n")
+	}
+}
+
+func TestParseConfigFanOutRejectsGarbageN(t *testing.T) {
+	if _, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t", "--fanout-n", "1,x"}); err == nil {
+		t.Fatal("expected error for non-numeric --fanout-n")
+	}
+}
+
+func TestParseConfigPrefetch(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "prefetch", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modePrefetch {
+		t.Errorf("mode = %q, want %q", cfg.mode, modePrefetch)
+	}
+}
+
+func TestParseConfigPinning(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "pinning", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modePinning {
+		t.Errorf("mode = %q, want %q", cfg.mode, modePinning)
+	}
+}

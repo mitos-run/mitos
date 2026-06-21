@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typecheck:mapping": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution bundler --skipLibCheck src/claim-mapping.ts src/claim-client.ts"
   },
   "dependencies": {
     "@paperclipai/plugin-sdk": "workspace:*"

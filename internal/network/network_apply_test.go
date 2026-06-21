@@ -47,7 +47,7 @@ func TestSetupCommandOrder(t *testing.T) {
 	resolver := net.ParseIP("10.200.0.1")
 
 	err := setup(context.Background(), rr.run, func() error { return nil },
-		id, v1alpha1.EgressDeny, allow, resolver, applyOptions{})
+		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allow}, resolver, applyOptions{})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestSetupWithForwardingAndMasquerade(t *testing.T) {
 	forwardCalled := false
 
 	err := setup(context.Background(), rr.run, func() error { forwardCalled = true; return nil },
-		id, v1alpha1.EgressDeny, nil, nil,
+		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil,
 		applyOptions{subnetCIDR: "10.200.0.0/16", uplink: "eth0", enableForwarding: true})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
@@ -114,7 +114,7 @@ func TestSetupStopsOnError(t *testing.T) {
 	rr := &recordingRunner{failOn: "addr add", failErr: errors.New("boom")}
 	id := testIdentity()
 	err := setup(context.Background(), rr.run, func() error { return nil },
-		id, v1alpha1.EgressDeny, nil, nil, applyOptions{})
+		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{})
 	if err == nil {
 		t.Fatal("expected error from addr add")
 	}
@@ -131,16 +131,18 @@ func TestTeardownCommandOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
-	// link del, dispatch element del, sandbox chain del, dynamic allow set del.
-	// The shared table is NOT deleted: other sandboxes may still use it.
-	if len(rr.calls) != 4 {
-		t.Fatalf("expected 4 commands, got %d: %+v", len(rr.calls), rr.calls)
+	// link del, dispatch element del, sandbox chain del, dynamic allow set del,
+	// egress counter del. The shared table is NOT deleted: other sandboxes may
+	// still use it.
+	if len(rr.calls) != 5 {
+		t.Fatalf("expected 5 commands, got %d: %+v", len(rr.calls), rr.calls)
 	}
 	wantArgv := [][]string{
 		netconf.LinkDelArgs(id.TapName),
 		netconf.NftDeleteDispatchElementArgs(id.TapName),
 		netconf.NftDeleteSandboxChainArgs(id.TapName),
 		netconf.NftDeleteSandboxAllowSetArgs(id.TapName),
+		netconf.NftDeleteSandboxEgressCounterArgs(id.TapName),
 	}
 	for i, w := range wantArgv {
 		if !reflect.DeepEqual(rr.calls[i].argv, w) {
@@ -164,7 +166,7 @@ func TestTeardownBestEffort(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from link del")
 	}
-	if len(rr.calls) != 4 {
+	if len(rr.calls) != 5 {
 		t.Errorf("expected all teardown commands to run, got %d", len(rr.calls))
 	}
 }
@@ -178,9 +180,9 @@ func TestTeardownWithMasquerade(t *testing.T) {
 		t.Fatalf("teardown: %v", err)
 	}
 	// masquerade del, link del, dispatch element del, sandbox chain del,
-	// dynamic allow set del.
-	if len(rr.calls) != 5 {
-		t.Fatalf("expected 5 commands, got %d", len(rr.calls))
+	// dynamic allow set del, egress counter del.
+	if len(rr.calls) != 6 {
+		t.Fatalf("expected 6 commands, got %d", len(rr.calls))
 	}
 	if !reflect.DeepEqual(rr.calls[0].argv, netconf.MasqueradeDelArgs("10.200.0.0/16", "eth0")) {
 		t.Errorf("first teardown call = %v, want masquerade del", rr.calls[0].argv)
@@ -202,12 +204,12 @@ func TestSecondSandboxSetupIsIdempotent(t *testing.T) {
 
 	rrA := &recordingRunner{}
 	if err := setup(context.Background(), rrA.run, func() error { return nil },
-		idA, v1alpha1.EgressDeny, nil, nil, applyOptions{}); err != nil {
+		idA, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{}); err != nil {
 		t.Fatalf("setup A: %v", err)
 	}
 	rrB := &recordingRunner{}
 	if err := setup(context.Background(), rrB.run, func() error { return nil },
-		idB, v1alpha1.EgressDeny, nil, nil, applyOptions{}); err != nil {
+		idB, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{}); err != nil {
 		t.Fatalf("setup B: %v", err)
 	}
 
@@ -246,13 +248,13 @@ func TestFakeManagerRecords(t *testing.T) {
 	fm := &FakeManager{}
 	id := testIdentity()
 	allow := []netconf.HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}
-	if err := fm.Setup(context.Background(), id, v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1")); err != nil {
+	if err := fm.Setup(context.Background(), id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allow}, net.ParseIP("10.200.0.1")); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if err := fm.Teardown(context.Background(), id); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if len(fm.SetupLog) != 1 || fm.SetupLog[0].Policy != v1alpha1.EgressDeny {
+	if len(fm.SetupLog) != 1 || fm.SetupLog[0].Policy.Egress != v1alpha1.EgressDeny {
 		t.Errorf("SetupLog not recorded: %+v", fm.SetupLog)
 	}
 	if len(fm.Teardowns) != 1 || fm.Teardowns[0].TapName != "sbtap0" {

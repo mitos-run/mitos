@@ -1,0 +1,289 @@
+package billing
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"mitos.run/mitos/internal/usage"
+)
+
+// Suspender is the narrow seam the billing service drives the #213 kill-switch
+// through. quota.KillSwitch satisfies it (via the SuspenderAdapter in
+// quota_adapter.go), so a breached HARD spend cap suspends the org through the
+// exact same mechanism the abuse controls use, and billing does not import the
+// quota package directly (no cycle, and billing stays testable with a fake
+// suspender). reason and note are non-secret and safe to log.
+type Suspender interface {
+	// Suspend suspends the org so it fails closed everywhere. manualHold marks
+	// that a human must review before it is lifted (a spend-cap suspension carries
+	// a hold so a runaway agent's org is not auto-unsuspended into the same bill).
+	Suspend(ctx context.Context, orgID, reason, note string, manualHold bool) error
+}
+
+// AlertSink receives soft-cap budget alerts. A SOFT cap does not suspend; it
+// fires an alert (email, webhook, console banner) so the org can act before the
+// hard cap. The sink is a seam: the test uses a recording fake; the real sink is
+// the notification follow-up. Alerts carry org id, the cap, and current spend;
+// NO secret.
+type AlertSink interface {
+	BudgetAlert(ctx context.Context, alert BudgetAlertEvent) error
+}
+
+// BudgetAlertEvent is a soft-cap breach notification.
+type BudgetAlertEvent struct {
+	OrgID   string
+	SoftCap Money
+	HardCap Money
+	Spend   Money
+	At      time.Time
+}
+
+// SpendCap is an org's budget envelope: a soft cap that fires an alert and a
+// hard cap that suspends. The hard cap is the runaway-agent backstop: when the
+// org's billable spend in the cap period crosses it, the org is suspended via
+// the #213 kill-switch so a looping agent cannot generate an unbounded bill. A
+// zero cap means "not set" (no alert / no suspend on that threshold).
+type SpendCap struct {
+	OrgID   string
+	SoftCap Money
+	HardCap Money
+}
+
+// SpendCapStore holds per-org spend caps. In-memory tested default; durable
+// store is a follow-up.
+type SpendCapStore interface {
+	Get(ctx context.Context, orgID string) (SpendCap, bool, error)
+	Set(ctx context.Context, cap SpendCap) error
+}
+
+// StatusStore holds each org's BillingStatus (the dunning state). In-memory
+// tested default; durable store is a follow-up.
+type StatusStore interface {
+	Status(ctx context.Context, orgID string) (BillingStatus, error)
+	SetStatus(ctx context.Context, orgID string, s BillingStatus) error
+}
+
+// Service is the billing core: it pushes #211 usage records to Stripe as
+// metered usage (idempotently), draws down the credit ledger, enforces spend
+// caps (soft alert / hard suspend via #213), and runs the dunning state machine
+// over the webhook events. It is built entirely over the seams above so the
+// whole core is unit-tested against FakeStripe with no keys and no network.
+type Service struct {
+	stripe  StripeClient
+	ledger  CreditLedger
+	caps    SpendCapStore
+	status  StatusStore
+	suspend Suspender
+	alerts  AlertSink
+	rates   Rates
+	now     func() time.Time
+}
+
+// Config wires a Service. now defaults to time.Now; rates defaults to
+// DefaultRates. The stores default to in-memory implementations so a caller can
+// stand up a working service with just a StripeClient, a Suspender, and an
+// AlertSink.
+type Config struct {
+	Stripe  StripeClient
+	Ledger  CreditLedger
+	Caps    SpendCapStore
+	Status  StatusStore
+	Suspend Suspender
+	Alerts  AlertSink
+	Rates   Rates
+	Now     func() time.Time
+}
+
+// NewService builds a Service from a Config, filling in in-memory store defaults
+// and the default rate table / clock where the caller left them nil.
+func NewService(cfg Config) *Service {
+	if cfg.Ledger == nil {
+		cfg.Ledger = NewMemCreditLedger()
+	}
+	if cfg.Caps == nil {
+		cfg.Caps = NewMemSpendCapStore()
+	}
+	if cfg.Status == nil {
+		cfg.Status = NewMemStatusStore()
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if (cfg.Rates == Rates{}) {
+		cfg.Rates = DefaultRates()
+	}
+	return &Service{
+		stripe:  cfg.Stripe,
+		ledger:  cfg.Ledger,
+		caps:    cfg.Caps,
+		status:  cfg.Status,
+		suspend: cfg.Suspend,
+		alerts:  cfg.Alerts,
+		rates:   cfg.Rates,
+		now:     cfg.Now,
+	}
+}
+
+// IdempotencyKey is the Stripe idempotency key for pushing one usage record's
+// one meter: the (org, sandbox, window) record key plus the meter. Because the
+// usage record key is itself idempotent (issue #211), and we append the meter,
+// re-pushing the SAME record reports the SAME key, so Stripe de-duplicates and a
+// retried push never double-reports. This is the load-bearing money property.
+func IdempotencyKey(rec usage.UsageRecord, unit MeterUnit) string {
+	return fmt.Sprintf("%s|%s|%s|%s", rec.OrgID, rec.SandboxID, rec.Window.UTC().Format(time.RFC3339Nano), unit)
+}
+
+// PushUsage reports one finalized usage record to Stripe as metered usage, one
+// event per non-zero meter, each under the (org, sandbox, window)+meter
+// idempotency key. A retried PushUsage with the same record reports the same
+// keys, so Stripe never double-reports. It returns the number of meter events
+// reported (zero-quantity meters are skipped). It does NOT draw down credit or
+// check caps; ApplyUsage does the full money path.
+func (s *Service) PushUsage(ctx context.Context, rec usage.UsageRecord) (int, error) {
+	customerID, err := s.stripe.EnsureCustomer(ctx, rec.OrgID)
+	if err != nil {
+		return 0, fmt.Errorf("ensure customer: %w", err)
+	}
+	n := 0
+	for _, unit := range AllMeters() {
+		q := QuantityFor(unit, rec)
+		if q <= 0 {
+			continue
+		}
+		ev := UsageEvent{
+			CustomerID:     customerID,
+			Unit:           unit,
+			Quantity:       q,
+			IdempotencyKey: IdempotencyKey(rec, unit),
+		}
+		if err := s.stripe.ReportUsage(ctx, ev); err != nil {
+			return n, fmt.Errorf("report usage (%s): %w", unit, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// DrawdownResult reports how a usage record's cost was settled against the
+// org's prepaid credit: how much credit covered it and how much remains to be
+// invoiced (the metered overage Stripe bills).
+type DrawdownResult struct {
+	Cost       Money
+	FromCredit Money
+	Remaining  Money // billed via metered usage beyond credit.
+}
+
+// Drawdown prices a usage record and draws it down against the org's prepaid
+// credit balance, capping the debit at the available balance so the ledger
+// NEVER goes negative. The portion not covered by credit (Remaining) is what the
+// metered Stripe push bills. The drawdown is idempotent on the usage record key:
+// replaying the same record is a no-op (ErrDuplicateEntry is swallowed) so a
+// retried settlement never double-debits.
+func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (DrawdownResult, error) {
+	cost := s.rates.CostCents(rec)
+	bal, err := s.ledger.Balance(ctx, rec.OrgID)
+	if err != nil {
+		return DrawdownResult{}, fmt.Errorf("balance: %w", err)
+	}
+	fromCredit := cost
+	if fromCredit > bal {
+		fromCredit = bal
+	}
+	if fromCredit < 0 {
+		fromCredit = 0
+	}
+	if fromCredit > 0 {
+		err := s.ledger.Append(ctx, LedgerEntry{
+			OrgID:  rec.OrgID,
+			Kind:   KindUsageDrawdown,
+			Amount: -fromCredit,
+			Key:    usageKey(rec),
+			At:     s.now(),
+			Note:   "usage drawdown",
+		})
+		if err == ErrDuplicateEntry {
+			// Already settled: idempotent replay, charge nothing again.
+			return DrawdownResult{Cost: cost, FromCredit: 0, Remaining: cost - 0}, nil
+		}
+		if err != nil {
+			return DrawdownResult{}, fmt.Errorf("append drawdown: %w", err)
+		}
+	}
+	return DrawdownResult{Cost: cost, FromCredit: fromCredit, Remaining: cost - fromCredit}, nil
+}
+
+// usageKey is the (org, sandbox, window) ledger idempotency key for a drawdown.
+func usageKey(rec usage.UsageRecord) string {
+	return fmt.Sprintf("drawdown:%s|%s|%s", rec.OrgID, rec.SandboxID, rec.Window.UTC().Format(time.RFC3339Nano))
+}
+
+// EnforceSpendCap checks an org's period spend against its caps and fires the
+// right effect: a soft-cap breach fires a budget alert (no suspension); a
+// hard-cap breach SUSPENDS the org via the #213 kill-switch with a manual hold
+// so a runaway agent cannot generate an unbounded bill and is not auto-lifted
+// back into it. It returns whether the org was suspended. periodSpend is the
+// org's total billable spend in the current cap period (the caller sums it from
+// the usage records / invoices).
+func (s *Service) EnforceSpendCap(ctx context.Context, orgID string, periodSpend Money) (suspended bool, err error) {
+	cap, ok, err := s.caps.Get(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get spend cap: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	if cap.HardCap > 0 && periodSpend >= cap.HardCap {
+		if s.suspend != nil {
+			// Note is non-secret: org id, the cap, the spend. No payment detail.
+			note := fmt.Sprintf("hard spend cap reached: spend %d cents >= cap %d cents", int64(periodSpend), int64(cap.HardCap))
+			if err := s.suspend.Suspend(ctx, orgID, "spend_cap", note, true); err != nil {
+				return false, fmt.Errorf("suspend on spend cap: %w", err)
+			}
+		}
+		if err := s.status.SetStatus(ctx, orgID, StatusSuspended); err != nil {
+			return true, fmt.Errorf("set suspended status: %w", err)
+		}
+		return true, nil
+	}
+	if cap.SoftCap > 0 && periodSpend >= cap.SoftCap && s.alerts != nil {
+		if err := s.alerts.BudgetAlert(ctx, BudgetAlertEvent{
+			OrgID:   orgID,
+			SoftCap: cap.SoftCap,
+			HardCap: cap.HardCap,
+			Spend:   periodSpend,
+			At:      s.now(),
+		}); err != nil {
+			return false, fmt.Errorf("budget alert: %w", err)
+		}
+	}
+	return false, nil
+}
+
+// SetSpendCap sets an org's spend cap.
+func (s *Service) SetSpendCap(ctx context.Context, cap SpendCap) error {
+	return s.caps.Set(ctx, cap)
+}
+
+// applyDunning runs the dunning state machine for an org over one event and
+// applies the side effects: a transition INTO suspended drives the #213
+// kill-switch; any transition persists the new status. It returns the new
+// status. It is the single place the pure NextStatus function is paired with the
+// suspend side effect.
+func (s *Service) applyDunning(ctx context.Context, orgID string, ev DunningEvent) (BillingStatus, error) {
+	cur, err := s.status.Status(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("status: %w", err)
+	}
+	next := NextStatus(cur, ev)
+	if next == StatusSuspended && cur != StatusSuspended && s.suspend != nil {
+		note := fmt.Sprintf("dunning: %s", ev)
+		if err := s.suspend.Suspend(ctx, orgID, "dunning", note, false); err != nil {
+			return cur, fmt.Errorf("suspend on dunning: %w", err)
+		}
+	}
+	if err := s.status.SetStatus(ctx, orgID, next); err != nil {
+		return cur, fmt.Errorf("set status: %w", err)
+	}
+	return next, nil
+}

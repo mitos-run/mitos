@@ -15,6 +15,7 @@ package controller_test
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,25 @@ import (
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// uniqueSuffix is a process-global counter that makes per-test object names
+// distinct across repeated runs (go test -count=N) on the SHARED envtest
+// apiserver. The whole suite shares one default namespace and one manager, and
+// envtest does NOT run the garbage-collector controller, so owner-ref cascade
+// deletes never fire: a revision created on a terminate (a GenerateName child of
+// the workspace) outlives its test's cleanup. The Workspace reconciler adopts
+// every revision in the namespace whose spec.workspaceRef matches by NAME, so a
+// later run that reuses a fixed workspace name picks up the prior run's leftover
+// child revision as its head, and the diff parent resolves to that stranded
+// revision instead of the fixed -r1 the test created. A unique name per run
+// keeps each test's revision set to itself.
+var uniqueSuffix atomic.Uint64
+
+// uniqueName appends a process-unique numeric suffix to base so repeated runs of
+// the same test on the shared apiserver never collide on object names.
+func uniqueName(base string) string {
+	return fmt.Sprintf("%s-%d", base, uniqueSuffix.Add(1))
+}
 
 // a valid content-addressed digest (64 lowercase hex chars) for the test seam.
 func testManifest(seed byte) string {

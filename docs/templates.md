@@ -81,8 +81,10 @@ file-path templates do not need it.
   image (installing packages, warming caches), not for per-claim configuration.
 - A nonzero exit aborts the build; the broken template is never snapshotted or
   served.
-- `template.Spec.Init` is plumbed end to end: pool reconciler ->
-  `CreateTemplateRequest.init_commands` -> forkd -> engine -> the VM.
+- `template.Spec.InitCommands()` is plumbed end to end: pool reconciler ->
+  `CreateTemplateRequest.init_commands` -> forkd -> engine -> the VM. It returns
+  the legacy `spec.init` list, or, when `spec.buildSteps` is set, the flattened
+  run/env/workdir steps in order (see the code-first section below).
 
 ## CI proof
 
@@ -94,6 +96,66 @@ in the fork) and the image filesystem is present (`/bin/busybox` resolves).
 Docker Hub pull flakes are retried and marked `PULL_FAILED` so a registry flake
 is distinguished from a real pipeline failure; a registry mirror is the
 production answer.
+
+## Define a custom environment (code-first)
+
+You do not have to hand-write the `SandboxTemplate` YAML. The Python SDK ships a
+fluent `Template` builder (issue #220) that authors the spec from code, in the
+shape E2B and Daytona use:
+
+```python
+from mitos import Template
+
+spec = (
+    Template()
+    .from_image("python:3.12")
+    .workdir("/app")
+    .copy("app/", "/app")
+    .env("PORT", "8080")
+    .run("pip install -r requirements.txt")
+    .set_start("python app.py")
+    .cpu("2")
+    .memory("1Gi")
+    .to_spec()
+)
+```
+
+`to_spec()` emits the `SandboxTemplateSpec` dict; `to_template("my-tmpl")` wraps
+it in a full object you can apply to a cluster. The ordered step list maps onto
+the CRD `spec.buildSteps` (copy / run / env / workdir); the build path flattens
+run, env, and workdir steps into the in-VM init commands in order, so a template
+authored with `buildSteps` builds exactly like one authored with `spec.init`. A
+template may set either; `buildSteps` is the recommended code-first form.
+
+### From the CLI, from a Dockerfile or a spec
+
+```sh
+# From a Dockerfile (Daytona create --dockerfile parity):
+mitos template build --name web --dockerfile ./Dockerfile
+
+# From a declarative spec file (YAML or JSON):
+mitos template build --name web --spec ./template.yaml
+
+# Publish a built template:
+mitos template push web
+```
+
+`mitos template build` parses the source into a spec, prints the build plan
+(which steps a cached build would reuse), and authors the `SandboxTemplate`. The
+node then builds the snapshot on a KVM host. A failing build step surfaces the
+typed `build_failed` error (HTTP 422) whose `context` names the failing step
+index and kind and whose remediation tells you to fix that step and rebuild.
+
+### Fast cached builds
+
+Each build step gets a content-addressed cache key chained over the base image
+and every step before it (`internal/templatebuild`): the key at step N depends on
+the base image and steps 0..N. Changing step N invalidates step N and every step
+after it, but leaves the keys of steps 0..N-1 untouched, so a real build reuses
+the unchanged prefix and rebuilds only from the first changed step. This is the
+E2B-style fast-cached-build behavior. The key computation and the skip decision
+are pure and unit-tested on any host; the actual layer reuse on a live boot is
+KVM gated and asserted in the Firecracker suite.
 
 ## Open follow-ups
 

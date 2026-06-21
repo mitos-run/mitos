@@ -175,3 +175,36 @@ describe("Sandbox.terminate", () => {
     expect(called).toBe(true);
   });
 });
+
+describe("Sandbox lifecycle (issue #218)", () => {
+  it("setTimeout posts the new TTL and returns the deadline", async () => {
+    responder = (_req, _body, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ status: "ok", deadline_unix: 1700000600, timeout_seconds: 600 }));
+    };
+    const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl, token: "tok-1" });
+    const deadline = await sandbox.setTimeout(600);
+    expect(deadline).toBe(1700000600);
+    expect(recorded[0].url).toBe("/v1/set_timeout");
+    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", timeout_seconds: 600 });
+  });
+
+  it("setTimeout rejects an over-ceiling value without a request", async () => {
+    responder = (_req, _body, res) => res.end("{}");
+    const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
+    await expect(sandbox.setTimeout(10 ** 9)).rejects.toThrow();
+    expect(recorded.length).toBe(0);
+  });
+
+  it("pause and resume post to the lifecycle endpoints", async () => {
+    responder = (_req, _body, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ status: "ok" }));
+    };
+    const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl, token: "tok-1" });
+    await sandbox.pause();
+    await sandbox.resume();
+    expect(recorded[0].url).toBe("/v1/pause");
+    expect(recorded[1].url).toBe("/v1/resume");
+  });
+});

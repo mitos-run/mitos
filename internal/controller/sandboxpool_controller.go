@@ -247,7 +247,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// programs is the guarantee. A failure is logged but does NOT block husk
 		// pod creation, so a CNI without NetworkPolicy support never stalls the
 		// warm pool.
-		_, npAllow := huskEgressConfig(&template)
+		npAllow := huskEgressConfig(&template).Allow
 		if err := r.ensureHuskNetworkPolicy(ctx, &pool, npAllow); err != nil {
 			logger.Error(err, "ensure husk network policy (best effort; in-pod filter is the guarantee)")
 		}
@@ -503,7 +503,10 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
 		}
 	}
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
+	// InitCommands flattens the declarative BuildSteps (issue #220) into the
+	// in-VM init commands, falling back to the legacy Init list when no
+	// BuildSteps are set, so a template authored either way builds identically.
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.InitCommands(), template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil
@@ -563,11 +566,16 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// deficit nodes in this same pass pull from it.
 		if distribute {
 			if holder, casURL, digest, ok := r.NodeRegistry.TemplateSource(templateID); ok && holder.Name != node.Name {
+				pullStart := r.now()
 				if err := r.pullTemplateOnNode(ctx, node, templateID, digest, casURL, r.PeerToken); err != nil {
 					errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 					continue
 				}
 				r.NodeRegistry.AddTemplateWithDigest(node.Name, templateID, digest)
+				// Snapshot-distribution lag (#164): record the pull duration. This is
+				// the multi-node distribution path (a peer token AND a holder), so the
+				// metric series is populated only when real distribution happened.
+				observeSnapshotDistributionLag(templateID, r.now().Sub(pullStart).Seconds())
 				added++
 				continue
 			}

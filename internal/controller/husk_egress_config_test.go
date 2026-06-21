@@ -51,19 +51,50 @@ func TestHuskEgressAllowFromTemplate(t *testing.T) {
 			Network: &v1alpha1.NetworkPolicy{Egress: v1alpha1.EgressDeny, Allow: []string{"x:1"}},
 		},
 	}
-	egress, allow := huskEgressConfig(tmpl)
-	if egress != "deny" || len(allow) != 1 || allow[0] != "x:1" {
-		t.Errorf("egress=%q allow=%v, want deny [x:1]", egress, allow)
+	cfg := huskEgressConfig(tmpl)
+	if cfg.Egress != "deny" || len(cfg.Allow) != 1 || cfg.Allow[0] != "x:1" {
+		t.Errorf("egress=%q allow=%v, want deny [x:1]", cfg.Egress, cfg.Allow)
 	}
 }
 
 // TestHuskEgressConfigDefaultsDeny asserts a nil template or one with no policy
-// fails closed to deny with no allows.
+// fails closed to deny with no allows (and deny-by-default inbound, the empty
+// Inbound string which the renderer and stub treat as deny).
 func TestHuskEgressConfigDefaultsDeny(t *testing.T) {
 	for _, tmpl := range []*v1alpha1.SandboxTemplate{nil, {}} {
-		egress, allow := huskEgressConfig(tmpl)
-		if egress != "deny" || allow != nil {
-			t.Errorf("egress=%q allow=%v, want deny nil", egress, allow)
+		cfg := huskEgressConfig(tmpl)
+		if cfg.Egress != "deny" || cfg.Allow != nil {
+			t.Errorf("egress=%q allow=%v, want deny nil", cfg.Egress, cfg.Allow)
 		}
+		if cfg.BlockNetwork || cfg.Inbound != "" {
+			t.Errorf("default posture must be no-block, deny-by-default inbound; got block=%v inbound=%q", cfg.BlockNetwork, cfg.Inbound)
+		}
+	}
+}
+
+// TestHuskEgressConfigThreadsNewDimensions asserts the block_network total-deny,
+// the CIDR allowlist, and the inbound policy from the template's NetworkPolicy
+// are extracted for threading into the activate request (issue #219).
+func TestHuskEgressConfigThreadsNewDimensions(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Network: &v1alpha1.NetworkPolicy{
+				Egress:       v1alpha1.EgressDeny,
+				BlockNetwork: true,
+				AllowCIDRs:   []string{"10.0.0.0/8"},
+				Inbound:      v1alpha1.InboundAllow,
+				InboundCIDRs: []string{"203.0.113.0/24"},
+			},
+		},
+	}
+	cfg := huskEgressConfig(tmpl)
+	if !cfg.BlockNetwork {
+		t.Error("block_network not threaded")
+	}
+	if len(cfg.AllowCIDRs) != 1 || cfg.AllowCIDRs[0] != "10.0.0.0/8" {
+		t.Errorf("allow_cidrs not threaded: %v", cfg.AllowCIDRs)
+	}
+	if cfg.Inbound != "allow" || len(cfg.InboundCIDRs) != 1 {
+		t.Errorf("inbound policy not threaded: inbound=%q cidrs=%v", cfg.Inbound, cfg.InboundCIDRs)
 	}
 }

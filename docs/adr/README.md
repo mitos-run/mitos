@@ -68,6 +68,7 @@ docs/facade-conformance.md. See ADR 0000 for the full numbering note.
 | [0004](0004-node-flat-snapshot-trust-domain.md) | Node-flat snapshot trust domain | accepted | Snapshots are content-addressed and node-shared; treat the whole cluster as one trust domain until per-tenant snapshot isolation lands. |
 | [0005](0005-raw-forkd-not-multitenant.md) | raw-forkd is not for untrusted multi-tenant | accepted | The husk pod is the default tenant runner; raw-forkd is the opt-in privileged fallback, gated off by default. |
 | [0006](0006-husk-netadmin-egress-firewall.md) | The husk-pod NET_ADMIN capability for in-pod egress firewalling | proposed | One scoped `NET_ADMIN` capability, in the pod's own netns, as the minimal control for default-deny husk egress plus a metadata block. |
+| [0007](0007-api-v2-three-noun-consolidation.md) | API v2 consolidates four kinds to three nouns (Pool, Sandbox, Workspace) | accepted | Folding `SandboxTemplate` into the pool and `SandboxFork`+`SandboxClaim` into `Sandbox`; the v1alpha1 to v2 conversion contract; discharging ADR 0001's deferred rename as one breaking migration. |
 
 ## Residual ADRs and the compliance claim-language rule
 

@@ -110,18 +110,67 @@ func (n *NodeInfo) atSandboxCeiling() bool {
 	return n.MaxSandboxes > 0 && n.ActiveSandboxes >= n.MaxSandboxes
 }
 
-// admits reports whether node can take a fork of templateID: it is below its
-// sandbox-count ceiling AND its known memory budget has room for the projected
-// cost. Nodes with an unknown budget (MemoryTotal 0) admit on memory (dev/mock)
-// but are still subject to the count ceiling. Caller must hold at least the read
-// lock.
-func (r *NodeRegistry) admits(node *NodeInfo, templateID string) bool {
+// admitsRequest is the size- and GPU-aware admission check (issue #221). A node
+// admits the request when it is below its sandbox-count ceiling, satisfies the
+// request's GPU demand (GPU-capable, the right type, with enough free devices),
+// and has memory headroom for the LARGER of the per-template CoW projected cost
+// and the request's EXPLICIT memory size. The explicit-size term is what lets a
+// large sandbox (above the 8 GiB E2B class) be admitted only where the node
+// actually has the RAM; a small CoW estimate must not let an oversized request
+// slip onto a node that cannot hold it. Nodes with an unknown budget
+// (MemoryTotal 0, dev/mock) admit on memory but are still subject to the count
+// ceiling and the GPU gate. Caller must hold at least the read lock.
+func (r *NodeRegistry) admitsRequest(node *NodeInfo, req ForkRequest) bool {
 	if node.atSandboxCeiling() {
+		return false
+	}
+	if !node.admitsGPU(req) {
+		return false
+	}
+	if !node.admitsTier(req) {
 		return false
 	}
 	avail, known := r.available(node)
 	if !known {
 		return true
 	}
-	return r.projectedCost(node, templateID) <= avail
+	cost := r.projectedCost(node, req.TemplateID)
+	if req.MemoryBytes > cost {
+		cost = req.MemoryBytes
+	}
+	return cost <= avail
+}
+
+// admitsGPU reports whether the node satisfies the request's GPU demand. A
+// non-GPU request (GPUCount 0) is satisfied by ANY node. A GPU request requires
+// the node to be GPU-capable (GPUTotal > 0), to advertise the requested type
+// (when the request names one), and to have at least GPUCount free devices
+// (GPUTotal minus GPUUsed). A GPU is assigned EXCLUSIVELY to a sandbox and is
+// never CoW-shared across forks, so device availability is a hard count, not a
+// projected estimate. This is the scheduling gate only; the device-attach/VFIO
+// path is hardware-gated (docs/platforms/gpu.md).
+func (n *NodeInfo) admitsGPU(req ForkRequest) bool {
+	if req.GPUCount <= 0 {
+		return true
+	}
+	if n.GPUTotal <= 0 {
+		return false
+	}
+	if req.GPUType != "" && n.GPUType != req.GPUType {
+		return false
+	}
+	return n.GPUTotal-n.GPUUsed >= req.GPUCount
+}
+
+// admitsTier reports whether the node's declared isolation tier MEETS the
+// request's minimum assurance floor (issue #40). A request with no floor
+// (MinIsolationTier empty) is satisfied by ANY node, so the control is strictly
+// opt-in. A request with a floor is satisfied only by a node whose tier is at
+// least as strong: a hardware-kvm floor never admits a PVM (lower-assurance)
+// node, and an UNDECLARED node (empty tier) never admits a real floor
+// (fail-closed). This is the scheduling gate that keeps a security-sensitive
+// tenant off a weaker-isolation node; the node-side mechanism that earns a tier
+// is operational (docs/platforms/pvm-evaluation.md, docs/threat-model.md).
+func (n *NodeInfo) admitsTier(req ForkRequest) bool {
+	return n.IsolationTier.meets(req.MinIsolationTier)
 }

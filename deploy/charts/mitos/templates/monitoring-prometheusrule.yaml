@@ -107,4 +107,27 @@ spec:
               bare-metal target, not this threshold; this budget is
               environment-tunable. See the runbook for what drives fork latency.
             runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/ForkLatencyHigh.md"
+
+    - name: mitos-distribution
+      rules:
+        - alert: SnapshotDistributionLagHigh
+          # p95 time to distribute a template snapshot to a deficit node by pull
+          # from a holder. Populated ONLY on the multi-node distribution path (a
+          # peer token AND a holder), so on a single-node cluster it is empty and
+          # this never fires. Threshold is environment-tunable.
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, template) (rate(mitos_snapshot_distribution_lag_seconds_bucket[10m]))
+            ) > 60
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Snapshot distribution lag high for template {{`{{ $labels.template }}`}}"
+            description: >
+              p95 snapshot distribution lag for template {{`{{ $labels.template }}`}}
+              is {{`{{ printf "%.1f" $value }}`}}s over 10m, sustained for 15m.
+              Deficit nodes are pulling the snapshot slowly from a holder; check CAS
+              bandwidth and holder load. Populated only on the multi-node path.
 {{- end }}

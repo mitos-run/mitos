@@ -190,6 +190,46 @@ func TestClient_Ping(t *testing.T) {
 	}
 }
 
+func TestClient_Vitals(t *testing.T) {
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type != TypeVitals {
+			return Response{OK: false, Error: "unexpected type"}
+		}
+		return Response{OK: true, Vitals: &VitalsResponse{
+			StealFraction:      0.125,
+			SampleWindowMs:     100,
+			MemTotalKB:         2048000,
+			MemAvailableKB:     1024000,
+			MemUsedKB:          1024000,
+			BalloonReclaimedKB: 512000,
+			Processes: []ProcessEntry{
+				{PID: 1, Comm: "agent", State: "S", CPUJiffies: 42, RSSKB: 4096},
+				{PID: 99, Comm: "python", State: "R", CPUJiffies: 7, RSSKB: 65536},
+			},
+		}}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	v, err := client.Vitals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.StealFraction != 0.125 {
+		t.Errorf("steal fraction = %f, want 0.125", v.StealFraction)
+	}
+	if v.BalloonReclaimedKB != 512000 {
+		t.Errorf("balloon reclaimed = %d, want 512000", v.BalloonReclaimedKB)
+	}
+	if len(v.Processes) != 2 || v.Processes[1].Comm != "python" {
+		t.Errorf("unexpected process table: %+v", v.Processes)
+	}
+}
+
 func TestClient_Exec(t *testing.T) {
 	sockPath := startFakeAgent(t, mockAgentHandler())
 

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mitos.run/api/error-schema.json",
+  "title": "Mitos LLM-legible error envelope",
+  "description": "The error body returned by the forkd sandbox API and the standalone sandbox-server. The primary reader is a language model: every error carries a stable machine code, a one-sentence cause, an actionable remediation, and structured context. See docs/api/errors.md (the normative catalogue) and docs/api/v2-spec.md section 2.3.",
+  "type": "object",
+  "required": ["error"],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "remediation"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable machine-readable error code. One of the values in docs/api/errors.md.",
+          "enum": [
+            "body_too_large",
+            "build_failed",
+            "budget_exhausted",
+            "canceled",
+            "exec_failed",
+            "exec_timeout",
+            "file_failed",
+            "forbidden",
+            "idle_timeout",
+            "internal",
+            "invalid_json",
+            "not_found",
+            "quota_exceeded",
+            "rate_limited",
+            "timeout_too_large",
+            "too_many_streams",
+            "unauthorized"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "One-line human and LLM-legible summary from the catalogue.",
+          "minLength": 1
+        },
+        "cause": {
+          "type": "string",
+          "description": "The call-site detail: sandbox ids, paths, and operation names only. Never a secret value, bearer token, or credential."
+        },
+        "remediation": {
+          "type": "string",
+          "description": "An actionable next step the agent can take. Always present and non-empty.",
+          "minLength": 1
+        },
+        "context": {
+          "type": "object",
+          "description": "Structured fields for the code: for example {\"sandbox\":\"sb-7\"} or {\"sandbox\":\"sb-7\",\"path\":\"/work/out.txt\"}. Never contains a secret value.",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

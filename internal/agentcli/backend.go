@@ -64,6 +64,9 @@ type Backend interface {
 	// Workspace returns the workspace lifecycle surface, or nil if the backend
 	// does not support workspaces (the dev mock backend).
 	Workspace() WorkspaceBackend
+	// Template returns the template authoring surface (build/push), or nil if the
+	// backend does not support templates.
+	Template() TemplateBackend
 }
 
 // FakeCall records a single backend invocation for assertions in tests.
@@ -101,6 +104,10 @@ type FakeBackend struct {
 	// WS is the workspace backend returned by Workspace(); lazily created on
 	// first access so tests that never touch workspaces pay nothing.
 	WS *FakeWorkspaceBackend
+
+	// TB is the template backend returned by Template(); lazily created on first
+	// access. Tests may set it directly to inject a build error.
+	TB *FakeTemplateBackend
 }
 
 // Workspace implements Backend, returning a lazily created FakeWorkspaceBackend.
@@ -111,6 +118,16 @@ func (f *FakeBackend) Workspace() WorkspaceBackend {
 		f.WS = NewFakeWorkspaceBackend()
 	}
 	return f.WS
+}
+
+// Template implements Backend, returning a lazily created FakeTemplateBackend.
+func (f *FakeBackend) Template() TemplateBackend {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.TB == nil {
+		f.TB = &FakeTemplateBackend{}
+	}
+	return f.TB
 }
 
 // NewFakeBackend returns a FakeBackend with sensible default canned responses.

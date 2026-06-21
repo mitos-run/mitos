@@ -294,6 +294,53 @@ func (b *ClusterBackend) Workspace() WorkspaceBackend {
 	return &ClusterWorkspaceBackend{client: b.client, namespace: b.namespace, now: b.now}
 }
 
+// Template returns the template authoring surface over the cluster: it applies a
+// SandboxTemplate object so a SandboxPool referencing it triggers the node-side
+// snapshot build (KVM gated). Push is a publish marker for now.
+func (b *ClusterBackend) Template() TemplateBackend {
+	return &ClusterTemplateBackend{client: b.client, namespace: b.namespace}
+}
+
+// ClusterTemplateBackend creates or updates SandboxTemplate objects. The real
+// snapshot build runs on a KVM node via forkd once a pool references the
+// template; this backend just authors the declarative object from the builder
+// or a Dockerfile.
+type ClusterTemplateBackend struct {
+	client    client.Client
+	namespace string
+}
+
+// Build creates or updates the named SandboxTemplate with spec.
+func (t *ClusterTemplateBackend) Build(ctx context.Context, name string, spec v1alpha1.SandboxTemplateSpec) error {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: t.namespace},
+		Spec:       spec,
+	}
+	existing := &v1alpha1.SandboxTemplate{}
+	err := t.client.Get(ctx, client.ObjectKey{Name: name, Namespace: t.namespace}, existing)
+	switch {
+	case apierrors.IsNotFound(err):
+		if err := t.client.Create(ctx, tmpl); err != nil {
+			return fmt.Errorf("create template %s: %w", name, err)
+		}
+	case err != nil:
+		return fmt.Errorf("get template %s: %w", name, err)
+	default:
+		existing.Spec = spec
+		if err := t.client.Update(ctx, existing); err != nil {
+			return fmt.Errorf("update template %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// Push is a no-op publish marker on the cluster backend: a template applied to
+// the cluster is already discoverable. It exists for CLI and Daytona parity and
+// is a seam for a future registry push.
+func (t *ClusterTemplateBackend) Push(_ context.Context, _ string) error {
+	return nil
+}
+
 // ClusterWorkspaceBackend drives the workspace verbs over the cluster: it
 // creates Workspace and WorkspaceRevision objects and reads their status. It
 // reuses WorkspaceVerbs (the controller-side fork/revert helpers) so the lineage

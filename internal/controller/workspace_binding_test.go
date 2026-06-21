@@ -391,17 +391,22 @@ func TestClaimWorkspaceOutputsDiffRecorded(t *testing.T) {
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-diff", v1alpha1.WorkspaceRetention{})
+	// Unique names per run: the shared envtest apiserver has no GC controller, so
+	// a prior run's terminate-created child revision survives and would be adopted
+	// as this workspace's head if the name were reused.
+	wsName := uniqueName("ws-diff")
+	claimPrefix := uniqueName("wsdf")
+	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
 
-	makeBoundClaim(t, "wsdf", "ws-diff", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, claimPrefix, wsName, v1alpha1.SandboxClaimSpec{
 		NodeName: "ws-diff-node",
 		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
 		Outputs:  []v1alpha1.OutputSpec{{Diff: true}},
 	})
-	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claimPrefix+"-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, claimPrefix+"-claim", v1alpha1.SandboxTerminated)
 
-	ws := waitWorkspace(t, "ws-diff", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
 		return ws.Status.Head != ""
 	}, "head advanced after dehydrate")
 
@@ -550,13 +555,23 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 	})
 	t.Cleanup(func() { setWSRendezvous(nil) })
 
+	// Unique names per run: the shared envtest apiserver has no GC controller, so
+	// a prior run's leftover objects (the terminate-created revision, the claim)
+	// outlive cleanup and would collide with reused fixed names.
+	secretName := uniqueName("git-creds")
+	wsName := uniqueName("ws-cred")
+	claimPrefix := uniqueName("wsc")
+	claimName := claimPrefix + "-claim"
+
 	// The credentials Secret holding the push token.
-	if err := k8sClient.Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
 		Data:       map[string][]byte{"token": []byte(token)},
-	}); err != nil {
+	}
+	if err := k8sClient.Create(ctx, secret); err != nil {
 		t.Fatalf("create credentials secret: %v", err)
 	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, secret) })
 
 	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-cred-node", "wsc-tmpl")
 	if err != nil {
@@ -564,7 +579,7 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 	}
 	defer stop()
 
-	ws := makeWorkspace(t, "ws-cred", v1alpha1.WorkspaceRetention{})
+	ws := makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.Name, Namespace: ws.Namespace}, ws); err != nil {
 			return err
@@ -572,20 +587,20 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 		ws.Spec.Git = v1alpha1.WorkspaceGit{
 			Paths:                []string{"/workspace/repo"},
 			CredentialsUsername:  "bot",
-			CredentialsSecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "git-creds"}, Key: "token"},
+			CredentialsSecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: secretName}, Key: "token"},
 		}
 		return k8sClient.Update(ctx, ws)
 	}); err != nil {
 		t.Fatalf("set workspace git creds: %v", err)
 	}
 
-	makeBoundClaim(t, "wsc", "ws-cred", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, claimPrefix, wsName, v1alpha1.SandboxClaimSpec{
 		NodeName: "ws-cred-node",
 		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
 		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "https://example.test/rendezvous.git", Branch: "attempt/{{.name}}"}}},
 	})
-	waitBoundPhase(t, "wsc-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wsc-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claimName, v1alpha1.SandboxReady)
+	waitBoundPhase(t, claimName, v1alpha1.SandboxTerminated)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -612,7 +627,7 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 
 	// The token VALUE must never appear in any claim condition.
 	var claim v1alpha1.SandboxClaim
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "wsc-claim"}, &claim); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: claimName}, &claim); err != nil {
 		t.Fatalf("get claim: %v", err)
 	}
 	for _, c := range claim.Status.Conditions {

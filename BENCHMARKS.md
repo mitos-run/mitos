@@ -344,37 +344,176 @@ for pod schedule + image + container start + app boot) is the documented,
 clearly-labeled cold-start range, not an invented measurement; the precise
 same-hardware figure is what the bare-metal harness run produces.
 
+## Controller-path harness (claim, sustained, pool-rebuild)
+
+Issue #15 items 1-3 are the controller + pool path the in-process `cmd/bench`
+harness does NOT cover. They are now RUNNABLE harnesses under `bench/` that drive
+a REAL cluster over a kubeconfig. They are **method-only here**: the harness
+ships in-repo, but the NUMBERS are produced by a maintainer running them on a
+cluster on documented hardware and recorded in `bench/results/`. None is faked.
+On a host with no reachable cluster (a darwin laptop) each fails at client
+construction with a clear message and prints no number.
+
+- **Claim to first-exec end to end through the controller** (#15 item 1):
+  `bench/claim-first-exec-latency.sh <kubeconfig> <pool> [ns] [iters]`, the
+  `claim-exec` mode of the `bench/claim` Go harness. For each sequential claim it
+  creates a `SandboxClaim`, waits for the controller to drive it Ready, and runs
+  the FIRST exec over the sandbox HTTP API (the same endpoint + per-sandbox
+  bearer token kubectl-sandbox and the SDK use), measuring claim-create ->
+  first-exec P50/P90/P99. This is the full controller + scheduler + pool path, NOT
+  the engine data path `cmd/bench` measures. **Status: harness runnable on a
+  cluster; numbers OPEN, pending the #16 reference node.**
+- **Sustained claims/sec and density curve** (#15 item 2):
+  `bench/sustained-claims-throughput.sh <kubeconfig> <pool> [ns] [rate] [duration] [max_concurrent]`,
+  the `sustained` mode. It arrives claims at a target rate for a window and
+  records achieved claims/sec, peak concurrency, and per-node density (sweep the
+  rate to trace the density curve and find where achieved/sec stops tracking the
+  target). Aggregation is the unit-tested `internal/benchstat.AggregateThroughput`.
+  **Status: harness runnable on a cluster; numbers OPEN.**
+- **Pool-rebuild propagation** (#15 item 3):
+  `bench/pool-rebuild-propagation.sh <kubeconfig> <pool> [ns]`, the `pool-rebuild`
+  mode. It triggers a pool rebuild and times from the spec change to all-nodes
+  reporting the snapshot ready (`ReadySnapshots == TotalSnapshots`), the
+  snapshot-distribution propagation latency. Meaningful on a multi-node cluster;
+  on a single node it measures that node and says so. **Status: harness runnable
+  on a multi-node cluster; numbers OPEN.**
+
+## 1-to-N live fork fan-out (issue #207)
+
+The defensible mitos claim is sub-second 1-to-N live copy-on-write fan-out:
+forking ONE warmed base (the template snapshot, built with the repo loaded and
+deps installed) into N children cheaply, with each child a private COW fork of
+the same restored page set. This is a different shape from the single
+fork -> first-exec number above: it measures how the system behaves when one base
+is fanned into many children at once, which is the workload that motivates
+forking over cold starts.
+
+The harness is `cmd/bench --mode fork-fanout`. For each N in `--fanout-n`
+(default `1,4,16,64`) it forks one base into N children, measures each child's
+fork -> first-exec time-to-ready on a shared wall clock, and reports:
+
+- **per-child time-to-ready distribution** (min / p50 / p90 / p99 / max): the
+  cost of one child, and how that cost degrades as N grows and the children
+  contend for the host; and
+- **wall-clock-to-N-ready**: the wall clock from the fan-out start to the instant
+  the LAST child is ready, the headline number for the sub-second claim.
+
+Like the other modes, `fork-fanout` drives the real KVM-backed engine in-process
+(no forkd, no gRPC, no HTTP in the path) and validates `/dev/kvm` at engine
+construction, so on a host without KVM it exits non-zero with a clear message and
+produces NO number. The per-N aggregation (per-child distribution +
+wall-clock-to-N-ready) is the pure, unit-tested `benchstat.AggregateFanOut`; the
+timing path only collects the real samples and hands them to it. The result JSON
+carries the raw per-child samples alongside the summary so the distribution is
+auditable, not just a pre-aggregated number.
+
+**Prerequisite for a FAIR fan-out number.** A representative fan-out figure needs
+a warmed base that already has the repo loaded and deps installed (so each child
+is a fork of useful state, not a bare boot), and at larger N a warm pool /
+autoscale and repo-preloaded templates so the host is not paying first-fork costs
+mid-fan-out. The in-process `cmd/bench` harness forks from ONE pre-built template
+snapshot directly, so it isolates the engine fan-out cost; the end-to-end
+controller-path fan-out (claim N children through the controller + pool) depends
+on warm-pool autoscale and repo-preloaded templates (roadmap; pool prewarm), and
+is OPEN pending those plus the #16 reference node.
+
+**Status: harness + pure aggregation in-repo and unit-tested; the fan-out
+numbers (per-child distribution and wall-clock-to-N-ready at N = 1, 4, 16, 64)
+are OPEN, to be filled on the #16 reference node. No number is recorded here
+until it is produced on that node, because a hand-copied number is exactly the
+unverifiable claim this harness exists to eliminate.**
+
+## 1-to-N fan-out competitor comparison (issue #207)
+
+This is the contested-claim comparison. Benchmarking only against E2B would
+overstate the mitos edge (Daytona advertises 27-90 ms creates and Modal markets a
+sandbox snapshot/branch capability), so the honest comparison measures the SAME
+1-to-N fan-out shape on each system:
+
+- **Modal Sandboxes (snapshot/fork)** is the headline competitor: it is the
+  closest analogue to mitos's live COW fan-out (branch one snapshot into many).
+  Modal is NOT self-hostable, so its number necessarily comes from Modal's hosted
+  service, not the reference node; that asymmetry is recorded with any Modal
+  figure.
+- **Daytona (OSS)** and **E2B (self-hosted)** provide the cold-start baseline:
+  their "fan-out" is N independent creates from the same warmed image/template,
+  measured by the same shape.
+
+The harness is `bench/competitors/run-fanout-comparison.sh <adapter> [n1,n2,...]`,
+a neutral driver that runs the same fan-out method via an adapter.
+`adapters/mitos-fanout.sh` is wired to this repo's own `cmd/bench --mode
+fork-fanout`; `adapters/modal-fanout.sh`, `adapters/daytona-fanout.sh`, and
+`adapters/e2b-fanout.sh` are placeholders that exit non-zero until a reproducer
+fills them in, so a run can never emit a fabricated competitor number. The
+honesty rule is the same as the create -> first-exec comparison: any competitor
+figure not measured here on the documented hardware is labeled
+**vendor-published** (with a citation), NOT our measurement.
+
+**What this comparison will plainly record.** It will record whether mitos fork
+actually beats Modal branching on wall-clock-to-N-ready and per-child
+time-to-ready. If mitos wins, the wedge includes raw fan-out speed. **If it does
+NOT win on raw speed, the wedge is self-hosting plus per-fork network isolation,
+not speed**, and this section will say so. No conclusion and no number is
+pre-written here: the result is OPEN, pending the #16 reference node and a
+reproducer standing up each competitor.
+
+## Competitor comparison (scaffold + methodology)
+
+Issue #15 item 5 asks for a head-to-head against E2B (self-hosted), Daytona
+(OSS), and Agent Sandbox + Kata, on identical hardware, reproducible from
+in-repo scripts. Running a competitor requires standing up that competitor's own
+stack, which is out of this repo's control, so what ships in-repo is a
+**scaffold + methodology**: `bench/competitors/` with a neutral driver
+(`run-comparison.sh`) that measures every system by the SAME create-sandbox ->
+first-exec method, a reference adapter (`adapters/mitos.sh`) wired to this repo's
+own harness, and placeholder adapters for each competitor that a reproducer fills
+in (they exit non-zero until then, so a run can never emit a fabricated competitor
+number). The honesty rule is explicit in `bench/competitors/README.md`: we
+publish a mitos number only from our own harness on documented hardware, and any
+competitor figure not measured here on the same hardware is labeled
+**vendor-published** (with a citation), NOT our measurement. **Status: scaffold +
+methodology in-repo; head-to-head numbers OPEN, pending the #16 reference node and
+a reproducer standing up each competitor.**
+
+## Items still needing the pinned bare-metal reference node (#16)
+
+Every controller-path number above and the competitor head-to-head need the
+pinned #16 bare-metal reference node before they can be published as measured.
+Concretely OPEN pending #16:
+
+- claim -> first-exec P50/P99 end to end through the controller;
+- sustained claims/sec and the density curve;
+- pool-rebuild propagation across a multi-node pool;
+- the competitor head-to-head (each competitor stood up on the same node);
+- the bare-metal engine fork -> first-exec via `cmd/bench` (not run on the box
+  this session);
+- the **1-to-N live fork fan-out** (issue #207): per-child time-to-ready and
+  wall-clock-to-N-ready at N = 1, 4, 16, 64 via `cmd/bench --mode fork-fanout`,
+  and the fan-out competitor head-to-head vs Modal snapshot/fork and the
+  Daytona/E2B cold-start baseline via
+  `bench/competitors/run-fanout-comparison.sh`;
+- the **<= 10ms warm husk-pod activation TARGET** (#18/#15): the activate
+  restore step is sub-10 ms on the reference node, but the full activate measures
+  ~27 ms P50 there, so the end-to-end target is not yet met;
+- a pinned reference-node CI runner so all of the above regenerate on every run.
+
 ## Open (not yet measured)
 
-These are explicitly out of scope for the current harness and tracked in
+These remain out of scope for the current harnesses and are tracked in
 [#15](https://github.com/paperclipinc/mitos/issues/15) / roadmap section 4:
 
 - **Bare-metal reference numbers** on the Hetzner + Talos reference node. A first
-  reference run is now recorded in the "Bare-metal reference node (#16)" section
-  above (warm-claim activate P50 ~27 ms, restore ~6-16 ms, ~3 MiB marginal memory
-  per fork), reproducible from `bench/husk-activate-latency.sh` and
-  `bench/results/2026-06-13-bare-metal-husk.md`. Still open: the bare-metal engine
-  fork->first-exec via `cmd/bench` (not run on the box this session) and a pinned
-  reference-node CI runner so the numbers regenerate on every run. The **<= 10ms
-  warm husk-pod activation TARGET** (#18/#15) also remains OPEN: the activate
-  restore step is sub-10 ms on the reference node, but the full activate measures
-  ~27 ms P50 there, so the end-to-end target is not yet met.
-- **Claim to first-exec end to end through the controller** on a real cluster
-  (claim a `Sandbox` CRD, wait for the pool to hand back a forked VM, exec):
-  the current harness measures the engine data path, not the controller +
-  scheduler + pool path.
-- **Sustained claims/sec** and **density curves** (how many forks per node
-  before p99 degrades, unique-vs-shared memory at density).
-- **Pool-rebuild propagation**: time from a new template snapshot landing to it
-  being claimable across the pool.
+  reference run is recorded in the "Bare-metal reference node (#16)" section above
+  (warm-claim activate P50 ~27 ms, restore ~6-16 ms, ~3 MiB marginal memory per
+  fork), reproducible from `bench/husk-activate-latency.sh` and
+  `bench/results/2026-06-13-bare-metal-husk.md`. The remaining bare-metal items
+  are listed in "Items still needing the pinned bare-metal reference node (#16)"
+  above.
 - **Facade vs upstream in-VM resume head-to-head** on a KVM-capable kubelet (the
   #16 reference node): our warm husk re-activation vs the upstream reference
   controller's cold pod create, both timed to a serving endpoint on identical
   hardware. The `bench/facade/` harness measures the object-level resume on kind
   today; the in-VM tail is the bare-metal target (#16), as described in the
   "Facade vs upstream reference: resume latency" section above.
-- **Head-to-head competitor comparison** against E2B (self-hosted), Daytona
-  (OSS), and Agent Sandbox + Kata, on identical hardware, regenerated from
-  in-repo scripts so anyone can reproduce or refute it.
 - **Latency regression gating**: deliberately not done on shared CI, which is
   too noisy to threshold without flaking.

@@ -409,14 +409,48 @@ func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
 		if !rec.CreatedAt.IsZero() {
 			uptimeSeconds = int64(now.Sub(rec.CreatedAt).Seconds())
 		}
+		// Surface the work-aware idle signals (issue #218): the live set_timeout
+		// deadline, the count of OPEN streams (a non-zero count is a running
+		// background job), and the paused flag, so the controller's lifetime
+		// reaper honors the running-sandbox TTL and never reaps a sandbox that is
+		// doing actual work or is held by a pause.
+		var deadlineUnix int64
+		if dl, ok := s.sandboxAPI.Deadline(rec.ID); ok {
+			deadlineUnix = dl.Unix()
+		}
 		out = append(out, &forkdpb.SandboxInfo{
 			SandboxId:        rec.ID,
 			CreatedAtUnix:    rec.CreatedAt.Unix(),
 			LastActivityUnix: lastActivityUnix,
 			UptimeSeconds:    uptimeSeconds,
+			DeadlineUnix:     deadlineUnix,
+			ActiveStreams:    int32(s.sandboxAPI.ActiveStreams(rec.ID)),
+			Paused:           s.sandboxAPI.IsPaused(rec.ID),
 		})
 	}
 	return out
+}
+
+// ListVolumes returns one VolumeInfo per per-sandbox volume backing dir the
+// engine reports, keyed by sandbox id with an age in seconds. The controller GC
+// uses it to find volume backings whose claim object is gone.
+func (s *Server) ListVolumes() []*forkdpb.VolumeInfo {
+	records := s.engine.ListVolumes()
+	out := make([]*forkdpb.VolumeInfo, 0, len(records))
+	for _, rec := range records {
+		out = append(out, &forkdpb.VolumeInfo{
+			SandboxId:  rec.SandboxID,
+			AgeSeconds: int64(rec.Age.Seconds()),
+		})
+	}
+	return out
+}
+
+// ReclaimVolume removes one per-sandbox volume backing dir. It is the
+// volume-orphan counterpart to Terminate; unlike Terminate it does not touch
+// the SandboxAPI registration (an orphan volume has no live sandbox).
+func (s *Server) ReclaimVolume(sandboxID string) error {
+	return s.engine.ReclaimVolume(sandboxID)
 }
 
 // networkOpts converts the proto NetworkConfig from a ForkRequest into the
@@ -429,12 +463,17 @@ func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
 	if c == nil {
 		return nil
 	}
-	if c.EgressPolicy == "" && len(c.AllowList) == 0 {
+	if c.EgressPolicy == "" && len(c.AllowList) == 0 && !c.BlockNetwork &&
+		len(c.AllowCidrs) == 0 && c.Inbound == "" && len(c.InboundCidrs) == 0 {
 		return nil
 	}
 	return &fork.NetworkOpts{
 		EgressPolicy: c.EgressPolicy,
 		AllowList:    c.AllowList,
+		BlockNetwork: c.BlockNetwork,
+		AllowCIDRs:   c.AllowCidrs,
+		Inbound:      c.Inbound,
+		InboundCIDRs: c.InboundCidrs,
 	}
 }
 

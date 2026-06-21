@@ -170,3 +170,94 @@ func TestClaimIdleTimeoutNotReapedWhenActive(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// TestClaimIdleTimeoutNotReapedWithBackgroundJob is the work-aware idle
+// regression (issue #218): a sandbox with NO inbound interaction but a live
+// background job (an open stream, surfaced as active_streams via ListSandboxes)
+// must NOT be idle-reaped mid-run. This is the Daytona weakness we beat. The
+// background work is injected by holding an open stream slot on the node's
+// SandboxAPI; the controller sees a non-zero active-streams count and keeps the
+// claim Ready across the idle window.
+func TestClaimIdleTimeoutNotReapedWithBackgroundJob(t *testing.T) {
+	stop, _, api, err := controller.StartFakeForkdNodeWithAPI(testRegistry, "life-node-4", "life4-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeLifecycleClaim(t, "life4", v1alpha1.SandboxClaimSpec{
+		IdleTimeout: &metav1.Duration{Duration: 2 * time.Second},
+	})
+
+	ready := waitClaimReady(t, "life4-claim")
+	sandboxID := ready.Status.SandboxID
+
+	// Inject a live background job: hold an open stream slot for this sandbox so
+	// ListSandboxes reports active_streams > 0. No inbound interaction is
+	// recorded, so an interaction-only idle clock would reap it.
+	release := api.HoldStreamForTest(sandboxID)
+	defer release()
+
+	// Across the idle window plus margin, the claim with a live background job
+	// must stay Ready.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var got v1alpha1.SandboxClaim
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "life4-claim", Namespace: "default"}, &got); err == nil {
+			if got.Status.Phase == v1alpha1.SandboxTerminated {
+				t.Fatalf("sandbox with a live background job was idle-reaped: reason %q", terminatedReason(&got))
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestClaimSetTimeoutExtendsLiveTTL asserts a live set_timeout extends a running
+// sandbox's TTL: with a short idle timeout but a far-future live deadline set
+// via the SandboxAPI, the sandbox is NOT reaped within the idle window because
+// the caller explicitly extended its TTL (issue #218, the #206 set_timeout seam).
+func TestClaimSetTimeoutExtendsLiveTTL(t *testing.T) {
+	stop, _, api, err := controller.StartFakeForkdNodeWithAPI(testRegistry, "life-node-5", "life5-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeLifecycleClaim(t, "life5", v1alpha1.SandboxClaimSpec{
+		IdleTimeout: &metav1.Duration{Duration: 2 * time.Second},
+	})
+
+	ready := waitClaimReady(t, "life5-claim")
+	sandboxID := ready.Status.SandboxID
+
+	// Live set_timeout to a far-future deadline keeps the sandbox alive past the
+	// idle window. Set it synchronously first so no early reconcile can race the
+	// idle clock before the deadline is recorded.
+	api.SetTimeout(sandboxID, time.Hour)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+		api.SetTimeout(sandboxID, time.Hour)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				api.SetTimeout(sandboxID, time.Hour)
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var got v1alpha1.SandboxClaim
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "life5-claim", Namespace: "default"}, &got); err == nil {
+			if got.Status.Phase == v1alpha1.SandboxTerminated {
+				t.Fatalf("sandbox with an extended live TTL was reaped: reason %q", terminatedReason(&got))
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}

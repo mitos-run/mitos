@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,89 @@ func TestEncodeWritesEnvelopeWithCodeAndRemediation(t *testing.T) {
 	}
 	if got.Error.Message != "sandbox not found" {
 		t.Fatalf("message = %q", got.Error.Message)
+	}
+}
+
+func TestBudgetExhaustedCarriesCodeAndOrchestratorRemediation(t *testing.T) {
+	e := Get(CodeBudgetExhausted)
+	if e.Code != string(CodeBudgetExhausted) {
+		t.Fatalf("code = %q, want budget_exhausted", e.Code)
+	}
+	if e.Status != 403 {
+		t.Fatalf("status = %d, want 403 (creator-scope refusal, not retryable by the sandbox)", e.Status)
+	}
+	if e.Remediation == "" {
+		t.Fatal("budget_exhausted must carry a remediation")
+	}
+	// The remediation must name the orchestrator escalation path: the in-sandbox
+	// agent cannot widen its own creator-set budget (issue #25 §3).
+	if !strings.Contains(e.Remediation, "orchestrator") {
+		t.Errorf("remediation must name the orchestrator escalation path, got %q", e.Remediation)
+	}
+	// A budget_exhausted error carries the exhausted dimension and remaining
+	// allowance as structured context; assert the WithContext copy preserves the
+	// catalogue code and remediation.
+	withCtx := e.WithContext(map[string]any{"sandbox": "sb-7", "dimension": "maxForks", "remaining": 0})
+	if withCtx.Code != e.Code || withCtx.Remediation != e.Remediation {
+		t.Fatal("WithContext must preserve code and remediation")
+	}
+	if withCtx.Context["dimension"] != "maxForks" {
+		t.Fatalf("context dimension = %v, want maxForks", withCtx.Context["dimension"])
+	}
+}
+
+// TestTimeoutFamilyCodesAreDistinct asserts the timeout/cancel family is
+// discriminable: idle-timeout, execution-deadline, request-canceled, and the
+// requested-timeout-too-large rejection each have their own typed code and a
+// distinct HTTP status, so a caller branches on the code, never on message text
+// (issue #216).
+func TestTimeoutFamilyCodesAreDistinct(t *testing.T) {
+	cases := []struct {
+		code   Code
+		status int
+	}{
+		{CodeIdleTimeout, 410},
+		{CodeExecTimeout, 504},
+		{CodeCanceled, 499},
+		{CodeTimeoutTooLarge, 400},
+		{CodeRateLimited, 429},
+	}
+	seen := map[string]bool{}
+	for _, c := range cases {
+		e := Get(c.code)
+		if e.Code != string(c.code) {
+			t.Errorf("Get(%q).Code = %q, want %q", c.code, e.Code, c.code)
+		}
+		if e.Status != c.status {
+			t.Errorf("code %q: status = %d, want %d", c.code, e.Status, c.status)
+		}
+		if e.Remediation == "" {
+			t.Errorf("code %q: empty remediation", c.code)
+		}
+		if seen[e.Code] {
+			t.Errorf("code %q: duplicate", c.code)
+		}
+		seen[e.Code] = true
+	}
+}
+
+// TestBuildFailedNamesTheFailingStep asserts the build_failed code exists, is a
+// 422 (the build recipe was processed but a step failed), and its remediation
+// tells the caller to inspect the named failing step (issue #220).
+func TestBuildFailedNamesTheFailingStep(t *testing.T) {
+	e := Get(CodeBuildFailed)
+	if e.Code != string(CodeBuildFailed) {
+		t.Fatalf("code = %q, want build_failed", e.Code)
+	}
+	if e.Status != 422 {
+		t.Fatalf("status = %d, want 422", e.Status)
+	}
+	if e.Remediation == "" {
+		t.Fatal("build_failed must carry a remediation")
+	}
+	withCtx := e.WithContext(map[string]any{"step": 2, "step_kind": "run"})
+	if withCtx.Context["step"] != 2 {
+		t.Fatalf("context step not carried: %v", withCtx.Context)
 	}
 }
 

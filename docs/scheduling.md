@@ -172,7 +172,10 @@ ENFORCED and tested:
 
 OPEN (not implemented, do not assume):
 
-- NUMA-aware vCPU/memory pinning.
+- NUMA-aware vCPU/memory pinning. (Dynamic, post-ready, single-node CPU pinning
+  plus sibling-hyperthread pairing and a launch scheduling-priority bump is in
+  design + skeleton form; see `docs/perf/cpu-pinning.md` and issue #168. NUMA
+  awareness across sockets is still open.)
 - Hugepage-backed guest memory.
 - KSM (kernel same-page merging) tuning for cross-template sharing.
 - Multi-resource bin-packing: disk, CPU, and the cold-start

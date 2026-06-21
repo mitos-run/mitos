@@ -28,6 +28,22 @@ async def _app(scope, receive, send):
     elif path == "/v1/files/write":
         payload = {"status": "ok"}
         status = 200
+    elif path == "/v1/set_timeout":
+        ts = int(req.get("timeout_seconds", 0))
+        if ts > 10**8:
+            payload = {"error": {"code": "timeout_too_large", "message": "too large",
+                                 "remediation": "Lower it."}}
+            status = 400
+        else:
+            payload = {"status": "ok", "deadline_unix": 1_700_000_000 + ts,
+                       "timeout_seconds": ts}
+            status = 200
+    elif path == "/v1/pause":
+        payload = {"status": "paused"}
+        status = 200
+    elif path == "/v1/resume":
+        payload = {"status": "running"}
+        status = 200
     else:
         payload = {"error": {"code": "not_found", "message": "no route",
                              "remediation": "Use a documented endpoint."}}
@@ -69,4 +85,30 @@ async def test_async_error_is_structured():
     with pytest.raises(AgentRunError) as ei:
         await sb.files.list("/nope-route-trigger")  # hits the 404 default route
     assert ei.value.code == "not_found"
+    await sb.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_set_timeout():
+    sb = _async_sandbox()
+    deadline = await sb.set_timeout(600)
+    assert deadline == 1_700_000_000 + 600
+    await sb.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_set_timeout_over_ceiling_rejected():
+    from mitos.errors import TimeoutTooLargeError
+
+    sb = _async_sandbox()
+    with pytest.raises(TimeoutTooLargeError):
+        await sb.set_timeout(10**9)
+    await sb.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_pause_resume():
+    sb = _async_sandbox()
+    await sb.pause()
+    await sb.resume()
     await sb.aclose()

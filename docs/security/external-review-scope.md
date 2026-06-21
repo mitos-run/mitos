@@ -1,10 +1,12 @@
-# External security review: scope & package (#4)
+# External security review: scope & package (G4, #194)
 
 mitos runs untrusted AI-agent code in Firecracker microVMs on shared Kubernetes
 nodes. Before any 1.0 / production-tenant claim, an independent security review is
-a gating requirement (ROADMAP G4). This page is the package to hand a reviewer:
-the trust model, the surfaces to examine, the threat model, and the known
-findings already closed, so the engagement focuses on residual risk.
+a gating requirement (ROADMAP G4, issue #194). This page is the package to hand a
+reviewer: the trust model, the surfaces to examine, the threat model, and the
+known findings already closed, so the engagement focuses on residual risk. The
+live findings tracker that drives each finding to closure is
+[external-review-findings.md](external-review-findings.md).
 
 ## Trust model (what is and is not trusted)
 

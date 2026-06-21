@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 
-	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -50,8 +49,8 @@ func NewManager(opts Options) Manager {
 	}
 }
 
-func (m *linuxManager) Setup(ctx context.Context, id netconf.Identity, policy v1alpha1.EgressPolicy, allow []netconf.HostPort, resolverIP net.IP) error {
-	return setup(ctx, m.run, m.enableF, id, policy, allow, resolverIP, m.opts)
+func (m *linuxManager) Setup(ctx context.Context, id netconf.Identity, policy netconf.SandboxPolicy, resolverIP net.IP) error {
+	return setup(ctx, m.run, m.enableF, id, policy, resolverIP, m.opts)
 }
 
 func (m *linuxManager) Teardown(ctx context.Context, id netconf.Identity) error {

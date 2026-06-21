@@ -41,10 +41,14 @@ func (f *fakeMeteringEngine) ForkRunning(string, string, bool) (*fork.ForkResult
 	panic("not used")
 }
 func (f *fakeMeteringEngine) Terminate(string) error { panic("not used") }
+func (f *fakeMeteringEngine) Pause(string) error     { panic("not used") }
+func (f *fakeMeteringEngine) Resume(string) error    { panic("not used") }
 func (f *fakeMeteringEngine) GetCapacity() fork.Capacity {
 	return fork.Capacity{ActiveSandboxes: int32(len(f.report.Sandboxes))}
 }
 func (f *fakeMeteringEngine) ListSandboxes() []fork.SandboxRecord { return nil }
+func (f *fakeMeteringEngine) ListVolumes() []fork.VolumeRecord    { return nil }
+func (f *fakeMeteringEngine) ReclaimVolume(string) error          { panic("not used") }
 func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec) error {
 	panic("not used")
 }

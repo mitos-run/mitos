@@ -20,6 +20,7 @@ on:
       - 'cmd/crypt-smoke/**'
       - 'cmd/pull-smoke/**'
       - 'cmd/husk-stub/**'
+      - 'cmd/mem-smoke/**'
       - 'internal/husk/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
@@ -819,11 +820,17 @@ jobs:
           WALL2=$(grep '^WALLCLOCK_NS=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
           GEN1=$(grep '^FORKGEN=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
           GEN2=$(grep '^FORKGEN=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+          UUID1=$(grep '^UUID=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          UUID2=$(grep '^UUID=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+          TLS1=$(grep '^TLSRANDOM=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          TLS2=$(grep '^TLSRANDOM=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
 
           echo "URANDOM1=$URANDOM1"
           echo "URANDOM2=$URANDOM2"
           echo "WALL1=$WALL1 WALL2=$WALL2 RUNNER_NS=$RUNNER_NS"
           echo "GEN1=$GEN1 GEN2=$GEN2"
+          echo "UUID1=$UUID1 UUID2=$UUID2"
+          echo "TLS1=$TLS1 TLS2=$TLS2"
 
           if [ -z "$URANDOM1" ] || [ -z "$URANDOM2" ]; then
             echo "FAIL: missing URANDOM sample from a fork"
@@ -834,6 +841,36 @@ jobs:
             exit 1
           fi
           echo "PASS: forks produced distinct RNG streams"
+
+          # Distinct machine identity: the kernel draws a fresh v4 UUID from its
+          # CRNG on every read of /proc/sys/kernel/random/uuid (the same source
+          # uuid.uuid4 and systemd machine-id use). Two forks producing the SAME
+          # UUID is the colliding-UUID bug fork-correctness section 1 names; this
+          # goes beyond the raw /dev/urandom stream above to a real identity draw.
+          if [ -z "$UUID1" ] || [ -z "$UUID2" ]; then
+            echo "FAIL: missing UUID sample from a fork"
+            exit 1
+          fi
+          if [ "$UUID1" = "$UUID2" ]; then
+            echo "FAIL: two forks produced IDENTICAL kernel UUIDs: shared machine identity / shared-RNG bug"
+            exit 1
+          fi
+          echo "PASS: forks produced distinct kernel UUIDs (distinct machine identity)"
+
+          # Distinct TLS client random: a TLS ClientHello random is 32 bytes the
+          # TLS stack reads from the SAME kernel CRNG (crypto getrandom). Sampling
+          # getrandom of that size models what the handshake would put on the
+          # wire; equal across forks would be identical ClientHello randoms, the
+          # predictable-nonce hazard in fork-correctness section 1.
+          if [ -z "$TLS1" ] || [ -z "$TLS2" ]; then
+            echo "FAIL: missing TLSRANDOM sample from a fork"
+            exit 1
+          fi
+          if [ "$TLS1" = "$TLS2" ]; then
+            echo "FAIL: two forks produced IDENTICAL TLS client randoms: predictable-nonce / shared-RNG bug"
+            exit 1
+          fi
+          echo "PASS: forks produced distinct TLS client randoms"
 
           # Each guest wall clock must be within 2 seconds of the runner clock.
           for pair in "1:$WALL1" "2:$WALL2"; do
@@ -853,6 +890,59 @@ jobs:
 
           echo "================================"
           echo "  Fork-correctness checks passed"
+          echo "================================"
+
+      # Lifetime memory-growth proof (fork-correctness section 5, issue #3). The
+      # metering re-samples each live sandbox's /proc/<pid>/smaps_rollup on every
+      # Engine.Metering call, so the exported unique-memory figure must track a
+      # fork's growth AFTER a real workload, not freeze at the T=0 dirty-page
+      # footprint recorded at fork time. cmd/mem-smoke drives fork.NewEngine
+      # directly: build a template, fork one sandbox, sample TotalUnique at T=0,
+      # allocate and TOUCH 64 MiB in the guest over the agent, re-sample, and
+      # assert the metered unique bytes grew by at least a 32 MiB floor. A metric
+      # stuck at the T=0 value (the "misleading memory accounting" bug) fails the
+      # job. The rootfs is hand-built (no registry pull), so there is no pull
+      # flake here. This phase GATES: a real growth shortfall is exit 1; an
+      # engine/template/fork setup problem is exit 2.
+      - name: Lifetime memory metering, exported unique bytes grow after a real guest workload
+        timeout-minutes: 8
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          WORKDIR=/tmp/mitos-test/mem-build
+          mkdir -p $WORKDIR
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # dd/sync/mkdir are the workload; the rest round out a usable shell.
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr sync dd; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/mem-smoke ./cmd/mem-smoke/
+
+          sudo /tmp/mem-smoke \
+            --image $WORKDIR/rootfs.ext4 \
+            --data-dir /tmp/mitos-test/mem-smoke-data \
+            --firecracker /usr/local/bin/firecracker \
+            --kernel /tmp/mitos-test/vmlinux \
+            --agent-bin /tmp/mitos-test/agent \
+            --grow-mib 64 \
+            --min-growth-bytes 33554432
+
+          echo "================================"
+          echo "  Lifetime memory metering tracks fork growth after a workload"
           echo "================================"
 
       # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE
@@ -2371,6 +2461,21 @@ jobs:
           sudo /tmp/net-smoke validate
           echo "================================"
           echo "  Real-nft two-sandbox install validated"
+          echo "================================"
+
+      # Network-posture dimensions proof (issue #219): install a block_network
+      # sandbox (total deny) and a CIDR-allow sandbox through the REAL Manager and
+      # assert the live nft ruleset proves each dimension: block_network accepts
+      # nothing it was given, the CIDR allow renders a daddr accept, and both
+      # carry their per-sandbox egress byte counter. Drives the production
+      # Manager, never a fake. REQUIRED gate.
+      - name: Network-posture dimensions validation against real nft
+        run: |
+          set -e
+          go build -o /tmp/net-smoke ./cmd/net-smoke/
+          sudo /tmp/net-smoke validate-policy
+          echo "================================"
+          echo "  Real-nft block_network + CIDR allow + egress counters validated"
           echo "================================"
 
       # Guest egress enforcement proof: boot ONE Firecracker VM whose NIC is on

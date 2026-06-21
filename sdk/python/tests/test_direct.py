@@ -124,3 +124,35 @@ def test_repr():
     r = repr(sandbox)
     assert "repr-test" in r
     sandbox.terminate()
+
+
+def test_set_timeout_extends_live_ttl():
+    """Live set_timeout adjusts a running sandbox's TTL (issue #218). The mock
+    server records the new deadline and returns it; the SDK surfaces it."""
+    server = SandboxServer(SERVER_URL)
+    sandbox = server.fork("test-python", "set-timeout-1")
+    deadline = sandbox.set_timeout(600)
+    assert deadline > 0
+    sandbox.terminate()
+
+
+def test_set_timeout_over_ceiling_rejected():
+    """A live timeout over the ceiling is rejected with the typed
+    TimeoutTooLargeError, never silently clamped (issue #216/#218)."""
+    from mitos.errors import TimeoutTooLargeError
+
+    server = SandboxServer(SERVER_URL)
+    sandbox = server.fork("test-python", "set-timeout-2")
+    with pytest.raises(TimeoutTooLargeError):
+        sandbox.set_timeout(10**9)
+    sandbox.terminate()
+
+
+def test_pause_resume_roundtrip():
+    """Pause then resume a running sandbox (issue #218). On the mock server this
+    records the held state; the SDK methods drive the endpoints and return."""
+    server = SandboxServer(SERVER_URL)
+    sandbox = server.fork("test-python", "pause-1")
+    sandbox.pause()
+    sandbox.resume()
+    sandbox.terminate()

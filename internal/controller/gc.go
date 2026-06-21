@@ -99,7 +99,8 @@ func (g *GarbageCollector) runOnce(ctx context.Context) {
 	// never act on the same node. A claim just marked NodeLost stamps
 	// FinishedAt=now, so it is too fresh for any later TTL pass to delete.
 	g.markNodeLost(ctx, logger, claims.Items)
-	g.sweepOrphans(ctx, logger, desired, liveIDs)
+	g.sweepOrphans(ctx, logger, desired, liveIDs, claims.Items)
+	g.sweepOrphanVolumes(ctx, logger, desired, liveIDs)
 	g.ttlFinished(ctx, logger, claims.Items)
 }
 
@@ -175,7 +176,19 @@ func (g *GarbageCollector) liveIDs(claims []v1alpha1.SandboxClaim, forks []v1alp
 // is owned by the NodeLost path. The liveIDs guard closes the stuck-Restoring
 // window: a VM keeps living as long as its claim object exists, while a
 // genuinely-abandoned VM (claim object gone) is still reaped.
-func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool) {
+func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool, claims []v1alpha1.SandboxClaim) {
+	// Index terminal claims by sandbox id (the claim name) so the sweep can
+	// surface a typed condition when it reaps a VM a still-present claim once
+	// backed. Only terminal claims appear here: a non-terminal claim by name is
+	// in liveIDs and never swept. The claim having reached a terminal phase while
+	// its VM lingered is the re-adopted-orphan case the condition names.
+	terminalClaims := make(map[string]*v1alpha1.SandboxClaim, len(claims))
+	for i := range claims {
+		c := &claims[i]
+		if c.Status.Phase == v1alpha1.SandboxTerminated || c.Status.Phase == v1alpha1.SandboxFailed {
+			terminalClaims[c.Name] = c
+		}
+	}
 	for _, node := range g.Registry.ListNodes() {
 		if !g.Registry.NodeHealthy(node.Name) {
 			continue
@@ -200,6 +213,74 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 			}
 			recordOrphanSweep()
 			logger.Info("terminated orphan sandbox", "node", node.Name, "sandbox", sb.SandboxId)
+			// If a terminal claim still names this VM, the GC (not a graceful
+			// terminate) reaped a VM that lingered past the claim's terminal
+			// transition: stamp a typed condition so an operator/SDK can tell the
+			// two apart.
+			if c, ok := terminalClaims[sb.SandboxId]; ok {
+				g.stampOrphanReaped(ctx, logger, c)
+			}
+		}
+	}
+}
+
+// stampOrphanReaped records the typed OrphanReaped condition on a terminal claim
+// whose lingering VM the orphan sweep just reaped. The condition is idempotent
+// (setCondition no-ops an identical re-assert) so repeated passes on a claim
+// that survives its TTL do not churn the object. The message is operator-legible
+// and carries no secret value.
+func (g *GarbageCollector) stampOrphanReaped(ctx context.Context, logger logr.Logger, claim *v1alpha1.SandboxClaim) {
+	changed := setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "OrphanReaped",
+		Message:            "the garbage collector reaped a backing VM that lingered past this claim's terminal transition (a terminate that crashed or was missed); no action is needed, the VM is gone",
+	})
+	if !changed {
+		return
+	}
+	if err := g.Client.Status().Update(ctx, claim); err != nil {
+		logger.Error(err, "stamp OrphanReaped condition", "claim", claim.Name)
+	}
+}
+
+// sweepOrphanVolumes reclaims per-sandbox volume backing dirs on healthy nodes
+// that are not in the desired-alive set, not in the node-independent liveIDs
+// set, and whose age exceeds OrphanGrace. It is the volume counterpart to
+// sweepOrphans and reuses the exact same desired and liveIDs sets, since a
+// volume backing is keyed by the same sandbox id (the claim name) the VM is.
+//
+// The orphan case is a backing dir left behind when a terminate crashed or was
+// missed: the VM is gone but its backing files survived. The grace and liveID
+// nets are the same safety valves as the VM sweep: a backing for a non-terminal
+// claim by name is left alone (even if its status never landed), and a backing
+// freshly prepared (younger than OrphanGrace) is left alone so a just-forked
+// sandbox whose claim status has not landed yet is never reclaimed. Only healthy
+// nodes are visited, mirroring sweepOrphans.
+func (g *GarbageCollector) sweepOrphanVolumes(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool) {
+	for _, node := range g.Registry.ListNodes() {
+		if !g.Registry.NodeHealthy(node.Name) {
+			continue
+		}
+		for _, vol := range g.listVolumes(ctx, node.Name) {
+			if desired[node.Name][vol.SandboxId] {
+				continue
+			}
+			if liveIDs[vol.SandboxId] {
+				// A CRD object still backs this volume by name: leave it alone.
+				continue
+			}
+			if vol.AgeSeconds < int64(g.OrphanGrace.Seconds()) {
+				// Freshly prepared, claim status not yet written: leave it alone.
+				continue
+			}
+			if err := reclaimVolumeOnNode(ctx, g.Registry, node.Name, vol.SandboxId); err != nil {
+				logger.Error(err, "reclaim orphan volume", "node", node.Name, "sandbox", vol.SandboxId)
+				continue
+			}
+			recordVolumeOrphanSweep()
+			logger.Info("reclaimed orphan volume", "node", node.Name, "sandbox", vol.SandboxId)
 		}
 	}
 }
@@ -298,4 +379,21 @@ func (g *GarbageCollector) listSandboxes(ctx context.Context, nodeName string) [
 		return nil
 	}
 	return resp.Sandboxes
+}
+
+// listVolumes calls forkd ListVolumes on the node with a bounded timeout,
+// returning nil on any error (the node will be revisited next pass). It mirrors
+// listSandboxes for the volume-orphan sweep.
+func (g *GarbageCollector) listVolumes(ctx context.Context, nodeName string) []*forkdpb.VolumeInfo {
+	conn, err := g.Registry.GetConnection(nodeName)
+	if err != nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := forkdpb.NewForkDaemonClient(conn).ListVolumes(cctx, &forkdpb.ListVolumesRequest{})
+	if err != nil {
+		return nil
+	}
+	return resp.Volumes
 }

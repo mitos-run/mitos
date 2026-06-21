@@ -94,6 +94,22 @@ func (g *grpcService) ListSandboxes(ctx context.Context, _ *forkdpb.ListSandboxe
 	return &forkdpb.ListSandboxesResponse{Sandboxes: g.srv.ListSandboxes()}, nil
 }
 
+func (g *grpcService) ListVolumes(ctx context.Context, _ *forkdpb.ListVolumesRequest) (*forkdpb.ListVolumesResponse, error) {
+	return &forkdpb.ListVolumesResponse{Volumes: g.srv.ListVolumes()}, nil
+}
+
+func (g *grpcService) ReclaimVolume(ctx context.Context, req *forkdpb.ReclaimVolumeRequest) (*forkdpb.ReclaimVolumeResponse, error) {
+	// The sandbox id lands in host filesystem paths, so validate it here before
+	// any reclaim path runs (the C1 traversal guard, same as Terminate).
+	if err := validateIDs(req.SandboxId); err != nil {
+		return nil, err
+	}
+	if err := g.srv.ReclaimVolume(req.SandboxId); err != nil {
+		return nil, grpcError(err)
+	}
+	return &forkdpb.ReclaimVolumeResponse{}, nil
+}
+
 func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityRequest) (*forkdpb.GetCapacityResponse, error) {
 	c := g.srv.engine.GetCapacity()
 	templates := make([]*forkdpb.TemplateCapacity, 0, len(c.TemplateEstimates))

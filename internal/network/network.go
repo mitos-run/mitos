@@ -10,15 +10,17 @@ import (
 	"net"
 	"sync"
 
-	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/netconf"
 )
 
 // Manager applies and removes the host-side network for a sandbox identity.
 type Manager interface {
 	// Setup creates the tap, assigns the host IP, brings the link up, and
-	// installs the per-tap egress ruleset for the given policy and allowlist.
-	Setup(ctx context.Context, id netconf.Identity, policy v1alpha1.EgressPolicy, allow []netconf.HostPort, resolverIP net.IP) error
+	// installs the per-tap egress ruleset for the given network policy
+	// (egress default, allowlists, block_network, CIDR allowlist, and the
+	// optional egress byte counter). The inbound policy is applied on the husk
+	// input path; the raw-forkd host path runs no input hook.
+	Setup(ctx context.Context, id netconf.Identity, policy netconf.SandboxPolicy, resolverIP net.IP) error
 	// Teardown removes the tap and the per-tap nftables table.
 	Teardown(ctx context.Context, id netconf.Identity) error
 }
@@ -36,16 +38,15 @@ type FakeManager struct {
 // SetupCall records the arguments of one Setup call.
 type SetupCall struct {
 	Identity   netconf.Identity
-	Policy     v1alpha1.EgressPolicy
-	Allow      []netconf.HostPort
+	Policy     netconf.SandboxPolicy
 	ResolverIP net.IP
 }
 
 // Setup records the call and returns FakeManager.SetupErr.
-func (f *FakeManager) Setup(_ context.Context, id netconf.Identity, policy v1alpha1.EgressPolicy, allow []netconf.HostPort, resolverIP net.IP) error {
+func (f *FakeManager) Setup(_ context.Context, id netconf.Identity, policy netconf.SandboxPolicy, resolverIP net.IP) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.SetupLog = append(f.SetupLog, SetupCall{Identity: id, Policy: policy, Allow: allow, ResolverIP: resolverIP})
+	f.SetupLog = append(f.SetupLog, SetupCall{Identity: id, Policy: policy, ResolverIP: resolverIP})
 	return f.SetupErr
 }
 

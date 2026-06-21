@@ -19,8 +19,15 @@ Usage:
   mitos sandbox terminate <id>                   destroy a sandbox
   mitos ws create|ls|log|diff|fork|revert|rm     workspace lifecycle (git verbs)
   mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
+  mitos template build --name N                  build a template from a
+    (--dockerfile F | --spec F)                    Dockerfile or declarative spec
+  mitos template push <name>                     publish a built template
+  mitos auth login --token <token>               log in to the hosted offering
+  mitos auth keys create|ls|revoke               manage scoped API keys
   mitos dev up | down                            bring a local kind dev
                                                     cluster up or down
+  mitos doctor [-n namespace]                    run install/node preflight
+                                                    checks and print remediation
 
 Flags:
   --pool string      pool to create sandboxes from
@@ -61,8 +68,28 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 			return 2
 		}
 		return cmdWorkspace(ctx, args[1:], backend.Workspace(), out, errw)
+	case "template":
+		if backend == nil {
+			fmt.Fprint(errw, "template: this backend does not support templates\n")
+			return 2
+		}
+		return cmdTemplate(ctx, args[1:], backend.Template(), out, errw)
+	case "auth":
+		// auth login and key management talk to the hosted account service, not the
+		// cluster backend. A backend that also exposes an AuthService (via the
+		// authProvider interface) wires it in; otherwise the subcommands report no
+		// service is configured.
+		return cmdAuth(ctx, args[1:], authServiceFor(backend), out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
+	case "doctor":
+		// doctor builds a real node + k8s probe (reads /dev, /proc, and the
+		// cluster), which the pure CLI dispatcher does not do; cmd/mitos
+		// intercepts doctor before agentcli.Run and runs it with a real probe.
+		// Reaching here means doctor was invoked through a path that did not wire
+		// the probe, so it reports that and returns nonzero.
+		fmt.Fprint(errw, "doctor: run via the mitos binary, which wires the node + cluster probe\n")
+		return 1
 	default:
 		fmt.Fprintf(errw, "unknown subcommand %q\n\n%s", args[0], usage)
 		return 2

@@ -1,0 +1,145 @@
+# mitos
+
+> Snapshot-fork sandboxes for AI agents on Kubernetes. Boots Firecracker
+> microVMs, forks them via copy-on-write snapshots, and exposes the lifecycle
+> through declarative CRDs and a sandbox API. The primary reader of every runtime
+> error is a language model: errors are LLM-legible by contract.
+
+This file is for AI agents. When a call against the sandbox API (forkd :9091 or
+the standalone sandbox-server) or an SDK fails, the failure is a structured
+envelope you can act on without parsing prose. Read the `code` and the
+`remediation`; do not parse the `message`.
+
+## Error envelope
+
+Every error is:
+
+```json
+{
+  "error": {
+    "code": "<stable machine code>",
+    "message": "<one-line summary>",
+    "cause": "<call-site detail: ids, paths, ops; never a secret>",
+    "remediation": "<an action you can take>",
+    "context": { "sandbox": "sb-7" }
+  }
+}
+```
+
+- `code` is stable. Branch on it.
+- `remediation` is always present and non-empty. Follow it.
+- `cause` and `context` never contain a secret, token, or credential.
+- JSON Schema: docs/api/error-schema.json
+- Full normative catalogue: docs/api/errors.md
+
+## Error codes (the full set)
+
+- `invalid_json` (HTTP 400): the request body is not valid JSON. Send a JSON
+  body matching the endpoint contract.
+- `body_too_large` (HTTP 413): the body exceeds the size limit. Reduce the
+  payload (file content is hex-encoded and bounded).
+- `build_failed` (HTTP 422): a declarative template build step failed, so no
+  snapshot was produced. The `context` names the failing `step` index and
+  `step_kind`; fix that step and rebuild (cached steps before it are reused).
+- `unauthorized` (HTTP 401): the per-sandbox bearer token is missing or invalid.
+  Send `Authorization: Bearer <token>` with the per-sandbox token.
+- `not_found` (HTTP 404): no such sandbox. Confirm the sandbox id exists and is
+  Ready before calling. If the claim never went Ready, read its conditions in
+  docs/conditions.md.
+- `too_many_streams` (HTTP 429): the sandbox is at its concurrent-stream limit.
+  Close an existing exec/run_code/PTY stream for this sandbox before opening
+  another. Existing streams are unaffected.
+- `budget_exhausted` (HTTP 403): a budget-gated self-service operation (fork,
+  checkpoint, extend-lifetime) was refused because the creator-set capability
+  budget for that dimension is spent. The sandbox cannot widen its own budget;
+  request a larger budget from the orchestrator or operator that created the
+  sandbox, or proceed within the remaining budget reported by the Budget call.
+- `rate_limited` (HTTP 429): the request rate limit was exceeded. Back off and
+  retry after `context.retry_after_ms`. Distinct from `too_many_streams` (a
+  concurrent-stream ceiling): this is a per-window request-rate refusal.
+- `idle_timeout` (HTTP 410): the sandbox was reaped after exceeding its idle
+  timeout, so the call hit a sandbox that is gone. Distinct from `not_found`
+  (never existed): create a fresh sandbox (or fork from a checkpoint) and retry,
+  or raise the idle timeout / call set_timeout to keep it alive longer.
+- `exec_timeout` (HTTP 504): a command or run_code execution ran past its
+  requested timeout and was terminated. This is the execution deadline (the
+  context carries `timeout_s`); raise the call timeout or split the work.
+- `canceled` (HTTP 499): the request was canceled by the caller (the client
+  closed the connection or canceled the context). Retry if unintentional.
+- `timeout_too_large` (HTTP 400): the requested timeout exceeds the server
+  ceiling. The server REJECTS it (never silently reduces it); request a timeout
+  at or below `context.max_timeout_s`.
+- `exec_failed` (HTTP 500): the command could not be executed. Inspect `cause`;
+  retry a transport error, otherwise check forkd logs for the guest agent state.
+- `file_failed` (HTTP 500): a file operation failed. Confirm the path exists and
+  is writable; inspect `cause`.
+- `internal` (HTTP 500): an unclassified internal error. Retry; if it persists,
+  inspect the forkd or sandbox-server logs.
+- `forbidden` (HTTP 403): the customer API key is valid but is not permitted for
+  this action: it lacks the required scope, or the targeted resource belongs to a
+  different organization (the public gateway org-isolation refusal). Use a key
+  for the owning organization with the required scope. Distinct from
+  `unauthorized` (no valid credential at all).
+- `quota_exceeded` (HTTP 429): the customer organization exceeded a hosted-plan
+  quota (concurrent sandboxes, monthly usage, or a rate ceiling) enforced by the
+  public gateway. Reduce concurrency or wait for the window to reset, or raise
+  the plan limit. Distinct from `budget_exhausted` (a per-sandbox creator-set
+  capability budget) and `rate_limited` (a per-sandbox request window).
+
+## Examples corpus (in-context learning)
+
+Real envelopes and the correct agent reaction.
+
+### A call returns 404 not_found
+
+```json
+{"error":{"code":"not_found","message":"no such sandbox","cause":"no sandbox registered for id sb-7","remediation":"Confirm the sandbox id exists and is Ready before calling.","context":{"sandbox":"sb-7"}}}
+```
+
+React: do not retry the same id. Re-create or re-claim the sandbox, wait for
+Ready, then retry. If you created it via a SandboxClaim, check its
+`status.conditions` (docs/conditions.md) for why it is not Ready
+(`NoCapacity`, `NoHuskPod`, `ActivateFailed`).
+
+### A streaming exec is refused with 429 too_many_streams
+
+```json
+{"error":{"code":"too_many_streams","message":"the sandbox is at its concurrent-stream limit","cause":"sandbox sb-7 is at its concurrent-stream limit","remediation":"Close an existing streaming exec, run_code, or PTY session for this sandbox before opening another, or raise the forkd --max-streams-per-sandbox ceiling. Existing streams are unaffected.","context":{"sandbox":"sb-7"}}}
+```
+
+React: close one of your open streams for `sb-7` and retry; do not open more.
+Other sandboxes and your already-open streams are unaffected.
+
+### A file write fails with 500 file_failed
+
+```json
+{"error":{"code":"file_failed","message":"the file operation failed in the sandbox","cause":"open /work/out.txt: read-only file system","remediation":"Confirm the path exists and is writable; inspect the cause for the underlying error.","context":{"sandbox":"sb-7","path":"/work/out.txt"}}}
+```
+
+React: the `cause` names the underlying error (read-only path). Write to a
+writable path instead; do not retry the same write.
+
+### A call without a token returns 401 unauthorized
+
+```json
+{"error":{"code":"unauthorized","message":"the bearer token is missing or invalid for this sandbox","remediation":"Send Authorization: Bearer <token> with the per-sandbox token from the <name>-sandbox-token Secret."}}
+```
+
+React: attach the per-sandbox bearer token and retry. The token is never echoed
+in any error field.
+
+## SDK error types
+
+- Python: `from mitos.errors import AgentRunError` (`.code`, `.cause`,
+  `.remediation`, `.status`, `.context`).
+- TypeScript: `AgentRunError` (`.code`, `.errorCause`, `.remediation`).
+
+Both parse the envelope above and redact any reflected bearer token from
+`cause` before you ever see it.
+
+## Optional
+
+- [Error catalogue (normative)](docs/api/errors.md): the single source of truth.
+- [Condition reason codes](docs/conditions.md): asynchronous control-plane
+  reasons on CRD status, joint with the error catalogue.
+- [API v2 spec section 2.3](docs/api/v2-spec.md): the normative intent.

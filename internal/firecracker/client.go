@@ -347,6 +347,17 @@ func (c *Client) SetVsock(guestCID int, udsPath string) error {
 	})
 }
 
+// SetEntropy attaches a virtio-rng device backed by the host RNG via
+// PUT /entropy. It must be called before InstanceStart: Firecracker bakes its
+// device model into the snapshot and cannot add a device on restore, so the
+// device has to exist at build time. Once baked, every fork restores the device
+// and the guest keeps a continuous host entropy source after the one-shot
+// NotifyForked reseed (fork-correctness row 1). The device is attached
+// unthrottled (no rate limiter); the request carries no secrets.
+func (c *Client) SetEntropy() error {
+	return c.put("/entropy", Entropy{})
+}
+
 // ensureJailedDir creates the in-chroot mirror of a host directory and
 // hands it to the jailed uid. No-op for direct-exec clients.
 func (c *Client) ensureJailedDir(hostDir string) error {

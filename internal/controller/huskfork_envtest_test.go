@@ -355,8 +355,17 @@ func TestHuskForkRemovesSnapshotOnDelete(t *testing.T) {
 // controller opts path (not a direct buildForkChildPod call), so it catches the
 // wiring, not just the builder.
 func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
-	srcPod := makeDormantHuskPod(t, "pool-shape", "10.0.0.9")
-	makeForkSourceClaim(t, "src-claim-shape", "pool-shape", srcPod)
+	// Per-run unique names so repeated runs on the shared apiserver never collide.
+	// The fork name in particular is finalizer-gated on delete (the husk-fork
+	// reconciler stamps mitos.run/husk-fork-snapshot and clears it asynchronously),
+	// so a fixed name races the prior run's still-terminating object on Create
+	// (object is being deleted) under -count: the pre-existing flake. A unique fork
+	// name also scopes listForkChildren (keyed on mitos.run/fork) to this run.
+	poolName := uniqueName("pool-shape")
+	srcClaimName := uniqueName("src-claim-shape")
+	forkName := uniqueName("shape")
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.0.9")
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
 
 	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
 		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
@@ -369,11 +378,11 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 
 	fork := &v1alpha1.SandboxFork{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "shape-1",
+			Name:      forkName,
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-shape"}, Replicas: 1},
+		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: srcClaimName}, Replicas: 1},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -385,7 +394,7 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 	var child corev1.Pod
 	waitUntilForkReady(t, 15*time.Second, func() bool {
 		var pods corev1.PodList
-		_ = k8sClient.List(ctx, &pods, listForkChildren("shape-1"))
+		_ = k8sClient.List(ctx, &pods, listForkChildren(forkName))
 		for i := range pods.Items {
 			forceHuskPodReady(t, &pods.Items[i])
 		}

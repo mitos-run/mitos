@@ -2,7 +2,12 @@
 // (forkd :9091 or the standalone sandbox-server). Mirrors the Python Sandbox
 // surface (sdk/python/mitos/sandbox.py), camelCased.
 
-import { AgentRunError } from "./errors.js";
+import {
+  AgentRunError,
+  ExecutionDeadlineError,
+  EXEC_TIMEOUT_EXIT_CODE,
+  validateTimeout,
+} from "./errors.js";
 import { HttpClient, validSandboxId } from "./http.js";
 import { Pty, createPty } from "./pty.js";
 import type {
@@ -188,6 +193,11 @@ export class Sandbox {
       onStderr?: (chunk: Uint8Array) => void;
     },
   ): Promise<ExecResult> {
+    // Determinism (issue #216): reject an over-ceiling timeout with a typed
+    // TimeoutTooLargeError BEFORE the request, never silently reduce it.
+    if (opts?.timeoutSeconds !== undefined) {
+      validateTimeout(opts.timeoutSeconds);
+    }
     if (!opts?.onStdout && !opts?.onStderr) {
       const body: Record<string, unknown> = { sandbox: this.id, command };
       if (opts?.timeoutSeconds !== undefined) {
@@ -220,15 +230,52 @@ export class Sandbox {
   ): Promise<BackgroundProcess> {
     const controller = new AbortController();
     const timeout = opts?.timeoutSeconds ?? 86400;
+    validateTimeout(timeout);
+    // A background process may legitimately set a very long timeout; do NOT map
+    // exit 124 to ExecutionDeadlineError here (the caller wants the raw result).
     const promise = this.streamExec(
       command,
       { ...opts, timeoutSeconds: timeout },
       controller.signal,
+      false,
     );
     return {
       wait: () => promise,
       kill: () => controller.abort(),
     };
+  }
+
+  /**
+   * Adjusts this RUNNING sandbox's TTL to now + timeoutSeconds (issue #218).
+   * Returns the new absolute deadline as a unix timestamp. A value over the
+   * server ceiling throws a typed TimeoutTooLargeError; the server never
+   * silently clamps it (issue #216). This is the native method the E2B compat
+   * shim (#206) maps its setTimeout onto.
+   */
+  async setTimeout(timeoutSeconds: number): Promise<number> {
+    validateTimeout(timeoutSeconds);
+    const resp = await this.http.post<{ deadline_unix?: number }>(
+      "/v1/set_timeout",
+      { sandbox: this.id, timeout_seconds: timeoutSeconds },
+    );
+    return resp.deadline_unix ?? 0;
+  }
+
+  /**
+   * Pauses this sandbox: snapshots full state (memory + filesystem) and stops
+   * the clock (issue #218). A paused sandbox is never idle-reaped. resume()
+   * restores it.
+   */
+  async pause(): Promise<void> {
+    await this.http.post<{ status?: string }>("/v1/pause", { sandbox: this.id });
+  }
+
+  /**
+   * Resumes a paused sandbox: restores its full state and restarts the clock
+   * (issue #218).
+   */
+  async resume(): Promise<void> {
+    await this.http.post<{ status?: string }>("/v1/resume", { sandbox: this.id });
   }
 
   private async streamExec(
@@ -239,7 +286,11 @@ export class Sandbox {
       onStderr?: (chunk: Uint8Array) => void;
     },
     signal?: AbortSignal,
+    mapDeadline = true,
   ): Promise<ExecResult> {
+    if (opts.timeoutSeconds !== undefined) {
+      validateTimeout(opts.timeoutSeconds);
+    }
     const body: Record<string, unknown> = { sandbox: this.id, command };
     if (opts.timeoutSeconds !== undefined) {
       body["timeout"] = opts.timeoutSeconds;
@@ -338,6 +389,23 @@ export class Sandbox {
       );
     }
 
+    if (mapDeadline && !aborted && exitCode === EXEC_TIMEOUT_EXIT_CODE) {
+      // The streaming terminal frame reports 124 inside a 200 response (the
+      // status header is already sent); surface the typed deadline error so the
+      // streaming path matches the blocking path's 504 exec_timeout (issue #216).
+      const timeoutS = opts.timeoutSeconds ?? 30;
+      throw new ExecutionDeadlineError(
+        `command exceeded its ${timeoutS}s execution deadline and was terminated`,
+        {
+          code: "exec_timeout",
+          cause: `command ran past its ${timeoutS}s deadline (exit 124)`,
+          remediation:
+            "Raise the timeout on the exec call or split the work into shorter steps.",
+          context: { timeout_s: timeoutS },
+        },
+      );
+    }
+
     return {
       exitCode,
       stdout: outParts.join(""),
@@ -357,6 +425,9 @@ export class Sandbox {
     code: string,
     opts?: { language?: string; timeoutSeconds?: number } & RunCodeCallbacks,
   ): Promise<Execution> {
+    if (opts?.timeoutSeconds !== undefined) {
+      validateTimeout(opts.timeoutSeconds);
+    }
     const body: Record<string, unknown> = {
       sandbox: this.id,
       code,

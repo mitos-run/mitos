@@ -11,9 +11,15 @@ from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 
 from mitos.client import API_GROUP, API_VERSION, default_pool_name
-from mitos.errors import AgentRunError
-from mitos._envelope import raise_for_status
-from mitos.types import ExecResult, FileInfo, SandboxPhase
+from mitos.direct import _resolve_auth
+from mitos.errors import AgentRunError, ExecutionDeadlineError
+from mitos._envelope import raise_for_status, raise_for_status_stream
+from mitos.sandbox import (
+    EXEC_TIMEOUT_EXIT_CODE,
+    _parse_run_code_stream,
+    _validate_timeout,
+)
+from mitos.types import Execution, ExecResult, FileInfo, Network, Result, SandboxPhase
 
 POLL_INTERVAL = 0.05
 
@@ -128,6 +134,40 @@ class AsyncSandbox:
             on_data=on_data,
         )
 
+    async def set_timeout(self, timeout_seconds: int) -> int:
+        """Adjust this RUNNING sandbox's TTL to now + timeout_seconds (issue
+        #218). Returns the new absolute deadline as a unix timestamp. A value
+        over the server ceiling raises TimeoutTooLargeError; the server never
+        silently clamps it (issue #216)."""
+        _validate_timeout(timeout_seconds)
+        resp = await self._http.post(
+            f"{self._base_url}/set_timeout",
+            json={"sandbox": self.id, "timeout_seconds": timeout_seconds},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+        return int(resp.json().get("deadline_unix", 0))
+
+    async def pause(self) -> None:
+        """Pause this sandbox: snapshot full state (memory + filesystem) and
+        stop the clock (issue #218). A paused sandbox is never idle-reaped."""
+        resp = await self._http.post(
+            f"{self._base_url}/pause",
+            json={"sandbox": self.id},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+
+    async def resume(self) -> None:
+        """Resume a paused sandbox: restore its full state and restart the
+        clock (issue #218)."""
+        resp = await self._http.post(
+            f"{self._base_url}/resume",
+            json={"sandbox": self.id},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+
     async def exec(
         self,
         command: str,
@@ -140,6 +180,7 @@ class AsyncSandbox:
         """Run a command. With on_stdout/on_stderr it streams /v1/exec/stream
         NDJSON and awaits-or-calls the callback per chunk; without them it uses
         the blocking /v1/exec path. Mirrors the sync Sandbox.exec."""
+        _validate_timeout(timeout)
         if on_stdout is None and on_stderr is None:
             payload: dict = {"sandbox": self.id, "command": command,
                              "timeout": timeout, "working_dir": working_dir}
@@ -211,6 +252,17 @@ class AsyncSandbox:
                 code="exec_stream_truncated",
                 cause="the connection was truncated or dropped; the exit code is unknown",
                 remediation="Retry the command; if it persists, inspect the forkd or sandbox-server logs.",
+            )
+        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+            # The streaming terminal frame reports 124 inside a 200 response;
+            # surface the typed deadline error to match the blocking path's 504
+            # exec_timeout (issue #216).
+            raise ExecutionDeadlineError(
+                f"command exceeded its {timeout}s execution deadline and was terminated",
+                code="exec_timeout",
+                cause=f"command ran past its {timeout}s deadline (exit 124)",
+                remediation="Raise the timeout on the exec call or split the work into shorter steps.",
+                context={"timeout_s": timeout},
             )
         return ExecResult(
             exit_code=exit_code,
@@ -449,3 +501,239 @@ class AsyncAgentRun:
         except ApiException as exc:
             if exc.status != 409:
                 raise
+
+
+# Async parity for the flat one-liner native onboarding path (issue #217). The
+# async handle mirrors the sync DirectSandbox: exec / run_code / files / pty /
+# fork / terminate against the sandbox-server REST API over httpx.AsyncClient.
+
+
+class AsyncDirectSandboxFiles:
+    """Async file operations on an AsyncDirectSandbox. Mirrors the sync
+    DirectSandboxFiles wire calls against the sandbox-server REST API."""
+
+    def __init__(self, sandbox: "AsyncDirectSandbox"):
+        self._sb = sandbox
+
+    async def read(self, path: str) -> str:
+        resp = await self._sb._http.post(
+            f"{self._sb._server_url}/v1/files/read",
+            json={"sandbox": self._sb.id, "path": path},
+            headers=self._sb._auth_headers(),
+        )
+        raise_for_status(resp, token=self._sb._api_key)
+        return resp.json()["content"]
+
+    async def write(self, path: str, content: Union[str, bytes], mode: int = 0o644) -> None:
+        data: dict = {"sandbox": self._sb.id, "path": path, "mode": mode}
+        if isinstance(content, bytes):
+            data["content"] = content.hex()
+            data["binary"] = True
+        else:
+            data["content"] = content
+        resp = await self._sb._http.post(
+            f"{self._sb._server_url}/v1/files/write",
+            json=data,
+            headers=self._sb._auth_headers(),
+        )
+        raise_for_status(resp, token=self._sb._api_key)
+
+    async def list(self, path: str = "/") -> list[FileInfo]:
+        resp = await self._sb._http.post(
+            f"{self._sb._server_url}/v1/files/list",
+            json={"sandbox": self._sb.id, "path": path},
+            headers=self._sb._auth_headers(),
+        )
+        raise_for_status(resp, token=self._sb._api_key)
+        return [
+            FileInfo(
+                name=f["name"], is_dir=f["is_dir"], size=f["size"],
+                mode=f.get("mode", 0), modified_at=f.get("modified_at"),
+            )
+            for f in resp.json()["entries"]
+        ]
+
+    async def remove(self, path: str) -> None:
+        resp = await self._sb._http.post(
+            f"{self._sb._server_url}/v1/files/remove",
+            json={"sandbox": self._sb.id, "path": path},
+            headers=self._sb._auth_headers(),
+        )
+        raise_for_status(resp, token=self._sb._api_key)
+
+    async def mkdir(self, path: str) -> None:
+        resp = await self._sb._http.post(
+            f"{self._sb._server_url}/v1/files/mkdir",
+            json={"sandbox": self._sb.id, "path": path},
+            headers=self._sb._auth_headers(),
+        )
+        raise_for_status(resp, token=self._sb._api_key)
+
+
+class AsyncDirectSandbox:
+    """Async flat handle over the sandbox-server REST API. Returned by
+    mitos.aio.create()."""
+
+    def __init__(
+        self,
+        id: str,
+        template: str,
+        endpoint: str,
+        server_url: str,
+        fork_time_ms: float,
+        api_key: Optional[str] = None,
+        _http: Optional[httpx.AsyncClient] = None,
+    ):
+        self.id = id
+        self.template = template
+        self.endpoint = endpoint
+        self.fork_time_ms = fork_time_ms
+        self._server_url = server_url.rstrip("/")
+        self._api_key = api_key
+        self._http = _http or httpx.AsyncClient(timeout=30.0)
+        self.files = AsyncDirectSandboxFiles(self)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._api_key:
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {}
+
+    async def exec(self, command: str, timeout: int = 30) -> ExecResult:
+        _validate_timeout(timeout)
+        resp = await self._http.post(
+            f"{self._server_url}/v1/exec",
+            json={"sandbox": self.id, "command": command, "timeout": timeout},
+            timeout=timeout + 5,
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+        data = resp.json()
+        return ExecResult(
+            exit_code=data["exit_code"], stdout=data.get("stdout", ""),
+            stderr=data.get("stderr", ""), exec_time_ms=data.get("exec_time_ms", 0),
+        )
+
+    async def run_code(
+        self,
+        code: str,
+        language: str = "python",
+        timeout: int = 60,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+        on_result: Optional[Callable[[Result], None]] = None,
+    ) -> Execution:
+        """Run a code snippet in the sandbox's stateful kernel. Mirrors the sync
+        DirectSandbox.run_code; folds the NDJSON stream into an Execution."""
+        _validate_timeout(timeout)
+        payload = {"sandbox": self.id, "code": code, "language": language, "timeout": timeout}
+        lines: list[bytes] = []
+        async with self._http.stream(
+            "POST", f"{self._server_url}/v1/run_code/stream",
+            json=payload, timeout=timeout + 10, headers=self._auth_headers(),
+        ) as resp:
+            if not resp.is_success:
+                await resp.aread()
+                raise_for_status_stream(resp, token=self._api_key)
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    lines.append(line.encode() if isinstance(line, str) else line)
+        return _parse_run_code_stream(iter(lines), on_stdout, on_stderr, on_result)
+
+    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
+        ws_base = self._server_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return f"{ws_base}/v1/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+
+    async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
+        """Open an interactive PTY over a WebSocket and return an
+        AsyncPtyHandle. The bearer key is sent in the Authorization header,
+        never logged."""
+        from mitos.pty import AsyncPtyHandle
+
+        return await AsyncPtyHandle.connect(
+            url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data
+        )
+
+    async def fork(self, n: int = 1, id: Optional[str] = None) -> list["AsyncDirectSandbox"]:
+        """Fork into n independent sibling sandboxes on the server. Each child is
+        a READY AsyncDirectSandbox with its own id; the source keeps running."""
+        children: list[AsyncDirectSandbox] = []
+        for i in range(n):
+            child_id = None
+            if id is not None:
+                child_id = id if n == 1 else f"{id}-{i}"
+            children.append(await self._fork_one(child_id))
+        return children
+
+    async def _fork_one(self, child_id: Optional[str]) -> "AsyncDirectSandbox":
+        if child_id is None:
+            child_id = f"sandbox-{uuid.uuid4().hex[:8]}"
+        resp = await self._http.post(
+            f"{self._server_url}/v1/fork",
+            json={"template": self.template, "id": child_id},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+        data = resp.json()
+        return AsyncDirectSandbox(
+            id=data["id"], template=data["template_id"], endpoint=data["endpoint"],
+            server_url=self._server_url, fork_time_ms=data["fork_time_ms"], api_key=self._api_key,
+        )
+
+    async def terminate(self) -> None:
+        await self._http.delete(
+            f"{self._server_url}/v1/sandboxes/{self.id}", headers=self._auth_headers()
+        )
+        await self._http.aclose()
+
+    async def __aenter__(self) -> "AsyncDirectSandbox":
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        await self.terminate()
+
+    def __repr__(self) -> str:
+        return f"AsyncDirectSandbox(id={self.id!r}, fork_time_ms={self.fork_time_ms:.2f})"
+
+
+async def create(
+    image: str = "python",
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    id: Optional[str] = None,
+    network: Optional[Network] = None,
+) -> AsyncDirectSandbox:
+    """Async flat one-liner native onboarding (issue #217). Resolves the API
+    key and base URL (explicit arg, else MITOS_API_KEY / MITOS_BASE_URL),
+    gets-or-creates the template for image, forks it, and returns a running
+    AsyncDirectSandbox. The standalone server is tokenless; the hosted front
+    door (#210) verifies the same Authorization header server-side later.
+
+    network is the per-sandbox egress/ingress posture (issue #219); see
+    ``mitos.Network``. Omitting it applies the secure deny-by-default both ways.
+    This is the async parity of ``mitos.create``."""
+    key, url = _resolve_auth(api_key, base_url)
+    http = httpx.AsyncClient(timeout=60.0)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        # get-or-create the template; a 409 (exists) is success so create is idempotent.
+        tmpl_body: dict = {"id": image, "init_wait_seconds": 5}
+        if network is not None:
+            tmpl_body["network"] = network.to_dict()
+        resp = await http.post(
+            f"{url}/v1/templates", json=tmpl_body, headers=headers,
+        )
+        if resp.status_code != 409:
+            raise_for_status(resp, token=key)
+        if id is None:
+            id = f"sandbox-{uuid.uuid4().hex[:8]}"
+        resp = await http.post(
+            f"{url}/v1/fork", json={"template": image, "id": id}, headers=headers,
+        )
+        raise_for_status(resp, token=key)
+        data = resp.json()
+    finally:
+        await http.aclose()
+    return AsyncDirectSandbox(
+        id=data["id"], template=data["template_id"], endpoint=data["endpoint"],
+        server_url=url, fork_time_ms=data["fork_time_ms"], api_key=key,
+    )

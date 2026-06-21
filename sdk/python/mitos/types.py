@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 
 class ForkPolicy(str, Enum):
@@ -11,6 +11,58 @@ class ForkPolicy(str, Enum):
     SHARE = "Share"
     CLONE = "Clone"
     SNAPSHOT = "Snapshot"
+
+
+@dataclass
+class Network:
+    """Per-sandbox network posture, the first-class egress/ingress knobs
+    (issue #219), mirroring the CRD NetworkPolicy and Modal's controls.
+
+    The SECURE DEFAULT for an untrusted sandbox is deny-by-default in BOTH
+    directions: when you pass no ``network`` at all, the server applies egress
+    ``deny`` (no allows) and inbound deny-by-default, so the sandbox can neither
+    reach out nor be dialed into. Opt OUT of that explicitly by listing what is
+    allowed.
+
+    Knobs:
+      - ``block``: drop ALL egress (Modal ``block_network=True``); overrides the
+        allowlists below.
+      - ``egress``: the default verdict for traffic matching no allow rule,
+        ``"deny"`` (the secure default) or ``"allow"``.
+      - ``allow_domains``: DNS-name egress allowlist as ``host:port`` (enforced
+        via the controlled resolver; Modal ``outbound_domain_allowlist``).
+      - ``allow_cidrs``: egress CIDR allowlist (Modal ``outbound_cidr_allowlist``).
+      - ``inbound``: unsolicited inbound to the guest, ``"deny"`` (the secure
+        default) or ``"allow"``.
+      - ``inbound_cidrs``: narrow an inbound ``"allow"`` to source CIDRs (Modal
+        ``inbound_cidr_allowlist``).
+    """
+
+    block: bool = False
+    egress: str = "deny"
+    allow_domains: List[str] = field(default_factory=list)
+    allow_cidrs: List[str] = field(default_factory=list)
+    inbound: str = "deny"
+    inbound_cidrs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """The wire form the sandbox-server /v1/templates route accepts. Omits
+        empty lists and false flags so the request stays minimal and the server
+        applies the secure default for anything unset."""
+        d: dict = {}
+        if self.block:
+            d["block"] = True
+        if self.egress and self.egress != "deny":
+            d["egress"] = self.egress
+        if self.allow_domains:
+            d["allow_domains"] = list(self.allow_domains)
+        if self.allow_cidrs:
+            d["allow_cidrs"] = list(self.allow_cidrs)
+        if self.inbound and self.inbound != "deny":
+            d["inbound"] = self.inbound
+        if self.inbound_cidrs:
+            d["inbound_cidrs"] = list(self.inbound_cidrs)
+        return d
 
 
 class SandboxPhase(str, Enum):

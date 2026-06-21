@@ -50,6 +50,7 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | `NoHuskPod` | SandboxClaim | No dormant husk pod was available to activate. |
 | `NoCapacity` / `CapacityExhausted` | SandboxClaim | No node had capacity to admit the sandbox before the pending deadline. |
 | `NodeLost` | SandboxClaim | The node backing an active sandbox was lost (drain, eviction, deletion). |
+| `OrphanReaped` | SandboxClaim | The GC orphan sweep reaped a backing VM that lingered past this (terminal) claim's transition, e.g. a terminate that crashed or was missed and was then re-adopted by a restarted forkd. Informational; the VM is gone. |
 | `SecretInheritanceDenied` | SandboxFork | A fork was rejected because the source claim holds secrets and inheritance was not explicitly opted into. |
 | `ExplicitOptIn` | SandboxFork | Secret inheritance was explicitly permitted on the fork. |
 | `Forked` / `ForksCreated` | SandboxFork | The requested forks were created. |
@@ -69,4 +70,5 @@ catalogue is the normative reference the alerts and runbooks cite (see
 | `NoHuskPod` | False | Warm pool is empty for this claim's pool; scale the SandboxPool warm count (the WarmPoolStarved runbook). |
 | `NoCapacity` / `CapacityExhausted` | False | No node had admission capacity before the pending deadline; add capacity or scale pools (the ClaimsPendingSustained runbook). |
 | `NodeLost` | False | The backing node was lost (drain, eviction, deletion); the claim re-places. Confirm the node and recover it if unexpected. |
+| `OrphanReaped` | False | None; the GC reaped a VM that outlived this terminal claim. Investigate only if it recurs, which would point at a forkd terminate path crashing or being missed. |
 | `WorkspaceBusy` | False | None; the claim waits on the single-writer-per-workspace lock and retries. Investigate only if a writer never releases it. |

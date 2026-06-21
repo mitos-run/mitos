@@ -40,6 +40,32 @@ rootfs=$(stat -f -c %T / 2>/dev/null); case "$rootfs" in overlayfs|tmpfs|ramfs) 
 exit $fail
 ```
 
+## Running on <distro>: support matrix
+
+mitos is a standard operator and runs on any conformant Kubernetes. The KVM
+nodes need the kernel + data-dir + privileged-namespace prep below; the operator
+side (controller, forkd DaemonSet, device plugin, husk pods) is identical across
+distributions.
+
+| Distribution | Status | Node-prep mechanism | Notes |
+| --- | --- | --- | --- |
+| Talos | Documented bare-metal target | `deploy/talos/worker-kvm.yaml` MachineConfig patch | `machine.kernel.modules` + `machine.nodeLabels` + a data partition; see `talos-hetzner.md` |
+| k3s | Supported (distro-neutral prep) | `/etc/modules-load.d/mitos.conf` + `kubectl label` + a `/var/lib/mitos` dir/disk | Single-binary k8s; nothing k3s-specific beyond the generic prep |
+| kubeadm | Supported (distro-neutral prep) | `/etc/modules-load.d/mitos.conf` + `kubectl label` + a `/var/lib/mitos` dir/disk | Back up the CA keys under `/etc/kubernetes/pki` (see Secrets backup) |
+| EKS-metal / managed metal pools | Supported (distro-neutral prep) | node bootstrap script or a module-loading DaemonSet + `kubectl label` | Same prep; load modules from the node bootstrap and label the node |
+
+The three things every distro must arrange on a KVM node are identical:
+
+1. **Kernel modules** load at boot: `kvm`, `kvm_intel`/`kvm_amd`, `vhost_vsock`,
+   `tun` (and `nf_tables` support; see `host-prerequisites.md` for why).
+2. **A writable data dir** at `--data-dir` (default `/var/lib/mitos`), on a real
+   block-backed filesystem (a mounted disk or a directory on the real root fs).
+3. **The privileged PSA namespace** for the install/pool namespace
+   (`pod-security.kubernetes.io/enforce=privileged`), since forkd, the husk pods,
+   and the device plugin are privileged with hostPath mounts.
+
+Run `mitos doctor` after prep to confirm all three plus PKI and the pull secret.
+
 ## Node preparation per distribution
 
 The node must load the kernel modules and label itself. How you do that is
@@ -86,5 +112,9 @@ kubectl get pods -n mitos          # controller, forkd (per KVM node), device-pl
 kubectl get nodes -L mitos.run/kvm # KVM nodes labeled true
 ```
 
-A `mitos doctor` preflight that automates the node + install checks above and
-prints remediation is tracked in #174.
+`mitos doctor` automates the node + install checks above and prints an
+actionable remediation per failing check (`/dev/kvm`, the `nf_tables` /
+`vhost_vsock` / `tun` modules, the staged guest kernel, the minted PKI secrets,
+the image pull secret, and the privileged PSA label). Run it on a KVM node or as
+an in-cluster Job; it exits non-zero if any check fails. See
+`host-prerequisites.md` for the host/kernel checklist it enforces.

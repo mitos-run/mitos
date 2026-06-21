@@ -3,6 +3,7 @@ package controller
 import (
 	"crypto/tls"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -47,8 +48,31 @@ type NodeInfo struct {
 	MaxSandboxes    int32
 	MemoryTotal     int64
 	MemoryUsed      int64
-	TemplateIDs     []string
-	SnapshotIDs     []string
+
+	// GPU capacity (issue #221). A GPU node advertises the GPU node label and a
+	// GPU type; the controller mirrors that here so GPU pools are scheduled ONLY
+	// onto GPU-capable nodes, mirroring the KVM node selection. GPUTotal is the
+	// node's GPU device count; GPUUsed is how many are already assigned to
+	// sandboxes (a GPU is exclusively assigned, never CoW-shared). GPUTotal 0
+	// means the node is CPU-only and never admits a GPU request. The actual
+	// device-attach/VFIO path is hardware-gated (docs/platforms/gpu.md); these
+	// fields are the scheduling seam only.
+	GPUTotal int32
+	GPUUsed  int32
+	// GPUType is the SKU the node advertises (for example "nvidia-a100"), matched
+	// against a typed GPU request. Empty on a CPU-only node.
+	GPUType string
+
+	// IsolationTier is the assurance tier of the node's sandbox isolation (issue
+	// #40), declared via the mitos.run/isolation-tier node label and mirrored here
+	// so the scheduler can keep a tenant that REQUIRES a minimum assurance off a
+	// lower-assurance node (a security-sensitive pool never lands on a PVM node).
+	// Empty means the node has not declared a tier and is treated as the LOWEST
+	// assurance (fail-closed): it satisfies no isolation floor. See
+	// IsolationTierFromNodeLabels and docs/platforms/pvm-evaluation.md.
+	IsolationTier IsolationTier
+	TemplateIDs   []string
+	SnapshotIDs   []string
 	// TemplateDigests maps each held template id to its content-addressed
 	// snapshot manifest digest, as reported by the node's GetCapacity. Safe
 	// to log; used by the pool reconciler to record the digest in CRD status.
@@ -79,6 +103,51 @@ type NodeInfo struct {
 // discovery interval, three failures means roughly 45s of an unreachable forkd
 // before the node is dropped, well inside the 2-minute heartbeat TTL.
 const probeFailureThreshold = 3
+
+// gpuNodeLabel is the node label a GPU-capable node carries (issue #221). A GPU
+// pool's sandboxes are pinned to nodes carrying this label, mirroring the KVM
+// node label (huskpod.go huskKVMNodeLabel). The node-side GPU setup (VFIO
+// binding, device plugin advertising the GPU resource) is documented and
+// hardware-gated in docs/platforms/gpu.md; the controller only consumes the
+// label/resource a properly prepared node advertises. The companion GPU SKU
+// label a typed request matches against is "mitos.run/gpu-type" (see
+// docs/platforms/gpu.md and GPUFromNodeLabels).
+const gpuNodeLabel = "mitos.run/gpu"
+
+// gpuTypeNodeLabel is the node label advertising the GPU SKU (for example
+// "nvidia-a100") that a typed GPU request matches against.
+const gpuTypeNodeLabel = "mitos.run/gpu-type"
+
+// GPUFromNodeLabels reads a node's GPU capability from its Kubernetes labels
+// (issue #221), the bridge from a GPU-prepared node to the NodeInfo the
+// scheduler consumes. A node is GPU-capable when it carries gpuNodeLabel="true";
+// the device count is parsed from that label's integer value when present (a
+// bare "true" advertises a single device), and the SKU comes from
+// gpuTypeNodeLabel. Returns total=0 (CPU-only) when the GPU label is absent or
+// not truthy. The node-side VFIO binding and device-plugin setup that make a
+// node advertise these labels are hardware-gated (docs/platforms/gpu.md); this
+// is the label-to-scheduler mapping only and needs no hardware to exercise.
+func GPUFromNodeLabels(labels map[string]string) (total int32, gpuType string) {
+	v, ok := labels[gpuNodeLabel]
+	if !ok {
+		return 0, ""
+	}
+	switch v {
+	case "", "false", "0":
+		return 0, ""
+	case "true":
+		total = 1
+	default:
+		// ParseInt with bitSize 32 fails closed on an out-of-range value, so the
+		// int32 conversion can never overflow on a hostile or malformed label.
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil && n > 0 {
+			total = int32(n)
+		} else {
+			total = 1
+		}
+	}
+	return total, labels[gpuTypeNodeLabel]
+}
 
 // TemplateCapacity is the controller-side mirror of the forkd proto
 // TemplateCapacity: the per-template memory estimate the scheduler bin-packs
@@ -168,6 +237,46 @@ func (r *NodeRegistry) Unregister(name string) {
 // fork under the overcommit policy (a transient shortage, scale out or raise
 // the factor).
 func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*NodeInfo, error) {
+	return r.SelectNodeForFork(ForkRequest{TemplateID: snapshotID, PreferredNode: preferredNode})
+}
+
+// ForkRequest is the full input to node selection (issue #221): the template to
+// fork plus the requested SIZE and GPU demand, so the scheduler can admit large
+// sandboxes (above the 8 GiB E2B class) only where the node has the RAM and pin
+// GPU sandboxes to GPU-capable nodes. MemoryBytes 0 means "size from the
+// per-template CoW estimate" (the legacy behavior SelectNode preserves);
+// GPUCount 0 means a CPU-only sandbox.
+type ForkRequest struct {
+	// TemplateID is the snapshot/template the sandbox forks from.
+	TemplateID string
+	// PreferredNode is honored only when healthy AND it admits the request.
+	PreferredNode string
+	// MemoryBytes is the sandbox's explicit memory size in bytes. When greater
+	// than the per-template projected CoW cost it gates admission, so an oversized
+	// sandbox lands only on a node that can hold it.
+	MemoryBytes int64
+	// GPUCount is the number of GPUs the sandbox requires (0 for CPU-only). A
+	// positive count restricts placement to GPU-capable nodes with free devices.
+	GPUCount int32
+	// GPUType narrows a GPU request to nodes advertising this SKU (empty = any).
+	GPUType string
+	// MinIsolationTier is the minimum isolation assurance the sandbox requires
+	// (issue #40). When set, placement is restricted to nodes whose declared tier
+	// MEETS this floor, so a security-sensitive tenant never lands on a
+	// lower-assurance node (for example a hardware-kvm floor never selects a PVM
+	// node). Empty means no floor: the request schedules onto any healthy node.
+	MinIsolationTier IsolationTier
+}
+
+// SelectNodeForFork is the size- and GPU-aware node selection (issue #221). It
+// admits only nodes that satisfy the request's memory SIZE and GPU demand, then
+// packs admitted nodes to maximize CoW sharing exactly as SelectNode does. GPU
+// requests are pinned to GPU-capable nodes (mirroring the KVM node selection);
+// large sizes are admitted only where the node has the RAM. Errors stay distinct:
+// empty registry and no healthy nodes are scheduling preconditions; ErrNoCapacity
+// means healthy nodes exist but none admit (memory exhausted, no GPU node, no
+// matching GPU type, or GPU devices exhausted).
+func (r *NodeRegistry) SelectNodeForFork(req ForkRequest) (*NodeInfo, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -175,11 +284,11 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 		return nil, fmt.Errorf("no forkd nodes registered")
 	}
 
-	// Preferred node is honored only when healthy AND it admits the fork.
+	// Preferred node is honored only when healthy AND it admits the request.
 	// Otherwise fall through to the general scoring so a full preferred node
 	// does not pin the claim.
-	if preferredNode != "" {
-		if node, ok := r.nodes[preferredNode]; ok && node.isHealthy() && r.admits(node, snapshotID) {
+	if req.PreferredNode != "" {
+		if node, ok := r.nodes[req.PreferredNode]; ok && node.isHealthy() && r.admitsRequest(node, req) {
 			return node, nil
 		}
 	}
@@ -191,7 +300,7 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 			continue
 		}
 		healthy = true
-		if r.admits(node, snapshotID) {
+		if r.admitsRequest(node, req) {
 			admitted = append(admitted, node)
 		}
 	}
@@ -200,10 +309,16 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 		return nil, fmt.Errorf("no healthy forkd nodes available")
 	}
 	if len(admitted) == 0 {
+		if req.MinIsolationTier != "" && !r.anyNodeMeetsTier(req.MinIsolationTier) {
+			return nil, fmt.Errorf("%w: no node meets the required isolation tier %q; label a qualifying node %s=%s, or relax the pool's minIsolationTier/requireHardwareKvm", ErrNoCapacity, req.MinIsolationTier, isolationTierNodeLabel, req.MinIsolationTier)
+		}
+		if req.GPUCount > 0 {
+			return nil, fmt.Errorf("%w: no GPU-capable node admits the request (count %d, type %q); add GPU nodes labeled %s or free GPU devices", ErrNoCapacity, req.GPUCount, req.GPUType, gpuNodeLabel)
+		}
 		return nil, fmt.Errorf("%w: cluster memory exhausted under the overcommit policy (factor %.2f); scale out forkd nodes or raise the overcommit factor", ErrNoCapacity, r.overcommitFactor)
 	}
 
-	return r.packBest(admitted, snapshotID), nil
+	return r.packBest(admitted, req.TemplateID), nil
 }
 
 // packBest scores admitted nodes to maximize density. Warm snapshot-holders
@@ -267,6 +382,19 @@ func (r *NodeRegistry) denser(c, b *NodeInfo, snapshotID string) bool {
 		return cAvail > bAvail
 	}
 	return c.Name < b.Name
+}
+
+// anyNodeMeetsTier reports whether any HEALTHY node declares an isolation tier
+// that meets the floor (issue #40). It distinguishes "no node has the required
+// assurance at all" (a hard misconfiguration: relabel a node or relax the floor)
+// from a transient capacity shortage. Caller must hold at least the read lock.
+func (r *NodeRegistry) anyNodeMeetsTier(min IsolationTier) bool {
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.IsolationTier.meets(min) {
+			return true
+		}
+	}
+	return false
 }
 
 // NodesWithTemplate returns healthy nodes that hold the given template snapshot.

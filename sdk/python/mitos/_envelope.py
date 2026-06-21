@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from mitos.errors import AgentRunError
+from mitos.errors import AgentRunError, error_for_code
 
 
 def _redact(text: str, token: Optional[str]) -> str:
@@ -86,9 +86,12 @@ def error_from_response(resp: httpx.Response, token: Optional[str] = None) -> Ag
             # Legacy bare {"error": "msg"} shape.
             cause = _redact(err, token) or cause
 
-    return AgentRunError(
-        message=message,
-        code=code,
+    # Build the TYPED subclass for the code (issue #216): a caller branches on
+    # the exception type, never on the message. An unknown code falls back to the
+    # base AgentRunError inside error_for_code.
+    return error_for_code(
+        code,
+        message,
         cause=cause,
         remediation=remediation,
         status=status,

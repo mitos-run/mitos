@@ -551,7 +551,13 @@ out of capacity. Chaos suite in CI.
   still open.
 - ✅ Claim TTLs: `maxLifetime` and `idleTimeout` reap to a terminal
   `Terminated` phase with status conditions; `idleTimeout` reads activity
-  via the forkd `ListSandboxes` primitive.
+  via the forkd `ListSandboxes` primitive. The idle clock is WORK-AWARE
+  (issue #218): a sandbox with a live background process (an open stream) or a
+  paused sandbox is not idle-reaped, and a live `set_timeout` deadline takes
+  authority over the idle clock. Live `set_timeout` and first-class
+  pause/resume (full memory + filesystem state) ship on the sandbox HTTP API
+  and both SDKs; pause/resume correctness across N cycles is the KVM bar
+  (`TestEnginePauseResumePreservesStateKVM`). See `docs/lifecycle.md`.
 - 🔨 etcd hygiene: TTL of finished objects, including early-failed claims,
   is done. Rate-limiting and batching of status updates is still open.
 - ✅ Saturation behavior: queue with backpressure then a typed fail-fast
@@ -754,11 +760,19 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   survives scale-down). The legacy fixed pool is `minWarm == replicas`.
 - ⬜ NUMA pinning + hugepage-backed guest memory; KSM same-page-merging
   tuning; per-node max density config (needs hardware)
-- ⬜ Snapshot-resume page-fault prefetch: hugepage-backed guest memory plus a
+- 🔨 Snapshot-resume page-fault prefetch: hugepage-backed guest memory plus a
   userfaultfd handler that preloads a captured hot-page working set before
   resume, to cut the lazy-fault tail (the "0.8ms restore + ~40ms lazy faults"
   in BENCHMARKS.md). Externally validated technique (Browser Use cut
   resume-to-ready 9.8s to 3.1s, page faults ~100k to ~1.1k). Tracked in #167.
+  DONE (off bare metal): design (docs/perf/snapshot-prefetch.md), the
+  content-addressed optional hot-page manifest descriptor (cas.HotPageSet,
+  additive and #32-safe), the pure capture-selection (fork.SelectHotPages:
+  dedupe, page-align, hotness cap, order), the Linux-gated userfaultfd handler
+  skeleton (internal/fork/prefetch_linux.go), and the bench aggregation +
+  cmd/bench --mode prefetch (benchstat.AggregatePrefetch). DEFERRED to the
+  bare-metal node (#16): the userfaultfd syscall wiring, Firecracker hugetlbfs,
+  and the real fault-count / claim->first-exec measurement (all TARGETS today).
 - ⬜ Dynamic CPU pinning: pin a fork's vCPU threads AFTER guest-ready (not at
   launch), unpinned during the activate burst, sibling hyperthreads together,
   with an optional launch-window RT scheduling priority (Browser Use: launch

@@ -121,9 +121,10 @@ func TestHuskClaimWorkspaceDehydrateDelegates(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	makeWorkspace(t, "hw-dehydrate-ws", v1alpha1.WorkspaceRetention{})
+	wsName := uniqueName("hw-dehydrate-ws")
+	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
 
-	claim := makeHuskWorkspaceClaim(t, "hw-de", "hw-dehydrate-ws", "10.20.0.1", v1alpha1.SandboxClaimSpec{
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-de"), wsName, "10.20.0.1", v1alpha1.SandboxClaimSpec{
 		Timeout: &metav1.Duration{Duration: 2 * time.Second},
 	})
 	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
@@ -152,7 +153,7 @@ func TestHuskClaimWorkspaceDehydrateDelegates(t *testing.T) {
 	// The controller still owns the commit + head advance: a committed
 	// WorkspaceRevision with fromClaim lineage exists and the head advanced to the
 	// digest the delegate returned.
-	ws := waitWorkspace(t, "hw-dehydrate-ws", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after husk dehydrate")
 
@@ -201,14 +202,18 @@ func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	// A committed parent head: the diff's parent manifest and the lineage tip.
-	makeWorkspace(t, "hw-diff-ws", v1alpha1.WorkspaceRetention{})
-	makeRevision(t, "hw-diff-ws-r1", "hw-diff-ws", parentManifest, nil, nil)
-	waitWorkspace(t, "hw-diff-ws", func(ws *v1alpha1.Workspace) bool {
-		return ws.Status.Head == "hw-diff-ws-r1"
+	// A committed parent head: the diff's parent manifest and the lineage tip. The
+	// workspace name is unique per run so a prior run's stranded child revision
+	// (envtest has no GC to cascade-delete it) cannot be adopted as this head.
+	wsName := uniqueName("hw-diff-ws")
+	parentRevName := wsName + "-r1"
+	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeRevision(t, parentRevName, wsName, parentManifest, nil, nil)
+	waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head == parentRevName
 	}, "parent head committed")
 
-	claim := makeHuskWorkspaceClaim(t, "hw-diff", "hw-diff-ws", "10.20.0.3", v1alpha1.SandboxClaimSpec{
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-diff"), wsName, "10.20.0.3", v1alpha1.SandboxClaimSpec{
 		Timeout: &metav1.Duration{Duration: 2 * time.Second},
 		Outputs: []v1alpha1.OutputSpec{{Diff: true}},
 	})
@@ -217,8 +222,8 @@ func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
 
 	// The head advanced to a NEW revision (the dehydrated child) carrying the diff
 	// summary; the not-wired error never fired (else terminate would not commit).
-	ws := waitWorkspace(t, "hw-diff-ws", func(ws *v1alpha1.Workspace) bool {
-		return ws.Status.Head != "" && ws.Status.Head != "hw-diff-ws-r1"
+	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head != "" && ws.Status.Head != parentRevName
 	}, "head advanced past the parent after husk diff dehydrate")
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -227,8 +232,8 @@ func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
 			if head.Status.DiffSummary != nil {
 				ds := head.Status.DiffSummary
-				if ds.ParentRevision != "hw-diff-ws-r1" {
-					t.Fatalf("diff summary parentRevision = %q, want hw-diff-ws-r1", ds.ParentRevision)
+				if ds.ParentRevision != parentRevName {
+					t.Fatalf("diff summary parentRevision = %q, want %q", ds.ParentRevision, parentRevName)
 				}
 				if len(ds.Added) != 1 || ds.Added[0] != "new.txt" || ds.AddedCount != 1 {
 					t.Fatalf("diff summary added = %v (count %d), want [new.txt]", ds.Added, ds.AddedCount)
@@ -268,13 +273,15 @@ func TestHuskClaimWorkspaceHydrateDelegates(t *testing.T) {
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
 	headManifest := testManifest(0x7c)
-	makeWorkspace(t, "hw-hydrate-ws", v1alpha1.WorkspaceRetention{})
-	makeRevision(t, "hw-hydrate-ws-r1", "hw-hydrate-ws", headManifest, nil, nil)
-	waitWorkspace(t, "hw-hydrate-ws", func(ws *v1alpha1.Workspace) bool {
-		return ws.Status.Head == "hw-hydrate-ws-r1"
+	wsName := uniqueName("hw-hydrate-ws")
+	parentRevName := wsName + "-r1"
+	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeRevision(t, parentRevName, wsName, headManifest, nil, nil)
+	waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head == parentRevName
 	}, "head committed")
 
-	claim := makeHuskWorkspaceClaim(t, "hw-hy", "hw-hydrate-ws", "10.20.0.2", v1alpha1.SandboxClaimSpec{})
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-hy"), wsName, "10.20.0.2", v1alpha1.SandboxClaimSpec{})
 	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
 
 	// The hydrate delegate must have been invoked with the head's manifest.

@@ -371,17 +371,39 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 	return startFakeForkdNodeOpts(registry, nodeName, serverTLS, clientTLS, nil, templates...)
 }
 
+// StartFakeForkdNodeWithAPI is StartFakeForkdNodeRecording that also returns the
+// node's SandboxAPI, so a test can inject the work-aware idle signals (issue
+// #218) the controller reads through ListSandboxes: MarkPaused to hold a
+// sandbox's clock, or SetTimeout to set a live TTL deadline. It lets the idle
+// reaper's work-awareness be driven end to end on the envtest/mock path.
+func StartFakeForkdNodeWithAPI(registry *NodeRegistry, nodeName string, templates ...string) (stop func(), engine *fork.MockEngine, api *daemon.SandboxAPI, err error) {
+	return startFakeForkdNodeWithAPI(registry, nodeName, templates...)
+}
+
 func startFakeForkdNodeOpts(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, interceptor grpc.UnaryServerInterceptor, templates ...string) (stop func(), engine *fork.MockEngine, setActivity func(string, time.Time), err error) {
+	stop, engine, setActivity, _, err = startFakeForkdNodeFull(registry, nodeName, serverTLS, clientTLS, interceptor, templates...)
+	return stop, engine, setActivity, err
+}
+
+// startFakeForkdNodeWithAPI runs a fake forkd node and returns the node's
+// SandboxAPI so a test can inject the work-aware idle signals the controller
+// reads through ListSandboxes (issue #218).
+func startFakeForkdNodeWithAPI(registry *NodeRegistry, nodeName string, templates ...string) (stop func(), engine *fork.MockEngine, api *daemon.SandboxAPI, err error) {
+	stop, engine, _, api, err = startFakeForkdNodeFull(registry, nodeName, nil, nil, nil, templates...)
+	return stop, engine, api, err
+}
+
+func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, interceptor grpc.UnaryServerInterceptor, templates ...string) (stop func(), engine *fork.MockEngine, setActivity func(string, time.Time), api *daemon.SandboxAPI, err error) {
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
 		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	dir, err := os.MkdirTemp("", "fake-forkd-*")
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	sandboxAPI := daemon.NewSandboxAPI(dir)
 	srv := daemon.NewServer(engine, sandboxAPI)
@@ -389,7 +411,7 @@ func startFakeForkdNodeOpts(registry *NodeRegistry, nodeName string, serverTLS, 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		os.RemoveAll(dir)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// The otelgrpc server handler mirrors forkd's real gRPC server so the
 	// propagated trace context is honored: the forkd.Fork span joins the
@@ -426,5 +448,5 @@ func startFakeForkdNodeOpts(registry *NodeRegistry, nodeName string, serverTLS, 
 		httpSrv.Close()
 		os.RemoveAll(dir)
 		registry.Unregister(nodeName)
-	}, engine, setActivity, nil
+	}, engine, setActivity, sandboxAPI, nil
 }

@@ -30,6 +30,17 @@ type NetfilterConfig struct {
 	// Allow is the raw allowlist; IP:port entries become static chain accepts,
 	// name entries are enforced by the DNS proxy (handled by the caller).
 	Allow []string
+	// BlockNetwork drops ALL egress (Modal block_network=True), overriding Egress
+	// and the allowlists.
+	BlockNetwork bool
+	// AllowCIDRs is the egress CIDR allowlist (Modal outbound_cidr_allowlist).
+	AllowCIDRs []string
+	// Inbound governs unsolicited inbound to the guest; empty means deny-by-default
+	// (the secure default), the existing input-chain behavior.
+	Inbound v1alpha1.InboundPolicy
+	// InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
+	// inbound_cidr_allowlist).
+	InboundCIDRs []string
 	// ResolverIP is the in-pod DNS proxy address the chain allows on port 53 and
 	// the guest is pointed at. Nil disables the DNS allow rule (IP-only mode).
 	ResolverIP net.IP
@@ -50,6 +61,10 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
 	if err != nil {
 		return fmt.Errorf("husk netfilter: parse allowlist: %w", err)
+	}
+	cidrV4, cidrV6, err := netconf.ParseCIDRList(cfg.AllowCIDRs)
+	if err != nil {
+		return fmt.Errorf("husk netfilter: parse CIDR allowlist: %w", err)
 	}
 	// IPv4 forwarding in the pod netns: the kernel will not route the guest /30
 	// between the tap and the pod uplink without it, so the SNAT below would have
@@ -80,7 +95,19 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedTable()); err != nil {
 		return fmt.Errorf("husk netfilter: apply shared egress table: %w", err)
 	}
-	chain := netconf.RenderSandboxChain(cfg.Tap, cfg.GuestIP, cfg.Egress, enforceable, cfg.ResolverIP)
+	chain := netconf.RenderSandboxChainSpec(netconf.ChainSpec{
+		Tap:          cfg.Tap,
+		GuestIP:      cfg.GuestIP,
+		Egress:       cfg.Egress,
+		Allow:        enforceable,
+		AllowCIDRsV4: cidrV4,
+		AllowCIDRsV6: cidrV6,
+		ResolverIP:   cfg.ResolverIP,
+		BlockNetwork: cfg.BlockNetwork,
+		// Always wire the per-sandbox egress counter so the metering pipeline
+		// (#211) can read this sandbox's egress bytes. Passive: no verdict.
+		Counter: true,
+	})
 	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
 		return fmt.Errorf("husk netfilter: apply egress chain for tap %s: %w", cfg.Tap, err)
 	}
@@ -99,7 +126,14 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedInputTable()); err != nil {
 		return fmt.Errorf("husk netfilter: apply shared input table: %w", err)
 	}
-	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSandboxInputChain(cfg.Tap, cfg.GuestIP, cfg.ResolverIP)); err != nil {
+	inputChain := netconf.RenderSandboxInputChainSpec(netconf.InputChainSpec{
+		Tap:          cfg.Tap,
+		GuestIP:      cfg.GuestIP,
+		ResolverIP:   cfg.ResolverIP,
+		Inbound:      cfg.Inbound,
+		InboundCIDRs: cfg.InboundCIDRs,
+	})
+	if err := run(ctx, netconf.NftApplyArgs(), inputChain); err != nil {
 		return fmt.Errorf("husk netfilter: apply input chain for tap %s: %w", cfg.Tap, err)
 	}
 	return nil
@@ -121,6 +155,9 @@ func teardownEgressFilter(ctx context.Context, run netfilterRunner, tap string) 
 	}
 	if err := run(ctx, netconf.NftDeleteSandboxAllowSetArgs(tap), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("husk netfilter: delete allow set for tap %s: %w", tap, err)
+	}
+	if err := run(ctx, netconf.NftDeleteSandboxEgressCounterArgs(tap), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("husk netfilter: delete egress counter for tap %s: %w", tap, err)
 	}
 	if err := run(ctx, netconf.NftDeleteInputDispatchElementArgs(tap), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("husk netfilter: delete input dispatch element for tap %s: %w", tap, err)
