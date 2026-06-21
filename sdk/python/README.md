@@ -333,6 +333,77 @@ Install the optional extra only if you use the integration:
 without `claude-agent-sdk`; only `as_mcp_server()` needs it and it raises a clear
 error naming the extra when absent.
 
+### Use mitos via VibeKit
+
+VibeKit is a provider aggregator over sandbox backends ("E2B today; Daytona,
+Modal, Fly.io coming soon"). `MitosVibeKitProvider` is the mitos provider against
+VibeKit's provider shape: a named provider that creates sandboxes exposing
+command execution, a filesystem, and a lifecycle.
+
+```python
+from mitos.integrations.vibekit import MitosVibeKitProvider
+
+provider = MitosVibeKitProvider(base_url="http://localhost:8080")  # name == "mitos"
+sandbox = provider.create("python")
+
+out = sandbox.run_command("echo hi")     # {stdout, stderr, exit_code, exec_time_ms}
+sandbox.write_file("/workspace/a.txt", "hello")
+print(sandbox.read_file("/workspace/a.txt"))
+ex = sandbox.run_code("1 + 1")           # rich Execution with MIME results
+sandbox.kill()                            # alias: sandbox.close()
+```
+
+Install the optional extra only if you use the integration:
+`pip install "mitos[vibekit]"`. The provider does not subclass any VibeKit type
+and is fully usable and testable without VibeKit installed. Fork stays reachable
+as a mitos-native op via `sandbox.fork(n)`, which VibeKit's provider interface
+does not expose.
+
+### Use mitos via ZenML
+
+ZenML treats a sandbox as a pluggable stack component selected by a flavor.
+`MitosSandboxComponent` is the framework-neutral mitos backend (config, flavor
+name, and the provision / run_command / files / run_code / deprovision logic the
+flavor wraps).
+
+```python
+from mitos.integrations.zenml import MitosSandboxComponent, MitosSandboxConfig
+
+comp = MitosSandboxComponent(
+    MitosSandboxConfig(template="python", base_url="http://localhost:8080")
+)  # FLAVOR == "mitos"
+comp.provision()
+out = comp.run_command("echo hi")        # {stdout, stderr, exit_code, exec_time_ms}
+comp.write_file("/workspace/a.txt", "hello")
+ex = comp.run_code("1 + 1")              # rich Execution; comp.run_code_dict(...) for JSON
+comp.deprovision()
+```
+
+Install the optional extra only if you use the integration:
+`pip install "mitos[zenml]"`. The component backend is fully usable and testable
+without ZenML; only `MitosSandboxComponent.flavor()` needs it and raises a clear
+error naming the extra when absent.
+
+### Registering mitos with VibeKit / ZenML (maintainer step)
+
+The adapters above implement the mitos backend each aggregator expects, but
+LISTING mitos as a selectable option inside VibeKit or ZenML is a contribution to
+THOSE projects' own repositories and is NOT done by installing this SDK. It is a
+maintainer step:
+
+- **VibeKit:** open a PR to VibeKit adding a provider entry that constructs
+  `MitosVibeKitProvider` and wires its create / command / filesystem methods to
+  VibeKit's provider interface, following VibeKit's contribution process.
+- **ZenML:** open a PR (or ship a plugin) that subclasses ZenML's sandbox
+  stack-component base with `MitosSandboxConfig` and `FLAVOR = "mitos"`, delegates
+  its hooks to `MitosSandboxComponent`, and registers the flavor through ZenML's
+  flavor API, following ZenML's integration contribution process.
+
+Until those external PRs merge, mitos is usable through the adapters directly (as
+shown above); it is not yet selectable by name inside VibeKit's or ZenML's own
+provider lists. See the module docstrings in `mitos/integrations/vibekit.py` and
+`mitos/integrations/zenml.py` for the targeted contract each PR conforms to.
+
 ## What is proven where
 
 The cluster examples (lazy default-pool creation, fork, from_name reconnect,
