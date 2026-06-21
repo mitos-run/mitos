@@ -8,17 +8,21 @@ export interface AgentRunErrorOptions {
   code: string;
   cause?: string;
   remediation?: string;
+  context?: Record<string, unknown>;
 }
 
 /**
  * An error from the SDK. `code` is a stable machine-readable identifier;
  * `cause` is the underlying detail (server body, redacted); `remediation` is a
- * short actionable hint. The token never appears in any of these fields.
+ * short actionable hint; `context` is the structured envelope context (ids,
+ * paths, op names; never a secret). The token never appears in any of these
+ * fields. Mirrors the server envelope in docs/api/errors.md.
  */
 export class AgentRunError extends Error {
   readonly code: string;
   readonly errorCause?: string;
   readonly remediation?: string;
+  readonly context: Record<string, unknown>;
 
   constructor(message: string, opts: AgentRunErrorOptions) {
     super(message);
@@ -26,6 +30,7 @@ export class AgentRunError extends Error {
     this.code = opts.code;
     this.errorCause = opts.cause;
     this.remediation = opts.remediation;
+    this.context = opts.context ?? {};
   }
 
   /**
@@ -43,6 +48,7 @@ export class AgentRunError extends Error {
     let message = `sandbox API request failed: HTTP ${status} (${code})`;
     let cause = safeBody === "" ? `HTTP ${status}` : safeBody;
     let remediation = remediationForStatus(status);
+    let context: Record<string, unknown> = {};
 
     try {
       const parsed = JSON.parse(safeBody) as unknown;
@@ -54,11 +60,15 @@ export class AgentRunError extends Error {
             message?: string;
             cause?: string;
             remediation?: string;
+            context?: Record<string, unknown>;
           };
           code = e.code || code;
           message = e.message || message;
           cause = (e.cause && redact(e.cause, token)) || cause;
           remediation = e.remediation || remediation;
+          if (e.context && typeof e.context === "object") {
+            context = e.context;
+          }
         } else if (typeof err === "string") {
           // Legacy bare {"error": "msg"} body.
           cause = redact(err, token) || cause;
@@ -68,7 +78,7 @@ export class AgentRunError extends Error {
       // Not JSON; keep the status-derived defaults with the text body as cause.
     }
 
-    return new AgentRunError(message, { code, cause, remediation });
+    return new AgentRunError(message, { code, cause, remediation, context });
   }
 }
 

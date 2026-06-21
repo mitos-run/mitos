@@ -90,7 +90,8 @@ func (api *SandboxAPI) handlePty(w http.ResponseWriter, r *http.Request) {
 	// rather than a post-upgrade close; existing streams are never touched.
 	release, ok := api.acquireStream(sandbox)
 	if !ok {
-		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", sandbox)))
+		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", sandbox)).
+			WithContext(map[string]any{"sandbox": sandbox}))
 		return
 	}
 	defer release()

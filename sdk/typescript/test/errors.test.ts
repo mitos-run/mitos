@@ -34,6 +34,26 @@ describe("AgentRunError.fromResponse server envelope", () => {
     expect(err.remediation).not.toBe("");
   });
 
+  it("parses the structured context from the envelope", () => {
+    const body = JSON.stringify({
+      error: {
+        code: "file_failed",
+        message: "the file operation failed in the sandbox",
+        cause: "open /work/out.txt: read-only file system",
+        remediation: "Confirm the path exists and is writable.",
+        context: { sandbox: "sb-7", path: "/work/out.txt" },
+      },
+    });
+    const err = AgentRunError.fromResponse(500, body);
+    expect(err.code).toBe("file_failed");
+    expect(err.context).toEqual({ sandbox: "sb-7", path: "/work/out.txt" });
+  });
+
+  it("defaults context to an empty object for a non-envelope body", () => {
+    const err = AgentRunError.fromResponse(503, "upstream gateway error");
+    expect(err.context).toEqual({});
+  });
+
   it("redacts a token echoed in an envelope cause", () => {
     const token = "supersecrettoken";
     const body = JSON.stringify({

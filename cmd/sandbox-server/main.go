@@ -350,10 +350,10 @@ func errResp(w http.ResponseWriter, msg string, code int) {
 func codeForStatus(status int) apierr.Error {
 	switch status {
 	case http.StatusBadRequest:
-		return apierr.Catalogue["invalid_json"]
+		return apierr.Get(apierr.CodeInvalidJSON)
 	case http.StatusNotFound:
-		return apierr.Catalogue["not_found"]
+		return apierr.Get(apierr.CodeNotFound)
 	default:
-		return apierr.Catalogue["internal"]
+		return apierr.Get(apierr.CodeInternal)
 	}
 }

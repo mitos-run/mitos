@@ -517,7 +517,8 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["exec_failed"].WithCause(fmt.Sprintf("exec failed: %v", err)))
+		writeAPIErr(w, apierr.Get(apierr.CodeExecFailed).WithCause(fmt.Sprintf("exec failed: %v", err)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
 		return
 	}
 
@@ -593,7 +594,8 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 	// never touched. Checked at OPEN, off the activate path.
 	release, ok := api.acquireStream(req.Sandbox)
 	if !ok {
-		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
 		return
 	}
 	defer release()
@@ -683,7 +685,8 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 	// before writing the 200 header; existing streams are never touched.
 	release, ok := api.acquireStream(req.Sandbox)
 	if !ok {
-		writeAPIErr(w, apierr.Catalogue["too_many_streams"].WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)))
+		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+			WithContext(map[string]any{"sandbox": req.Sandbox}))
 		return
 	}
 	defer release()
@@ -764,7 +767,8 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 	content, err := agent.ReadFile(req.Path)
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -800,7 +804,8 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.WriteFile(req.Path, []byte(req.Content), mode); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -832,7 +837,8 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := agent.ListDir(req.Path)
 	if err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -861,7 +867,8 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Mkdir(req.Path); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -890,7 +897,8 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Remove(req.Path); err != nil {
-		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
+		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
 	}
 
@@ -929,14 +937,14 @@ func writeErr(w http.ResponseWriter, msg string, code int) {
 func codeForStatus(status int) apierr.Error {
 	switch status {
 	case http.StatusBadRequest:
-		return apierr.Catalogue["invalid_json"]
+		return apierr.Get(apierr.CodeInvalidJSON)
 	case http.StatusRequestEntityTooLarge:
-		return apierr.Catalogue["body_too_large"]
+		return apierr.Get(apierr.CodeBodyTooLarge)
 	case http.StatusUnauthorized:
-		return apierr.Catalogue["unauthorized"]
+		return apierr.Get(apierr.CodeUnauthorized)
 	case http.StatusNotFound:
-		return apierr.Catalogue["not_found"]
+		return apierr.Get(apierr.CodeNotFound)
 	default:
-		return apierr.Catalogue["internal"]
+		return apierr.Get(apierr.CodeInternal)
 	}
 }
