@@ -240,14 +240,31 @@ breaking change on the conversion path being green.
 
 ## Status of the slice
 
-PROVEN now: nothing in code changes in this slice. The four v1alpha1 kinds remain
-in force and unchanged; `make manifests` output for existing kinds is unchanged
-(verified: no Go type was added, so CRD generation cannot drift). This slice
-delivers the ADR and docs/api/v2-migration.md only.
+The DESIGN slice (this ADR and docs/api/v2-migration.md) landed first. The first
+IMPLEMENTATION slice has now landed too, additive and non-destabilizing:
 
-OPEN (the breaking migration follow-up, issue #23 continuation): the v2
-(`v1alpha2`) Go types for the consolidated `SandboxPool` and `Sandbox`; the
-removal of `SandboxTemplate` and `SandboxFork`; the conversion webhook
-implementing the migration table; the storage migration; the controller, SDK,
-and facade cutover; and the conditions catalogue re-homing. Each rides the
-conversion-path-green gate before any production tenant sees it.
+PROVEN now:
+
+- The `v1alpha2` Go types for the consolidated `SandboxPool` (inline `template`
+  plus optional `templateRef`, `snapshots`, `warm`, `placement`) and `Sandbox`
+  (`source` oneof poolRef/fromSandbox/fromRevision plus `replicas`, folding the
+  v1alpha1 SandboxClaim and SandboxFork into one kind) exist in `api/v1alpha2`.
+- v1alpha1 `SandboxPool` is the conversion Hub (storage version); v1alpha2
+  `SandboxPool` implements `conversion.Convertible` with PURE ConvertTo/
+  ConvertFrom per the migration table, covered by round-trip unit tests and a
+  conversion-webhook envtest that serves both versions through the API server.
+- An opt-in consolidated `Sandbox` reconciler maps a Sandbox onto the EXISTING
+  SandboxClaim/SandboxFork engine (additive), with a conformance envtest proving
+  a Sandbox{source.poolRef} reaches Ready (claim equivalent) and a
+  Sandbox{source.fromSandbox, replicas:N} produces N children (fork equivalent)
+  on the mock engine.
+- The four v1alpha1 kinds remain in force and unchanged; their CRDs do not drift
+  (the sandboxpools CRD gains an additive v1alpha2 version; a new sandboxes CRD
+  is added). Both surfaces serve.
+
+OPEN (the breaking migration follow-up, issue #23 continuation): the
+storage-version flip to v1alpha2; the removal of `SandboxTemplate` and
+`SandboxFork`; the cross-kind storage migration (SandboxClaim/SandboxFork ->
+Sandbox); the facade re-target; the SDK cutover; and the conditions catalogue
+re-homing. Each rides the conversion-path-green gate before any production tenant
+sees it.
