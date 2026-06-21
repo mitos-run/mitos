@@ -203,14 +203,47 @@ func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (Drawdown
 			Note:   "usage drawdown",
 		})
 		if err == ErrDuplicateEntry {
-			// Already settled: idempotent replay, charge nothing again.
-			return DrawdownResult{Cost: cost, FromCredit: 0, Remaining: cost - 0}, nil
+			// Idempotent replay: the credit was already debited on the first call.
+			// Recover the credit portion from the existing ledger entry so the
+			// returned split matches the first call. Returning FromCredit:0
+			// (Remaining:cost) here would tell the caller to re-bill the WHOLE cost
+			// via Stripe even though credit already covered part of it: a double-bill.
+			prior, perr := s.priorDrawdownCredit(ctx, rec)
+			if perr != nil {
+				return DrawdownResult{}, perr
+			}
+			return DrawdownResult{Cost: cost, FromCredit: prior, Remaining: cost - prior}, nil
 		}
 		if err != nil {
 			return DrawdownResult{}, fmt.Errorf("append drawdown: %w", err)
 		}
 	}
 	return DrawdownResult{Cost: cost, FromCredit: fromCredit, Remaining: cost - fromCredit}, nil
+}
+
+// priorDrawdownCredit returns the credit amount debited by the already-recorded
+// drawdown for rec (its ledger entry's debit, as a positive Money), so a
+// replayed Drawdown reports the same FromCredit it did the first time. The entry
+// is found by the same (org, sandbox, window) idempotency key the drawdown wrote.
+func (s *Service) priorDrawdownCredit(ctx context.Context, rec usage.UsageRecord) (Money, error) {
+	entries, err := s.ledger.Entries(ctx, rec.OrgID)
+	if err != nil {
+		return 0, fmt.Errorf("read ledger for prior drawdown: %w", err)
+	}
+	key := usageKey(rec)
+	for _, e := range entries {
+		if e.Kind == KindUsageDrawdown && e.Key == key {
+			// The drawdown stored a negative Amount (-fromCredit); return its
+			// magnitude as the credit portion.
+			if e.Amount < 0 {
+				return -e.Amount, nil
+			}
+			return 0, nil
+		}
+	}
+	// No matching entry: the first call debited nothing (fromCredit was 0), so the
+	// duplicate guard cannot have fired on a drawdown entry; treat as zero credit.
+	return 0, nil
 }
 
 // usageKey is the (org, sandbox, window) ledger idempotency key for a drawdown.
