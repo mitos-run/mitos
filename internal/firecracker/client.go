@@ -496,6 +496,24 @@ func (c *Client) LoadSnapshotWithOverrides(memPath, snapshotPath string, resumeV
 	})
 }
 
+// LoadSnapshotUFFD loads a snapshot through the userfaultfd memory backend (issue
+// #167): instead of a mem file path it points Firecracker at uffdSocketPath, a
+// unix socket an external handler is already listening on. Firecracker connects
+// to it during the load, creates the guest userfaultfd, and sends the handler the
+// region mappings and the uffd descriptor. This path is REQUIRED to restore a
+// hugetlbfs-backed snapshot (Firecracker refuses to file-map one) and is how a
+// hot-page set is preloaded before resume. It always loads paused (resume_vm
+// false): the engine preloads, then Resume()s. NetworkOverrides behave exactly as
+// in LoadSnapshotWithOverrides.
+func (c *Client) LoadSnapshotUFFD(snapshotPath, uffdSocketPath string, overrides []NetworkOverride) error {
+	return c.put("/snapshot/load", SnapshotLoad{
+		SnapshotPath:     snapshotPath,
+		ResumeVM:         false,
+		NetworkOverrides: overrides,
+		MemBackend:       &MemBackend{BackendType: "Uffd", BackendPath: uffdSocketPath},
+	})
+}
+
 // --- Process Management ---
 
 func (c *Client) Kill() error {

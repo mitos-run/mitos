@@ -377,6 +377,7 @@ func decodeManifest(data []byte) (Manifest, error) {
 		CreatedUnix           int64         `json:"createdUnix"`
 		Files                 []fileJSON    `json:"files"`
 		HotPages              *hotPagesJSON `json:"hotPages"`
+		HugePages             string        `json:"hugePages"`
 		KernelVersion         string        `json:"kernelVersion"`
 		SnapshotFormatVersion int           `json:"snapshotFormatVersion"`
 		VMMVersion            string        `json:"vmmVersion"`
@@ -395,6 +396,7 @@ func decodeManifest(data []byte) (Manifest, error) {
 		CPUModel:              mj.CPUModel,
 		KernelVersion:         mj.KernelVersion,
 		ConfigHash:            mj.ConfigHash,
+		HugePages:             mj.HugePages,
 	}
 	if mj.HotPages != nil {
 		m.HotPages = &HotPageSet{

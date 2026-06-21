@@ -647,6 +647,11 @@ type Sandbox struct {
 	// enabled and the fork requested it; the zero value (empty TapName) means
 	// no host network was set up and Terminate skips teardown.
 	netID netconf.Identity
+	// uffd is the userfaultfd memory backend serving this fork's guest memory
+	// when it was restored via UFFD (issue #167: hugepage-backed snapshots and
+	// hot-page prefetch). It runs a Serve goroutine for the life of the VM and is
+	// Closed by Terminate. Nil for file-backed restores (the default path).
+	uffd *uffdHandler
 	// hasVolumes records whether this sandbox had per-fork volume backings
 	// prepared, so Terminate cleans them up. False means Terminate skips the
 	// volume cleanup entirely (no backend call for sandboxes without volumes).
@@ -986,6 +991,9 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 		CPUModel:              e.env.CPUModel,
 		KernelVersion:         e.env.KernelVersion,
 		ConfigHash:            snapcompat.ConfigHash(cfg.VcpuCount, cfg.MemSizeMib, e.kernelPath, ""),
+		// Record the guest-memory page backing so the snapshot is self-describing:
+		// any node restoring it knows it must use the UFFD backend (issue #167).
+		HugePages: cfg.HugePages,
 	}
 }
 
@@ -1252,8 +1260,15 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// (the FC process, the per-fork network, and the per-fork volume backings) on
 	// any failure between here and commit. os.RemoveAll(sandboxDir) also removes the
 	// per-fork rootfs clone so it never outlives a failed fork.
+	// uffd is the userfaultfd backend handler when this fork restores via UFFD
+	// (issue #167); declared here so cleanupFork can tear it down on any failure
+	// after it is created.
+	var uffd *uffdHandler
 	cleanupFork := func() {
 		_ = fcClient.Kill()
+		if uffd != nil {
+			_ = uffd.Close()
+		}
 		if fnet != nil {
 			e.teardownForkNetwork(sandboxID, fnet.identity)
 		}
@@ -1273,7 +1288,25 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// this; the network analog of the relative vsock uds_path). nil overrides
 	// restores exactly as before. This mirrors the husk activate path's
 	// load-paused, rebind-rootfs, resume order.
-	if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+	// Decide the memory restore backend (issue #167). A hugetlbfs-backed snapshot
+	// can ONLY be restored through userfaultfd (Firecracker refuses to file-map
+	// one), and a captured hot-page set is preloaded through the same backend, so
+	// use UFFD when this node is configured for hugepages OR the template carries a
+	// non-empty hot-page set. Otherwise keep the file-mapping backend unchanged.
+	hot, snapHugePages := e.templateMemBacking(snapshotID)
+	useUFFD := e.hugePages != "" || snapHugePages != "" || !isEmptyHot(hot) || opts.CaptureHotPages
+	preloadSet := hot
+	if opts.DisablePrefetch {
+		preloadSet = nil
+	}
+	if useUFFD {
+		h, err := e.loadSnapshotUFFD(fcClient, sandboxDir, memFile, vmStateFile, overrides, preloadSet, opts.CaptureHotPages)
+		if err != nil {
+			cleanupFork()
+			return nil, err
+		}
+		uffd = h
+	} else if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		cleanupFork()
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
@@ -1348,6 +1381,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		VsockPath:  vsockPath,
 		rootfsPath: rootfsPath,
 		volumes:    opts.Volumes,
+		uffd:       uffd,
 	}
 	var guestNet *vsock.NotifyForkedNetwork
 	if fnet != nil {
@@ -1561,6 +1595,13 @@ func (e *Engine) Terminate(sandboxID string) error {
 		// recorded pid + jailer artifacts: kill the process, return its uid, and
 		// remove its jailer workspace, mirroring firecracker.Client.Kill.
 		e.reapAdopted(sandbox)
+	}
+
+	// Close the userfaultfd backend (issue #167) AFTER the VM is killed so no
+	// further faults arrive: this ends the Serve goroutine, unmaps the mem file,
+	// and removes the per-fork socket. No-op for file-backed restores (uffd nil).
+	if sandbox.uffd != nil {
+		_ = sandbox.uffd.Close()
 	}
 
 	// Release the per-fork host network (tap + egress ruleset) and the
@@ -2229,6 +2270,19 @@ type ForkOpts struct {
 	// VCPUs is the fork's vCPU count, used to size the pin plan (one physical core
 	// per vCPU). Zero means unknown and defaults to 1 in the pin hook.
 	VCPUs int
+
+	// DisablePrefetch skips preloading the template's captured hot-page set on a
+	// UFFD-backed restore (issue #167), so the guest faults its working set in
+	// lazily. It is the OFF arm of the prefetch benchmark; the restore still uses
+	// the UFFD backend (so faults are counted), just without the upfront preload.
+	// The default (false) preloads when a hot-page set is present.
+	DisablePrefetch bool
+
+	// CaptureHotPages restores through the UFFD backend in CAPTURE mode: the
+	// handler records every fault it services so the working set can be reduced to
+	// a hot-page set and stamped onto the manifest. Used by CaptureTemplateHotPages
+	// off the tenant claim path; the default (false) never records.
+	CaptureHotPages bool
 }
 
 type NetworkOpts struct {

@@ -19,7 +19,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -319,29 +318,70 @@ func printMeteringSummary(report metering.Report, forks int) {
 // fault count per resume and the claim->first-exec span, and hands both arms to
 // AggregatePrefetch; the aggregation and JSON shape are testable today.
 func runPrefetch(engine *fork.Engine, cfg config) error {
-	_ = engine
-	// Drive the real capture seam. On a KVM host the engine constructed above; the
-	// missing piece is the userfaultfd fault-count source, so CaptureHotPages
-	// returns an actionable not-yet-wired error rather than a fabricated trace. We
-	// surface that directly so the mode never invents a fault count or latency.
-	// The off-vs-on aggregation that would consume the counts is the pure,
-	// unit-tested benchstat.AggregatePrefetch.
-	memPath := filepath.Join(cfg.dataDir, "templates", cfg.template, "snapshot", "mem")
-	_, err := fork.CaptureHotPages(fork.PrefetchConfig{
-		MemPath:       memPath,
-		File:          "mem",
-		PageSizeBytes: 2 << 20,
-	})
-	if err != nil {
-		return fmt.Errorf(
-			"prefetch mode (issue #167) cannot measure yet: %w; the off-vs-on aggregation (benchstat.AggregatePrefetch) and the manifest hot-page descriptor are in place, the bare-metal userfaultfd handler is the remaining work (template=%q, iterations=%d)",
-			err, cfg.template, cfg.iterations,
-		)
+	// Capture the template's hot-page working set once (off the measured path),
+	// stamping it onto the snapshot manifest, then run two arms over the real
+	// UFFD-backed restore: OFF disables preload (lazy faults), ON preloads the
+	// captured set before resume. Each arm records the per-resume page-fault count
+	// the userfaultfd handler serviced and the claim->first-exec latency; the pure,
+	// unit-tested benchstat.AggregatePrefetch turns the two arms into the headline
+	// fault reduction. No number is fabricated: the fault counts come from the real
+	// handler, and off any non-KVM host the engine failed to construct in run().
+	if _, err := engine.CaptureTemplateHotPages(cfg.template, 0); err != nil {
+		return fmt.Errorf("prefetch mode (#167): capture hot-page set for %q: %w", cfg.template, err)
 	}
-	// Unreachable until the handler is wired; kept so the aggregation type is
-	// referenced from the driver it belongs to.
-	_ = benchstat.PrefetchComparison{}
+
+	off, err := prefetchArm(engine, cfg, true)
+	if err != nil {
+		return fmt.Errorf("prefetch OFF arm: %w", err)
+	}
+	on, err := prefetchArm(engine, cfg, false)
+	if err != nil {
+		return fmt.Errorf("prefetch ON arm: %w", err)
+	}
+
+	cmp := benchstat.AggregatePrefetch(off, on)
+	if cfg.summary {
+		fmt.Print(cmp.Table())
+	}
+	if cfg.jsonPath != "" {
+		f, err := os.Create(cfg.jsonPath)
+		if err != nil {
+			return fmt.Errorf("create json output: %w", err)
+		}
+		defer f.Close()
+		if err := benchstat.WritePrefetchJSON(f, cmp); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// prefetchArm forks the template cfg.iterations times (after cfg.warmup discarded
+// warmups), execs a trivial command to mark first-exec, and records the per-resume
+// page-fault count and claim->first-exec latency. disablePrefetch selects the OFF
+// arm (lazy faults) vs the ON arm (hot-page set preloaded before resume).
+func prefetchArm(engine *fork.Engine, cfg config, disablePrefetch bool) (benchstat.PrefetchArm, error) {
+	arm := benchstat.PrefetchArm{}
+	tag := "on"
+	if disablePrefetch {
+		tag = "off"
+	}
+	for i := 0; i < cfg.warmup; i++ {
+		id := fmt.Sprintf("pf-%s-warm-%d", tag, i)
+		if _, _, err := onePrefetchForkExec(engine, cfg.template, id, disablePrefetch); err != nil {
+			return arm, fmt.Errorf("warmup %d: %w", i, err)
+		}
+	}
+	for i := 0; i < cfg.iterations; i++ {
+		id := fmt.Sprintf("pf-%s-%d", tag, i)
+		faults, elapsed, err := onePrefetchForkExec(engine, cfg.template, id, disablePrefetch)
+		if err != nil {
+			return arm, fmt.Errorf("iteration %d: %w", i, err)
+		}
+		arm.FaultCounts = append(arm.FaultCounts, faults)
+		arm.ClaimToExec = append(arm.ClaimToExec, elapsed)
+	}
+	return arm, nil
 }
 
 // runPinning measures the dynamic CPU pinning + launch RT priority win (issue
@@ -549,6 +589,37 @@ func oneForkExec(engine *fork.Engine, template, sandboxID string) (time.Duration
 	client.Close()
 	cleanup() // teardown is NOT part of elapsed
 	return elapsed, nil
+}
+
+// onePrefetchForkExec forks one sandbox (UFFD-backed; disablePrefetch selects the
+// lazy OFF arm vs the preloaded ON arm), execs a trivial command to mark
+// first-exec, and returns the userfaultfd lazy-fault count for the resume and the
+// claim->first-exec latency. The sandbox is always torn down before returning so
+// no iteration leaks a VM. The fault count is read AFTER the exec (faults accrue
+// as the guest runs) and BEFORE teardown.
+func onePrefetchForkExec(engine *fork.Engine, template, sandboxID string, disablePrefetch bool) (int, time.Duration, error) {
+	t0 := time.Now()
+	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{DisablePrefetch: disablePrefetch})
+	if err != nil {
+		return 0, 0, fmt.Errorf("fork: %w", err)
+	}
+	cleanup := func() { _ = engine.Terminate(sandboxID) }
+
+	client, err := connectWithRetry(res.VsockPath)
+	if err != nil {
+		cleanup()
+		return 0, 0, fmt.Errorf("connect: %w", err)
+	}
+	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
+		client.Close()
+		cleanup()
+		return 0, 0, fmt.Errorf("exec: %w", err)
+	}
+	elapsed := time.Since(t0)
+	faults := int(engine.FaultsServed(sandboxID))
+	client.Close()
+	cleanup()
+	return faults, elapsed, nil
 }
 
 // benchExecRT forks one sandbox, warms it, then measures M trivial exec
