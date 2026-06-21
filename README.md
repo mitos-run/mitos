@@ -169,6 +169,18 @@ sb.exec_background("python train.py > /workspace/train.log 2>&1")
 
 Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require the raw-forkd path or a husk template snapshot rebuilt with the current guest agent: the agent baked into today's husk template snapshot predates the vsock streaming/PTY frame protocol, so on the husk default the stream and the PTY WebSocket close early. Blocking exec (`/v1/exec`) is unaffected and works on the husk default. The husk template guest-agent rebuild is a tracked follow-up ([#24](https://github.com/mitos-run/mitos/issues/24)).
 
+### Integrations
+
+Drop a mitos sandbox into the agent framework you already use; each adapter is a thin shim over the same native SDK ops (`exec`, `run_code`, `files`), with no hard dependency on the framework package.
+
+| Framework | Import | Docs |
+|---|---|---|
+| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | [#203](https://github.com/mitos-run/mitos/issues/203) |
+| OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | [#204](https://github.com/mitos-run/mitos/issues/204) |
+| E2B (self-hosting migration) | `from mitos.e2b import Sandbox` | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
+
+The E2B shim is a "change one import" migration bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface (`commands.run`, `files.*`, `run_code`, `set_timeout`, `kill`, `create` / `connect` / `list`) over the standalone sandbox-server. One method, `get_host`, depends on preview URLs ([#126](https://github.com/mitos-run/mitos/issues/126)) and is not built yet, so it raises a typed error instead of fabricating a URL. See the full support table in [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md).
+
 ### On a cluster
 
 ```bash
@@ -410,6 +422,7 @@ Per-topic docs in [`docs/`](docs/):
 | Threat model | [docs/threat-model.md](docs/threat-model.md) |
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
+| Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |
 | Benchmark methodology | [BENCHMARKS.md](BENCHMARKS.md) |
