@@ -220,6 +220,60 @@ The ordered steps (copy / run / env / workdir) map onto the CRD
 steps are reused. See docs/templates.md for the CLI (`mitos template build` /
 `push`) and the cache semantics.
 
+## Integrations
+
+Framework adapters live under `mitos.integrations`. Each maps a framework's
+sandbox-backend interface onto the native SDK ops (exec, files, run_code, fork),
+so you change the backend and keep your agent code. The framework is an OPTIONAL
+dependency: the adapter modules import mitos always and the framework lazily, so
+the base SDK installs and tests without it.
+
+### LangChain / deepagents quickstart
+
+LangChain and deepagents let you pick a pluggable sandbox backend (they ship
+`E2BSandbox` and `DaytonaSandbox`). `MitosSandbox` is the mitos backend: change
+the backend, keep your agent code.
+
+```python
+from mitos.integrations.langchain import MitosSandbox
+
+# Standalone sandbox-server / hosted control plane, no Kubernetes:
+sb = MitosSandbox.create("python", base_url="http://localhost:8080")
+
+# Shell command -> normalized result dict (stdout, stderr, exit_code).
+out = sb.execute("echo hi")          # alias: sb.run("echo hi")
+
+# Filesystem ops.
+sb.write_file("/workspace/a.txt", "hello")
+print(sb.read_file("/workspace/a.txt"))
+print(sb.list_files("/workspace"))
+
+# Code execution with rich MIME results (image/png, text/html, ...).
+ex = sb.run_code("import math; math.sqrt(144)")
+print(ex.text, ex.results)
+
+sb.close()                           # alias: sb.stop(); lifecycle close
+```
+
+Install the optional extra only if you use the integration:
+`pip install "mitos[langchain]"`. `MitosSandbox` does not subclass any langchain
+type and is fully usable without langchain installed.
+
+Fork is a mitos superpower the LangChain sandbox-backend interface does not
+expose, so it is NOT forced onto that interface. Reach branching / parallel runs
+through the adapter's native `fork`, which returns sibling `MitosSandbox`
+backends:
+
+```python
+children = sb.fork(2)                # two independent forked sandboxes
+for c in children:
+    print(c.execute("echo from-fork")["stdout"])
+    c.close()
+```
+
+The wire-op mapping is factored into `mitos.integrations._mapping` so the other
+adapters (OpenAI / Claude, the E2B-compat shim) reuse one translation layer.
+
 ## What is proven where
 
 The cluster examples (lazy default-pool creation, fork, from_name reconnect,
