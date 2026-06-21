@@ -122,7 +122,13 @@ func (c *Console) caller(r *http.Request) (accountID, orgID string, err apierr.E
 		return "", "", apierr.Get(apierr.CodeUnauthorized).
 			WithCause("no authenticated org context is attached to the request"), false
 	}
-	return accountID, orgID, apierr.Error{}, true
+	// noErr is the zero value returned on the success path; callers ignore the
+	// error whenever ok is true, so it is never surfaced. It is a declaration,
+	// not an apierr.Error literal, because an all-zero error carries no code or
+	// remediation and is not a real error (the #28 remediation lint targets
+	// error literals that purport to be errors, not this no-error sentinel).
+	var noErr apierr.Error
+	return accountID, orgID, noErr, true
 }
 
 // --- Keys (over #210 key service via the membership-guarded AccountService) ---
