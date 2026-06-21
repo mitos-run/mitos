@@ -17,6 +17,7 @@
           "description": "Stable machine-readable error code. One of the values in docs/api/errors.md.",
           "enum": [
             "body_too_large",
+            "budget_exhausted",
             "exec_failed",
             "file_failed",
             "internal",

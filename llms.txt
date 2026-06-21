@@ -46,6 +46,11 @@ Every error is:
 - `too_many_streams` (HTTP 429): the sandbox is at its concurrent-stream limit.
   Close an existing exec/run_code/PTY stream for this sandbox before opening
   another. Existing streams are unaffected.
+- `budget_exhausted` (HTTP 403): a budget-gated self-service operation (fork,
+  checkpoint, extend-lifetime) was refused because the creator-set capability
+  budget for that dimension is spent. The sandbox cannot widen its own budget;
+  request a larger budget from the orchestrator or operator that created the
+  sandbox, or proceed within the remaining budget reported by the Budget call.
 - `exec_failed` (HTTP 500): the command could not be executed. Inspect `cause`;
   retry a transport error, otherwise check forkd logs for the guest agent state.
 - `file_failed` (HTTP 500): a file operation failed. Confirm the path exists and

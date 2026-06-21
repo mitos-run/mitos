@@ -41,6 +41,10 @@ const (
 	CodeNotFound Code = "not_found"
 	// CodeTooManyStreams: the sandbox is at its concurrent-stream limit.
 	CodeTooManyStreams Code = "too_many_streams"
+	// CodeBudgetExhausted: a budget-gated self-service operation (Fork,
+	// Checkpoint, ExtendLifetime) was refused because the sandbox's capability
+	// budget for that dimension is spent (issue #25, docs/api/v2-spec.md §3).
+	CodeBudgetExhausted Code = "budget_exhausted"
 	// CodeExecFailed: the command could not be executed in the sandbox.
 	CodeExecFailed Code = "exec_failed"
 	// CodeFileFailed: a file operation failed in the sandbox.
@@ -124,6 +128,16 @@ var Catalogue = map[string]Error{
 		Message:     "the sandbox is at its concurrent-stream limit",
 		Remediation: "Close an existing streaming exec, run_code, or PTY session for this sandbox before opening another, or raise the forkd --max-streams-per-sandbox ceiling. Existing streams are unaffected.",
 		Status:      http.StatusTooManyRequests,
+	},
+	string(CodeBudgetExhausted): {
+		Code:    string(CodeBudgetExhausted),
+		Message: "the sandbox capability budget for this operation is exhausted",
+		// Remediation names the orchestrator escalation path: budgets are
+		// creator-set, so the in-sandbox agent cannot widen its own; it must ask
+		// the orchestrator (or operator) that created the sandbox to raise the
+		// budget on the parent Sandbox object, or run within the remaining budget.
+		Remediation: "This is a creator-set capability budget; the sandbox cannot widen its own. Request a larger budget from the orchestrator or operator that created this sandbox (raise spec.budget on the parent Sandbox), or proceed within the remaining budget reported by the Budget call. The context names the exhausted dimension and the remaining allowance.",
+		Status:      http.StatusForbidden,
 	},
 	string(CodeExecFailed): {
 		Code:        string(CodeExecFailed),

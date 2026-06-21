@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,34 @@ func TestEncodeWritesEnvelopeWithCodeAndRemediation(t *testing.T) {
 	}
 	if got.Error.Message != "sandbox not found" {
 		t.Fatalf("message = %q", got.Error.Message)
+	}
+}
+
+func TestBudgetExhaustedCarriesCodeAndOrchestratorRemediation(t *testing.T) {
+	e := Get(CodeBudgetExhausted)
+	if e.Code != string(CodeBudgetExhausted) {
+		t.Fatalf("code = %q, want budget_exhausted", e.Code)
+	}
+	if e.Status != 403 {
+		t.Fatalf("status = %d, want 403 (creator-scope refusal, not retryable by the sandbox)", e.Status)
+	}
+	if e.Remediation == "" {
+		t.Fatal("budget_exhausted must carry a remediation")
+	}
+	// The remediation must name the orchestrator escalation path: the in-sandbox
+	// agent cannot widen its own creator-set budget (issue #25 §3).
+	if !strings.Contains(e.Remediation, "orchestrator") {
+		t.Errorf("remediation must name the orchestrator escalation path, got %q", e.Remediation)
+	}
+	// A budget_exhausted error carries the exhausted dimension and remaining
+	// allowance as structured context; assert the WithContext copy preserves the
+	// catalogue code and remediation.
+	withCtx := e.WithContext(map[string]any{"sandbox": "sb-7", "dimension": "maxForks", "remaining": 0})
+	if withCtx.Code != e.Code || withCtx.Remediation != e.Remediation {
+		t.Fatal("WithContext must preserve code and remediation")
+	}
+	if withCtx.Context["dimension"] != "maxForks" {
+		t.Fatalf("context dimension = %v, want maxForks", withCtx.Context["dimension"])
 	}
 }
 

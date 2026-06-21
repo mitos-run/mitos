@@ -52,6 +52,7 @@ gRPC status the controller<->forkd path maps to (the gRPC mapping column). The
 | Code | Cause (one sentence) | Remediation | HTTP | gRPC | Context fields |
 | --- | --- | --- | --- | --- | --- |
 | `body_too_large` | The request body exceeds the server size limit. | Reduce the payload; file content is hex-encoded and bounded by the server. | 413 | `ResourceExhausted` | (none) |
+| `budget_exhausted` | A budget-gated self-service operation (fork, checkpoint, extend-lifetime) was refused because the sandbox capability budget for that dimension is spent. | This is a creator-set capability budget; the sandbox cannot widen its own. Request a larger budget from the orchestrator or operator that created this sandbox (raise spec.budget on the parent Sandbox), or proceed within the remaining budget reported by the Budget call. The context names the exhausted dimension and the remaining allowance. | 403 | `PermissionDenied` | `sandbox`, `dimension`, `remaining` |
 | `exec_failed` | The command could not be executed in the sandbox. | Inspect the cause; if it is a transport error retry, otherwise check the forkd logs for the guest agent state. | 500 | `Internal` | `sandbox` |
 | `file_failed` | A file operation failed in the sandbox. | Confirm the path exists and is writable; inspect the cause for the underlying error. | 500 | `Internal` | `sandbox`, `path` |
 | `internal` | An unclassified internal error occurred. | Retry the request; if it persists, inspect the forkd or sandbox-server logs. | 500 | `Internal` | (none) |
