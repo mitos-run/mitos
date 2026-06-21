@@ -1974,6 +1974,13 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 }
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
+	// Fail fast with an actionable error if the guest kernel the build boots from
+	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
+	// still be coming up, and an opaque Firecracker boot failure would hide that.
+	if err := ensureGuestKernelStaged(e.kernelPath); err != nil {
+		return fmt.Errorf("create template %s: %w", id, err)
+	}
+
 	cfg := firecracker.DefaultVMConfig()
 	// Bake the configured guest-memory page granularity into this template's
 	// snapshot (issue #167). "" leaves the Firecracker default (4 KiB); "2M"
