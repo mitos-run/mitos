@@ -376,8 +376,25 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		return VerifyResult{}, ErrTokenExpired
 	}
 
-	// Provision: account + Personal org (#210).
+	// Provision: account + Personal org (#210). A prior verify attempt may have
+	// provisioned the account but crashed before MarkVerified (the credit grant or
+	// key issue below errored), leaving the email taken while this pending signup
+	// is still unverified. In that case SignUp returns ErrConflict; load the
+	// existing account+org and finish onboarding idempotently rather than stranding
+	// the user (the documented re-verify idempotency must hold even after a partial
+	// prior attempt, not only after a fully successful one).
 	acct, org, err := s.accounts.SignUp(ctx, pending.Email)
+	if errors.Is(err, saas.ErrConflict) {
+		existing, gerr := s.store.GetAccountByEmail(ctx, pending.Email)
+		if gerr != nil {
+			return VerifyResult{}, fmt.Errorf("onboarding verify: load account after conflict: %w", gerr)
+		}
+		porg, oerr := s.store.GetOrg(ctx, existing.PersonalOrgID)
+		if oerr != nil {
+			return VerifyResult{}, fmt.Errorf("onboarding verify: load org after conflict: %w", oerr)
+		}
+		acct, org, err = existing, porg, nil
+	}
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("onboarding verify: provision account: %w", err)
 	}
