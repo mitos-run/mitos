@@ -14,10 +14,20 @@
 #   6. kill -9 storm    SIGKILL the controller + forkd (--grace-period=0 --force,
 #                        no graceful shutdown) WHILE a 3-claim burst activates ->
 #                        every claim still converges, the pre-existing claim is
-#                        undisturbed, and the components recover. The headline G2
+#                        undisturbed, the components recover, ZERO claims are
+#                        permanently stuck in a non-terminal phase, and ZERO
+#                        orphan VMs survive once the storm claims are deleted
+#                        (finalizer reap + GC orphan sweep). The headline G2
 #                        crash-injection proof, distinct from the graceful
 #                        pod-loss of stage 3. Self-skips without delete on mitos
 #                        pods.
+#
+# KVM/cluster-gated remainder (NOT runnable on darwin/GitHub-hosted CI): the
+# guest-agent in-VM SIGKILL and the real-forkd-with-VMs crash. The
+# controller-restart-under-storm INVARIANT (no in-memory desired state; a fresh
+# GC reconciles a storm purely from CRDs with zero orphans and zero stuck claims)
+# is additionally proven without KVM in the envtest
+# TestGCChaosStormNoOrphansNoStuckClaims (internal/controller).
 #
 # Runner permissions: stages 1-4 use only pod ops in the e2e namespace; stage 5
 # needs node cordon; stage 6 needs delete on mitos pods. The CI runner is granted
@@ -200,7 +210,38 @@ EOF
     fail "controller did not recover after SIGKILL within ${READY_TIMEOUT}s"; diagnostics
   fi
 
+  # Zero permanently-stuck claims: no storm claim is wedged in a non-terminal,
+  # non-Ready phase. They all reached Ready above; this re-checks after recovery
+  # that none regressed into a stuck Pending/Restoring.
+  stuck=0
+  for i in 1 2 3; do
+    ph="$(k get sandboxclaim "${storm}-${i}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+    case "$ph" in
+      Ready|Terminated|Failed) ;;
+      *) stuck=$((stuck + 1)); info "storm claim ${storm}-${i} is in non-terminal phase '${ph}'" ;;
+    esac
+  done
+  if [ "$stuck" -eq 0 ]; then
+    pass "zero permanently-stuck storm claims after component recovery"
+  else
+    fail "${stuck} storm claim(s) wedged in a non-terminal phase after recovery"; diagnostics
+  fi
+
+  # Zero orphan VMs after the storm subsides. Delete every storm claim; the
+  # finalizer reap terminates its backing VM, and the recovered controller's GC
+  # orphan sweep reaps any VM the kill -9 interrupted mid-terminate. Then assert
+  # the husk pods that backed the storm claims are gone: no VM is stranded with no
+  # backing object. The pre-existing claim's pod is excluded by name.
+  preexisting_pod="$(claim_pod)"
   for i in 1 2 3; do k delete sandboxclaim "${storm}-${i}" --ignore-not-found --wait=false >/dev/null 2>&1 || true; done
+  if wait_until "$READY_TIMEOUT" sh -c "
+    leftover=\$(kubectl -n ${NAMESPACE} get pods -l 'mitos.run/pool=${POOL},mitos.run/husk=true,mitos.run/claim' -o jsonpath='{range .items[*]}{.metadata.name}{\"\n\"}{end}' 2>/dev/null | grep -v '^${preexisting_pod}\$' | grep -c . || true)
+    [ \"\${leftover:-0}\" -eq 0 ]
+  "; then
+    pass "zero orphan VMs after the storm subsided (every storm-backing pod reaped)"
+  else
+    fail "a storm-backing VM lingered after the storm claims were deleted within ${READY_TIMEOUT}s"; diagnostics
+  fi
 fi
 
 echo "=== chaos summary: ${PASS_COUNT} passed, ${FAIL_COUNT} failed ==="
