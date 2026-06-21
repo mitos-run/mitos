@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mitos.run/mitos/internal/benchstat"
@@ -400,23 +401,93 @@ func prefetchArm(engine *fork.Engine, cfg config, disablePrefetch bool) (benchst
 // scheduler state (darwin) or when the claim-storm harness is not yet wired
 // (the bare-metal follow-up, #16). No number is fabricated.
 func runPinning(engine *fork.Engine, cfg config) error {
-	_ = engine
 	if !cpupin.NewApplier().Supported() {
 		return fmt.Errorf(
-			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM + bare metal (template=%q, iterations=%d)",
+			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM (template=%q, iterations=%d)",
 			cfg.template, cfg.iterations,
 		)
 	}
-	// On a supporting (Linux/KVM) host the remaining piece is the claim-storm
-	// driver that forks under contention with pinning off then on, records each
-	// activation's ActivateOutcome, and hands both arms to AggregatePinning. That
-	// driver is the bare-metal follow-up (#16, tied to the chaos suite #163), so
-	// we surface a clear not-yet-wired signal rather than inventing outcomes.
-	_ = benchstat.PinningComparison{}
-	return fmt.Errorf(
-		"pinning mode (issue #168): the claim-storm activate-success driver is the bare-metal follow-up (#16, chaos suite #163); the pin-plan logic (internal/cpupin), the Linux-gated applier, and the on-vs-off aggregation (benchstat.AggregatePinning) are in place and unit-tested (template=%q, iterations=%d)",
-		cfg.template, cfg.iterations,
-	)
+	// Real claim storm: each round forks cfg.forks sandboxes CONCURRENTLY (the
+	// contention that makes pinning matter), execs each to first-exec, and records
+	// the per-activation outcome (success + latency). The OFF arm leaves forks
+	// unpinned; the ON arm pins each fork's vCPU threads after guest-ready
+	// (sibling-paired). benchstat.AggregatePinning turns the two arms into the
+	// success-rate lift and the activate-latency distributions. Outcomes come from
+	// the real engine under real contention; nothing is fabricated.
+	off, err := pinningStormArm(engine, cfg, nil)
+	if err != nil {
+		return fmt.Errorf("pinning OFF arm: %w", err)
+	}
+	on, err := pinningStormArm(engine, cfg, &cpupin.Config{Enabled: true, SiblingPairing: true})
+	if err != nil {
+		return fmt.Errorf("pinning ON arm: %w", err)
+	}
+	cmp := benchstat.AggregatePinning(off, on)
+	if cfg.summary {
+		fmt.Print(cmp.Table())
+	}
+	if cfg.jsonPath != "" {
+		f, err := os.Create(cfg.jsonPath)
+		if err != nil {
+			return fmt.Errorf("create json output: %w", err)
+		}
+		defer f.Close()
+		if err := benchstat.WritePinningJSON(f, cmp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pinningStormArm runs cfg.iterations storm rounds; each round forks cfg.forks
+// sandboxes CONCURRENTLY (a claim storm), execs each to first-exec, and records
+// one ActivateOutcome per fork. pin nil leaves the round unpinned (OFF arm); a
+// non-nil pin enables post-ready CPU pinning (ON arm). All forks in a round are
+// torn down before the next round so contention is per-round, not cumulative.
+func pinningStormArm(engine *fork.Engine, cfg config, pin *cpupin.Config) (benchstat.PinningArm, error) {
+	arm := benchstat.PinningArm{}
+	for round := 0; round < cfg.iterations; round++ {
+		outcomes := make([]benchstat.ActivateOutcome, cfg.forks)
+		var wg sync.WaitGroup
+		for i := 0; i < cfg.forks; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				id := fmt.Sprintf("storm-r%d-%d", round, idx)
+				outcomes[idx] = oneStormActivate(engine, cfg.template, id, pin)
+			}(i)
+		}
+		wg.Wait()
+		arm.Outcomes = append(arm.Outcomes, outcomes...)
+	}
+	return arm, nil
+}
+
+// oneStormActivate forks one sandbox (optionally pinned), execs a trivial command
+// to mark first-exec, and returns the activation outcome (success + fork->exec
+// latency). Any fork/connect/exec failure is recorded as a failed activation, so
+// the storm's success RATE is meaningful under contention. The sandbox is always
+// torn down.
+func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpupin.Config) benchstat.ActivateOutcome {
+	t0 := time.Now()
+	opts := fork.ForkOpts{VCPUs: 1}
+	if pin != nil {
+		opts.CPUPinning = pin
+	}
+	res, err := engine.Fork(template, sandboxID, opts)
+	if err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	defer func() { _ = engine.Terminate(sandboxID) }()
+	client, err := connectWithRetry(res.VsockPath)
+	if err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	defer client.Close()
+	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	return benchstat.ActivateOutcome{OK: true, Latency: time.Since(t0)}
 }
 
 // runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork
