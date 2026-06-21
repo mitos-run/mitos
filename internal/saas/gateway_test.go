@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"mitos.run/mitos/internal/apierr"
 )
 
 // fakeControlPlane records every ForwardRequest it receives so a test can assert
@@ -174,6 +176,45 @@ func TestGatewayQuotaDeniedNeverForwards(t *testing.T) {
 	}
 	if len(f.cp.got) != 0 {
 		t.Error("control plane reached despite quota denial")
+	}
+}
+
+// rateLimitedQuota denies with an enforcer error that carries a precise public
+// envelope (rate_limited), exercising the gateway's APIError seam: when an
+// enforcer supplies its own envelope, the gateway honors it instead of the
+// generic quota_exceeded fallback.
+type rateLimitedQuota struct{}
+
+func (rateLimitedQuota) Check(_ context.Context, _, _ string) error {
+	return preciseDenial{code: "rate_limited", status: http.StatusTooManyRequests}
+}
+
+// preciseDenial is a quota error that carries its own public apierr envelope via
+// the APIError method the gateway probes for.
+type preciseDenial struct {
+	code   string
+	status int
+}
+
+func (preciseDenial) Error() string { return "rate limited" }
+func (d preciseDenial) APIError() apierr.Error {
+	return apierr.Lookup(d.code)
+}
+
+// TestGatewayHonorsEnforcerEnvelope asserts the gateway emits the enforcer's own
+// envelope (rate_limited here) when the enforcer supplies one, rather than
+// collapsing every quota denial to quota_exceeded.
+func TestGatewayHonorsEnforcerEnvelope(t *testing.T) {
+	f := newGatewayFixture(t, rateLimitedQuota{})
+	rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", f.rawA, "{}")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if code := decodeErr(t, rec); code != "rate_limited" {
+		t.Errorf("error code = %q, want rate_limited", code)
+	}
+	if len(f.cp.got) != 0 {
+		t.Error("control plane reached despite rate-limit denial")
 	}
 }
 

@@ -98,12 +98,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	orgID := res.Key.OrgID
 
 	// Quota is enforced AFTER authn and org-resolution, BEFORE forwarding, so a
-	// denied request never touches the control plane.
+	// denied request never touches the control plane. The real enforcer (issue
+	// #213) distinguishes a quota cap (quota_exceeded) from a rate-limit denial
+	// (rate_limited) and a suspension (forbidden): when the enforcer error supplies
+	// its own envelope via the APIError seam, the gateway honors it; otherwise it
+	// falls back to the generic quota_exceeded envelope.
 	if qErr := g.quota.Check(r.Context(), orgID, op); qErr != nil {
 		g.log.Info("gateway quota denied", "key_id", res.Key.ID, "org", orgID, "op", op)
-		g.fail(w, apierr.Get(apierr.CodeQuotaExceeded).
-			WithCause("organization quota check denied the request").
-			WithContext(map[string]any{"op": op}))
+		g.fail(w, quotaEnvelope(qErr, op))
 		return
 	}
 
@@ -153,6 +155,34 @@ func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
 		g.fail(w, apierr.Get(apierr.CodeUnauthorized).
 			WithCause("the api key is missing, invalid, expired, or revoked"))
 	}
+}
+
+// apiErrorProvider is the seam a quota enforcer error implements to carry its own
+// public envelope. The real enforcer (internal/saas/quota, issue #213) returns a
+// denial that names the precise code (quota_exceeded, rate_limited, or
+// forbidden); the gateway honors that code instead of collapsing every denial to
+// quota_exceeded. An error that does not implement this falls back to the generic
+// quota_exceeded envelope, which is correct for the cap case.
+type apiErrorProvider interface {
+	APIError() apierr.Error
+}
+
+// quotaEnvelope maps a quota-enforcer denial to its public envelope. If the error
+// carries its own envelope (via apiErrorProvider, possibly wrapped), that
+// envelope is used; otherwise the generic quota_exceeded envelope is returned.
+// The envelope never includes a secret value.
+func quotaEnvelope(qErr error, op string) apierr.Error {
+	var p apiErrorProvider
+	if errors.As(qErr, &p) {
+		e := p.APIError()
+		if e.Context == nil {
+			e = e.WithContext(map[string]any{"op": op})
+		}
+		return e
+	}
+	return apierr.Get(apierr.CodeQuotaExceeded).
+		WithCause("organization quota check denied the request").
+		WithContext(map[string]any{"op": op})
 }
 
 // fail writes the error envelope. It never includes any secret value.
