@@ -980,26 +980,6 @@ func validateKVM() error {
 	return nil
 }
 
-// validateKernelStaged confirms the guest kernel image is staged where forkd
-// boots every microVM from. The error is deliberately LLM-legible (issue #28 /
-// #174 deploy-layer rule): it names the exact path and points at the likely
-// cause, an unhealthy kernel-provisioner, so an operator or an agent reading the
-// startup log knows the precise fix instead of seeing an opaque boot failure on
-// the first fork.
-func validateKernelStaged(kernelPath string) error {
-	info, err := os.Stat(kernelPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("guest kernel missing at %s; is the kernel-provisioner (the kernel-stage DaemonSet) healthy? forkd boots every microVM from this image. Check that the kernel-stage pod on this node is Running and that --data-dir is a writable real filesystem; run `mitos doctor` for a full preflight", kernelPath)
-		}
-		return fmt.Errorf("cannot stat guest kernel at %s: %w; ensure --data-dir is a writable real filesystem and the kernel-provisioner staged the image there; run `mitos doctor` for a full preflight", kernelPath, err)
-	}
-	if info.IsDir() || info.Size() == 0 {
-		return fmt.Errorf("guest kernel at %s is empty or a directory, not a kernel image; the kernel-provisioner did not stage it correctly. Re-run the kernel-stage step and confirm it wrote a non-empty vmlinux; run `mitos doctor` for a full preflight", kernelPath)
-	}
-	return nil
-}
-
 // admitFork enforces the per-node host-DoS ceiling and atomically reserves a
 // slot for the admitted fork. Under a single e.mu.Lock() it tests
 // len(sandboxes)+reserved against maxSandboxes and, on success, increments
@@ -1926,13 +1906,6 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 }
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
-	// A template boots a microVM from the staged guest kernel. Check it here, at
-	// the point of use, with an LLM-legible, actionable message (issue #174). This
-	// is deliberately not a startup check: forkd must come up while the
-	// kernel-provisioner DaemonSet is still staging the image.
-	if err := validateKernelStaged(e.kernelPath); err != nil {
-		return err
-	}
 	cfg := firecracker.DefaultVMConfig()
 
 	// Compute the content-addressed build plan (issue #220). Each init command is
