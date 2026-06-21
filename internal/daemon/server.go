@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/guestsock"
 	"mitos.run/mitos/internal/volume"
 	"mitos.run/mitos/internal/vsock"
 	forkdpb "mitos.run/mitos/proto/forkd"
@@ -287,9 +288,15 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 		return err
 	}
 
-	if len(env) == 0 && len(secrets) == 0 {
-		return nil
-	}
+	// Advertise the in-guest self-service socket (issue #22, API v2 section 2.2)
+	// and the sandbox's own identity to the guest. The agent serves the socket
+	// at MITOS_SOCKET; the in-VM workload (and the mitos.guest SDK) connects to
+	// it to read its own identity and budget. These are NAMES and a path, never
+	// a secret value, so they ride the (best-effort) env channel alongside any
+	// caller env. We always deliver them, even when the caller passed no env, so
+	// every sandbox advertises its socket.
+	env = withSelfServiceEnv(env, sandboxID)
+
 	if err := s.sandboxAPI.Configure(sandboxID, env, secrets); err != nil {
 		if len(secrets) > 0 {
 			return fmt.Errorf("configure guest: %w", err)
@@ -297,6 +304,26 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 		log.Printf("forkd: sandbox %s: env delivery failed (best-effort): %v", sandboxID, err)
 	}
 	return nil
+}
+
+// withSelfServiceEnv returns env with the in-guest self-service variables added
+// (issue #22, API v2 section 2.2): MITOS_SOCKET advertises the unix socket the
+// agent serves, and MITOS_SANDBOX_ID is the sandbox's own identity. These are a
+// path and a NAME, never a secret value. A nil input map is allocated; a
+// caller-supplied MITOS_SOCKET is never overridden (an operator may relocate the
+// socket). The input map is not mutated; a copy is returned.
+func withSelfServiceEnv(env map[string]string, sandboxID string) map[string]string {
+	out := make(map[string]string, len(env)+2)
+	for k, v := range env {
+		out[k] = v
+	}
+	if _, ok := out[guestsock.SocketEnvVar]; !ok {
+		out[guestsock.SocketEnvVar] = guestsock.DefaultSocketPath
+	}
+	if _, ok := out["MITOS_SANDBOX_ID"]; !ok {
+		out["MITOS_SANDBOX_ID"] = sandboxID
+	}
+	return out
 }
 
 // notifyForked sends the fork notification (fresh generation + 32 bytes of
