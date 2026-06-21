@@ -5,11 +5,76 @@ snapshot-fork sandboxes for AI agents on Kubernetes.
 
 Two modes:
 
+- `mitos.create` (flat one-liner): API key plus base URL, returns a Ready
+  sandbox handle against the hosted control plane or a standalone
+  `sandbox-server`. No Kubernetes required. The canonical entry point.
 - `mitos.AgentRun` / `Sandbox`: drives the Kubernetes CRDs
   (`SandboxClaim`, `SandboxFork`, `SandboxPool`, `SandboxTemplate`) and execs
-  through the forkd sandbox API.
-- `mitos.direct.SandboxServer`: talks to a standalone `sandbox-server`
-  (no Kubernetes required).
+  through the forkd sandbox API. For operators who run the mitos cluster.
+
+## The flat one-liner
+
+```python
+import mitos
+
+# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+sb = mitos.create("python")
+print(sb.exec("echo hello").stdout)              # hello
+sb.terminate()
+```
+
+`mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
+else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`) and returns a
+`DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`, and
+`terminate`. `Sandbox.create(...)` is an alias for the same call.
+
+```python
+import mitos
+
+sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+
+sb.files.write("/workspace/plan.txt", "draft")
+print(sb.files.read("/workspace/plan.txt"))      # draft
+
+ex = sb.run_code("import math; math.sqrt(144)")
+print(ex.text)                                   # 12.0
+
+fork_a, fork_b = sb.fork(2)                       # independent sibling sandboxes
+fork_a.exec("echo a > /workspace/a.txt")
+fork_b.exec("echo b > /workspace/b.txt")
+
+sb.terminate()
+```
+
+Auth: the API key rides on `Authorization: Bearer <key>` on every request. The
+standalone `sandbox-server` runs tokenless and ignores it; the hosted control
+plane verifies the same header server-side ([#210], not yet built) without an SDK
+change. The key value is never logged and never placed in an error message. A
+missing base URL raises a typed `AgentRunError(code="missing_base_url")` whose
+remediation names the argument and the env var but no key value.
+
+[#210]: https://github.com/mitos-run/mitos/issues/210
+
+### Async flat path
+
+```python
+import asyncio
+import mitos.aio
+
+async def main():
+    sb = await mitos.aio.create("python")        # AsyncDirectSandbox
+    print((await sb.exec("echo hi")).stdout)
+    await sb.files.write("/workspace/a.txt", "x")
+    print(await sb.files.read("/workspace/a.txt"))
+    ex = await sb.run_code("1 + 1")
+    print(ex.text)
+    children = await sb.fork(2)
+    for c in children:
+        await c.terminate()
+    await sb.terminate()
+
+asyncio.run(main())
+```
 
 ## Cluster mode: the one-liner
 

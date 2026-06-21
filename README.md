@@ -49,6 +49,56 @@ Two ways to run it:
 
 ### Python
 
+The flat one-liner is the canonical hosted and standalone entry point: an API
+key plus a base URL and you have a Ready sandbox. No Kubernetes required.
+
+```python
+import mitos
+
+# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+sb = mitos.create("python")                      # Ready sandbox handle
+print(sb.exec("echo hello").stdout)              # hello
+sb.terminate()
+```
+
+`mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
+else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`), then returns
+a `DirectSandbox` that exposes `exec`, `run_code`, `files`, `pty`, `fork`, and
+`terminate` directly. The standalone `sandbox-server` runs tokenless and ignores
+the key; the hosted control plane verifies the same `Authorization: Bearer`
+header server-side ([#210](https://github.com/mitos-run/mitos/issues/210)). The
+key value is never logged. `Sandbox.create(...)` is an alias for the same call.
+
+```python
+import mitos
+
+sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+
+# Files, stateful code, and fork all work on the flat handle.
+sb.files.write("/workspace/plan.txt", "draft")
+print(sb.files.read("/workspace/plan.txt"))      # draft
+
+ex = sb.run_code("import math; math.sqrt(144)")
+print(ex.text)                                   # 12.0
+
+# Fork the sandbox into independent siblings to try two approaches at once.
+fork_a, fork_b = sb.fork(2)
+fork_a.exec("echo conservative > /workspace/plan_a.txt")
+fork_b.exec("echo aggressive > /workspace/plan_b.txt")
+
+sb.terminate()
+```
+
+The async client mirrors the flat path: `await mitos.aio.create("python")` returns
+an `AsyncDirectSandbox` with the same `exec` / `run_code` / `files` / `create_pty`
+/ `fork` / `terminate` surface over `httpx.AsyncClient`.
+
+### Python on Kubernetes (operators)
+
+On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxTemplate,
+SandboxPool, SandboxClaim, SandboxFork) directly. Use this when you run the mitos
+operator yourself.
+
 ```python
 from mitos import AgentRun
 
@@ -60,8 +110,6 @@ result = sb.exec("python -c 'import numpy as np; print(np.mean([1,2,3,4,5]))'")
 print(result.stdout)                             # 3.0
 
 # Fork the running sandbox to try two approaches against shared warmed state.
-# Live fork runs on the husk pod-native default and the raw-forkd engine path;
-# each child is an independent Ready sandbox.
 fork_a, fork_b = sb.fork(2)
 fork_a.exec("python -c \"open('/workspace/plan_a.txt','w').write('conservative')\"")
 fork_b.exec("python -c \"open('/workspace/plan_b.txt','w').write('aggressive')\"")
@@ -71,7 +119,7 @@ sb.terminate()
 
 `c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxTemplate plus a SandboxPool) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
 
-The async client (`AsyncAgentRun`) mirrors the hot paths and adds `create_pty()` for an interactive terminal over WebSocket.
+The async cluster client (`AsyncAgentRun`) mirrors the hot paths and adds `create_pty()` for an interactive terminal over WebSocket.
 
 ### TypeScript
 

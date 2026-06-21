@@ -100,6 +100,7 @@ def test_direct_sandbox_run_code_routes(monkeypatch):
     sb = DirectSandbox.__new__(DirectSandbox)
     sb.id = "sb1"
     sb._server_url = "http://localhost:18080"
+    sb._api_key = None
 
     class _FakeHTTP:
         stream = staticmethod(_fake_stream)

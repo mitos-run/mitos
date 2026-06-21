@@ -1,5 +1,6 @@
 from mitos.aio import AsyncAgentRun, AsyncSandbox
 from mitos.client import AgentRun
+from mitos.direct import DirectSandbox, SandboxServer, create
 from mitos.errors import (
     AgentRunError,
     ExecutionDeadlineError,
@@ -21,6 +22,9 @@ from mitos.types import (
 )
 
 __all__ = [
+    "create",
+    "DirectSandbox",
+    "SandboxServer",
     "AgentRun",
     "AgentRunError",
     "ExecutionDeadlineError",

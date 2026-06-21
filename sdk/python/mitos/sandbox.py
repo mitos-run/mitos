@@ -270,6 +270,28 @@ class Sandbox:
         self.files = SandboxFiles(self)
         self.pty = SandboxPty(self)
 
+    @staticmethod
+    def create(
+        image: str = "python",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        id: Optional[str] = None,
+    ):
+        """Flat one-liner native onboarding (issue #217): return a READY sandbox
+        handle from an API key + base URL, against the standalone sandbox-server
+        or the hosted control plane. This is the alias to mitos.create(); it
+        returns a DirectSandbox (exec / run_code / files / pty / fork /
+        terminate), NOT a k8s Sandbox. The k8s operator path stays
+        AgentRun(...).sandbox(...).
+
+        Auth resolves from the explicit api_key / base_url arguments, else the
+        MITOS_API_KEY / MITOS_BASE_URL environment variables. The key value is
+        never logged.
+        """
+        from mitos.direct import create as _create
+
+        return _create(image, api_key=api_key, base_url=base_url, id=id)
+
     @property
     def _base_url(self) -> str:
         if not self._endpoint:
