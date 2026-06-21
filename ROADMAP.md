@@ -776,9 +776,12 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   real off-vs-on prefetch bench (cmd/bench --mode prefetch). KEY FINDING:
   hugepage restore REQUIRES userfaultfd (Firecracker refuses to file-map a
   hugetlbfs snapshot), and both need a CONFIG_USERFAULTFD=y kernel (mitos doctor
-  checks this; the Hetzner rescue kernel lacks it). DEFERRED: the real fault-count
-  / claim->first-exec MEASUREMENT and its bench/results entry, on a
-  userfaultfd-capable node (a stock-kernel install; all figures TARGETS today).
+  checks this; the Hetzner rescue kernel lacks it). MEASURED on a userfaultfd node
+  (bench/results/2026-06-21-kvm-perf-correctness.md): hugepages cut faults ~78x
+  (1877 -> 24 at the same workload), prefetch cuts the residual further (1877 ->
+  45 on 4 KiB, 24 -> 2 on 2 MiB), claim->first-exec p50 153 -> 117 ms (4 KiB) and
+  116 -> 109 ms (2 MiB). REMAINING: concurrent-density under a real claim storm
+  (single-fork resume is measured).
 - ⬜ Dynamic CPU pinning: pin a fork's vCPU threads AFTER guest-ready (not at
   launch), unpinned during the activate burst, sibling hyperthreads together,
   with an optional launch-window RT scheduling priority (Browser Use: launch

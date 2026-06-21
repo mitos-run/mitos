@@ -1,11 +1,12 @@
 # Snapshot-resume page-fault prefetch
 
-Tracking: issue #167. Status: IMPLEMENTED (hugepage build-time plumbing, the
-Firecracker userfaultfd restore backend, the manifest hot-page + hugepage
-descriptors, capture-at-template, and the off-vs-on prefetch benchmark), with the
-real fault-count/latency MEASUREMENT pending a userfaultfd-capable measurement
-node. Every latency and fault-count figure here is a TARGET until measured
-(CLAUDE.md operating principle 1); nothing here is a measured claim.
+Tracking: issue #167. Status: IMPLEMENTED and MEASURED. The hugepage build-time
+plumbing, the Firecracker userfaultfd restore backend, the manifest hot-page +
+hugepage descriptors, capture-at-template, and the off-vs-on prefetch benchmark
+are all in place, and the fault-count + claim->first-exec numbers are measured on
+a userfaultfd-capable node (see the Measured section below and
+`bench/results/2026-06-21-kvm-perf-correctness.md`). The remaining open item is
+concurrent-density measurement under a real claim storm.
 
 ## Critical prerequisite (learned on real hardware)
 
@@ -187,18 +188,24 @@ prefetch` fails with a clear not-yet-measurable message rather than emitting a
 fabricated number. Off any non-KVM host the engine fails to construct before the
 mode runs at all, so no number is ever invented off bare metal.
 
-### Targets (NOT measured)
+### Measured (2026-06-21, userfaultfd-capable node)
 
-These are the numbers the bare-metal run is expected to move; they are targets,
-restated here so the goalposts are explicit, and will be replaced with measured
-figures (and a `bench/results/` entry) only once produced on #16:
+Measured on an i7-6700 reinstalled to stock Debian 12 (CONFIG_USERFAULTFD=y),
+python:3.12-slim, N=20. Full table and analysis in
+`bench/results/2026-06-21-kvm-perf-correctness.md`. Headline:
 
-- Fault count per resume: large reduction (hugepages cut the count, prefetch
-  pays the rest up front), order-of-magnitude in the spirit of the Browser Use
-  ~100k -> ~1.1k figure, on the mitos template workload.
-- claim->first-exec P50/P99: lower with prefetch on, by the fault-tail span.
-
-No figure above is published or reproducible yet; none is a claim.
+- Fault count per resume: hugepages alone cut it ~78x (1877 base-page faults vs
+  24 huge-page faults at the same workload, prefetch off). Prefetch cuts the
+  residual further: 1877 -> 45 on 4 KiB, 24 -> 2 on 2 MiB.
+- claim->first-exec p50 improves with prefetch WITHIN the UFFD path: 153 -> 117 ms
+  on 4 KiB, 116 -> 109 ms on 2 MiB.
+- Honest nuance: the UFFD path adds per-fault handler overhead, so its absolute
+  claim->exec (108-153 ms) is higher than the plain file-mapped 4 KiB baseline
+  (~51-67 ms). The win is the fault-count collapse (the per-fault cost is what
+  scales under concurrent load) plus the within-UFFD prefetch latency gain;
+  hugepage restore has no file-mapped alternative, so for hugepages the UFFD path
+  is the only path. Concurrent-density gains under a real claim storm remain to be
+  measured (this run measures single-fork resume).
 
 ## Security surface
 

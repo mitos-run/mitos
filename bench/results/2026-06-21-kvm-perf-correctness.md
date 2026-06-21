@@ -93,13 +93,50 @@ needs the RT class and/or more cores.
   not a gate this PR introduces. It is unrelated to the #167/#168 work and not on
   the UFFD path.
 
-## #167 hugepage + prefetch (NOT measured here; blocked on kernel)
+## #167 hugepage + prefetch (MEASURED on a userfaultfd-capable node)
 
-The hugepage-backed restore and the userfaultfd prefetch handler require a kernel
-built with `CONFIG_USERFAULTFD=y`. The kernel available for this run lacked it
-(`userfaultfd(2)` -> ENOSYS; Firecracker fails restore of a 2 MiB template with
-"Failed to UFFD object: System error", and refuses a hugetlbfs file-map with
-"Please use uffd"). The code is complete and unit-tested; the off-vs-on fault
-count + claim->first-exec measurement (`cmd/bench --mode prefetch`) is pending a
-stock-kernel node. `mitos doctor` now flags a missing userfaultfd. All #167
-figures remain TARGETS (`docs/perf/snapshot-prefetch.md`).
+Measured on a SECOND i7-6700 reinstalled to stock Debian 12 (kernel
+6.1.0-49-amd64, `CONFIG_USERFAULTFD=y`), NVMe XFS reflink, python:3.12-slim,
+2048 x 2 MiB hugepages reserved. `cmd/bench --mode prefetch` captures the
+template hot-page set, then runs two arms over the REAL userfaultfd restore:
+OFF (lazy faults) vs ON (hot set preloaded before resume). N=20, 3 warmup.
+
+4 KiB base-page template (UFFD restore):
+
+| arm | mean faults/resume | claim->exec p50 | claim->exec p99 |
+| --- | --- | --- | --- |
+| prefetch off | 1877 | 153.5 ms | 216.0 ms |
+| prefetch on | 45 | 117.0 ms | 138.2 ms |
+
+2 MiB hugepage template (UFFD restore; hugepages REQUIRE uffd):
+
+| arm | mean faults/resume | claim->exec p50 | claim->exec p99 |
+| --- | --- | --- | --- |
+| prefetch off | 24 | 115.7 ms | 140.0 ms |
+| prefetch on | 2 | 108.7 ms | 134.2 ms |
+
+Readings, in order of impact:
+
+- HUGEPAGES cut the fault count ~78x at the same workload: 1877 faults (4 KiB)
+  vs 24 (2 MiB), prefetch OFF in both. The ~7.5 MiB the guest touches to first
+  exec is ~1877 base pages but only ~24 huge pages (512x coverage per page).
+- PREFETCH cuts the residual faults further within each backing: 1877 -> 45 on
+  4 KiB, 24 -> 2 on 2 MiB, and improves claim->first-exec p50 within the UFFD
+  path (153 -> 117 ms on 4 KiB; 116 -> 109 ms on 2 MiB).
+- HONEST nuance on absolute latency: the userfaultfd path adds handler overhead
+  (each fault is serviced by a userspace UFFDIO_COPY, and the load itself takes
+  ~30 ms vs ~8 ms file-mapped), so a UFFD claim->exec (108-153 ms) is HIGHER than
+  the plain file-mapped 4 KiB baseline (~51-67 ms, see #15 and the box1 tmpl
+  fork at 51 ms). The win is the fault-count collapse (the kernel/handler pay
+  per fault, so 1877 -> 2 is the density-and-scale lever under concurrent load)
+  and the within-UFFD prefetch latency improvement. Hugepage restore has NO
+  file-mapped alternative (Firecracker refuses it), so for hugepages the UFFD
+  path is the only path and 2 MiB + prefetch (2 faults, 109 ms p50) is its best
+  configuration.
+
+These numbers replace the prior TARGETs for the fault-count reduction; the
+absolute hugepage density gains under a real claim storm remain to be measured
+(this run measures single-fork resume, not concurrent density). The earlier
+blocker (the Hetzner rescue kernel lacks `CONFIG_USERFAULTFD`, so
+`userfaultfd(2)` -> ENOSYS and Firecracker fails a 2 MiB restore with "Failed to
+UFFD object: System error") is exactly what `mitos doctor` now flags.
