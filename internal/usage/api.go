@@ -42,7 +42,11 @@ type PriceList struct {
 
 // DefaultPriceList returns illustrative non-zero rates so the usage API returns a
 // non-trivial cost out of the box. These are placeholders, not published prices
-// (the no-unverified-claims rule: real prices are a billing follow-up, #212).
+// (the no-unverified-claims rule). The billing model (#212) reconciles this
+// placeholder into the structured billing rate table: billing.FromPriceList
+// re-expresses these dollars-per-unit rates as the milli-cents-per-unit
+// billing.Rates, so the display-cost estimate here and the real billing rates
+// derive from one table. See docs/saas/pricing.md.
 func DefaultPriceList() PriceList {
 	return PriceList{
 		VCPUSecond:     0.0000128,

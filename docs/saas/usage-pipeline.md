@@ -155,12 +155,14 @@ auditable endpoint is a deliberate differentiator.
 
 ## Stripe seam (#212)
 
-The usage records are the input to Stripe metered billing (issue #212): a
-follow-up reads finalized `UsageRecord`s per org per billing period and pushes
-usage events to Stripe. The idempotency key for the Stripe push is the same
-`(org, sandbox, window)` record key, so a retried push never double-reports. This
-slice does not implement the Stripe push; it produces the auditable records the
-push consumes.
+The usage records are the input to Stripe metered billing (issue #212), which is
+now implemented in `internal/saas/billing` (see docs/saas/pricing.md):
+`billing.Service.PushUsage` reads finalized `UsageRecord`s and pushes one metered
+usage event per non-zero meter to Stripe. The idempotency key for the Stripe push
+is the same `(org, sandbox, window)` record key plus the meter, so a retried push
+never double-reports. The billing slice builds against a `StripeClient` interface
+with a `FakeStripe` for tests; the real Stripe SDK adapter is a documented seam.
+This usage pipeline produces the auditable records the push consumes.
 
 ## What is a seam / follow-up
 

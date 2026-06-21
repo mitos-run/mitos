@@ -21,6 +21,14 @@ const (
 	// ReasonEmergencyStop is a pool-wide or org-wide emergency stop (the big red
 	// button): suspend everything now, ask questions later.
 	ReasonEmergencyStop SuspensionReason = "emergency_stop"
+	// ReasonSpendCap is an automated suspension fired when an org crosses its hard
+	// spend cap (issue #212), so a runaway agent cannot generate an unbounded bill.
+	// It carries a manual hold: the org is not auto-lifted back into the same bill.
+	ReasonSpendCap SuspensionReason = "spend_cap"
+	// ReasonDunning is a suspension fired when dunning exhausts its payment-retry
+	// budget (issue #212): the org's charges keep failing, so it fails closed until
+	// a payment succeeds.
+	ReasonDunning SuspensionReason = "dunning"
 )
 
 // Suspension records that an org is suspended: when, why, and a non-secret note.
