@@ -366,14 +366,20 @@ func decodeManifest(data []byte) (Manifest, error) {
 		Name   string      `json:"name"`
 		Size   int64       `json:"size"`
 	}
+	type hotPagesJSON struct {
+		File          string  `json:"file"`
+		Offsets       []int64 `json:"offsets"`
+		PageSizeBytes int64   `json:"pageSizeBytes"`
+	}
 	type manifestJSON struct {
-		ConfigHash            string     `json:"configHash"`
-		CPUModel              string     `json:"cpuModel"`
-		CreatedUnix           int64      `json:"createdUnix"`
-		Files                 []fileJSON `json:"files"`
-		KernelVersion         string     `json:"kernelVersion"`
-		SnapshotFormatVersion int        `json:"snapshotFormatVersion"`
-		VMMVersion            string     `json:"vmmVersion"`
+		ConfigHash            string        `json:"configHash"`
+		CPUModel              string        `json:"cpuModel"`
+		CreatedUnix           int64         `json:"createdUnix"`
+		Files                 []fileJSON    `json:"files"`
+		HotPages              *hotPagesJSON `json:"hotPages"`
+		KernelVersion         string        `json:"kernelVersion"`
+		SnapshotFormatVersion int           `json:"snapshotFormatVersion"`
+		VMMVersion            string        `json:"vmmVersion"`
 	}
 	if len(data) == 0 {
 		return Manifest{}, errEmptyManifest
@@ -389,6 +395,13 @@ func decodeManifest(data []byte) (Manifest, error) {
 		CPUModel:              mj.CPUModel,
 		KernelVersion:         mj.KernelVersion,
 		ConfigHash:            mj.ConfigHash,
+	}
+	if mj.HotPages != nil {
+		m.HotPages = &HotPageSet{
+			PageSizeBytes: mj.HotPages.PageSizeBytes,
+			File:          mj.HotPages.File,
+			Offsets:       mj.HotPages.Offsets,
+		}
 	}
 	for _, fj := range mj.Files {
 		fe := FileEntry{Name: fj.Name, Size: fj.Size}

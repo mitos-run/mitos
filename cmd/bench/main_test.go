@@ -123,3 +123,13 @@ func TestParseConfigFanOutRejectsGarbageN(t *testing.T) {
 		t.Fatal("expected error for non-numeric --fanout-n")
 	}
 }
+
+func TestParseConfigPrefetch(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "prefetch", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modePrefetch {
+		t.Errorf("mode = %q, want %q", cfg.mode, modePrefetch)
+	}
+}

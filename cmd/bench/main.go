@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ const (
 	modeExecRT      = "exec-rt"
 	modeMetering    = "metering"
 	modeForkFanOut  = "fork-fanout"
+	modePrefetch    = "prefetch"
 	defaultFanOutNs = "1,4,16,64"
 )
 
@@ -68,7 +70,7 @@ func parseConfig(args []string) (config, error) {
 
 	var cfg config
 	var fanOutNs string
-	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering|fork-fanout")
+	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering|fork-fanout|prefetch")
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
 	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
@@ -85,8 +87,8 @@ func parseConfig(args []string) (config, error) {
 		return config{}, err
 	}
 
-	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering && cfg.mode != modeForkFanOut {
-		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering, modeForkFanOut)
+	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering && cfg.mode != modeForkFanOut && cfg.mode != modePrefetch {
+		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering, modeForkFanOut, modePrefetch)
 	}
 	if cfg.template == "" {
 		return config{}, fmt.Errorf("--template is required")
@@ -174,6 +176,12 @@ func run(cfg config) error {
 	// all N ready; it produces FanOutResults, not a single latency Result.
 	if cfg.mode == modeForkFanOut {
 		return runForkFanOut(engine, cfg)
+	}
+
+	// Prefetch mode measures the snapshot-resume page-fault prefetch win (issue
+	// #167): fault count per resume and claim->first-exec, prefetch on vs off.
+	if cfg.mode == modePrefetch {
+		return runPrefetch(engine, cfg)
 	}
 
 	var result benchstat.Result
@@ -282,6 +290,49 @@ func printMeteringSummary(report metering.Report, forks int) {
 		fmt.Printf("  fork %q: unique=%.2f MiB shared=%.2f MiB\n",
 			s.ID, mib(s.MemoryUnique), mib(s.MemoryShared))
 	}
+}
+
+// runPrefetch measures the snapshot-resume page-fault prefetch win (issue #167):
+// for the prefetch-OFF arm (lazy-fault baseline) and the prefetch-ON arm
+// (the captured hot-page set preloaded by the userfaultfd handler before
+// resume), it records the page-fault count per resume and the claim->first-exec
+// latency, then reports the per-arm distributions and the fault-count reduction
+// via the pure, unit-tested benchstat.AggregatePrefetch.
+//
+// HONEST GATING: the per-resume fault count comes from the userfaultfd handler
+// (internal/fork prefetch_linux.go), which needs a live KVM host with
+// hugepage-backed guest memory and is not yet wired (the syscall-level
+// register/copy is the bare-metal follow-up). So this mode does NOT fabricate a
+// number: it returns a clear not-yet-measurable error rather than inventing
+// fault counts or latencies. On a non-KVM host the engine already failed to
+// construct in run() before this is ever reached. Once the handler lands, the
+// collection loop here forks with prefetch off then on, reads the handler's
+// fault count per resume and the claim->first-exec span, and hands both arms to
+// AggregatePrefetch; the aggregation and JSON shape are testable today.
+func runPrefetch(engine *fork.Engine, cfg config) error {
+	_ = engine
+	// Drive the real capture seam. On a KVM host the engine constructed above; the
+	// missing piece is the userfaultfd fault-count source, so CaptureHotPages
+	// returns an actionable not-yet-wired error rather than a fabricated trace. We
+	// surface that directly so the mode never invents a fault count or latency.
+	// The off-vs-on aggregation that would consume the counts is the pure,
+	// unit-tested benchstat.AggregatePrefetch.
+	memPath := filepath.Join(cfg.dataDir, "templates", cfg.template, "snapshot", "mem")
+	_, err := fork.CaptureHotPages(fork.PrefetchConfig{
+		MemPath:       memPath,
+		File:          "mem",
+		PageSizeBytes: 2 << 20,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"prefetch mode (issue #167) cannot measure yet: %w; the off-vs-on aggregation (benchstat.AggregatePrefetch) and the manifest hot-page descriptor are in place, the bare-metal userfaultfd handler is the remaining work (template=%q, iterations=%d)",
+			err, cfg.template, cfg.iterations,
+		)
+	}
+	// Unreachable until the handler is wired; kept so the aggregation type is
+	// referenced from the driver it belongs to.
+	_ = benchstat.PrefetchComparison{}
+	return nil
 }
 
 // runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork
