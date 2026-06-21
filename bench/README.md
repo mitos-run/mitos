@@ -94,3 +94,40 @@ To capture bare-metal reference numbers (roadmap section 4 / issue #15), run the
 two modes on the reference node with a higher iteration count (the runs above
 use 100), archive both JSON files, and record the host (CPU, kernel, Firecracker
 version, rootfs) alongside them so the numbers are reproducible and auditable.
+
+## Controller-path harnesses (claim, sustained, pool-rebuild)
+
+`cmd/bench` measures the in-process engine data path only. The controller + pool
+path (issue #15 items 1-3) is measured by the `bench/claim` Go harness, wrapped
+by three shell scripts that mirror the structure of the scripts above. They drive
+a REAL cluster over a kubeconfig: with no reachable cluster they fail with a clear
+message and produce NO number (CLAUDE.md operating principle 1). Numbers are
+produced on the maintainer's hardware and recorded in `bench/results/`.
+
+| script | mode | measures |
+| --- | --- | --- |
+| `claim-first-exec-latency.sh <kubeconfig> <pool> [ns] [iters]` | `claim-exec` | claim-create -> first-exec end to end through the controller, P50/P90/P99 |
+| `sustained-claims-throughput.sh <kubeconfig> <pool> [ns] [rate] [duration] [max_concurrent]` | `sustained` | achieved claims/sec, peak concurrency, per-node density (sweep `[rate]` for the density curve) |
+| `pool-rebuild-propagation.sh <kubeconfig> <pool> [ns]` | `pool-rebuild` | pool update -> all-nodes-snapshot-ready propagation (multi-node cluster) |
+
+The harness can also be run directly:
+
+```sh
+go build -o /tmp/claim-bench ./bench/claim/
+/tmp/claim-bench --mode claim-exec --kubeconfig "$HOME/.kube/config" --pool default --iterations 20
+```
+
+`--json <path>` writes the result distribution (claim-exec, pool-rebuild) or the
+throughput object (sustained) as machine-readable JSON for archiving.
+
+## Competitor comparison (scaffold + methodology)
+
+`bench/competitors/` is the scaffold + methodology for the head-to-head against
+E2B (self-hosted), Daytona (OSS), and Agent Sandbox + Kata (issue #15 item 5).
+`run-comparison.sh <adapter.sh> [iters] [warmup]` measures every system by the
+SAME create-sandbox -> first-exec method via an adapter. `adapters/mitos.sh` is
+wired to this repo's own harness; the competitor adapters are placeholders a
+reproducer fills in for their own deployment (they exit non-zero until then, so a
+run can never emit a fabricated competitor number). The honesty rule (no invented
+competitor numbers; vendor-published figures are labeled as such) is in
+`bench/competitors/README.md`.

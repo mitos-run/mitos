@@ -344,37 +344,92 @@ for pod schedule + image + container start + app boot) is the documented,
 clearly-labeled cold-start range, not an invented measurement; the precise
 same-hardware figure is what the bare-metal harness run produces.
 
+## Controller-path harness (claim, sustained, pool-rebuild)
+
+Issue #15 items 1-3 are the controller + pool path the in-process `cmd/bench`
+harness does NOT cover. They are now RUNNABLE harnesses under `bench/` that drive
+a REAL cluster over a kubeconfig. They are **method-only here**: the harness
+ships in-repo, but the NUMBERS are produced by a maintainer running them on a
+cluster on documented hardware and recorded in `bench/results/`. None is faked.
+On a host with no reachable cluster (a darwin laptop) each fails at client
+construction with a clear message and prints no number.
+
+- **Claim to first-exec end to end through the controller** (#15 item 1):
+  `bench/claim-first-exec-latency.sh <kubeconfig> <pool> [ns] [iters]`, the
+  `claim-exec` mode of the `bench/claim` Go harness. For each sequential claim it
+  creates a `SandboxClaim`, waits for the controller to drive it Ready, and runs
+  the FIRST exec over the sandbox HTTP API (the same endpoint + per-sandbox
+  bearer token kubectl-sandbox and the SDK use), measuring claim-create ->
+  first-exec P50/P90/P99. This is the full controller + scheduler + pool path, NOT
+  the engine data path `cmd/bench` measures. **Status: harness runnable on a
+  cluster; numbers OPEN, pending the #16 reference node.**
+- **Sustained claims/sec and density curve** (#15 item 2):
+  `bench/sustained-claims-throughput.sh <kubeconfig> <pool> [ns] [rate] [duration] [max_concurrent]`,
+  the `sustained` mode. It arrives claims at a target rate for a window and
+  records achieved claims/sec, peak concurrency, and per-node density (sweep the
+  rate to trace the density curve and find where achieved/sec stops tracking the
+  target). Aggregation is the unit-tested `internal/benchstat.AggregateThroughput`.
+  **Status: harness runnable on a cluster; numbers OPEN.**
+- **Pool-rebuild propagation** (#15 item 3):
+  `bench/pool-rebuild-propagation.sh <kubeconfig> <pool> [ns]`, the `pool-rebuild`
+  mode. It triggers a pool rebuild and times from the spec change to all-nodes
+  reporting the snapshot ready (`ReadySnapshots == TotalSnapshots`), the
+  snapshot-distribution propagation latency. Meaningful on a multi-node cluster;
+  on a single node it measures that node and says so. **Status: harness runnable
+  on a multi-node cluster; numbers OPEN.**
+
+## Competitor comparison (scaffold + methodology)
+
+Issue #15 item 5 asks for a head-to-head against E2B (self-hosted), Daytona
+(OSS), and Agent Sandbox + Kata, on identical hardware, reproducible from
+in-repo scripts. Running a competitor requires standing up that competitor's own
+stack, which is out of this repo's control, so what ships in-repo is a
+**scaffold + methodology**: `bench/competitors/` with a neutral driver
+(`run-comparison.sh`) that measures every system by the SAME create-sandbox ->
+first-exec method, a reference adapter (`adapters/mitos.sh`) wired to this repo's
+own harness, and placeholder adapters for each competitor that a reproducer fills
+in (they exit non-zero until then, so a run can never emit a fabricated competitor
+number). The honesty rule is explicit in `bench/competitors/README.md`: we
+publish a mitos number only from our own harness on documented hardware, and any
+competitor figure not measured here on the same hardware is labeled
+**vendor-published** (with a citation), NOT our measurement. **Status: scaffold +
+methodology in-repo; head-to-head numbers OPEN, pending the #16 reference node and
+a reproducer standing up each competitor.**
+
+## Items still needing the pinned bare-metal reference node (#16)
+
+Every controller-path number above and the competitor head-to-head need the
+pinned #16 bare-metal reference node before they can be published as measured.
+Concretely OPEN pending #16:
+
+- claim -> first-exec P50/P99 end to end through the controller;
+- sustained claims/sec and the density curve;
+- pool-rebuild propagation across a multi-node pool;
+- the competitor head-to-head (each competitor stood up on the same node);
+- the bare-metal engine fork -> first-exec via `cmd/bench` (not run on the box
+  this session);
+- the **<= 10ms warm husk-pod activation TARGET** (#18/#15): the activate
+  restore step is sub-10 ms on the reference node, but the full activate measures
+  ~27 ms P50 there, so the end-to-end target is not yet met;
+- a pinned reference-node CI runner so all of the above regenerate on every run.
+
 ## Open (not yet measured)
 
-These are explicitly out of scope for the current harness and tracked in
+These remain out of scope for the current harnesses and are tracked in
 [#15](https://github.com/paperclipinc/mitos/issues/15) / roadmap section 4:
 
 - **Bare-metal reference numbers** on the Hetzner + Talos reference node. A first
-  reference run is now recorded in the "Bare-metal reference node (#16)" section
-  above (warm-claim activate P50 ~27 ms, restore ~6-16 ms, ~3 MiB marginal memory
-  per fork), reproducible from `bench/husk-activate-latency.sh` and
-  `bench/results/2026-06-13-bare-metal-husk.md`. Still open: the bare-metal engine
-  fork->first-exec via `cmd/bench` (not run on the box this session) and a pinned
-  reference-node CI runner so the numbers regenerate on every run. The **<= 10ms
-  warm husk-pod activation TARGET** (#18/#15) also remains OPEN: the activate
-  restore step is sub-10 ms on the reference node, but the full activate measures
-  ~27 ms P50 there, so the end-to-end target is not yet met.
-- **Claim to first-exec end to end through the controller** on a real cluster
-  (claim a `Sandbox` CRD, wait for the pool to hand back a forked VM, exec):
-  the current harness measures the engine data path, not the controller +
-  scheduler + pool path.
-- **Sustained claims/sec** and **density curves** (how many forks per node
-  before p99 degrades, unique-vs-shared memory at density).
-- **Pool-rebuild propagation**: time from a new template snapshot landing to it
-  being claimable across the pool.
+  reference run is recorded in the "Bare-metal reference node (#16)" section above
+  (warm-claim activate P50 ~27 ms, restore ~6-16 ms, ~3 MiB marginal memory per
+  fork), reproducible from `bench/husk-activate-latency.sh` and
+  `bench/results/2026-06-13-bare-metal-husk.md`. The remaining bare-metal items
+  are listed in "Items still needing the pinned bare-metal reference node (#16)"
+  above.
 - **Facade vs upstream in-VM resume head-to-head** on a KVM-capable kubelet (the
   #16 reference node): our warm husk re-activation vs the upstream reference
   controller's cold pod create, both timed to a serving endpoint on identical
   hardware. The `bench/facade/` harness measures the object-level resume on kind
   today; the in-VM tail is the bare-metal target (#16), as described in the
   "Facade vs upstream reference: resume latency" section above.
-- **Head-to-head competitor comparison** against E2B (self-hosted), Daytona
-  (OSS), and Agent Sandbox + Kata, on identical hardware, regenerated from
-  in-repo scripts so anyone can reproduce or refute it.
 - **Latency regression gating**: deliberately not done on shared CI, which is
   too noisy to threshold without flaking.
