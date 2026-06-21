@@ -54,6 +54,7 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | `SecretInheritanceDenied` | SandboxFork | A fork was rejected because the source claim holds secrets and inheritance was not explicitly opted into. |
 | `ExplicitOptIn` | SandboxFork | Secret inheritance was explicitly permitted on the fork. |
 | `Forked` / `ForksCreated` | SandboxFork | The requested forks were created. |
+| `BudgetExhausted` | Sandbox (v1alpha2, source.fromSandbox) | A self-initiated fork was rejected because the source sandbox's capability budget (`spec.budget.maxForks`) is spent; admitted forks are ranked deterministically by creation time, and the ones beyond the limit fail terminally with the LLM-legible `budget_exhausted` remediation (request a larger budget from the creator). Issue #25. |
 | `WorkspaceBusy` | SandboxClaim | Another writer holds the single-writer-per-workspace lock for the claim's target workspace; this claim waits and retries until the first writer releases it. |
 
 ### Operator actions per SandboxClaim reason
