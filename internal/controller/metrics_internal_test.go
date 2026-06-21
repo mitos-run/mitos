@@ -76,3 +76,54 @@ func TestFleetMetricHelpers(t *testing.T) {
 		}
 	})
 }
+
+// histogramCountByLabel returns the observation count of the named histogram
+// series whose labels include every given pair (0 if none).
+func histogramCountByLabel(t *testing.T, name string, want map[string]string) uint64 {
+	t.Helper()
+	fams, err := ctrlmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, fam := range fams {
+		if fam.GetName() != name {
+			continue
+		}
+		for _, m := range fam.GetMetric() {
+			ok := true
+			for k, v := range want {
+				found := false
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == k && lp.GetValue() == v {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+// TestSnapshotDistributionLagMetric asserts the multi-node snapshot-distribution
+// lag histogram records an observation when observeSnapshotDistributionLag runs,
+// and that an untouched template has an empty series (the value is meaningful
+// only on the multi-node path; an empty series means no pull-based distribution
+// happened, not zero lag).
+func TestSnapshotDistributionLagMetric(t *testing.T) {
+	const tmpl = "dist-lag-template"
+	if got := histogramCountByLabel(t, "mitos_snapshot_distribution_lag_seconds", map[string]string{"template": tmpl}); got != 0 {
+		t.Fatalf("untouched series count = %d, want 0", got)
+	}
+	observeSnapshotDistributionLag(tmpl, 1.5)
+	if got := histogramCountByLabel(t, "mitos_snapshot_distribution_lag_seconds", map[string]string{"template": tmpl}); got != 1 {
+		t.Errorf("after one observe, count = %d, want 1", got)
+	}
+}

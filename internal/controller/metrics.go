@@ -131,6 +131,24 @@ var (
 		Help:    "Seconds a claim waited from creation to activating a warm husk pod.",
 		Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15},
 	})
+
+	// snapshotDistributionLagSeconds measures the wall-clock to distribute a
+	// template snapshot to one deficit node by PULL from a holder (the
+	// content-addressed CAS transfer): from the start of the pull to the digest
+	// being registered on the destination node. It is the multi-node snapshot
+	// distribution lag of issue #164. The metric is ONLY populated on the
+	// multi-node distribution path (a peer token configured AND a holder exists);
+	// a single-node cluster, an encrypted template (built per node), or the very
+	// first build (no holder yet) never observe it, so an empty series correctly
+	// means "no pull-based distribution happened", not "lag is zero". Labeled by
+	// template (the content-addressed snapshot id) so an operator sees which
+	// template's distribution is slow; the template id is derived from the pool's
+	// template ref and carries no secret.
+	snapshotDistributionLagSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "mitos_snapshot_distribution_lag_seconds",
+		Help:    "Seconds to distribute a template snapshot to a deficit node by pull from a holder, by template. Populated only on the multi-node distribution path.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+	}, []string{"template"})
 )
 
 func init() {
@@ -150,7 +168,17 @@ func init() {
 		nodeLostTotal,
 		refillLatencySeconds,
 		claimWaitForWarmSeconds,
+		snapshotDistributionLagSeconds,
 	)
+}
+
+// observeSnapshotDistributionLag records the seconds taken to distribute a
+// template snapshot to one node by pull from a holder, for templateID. It is
+// called ONLY on the multi-node pull path, so the series stays empty until at
+// least one pull-based distribution happens (the value is meaningful only on
+// multi-node).
+func observeSnapshotDistributionLag(templateID string, seconds float64) {
+	snapshotDistributionLagSeconds.WithLabelValues(templateID).Observe(seconds)
 }
 
 // recordClaimPending bumps the pending-requeue counter.

@@ -566,11 +566,16 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// deficit nodes in this same pass pull from it.
 		if distribute {
 			if holder, casURL, digest, ok := r.NodeRegistry.TemplateSource(templateID); ok && holder.Name != node.Name {
+				pullStart := r.now()
 				if err := r.pullTemplateOnNode(ctx, node, templateID, digest, casURL, r.PeerToken); err != nil {
 					errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 					continue
 				}
 				r.NodeRegistry.AddTemplateWithDigest(node.Name, templateID, digest)
+				// Snapshot-distribution lag (#164): record the pull duration. This is
+				// the multi-node distribution path (a peer token AND a holder), so the
+				// metric series is populated only when real distribution happened.
+				observeSnapshotDistributionLag(templateID, r.now().Sub(pullStart).Seconds())
 				added++
 				continue
 			}
