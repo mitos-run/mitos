@@ -43,6 +43,7 @@ const usage = `kubectl sandbox: inspect and operate mitos.run sandbox objects
 Usage:
   kubectl sandbox ls [-n namespace] [-A]         list SandboxClaims
   kubectl sandbox ps [name] [-n namespace] [-A]  list SandboxForks (or one claim's forks)
+  kubectl sandbox ps <name> --processes [-n ns]  show the REAL in-guest process table for one sandbox
   kubectl sandbox tree [--pool name] [-n ns] [-A] render the fork/lineage DAG
   kubectl sandbox top [-n namespace] [-A]        per-sandbox CoW-aware metering
   kubectl sandbox logs <sandbox> [-n namespace]  husk stub pod console for a claim
@@ -65,9 +66,11 @@ func main() {
 	var namespace string
 	var allNamespaces bool
 	var pool string
+	var processes bool
 	fs.StringVar(&namespace, "n", "default", "namespace")
 	fs.BoolVar(&allNamespaces, "A", false, "all namespaces")
 	fs.StringVar(&pool, "pool", "", "scope to one pool (tree only)")
+	fs.BoolVar(&processes, "processes", false, "ps: show the REAL in-guest process table for one sandbox (requires a name)")
 
 	fail := func(err error) {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -85,6 +88,16 @@ func main() {
 		var name string
 		if fs.NArg() > 0 {
 			name = fs.Arg(0)
+		}
+		if processes {
+			if name == "" {
+				fmt.Fprintln(os.Stderr, "error: ps --processes requires a sandbox name")
+				os.Exit(2)
+			}
+			if err := runPsProcesses(namespace, name); err != nil {
+				fail(err)
+			}
+			break
 		}
 		if err := runPs(namespace, allNamespaces, name); err != nil {
 			fail(err)

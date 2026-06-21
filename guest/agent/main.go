@@ -237,6 +237,9 @@ func handleRequest(req *vsock.Request) vsock.Response {
 		}
 		return handleUntarDir(req.UntarDir)
 
+	case vsock.TypeVitals:
+		return handleVitals()
+
 	default:
 		return vsock.Response{OK: false, Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}

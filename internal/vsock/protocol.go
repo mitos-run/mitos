@@ -20,6 +20,14 @@ const (
 	TypeExecStream   RequestType = "exec_stream"
 	TypeRunCode      RequestType = "run_code"
 	TypePty          RequestType = "pty"
+	// TypeVitals asks the guest agent for a one-shot telemetry snapshot: CPU
+	// steal over a short sampling window, memory vs balloon, and the in-guest
+	// process table. It is the Layer 3 guest telemetry bridge (issue #164). The
+	// request carries no fields; the guest samples /proc on receipt. The reply is
+	// VitalsResponse. Process names (comm) and pids are not secret values; the
+	// guest never includes process environments or command-line arguments, which
+	// could carry secrets, only the program name.
+	TypeVitals RequestType = "vitals"
 )
 
 // MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
@@ -56,6 +64,47 @@ type Request struct {
 	ExecStream   *ExecRequest         `json:"exec_stream,omitempty"`
 	RunCode      *RunCodeRequest      `json:"run_code,omitempty"`
 	Pty          *PtyRequest          `json:"pty,omitempty"`
+	Vitals       *VitalsRequest       `json:"vitals,omitempty"`
+}
+
+// VitalsRequest is the (currently empty) payload for a TypeVitals telemetry
+// snapshot. It is a struct rather than a bare type so future knobs (sampling
+// window, process-table cap) can be added without changing the wire tag.
+type VitalsRequest struct{}
+
+// VitalsResponse is the guest telemetry snapshot returned for a TypeVitals
+// request: CPU steal over the guest's sampling window, the guest-visible memory
+// figures (and what the host has reclaimed via the balloon), and the in-guest
+// process table. The host side labels this with claim/pool/workspace; the guest
+// reports raw values only. None of these fields carry secrets: process entries
+// are the program name and resource counters, never argv or environment.
+type VitalsResponse struct {
+	// StealFraction is the fraction of the sampling window the vCPUs spent
+	// involuntarily descheduled by the host (from /proc/stat steal), in [0,1].
+	StealFraction float64 `json:"steal_fraction"`
+	// SampleWindowMs is how long the guest sampled to compute StealFraction.
+	SampleWindowMs float64 `json:"sample_window_ms"`
+	// MemTotalKB / MemAvailableKB / MemUsedKB are the guest-visible figures from
+	// /proc/meminfo. BalloonReclaimedKB is how much the host balloon has taken
+	// back (0 when the guest has no balloon device or it was never inflated).
+	MemTotalKB         uint64 `json:"mem_total_kb"`
+	MemAvailableKB     uint64 `json:"mem_available_kb"`
+	MemUsedKB          uint64 `json:"mem_used_kb"`
+	BalloonReclaimedKB uint64 `json:"balloon_reclaimed_kb"`
+	// Processes is the in-guest process table, one entry per live pid.
+	Processes []ProcessEntry `json:"processes,omitempty"`
+}
+
+// ProcessEntry is one row of the in-guest process table: the pid, program name,
+// single-letter state, accrued CPU jiffies (user + system), and resident set in
+// kilobytes. These map directly onto the guestvitals.PidStat the guest parsed
+// from /proc; the host carries them verbatim to kubectl sandbox ps.
+type ProcessEntry struct {
+	PID        int    `json:"pid"`
+	Comm       string `json:"comm"`
+	State      string `json:"state"`
+	CPUJiffies uint64 `json:"cpu_jiffies"`
+	RSSKB      uint64 `json:"rss_kb"`
 }
 
 // RunCodeRequest asks the guest agent to run a code snippet in the stateful
@@ -197,6 +246,7 @@ type Response struct {
 	Ping         *PingResponse         `json:"ping,omitempty"`
 	NotifyForked *NotifyForkedResponse `json:"notify_forked,omitempty"`
 	TarDir       *TarDirResponse       `json:"tar_dir,omitempty"`
+	Vitals       *VitalsResponse       `json:"vitals,omitempty"`
 }
 
 // TarDirResponse carries the tar bytes of the requested directory. The tar is

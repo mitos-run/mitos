@@ -99,6 +99,13 @@ type SandboxAPI struct {
 	// chosen to clear the exec_background one-day default. <=0 disables the
 	// ceiling (any timeout honored). Set via SetMaxExecTimeoutSeconds.
 	maxExecTimeout int
+	// vitalsLabels records the claim/pool/workspace identity per sandbox id,
+	// guarded by mu. The forkd Fork path sets it so the /v1/vitals guest
+	// telemetry snapshot (Layer 3, issue #164) is labeled with the same identity
+	// the OTel spans and metrics carry. Absent until SetVitalsLabels is called;
+	// an unlabeled sandbox returns empty label fields, never a fabricated one.
+	// The labels are k8s object names, never secrets.
+	vitalsLabels map[string]VitalsLabels
 }
 
 // defaultMaxExecTimeoutSeconds is the default ceiling on a requested exec or
@@ -121,6 +128,7 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		deadlines:      make(map[string]time.Time),
 		paused:         make(map[string]bool),
 		maxExecTimeout: defaultMaxExecTimeoutSeconds,
+		vitalsLabels:   make(map[string]VitalsLabels),
 	}
 }
 
@@ -345,6 +353,7 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	delete(api.streamPaths, sandboxID)
 	delete(api.deadlines, sandboxID)
 	delete(api.paused, sandboxID)
+	delete(api.vitalsLabels, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -434,6 +443,7 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
 	mux.HandleFunc("POST /v1/pause", api.handlePause)
 	mux.HandleFunc("POST /v1/resume", api.handleResume)
+	mux.HandleFunc("POST /v1/vitals", api.handleVitals)
 
 	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
 	// body-peeking requireBearer middleware; it authenticates itself in

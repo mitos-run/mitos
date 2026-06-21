@@ -149,6 +149,23 @@ func (c *Client) Ping() (float64, error) {
 	return resp.Ping.Uptime, nil
 }
 
+// Vitals asks the guest agent for a one-shot telemetry snapshot (CPU steal,
+// memory vs balloon, and the in-guest process table). It is the host half of the
+// Layer 3 guest telemetry bridge. The guest samples /proc on receipt, so this
+// call blocks for the guest's short sampling window plus round-trip. The reply
+// carries no secrets: process entries are program names and resource counters,
+// never argv or environment.
+func (c *Client) Vitals() (*VitalsResponse, error) {
+	resp, err := c.send(&Request{Type: TypeVitals, Vitals: &VitalsRequest{}})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Vitals == nil {
+		return nil, fmt.Errorf("vitals: empty response")
+	}
+	return resp.Vitals, nil
+}
+
 func (c *Client) Exec(command string, workingDir string, env map[string]string, timeout int) (*ExecResponse, error) {
 	resp, err := c.send(&Request{
 		Type: TypeExec,
