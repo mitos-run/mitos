@@ -18,11 +18,16 @@
           "enum": [
             "body_too_large",
             "budget_exhausted",
+            "canceled",
             "exec_failed",
+            "exec_timeout",
             "file_failed",
+            "idle_timeout",
             "internal",
             "invalid_json",
             "not_found",
+            "rate_limited",
+            "timeout_too_large",
             "too_many_streams",
             "unauthorized"
           ]

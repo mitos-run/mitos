@@ -13,7 +13,21 @@ export type {
   ForkInfo,
 } from "./types.js";
 
-export { AgentRunError, redact } from "./errors.js";
+export {
+  AgentRunError,
+  IdleTimeoutError,
+  ExecutionDeadlineError,
+  RequestCanceledError,
+  RateLimitedError,
+  NotFoundError,
+  UnauthorizedError,
+  TimeoutTooLargeError,
+  errorForCode,
+  validateTimeout,
+  redact,
+  MAX_EXEC_TIMEOUT_SECONDS,
+  EXEC_TIMEOUT_EXIT_CODE,
+} from "./errors.js";
 export type { AgentRunErrorOptions } from "./errors.js";
 
 export { HttpClient, validSandboxId } from "./http.js";

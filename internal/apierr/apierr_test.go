@@ -75,6 +75,41 @@ func TestBudgetExhaustedCarriesCodeAndOrchestratorRemediation(t *testing.T) {
 	}
 }
 
+// TestTimeoutFamilyCodesAreDistinct asserts the timeout/cancel family is
+// discriminable: idle-timeout, execution-deadline, request-canceled, and the
+// requested-timeout-too-large rejection each have their own typed code and a
+// distinct HTTP status, so a caller branches on the code, never on message text
+// (issue #216).
+func TestTimeoutFamilyCodesAreDistinct(t *testing.T) {
+	cases := []struct {
+		code   Code
+		status int
+	}{
+		{CodeIdleTimeout, 410},
+		{CodeExecTimeout, 504},
+		{CodeCanceled, 499},
+		{CodeTimeoutTooLarge, 400},
+		{CodeRateLimited, 429},
+	}
+	seen := map[string]bool{}
+	for _, c := range cases {
+		e := Get(c.code)
+		if e.Code != string(c.code) {
+			t.Errorf("Get(%q).Code = %q, want %q", c.code, e.Code, c.code)
+		}
+		if e.Status != c.status {
+			t.Errorf("code %q: status = %d, want %d", c.code, e.Status, c.status)
+		}
+		if e.Remediation == "" {
+			t.Errorf("code %q: empty remediation", c.code)
+		}
+		if seen[e.Code] {
+			t.Errorf("code %q: duplicate", c.code)
+		}
+		seen[e.Code] = true
+	}
+}
+
 func TestCatalogueEntriesAllCarryCodeAndRemediation(t *testing.T) {
 	for name, e := range Catalogue {
 		if e.Code == "" {

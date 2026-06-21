@@ -37,7 +37,7 @@ func TestMaxStreamsPerSandboxFlagDefault(t *testing.T) {
 // must surface unchanged.
 func TestNewServerPlumbsStreamCap(t *testing.T) {
 	const want = 7
-	s := newServer(t.TempDir(), "", true, want)
+	s := newServer(t.TempDir(), "", true, want, 86400)
 	if s.sandboxAPI == nil {
 		t.Fatal("newServer must construct a SandboxAPI")
 	}
@@ -121,7 +121,7 @@ func realServerWithAgent(t *testing.T, sandboxID string, reseeded bool) (*server
 	}
 	t.Cleanup(func() { os.RemoveAll(dataDir) })
 
-	s := newServer(dataDir, "", false, 16) // real mode
+	s := newServer(dataDir, "", false, 16, 86400) // real mode
 	s.templates[sandboxID+"-tmpl"] = &templateInfo{ID: sandboxID + "-tmpl", Ready: true}
 	return s, notifies
 }

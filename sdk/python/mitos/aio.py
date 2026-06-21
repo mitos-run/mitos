@@ -11,8 +11,9 @@ from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 
 from mitos.client import API_GROUP, API_VERSION, default_pool_name
-from mitos.errors import AgentRunError
+from mitos.errors import AgentRunError, ExecutionDeadlineError
 from mitos._envelope import raise_for_status
+from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _validate_timeout
 from mitos.types import ExecResult, FileInfo, SandboxPhase
 
 POLL_INTERVAL = 0.05
@@ -140,6 +141,7 @@ class AsyncSandbox:
         """Run a command. With on_stdout/on_stderr it streams /v1/exec/stream
         NDJSON and awaits-or-calls the callback per chunk; without them it uses
         the blocking /v1/exec path. Mirrors the sync Sandbox.exec."""
+        _validate_timeout(timeout)
         if on_stdout is None and on_stderr is None:
             payload: dict = {"sandbox": self.id, "command": command,
                              "timeout": timeout, "working_dir": working_dir}
@@ -211,6 +213,17 @@ class AsyncSandbox:
                 code="exec_stream_truncated",
                 cause="the connection was truncated or dropped; the exit code is unknown",
                 remediation="Retry the command; if it persists, inspect the forkd or sandbox-server logs.",
+            )
+        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+            # The streaming terminal frame reports 124 inside a 200 response;
+            # surface the typed deadline error to match the blocking path's 504
+            # exec_timeout (issue #216).
+            raise ExecutionDeadlineError(
+                f"command exceeded its {timeout}s execution deadline and was terminated",
+                code="exec_timeout",
+                cause=f"command ran past its {timeout}s deadline (exit 124)",
+                remediation="Raise the timeout on the exec call or split the work into shorter steps.",
+                context={"timeout_s": timeout},
             )
         return ExecResult(
             exit_code=exit_code,

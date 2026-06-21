@@ -45,6 +45,27 @@ const (
 	// Checkpoint, ExtendLifetime) was refused because the sandbox's capability
 	// budget for that dimension is spent (issue #25, docs/api/v2-spec.md §3).
 	CodeBudgetExhausted Code = "budget_exhausted"
+	// CodeRateLimited: the caller has exceeded the request rate limit for this
+	// sandbox or endpoint. Distinct from too_many_streams (a concurrent-stream
+	// ceiling): rate-limited is a per-window request-rate refusal (issue #216).
+	CodeRateLimited Code = "rate_limited"
+	// CodeIdleTimeout: the sandbox was reaped after exceeding its idle timeout,
+	// so the call hit a sandbox that is no longer running. Distinct from
+	// not_found (never existed) and from execution-deadline (issue #216).
+	CodeIdleTimeout Code = "idle_timeout"
+	// CodeExecTimeout: a command or run_code execution ran past its requested
+	// timeout (the execution deadline) and was terminated. This is the
+	// execution-deadline case, distinct from idle-timeout and request-canceled
+	// (issue #216).
+	CodeExecTimeout Code = "exec_timeout"
+	// CodeCanceled: the request or stream was canceled by the caller (the client
+	// hung up or the context was canceled) before it completed. Distinct from a
+	// server-side deadline (issue #216).
+	CodeCanceled Code = "canceled"
+	// CodeTimeoutTooLarge: the requested timeout exceeds the server ceiling. The
+	// timeout is REJECTED with this error, never silently reduced, so a requested
+	// deadline is always either honored or rejected (issue #216).
+	CodeTimeoutTooLarge Code = "timeout_too_large"
 	// CodeExecFailed: the command could not be executed in the sandbox.
 	CodeExecFailed Code = "exec_failed"
 	// CodeFileFailed: a file operation failed in the sandbox.
@@ -138,6 +159,46 @@ var Catalogue = map[string]Error{
 		// budget on the parent Sandbox object, or run within the remaining budget.
 		Remediation: "This is a creator-set capability budget; the sandbox cannot widen its own. Request a larger budget from the orchestrator or operator that created this sandbox (raise spec.budget on the parent Sandbox), or proceed within the remaining budget reported by the Budget call. The context names the exhausted dimension and the remaining allowance.",
 		Status:      http.StatusForbidden,
+	},
+	string(CodeRateLimited): {
+		Code:        string(CodeRateLimited),
+		Message:     "the request rate limit for this sandbox was exceeded",
+		Remediation: "Back off and retry after the delay in the context retry_after_ms; this is a per-window request-rate limit, distinct from too_many_streams (the concurrent-stream ceiling).",
+		Status:      http.StatusTooManyRequests,
+	},
+	string(CodeIdleTimeout): {
+		Code:    string(CodeIdleTimeout),
+		Message: "the sandbox was reaped after exceeding its idle timeout",
+		// Distinct from not_found so a caller can tell "it idled out" from "it
+		// never existed" without parsing the message. The remediation names the
+		// create-a-fresh-sandbox path and the set-timeout lever.
+		Remediation: "The sandbox idled out and was reaped; create a fresh sandbox (or fork from a checkpoint) and retry. Raise the idle timeout on the parent Sandbox or call set_timeout to keep an idle sandbox alive longer.",
+		Status:      http.StatusGone,
+	},
+	string(CodeExecTimeout): {
+		Code:    string(CodeExecTimeout),
+		Message: "the execution ran past its requested timeout and was terminated",
+		// Distinct from idle_timeout: this is the per-command execution deadline,
+		// not sandbox inactivity. The context carries the timeout_s that was hit.
+		Remediation: "The command exceeded its execution deadline and was killed. Raise the timeout on the exec or run_code call, or split the work into shorter steps. The context carries the timeout_s that was hit.",
+		Status:      http.StatusGatewayTimeout,
+	},
+	string(CodeCanceled): {
+		Code:    string(CodeCanceled),
+		Message: "the request was canceled before it completed",
+		// HTTP 499 (client closed request) is the nginx convention for a caller
+		// that hung up; it is intentionally distinct from a server deadline.
+		Remediation: "The request was canceled by the caller (the client closed the connection or canceled the context). Retry the call if the cancellation was not intentional.",
+		Status:      499,
+	},
+	string(CodeTimeoutTooLarge): {
+		Code:    string(CodeTimeoutTooLarge),
+		Message: "the requested timeout exceeds the server ceiling",
+		// Determinism rule (issue #216): a requested timeout is HONORED or
+		// REJECTED, never silently reduced. The context carries the requested
+		// value and the ceiling so the caller can pick a value at or under it.
+		Remediation: "Request a timeout at or below the ceiling reported in the context (max_timeout_s); the server never silently reduces a requested timeout, it rejects it so the deadline you set is the deadline you get.",
+		Status:      http.StatusBadRequest,
 	},
 	string(CodeExecFailed): {
 		Code:        string(CodeExecFailed),

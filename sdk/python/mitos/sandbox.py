@@ -12,7 +12,7 @@ from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
 from mitos._envelope import raise_for_status, raise_for_status_stream
-from mitos.errors import AgentRunError
+from mitos.errors import AgentRunError, ExecutionDeadlineError, TimeoutTooLargeError
 from mitos.pty import PtyHandle
 from mitos.types import (
     BackgroundProcess,
@@ -101,6 +101,36 @@ def _parse_run_code_stream(
 API_GROUP = "mitos.run"
 API_VERSION = "v1alpha1"
 POLL_INTERVAL = 0.05
+
+# The exec/run_code timeout ceiling (seconds). Mirrors the server default
+# (--max-exec-timeout-seconds, 24h): a requested timeout over it is REJECTED with
+# a typed TimeoutTooLargeError, never silently reduced (the determinism rule,
+# issue #216). The SDK validates client-side so an over-ceiling timeout fails
+# before the request is sent; the server enforces the same ceiling authoritatively.
+MAX_EXEC_TIMEOUT_SECONDS = 86400
+
+# The conventional exit code the guest reports for a command killed at its
+# execution deadline (matching the shell `timeout` utility). The SDK maps it to
+# a typed ExecutionDeadlineError so "the command timed out" is a type, not an
+# exit-code comparison.
+EXEC_TIMEOUT_EXIT_CODE = 124
+
+
+def _validate_timeout(timeout: int) -> None:
+    """Reject a requested timeout over the ceiling with a typed
+    TimeoutTooLargeError (issue #216): the SDK never silently clamps a requested
+    deadline, it rejects it so the deadline you set is the deadline you get."""
+    if timeout > MAX_EXEC_TIMEOUT_SECONDS:
+        raise TimeoutTooLargeError(
+            f"requested timeout {timeout}s exceeds the ceiling of {MAX_EXEC_TIMEOUT_SECONDS}s",
+            code="timeout_too_large",
+            cause=f"requested timeout {timeout}s exceeds the ceiling {MAX_EXEC_TIMEOUT_SECONDS}s",
+            remediation=(
+                "Request a timeout at or below the ceiling "
+                f"({MAX_EXEC_TIMEOUT_SECONDS}s); the timeout is rejected, never silently reduced."
+            ),
+            context={"requested_s": timeout, "max_timeout_s": MAX_EXEC_TIMEOUT_SECONDS},
+        )
 
 
 class SandboxFiles:
@@ -352,6 +382,7 @@ class Sandbox:
         arrive; the returned ExecResult still carries the full aggregate. With
         no callbacks the blocking /v1/exec path is used unchanged.
         """
+        _validate_timeout(timeout)
         if on_stdout is None and on_stderr is None:
             return self._exec_blocking(command, timeout, working_dir, env)
         out_parts: list[bytes] = []
@@ -361,6 +392,19 @@ class Sandbox:
             lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
             lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
         )
+        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+            # The streaming terminal frame reports 124 inside a 200 response (the
+            # status header is already sent); surface the typed deadline error so
+            # the streaming path matches the blocking path's 504 exec_timeout.
+            raise ExecutionDeadlineError(
+                f"command exceeded its {timeout}s execution deadline and was terminated",
+                code="exec_timeout",
+                cause=f"command ran past its {timeout}s deadline (exit 124)",
+                remediation=(
+                    "Raise the timeout on the exec call or split the work into shorter steps."
+                ),
+                context={"timeout_s": timeout},
+            )
         return ExecResult(
             exit_code=exit_code,
             stdout=b"".join(out_parts).decode("utf-8", "replace"),
@@ -369,6 +413,7 @@ class Sandbox:
         )
 
     def _exec_blocking(self, command, timeout, working_dir, env) -> ExecResult:
+        _validate_timeout(timeout)
         payload: dict = {
             "sandbox": self._sandbox_ref,
             "command": command,
@@ -409,6 +454,7 @@ class Sandbox:
         arrive. Requires a base image with the code-interpreter kernel; without
         it the Execution carries a KernelUnavailable error.
         """
+        _validate_timeout(timeout)
         payload: dict = {
             "sandbox": self._sandbox_ref,
             "code": code,
@@ -507,6 +553,7 @@ class Sandbox:
         cancels the guest process group, leaving the shared Sandbox client (and
         every other exec/file call) untouched. Default timeout is one day so a
         background server is not reaped by the per-exec timeout."""
+        _validate_timeout(timeout)
         out_parts: list[bytes] = []
         err_parts: list[bytes] = []
         # Resolve the endpoint and token on the calling thread so a failure to

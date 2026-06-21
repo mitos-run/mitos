@@ -53,11 +53,16 @@ gRPC status the controller<->forkd path maps to (the gRPC mapping column). The
 | --- | --- | --- | --- | --- | --- |
 | `body_too_large` | The request body exceeds the server size limit. | Reduce the payload; file content is hex-encoded and bounded by the server. | 413 | `ResourceExhausted` | (none) |
 | `budget_exhausted` | A budget-gated self-service operation (fork, checkpoint, extend-lifetime) was refused because the sandbox capability budget for that dimension is spent. | This is a creator-set capability budget; the sandbox cannot widen its own. Request a larger budget from the orchestrator or operator that created this sandbox (raise spec.budget on the parent Sandbox), or proceed within the remaining budget reported by the Budget call. The context names the exhausted dimension and the remaining allowance. | 403 | `PermissionDenied` | `sandbox`, `dimension`, `remaining` |
+| `canceled` | The request was canceled by the caller before it completed. | The request was canceled by the caller (the client closed the connection or canceled the context). Retry the call if the cancellation was not intentional. | 499 | `Canceled` | `sandbox` |
 | `exec_failed` | The command could not be executed in the sandbox. | Inspect the cause; if it is a transport error retry, otherwise check the forkd logs for the guest agent state. | 500 | `Internal` | `sandbox` |
+| `exec_timeout` | A command or run_code execution ran past its requested timeout and was terminated. | The command exceeded its execution deadline and was killed. Raise the timeout on the exec or run_code call, or split the work into shorter steps. The context carries the timeout_s that was hit. | 504 | `DeadlineExceeded` | `sandbox`, `timeout_s` |
 | `file_failed` | A file operation failed in the sandbox. | Confirm the path exists and is writable; inspect the cause for the underlying error. | 500 | `Internal` | `sandbox`, `path` |
+| `idle_timeout` | The sandbox was reaped after exceeding its idle timeout, so the call hit a sandbox that is no longer running. | The sandbox idled out and was reaped; create a fresh sandbox (or fork from a checkpoint) and retry. Raise the idle timeout on the parent Sandbox or call set_timeout to keep an idle sandbox alive longer. | 410 | `FailedPrecondition` | `sandbox` |
 | `internal` | An unclassified internal error occurred. | Retry the request; if it persists, inspect the forkd or sandbox-server logs. | 500 | `Internal` | (none) |
 | `invalid_json` | The request body is not valid JSON. | Send a JSON body matching the sandbox API contract for this endpoint. | 400 | `InvalidArgument` | (none) |
 | `not_found` | No such sandbox. | Confirm the sandbox id exists and is Ready before calling. | 404 | `NotFound` | `sandbox` |
+| `rate_limited` | The caller exceeded the request rate limit for this sandbox or endpoint. | Back off and retry after the delay in the context retry_after_ms; this is a per-window request-rate limit, distinct from too_many_streams (the concurrent-stream ceiling). | 429 | `ResourceExhausted` | `sandbox`, `retry_after_ms` |
+| `timeout_too_large` | The requested timeout exceeds the server ceiling. | Request a timeout at or below the ceiling reported in the context (max_timeout_s); the server never silently reduces a requested timeout, it rejects it so the deadline you set is the deadline you get. | 400 | `InvalidArgument` | `sandbox`, `requested_s`, `max_timeout_s` |
 | `too_many_streams` | The sandbox is at its concurrent-stream limit. | Close an existing streaming exec, run_code, or PTY session for this sandbox before opening another, or raise the forkd --max-streams-per-sandbox ceiling. Existing streams are unaffected. | 429 | `ResourceExhausted` | `sandbox` |
 | `unauthorized` | The per-sandbox bearer token is missing or invalid. | Send Authorization: Bearer <token> with the per-sandbox token from the <name>-sandbox-token Secret. | 401 | `Unauthenticated` | (none) |
 
@@ -68,9 +73,37 @@ reviewer can diff the doc against the constants by eye.
 
 - `sandbox`: the sandbox id the call targeted.
 - `path`: the in-sandbox file path for a `file_failed` error.
+- `timeout_s`: the execution deadline (seconds) an `exec_timeout` hit.
+- `requested_s`: the timeout (seconds) the caller asked for on a `timeout_too_large` error.
+- `max_timeout_s`: the server ceiling (seconds) on a `timeout_too_large` error.
+- `retry_after_ms`: the back-off delay (milliseconds) a `rate_limited` caller should wait.
 
 A `context` map never contains a secret value, a bearer token, or a credential;
 only ids, paths, and operation names.
+
+## Timeout determinism and the timeout family
+
+A requested timeout is HONORED or REJECTED, never silently reduced (issue #216).
+The four timeout/cancel codes are discriminable so a caller can tell them apart
+without parsing a message:
+
+- `timeout_too_large` (400): the requested exec/run_code timeout exceeds the
+  server ceiling. The server rejects it with `requested_s` and `max_timeout_s`
+  in the context; it never clamps the value down behind the caller's back.
+- `exec_timeout` (504): the command ran past its requested (honored) timeout and
+  was terminated. This is the execution deadline, with `timeout_s` in context.
+- `idle_timeout` (410): the sandbox was reaped for inactivity, so a later call
+  hit a sandbox that is gone. Distinct from `not_found` (never existed).
+- `canceled` (499): the caller hung up or canceled the request context before it
+  completed.
+
+The exec/run_code timeout ceiling is the forkd / sandbox-server
+`--max-exec-timeout-seconds` flag, default 86400 (24 hours). A request that omits
+a timeout takes the per-endpoint default (exec 30s, run_code 60s); a request at
+or under the ceiling is honored exactly; a request over the ceiling is rejected
+with `timeout_too_large`. The SDKs validate the same ceiling client-side so an
+over-ceiling timeout is rejected before the request is sent, and map the server
+codes to typed exceptions (see below).
 
 ## SDK behavior
 
@@ -80,6 +113,24 @@ Both SDKs parse the envelope into a structured error so an agent can branch on
 - Python: `mitos.errors.AgentRunError` (`code`, `cause`, `remediation`,
   `status`, `context`).
 - TypeScript: `AgentRunError` (`code`, `errorCause`, `remediation`).
+
+Both SDKs additionally raise a TYPED subclass per code so a caller branches on
+the exception TYPE, never on the message. The factory parses the envelope and
+selects the subclass; an unknown code falls back to the base type. The mapping:
+
+| Code | Python type | TypeScript type |
+| --- | --- | --- |
+| `idle_timeout` | `IdleTimeoutError` | `IdleTimeoutError` |
+| `exec_timeout` | `ExecutionDeadlineError` | `ExecutionDeadlineError` |
+| `canceled` | `RequestCanceledError` | `RequestCanceledError` |
+| `timeout_too_large` | `TimeoutTooLargeError` | `TimeoutTooLargeError` |
+| `rate_limited` | `RateLimitedError` | `RateLimitedError` |
+| `not_found` | `NotFoundError` | `NotFoundError` |
+| `unauthorized` | `UnauthorizedError` | `UnauthorizedError` |
+
+The execution-deadline case is also reached when an `exec` returns the
+conventional timeout exit code 124: the SDKs raise `ExecutionDeadlineError` so
+"the command timed out" is a typed branch, not an exit-code comparison.
 
 Both redact any echo of the bearer token from a server body before it becomes
 the error `cause`, so a reflected token never surfaces in a message, log, or

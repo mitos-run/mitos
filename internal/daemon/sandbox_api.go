@@ -75,19 +75,64 @@ type SandboxAPI struct {
 	// close, deleting the entry at zero so the map does not grow across sandbox
 	// lifetimes.
 	openStreams map[string]int
+	// maxExecTimeout is the ceiling (seconds) on a requested exec or run_code
+	// timeout (issue #216). A request over the ceiling is REJECTED with the typed
+	// timeout_too_large code, never silently reduced, so a requested deadline is
+	// always honored or rejected. Defaults to defaultMaxExecTimeoutSeconds (24h),
+	// chosen to clear the exec_background one-day default. <=0 disables the
+	// ceiling (any timeout honored). Set via SetMaxExecTimeoutSeconds.
+	maxExecTimeout int
 }
+
+// defaultMaxExecTimeoutSeconds is the default ceiling on a requested exec or
+// run_code timeout: 24 hours. It clears the SDK exec_background one-day default
+// so a long-running background command is honored, while still bounding an
+// absurd requested deadline. The determinism rule (issue #216) is that a request
+// over this ceiling is rejected with timeout_too_large, never silently reduced.
+const defaultMaxExecTimeoutSeconds = 86400
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	return &SandboxAPI{
-		agents:       make(map[string]*vsock.Client),
-		tokens:       make(map[string]string),
-		vsockDir:     vsockDir,
-		streamPaths:  make(map[string]string),
-		lastActivity: make(map[string]time.Time),
-		now:          time.Now,
-		auditor:      NopAuditor{},
-		openStreams:  make(map[string]int),
+		agents:         make(map[string]*vsock.Client),
+		tokens:         make(map[string]string),
+		vsockDir:       vsockDir,
+		streamPaths:    make(map[string]string),
+		lastActivity:   make(map[string]time.Time),
+		now:            time.Now,
+		auditor:        NopAuditor{},
+		openStreams:    make(map[string]int),
+		maxExecTimeout: defaultMaxExecTimeoutSeconds,
 	}
+}
+
+// SetMaxExecTimeoutSeconds sets the ceiling on a requested exec or run_code
+// timeout (issue #216). A request over the ceiling is rejected with the typed
+// timeout_too_large code, never silently reduced. n<=0 disables the ceiling.
+// Must be called before the API serves requests; the field is not synchronized.
+func (api *SandboxAPI) SetMaxExecTimeoutSeconds(n int) {
+	api.maxExecTimeout = n
+}
+
+// checkTimeout enforces the requested-timeout ceiling for sandboxID and the
+// requested timeout (seconds). It returns nil when the timeout is honored (at or
+// under the ceiling, or the ceiling is disabled). When the timeout exceeds the
+// ceiling it returns the typed timeout_too_large Error (carrying the requested
+// value and the ceiling in context) so the caller can reject the request
+// deterministically rather than silently clamp it. A nil return is the
+// honored-timeout sentinel; the error is built only on the reject path so the
+// remediation static check never sees an empty Error literal.
+func (api *SandboxAPI) checkTimeout(sandboxID string, timeout int) *apierr.Error {
+	if api.maxExecTimeout <= 0 || timeout <= api.maxExecTimeout {
+		return nil
+	}
+	e := apierr.Get(apierr.CodeTimeoutTooLarge).
+		WithCause(fmt.Sprintf("requested timeout %ds exceeds the ceiling of %ds", timeout, api.maxExecTimeout)).
+		WithContext(map[string]any{
+			"sandbox":       sandboxID,
+			"requested_s":   timeout,
+			"max_timeout_s": api.maxExecTimeout,
+		})
+	return &e
 }
 
 // SetMaxStreamsPerSandbox sets the per-sandbox ceiling on concurrent OPEN
@@ -500,6 +545,12 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	// Determinism (issue #216): reject an over-ceiling timeout BEFORE any work,
+	// with the typed timeout_too_large code, rather than silently reducing it.
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
+		return
+	}
 	api.touch(req.Sandbox)
 
 	if _, err := api.getAgent(req.Sandbox); err != nil {
@@ -519,6 +570,20 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeExecFailed).WithCause(fmt.Sprintf("exec failed: %v", err)).
 			WithContext(map[string]any{"sandbox": req.Sandbox}))
+		return
+	}
+
+	// Execution-deadline discrimination (issue #216): the guest kills a command
+	// that ran past its deadline and reports the conventional 124 exit code. On
+	// the blocking /v1/exec path we surface that as the typed exec_timeout
+	// envelope (504), so a caller can branch on the deadline without comparing
+	// exit codes. The streaming path keeps 124 in the terminal frame (the status
+	// header is already 200), and the SDK maps that frame to the same typed
+	// error.
+	if exit.ExitCode == execTimeoutExitCode {
+		writeAPIErr(w, apierr.Get(apierr.CodeExecTimeout).
+			WithCause(fmt.Sprintf("command exceeded its %ds execution deadline and was terminated", execTimeoutSeconds(req.Timeout))).
+			WithContext(map[string]any{"sandbox": req.Sandbox, "timeout_s": execTimeoutSeconds(req.Timeout)}))
 		return
 	}
 
@@ -546,10 +611,30 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 // invoking onChunk per chunk and returning the terminal frame. It falls back to
 // the shared connection's aggregated Exec when no stream path is registered so
 // callers still work on hosts that have not wired streaming.
+// execTimeoutExitCode is the conventional exit code the guest agent reports for
+// a command killed because it ran past its execution deadline (matching the
+// shell `timeout` utility). It is the signal handleExec maps to the typed
+// exec_timeout envelope.
+const execTimeoutExitCode = 124
+
+// defaultExecTimeoutSeconds is the per-endpoint exec default applied when the
+// request omits a timeout. Kept here so the execution-deadline error reports the
+// deadline that was actually in force.
+const defaultExecTimeoutSeconds = 30
+
+// execTimeoutSeconds resolves the deadline that was in force for a request: the
+// requested value, or the default when the request omitted one.
+func execTimeoutSeconds(requested int) int {
+	if requested == 0 {
+		return defaultExecTimeoutSeconds
+	}
+	return requested
+}
+
 func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChunk vsock.ChunkFunc) (*vsock.ExecStreamFrame, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
-		timeout = 30
+		timeout = defaultExecTimeoutSeconds
 	}
 	sc, err := api.dialStream(req.Sandbox)
 	if err != nil {
@@ -579,6 +664,12 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, "invalid json", 400)
+		return
+	}
+	// Reject an over-ceiling timeout here, BEFORE the 200 stream header is
+	// written, so it surfaces as a clean enveloped 400, not a terminal frame.
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
 		return
 	}
 	api.touch(req.Sandbox)
@@ -670,6 +761,12 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 	var req runCodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, "invalid json", 400)
+		return
+	}
+	// Reject an over-ceiling timeout before any work, BEFORE the 200 stream
+	// header is written, so it surfaces as a clean enveloped 400 (issue #216).
+	if e := api.checkTimeout(req.Sandbox, req.Timeout); e != nil {
+		writeAPIErr(w, *e)
 		return
 	}
 	api.touch(req.Sandbox)

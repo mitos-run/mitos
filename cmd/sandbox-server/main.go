@@ -33,6 +33,10 @@ type server struct {
 	// to sandboxAPI at construction. Retained so the flag plumbing is observable
 	// without reaching into the daemon package's unexported state.
 	maxStreamsPerSandbox int
+	// maxExecTimeoutSecs is the ceiling (seconds) on a requested exec or run_code
+	// timeout applied to sandboxAPI at construction (issue #216). Retained so the
+	// flag plumbing is observable without reaching into the daemon package.
+	maxExecTimeoutSecs int
 	// forkGeneration is the monotonically increasing fork generation handed to
 	// the guest in each NotifyForked so a guest can tell forks apart. Atomic so
 	// concurrent forks get distinct generations.
@@ -42,7 +46,7 @@ type server struct {
 // newServer builds the standalone server and applies the SandboxAPI policy
 // (token mode, unix fallback, and the per-sandbox concurrent-stream cap). It is
 // the single construction seam main() and the flag-plumbing test share.
-func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox int) *server {
+func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, maxExecTimeoutSecs int) *server {
 	s := &server{
 		rootfsPath:           rootfsPath,
 		templates:            make(map[string]*templateInfo),
@@ -50,6 +54,7 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox i
 		mockMode:             mockMode,
 		sandboxAPI:           daemon.NewSandboxAPI(dataDir),
 		maxStreamsPerSandbox: maxStreamsPerSandbox,
+		maxExecTimeoutSecs:   maxExecTimeoutSecs,
 	}
 	// Standalone local-testing path: if the Firecracker vsock UDS does not
 	// exist, fall back to a guest agent running directly on the host
@@ -64,6 +69,10 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox i
 	// unbounded streaming exec/run_code/PTY connections and exhaust host vsock
 	// connections and goroutines. Apply the same cap forkd enforces.
 	s.sandboxAPI.SetMaxStreamsPerSandbox(maxStreamsPerSandbox)
+	// Requested-timeout ceiling (issue #216): a requested exec/run_code timeout
+	// over the ceiling is rejected with timeout_too_large, never silently
+	// reduced. The same ceiling forkd enforces.
+	s.sandboxAPI.SetMaxExecTimeoutSeconds(maxExecTimeoutSecs)
 	return s
 }
 
@@ -92,6 +101,7 @@ func main() {
 		mockMode             bool
 		auditLog             string
 		maxStreamsPerSandbox int
+		maxExecTimeoutSecs   int
 	)
 
 	flag.StringVar(&addr, "addr", ":8080", "Listen address")
@@ -102,6 +112,7 @@ func main() {
 	flag.BoolVar(&mockMode, "mock", false, "Mock mode (no KVM, simulated responses)")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the fork path. 0 disables the cap (unbounded, the prior behavior). Matches the forkd default of 16.")
+	flag.IntVar(&maxExecTimeoutSecs, "max-exec-timeout-seconds", 86400, "Ceiling (seconds) on a requested exec or run_code timeout (issue #216). A request over the ceiling is REJECTED with the typed timeout_too_large error, never silently reduced. Default 86400 (24h). 0 disables the ceiling. Matches the forkd default.")
 	flag.Parse()
 
 	if !mockMode && (kernelPath == "" || rootfsPath == "") {
@@ -114,7 +125,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	s := newServer(dataDir, rootfsPath, mockMode, maxStreamsPerSandbox)
+	s := newServer(dataDir, rootfsPath, mockMode, maxStreamsPerSandbox, maxExecTimeoutSecs)
 
 	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
 	if err != nil {

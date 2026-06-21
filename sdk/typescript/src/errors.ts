@@ -26,7 +26,10 @@ export class AgentRunError extends Error {
 
   constructor(message: string, opts: AgentRunErrorOptions) {
     super(message);
-    this.name = "AgentRunError";
+    // Use the concrete constructor name so a typed subclass (IdleTimeoutError,
+    // ExecutionDeadlineError, ...) reports itself; instanceof is the contract,
+    // this just makes logs and stack traces legible.
+    this.name = new.target.name;
     this.code = opts.code;
     this.errorCause = opts.cause;
     this.remediation = opts.remediation;
@@ -78,7 +81,114 @@ export class AgentRunError extends Error {
       // Not JSON; keep the status-derived defaults with the text body as cause.
     }
 
-    return new AgentRunError(message, { code, cause, remediation, context });
+    return errorForCode(message, { code, cause, remediation, context });
+  }
+}
+
+/**
+ * The sandbox was reaped after exceeding its idle timeout, so the call hit a
+ * sandbox that is no longer running. Distinct from NotFoundError (never existed)
+ * and ExecutionDeadlineError (a per-command deadline). Server code
+ * `idle_timeout` (HTTP 410).
+ */
+export class IdleTimeoutError extends AgentRunError {}
+
+/**
+ * A command or run_code execution ran past its requested timeout (its execution
+ * deadline) and was terminated. Distinct from IdleTimeoutError (sandbox
+ * inactivity). Server code `exec_timeout` (HTTP 504); also raised when an exec
+ * returns the conventional timeout exit code 124.
+ */
+export class ExecutionDeadlineError extends AgentRunError {}
+
+/**
+ * The request was canceled by the caller (the client hung up or the request was
+ * aborted) before it completed. Server code `canceled` (HTTP 499).
+ */
+export class RequestCanceledError extends AgentRunError {}
+
+/**
+ * The request rate limit was exceeded. Distinct from too_many_streams (a
+ * concurrent-stream ceiling): this is a per-window request-rate refusal. Server
+ * code `rate_limited` (HTTP 429); context.retry_after_ms carries the back-off.
+ */
+export class RateLimitedError extends AgentRunError {}
+
+/** No such sandbox. Server code `not_found` (HTTP 404). */
+export class NotFoundError extends AgentRunError {}
+
+/**
+ * The per-sandbox bearer token is missing or invalid. Server code `unauthorized`
+ * (HTTP 401).
+ */
+export class UnauthorizedError extends AgentRunError {}
+
+/**
+ * The requested timeout exceeds the server ceiling and was REJECTED, never
+ * silently reduced (the determinism rule, issue #216). Server code
+ * `timeout_too_large` (HTTP 400); context.max_timeout_s carries the ceiling.
+ */
+export class TimeoutTooLargeError extends AgentRunError {}
+
+// Maps the server error `code` (the apierr catalogue, docs/api/errors.md) to the
+// typed subclass a caller branches on. A code absent here yields the base
+// AgentRunError so an unknown or newly added code never breaks a client.
+const CODE_TO_CLASS: Record<
+  string,
+  new (message: string, opts: AgentRunErrorOptions) => AgentRunError
+> = {
+  idle_timeout: IdleTimeoutError,
+  exec_timeout: ExecutionDeadlineError,
+  canceled: RequestCanceledError,
+  rate_limited: RateLimitedError,
+  not_found: NotFoundError,
+  unauthorized: UnauthorizedError,
+  timeout_too_large: TimeoutTooLargeError,
+};
+
+/**
+ * Construct the typed AgentRunError subclass for a server `code`. An unknown
+ * code falls back to the base AgentRunError so a caller's `instanceof
+ * AgentRunError` keeps working as the catalogue grows (issue #216).
+ */
+export function errorForCode(
+  message: string,
+  opts: AgentRunErrorOptions,
+): AgentRunError {
+  const Cls = CODE_TO_CLASS[opts.code] ?? AgentRunError;
+  return new Cls(message, opts);
+}
+
+/**
+ * The exec/run_code timeout ceiling (seconds). Mirrors the server default
+ * (--max-exec-timeout-seconds, 24h): a requested timeout over it is REJECTED
+ * with a typed TimeoutTooLargeError, never silently reduced (issue #216).
+ */
+export const MAX_EXEC_TIMEOUT_SECONDS = 86400;
+
+/** The conventional exit code the guest reports for a command killed at its
+ * execution deadline (matching the shell `timeout` utility). */
+export const EXEC_TIMEOUT_EXIT_CODE = 124;
+
+/**
+ * Reject a requested timeout over the ceiling with a typed TimeoutTooLargeError
+ * (issue #216): the SDK never silently clamps a requested deadline, it rejects
+ * it so the deadline you set is the deadline you get.
+ */
+export function validateTimeout(timeoutSeconds: number): void {
+  if (timeoutSeconds > MAX_EXEC_TIMEOUT_SECONDS) {
+    throw new TimeoutTooLargeError(
+      `requested timeout ${timeoutSeconds}s exceeds the ceiling of ${MAX_EXEC_TIMEOUT_SECONDS}s`,
+      {
+        code: "timeout_too_large",
+        cause: `requested timeout ${timeoutSeconds}s exceeds the ceiling ${MAX_EXEC_TIMEOUT_SECONDS}s`,
+        remediation: `Request a timeout at or below the ceiling (${MAX_EXEC_TIMEOUT_SECONDS}s); the timeout is rejected, never silently reduced.`,
+        context: {
+          requested_s: timeoutSeconds,
+          max_timeout_s: MAX_EXEC_TIMEOUT_SECONDS,
+        },
+      },
+    );
   }
 }
 

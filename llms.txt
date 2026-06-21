@@ -51,6 +51,21 @@ Every error is:
   budget for that dimension is spent. The sandbox cannot widen its own budget;
   request a larger budget from the orchestrator or operator that created the
   sandbox, or proceed within the remaining budget reported by the Budget call.
+- `rate_limited` (HTTP 429): the request rate limit was exceeded. Back off and
+  retry after `context.retry_after_ms`. Distinct from `too_many_streams` (a
+  concurrent-stream ceiling): this is a per-window request-rate refusal.
+- `idle_timeout` (HTTP 410): the sandbox was reaped after exceeding its idle
+  timeout, so the call hit a sandbox that is gone. Distinct from `not_found`
+  (never existed): create a fresh sandbox (or fork from a checkpoint) and retry,
+  or raise the idle timeout / call set_timeout to keep it alive longer.
+- `exec_timeout` (HTTP 504): a command or run_code execution ran past its
+  requested timeout and was terminated. This is the execution deadline (the
+  context carries `timeout_s`); raise the call timeout or split the work.
+- `canceled` (HTTP 499): the request was canceled by the caller (the client
+  closed the connection or canceled the context). Retry if unintentional.
+- `timeout_too_large` (HTTP 400): the requested timeout exceeds the server
+  ceiling. The server REJECTS it (never silently reduces it); request a timeout
+  at or below `context.max_timeout_s`.
 - `exec_failed` (HTTP 500): the command could not be executed. Inspect `cause`;
   retry a transport error, otherwise check forkd logs for the guest agent state.
 - `file_failed` (HTTP 500): a file operation failed. Confirm the path exists and

@@ -1,6 +1,15 @@
 from mitos.aio import AsyncAgentRun, AsyncSandbox
 from mitos.client import AgentRun
-from mitos.errors import AgentRunError
+from mitos.errors import (
+    AgentRunError,
+    ExecutionDeadlineError,
+    IdleTimeoutError,
+    NotFoundError,
+    RateLimitedError,
+    RequestCanceledError,
+    TimeoutTooLargeError,
+    UnauthorizedError,
+)
 from mitos.sandbox import Sandbox
 from mitos.types import (
     Execution,
@@ -14,6 +23,13 @@ from mitos.types import (
 __all__ = [
     "AgentRun",
     "AgentRunError",
+    "ExecutionDeadlineError",
+    "IdleTimeoutError",
+    "NotFoundError",
+    "RateLimitedError",
+    "RequestCanceledError",
+    "TimeoutTooLargeError",
+    "UnauthorizedError",
     "AsyncAgentRun",
     "AsyncSandbox",
     "Sandbox",
