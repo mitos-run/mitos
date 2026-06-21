@@ -1296,6 +1296,11 @@ func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.
 			req.GPUCount = gpu.Count
 			req.GPUType = gpu.Type
 		}
+		// Thread the required isolation floor into placement (issue #40): a
+		// security-sensitive template never lands on a lower-assurance node (for
+		// example a hardware-kvm floor keeps the sandbox off a PVM node). The
+		// requireHardwareKvm flag is folded in as the strongest possible floor.
+		req.MinIsolationTier = MinIsolationTierFromSpec(template.Spec.MinIsolationTier, template.Spec.RequireHardwareKvm)
 	}
 	node, err := r.NodeRegistry.SelectNodeForFork(req)
 	if err != nil {

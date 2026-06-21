@@ -127,6 +127,9 @@ func (r *NodeRegistry) admitsRequest(node *NodeInfo, req ForkRequest) bool {
 	if !node.admitsGPU(req) {
 		return false
 	}
+	if !node.admitsTier(req) {
+		return false
+	}
 	avail, known := r.available(node)
 	if !known {
 		return true
@@ -157,4 +160,17 @@ func (n *NodeInfo) admitsGPU(req ForkRequest) bool {
 		return false
 	}
 	return n.GPUTotal-n.GPUUsed >= req.GPUCount
+}
+
+// admitsTier reports whether the node's declared isolation tier MEETS the
+// request's minimum assurance floor (issue #40). A request with no floor
+// (MinIsolationTier empty) is satisfied by ANY node, so the control is strictly
+// opt-in. A request with a floor is satisfied only by a node whose tier is at
+// least as strong: a hardware-kvm floor never admits a PVM (lower-assurance)
+// node, and an UNDECLARED node (empty tier) never admits a real floor
+// (fail-closed). This is the scheduling gate that keeps a security-sensitive
+// tenant off a weaker-isolation node; the node-side mechanism that earns a tier
+// is operational (docs/platforms/pvm-evaluation.md, docs/threat-model.md).
+func (n *NodeInfo) admitsTier(req ForkRequest) bool {
+	return n.IsolationTier.meets(req.MinIsolationTier)
 }

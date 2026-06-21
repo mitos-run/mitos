@@ -920,6 +920,34 @@ surface so it is not silently expanded when the device path lands.
 | Fork-with-device (no live fork of a GPU sandbox) | **refused by design (documented)** | A GPU sandbox CANNOT be live-forked while the device is attached. A snapshot/fork captures and restores guest RAM with `MAP_PRIVATE`, but a passthrough PCI device has live hardware state (queues, BARs, on-device memory, DMA mappings) that is NOT part of the guest RAM image and cannot be coherently duplicated into a fork; restoring two VMs that both believe they own the same physical GPU is incoherent and unsafe. This matches Modal's documented limitation (memory-snapshot fork is GPU-incompatible). The stance, stated like the issue requires: a GPU sandbox is NOT forkable with the GPU attached. The fork engine must fail closed on a fork of a GPU-attached sandbox when that path is built (the device must be detached first, or the sandbox forked only before attach). See `docs/platforms/gpu.md`. |
 | GPU-seconds metering integrity | **partial (accounting only; measurement hardware-gated)** | GPU-seconds is added as a billable unit (`internal/metering`, summed straight per sandbox since a GPU is exclusively assigned and never CoW-shared across forks). The accounting math is unit-tested. The REAL per-device GPU-second measurement (reading actual device-busy time) is hardware-gated and not implemented; today the field is the seam the usage pipeline (#211) and Stripe metering (#212) bill on, fed by wall-clock-held-device time, not on-device utilization. |
 
+### Isolation tiers: not every node is the same assurance (issue #40)
+
+mitos's default and strongest isolation is the hardware-virtualization microVM
+(KVM + Firecracker). Two WEAKER mechanisms exist as run-anywhere or fallback
+tiers, and the threat model's job is to make sure they are NEVER silently treated
+as equivalent to hardware virt:
+
+- **PVM** (Firecracker on the PVM kernel module, pagetable-based virtual machine,
+  Ant/Alibaba): runs guests in ring 3 via pagetable switching with NO VMX/SVM, so
+  Firecracker runs on a plain cloud VPS that exposes no `/dev/kvm` nested virt.
+  Ring-3 pagetable isolation is WEAKER than hardware virt: there is no VT-x/AMD-V
+  root-mode boundary, the host kernel runs out-of-tree patches, and the guest
+  shares more of the host's privilege machinery. PVM is EVALUATED, NOT ADOPTED
+  (`docs/platforms/pvm-evaluation.md`); this row exists so that if a PVM tier is
+  ever enabled it is a documented lower-assurance tier from day one.
+- **gVisor** (userspace-kernel syscall interposition): not a VM at all. The
+  software-isolation tier, relevant to the gVisor fallback and to ADR 0005 (raw
+  forkd is not multi-tenant). Weaker still than a VM boundary.
+
+The MITIGATION that makes a mixed fleet safe is a NODE isolation tier plus a
+per-pool/template assurance FLOOR, both shipped here:
+
+| Control | Status | Detail |
+|---|---|---|
+| Node isolation tier label | **mitigated (scheduling control)** | Each node declares its isolation assurance via the `mitos.run/isolation-tier` label (`hardware-kvm`, `pvm`, or `gvisor`), mirrored into the scheduler's `NodeInfo.IsolationTier` (`IsolationTierFromNodeLabels`). An UNDECLARED node is treated as the LOWEST assurance (fail-closed): it satisfies no floor. The tier is the node's property, never inferred from the workload. The node-side mechanism that legitimately earns a tier (real hardware virt, a PVM host kernel, a gVisor runtime) is operational and out of scope for the controller; a typo or unrecognized label value never promotes a node above its declared assurance. |
+| Required assurance floor (`minIsolationTier` / `requireHardwareKvm`) | **mitigated (scheduling control)** | A template sets `spec.minIsolationTier` (`hardware-kvm`/`pvm`/`gvisor`) or the convenience `spec.requireHardwareKvm: true`; the controller's node selection (`internal/controller/scheduler.go` `admitsTier`) admits ONLY nodes whose declared tier meets the floor. A floor is a minimum, so a stronger node still qualifies. A security-sensitive tenant requiring `hardware-kvm` therefore NEVER lands on a PVM or gVisor node, and when no node meets the floor the placement fails loudly with `ErrNoCapacity` (a relabel-or-relax remediation), never a silent downgrade. `requireHardwareKvm` can only tighten, never weaken, an explicit floor. Unit-tested: a hardware-kvm floor skips a PVM node, an undeclared node fails a real floor, and no floor uses any node. |
+| PVM / gVisor co-tenancy posture | **open (documented; opt-in only)** | A PVM or gVisor node is a LOWER-assurance tier and must NOT co-host security-sensitive multi-tenant work unless the operator explicitly opts in. The default posture for an untrusted multi-tenant pool is to set a `hardware-kvm` floor so it cannot be scheduled onto a weaker tier. PVM nodes additionally carry an out-of-tree host kernel (a larger and less-reviewed host TCB than a stock hardware-virt node); treat a PVM-node host escape as compromising that node, and dedicate PVM nodes to trusted or explicitly-lower-assurance workloads. The control above is the enforcement seam; the operator owns the policy decision of which tenants may use which tier. |
+
 ## 6. Secrets
 
 | Control | Status | Detail |

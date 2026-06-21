@@ -62,8 +62,17 @@ type NodeInfo struct {
 	// GPUType is the SKU the node advertises (for example "nvidia-a100"), matched
 	// against a typed GPU request. Empty on a CPU-only node.
 	GPUType string
-	TemplateIDs     []string
-	SnapshotIDs     []string
+
+	// IsolationTier is the assurance tier of the node's sandbox isolation (issue
+	// #40), declared via the mitos.run/isolation-tier node label and mirrored here
+	// so the scheduler can keep a tenant that REQUIRES a minimum assurance off a
+	// lower-assurance node (a security-sensitive pool never lands on a PVM node).
+	// Empty means the node has not declared a tier and is treated as the LOWEST
+	// assurance (fail-closed): it satisfies no isolation floor. See
+	// IsolationTierFromNodeLabels and docs/platforms/pvm-evaluation.md.
+	IsolationTier IsolationTier
+	TemplateIDs   []string
+	SnapshotIDs   []string
 	// TemplateDigests maps each held template id to its content-addressed
 	// snapshot manifest digest, as reported by the node's GetCapacity. Safe
 	// to log; used by the pool reconciler to record the digest in CRD status.
@@ -249,6 +258,12 @@ type ForkRequest struct {
 	GPUCount int32
 	// GPUType narrows a GPU request to nodes advertising this SKU (empty = any).
 	GPUType string
+	// MinIsolationTier is the minimum isolation assurance the sandbox requires
+	// (issue #40). When set, placement is restricted to nodes whose declared tier
+	// MEETS this floor, so a security-sensitive tenant never lands on a
+	// lower-assurance node (for example a hardware-kvm floor never selects a PVM
+	// node). Empty means no floor: the request schedules onto any healthy node.
+	MinIsolationTier IsolationTier
 }
 
 // SelectNodeForFork is the size- and GPU-aware node selection (issue #221). It
@@ -292,6 +307,9 @@ func (r *NodeRegistry) SelectNodeForFork(req ForkRequest) (*NodeInfo, error) {
 		return nil, fmt.Errorf("no healthy forkd nodes available")
 	}
 	if len(admitted) == 0 {
+		if req.MinIsolationTier != "" && !r.anyNodeMeetsTier(req.MinIsolationTier) {
+			return nil, fmt.Errorf("%w: no node meets the required isolation tier %q; label a qualifying node %s=%s, or relax the pool's minIsolationTier/requireHardwareKvm", ErrNoCapacity, req.MinIsolationTier, isolationTierNodeLabel, req.MinIsolationTier)
+		}
 		if req.GPUCount > 0 {
 			return nil, fmt.Errorf("%w: no GPU-capable node admits the request (count %d, type %q); add GPU nodes labeled %s or free GPU devices", ErrNoCapacity, req.GPUCount, req.GPUType, gpuNodeLabel)
 		}
@@ -362,6 +380,19 @@ func (r *NodeRegistry) denser(c, b *NodeInfo, snapshotID string) bool {
 		return cAvail > bAvail
 	}
 	return c.Name < b.Name
+}
+
+// anyNodeMeetsTier reports whether any HEALTHY node declares an isolation tier
+// that meets the floor (issue #40). It distinguishes "no node has the required
+// assurance at all" (a hard misconfiguration: relabel a node or relax the floor)
+// from a transient capacity shortage. Caller must hold at least the read lock.
+func (r *NodeRegistry) anyNodeMeetsTier(min IsolationTier) bool {
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.IsolationTier.meets(min) {
+			return true
+		}
+	}
+	return false
 }
 
 // NodesWithTemplate returns healthy nodes that hold the given template snapshot.

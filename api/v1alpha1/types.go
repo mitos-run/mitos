@@ -49,6 +49,30 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
 	Encrypted bool `json:"encrypted,omitempty"`
+
+	// MinIsolationTier requires the sandbox to be scheduled ONLY onto a node whose
+	// isolation assurance meets this floor (issue #40). Nodes declare their tier
+	// via the mitos.run/isolation-tier label; the controller filters node
+	// selection so a security-sensitive tenant never lands on a lower-assurance
+	// node. The tiers, strongest to weakest, are hardware-kvm (hardware
+	// virtualization microVM, the default posture), pvm (Firecracker on PVM,
+	// ring-3 pagetable isolation with no nested virt, a documented LOWER-assurance
+	// tier, evaluated not adopted, see docs/platforms/pvm-evaluation.md), and
+	// gvisor (userspace-kernel syscall interposition). A floor is a MINIMUM: a
+	// stronger node tier still satisfies a weaker floor. Empty means no floor (any
+	// healthy node), the default. See docs/threat-model.md.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
+	MinIsolationTier string `json:"minIsolationTier,omitempty"`
+
+	// RequireHardwareKvm is a convenience equivalent to
+	// minIsolationTier=hardware-kvm (issue #40): it pins the sandbox to a
+	// hardware-virtualization node and keeps it off any lower-assurance tier (PVM,
+	// gVisor). When both are set the STRONGER floor wins, so this flag can only
+	// tighten, never weaken, an explicit minIsolationTier. Defaults to false.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	RequireHardwareKvm bool `json:"requireHardwareKvm,omitempty"`
 }
 
 // BuildStepType is the kind of a declarative build step.
