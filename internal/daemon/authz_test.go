@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/pki"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/pki"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // newAuthzPKI builds a CA plus the forkd server leaf and returns the

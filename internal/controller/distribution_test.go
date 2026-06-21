@@ -6,11 +6,11 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"mitos.run/mitos/internal/daemon"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/pki"
 )
 
 // distMTLSPair builds a CA and the forkd server + controller client TLS configs

@@ -3,9 +3,9 @@ package daemon
 import (
 	"context"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/metering"
-	"github.com/paperclipinc/mitos/internal/volume"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/volume"
 )
 
 // ForkEngine is the interface both the real Firecracker engine

@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
-	"github.com/paperclipinc/mitos/internal/apierr"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // ptySubprotocol is the WebSocket subprotocol the PTY endpoint speaks. Clients

@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // defaultDriverPath is where guest/rootfs/build.sh installs kernel_driver.py.

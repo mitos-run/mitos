@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/cli/sandboxtable"
-	"github.com/paperclipinc/mitos/internal/metering"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/cli/sandboxtable"
+	"mitos.run/mitos/internal/metering"
 )
 
 // meteringFetcher returns the CoW-aware metering report a forkd serves at

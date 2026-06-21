@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // runPty drives handlePtyStream over an in-process pipe: it returns a writer to

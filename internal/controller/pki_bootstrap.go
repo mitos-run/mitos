@@ -7,11 +7,11 @@ import (
 	"encoding/pem"
 	"fmt"
 
-	"github.com/paperclipinc/mitos/internal/pki"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"mitos.run/mitos/internal/pki"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

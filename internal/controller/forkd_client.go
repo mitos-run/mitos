@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // isNotFound reports whether err (possibly wrapped) carries gRPC NotFound.

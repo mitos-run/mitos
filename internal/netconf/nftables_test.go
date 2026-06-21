@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"mitos.run/mitos/api/v1alpha1"
 )
 
 // TestRenderMetadataBlock asserts the metadata-block fragment drops the cloud

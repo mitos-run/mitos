@@ -7,9 +7,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/husk"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/husk"
 )
 
 // TestHuskActivationFailureReleasesClaimLabel is the regression for the orphaned

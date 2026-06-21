@@ -11,8 +11,8 @@ import (
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/facade"
+	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/facade"
 )
 
 // newExtTemplate builds a minimal valid upstream extension SandboxTemplate: the

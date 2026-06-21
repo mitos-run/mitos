@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/netconf"
+	"mitos.run/mitos/internal/netconf"
 )
 
 func TestNftPinnerElementSyntax(t *testing.T) {

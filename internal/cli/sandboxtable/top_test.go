@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/metering"
+	"mitos.run/mitos/internal/metering"
 )
 
 func TestFormatTopRendersCoWAwareRows(t *testing.T) {

@@ -21,11 +21,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/benchstat"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/metering"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/benchstat"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/vsock"
 )
 
 const (

@@ -3,9 +3,9 @@ package controller_test
 import (
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/controller"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"mitos.run/mitos/internal/controller"
 )
 
 // TestEnsurePoolSecretsRoleBindingCreatesNamespacedBinding proves the controller

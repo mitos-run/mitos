@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	forkdpb "mitos.run/mitos/proto/forkd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )

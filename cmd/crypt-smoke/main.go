@@ -41,7 +41,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 func main() {

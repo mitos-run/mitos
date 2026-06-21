@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // FinalizerTerminate guards a claim (and, later, a fork) so its backing VM is

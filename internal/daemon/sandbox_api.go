@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/apierr"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // SandboxAPI exposes HTTP endpoints for exec/files on sandboxes managed by this forkd.

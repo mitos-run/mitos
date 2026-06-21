@@ -11,11 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/cas"
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/volume"
-	"github.com/paperclipinc/mitos/internal/vsock"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,6 +18,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/volume"
+	"mitos.run/mitos/internal/vsock"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 var (

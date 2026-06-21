@@ -8,8 +8,8 @@ import (
 	"net"
 	"runtime"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/netconf"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/netconf"
 )
 
 // notSupportedManager is returned on non-Linux platforms. Tap devices and

@@ -17,7 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/paperclipinc/mitos/internal/mcp"
+	"mitos.run/mitos/internal/mcp"
 )
 
 func main() {

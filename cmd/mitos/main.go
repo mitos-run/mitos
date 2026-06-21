@@ -19,7 +19,7 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/paperclipinc/mitos/internal/agentcli"
+	"mitos.run/mitos/internal/agentcli"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func mkClaim(name, ns, pool string, phase v1alpha1.SandboxPhase, node, endpoint string, age time.Duration, now time.Time) v1alpha1.SandboxClaim {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func adapterClaim(name, sa string) *v1alpha1.SandboxClaim {

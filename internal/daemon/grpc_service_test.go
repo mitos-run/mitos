@@ -7,13 +7,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"mitos.run/mitos/internal/fork"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 func newTestClient(t *testing.T) (forkdpb.ForkDaemonClient, *fork.MockEngine) {

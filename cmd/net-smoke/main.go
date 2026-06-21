@@ -42,10 +42,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/dnsproxy"
-	"github.com/paperclipinc/mitos/internal/netconf"
-	"github.com/paperclipinc/mitos/internal/network"
+	"mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/network"
 )
 
 func main() {

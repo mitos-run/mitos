@@ -10,10 +10,10 @@ package controller_test
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
-	"github.com/paperclipinc/mitos/internal/eventfeed"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/eventfeed"
 )
 
 func revisionCreatedData(t *testing.T, sink *recordingSink) eventfeed.RevisionCreatedData {

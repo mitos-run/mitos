@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"mitos.run/mitos/api/v1alpha1"
 )
 
 // HostPort is a destination IP and TCP port from an egress allowlist.

@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/apierr"
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/daemon"
+	"mitos.run/mitos/internal/firecracker"
 )
 
 // sandbox-server is a standalone REST API. No Kubernetes required.

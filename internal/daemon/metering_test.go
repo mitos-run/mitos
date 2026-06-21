@@ -7,11 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/metering"
-	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/volume"
 )
 
 // readGauge extracts the current value of a registered prometheus gauge.

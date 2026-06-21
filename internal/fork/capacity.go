@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/metering"
+	"mitos.run/mitos/internal/metering"
 )
 
 // defaultMemoryReserveBytes is the OS/forkd reserve withheld from the reported

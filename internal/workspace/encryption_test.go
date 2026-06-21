@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/kms"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/kms"
+	"mitos.run/mitos/internal/storecrypt"
 )
 
 // newTestKMS returns a LocalKEK over a fixed 32-byte KEK so a test can wrap and

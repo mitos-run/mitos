@@ -30,9 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/firecracker"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/daemon"
+	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // fakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS CONNECT

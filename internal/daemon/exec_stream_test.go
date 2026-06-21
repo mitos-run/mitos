@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // startFakeStreamUDS serves the Firecracker UDS preamble then writes the given
