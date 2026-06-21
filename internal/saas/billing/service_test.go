@@ -179,3 +179,45 @@ func TestSoftCapFiresAlertHardCapSuspends(t *testing.T) {
 		t.Errorf("status after hard cap = %q, want suspended", st)
 	}
 }
+
+// TestDrawdownReplayReturnsSameSplit proves a replayed drawdown of the same
+// usage record is idempotent in its RESULT, not just in the ledger. The first
+// call debits the credit portion; a replay must report the SAME FromCredit /
+// Remaining, because returning FromCredit:0 (Remaining:cost) would tell the
+// caller to re-bill the whole cost via Stripe even though credit already
+// covered part of it: a double-bill. The ledger must be debited exactly once.
+func TestDrawdownReplayReturnsSameSplit(t *testing.T) {
+	led := NewMemCreditLedger()
+	// Seed credit larger than the record cost so the first drawdown is fully
+	// covered by credit (FromCredit == cost, Remaining == 0).
+	if err := led.Append(context.Background(), LedgerEntry{OrgID: "org1", Kind: KindTopUp, Amount: Money(100_000_000), Key: "seed", At: fixedNow()}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(Config{Ledger: led, Now: fixedNow})
+	rec := sampleRecord()
+
+	first, err := svc.Drawdown(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("first drawdown: %v", err)
+	}
+	if first.Cost <= 0 {
+		t.Fatalf("expected a positive cost, got %d", first.Cost)
+	}
+	if first.FromCredit != first.Cost || first.Remaining != 0 {
+		t.Fatalf("first: FromCredit=%d Remaining=%d, want fully credit-covered (FromCredit=Cost=%d, Remaining=0)", first.FromCredit, first.Remaining, first.Cost)
+	}
+
+	balAfterFirst, _ := led.Balance(context.Background(), "org1")
+
+	second, err := svc.Drawdown(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("replay drawdown: %v", err)
+	}
+	if second.FromCredit != first.FromCredit || second.Remaining != first.Remaining || second.Cost != first.Cost {
+		t.Fatalf("replay result %+v != first result %+v (idempotency must report the same split, not FromCredit:0)", second, first)
+	}
+	balAfterSecond, _ := led.Balance(context.Background(), "org1")
+	if balAfterSecond != balAfterFirst {
+		t.Fatalf("replay debited the ledger again: balance %d -> %d", balAfterFirst, balAfterSecond)
+	}
+}
