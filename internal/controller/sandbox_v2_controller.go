@@ -3,12 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	v1alpha2 "mitos.run/mitos/api/v1alpha2"
+	"mitos.run/mitos/internal/apierr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -121,6 +124,22 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, sb *v1alpha2.S
 // reconcileFromSandbox maps source.fromSandbox onto an owned SandboxFork (the
 // fork equivalent) and mirrors readyForks / per-child status back.
 func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, sb *v1alpha2.Sandbox) (ctrl.Result, error) {
+	// Capability-budget enforcement (issue #25): a self-initiated fork
+	// (source.fromSandbox = P) is admitted only while P's capability budget has
+	// room. An over-budget fork is rejected terminally with a typed
+	// BudgetExhausted condition BEFORE the fork is ever materialized, so no engine
+	// work is spent on a fork the creator's budget forbids.
+	admitted, reason, message, err := r.enforceForkBudget(ctx, sb)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !admitted {
+		return ctrl.Result{}, r.mirror(ctx, sb, v1alpha1.SandboxFailed, sandboxMirror{
+			reason:  reason,
+			message: message,
+		})
+	}
+
 	fork, err := r.ensureFork(ctx, sb)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -162,6 +181,127 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, sb *v1alph
 	m.reason = "ForksPending"
 	m.message = fmt.Sprintf("%d/%d children ready (forking from %q)", fork.Status.ReadyForks, fork.Spec.Replicas, sb.Spec.Source.FromSandbox.Name)
 	return ctrl.Result{}, r.mirror(ctx, sb, v1alpha1.SandboxRestoring, m)
+}
+
+// effectiveReplicas treats a zero (unset) replicas as one, matching the
+// kubebuilder default so an unset replicas counts as a single fork.
+func effectiveReplicas(sb *v1alpha2.Sandbox) int32 {
+	if sb.Spec.Replicas <= 0 {
+		return 1
+	}
+	return sb.Spec.Replicas
+}
+
+// enforceForkBudget enforces the source Sandbox P's capability budget for a
+// self-initiated fork (sb.Spec.Source.FromSandbox = P), issue #25. It admits
+// forks up to P.spec.budget.maxForks (depth-aggregate by replicas) and rejects
+// the ones beyond, ranking P's fork-children deterministically by
+// (creationTimestamp, name) so the decision is the same regardless of reconcile
+// order. It best-effort records P.status.budgetSpend.forks (the admitted count,
+// capped at the limit).
+//
+// It returns admitted=true (and proceeds the normal flow) when P does not exist,
+// when P has no budget, or when P.budget.maxForks is unset (unlimited): there is
+// no Sandbox-scoped fork budget to enforce in those cases.
+func (r *SandboxReconciler) enforceForkBudget(ctx context.Context, sb *v1alpha2.Sandbox) (bool, string, string, error) {
+	src := sb.Spec.Source.FromSandbox
+	if src == nil {
+		return true, "", "", nil
+	}
+
+	var parent v1alpha2.Sandbox
+	if err := r.Get(ctx, client.ObjectKey{Name: src.Name, Namespace: sb.Namespace}, &parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			// No source Sandbox to enforce a budget against; let the normal flow
+			// proceed (the fork reconciler surfaces a missing-source condition).
+			return true, "", "", nil
+		}
+		return false, "", "", fmt.Errorf("get source sandbox %s/%s for budget: %w", sb.Namespace, src.Name, err)
+	}
+
+	if parent.Spec.Budget == nil || parent.Spec.Budget.MaxForks == nil {
+		// Unlimited fork budget; admit.
+		return true, "", "", nil
+	}
+	limit := *parent.Spec.Budget.MaxForks
+
+	// All fork-children of P in the namespace (including sb), ranked
+	// deterministically by (creationTimestamp, name).
+	var siblings v1alpha2.SandboxList
+	if err := r.List(ctx, &siblings, client.InNamespace(sb.Namespace)); err != nil {
+		return false, "", "", fmt.Errorf("list fork-children of %s/%s for budget: %w", sb.Namespace, parent.Name, err)
+	}
+	children := make([]v1alpha2.Sandbox, 0, len(siblings.Items))
+	for i := range siblings.Items {
+		c := siblings.Items[i]
+		if c.Spec.Source.FromSandbox != nil && c.Spec.Source.FromSandbox.Name == parent.Name {
+			children = append(children, c)
+		}
+	}
+	sort.SliceStable(children, func(i, j int) bool {
+		ti, tj := children[i].CreationTimestamp, children[j].CreationTimestamp
+		if ti.Equal(&tj) {
+			return children[i].Name < children[j].Name
+		}
+		return ti.Before(&tj)
+	})
+
+	// Walk in rank order. priorForks accumulates the replicas of strictly-earlier
+	// children; sb is over budget when its prior allocation already meets the
+	// limit. totalAdmitted is the cumulative replicas admitted (capped at limit),
+	// the value mirrored into P.status.budgetSpend.forks.
+	var totalAdmitted int32
+	var sbPriorForks int32
+	var sbOverBudget bool
+	for i := range children {
+		c := &children[i]
+		prior := totalAdmitted
+		if c.UID == sb.UID {
+			sbPriorForks = prior
+			sbOverBudget = prior >= limit
+		}
+		if prior < limit {
+			room := limit - prior
+			reps := effectiveReplicas(c)
+			if reps > room {
+				reps = room
+			}
+			totalAdmitted += reps
+		}
+	}
+
+	// Best-effort record P.status.budgetSpend.forks (idempotent). A conflict is
+	// not fatal: the next reconcile of any child re-derives and re-records it.
+	if err := r.recordParentForkSpend(ctx, &parent, totalAdmitted); err != nil && !apierrors.IsConflict(err) {
+		return false, "", "", err
+	}
+
+	if sbOverBudget {
+		base := apierr.Get(apierr.CodeBudgetExhausted)
+		message := fmt.Sprintf(
+			"%s The forks budget dimension is exhausted: the limit is %d and 0 remain (%d forks of %q were already admitted ahead of this one). %s",
+			base.Message, limit, sbPriorForks, parent.Name, base.Remediation,
+		)
+		return false, "BudgetExhausted", message, nil
+	}
+	return true, "", "", nil
+}
+
+// recordParentForkSpend writes parent.status.budgetSpend.forks = forks
+// idempotently onto the source Sandbox status subresource. It returns nil when
+// the value already matches so a steady state does not write.
+func (r *SandboxReconciler) recordParentForkSpend(ctx context.Context, parent *v1alpha2.Sandbox, forks int32) error {
+	if parent.Status.BudgetSpend != nil && parent.Status.BudgetSpend.Forks == forks {
+		return nil
+	}
+	if parent.Status.BudgetSpend == nil {
+		parent.Status.BudgetSpend = &v1alpha2.SandboxBudgetSpend{}
+	}
+	parent.Status.BudgetSpend.Forks = forks
+	if err := r.Status().Update(ctx, parent); err != nil {
+		return fmt.Errorf("record budgetSpend.forks on sandbox %s/%s: %w", parent.Namespace, parent.Name, err)
+	}
+	return nil
 }
 
 // ensureClaim get-or-creates the SandboxClaim owned by a poolRef Sandbox,
