@@ -93,6 +93,10 @@ The async client mirrors the flat path: `await mitos.aio.create("python")` retur
 an `AsyncDirectSandbox` with the same `exec` / `run_code` / `files` / `create_pty`
 / `fork` / `terminate` surface over `httpx.AsyncClient`.
 
+The canonical copy-paste quickstart lives in [docs/quickstart.md](docs/quickstart.md);
+hosted signup, the free-tier credit, and the first API key come from the
+[self-serve onboarding funnel](docs/saas/onboarding.md).
+
 ### Python on Kubernetes (operators)
 
 On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxTemplate,
