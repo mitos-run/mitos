@@ -708,14 +708,11 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
-	// Fail fast with an LLM-legible, actionable message if the guest kernel is
-	// not staged where forkd boots from (issue #174, deploy-layer error rule).
-	// Every microVM boots from this image; without it the engine cannot fork, so
-	// surface the path and the likely cause (an unhealthy kernel-provisioner) at
-	// startup rather than failing opaquely on the first fork.
-	if err := validateKernelStaged(kernelPath); err != nil {
-		return nil, err
-	}
+	// The guest kernel is staged by the kernel-provisioner DaemonSet, which may
+	// still be running when forkd starts, so forkd must NOT fail startup on a
+	// missing kernel (that would crash-loop the builder before the kernel lands).
+	// The staged-kernel check lives in CreateTemplate, the build path that boots
+	// from the image, where the LLM-legible error (issue #174) is actionable.
 
 	if jailer.Enabled() {
 		jailer.DataDir = dataDir
@@ -1929,6 +1926,13 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 }
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
+	// A template boots a microVM from the staged guest kernel. Check it here, at
+	// the point of use, with an LLM-legible, actionable message (issue #174). This
+	// is deliberately not a startup check: forkd must come up while the
+	// kernel-provisioner DaemonSet is still staging the image.
+	if err := validateKernelStaged(e.kernelPath); err != nil {
+		return err
+	}
 	cfg := firecracker.DefaultVMConfig()
 
 	// Compute the content-addressed build plan (issue #220). Each init command is
