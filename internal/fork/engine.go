@@ -707,6 +707,14 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
+	// Fail fast with an LLM-legible, actionable message if the guest kernel is
+	// not staged where forkd boots from (issue #174, deploy-layer error rule).
+	// Every microVM boots from this image; without it the engine cannot fork, so
+	// surface the path and the likely cause (an unhealthy kernel-provisioner) at
+	// startup rather than failing opaquely on the first fork.
+	if err := validateKernelStaged(kernelPath); err != nil {
+		return nil, err
+	}
 
 	if jailer.Enabled() {
 		jailer.DataDir = dataDir
@@ -963,10 +971,33 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 func validateKVM() error {
 	info, err := os.Stat("/dev/kvm")
 	if err != nil {
-		return fmt.Errorf("/dev/kvm not found: %w", err)
+		// LLM-legible remediation (issue #28 / #174): name the device, the likely
+		// cause, and the fix so the operator (or an agent reading the log) knows
+		// exactly what to do.
+		return fmt.Errorf("/dev/kvm not found: %w; this node lacks a usable KVM device. Ensure it is a KVM worker with CPU virtualization exposed to the OS (Hetzner AX bare-metal, not Cloud) and the kvm + kvm_intel/kvm_amd modules loaded at boot; run `mitos doctor` for a full preflight", err)
 	}
 	if info.Mode()&os.ModeCharDevice == 0 {
-		return fmt.Errorf("/dev/kvm is not a character device")
+		return fmt.Errorf("/dev/kvm is not a character device; the KVM device is present but unusable. Confirm forkd has access to it (the DaemonSet mounts it as a CharDevice hostPath) and that KVM is functional on this node; run `mitos doctor` for a full preflight")
+	}
+	return nil
+}
+
+// validateKernelStaged confirms the guest kernel image is staged where forkd
+// boots every microVM from. The error is deliberately LLM-legible (issue #28 /
+// #174 deploy-layer rule): it names the exact path and points at the likely
+// cause, an unhealthy kernel-provisioner, so an operator or an agent reading the
+// startup log knows the precise fix instead of seeing an opaque boot failure on
+// the first fork.
+func validateKernelStaged(kernelPath string) error {
+	info, err := os.Stat(kernelPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("guest kernel missing at %s; is the kernel-provisioner (the kernel-stage DaemonSet) healthy? forkd boots every microVM from this image. Check that the kernel-stage pod on this node is Running and that --data-dir is a writable real filesystem; run `mitos doctor` for a full preflight", kernelPath)
+		}
+		return fmt.Errorf("cannot stat guest kernel at %s: %w; ensure --data-dir is a writable real filesystem and the kernel-provisioner staged the image there; run `mitos doctor` for a full preflight", kernelPath, err)
+	}
+	if info.IsDir() || info.Size() == 0 {
+		return fmt.Errorf("guest kernel at %s is empty or a directory, not a kernel image; the kernel-provisioner did not stage it correctly. Re-run the kernel-stage step and confirm it wrote a non-empty vmlinux; run `mitos doctor` for a full preflight", kernelPath)
 	}
 	return nil
 }

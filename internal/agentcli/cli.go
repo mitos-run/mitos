@@ -26,6 +26,8 @@ Usage:
   mitos auth keys create|ls|revoke               manage scoped API keys
   mitos dev up | down                            bring a local kind dev
                                                     cluster up or down
+  mitos doctor [-n namespace]                    run install/node preflight
+                                                    checks and print remediation
 
 Flags:
   --pool string      pool to create sandboxes from
@@ -80,6 +82,14 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 		return cmdAuth(ctx, args[1:], authServiceFor(backend), out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
+	case "doctor":
+		// doctor builds a real node + k8s probe (reads /dev, /proc, and the
+		// cluster), which the pure CLI dispatcher does not do; cmd/mitos
+		// intercepts doctor before agentcli.Run and runs it with a real probe.
+		// Reaching here means doctor was invoked through a path that did not wire
+		// the probe, so it reports that and returns nonzero.
+		fmt.Fprint(errw, "doctor: run via the mitos binary, which wires the node + cluster probe\n")
+		return 1
 	default:
 		fmt.Fprintf(errw, "unknown subcommand %q\n\n%s", args[0], usage)
 		return 2

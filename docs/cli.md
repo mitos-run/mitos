@@ -31,7 +31,37 @@ mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
 mitos dev up [--skip-cluster-create]           bring a local kind dev cluster
                                                   up with a mock control plane
 mitos dev down                                 delete the local kind dev cluster
+mitos doctor [-n namespace]                    run the node + install preflight
+                                                  and print remediation
 ```
+
+### Preflight: `mitos doctor`
+
+`mitos doctor` runs an install/node preflight (issue #174) and prints a report
+with an actionable, LLM-legible remediation per failing check. It is meant to run
+on a KVM worker node, or as an in-cluster Job, and exits non-zero if any check
+fails so it composes in an install pipeline.
+
+Checks:
+
+- `kvm-device`: `/dev/kvm` is present and a usable character device.
+- `kernel-module-nf_tables` / `-vhost_vsock` / `-tun`: the required kernel
+  modules are loaded.
+- `guest-kernel`: the guest kernel image is staged where forkd boots from
+  (default `/var/lib/mitos/vmlinux`).
+- `pki-secrets`: the controller minted `mitos-ca`, `mitos-forkd-tls`, and
+  `mitos-controller-tls`.
+- `image-pull-secret`: a pull secret is present (a WARN, not a fail: public
+  images still pull, only private registries need it).
+- `psa-privileged`: the install/pool namespace carries
+  `pod-security.kubernetes.io/enforce=privileged`.
+
+The cluster checks (PKI, pull secret, PSA) read object PRESENCE only, never a
+Secret's contents, so a report can never leak a secret value. The node checks
+are meaningful on a Linux KVM node; on a workstation they honestly report
+"absent". Without a reachable kubeconfig the cluster checks are skipped and the
+node checks still run. See `docs/platforms/host-prerequisites.md` for the
+host/kernel checklist `doctor` enforces.
 
 ### Workspace verbs (git-shaped)
 

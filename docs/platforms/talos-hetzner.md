@@ -110,9 +110,42 @@ From a workstation that has `talosctl` installed:
 talosctl gen config my-cluster https://<CONTROL_PLANE_IP>:6443 --output-dir _out
 ```
 
-This writes `_out/controlplane.yaml`, `_out/worker.yaml`, and
-`_out/talosconfig`. Keep `_out/talosconfig` safe; it is the cluster admin
-credential.
+This writes `_out/controlplane.yaml`, `_out/worker.yaml`, `_out/talosconfig`,
+and `_out/secrets.yaml`.
+
+### 3c.1. BACK UP THE CLUSTER SECRETS NOW (do not skip this)
+
+> **STOP. Back up `_out/talosconfig` and `_out/secrets.yaml` before you do
+> anything else.** `talosctl gen config` shows these ONCE; they are the cluster
+> admin credential and the cluster's root secrets (the etcd, Kubernetes, and
+> machine CA keys). If you lose them you CANNOT add a node, upgrade Talos or
+> Kubernetes, rotate certificates, or otherwise manage the cluster. Recovery
+> means rebuilding the cluster from scratch and reprovisioning every node.
+
+Treat this as a first-class install step, not a footnote:
+
+```bash
+# Store both files in a secret manager (1Password, Vault, AWS Secrets Manager,
+# sealed git-crypt repo). Do NOT leave them only on one workstation; a lost
+# laptop is a lost cluster.
+ls -l _out/talosconfig _out/secrets.yaml
+# Example: push to a vault (adapt to your secret manager).
+# vault kv put secret/mitos/<cluster>/talos talosconfig=@_out/talosconfig secrets=@_out/secrets.yaml
+```
+
+What each file is:
+
+- `_out/talosconfig`: the client credential `talosctl` uses to reach the Talos
+  machine API on every node. Without it you cannot drive `apply-config`,
+  `upgrade`, `bootstrap`, `health`, or `kubeconfig`.
+- `_out/secrets.yaml`: the cluster's root secrets bundle (the CA keys and
+  bootstrap tokens) that `gen config` derived the configs from. It is required to
+  regenerate a matching config for a NEW node you add later; a node generated
+  from a different secrets bundle will not join.
+
+(On a self-managed kubeadm control plane the equivalent is the CA keys under
+`/etc/kubernetes/pki` plus a working admin kubeconfig; back those up the same
+way. See `prerequisites.md`.)
 
 ### 3d. Apply the KVM worker patch
 
@@ -204,6 +237,14 @@ kubectl get nodes
 ## 4. Verifying KVM readiness on a worker node
 
 After the workers join the cluster, verify each worker is ready to run forkd.
+
+The fastest path is `mitos doctor`, which runs the full node + install preflight
+(`/dev/kvm`, the `nf_tables`/`vhost_vsock`/`tun` modules, the staged guest
+kernel, the PKI secrets, the pull secret, and the privileged PSA label) and
+prints a remediation per failing check. Run it on a worker or as an in-cluster
+Job; it exits non-zero on any failure. See `host-prerequisites.md` for the
+host/kernel checklist it enforces and the two failure modes a minimal kernel
+causes. The manual checks below remain useful for ad-hoc inspection.
 
 ### Check `/dev/kvm` is present
 
@@ -442,6 +483,8 @@ References:
 
 | Topic | Document |
 |-------|---------|
+| Host/kernel prerequisites + the two minimal-kernel failure modes | `docs/platforms/host-prerequisites.md` |
+| Distro-neutral node + install checklist and the running-on matrix | `docs/platforms/prerequisites.md` |
 | Talos machine config patches and rationale | `deploy/talos/README.md` |
 | Deploy manifests (kustomize base) | `deploy/kustomization.yaml` |
 | CLI reference (`mitos sandbox`, `mitos dev`) | `docs/cli.md` |
