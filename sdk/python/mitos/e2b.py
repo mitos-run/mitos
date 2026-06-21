@@ -51,7 +51,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 from mitos.direct import DirectSandbox, SandboxServer, create as _create
-from mitos.errors import NotFoundError, error_for_code
+from mitos.errors import NotFoundError
 from mitos.integrations import _mapping
 from mitos.types import Execution, ExecResult, FileInfo, Network
 
@@ -337,29 +337,12 @@ class Sandbox:
     def get_host(self, port: int) -> str:
         """E2B ``sandbox.get_host(port)`` -> preview URLs (issue #126).
 
-        NOT AVAILABLE: preview URLs (the auto-TLS proxy that turns a sandbox
-        port into a reachable host) are not built yet (issue #126). Rather than
-        fabricate a URL that would not resolve, this raises a clear typed
-        ``AgentRunError`` (the #216 envelope) naming the missing feature and its
-        remediation. When #126 lands this method maps onto the proxy with no
-        change to a caller's ``get_host`` call.
+        Returns a signed, expiring preview URL for ``port`` on this sandbox by
+        delegating to the native ``DirectSandbox.get_host`` (the per-sandbox
+        preview reverse proxy). A server that does not expose the preview proxy
+        raises a typed ``AgentRunError`` from the underlying call.
         """
-        raise error_for_code(
-            "preview_urls_unavailable",
-            "get_host is not available yet on mitos",
-            cause=(
-                "get_host returns a preview URL for a sandbox port, which "
-                "depends on the auto-TLS preview-URL proxy that is not built "
-                "yet (issue #126)"
-            ),
-            remediation=(
-                "Track issue #126 (preview URLs). Until it ships, reach the "
-                "sandbox over the sandbox-server API (exec / files / run_code) "
-                "or expose the port via your own ingress / port-forward; do not "
-                "rely on get_host."
-            ),
-            status=501,
-        )
+        return self._sb.get_host(port)
 
     def kill(self) -> None:
         """E2B ``sandbox.kill()`` -> ``DirectSandbox.terminate``.

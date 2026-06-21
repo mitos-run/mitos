@@ -325,6 +325,34 @@ class DirectSandbox:
         )
         raise_for_status(resp, token=self._api_key)
 
+    def get_host(self, port: int = 80) -> str:
+        """Return a signed, expiring preview URL for a port on this sandbox
+        (issue #126; E2B ``sandbox.get_host(port)`` maps onto this).
+
+        The URL has the shape ``https://<sandbox-id>.preview.<domain>/?token=...``
+        and is served by the per-sandbox preview reverse proxy: it routes the
+        vhost to this sandbox's backend, verifies the signed token plus the
+        per-sandbox bearer gate, and proxies to ``port`` inside the sandbox. The
+        token expires (Daytona style), so the URL stops working after its TTL.
+
+        The signing secret lives on the server, so the SDK asks the server to
+        mint the URL (POST /v1/preview) and returns it; the URL VALUE carries a
+        bearer credential and should be treated as a secret. A server that does
+        not yet expose the preview proxy returns a typed error.
+        """
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            raise ValueError(f"port {port!r} out of range 1-65535")
+        resp = self._http.post(
+            f"{self._server_url}/v1/preview",
+            json={"sandbox": self.id, "port": port},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+        url = resp.json().get("url", "")
+        if not url:
+            raise ValueError("server returned no preview URL")
+        return url
+
     def fork(self, n: int = 1, id: Optional[str] = None) -> list["DirectSandbox"]:
         """Fork this sandbox into n independent sibling copies on the server.
 

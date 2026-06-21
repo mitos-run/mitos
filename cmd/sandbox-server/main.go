@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/preview"
 )
 
 // sandbox-server is a standalone REST API. No Kubernetes required.
@@ -43,6 +44,13 @@ type server struct {
 	// the guest in each NotifyForked so a guest can tell forks apart. Atomic so
 	// concurrent forks get distinct generations.
 	forkGeneration atomic.Uint64
+	// previewSigner mints signed, expiring preview URLs for get_host(port)
+	// (issue #126). nil disables the /v1/preview route (no signing secret
+	// configured). previewDomain is the base domain for <id>.preview.<domain>.
+	// previewTTL is how long a minted URL stays valid.
+	previewSigner *preview.Signer
+	previewDomain string
+	previewTTL    time.Duration
 }
 
 // newServer builds the standalone server and applies the SandboxAPI policy
@@ -113,6 +121,8 @@ func main() {
 		auditLog             string
 		maxStreamsPerSandbox int
 		maxExecTimeoutSecs   int
+		previewDomain        string
+		previewTTLSecs       int
 	)
 
 	flag.StringVar(&addr, "addr", ":8080", "Listen address")
@@ -124,6 +134,8 @@ func main() {
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the fork path. 0 disables the cap (unbounded, the prior behavior). Matches the forkd default of 16.")
 	flag.IntVar(&maxExecTimeoutSecs, "max-exec-timeout-seconds", 86400, "Ceiling (seconds) on a requested exec or run_code timeout (issue #216). A request over the ceiling is REJECTED with the typed timeout_too_large error, never silently reduced. Default 86400 (24h). 0 disables the ceiling. Matches the forkd default.")
+	flag.StringVar(&previewDomain, "preview-domain", "", "Base domain for per-sandbox preview URLs (issue #126): get_host(port) mints https://<id>.preview.<domain>/?token=... . Requires MITOS_PREVIEW_SECRET (>=16 bytes). Empty disables the /v1/preview route. The preview reverse proxy that serves these URLs is a separate component (cmd/preview-proxy).")
+	flag.IntVar(&previewTTLSecs, "preview-ttl-seconds", 3600, "How long a minted preview URL stays valid (issue #126). Default 3600 (1h).")
 	flag.Parse()
 
 	if !mockMode && (kernelPath == "" || rootfsPath == "") {
@@ -137,6 +149,25 @@ func main() {
 	}
 
 	s := newServer(dataDir, rootfsPath, mockMode, maxStreamsPerSandbox, maxExecTimeoutSecs)
+
+	// Preview URLs (issue #126): enabled when a domain is set and the signing
+	// secret is present. The secret VALUE is never logged; only its presence is
+	// asserted. Disabled by default so the standalone server stays minimal.
+	if previewDomain != "" {
+		secret := os.Getenv("MITOS_PREVIEW_SECRET")
+		if secret == "" {
+			fmt.Fprintln(os.Stderr, "error: --preview-domain set but MITOS_PREVIEW_SECRET is empty (need >=16 bytes)")
+			os.Exit(1)
+		}
+		signer, err := preview.NewSigner([]byte(secret))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: preview signer: %v\n", err)
+			os.Exit(1)
+		}
+		s.previewSigner = signer
+		s.previewDomain = previewDomain
+		s.previewTTL = time.Duration(previewTTLSecs) * time.Second
+	}
 
 	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
 	if err != nil {
@@ -161,6 +192,8 @@ func main() {
 	mux.HandleFunc("POST /v1/fork", s.handleFork)
 	mux.HandleFunc("GET /v1/sandboxes", s.handleListSandboxes)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", s.handleTerminate)
+	// Preview URLs (issue #126): mint a signed, expiring URL for get_host(port).
+	mux.HandleFunc("POST /v1/preview", s.handlePreview)
 
 	// Exec and files go through SandboxAPI → vsock → guest agent
 	apiHandler := s.sandboxAPI.Handler()
@@ -461,6 +494,54 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 	s.sandboxAPI.UnregisterSandbox(id)
 	log.Printf("terminated sandbox %q", id)
 	resp(w, map[string]string{"status": "terminated", "id": id})
+}
+
+type previewReq struct {
+	Sandbox string `json:"sandbox"`
+	Port    int    `json:"port"`
+}
+
+// handlePreview mints a signed, expiring preview URL for a sandbox port (issue
+// #126, get_host(port)). The signing secret lives here, never in the SDK; the
+// minted URL VALUE is a bearer credential and is never logged. The reverse proxy
+// that serves the URL is cmd/preview-proxy.
+func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	if s.previewSigner == nil {
+		// Discriminable by HTTP status (501): preview is a server-side feature a
+		// caller cannot turn on. Reuse the internal catalogue entry's envelope
+		// shape but send 501 so the SDK can tell "not enabled" from a 500.
+		e := apierr.Get(apierr.CodeInternal).WithCause("preview URLs are not enabled on this server: start sandbox-server with --preview-domain and MITOS_PREVIEW_SECRET, or run the preview proxy (cmd/preview-proxy)")
+		e.Status = http.StatusNotImplemented
+		apierr.Encode(w, e)
+		return
+	}
+	var req previewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errResp(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Sandbox == "" {
+		errResp(w, "sandbox is required", http.StatusBadRequest)
+		return
+	}
+	if req.Port < 1 || req.Port > 65535 {
+		errResp(w, fmt.Sprintf("port %d out of range 1-65535", req.Port), http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	_, known := s.sandboxes[req.Sandbox]
+	s.mu.RUnlock()
+	if !known {
+		errResp(w, fmt.Sprintf("sandbox %q not found", req.Sandbox), http.StatusNotFound)
+		return
+	}
+	expiry := time.Now().Add(s.previewTTL)
+	url, err := preview.MintURL(s.previewSigner, s.previewDomain, req.Sandbox, req.Port, expiry)
+	if err != nil {
+		errResp(w, "could not mint preview URL", http.StatusInternalServerError)
+		return
+	}
+	resp(w, map[string]any{"url": url, "expires_unix": expiry.Unix()})
 }
 
 func resp(w http.ResponseWriter, v any) {

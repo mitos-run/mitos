@@ -114,6 +114,9 @@ class _FakeSandbox:
     def fork(self, n: int = 1, id=None):
         return [_FakeSandbox(id=f"child-{i}") for i in range(n)]
 
+    def get_host(self, port: int = 80) -> str:
+        return f"https://{self.id}.preview.example.com/?token=tok&port={port}"
+
     def terminate(self) -> None:
         self.terminated = True
 
@@ -225,21 +228,15 @@ def test_run_code_returns_rich_execution():
 
 
 # --------------------------------------------------------------------------
-# get_host: NOT available yet (depends on preview URLs, #126). Must raise a
-# clear typed error with remediation, NOT fake a URL.
+# get_host: preview URLs (#126). Delegates to the native DirectSandbox.get_host
+# and returns the signed preview URL.
 # --------------------------------------------------------------------------
 
 
-def test_get_host_raises_clear_typed_not_available_error():
-    sb = Sandbox(_FakeSandbox())
-    with pytest.raises(AgentRunError) as ei:
-        sb.get_host(3000)
-    err = ei.value
-    # Typed envelope: stable code, actionable remediation, no fabricated URL.
-    assert err.code == "preview_urls_unavailable"
-    assert "126" in (err.remediation + err.cause + str(err))
-    # It must NOT return a string that looks like a URL.
-    assert not str(err).startswith("http")
+def test_get_host_returns_preview_url():
+    sb = Sandbox(_FakeSandbox(id="sb-x"))
+    url = sb.get_host(3000)
+    assert url == "https://sb-x.preview.example.com/?token=tok&port=3000"
 
 
 # --------------------------------------------------------------------------

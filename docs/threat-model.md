@@ -1021,6 +1021,31 @@ and review artifact only.
 | Session and login | partial | Token-based session resolution, hashed at rest, constant-time (`internal/saas/session.go`). Browser-based OAuth login is a documented follow-up; `mitos auth login` is `--token` only today. |
 | Persistence | open | The account, org, membership, key, and session stores are IN-MEMORY for this slice (lost on restart, single-process). The Postgres store and its migrations are a documented follow-up behind the same `Store` interface. Do not run the front door as a stateful production service until that lands. |
 
+## 7c. Preview URL ingress: per-sandbox port exposure (issue #126)
+
+Preview URLs add a NEW public ingress that maps a per-sandbox hostname,
+`<sandbox-id>.preview.<domain>`, to a port INSIDE a running sandbox through a
+reverse proxy (`cmd/preview-proxy`, `internal/preview`). This is the E2B
+`get_host(port)` / Daytona signed-preview-URL surface. It is a deliberate,
+caller-initiated hole in the otherwise deny-by-default inbound posture (section
+4): a tenant who mints a preview URL is asking for that port to be reachable
+from the internet for the URL's lifetime. Design: docs/preview-urls.md.
+
+PRODUCTION GATE: this ingress is NOT cleared for production tenants until the
+external security review (issue #194) covers the public attack surface it adds.
+Until then it is a development and review artifact only. The CertMagic on-demand
+TLS path is NOT enabled in this slice (no public domain in CI); the routing and
+signed-URL logic are unit-tested without ACME.
+
+| Boundary | Status | Mechanism |
+|---|---|---|
+| Signed, expiring URL minting and verification | mitigated (unit-tested) | A preview token is a detached HMAC-SHA256 over `(sandboxID, port, expiry)`, base64url payload + tag, keyed by a server secret (`internal/preview/sign.go`). It reuses the SAME standard-library HMAC + `crypto/subtle` constant-time-compare core proven in `internal/captoken` and the W4 SigV4 signer; it is NOT a captoken because it needs no macaroon attenuation chain, only a single expiring binding. Verify rejects an expired token (never-accept-after-expiry, boundary-inclusive), a tampered payload or signature, and a token signed with a different key. The token VALUE and the server secret are bearer credentials: never logged, never in an error/condition, never on a host path. The signing path logs nothing. Unit-tested: round-trip, expiry-boundary, tamper (payload and signature), wrong-key, malformed (`internal/preview/sign_test.go`). |
+| Cross-sandbox token binding | mitigated (unit-tested) | The proxy parses the sandbox id from the vhost and requires the verified token to NAME THAT SAME sandbox: a token minted for sb-2 presented against sb-1's host is rejected with 403 even though it verifies cryptographically (`TestProxyRejectsWrongSandboxToken`). So a leaked URL is bound to exactly one sandbox and one port; it cannot be replayed against another sandbox. |
+| Per-sandbox token gate to the backend | mitigated | After token + binding checks pass, the proxy attaches the per-sandbox bearer token (the SAME `:9091` sandbox-API gate) to the upstream request and STRIPS the preview token from the forwarded query, so the sandbox backend never sees the preview bearer and is reached only with its own registered token (`internal/preview/proxy.go`). A request with no token is 401; an unknown vhost or a sandbox with no route is 404. |
+| Route table from Ready claims + GC on terminate | mitigated (unit-tested) | The route table maps a sandbox id to its backend `IP:port` and is built ONLY from Ready claims (`Status.Phase==Ready`, `Status.Endpoint` set); a claim that leaves the Ready set (terminate) has its route REAPED on the next sync, so a terminated sandbox is immediately unroutable (`RouteTable.Sync`, `internal/preview/route.go`). No route means 404, so a preview URL for a dead sandbox cannot proxy anywhere. Unit-tested add-on-ready / remove-on-terminate. The real controller wiring that feeds the table from the live claim watch is a thin documented follow-up; the table + GC logic is tested against an injectable claim source. |
+| Automatic TLS (CertMagic on-demand ACME) | open (behind an interface, NOT enabled) | TLS is wired behind the `preview.CertProvider` seam (`GetCertificate` per SNI host). This slice ships a self-signed test provider only; the production CertMagic on-demand-TLS adapter is documented but NOT compiled (real ACME needs a public domain, a `*.preview.<domain>` DNS record, and a reachable endpoint, none present in CI). The documented adapter gates issuance with a DecisionFunc that consults the route table, so the proxy only asks the CA for a hostname that resolves to a live Ready sandbox and is not a CA-rate-limit amplifier for arbitrary SNI. A self-signed cert is not browser-trusted and is never a production substitute. Bare-metal TLS story (self-hosted ACME / a maintainer-provided wildcard cert) is documented in docs/preview-urls.md. |
+| Ingress DoS / unbounded SNI | open | This slice does not add per-IP rate limiting or a global SNI cap at the preview ingress; an attacker could spray arbitrary `*.preview.<domain>` hostnames. The route-table DecisionFunc bounds ACME issuance to live sandboxes, but request-rate limiting at the edge and a connection cap are documented follow-ups, sequenced with the #213 abuse-control envelope and the #194 review before this ingress opens to untrusted tenants. |
+
 ## 8. What we explicitly do NOT claim
 
 - No pod-scoped Kubernetes mechanism (NetworkPolicy, PodSecurity, pod quotas)
