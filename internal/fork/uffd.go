@@ -26,7 +26,27 @@ type uffdMapping struct {
 	BaseHostVirtAddr uint64 `json:"base_host_virt_addr"`
 	Size             uint64 `json:"size"`
 	Offset           uint64 `json:"offset"`
-	PageSizeKiB      uint64 `json:"page_size_kib"`
+	// PageSize is the backing page size in BYTES (Firecracker's "page_size"
+	// field: 4096 for base pages, 2097152 for 2 MiB hugepages).
+	PageSize uint64 `json:"page_size"`
+	// PageSizeKiB is Firecracker's "page_size_kib" field. Despite the name,
+	// observed Firecracker v1.15 emits it in BYTES (e.g. 2097152 for a 2 MiB
+	// page), identical to page_size; it is parsed only as a fallback for a
+	// Firecracker version that omits page_size.
+	PageSizeKiB uint64 `json:"page_size_kib"`
+}
+
+// pageSizeBytes returns the region's backing page size in bytes, preferring the
+// unambiguous page_size field and falling back to page_size_kib (treated as bytes
+// as Firecracker emits it). Defaults to 4 KiB when neither is set.
+func (m uffdMapping) pageSizeBytes() uint64 {
+	if m.PageSize > 0 {
+		return m.PageSize
+	}
+	if m.PageSizeKiB > 0 {
+		return m.PageSizeKiB
+	}
+	return 4096
 }
 
 // containsAddr reports whether the region covers host address addr.

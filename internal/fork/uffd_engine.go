@@ -55,30 +55,44 @@ func (e *Engine) loadSnapshotUFFD(client *firecracker.Client, sandboxDir, memFil
 	}
 
 	// Firecracker connects to the socket during /snapshot/load, so the receiver
-	// must be accepting before the load call. Run it concurrently and synchronize
-	// on recvErr.
+	// must be accepting before the load call. Both the load PUT and the handshake
+	// run concurrently.
+	//
+	// CRITICAL ordering: Firecracker FAULTS guest memory DURING the load itself
+	// (restoring device state dereferences guest RAM), and blocks in the kernel
+	// (handle_userfault) until the handler services those faults. So Serve MUST be
+	// running before the load can complete. The sequence is: start the handshake
+	// receiver and the load PUT; once the handshake delivers the uffd, start Serve
+	// so the load's faults are handled; only then does the PUT return.
 	recvErr := make(chan error, 1)
 	go func() { recvErr <- h.receive() }()
 
-	if err := client.LoadSnapshotUFFD(vmStateFile, sockPath, overrides); err != nil {
+	putErr := make(chan error, 1)
+	go func() { putErr <- client.LoadSnapshotUFFD(vmStateFile, sockPath, overrides) }()
+
+	// Firecracker sends the uffd early in the load, before it faults; wait for it,
+	// then start serving so the load's device-restore faults are handled.
+	if err := <-recvErr; err != nil {
+		_ = h.Close()
+		<-putErr // let the load unwind so the FC process is reaped by the caller
+		return nil, fmt.Errorf("uffd handshake: %w", err)
+	}
+	go func() { _ = h.Serve() }()
+
+	if err := <-putErr; err != nil {
 		_ = h.Close()
 		return nil, fmt.Errorf("load snapshot (uffd): %w", err)
 	}
-	if err := <-recvErr; err != nil {
-		_ = h.Close()
-		return nil, fmt.Errorf("uffd handshake: %w", err)
-	}
 
+	// Now the snapshot is loaded (paused) with Serve handling lazy faults. Preload
+	// the hot-page set before the caller resumes, paying the lazy-fault tail up
+	// front. A page Serve already filled is tolerated (UFFDIO_COPY EEXIST).
 	if !isEmptyHot(hot) {
 		if _, err := h.Preload(*hot); err != nil {
 			_ = h.Close()
 			return nil, fmt.Errorf("uffd preload hot pages: %w", err)
 		}
 	}
-
-	// Serve the pages NOT preloaded for the life of the VM. Closing the handler
-	// (Terminate) unblocks and ends this goroutine.
-	go func() { _ = h.Serve() }()
 	return h, nil
 }
 

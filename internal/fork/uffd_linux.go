@@ -226,10 +226,7 @@ func (h *uffdHandler) copyPage(dst, fileOffset, pageSize uint64) error {
 func (h *uffdHandler) regionPageSize(addr uint64) uint64 {
 	for _, r := range h.regions {
 		if r.containsAddr(addr) {
-			if r.PageSizeKiB == 0 {
-				return 4096
-			}
-			return r.PageSizeKiB * 1024
+			return r.pageSizeBytes()
 		}
 	}
 	return 0
