@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"mitos.run/mitos/internal/benchstat"
+	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
@@ -37,6 +38,7 @@ const (
 	modeMetering    = "metering"
 	modeForkFanOut  = "fork-fanout"
 	modePrefetch    = "prefetch"
+	modePinning     = "pinning"
 	defaultFanOutNs = "1,4,16,64"
 )
 
@@ -70,7 +72,7 @@ func parseConfig(args []string) (config, error) {
 
 	var cfg config
 	var fanOutNs string
-	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering|fork-fanout|prefetch")
+	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt|metering|fork-fanout|prefetch|pinning")
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
 	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
@@ -87,8 +89,8 @@ func parseConfig(args []string) (config, error) {
 		return config{}, err
 	}
 
-	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering && cfg.mode != modeForkFanOut && cfg.mode != modePrefetch {
-		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering, modeForkFanOut, modePrefetch)
+	if cfg.mode != modeForkExec && cfg.mode != modeExecRT && cfg.mode != modeMetering && cfg.mode != modeForkFanOut && cfg.mode != modePrefetch && cfg.mode != modePinning {
+		return config{}, fmt.Errorf("invalid --mode %q: want %s, %s, %s, %s, %s, or %s", cfg.mode, modeForkExec, modeExecRT, modeMetering, modeForkFanOut, modePrefetch, modePinning)
 	}
 	if cfg.template == "" {
 		return config{}, fmt.Errorf("--template is required")
@@ -182,6 +184,13 @@ func run(cfg config) error {
 	// #167): fault count per resume and claim->first-exec, prefetch on vs off.
 	if cfg.mode == modePrefetch {
 		return runPrefetch(engine, cfg)
+	}
+
+	// Pinning mode measures the dynamic CPU pinning + launch RT priority win
+	// (issue #168): activate success rate and activate latency under a claim
+	// storm, pinning on vs off.
+	if cfg.mode == modePinning {
+		return runPinning(engine, cfg)
 	}
 
 	var result benchstat.Result
@@ -333,6 +342,41 @@ func runPrefetch(engine *fork.Engine, cfg config) error {
 	// referenced from the driver it belongs to.
 	_ = benchstat.PrefetchComparison{}
 	return nil
+}
+
+// runPinning measures the dynamic CPU pinning + launch RT priority win (issue
+// #168): activate success rate and activate latency under a claim storm,
+// pinning ON vs OFF. The headline number is the activate-success-rate lift
+// under storm; the aggregation (success rate + latency distribution per arm,
+// the on-vs-off lift) is the pure, unit-tested benchstat.AggregatePinning.
+//
+// HONEST GATING: the success-rate and latency numbers require Linux + KVM +
+// bare metal + a REAL claim storm (sched_setaffinity and the RT class are
+// Linux-only, and the density/activate-success effect only appears under real
+// contention). darwin cannot apply a pin at all (the cpupin applier is a no-op
+// stub there), so this mode refuses to emit a number off a supporting host. On
+// a non-KVM host the engine already failed to construct in run() before this is
+// reached; here we additionally refuse when the applier reports it cannot change
+// scheduler state (darwin) or when the claim-storm harness is not yet wired
+// (the bare-metal follow-up, #16). No number is fabricated.
+func runPinning(engine *fork.Engine, cfg config) error {
+	_ = engine
+	if !cpupin.NewApplier().Supported() {
+		return fmt.Errorf(
+			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM + bare metal (template=%q, iterations=%d)",
+			cfg.template, cfg.iterations,
+		)
+	}
+	// On a supporting (Linux/KVM) host the remaining piece is the claim-storm
+	// driver that forks under contention with pinning off then on, records each
+	// activation's ActivateOutcome, and hands both arms to AggregatePinning. That
+	// driver is the bare-metal follow-up (#16, tied to the chaos suite #163), so
+	// we surface a clear not-yet-wired signal rather than inventing outcomes.
+	_ = benchstat.PinningComparison{}
+	return fmt.Errorf(
+		"pinning mode (issue #168): the claim-storm activate-success driver is the bare-metal follow-up (#16, chaos suite #163); the pin-plan logic (internal/cpupin), the Linux-gated applier, and the on-vs-off aggregation (benchstat.AggregatePinning) are in place and unit-tested (template=%q, iterations=%d)",
+		cfg.template, cfg.iterations,
+	)
 }
 
 // runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork

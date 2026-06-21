@@ -133,3 +133,13 @@ func TestParseConfigPrefetch(t *testing.T) {
 		t.Errorf("mode = %q, want %q", cfg.mode, modePrefetch)
 	}
 }
+
+func TestParseConfigPinning(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "pinning", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.mode != modePinning {
+		t.Errorf("mode = %q, want %q", cfg.mode, modePinning)
+	}
+}

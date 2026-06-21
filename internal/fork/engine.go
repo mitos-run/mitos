@@ -16,6 +16,7 @@ import (
 
 	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
@@ -57,6 +58,13 @@ type Engine struct {
 	// production reader runs `nft -j list counter` and parses it via
 	// netconf.ParseEgressCounterBytes.
 	egressBytes func(tap string) int64
+
+	// pinCtl owns dynamic post-ready CPU pinning + launch RT priority for this
+	// engine's forks (issue #168). It is created lazily on the first pinning-
+	// enabled fork over a platform applier (Linux real, darwin no-op), so engines
+	// that never pin pay nothing. The pure plan it drives is in internal/cpupin.
+	pinCtl   *cpupin.Controller
+	pinCtlMu sync.Mutex
 
 	// casStore content-addresses every template snapshot for integrity
 	// verification (issue #9) and incremental transfer (Task 4). Rooted at
@@ -1263,6 +1271,14 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		}
 	}
 
+	// Launch-priority hook (issue #168): bump the vCPU threads to the launch
+	// scheduling priority BEFORE the resume burst, so the activate window runs
+	// elevated. The matching drop happens in the post-ready hook below. A no-op
+	// when pinning is off or off Linux. Best-effort: a failure to raise priority
+	// must not fail the fork (the fork is still correct, just unprioritized), so
+	// it is logged via the hook and the fork proceeds.
+	e.onLaunchStart(sandboxID, fcClient, opts)
+
 	// Resume the VM only AFTER the rootfs and volume drives are rebound, so the
 	// guest comes up already bound to its own per-fork rootfs clone and volume
 	// backings, never the shared template. Fail closed: a rejected resume means the
@@ -1271,6 +1287,14 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		cleanupFork()
 		return nil, fmt.Errorf("resume fork %s after drive rebind: %w", sandboxID, err)
 	}
+
+	// Post-ready pin hook (issue #168): NOW that the guest is up (resumed), pin
+	// the fork's vCPU threads per the pool policy and drop the launch priority.
+	// Pinning AFTER ready (never from startup) and leaving the launch burst
+	// unpinned is the Browser Use lesson. Best-effort: a pin failure leaves the
+	// fork unpinned (floating in the husk pod cpuset, correct just less dense),
+	// so it never fails the fork.
+	e.onGuestReady(sandboxID, fcClient, opts)
 
 	elapsed := time.Since(start)
 
@@ -1470,6 +1494,10 @@ func (e *Engine) Terminate(sandboxID string) error {
 	}
 	delete(e.sandboxes, sandboxID)
 	e.mu.Unlock()
+
+	// Release any CPU-pin reservation so the fork's physical core(s) free up for
+	// later forks (issue #168). No-op when the fork was never pinned.
+	e.forgetPin(sandboxID)
 
 	if sandbox.agentClient != nil {
 		sandbox.agentClient.Close()
@@ -2132,6 +2160,20 @@ type ForkOpts struct {
 	// engine prepares and attaches their backing drives; until that lands
 	// (Task 3) it carries them without acting on them.
 	Volumes []volume.Spec
+
+	// CPUPinning carries the pool's dynamic post-ready CPU pinning + launch RT
+	// priority config (issue #168). Nil (the default) leaves the fork unpinned,
+	// exactly the legacy behavior. When set and Enabled, the engine runs the
+	// post-ready pin hook after Resume: it bumps launch priority before the burst
+	// (a no-op stub off Linux), then pins the fork's vCPU threads and drops the
+	// bump once ready. The actual scheduler mutation is Linux-gated in
+	// internal/cpupin; on darwin every step is a no-op so this path stays
+	// honest and compiles.
+	CPUPinning *cpupin.Config
+
+	// VCPUs is the fork's vCPU count, used to size the pin plan (one physical core
+	// per vCPU). Zero means unknown and defaults to 1 in the pin hook.
+	VCPUs int
 }
 
 type NetworkOpts struct {

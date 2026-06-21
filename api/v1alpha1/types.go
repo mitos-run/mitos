@@ -396,6 +396,114 @@ type SandboxPoolSpec struct {
 	// the physically dedicated nodes (see docs/superpowers/plans/2026-06-18-dedicated-nodes.md).
 	// +optional
 	Placement *PoolPlacement `json:"placement,omitempty"`
+
+	// CPUPinning configures dynamic (post-ready) CPU pinning and a launch-time
+	// scheduling-priority bump for this pool's sandbox VMs (issue #168). When nil
+	// the pool keeps the default unpinned behavior: vCPU threads float across the
+	// husk pod's cpuset, scheduled by the kernel. When set, after a fork's guest
+	// is ready the node pins that fork's vCPU threads to specific physical cores
+	// (pairing both hyperthread siblings per vCPU) per the chosen Policy, for
+	// higher and more predictable density. The launch burst itself is left
+	// unpinned so the kernel can spread it across cores; pinning is applied only
+	// AFTER guest-ready. The pin stays inside the husk pod's cpuset, so it never
+	// regresses the husk pod cgroup model or the CoW memcg accounting (issue #33).
+	// +optional
+	CPUPinning *CPUPinningSpec `json:"cpuPinning,omitempty"`
+}
+
+// CPUPinningSpec configures dynamic post-ready CPU pinning and launch-time
+// scheduling priority for a pool's sandbox VMs (issue #168). The lessons baked
+// into the defaults: pinning vCPUs from startup hurts, so pin only AFTER the
+// guest is ready and leave the launch burst unpinned (spread across cores);
+// assign both hyperthread siblings of a physical core to one vCPU; and bump
+// scheduling priority during the launch window to cut activate loss.
+type CPUPinningSpec struct {
+	// Enabled turns dynamic post-ready CPU pinning on for this pool. When false
+	// (the default) vCPU threads float across the husk pod cpuset and nothing is
+	// pinned, exactly the legacy behavior.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Policy is the packing strategy used when computing the pin plan after
+	// guest-ready. Pack consolidates forks onto as few physical cores as possible
+	// for maximum density, never letting two tenants share a physical core. Spread
+	// distributes forks across distinct physical cores for lower contention. Only
+	// consulted when Enabled is true.
+	// +kubebuilder:validation:Enum=spread;pack
+	// +kubebuilder:default=pack
+	// +optional
+	Policy CPUPinningPolicy `json:"policy,omitempty"`
+
+	// SiblingPairing assigns both hyperthread siblings of a physical core to the
+	// same vCPU, so a vCPU thread and its sibling never serve two different
+	// tenants. Defaults to true; set false on a node with hyperthreading disabled
+	// or to pin per-logical-CPU.
+	// +kubebuilder:default=true
+	// +optional
+	SiblingPairing *bool `json:"siblingPairing,omitempty"`
+
+	// LaunchRtPriority bumps the Firecracker vCPU threads to an elevated (real
+	// time) scheduling priority during the activate window, then drops them back
+	// after guest-ready, to cut launch loss under a claim storm. Defaults to true.
+	// +kubebuilder:default=true
+	// +optional
+	LaunchRtPriority *bool `json:"launchRtPriority,omitempty"`
+}
+
+// CPUPinningPolicy is the packing strategy for the post-ready pin plan.
+type CPUPinningPolicy string
+
+const (
+	// CPUPinningPack consolidates forks onto as few physical cores as possible,
+	// for maximum density. No two tenants share a physical core.
+	CPUPinningPack CPUPinningPolicy = "pack"
+	// CPUPinningSpread distributes forks across distinct physical cores, for lower
+	// contention.
+	CPUPinningSpread CPUPinningPolicy = "spread"
+)
+
+// Normalized returns a copy of the spec with the documented defaults filled in,
+// so callers never special-case nil or zero values. It mirrors the kubebuilder
+// +default markers (the API server applies those; this is the in-process
+// equivalent used by the controller and the pin applier). A nil receiver
+// normalizes to disabled, the safe legacy behavior. The returned value's *bool
+// fields are non-nil so SiblingPairingEnabled and LaunchRtPriorityEnabled read
+// directly.
+func (s *CPUPinningSpec) Normalized() CPUPinningSpec {
+	out := CPUPinningSpec{Policy: CPUPinningPack}
+	t := true
+	out.SiblingPairing = &t
+	rt := true
+	out.LaunchRtPriority = &rt
+	if s == nil {
+		return out
+	}
+	out.Enabled = s.Enabled
+	if s.Policy != "" {
+		out.Policy = s.Policy
+	}
+	if s.SiblingPairing != nil {
+		v := *s.SiblingPairing
+		out.SiblingPairing = &v
+	}
+	if s.LaunchRtPriority != nil {
+		v := *s.LaunchRtPriority
+		out.LaunchRtPriority = &v
+	}
+	return out
+}
+
+// SiblingPairingEnabled reports whether both hyperthread siblings of a physical
+// core are assigned to one vCPU. It treats a nil pointer as the default (true).
+func (s CPUPinningSpec) SiblingPairingEnabled() bool {
+	return s.SiblingPairing == nil || *s.SiblingPairing
+}
+
+// LaunchRtPriorityEnabled reports whether the launch-window scheduling-priority
+// bump is on. It treats a nil pointer as the default (true).
+func (s CPUPinningSpec) LaunchRtPriorityEnabled() bool {
+	return s.LaunchRtPriority == nil || *s.LaunchRtPriority
 }
 
 // PoolPlacement pins a pool's husk pods to a dedicated node set (issue #172).
