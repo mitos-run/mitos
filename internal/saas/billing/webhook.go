@@ -3,12 +3,19 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"mitos.run/mitos/internal/apierr"
 )
+
+// ErrWebhookSignature marks a webhook failure caused by signature verification
+// (or a malformed/unattributable body), as opposed to an internal failure while
+// applying a verified event. ServeHTTP maps this to 401 and everything else to
+// 500, so a transient backend fault is never masked as a client auth failure.
+var ErrWebhookSignature = errors.New("billing: webhook signature verification failed")
 
 // WebhookEventType is the subset of Stripe webhook event types this slice acts
 // on. Stripe sends many more; the handler ignores the rest. The strings match
@@ -77,9 +84,10 @@ func NewWebhookHandler(svc *Service, verifier SignatureVerifier) *WebhookHandler
 func (h *WebhookHandler) Handle(ctx context.Context, payload []byte, signatureHeader string) (BillingStatus, error) {
 	ev, err := h.verifier.Verify(payload, signatureHeader)
 	if err != nil {
-		// The signature did not verify (or the body did not parse). Return the
-		// error WITHOUT echoing the payload or the header, so no secret leaks.
-		return "", fmt.Errorf("webhook verify: %w", err)
+		// The signature did not verify (or the body did not parse). Tag it with
+		// ErrWebhookSignature so ServeHTTP returns 401, and do NOT echo the payload
+		// or the header into the error, so no secret leaks.
+		return "", fmt.Errorf("webhook verify: %w: %w", ErrWebhookSignature, err)
 	}
 	dev, ok := dunningEventFor(ev.Type)
 	if !ok {
@@ -123,9 +131,17 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sig := r.Header.Get("Stripe-Signature")
 	if _, err := h.Handle(r.Context(), payload, sig); err != nil {
 		// Do NOT include err's detail in the public cause: it could reference the
-		// payload. A fixed, non-secret remediation string only.
-		apierr.Encode(w, apierr.Get(apierr.CodeUnauthorized).
-			WithCause("the webhook signature did not verify"))
+		// payload. A fixed, non-secret remediation string only. Distinguish a
+		// signature/verify failure (401, the caller's problem, non-retryable) from
+		// an internal failure applying a verified event (500, our problem; the
+		// truthful code lets Stripe retry and does not mask the fault as auth).
+		if errors.Is(err, ErrWebhookSignature) {
+			apierr.Encode(w, apierr.Get(apierr.CodeUnauthorized).
+				WithCause("the webhook signature did not verify"))
+			return
+		}
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
+			WithCause("the webhook could not be processed; it will be retried"))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
