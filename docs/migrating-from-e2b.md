@@ -94,7 +94,7 @@ against the standalone sandbox-server.
 | `sandbox.run_code(code)` | `DirectSandbox.run_code` (rich MIME `Result`) | Supported (needs a guest agent) |
 | `sandbox.set_timeout(seconds)` | `DirectSandbox.set_timeout` (issue #218) | Supported |
 | `sandbox.kill()` | `DirectSandbox.terminate` | Supported |
-| `sandbox.get_host(port)` | preview URLs | NOT YET: depends on issue [#126](https://github.com/mitos-run/mitos/issues/126) |
+| `sandbox.get_host(port)` | preview URLs (issue [#126](https://github.com/mitos-run/mitos/issues/126)) | Supported (needs the preview proxy deployed) |
 
 "needs a guest agent" means the op runs end-to-end only against a real guest
 over vsock (a KVM deployment, or `mitos dev up` with the engine). The bare
@@ -109,26 +109,22 @@ E2B's `files.make_dir(path)` maps to mitos `files.mkdir(path)`. The shim
 exposes `make_dir` so your E2B script does not change; under the hood it calls
 `mkdir`.
 
-## get_host is not available yet
+## get_host returns a signed preview URL
 
-`sandbox.get_host(port)` returns a preview URL for a sandbox port. mitos preview
-URLs (the auto-TLS proxy) are tracked in issue
-[#126](https://github.com/mitos-run/mitos/issues/126) and are not built yet.
-Calling `get_host` raises a typed `AgentRunError` (code
-`preview_urls_unavailable`) with remediation, rather than fabricating a URL that
-would not resolve:
+`sandbox.get_host(port)` returns a signed, expiring preview URL for a sandbox
+port, served by the per-sandbox preview reverse proxy (issue
+[#126](https://github.com/mitos-run/mitos/issues/126)):
 
 ```python
-from mitos.errors import AgentRunError
-
-try:
-    sandbox.get_host(3000)
-except AgentRunError as err:
-    print(err.code)          # preview_urls_unavailable
-    print(err.remediation)   # track #126; reach the port over the API or your own ingress
+url = sandbox.get_host(3000)   # https://<sandbox-id>.preview.<domain>/?token=...
 ```
 
-When #126 lands, `get_host` maps onto the proxy with no change to your call.
+The server mints the URL (the signing secret stays server-side) and the token
+expires (Daytona style), so treat the URL value as a credential. The URL
+resolves once the preview proxy is deployed and routing to the sandbox; the
+proxy is not part of the default install yet, so a server that does not expose
+it raises a typed `AgentRunError` from the call rather than fabricating a URL
+that would not resolve.
 
 ## What you gain beyond E2B parity
 
