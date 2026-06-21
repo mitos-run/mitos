@@ -408,6 +408,16 @@ func decodeManifest(data []byte) (Manifest, error) {
 	for _, fj := range mj.Files {
 		fe := FileEntry{Name: fj.Name, Size: fj.Size}
 		for _, cj := range fj.Chunks {
+			// Validate the digest is a well-formed sha256 before trusting it: a
+			// manifest can arrive from an untrusted peer over the snapshot-pull
+			// transport, and chunkPath joins the digest into a filesystem path. An
+			// unvalidated digest like "../../etc/passwd" would traverse out of the
+			// store (streaming the target file to the output before the post-read
+			// verify fails) and a sub-2-char digest would panic chunkPath. Fail
+			// closed at the decode boundary.
+			if err := cj.Digest.Validate(); err != nil {
+				return Manifest{}, fmt.Errorf("manifest file %q: %w", fj.Name, err)
+			}
 			fe.Chunks = append(fe.Chunks, ChunkRef(cj))
 		}
 		m.Files = append(m.Files, fe)
