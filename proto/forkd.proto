@@ -29,6 +29,14 @@ service ForkDaemon {
   rpc Terminate(TerminateRequest) returns (TerminateResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
 
+  // Volume reclamation. ListVolumes enumerates per-sandbox volume backing dirs
+  // on this node by scanning disk (not the live sandbox map), so a backing dir
+  // whose sandbox is gone is still reported. ReclaimVolume removes one such
+  // backing dir. The controller GC uses the pair to sweep volume orphans the
+  // same way it sweeps VM orphans.
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  rpc ReclaimVolume(ReclaimVolumeRequest) returns (ReclaimVolumeResponse);
+
   // File operations
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
@@ -270,6 +278,34 @@ message SandboxInfo {
   int64 last_activity_unix = 3;
   int64 uptime_seconds = 4;
 }
+
+// --- Volume reclamation ---
+
+message ListVolumesRequest {}
+
+message ListVolumesResponse {
+  repeated VolumeInfo volumes = 1;
+}
+
+// VolumeInfo describes one per-sandbox volume backing directory on disk. It is
+// keyed by the sandbox id (the directory name under sandboxes/<id>/volumes), so
+// the controller can match it against the same live-claim and desired-alive
+// sets it uses for VM orphans. age_seconds is derived from the directory mtime
+// so a freshly-prepared backing whose claim status has not landed yet can be
+// protected by the same OrphanGrace the VM sweep uses.
+message VolumeInfo {
+  string sandbox_id = 1;
+  int64 age_seconds = 2;
+}
+
+message ReclaimVolumeRequest {
+  // sandbox_id names the per-sandbox volume backing dir to remove
+  // (sandboxes/<sandbox_id>/volumes and its sandbox dir). It is validated
+  // against the same path-safe pattern as a sandbox id before any path is built.
+  string sandbox_id = 1;
+}
+
+message ReclaimVolumeResponse {}
 
 // --- File operations ---
 

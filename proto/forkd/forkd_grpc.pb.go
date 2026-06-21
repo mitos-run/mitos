@@ -31,6 +31,8 @@ const (
 	ForkDaemon_ExecStream_FullMethodName     = "/forkd.ForkDaemon/ExecStream"
 	ForkDaemon_Terminate_FullMethodName      = "/forkd.ForkDaemon/Terminate"
 	ForkDaemon_ListSandboxes_FullMethodName  = "/forkd.ForkDaemon/ListSandboxes"
+	ForkDaemon_ListVolumes_FullMethodName    = "/forkd.ForkDaemon/ListVolumes"
+	ForkDaemon_ReclaimVolume_FullMethodName  = "/forkd.ForkDaemon/ReclaimVolume"
 	ForkDaemon_ReadFile_FullMethodName       = "/forkd.ForkDaemon/ReadFile"
 	ForkDaemon_WriteFile_FullMethodName      = "/forkd.ForkDaemon/WriteFile"
 	ForkDaemon_ListDir_FullMethodName        = "/forkd.ForkDaemon/ListDir"
@@ -61,6 +63,13 @@ type ForkDaemonClient interface {
 	ExecStream(ctx context.Context, in *ExecStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecStreamResponse], error)
 	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
 	ListSandboxes(ctx context.Context, in *ListSandboxesRequest, opts ...grpc.CallOption) (*ListSandboxesResponse, error)
+	// Volume reclamation. ListVolumes enumerates per-sandbox volume backing dirs
+	// on this node by scanning disk (not the live sandbox map), so a backing dir
+	// whose sandbox is gone is still reported. ReclaimVolume removes one such
+	// backing dir. The controller GC uses the pair to sweep volume orphans the
+	// same way it sweeps VM orphans.
+	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
+	ReclaimVolume(ctx context.Context, in *ReclaimVolumeRequest, opts ...grpc.CallOption) (*ReclaimVolumeResponse, error)
 	// File operations
 	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error)
 	WriteFile(ctx context.Context, in *WriteFileRequest, opts ...grpc.CallOption) (*WriteFileResponse, error)
@@ -206,6 +215,26 @@ func (c *forkDaemonClient) ListSandboxes(ctx context.Context, in *ListSandboxesR
 	return out, nil
 }
 
+func (c *forkDaemonClient) ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVolumesResponse)
+	err := c.cc.Invoke(ctx, ForkDaemon_ListVolumes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forkDaemonClient) ReclaimVolume(ctx context.Context, in *ReclaimVolumeRequest, opts ...grpc.CallOption) (*ReclaimVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReclaimVolumeResponse)
+	err := c.cc.Invoke(ctx, ForkDaemon_ReclaimVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forkDaemonClient) ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReadFileResponse)
@@ -270,6 +299,13 @@ type ForkDaemonServer interface {
 	ExecStream(*ExecStreamRequest, grpc.ServerStreamingServer[ExecStreamResponse]) error
 	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
 	ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error)
+	// Volume reclamation. ListVolumes enumerates per-sandbox volume backing dirs
+	// on this node by scanning disk (not the live sandbox map), so a backing dir
+	// whose sandbox is gone is still reported. ReclaimVolume removes one such
+	// backing dir. The controller GC uses the pair to sweep volume orphans the
+	// same way it sweeps VM orphans.
+	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
+	ReclaimVolume(context.Context, *ReclaimVolumeRequest) (*ReclaimVolumeResponse, error)
 	// File operations
 	ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error)
 	WriteFile(context.Context, *WriteFileRequest) (*WriteFileResponse, error)
@@ -321,6 +357,12 @@ func (UnimplementedForkDaemonServer) Terminate(context.Context, *TerminateReques
 }
 func (UnimplementedForkDaemonServer) ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSandboxes not implemented")
+}
+func (UnimplementedForkDaemonServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVolumes not implemented")
+}
+func (UnimplementedForkDaemonServer) ReclaimVolume(context.Context, *ReclaimVolumeRequest) (*ReclaimVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReclaimVolume not implemented")
 }
 func (UnimplementedForkDaemonServer) ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadFile not implemented")
@@ -564,6 +606,42 @@ func _ForkDaemon_ListSandboxes_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ForkDaemon_ListVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForkDaemonServer).ListVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ForkDaemon_ListVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForkDaemonServer).ListVolumes(ctx, req.(*ListVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ForkDaemon_ReclaimVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReclaimVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForkDaemonServer).ReclaimVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ForkDaemon_ReclaimVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForkDaemonServer).ReclaimVolume(ctx, req.(*ReclaimVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ForkDaemon_ReadFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReadFileRequest)
 	if err := dec(in); err != nil {
@@ -686,6 +764,14 @@ var ForkDaemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSandboxes",
 			Handler:    _ForkDaemon_ListSandboxes_Handler,
+		},
+		{
+			MethodName: "ListVolumes",
+			Handler:    _ForkDaemon_ListVolumes_Handler,
+		},
+		{
+			MethodName: "ReclaimVolume",
+			Handler:    _ForkDaemon_ReclaimVolume_Handler,
 		},
 		{
 			MethodName: "ReadFile",

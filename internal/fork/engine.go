@@ -652,6 +652,16 @@ type SandboxRecord struct {
 	CreatedAt time.Time
 }
 
+// VolumeRecord is the minimal view of one per-sandbox volume backing directory
+// an engine reports through ListVolumes: the sandbox id the directory is keyed
+// by, and the directory's age (now minus its mtime). The controller GC uses the
+// id to match the backing against its desired-alive and live-claim sets, and
+// the age to honor OrphanGrace, exactly as it does for a VM.
+type VolumeRecord struct {
+	SandboxID string
+	Age       time.Duration
+}
+
 // NewEngine builds the real KVM-backed engine. A zero jailer config
 // launches Firecracker directly (development only; flagged in the threat
 // model); with JailerBin set every VM runs through the jailer with a
@@ -1429,6 +1439,61 @@ func (e *Engine) ListSandboxes() []SandboxRecord {
 		records = append(records, SandboxRecord{ID: s.ID, CreatedAt: s.CreatedAt})
 	}
 	return records
+}
+
+// ListVolumes scans the on-disk per-sandbox backing layout
+// (<dataDir>/sandboxes/<id>/volumes) and reports one VolumeRecord per sandbox
+// id whose volumes dir exists. It is deliberately disk-driven, not map-driven:
+// the orphan case is exactly a backing dir whose sandbox the engine no longer
+// holds in memory (a forkd crash mid-terminate, or a missed terminate), so a
+// map walk would miss it. The id is the dir name; age is now minus the volumes
+// dir mtime, used by the controller to honor OrphanGrace. A missing sandboxes
+// root is not an error (no forks have run): it yields an empty list.
+func (e *Engine) ListVolumes() []VolumeRecord {
+	root := filepath.Join(e.dataDir, "sandboxes")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		// No sandboxes dir yet, or it cannot be read: nothing to reclaim.
+		return nil
+	}
+	now := time.Now()
+	records := make([]VolumeRecord, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		sandboxID := ent.Name()
+		volumesDir := filepath.Join(root, sandboxID, "volumes")
+		info, err := os.Stat(volumesDir)
+		if err != nil || !info.IsDir() {
+			// This sandbox dir has no volumes backing: nothing to reclaim here.
+			continue
+		}
+		records = append(records, VolumeRecord{
+			SandboxID: sandboxID,
+			Age:       now.Sub(info.ModTime()),
+		})
+	}
+	return records
+}
+
+// ReclaimVolume removes the per-sandbox volume backing for sandboxID via the
+// volume backend, then removes the sandbox dir itself, mirroring the terminate
+// cleanup path. It is the volume-orphan counterpart to Terminate and is only
+// expected to be called for a sandbox the engine no longer holds (the
+// controller GC guards on the claim object being gone). sandboxID is validated
+// at the gRPC boundary before it reaches here. A missing dir is not an error.
+func (e *Engine) ReclaimVolume(sandboxID string) error {
+	if e.volBackend != nil {
+		if err := e.volBackend.Cleanup(sandboxID); err != nil {
+			return fmt.Errorf("reclaim volume %s: %w", sandboxID, err)
+		}
+	}
+	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
+	if err := os.RemoveAll(sandboxDir); err != nil {
+		return fmt.Errorf("reclaim volume %s: remove sandbox dir: %w", sandboxID, err)
+	}
+	return nil
 }
 
 // GetCapacity returns the current node capacity. Memory is CoW-aware: forks of

@@ -32,6 +32,14 @@ var (
 		Help: "Number of orphan sandbox VMs terminated by the garbage collector.",
 	})
 
+	// volumeOrphanSweepsTotal counts per-sandbox volume backings reclaimed by the
+	// GC volume-orphan sweep (a backing whose claim object is gone). It is the
+	// volume counterpart to orphanSweepsTotal.
+	volumeOrphanSweepsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mitos_volume_orphan_sweeps_total",
+		Help: "Number of orphan volume backings reclaimed by the garbage collector.",
+	})
+
 	// claimErrorsTotal counts terminal claim failures, labeled by pool and a
 	// coarse reason (fork, secret, volume, token). Reasons are fixed strings,
 	// never error text, so no secret or path leaks into a label value.
@@ -129,6 +137,7 @@ func init() {
 	ctrlmetrics.Registry.MustRegister(
 		claimPendingTotal,
 		orphanSweepsTotal,
+		volumeOrphanSweepsTotal,
 		claimErrorsTotal,
 		poolReadySnapshots,
 		poolWarmDormant,
@@ -152,6 +161,12 @@ func recordClaimPending() {
 // recordOrphanSweep bumps the orphan-sweep counter once per reaped VM.
 func recordOrphanSweep() {
 	orphanSweepsTotal.Inc()
+}
+
+// recordVolumeOrphanSweep bumps the volume-orphan-sweep counter once per
+// reclaimed volume backing.
+func recordVolumeOrphanSweep() {
+	volumeOrphanSweepsTotal.Inc()
 }
 
 // recordClaimError bumps the per-pool, per-reason claim-error counter. reason

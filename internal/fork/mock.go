@@ -33,6 +33,15 @@ type MockEngine struct {
 	// terminated records every sandbox ID passed to Terminate, in call order,
 	// so tests can assert a VM was reaped even after it leaves the live map.
 	terminated []string
+	// volumes maps a sandbox id to the create-time of its volume backing dir.
+	// The mock prepares no real files, so this in-memory set stands in for the
+	// on-disk sandboxes/<id>/volumes layout the real engine scans. InjectVolume
+	// seeds an entry with a chosen age so the GC volume-orphan sweep can be
+	// exercised without KVM.
+	volumes map[string]time.Time
+	// reclaimedVolumes records every sandbox id passed to ReclaimVolume, in call
+	// order, so tests can assert an orphan volume was reclaimed.
+	reclaimedVolumes []string
 	// VsockDir overrides the root directory reported in ForkResult.VsockPath
 	// (defaults to /tmp/mitos-mock). Tests point it at a temp dir so a
 	// fake agent can listen on the exact path the engine reports.
@@ -132,6 +141,7 @@ func NewMockEngine() *MockEngine {
 	return &MockEngine{
 		templates:        make(map[string]*Template),
 		sandboxes:        make(map[string]*Sandbox),
+		volumes:          make(map[string]time.Time),
 		ForkDelay:        800 * time.Microsecond,
 		memoryTotalBytes: 16 * 1024 * 1024 * 1024,
 	}
@@ -320,6 +330,53 @@ func (e *MockEngine) TerminatedIDs() []string {
 	defer e.mu.RUnlock()
 	out := make([]string, len(e.terminated))
 	copy(out, e.terminated)
+	return out
+}
+
+// InjectVolume seeds a per-sandbox volume backing directly into the engine with
+// a chosen create-time, standing in for the on-disk sandboxes/<id>/volumes the
+// real engine scans (the mock prepares no real files). Tests use it to plant an
+// orphan volume (no backing claim) with a controlled age so the GC volume-orphan
+// sweep can be exercised without KVM.
+func (e *MockEngine) InjectVolume(sandboxID string, createdAt time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.volumes[sandboxID] = createdAt
+}
+
+// ListVolumes reports one VolumeRecord per per-sandbox volume backing the mock
+// holds, keyed by sandbox id with age derived from the seeded create-time. The
+// real engine scans disk; the mock reports its in-memory set so the controller
+// GC volume-orphan path is fully exercisable on the envtest/mock path.
+func (e *MockEngine) ListVolumes() []VolumeRecord {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	now := time.Now()
+	records := make([]VolumeRecord, 0, len(e.volumes))
+	for id, created := range e.volumes {
+		records = append(records, VolumeRecord{SandboxID: id, Age: now.Sub(created)})
+	}
+	return records
+}
+
+// ReclaimVolume records the call and drops the volume backing from the mock's
+// in-memory set, mirroring the real engine removing the on-disk dir. A missing
+// id is not an error, matching the real engine's tolerant RemoveAll.
+func (e *MockEngine) ReclaimVolume(sandboxID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.reclaimedVolumes = append(e.reclaimedVolumes, sandboxID)
+	delete(e.volumes, sandboxID)
+	return nil
+}
+
+// ReclaimedVolumeIDs returns the sandbox IDs passed to ReclaimVolume, in call
+// order. Tests use it to assert an orphan volume was reclaimed.
+func (e *MockEngine) ReclaimedVolumeIDs() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]string, len(e.reclaimedVolumes))
+	copy(out, e.reclaimedVolumes)
 	return out
 }
 

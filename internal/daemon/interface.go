@@ -20,6 +20,14 @@ type ForkEngine interface {
 	// GetCapacity it is NOT on the fork hot path and may stat backing files.
 	Metering() metering.Report
 	ListSandboxes() []fork.SandboxRecord
+	// ListVolumes enumerates per-sandbox volume backing dirs on disk, keyed by
+	// sandbox id, so a backing dir whose sandbox is gone is still reported. It
+	// is NOT on the fork hot path. The mock engine reports an in-memory set.
+	ListVolumes() []fork.VolumeRecord
+	// ReclaimVolume removes one per-sandbox volume backing dir (and its sandbox
+	// dir). It is the volume-orphan counterpart to Terminate; the controller GC
+	// calls it for a backing dir whose claim object is gone.
+	ReclaimVolume(sandboxID string) error
 	// CreateTemplate builds a template snapshot. volumes are the template's
 	// declared volumes; the engine bakes one placeholder drive per volume into
 	// the snapshot. Nil leaves the template drive-less (only the rootfs).

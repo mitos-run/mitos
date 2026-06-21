@@ -64,6 +64,39 @@ func terminateOnNode(ctx context.Context, registry *NodeRegistry, nodeName, sand
 	return nil
 }
 
+// reclaimVolumeOnNode asks the forkd on nodeName to reclaim the per-sandbox
+// volume backing for sandboxID. It is bounded and tolerant in exactly the same
+// way as terminateOnNode: a volume orphan on a node we can no longer reach is
+// left to the next pass rather than wedging the GC. A node that has left the
+// registry, is unhealthy, cannot be dialed, or answers NotFound/Unavailable/
+// DeadlineExceeded is treated as already reclaimed (nil), so a GC pass never
+// stalls on an unreachable node; any other error is returned so a reachable
+// forkd that rejects the call is retried next pass.
+func reclaimVolumeOnNode(ctx context.Context, registry *NodeRegistry, nodeName, sandboxID string) error {
+	if _, ok := registry.GetNode(nodeName); !ok {
+		return nil
+	}
+	if !registry.NodeHealthy(nodeName) {
+		return nil
+	}
+	conn, err := registry.GetConnection(nodeName)
+	if err != nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err = forkdpb.NewForkDaemonClient(conn).ReclaimVolume(cctx, &forkdpb.ReclaimVolumeRequest{
+		SandboxId: sandboxID,
+	})
+	if err != nil {
+		if isAlreadyTerminated(err) {
+			return nil
+		}
+		return fmt.Errorf("forkd reclaim volume %s on %s: %w", sandboxID, nodeName, err)
+	}
+	return nil
+}
+
 // isAlreadyTerminated reports whether err (possibly wrapped) means the sandbox
 // can be treated as gone for deletion purposes: NotFound (already reaped) or a
 // node we cannot confirm-terminate on (Unavailable, DeadlineExceeded).

@@ -419,6 +419,28 @@ func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
 	return out
 }
 
+// ListVolumes returns one VolumeInfo per per-sandbox volume backing dir the
+// engine reports, keyed by sandbox id with an age in seconds. The controller GC
+// uses it to find volume backings whose claim object is gone.
+func (s *Server) ListVolumes() []*forkdpb.VolumeInfo {
+	records := s.engine.ListVolumes()
+	out := make([]*forkdpb.VolumeInfo, 0, len(records))
+	for _, rec := range records {
+		out = append(out, &forkdpb.VolumeInfo{
+			SandboxId:  rec.SandboxID,
+			AgeSeconds: int64(rec.Age.Seconds()),
+		})
+	}
+	return out
+}
+
+// ReclaimVolume removes one per-sandbox volume backing dir. It is the
+// volume-orphan counterpart to Terminate; unlike Terminate it does not touch
+// the SandboxAPI registration (an orphan volume has no live sandbox).
+func (s *Server) ReclaimVolume(sandboxID string) error {
+	return s.engine.ReclaimVolume(sandboxID)
+}
+
 // networkOpts converts the proto NetworkConfig from a ForkRequest into the
 // engine's fork.NetworkOpts. It returns nil when the request carries no
 // network config (so the non-network fork path is untouched) and also when the

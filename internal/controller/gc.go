@@ -100,6 +100,7 @@ func (g *GarbageCollector) runOnce(ctx context.Context) {
 	// FinishedAt=now, so it is too fresh for any later TTL pass to delete.
 	g.markNodeLost(ctx, logger, claims.Items)
 	g.sweepOrphans(ctx, logger, desired, liveIDs)
+	g.sweepOrphanVolumes(ctx, logger, desired, liveIDs)
 	g.ttlFinished(ctx, logger, claims.Items)
 }
 
@@ -204,6 +205,46 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 	}
 }
 
+// sweepOrphanVolumes reclaims per-sandbox volume backing dirs on healthy nodes
+// that are not in the desired-alive set, not in the node-independent liveIDs
+// set, and whose age exceeds OrphanGrace. It is the volume counterpart to
+// sweepOrphans and reuses the exact same desired and liveIDs sets, since a
+// volume backing is keyed by the same sandbox id (the claim name) the VM is.
+//
+// The orphan case is a backing dir left behind when a terminate crashed or was
+// missed: the VM is gone but its backing files survived. The grace and liveID
+// nets are the same safety valves as the VM sweep: a backing for a non-terminal
+// claim by name is left alone (even if its status never landed), and a backing
+// freshly prepared (younger than OrphanGrace) is left alone so a just-forked
+// sandbox whose claim status has not landed yet is never reclaimed. Only healthy
+// nodes are visited, mirroring sweepOrphans.
+func (g *GarbageCollector) sweepOrphanVolumes(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool) {
+	for _, node := range g.Registry.ListNodes() {
+		if !g.Registry.NodeHealthy(node.Name) {
+			continue
+		}
+		for _, vol := range g.listVolumes(ctx, node.Name) {
+			if desired[node.Name][vol.SandboxId] {
+				continue
+			}
+			if liveIDs[vol.SandboxId] {
+				// A CRD object still backs this volume by name: leave it alone.
+				continue
+			}
+			if vol.AgeSeconds < int64(g.OrphanGrace.Seconds()) {
+				// Freshly prepared, claim status not yet written: leave it alone.
+				continue
+			}
+			if err := reclaimVolumeOnNode(ctx, g.Registry, node.Name, vol.SandboxId); err != nil {
+				logger.Error(err, "reclaim orphan volume", "node", node.Name, "sandbox", vol.SandboxId)
+				continue
+			}
+			recordVolumeOrphanSweep()
+			logger.Info("reclaimed orphan volume", "node", node.Name, "sandbox", vol.SandboxId)
+		}
+	}
+}
+
 // markNodeLost transitions Ready claims whose node is no longer a healthy
 // registered node to a terminal Failed phase with a NodeLost condition.
 //
@@ -298,4 +339,21 @@ func (g *GarbageCollector) listSandboxes(ctx context.Context, nodeName string) [
 		return nil
 	}
 	return resp.Sandboxes
+}
+
+// listVolumes calls forkd ListVolumes on the node with a bounded timeout,
+// returning nil on any error (the node will be revisited next pass). It mirrors
+// listSandboxes for the volume-orphan sweep.
+func (g *GarbageCollector) listVolumes(ctx context.Context, nodeName string) []*forkdpb.VolumeInfo {
+	conn, err := g.Registry.GetConnection(nodeName)
+	if err != nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := forkdpb.NewForkDaemonClient(conn).ListVolumes(cctx, &forkdpb.ListVolumesRequest{})
+	if err != nil {
+		return nil
+	}
+	return resp.Volumes
 }
