@@ -7,12 +7,22 @@ package controller_test
 // convertible SandboxPool and patches the CRD to route conversions at the test
 // webhook. A v1alpha1 pool created through the API is then read back as
 // v1alpha2 (and vice versa), exercising ConvertFrom and ConvertTo end to end.
+//
+// The DEPLOYED CRD (deploy/crds) serves only v1alpha1: v1alpha2 is
+// +kubebuilder:unservedversion because no conversion webhook ships by default,
+// and serving it with strategy None would prune v1alpha1-only fields. This
+// envtest therefore installs its OWN copy of the pool CRD with v1alpha2
+// served:true (envtest-only), so the round-trip through a served webhook stays
+// proven without serving v1alpha2 in the deployed CRD. The pure-Go ConvertTo /
+// ConvertFrom round-trip is additionally covered in api/v1alpha2/conversion_test.go.
 
 import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,10 +51,16 @@ func TestSandboxPoolConversionWebhookServesBothVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The deployed pool CRD serves only v1alpha1. Write an envtest-only copy that
+	// serves v1alpha2 too, so the conversion webhook can be exercised through a
+	// served version. envtest patches its conversion strategy to route at the
+	// test webhook once it detects the convertible SandboxPool in the scheme.
+	crdDir := writeWebhookPoolCRD(t)
+
 	env := &envtest.Environment{
 		Scheme: whScheme,
 		CRDDirectoryPaths: []string{
-			filepath.Join("..", "..", "deploy", "crds"),
+			crdDir,
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{},
@@ -125,6 +141,32 @@ func TestSandboxPoolConversionWebhookServesBothVersions(t *testing.T) {
 	if backV1.Spec.Replicas != 4 || backV1.Spec.Autoscale == nil || backV1.Spec.Autoscale.MaxWarm != 20 {
 		t.Fatalf("v1 round-trip lost values: %+v", backV1.Spec)
 	}
+}
+
+// writeWebhookPoolCRD copies the deployed sandboxpools CRD into a temp dir with
+// the v1alpha2 version flipped to served:true, so this envtest can serve both
+// versions through the conversion webhook. The deployed CRD keeps v1alpha2
+// unserved; only this test-local copy serves it. v1alpha1 is already served:true
+// in the deployed CRD, so the only served:false line is the v1alpha2 one.
+func writeWebhookPoolCRD(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join("..", "..", "deploy", "crds", "mitos.run_sandboxpools.yaml")
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read deployed pool CRD: %v", err)
+	}
+	patched := strings.Replace(string(raw), "    served: false\n", "    served: true\n", 1)
+	if patched == string(raw) {
+		t.Fatalf("expected a served:false line (v1alpha2) to flip in %s", src)
+	}
+	if strings.Contains(patched, "    served: false\n") {
+		t.Fatalf("more than one served:false line in %s; cannot safely flip only v1alpha2", src)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mitos.run_sandboxpools.yaml"), []byte(patched), 0o644); err != nil {
+		t.Fatalf("write patched pool CRD: %v", err)
+	}
+	return dir
 }
 
 // waitWebhookReady polls the webhook server's serving port until it accepts a

@@ -11,7 +11,16 @@ import (
 // the optional reuse alternative (the Deployment-embeds-PodSpec pattern). A pool
 // sets EXACTLY ONE of spec.template or spec.templateRef.
 //
+// v1alpha2 SandboxPool is DEFINED BUT NOT SERVED in the deployed CRD: the Go
+// types and the conversion code stay for the staged migration, but the deployed
+// sandboxpools.mitos.run CRD serves only v1alpha1 (the storage version) until
+// the conversion webhook ships by default. Serving v1alpha2 with conversion
+// strategy None would let the API server prune v1alpha1-only fields against the
+// v1alpha2 schema. The +kubebuilder:unservedversion marker keeps this version
+// out of the served set.
+//
 // +kubebuilder:object:root=true
+// +kubebuilder:unservedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.warm.min,statuspath=.status.readySnapshots
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readySnapshots`
