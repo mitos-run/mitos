@@ -551,8 +551,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Call forkd on the selected node: this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, wrappedDEK, kekID)
+	// Call forkd on the selected node: this is the <2ms hot path. The vitals
+	// labels (claim/pool/workspace/namespace, all object names, never secrets)
+	// ride along so the node can label the sandbox's Layer 3 guest telemetry
+	// (issue #164).
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, wrappedDEK, kekID, claimVitalsLabels(&claim))
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.

@@ -30,10 +30,10 @@ func TestServerListSandboxesMergesActivity(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	ctx := context.Background()
-	if _, err := srv.Fork(ctx, "py", "sb-touched", nil, nil, nil, nil, "tok-touched"); err != nil {
+	if _, err := srv.Fork(ctx, "py", "sb-touched", nil, nil, nil, nil, "tok-touched", VitalsLabels{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := srv.Fork(ctx, "py", "sb-idle", nil, nil, nil, nil, "tok-idle"); err != nil {
+	if _, err := srv.Fork(ctx, "py", "sb-idle", nil, nil, nil, nil, "tok-idle", VitalsLabels{}); err != nil {
 		t.Fatal(err)
 	}
 

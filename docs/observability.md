@@ -399,20 +399,31 @@ tolerance arithmetic is unit-tested (`internal/observability/opencost_test.go`).
 The guest agent samples CPU steal (`/proc/stat` steal field), memory vs balloon
 (`/proc/meminfo`), and the in-guest process table (`/proc/<pid>/stat`), and
 reports them over the existing vsock protocol on a `vitals` request. forkd
-consumes the snapshot, labels it with the sandbox's claim/pool/workspace, and
-serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
+consumes the snapshot, labels it with the sandbox's claim/pool/workspace/namespace,
+and serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
 exec). `kubectl sandbox ps <name> --processes` consumes the REAL in-guest process
 table; when the guest is unreachable (claim not running, no KVM behind it) it
 falls back to the SandboxFork object listing, so it never renders a fabricated
 table.
 
+The labeling is end to end. The controller knows the claim, its pool, its bound
+workspace, and the namespace when it reconciles a claim, and it threads that
+identity through the Fork gRPC (`ForkRequest.vitals_labels`). forkd records it
+per-sandbox on the Fork path and returns it in the `POST /v1/vitals` response, so
+every forked sandbox's guest telemetry is attributable to its claim. Any label is
+reported empty when the controller does not know it (a poolless or workspaceless
+fork); an empty field is never guessed. The labels are Kubernetes object names,
+never secrets.
+
 The snapshot carries no secrets: process entries are the program name (`comm`)
 and resource counters, never argv or the process environment.
 
 PROVEN: the `/proc/stat` steal parse, the process-table snapshot, the balloon
-arithmetic, the vsock message shapes, the host-side labeling, and the `ps`
-consumer are unit-tested on darwin against fixtures (`internal/guestvitals`,
-`internal/vsock`, `internal/daemon/vitals_api_test.go`,
+arithmetic, the vsock message shapes, the host-side labeling, the
+claim-to-Fork-to-vitals label plumbing, and the `ps` consumer are unit-tested on
+darwin against fixtures (`internal/guestvitals`, `internal/vsock`,
+`internal/daemon/vitals_api_test.go`,
+`internal/controller/forkd_client_test.go`,
 `cmd/kubectl-sandbox/ps_guest_test.go`).
 
 GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest

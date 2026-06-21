@@ -219,7 +219,12 @@ func meteringHandler(engine ForkEngine) http.Handler {
 // netConf is nil the fork gets no network identity (networking disabled or no
 // policy on the template). The egress policy and allowlist entries are safe to
 // log.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, volumes []*forkdpb.VolumeMount, apiToken string) (*fork.ForkResult, error) {
+// labels carries the control-plane identity (claim/pool/workspace/namespace)
+// the controller attached to this fork; forkd records it per-sandbox so the
+// sandbox's Layer 3 guest telemetry (/v1/vitals, kubectl sandbox ps
+// --processes) is LABELED (issue #164). The fields are object names, never
+// secrets; an empty VitalsLabels leaves the sandbox unlabeled.
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, volumes []*forkdpb.VolumeMount, apiToken string, labels VitalsLabels) (*fork.ForkResult, error) {
 	vols, err := volumeSpecs(volumes)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: invalid volume spec: %w", sandboxID, err)
@@ -258,6 +263,11 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	}
 
 	s.sandboxAPI.RegisterToken(result.SandboxID, apiToken)
+	// Record the control-plane identity so the sandbox's /v1/vitals snapshot is
+	// labeled (issue #164). Recorded even when every field is empty (a poolless
+	// or workspaceless fork): an empty field is reported as empty, never guessed.
+	// The labels are object names, never secrets.
+	s.sandboxAPI.SetVitalsLabels(result.SandboxID, labels)
 	return result, nil
 }
 

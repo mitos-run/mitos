@@ -50,7 +50,7 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 		defer g.srv.keyProvider.ForgetKey(req.SnapshotId)
 	}
 
-	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.Volumes, req.ApiToken)
+	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.Volumes, req.ApiToken, vitalsLabels(req.VitalsLabels))
 	if err != nil {
 		span.RecordError(err)
 		return nil, grpcError(err)
@@ -195,6 +195,24 @@ func (g *grpcService) PullTemplate(ctx context.Context, req *forkdpb.PullTemplat
 
 func (g *grpcService) Exec(ctx context.Context, _ *forkdpb.ExecRequest) (*forkdpb.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "exec is served by the HTTP sandbox API on the forkd HTTP port")
+}
+
+// vitalsLabels maps the proto VitalsLabels the controller attached to a Fork
+// onto the daemon's VitalsLabels so forkd can record the sandbox's
+// claim/pool/workspace/namespace identity for its /v1/vitals snapshot (issue
+// #164). A nil message (an older controller, or a fork the controller could not
+// label) yields the zero value, leaving the sandbox unlabeled. The fields are
+// object names, never secrets.
+func vitalsLabels(l *forkdpb.VitalsLabels) VitalsLabels {
+	if l == nil {
+		return VitalsLabels{}
+	}
+	return VitalsLabels{
+		Claim:     l.Claim,
+		Pool:      l.Pool,
+		Workspace: l.Workspace,
+		Namespace: l.Namespace,
+	}
 }
 
 func envMap(vars []*forkdpb.EnvVar) map[string]string {

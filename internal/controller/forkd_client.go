@@ -72,7 +72,11 @@ func sandboxInfo(ctx context.Context, registry *NodeRegistry, nodeName, sandboxI
 // policy (egress mode + allowlist); nil leaves the ForkRequest's NetworkConfig
 // unset and forkd applies no per-fork egress ruleset. The policy and allowlist
 // entries (IPs/ports/names) are safe to log.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, wrappedDEK []byte, kekID string) (*forkResult, error) {
+// labels carries the claim/pool/workspace/namespace identity the controller
+// attaches to the fork so the node can LABEL the sandbox's Layer 3 guest
+// telemetry (issue #164). The fields are Kubernetes object names, never secrets;
+// a nil value (no claim context) leaves the sandbox's vitals unlabeled.
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, wrappedDEK []byte, kekID string, labels *forkdpb.VitalsLabels) (*forkResult, error) {
 	// controller.forkOnNode is the child span whose context the otelgrpc client
 	// handler injects over the wire so the forkd.Fork span joins this trace.
 	// Only node and snapshot (config, no secrets) are recorded.
@@ -111,6 +115,10 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		// The wrapped DEK is never logged.
 		EncryptionKey: wrappedDEK,
 		KekId:         kekID,
+		// VitalsLabels lets the node label the sandbox's guest telemetry with the
+		// claim/pool/workspace/namespace identity. Object names, never secrets; nil
+		// leaves the sandbox unlabeled.
+		VitalsLabels: labels,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -245,6 +253,25 @@ func volumeMounts(templateVols []v1alpha1.SandboxVolume, overrides []v1alpha1.Vo
 		})
 	}
 	return mounts
+}
+
+// claimVitalsLabels builds the proto VitalsLabels the Fork RPC carries so the
+// node can label the sandbox's Layer 3 guest telemetry (issue #164) with the
+// control-plane identity: the claim name, its pool, its bound workspace (empty
+// when the claim has no workspaceRef), and the namespace. Every field is a
+// Kubernetes object name, never a secret value. Always non-nil so a poolless or
+// workspaceless claim still labels what it can.
+func claimVitalsLabels(claim *v1alpha1.SandboxClaim) *forkdpb.VitalsLabels {
+	workspace := ""
+	if claim.Spec.WorkspaceRef != nil {
+		workspace = claim.Spec.WorkspaceRef.Name
+	}
+	return &forkdpb.VitalsLabels{
+		Claim:     claim.Name,
+		Pool:      claim.Spec.PoolRef.Name,
+		Workspace: workspace,
+		Namespace: claim.Namespace,
+	}
 }
 
 func toSecretVars(m map[string]string) []*forkdpb.SecretVar {
