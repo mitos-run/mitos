@@ -129,6 +129,24 @@ def map_files_list(target: OpsTarget, path: str = "/") -> List[FileInfo]:
     return target.files.list(path)
 
 
+def file_info_to_dict(info: FileInfo) -> dict[str, Any]:
+    """Flatten one ``FileInfo`` to a JSON-friendly dict.
+
+    Shared by the OpenAI / Claude adapters (#204), whose ``list_files`` tools
+    return JSON the model reads rather than the native dataclass. ``mode`` is the
+    integer file mode; ``modified_at`` is included only when present.
+    """
+    out: dict[str, Any] = {
+        "name": info.name,
+        "is_dir": info.is_dir,
+        "size": info.size,
+        "mode": info.mode,
+    }
+    if info.modified_at is not None:
+        out["modified_at"] = info.modified_at
+    return out
+
+
 def result_to_dict(result: Result) -> dict[str, Any]:
     """Flatten one rich ``Result`` artifact to a JSON-friendly dict."""
     return {"data": dict(result.data), "is_main_result": result.is_main_result}

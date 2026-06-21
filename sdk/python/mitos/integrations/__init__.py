@@ -18,6 +18,7 @@ compat shim (#206) reuse one translation layer instead of three.
 from mitos.integrations._mapping import (
     OpsTarget,
     execution_to_dict,
+    file_info_to_dict,
     map_execute,
     map_files_list,
     map_files_read,
@@ -28,6 +29,7 @@ from mitos.integrations._mapping import (
 __all__ = [
     "OpsTarget",
     "execution_to_dict",
+    "file_info_to_dict",
     "map_execute",
     "map_files_list",
     "map_files_read",

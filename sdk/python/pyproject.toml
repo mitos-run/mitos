@@ -23,6 +23,12 @@ dev = [
 langchain = [
     "langchain>=0.3",
 ]
+openai-agents = [
+    "openai-agents>=0.1",
+]
+claude-agent = [
+    "claude-agent-sdk>=0.1",
+]
 
 [build-system]
 requires = ["hatchling"]

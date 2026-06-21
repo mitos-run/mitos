@@ -274,6 +274,65 @@ for c in children:
 The wire-op mapping is factored into `mitos.integrations._mapping` so the other
 adapters (OpenAI / Claude, the E2B-compat shim) reuse one translation layer.
 
+### OpenAI Agents SDK quickstart
+
+The OpenAI Agents SDK exposes tools as function tools. `MitosSandboxTools` binds
+`run_command` / `read_file` / `write_file` / `run_code` to a mitos sandbox: give
+the tools to your agent and its tool calls run inside the sandbox.
+
+```python
+from mitos.integrations.openai_agents import MitosSandboxTools
+
+# Standalone sandbox-server / hosted control plane, no Kubernetes:
+tools = MitosSandboxTools.create("python", base_url="http://localhost:8080")
+
+# Use the thin wrappers directly:
+print(tools.run_command("echo hi")["stdout"])
+tools.write_file("/workspace/a.txt", "hello")
+print(tools.read_file("/workspace/a.txt"))
+print(tools.run_code("import math; math.sqrt(144)")["text"])
+
+# Or hand real function tools to an Agent (needs the SDK installed):
+from agents import Agent
+agent = Agent(name="coder", tools=tools.as_function_tools())
+
+tools.close()
+```
+
+Install the optional extra only if you use the integration:
+`pip install "mitos[openai-agents]"`. The adapter is fully usable and testable
+without `openai-agents`; only `as_function_tools()` needs it and it raises a
+clear error naming the extra when absent.
+
+### Claude Agent SDK quickstart
+
+The Claude Agent SDK takes custom tools as an in-process MCP server.
+`MitosSandboxTools` binds the same four tools to a mitos sandbox and wraps them
+as an MCP server you pass to the agent.
+
+```python
+from mitos.integrations.claude_agent import MitosSandboxTools
+
+# Standalone sandbox-server / hosted control plane, no Kubernetes:
+tools = MitosSandboxTools.create("python", base_url="http://localhost:8080")
+
+# The handlers return MCP tool results (a content list of text blocks):
+res = tools.run_command({"command": "echo hi"})
+print(res["content"][0]["text"])
+tools.write_file({"path": "/workspace/a.txt", "content": "hello"})
+print(tools.read_file({"path": "/workspace/a.txt"})["content"][0]["text"])
+
+# Or build a real in-process MCP server (needs the SDK installed):
+server = tools.as_mcp_server(name="mitos-sandbox")  # pass via mcp_servers
+
+tools.close()
+```
+
+Install the optional extra only if you use the integration:
+`pip install "mitos[claude-agent]"`. The adapter is fully usable and testable
+without `claude-agent-sdk`; only `as_mcp_server()` needs it and it raises a clear
+error naming the extra when absent.
+
 ## What is proven where
 
 The cluster examples (lazy default-pool creation, fork, from_name reconnect,
