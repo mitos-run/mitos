@@ -110,10 +110,13 @@ func (e *Engine) FaultsServed(sandboxID string) int64 {
 	return sb.uffd.FaultCount()
 }
 
-// capturePageSize is the page granularity hot-page offsets are captured in: 2 MiB
-// when this node backs guest memory with hugepages, else 4 KiB base pages.
-func (e *Engine) capturePageSize() int64 {
-	if e.hugePages == "2M" {
+// hugePagesToBytes maps a snapshot's recorded page backing ("" or "2M") to the
+// page size in bytes the hot-page set must use: 2 MiB for a hugepage-backed
+// snapshot, else 4 KiB. The capture page size MUST match the snapshot's actual
+// backing (not the engine's own config), because Preload's UFFDIO_COPY length is
+// the page size and a hugepage region rejects a 4 KiB copy.
+func hugePagesToBytes(hugePages string) int64 {
+	if hugePages == "2M" {
 		return 2 << 20
 	}
 	return 4096
@@ -150,9 +153,12 @@ func (e *Engine) CaptureTemplateHotPages(template string, cap int) (cas.HotPageS
 	if !ok || sb.uffd == nil {
 		return cas.HotPageSet{}, fmt.Errorf("capture fork %s has no uffd handler (capture requires the UFFD backend)", captureID)
 	}
+	// The capture page size must match the SNAPSHOT's backing, not the engine's
+	// config: a hugepage snapshot's pages are 2 MiB and Preload copies whole pages.
+	_, snapHugePages := e.templateMemBacking(template)
 	trace := sb.uffd.CaptureTrace()
 	set := SelectHotPages(trace, HotPageSelection{
-		PageSizeBytes: e.capturePageSize(),
+		PageSizeBytes: hugePagesToBytes(snapHugePages),
 		File:          "mem",
 		Cap:           cap,
 	})

@@ -1296,7 +1296,11 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	hot, snapHugePages := e.templateMemBacking(snapshotID)
 	useUFFD := e.hugePages != "" || snapHugePages != "" || !isEmptyHot(hot) || opts.CaptureHotPages
 	preloadSet := hot
-	if opts.DisablePrefetch {
+	// A capture fork must NOT preload: it measures the lazy faults that BECOME the
+	// hot set, so preloading would hide them (and a stale set with a mismatched
+	// page size would break the copy). The OFF benchmark arm likewise disables
+	// preload to measure the lazy baseline.
+	if opts.DisablePrefetch || opts.CaptureHotPages {
 		preloadSet = nil
 	}
 	if useUFFD {
