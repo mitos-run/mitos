@@ -139,3 +139,31 @@ func TestRevokeOwnKeySucceeds(t *testing.T) {
 // svcStore reaches the store behind an account service for assertions. It exists
 // so the test can build a KeyService sharing the same store.
 func svcStore(s *AccountService) Store { return s.store }
+
+// TestListMembersReturnsOrgMembers asserts a member can list its org's members
+// and that another org's members are never included.
+func TestListMembersReturnsOrgMembers(t *testing.T) {
+	svc, _ := newAccountFixture(t)
+	ctx := context.Background()
+	alice, aliceOrg, _ := svc.SignUp(ctx, "alice.mem@example.com")
+	bob, bobOrg, _ := svc.SignUp(ctx, "bob.mem@example.com")
+
+	got, err := svc.ListMembers(ctx, alice.ID, aliceOrg.ID)
+	if err != nil {
+		t.Fatalf("ListMembers: %v", err)
+	}
+	if len(got) != 1 || got[0].AccountID != alice.ID {
+		t.Fatalf("ListMembers = %+v, want only alice", got)
+	}
+	// Bob's org must never leak alice, and alice cannot list bob's org.
+	if _, err := svc.ListMembers(ctx, alice.ID, bobOrg.ID); !errors.Is(err, ErrKeyWrongOrg) {
+		t.Errorf("alice ListMembers(bobOrg) err = %v, want ErrKeyWrongOrg", err)
+	}
+	bobMembers, err := svc.ListMembers(ctx, bob.ID, bobOrg.ID)
+	if err != nil {
+		t.Fatalf("bob ListMembers: %v", err)
+	}
+	if len(bobMembers) != 1 || bobMembers[0].AccountID != bob.ID {
+		t.Errorf("bob ListMembers = %+v, want only bob", bobMembers)
+	}
+}

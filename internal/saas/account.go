@@ -125,6 +125,23 @@ func (s *AccountService) ListKeys(ctx context.Context, accountID, orgID string) 
 	return keys, nil
 }
 
+// ListMembers returns the memberships of orgID on behalf of accountID,
+// enforcing that the account is itself a member of the org. It is the
+// org-scoped members view the console reads: an account that does not belong to
+// the org cannot enumerate its members. The result is sorted by account id for a
+// stable listing.
+func (s *AccountService) ListMembers(ctx context.Context, accountID, orgID string) ([]Membership, error) {
+	if !s.isMember(ctx, accountID, orgID) {
+		return nil, fmt.Errorf("list members: account is not a member of org %s: %w", orgID, ErrKeyWrongOrg)
+	}
+	members, err := s.store.ListOrgMembers(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list members: %w", err)
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].AccountID < members[j].AccountID })
+	return members, nil
+}
+
 // RevokeKey revokes a key by id on behalf of accountID, enforcing that the key
 // belongs to an org the account is a member of. This prevents an account from
 // revoking another org's key even if it learns the key id.

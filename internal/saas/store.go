@@ -46,6 +46,11 @@ type Store interface {
 	PutMembership(ctx context.Context, m Membership) error
 	// ListMemberships returns every membership for an account.
 	ListMemberships(ctx context.Context, accountID string) ([]Membership, error)
+	// ListOrgMembers returns every membership in an organization. It is the
+	// org-scoped half of membership listing the console members view reads: a
+	// caller asks for the members of an org it is authorized for, and never sees
+	// another org's members. It returns an empty slice for an unknown org.
+	ListOrgMembers(ctx context.Context, orgID string) ([]Membership, error)
 
 	// PutApiKey stores an API key. The key carries only a hash, never a raw value.
 	// It returns ErrConflict if the id is already used.
@@ -160,6 +165,20 @@ func (s *MemStore) ListMemberships(_ context.Context, accountID string) ([]Membe
 	list := s.members[accountID]
 	out := make([]Membership, len(list))
 	copy(out, list)
+	return out, nil
+}
+
+func (s *MemStore) ListOrgMembers(_ context.Context, orgID string) ([]Membership, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []Membership{}
+	for _, list := range s.members {
+		for _, m := range list {
+			if m.OrgID == orgID {
+				out = append(out, m)
+			}
+		}
+	}
 	return out, nil
 }
 

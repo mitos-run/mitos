@@ -166,6 +166,11 @@ func rollUp(records []UsageRecord) Totals {
 	return t
 }
 
+// Cost applies the price list to the totals. It is the exported estimator the
+// usage API uses internally and the console BFF (issue #214) reuses so the
+// console cost view matches the usage API cost exactly.
+func (p PriceList) Cost(t Totals) Cost { return p.cost(t) }
+
 // cost applies the price list to the totals.
 func (p PriceList) cost(t Totals) Cost {
 	egressGiB := float64(t.EgressBytes) / bytesPerGiB
