@@ -333,6 +333,7 @@ type SandboxTemplateList struct {
 // --- SandboxPool ---
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.readySnapshots
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readySnapshots`
