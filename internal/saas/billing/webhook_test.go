@@ -1,10 +1,59 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// failingStatusStore makes the post-verify processing path fail, modelling a
+// transient backend outage while the webhook signature itself is valid.
+type failingStatusStore struct{}
+
+func (failingStatusStore) Status(context.Context, string) (BillingStatus, error) {
+	return "", errors.New("status backend down")
+}
+func (failingStatusStore) SetStatus(context.Context, string, BillingStatus) error { return nil }
+
+// TestWebhookInternalErrorReturns500NotUnauthorized proves a post-verify failure
+// (the signature verified, but applying the event hit a backend error) returns
+// 500, not 401. 401 would both mask an internal failure as a signature problem
+// (misrouting on-call to rotate the webhook secret) and mislabel a retryable
+// server fault as a client auth failure.
+func TestWebhookInternalErrorReturns500NotUnauthorized(t *testing.T) {
+	svc := NewService(Config{Stripe: NewFakeStripe(), Status: failingStatusStore{}, Now: fixedNow})
+	h := NewWebhookHandler(svc, FakeVerifier{})
+
+	body, _ := json.Marshal(WebhookEvent{OrgID: "org1", Type: EventTypePaymentFailed})
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("internal processing error must return 500, got %d", rec.Code)
+	}
+}
+
+// TestWebhookSignatureFailureReturns401 locks in that a genuine verify failure
+// still maps to 401 after the internal-vs-signature split.
+func TestWebhookSignatureFailureReturns401(t *testing.T) {
+	svc := NewService(Config{Stripe: NewFakeStripe(), Now: fixedNow})
+	h := NewWebhookHandler(svc, FakeVerifier{})
+
+	// FakeVerifier rejects a body with no org as a verify failure.
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"type":"invoice.payment_failed"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("signature/verify failure must return 401, got %d", rec.Code)
+	}
+}
 
 // TestWebhookPaymentFailedThenSucceededUpdatesStatus asserts the webhook handler
 // runs the dunning machine over fake-verified events: a payment_failed moves the
