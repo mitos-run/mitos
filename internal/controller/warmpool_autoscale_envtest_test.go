@@ -15,8 +15,16 @@ import (
 )
 
 func TestWarmPoolAutoscaleUpDown(t *testing.T) {
+	// Per-run unique names so repeated runs on the shared apiserver never collide,
+	// and so the label-keyed pod helpers below (countDormant/markClaimed/
+	// claimedNames, all keyed off pool.Name) only ever count THIS run's husk pods.
+	// Without this, leaked husk pods from a prior run (envtest runs no GC to
+	// cascade-delete owner-ref'd pods on pool delete) accumulate under the same
+	// fixed labels and corrupt the dormant counts (the pre-existing flake).
+	templateName := uniqueName("t-autoscale")
+	poolName := uniqueName("p-autoscale")
 	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "t-autoscale", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
 		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
 	}
 	if err := k8sClient.Create(ctx, template); err != nil {
@@ -25,9 +33,9 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 	defer func() { _ = k8sClient.Delete(ctx, template) }()
 
 	pool := &v1alpha1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "p-autoscale", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default"},
 		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "t-autoscale"},
+			TemplateRef: v1alpha1.LocalObjectReference{Name: templateName},
 			Replicas:    1,
 			Autoscale: &v1alpha1.PoolAutoscaleSpec{
 				MinWarm: 1, MaxWarm: 8, TargetSpare: 2, ScaleDownCooldownSeconds: 60,
@@ -38,6 +46,19 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 		t.Fatalf("create pool: %v", err)
 	}
 	defer func() { _ = k8sClient.Delete(ctx, pool) }()
+	// envtest has no garbage collector, so deleting the pool does NOT cascade to
+	// its owner-ref'd husk pods. Explicitly delete this run's husk pods so they do
+	// not leak into a later run's label-keyed counts.
+	t.Cleanup(func() {
+		var leftover corev1.PodList
+		if err := k8sClient.List(ctx, &leftover, client.InNamespace("default"),
+			client.MatchingLabels{"mitos.run/pool": poolName, "mitos.run/husk": "true"}); err != nil {
+			return
+		}
+		for i := range leftover.Items {
+			_ = k8sClient.Delete(ctx, &leftover.Items[i])
+		}
+	})
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, pool); err != nil {
 		t.Fatalf("get pool for UID: %v", err)
 	}
