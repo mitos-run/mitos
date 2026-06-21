@@ -118,18 +118,22 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 		group = dedupeByTimestamp(group)
 		sort.Slice(group, func(i, j int) bool { return group[i].Timestamp.Before(group[j].Timestamp) })
 
-		// Counter units: per window, hold the first and last cumulative reading that
-		// fall in the window so the window delta is last-in-window minus
-		// first-in-window. A missed scrape never loses counter progress because the
-		// cumulative counter already reflects it.
-		firstCounter := map[time.Time]Sample{}
-		lastCounter := map[time.Time]Sample{}
+		// Counter units: per window, the in-window progress is the SUM of the
+		// positive steps between consecutive in-window samples. A non-decreasing
+		// step is the difference; a DECREASE means the cumulative counter reset
+		// (a sandbox restart zeroes its egress/GPU counter), so the post-reset
+		// value is fresh progress counted from zero, never a negative bill. For a
+		// monotonic counter this telescopes to last-minus-first (unchanged); a
+		// single in-window sample contributes zero. group is already sorted by
+		// timestamp, so each window's slice is in time order.
+		byWindow := map[time.Time][]Sample{}
+		var windows []time.Time
 		for _, s := range group {
 			w := s.Timestamp.Truncate(cfg.Window)
-			if _, ok := firstCounter[w]; !ok {
-				firstCounter[w] = s
+			if _, ok := byWindow[w]; !ok {
+				windows = append(windows, w)
 			}
-			lastCounter[w] = s
+			byWindow[w] = append(byWindow[w], s)
 		}
 
 		// Rate units: integrate level * elapsed between consecutive samples, clipped
@@ -149,12 +153,15 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 			integrateInterval(recs, sandbox, a, a.Timestamp, a.Timestamp.Add(held), cfg.Window)
 		}
 
-		// Apply the counter deltas to the records of each window. Ensure a record
-		// exists for every window that saw a sample, even a single one.
-		for w, last := range lastCounter {
-			first := firstCounter[w]
-			egress := last.EgressBytes - first.EgressBytes
-			gpu := last.GPUSeconds - first.GPUSeconds
+		// Apply the reset-aware counter deltas to each window's record. Ensure a
+		// record exists for every window with non-zero counter progress.
+		for _, w := range windows {
+			win := byWindow[w]
+			var egress, gpu int64
+			for i := 1; i < len(win); i++ {
+				egress += counterStep(win[i-1].EgressBytes, win[i].EgressBytes)
+				gpu += counterStep(win[i-1].GPUSeconds, win[i].GPUSeconds)
+			}
 			k := recKey{sandbox: sandbox, window: w}
 			r := recs[k]
 			if r == nil {
@@ -165,7 +172,7 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 				if egress == 0 && gpu == 0 {
 					continue
 				}
-				r = &UsageRecord{OrgID: last.OrgID, SandboxID: sandbox, Window: w}
+				r = &UsageRecord{OrgID: win[len(win)-1].OrgID, SandboxID: sandbox, Window: w}
 				recs[k] = r
 			}
 			r.EgressBytes += egress
@@ -341,4 +348,15 @@ func SamplesFromReport(
 		CoWSavings: report.UsedNaive - report.UsedCoWAware,
 	}
 	return samples, recon
+}
+
+// counterStep returns the in-window progress of a cumulative counter between two
+// consecutive readings. A non-decreasing step is the plain difference; a decrease
+// means the counter reset (for example a sandbox restart zeroing it), so the new
+// lower value is fresh progress counted from zero rather than a negative bill.
+func counterStep(prev, curr int64) int64 {
+	if curr >= prev {
+		return curr - prev
+	}
+	return curr
 }
