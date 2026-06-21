@@ -183,3 +183,42 @@ func TestAggregatePassesEgressBytes(t *testing.T) {
 		t.Errorf("sb-b egress bytes = %d, want 0", byID["sb-b"])
 	}
 }
+
+// TestAggregatePassesGPUSeconds asserts each sample's per-sandbox GPU-seconds
+// (issue #221, the billable GPU unit feeding the usage pipeline #211 and Stripe
+// #212) is echoed into its row unchanged AND summed into the report total. A GPU
+// is assigned EXCLUSIVELY to one sandbox and is never CoW-shared across forks
+// (unlike template memory), so GPU-seconds is summed straight, like EgressBytes,
+// never deduplicated.
+func TestAggregatePassesGPUSeconds(t *testing.T) {
+	samples := []Sample{
+		{ID: "sb-a", Template: "tmpl", MemoryUnique: 10, GPUCount: 1, GPUSeconds: 120},
+		{ID: "sb-b", Template: "tmpl", MemoryUnique: 10, GPUCount: 2, GPUSeconds: 60},
+		{ID: "sb-c", Template: "tmpl", MemoryUnique: 10}, // no GPU
+	}
+	report := Aggregate(samples)
+
+	byID := map[string]int64{}
+	gpuByID := map[string]int32{}
+	for _, s := range report.Sandboxes {
+		byID[s.ID] = s.GPUSeconds
+		gpuByID[s.ID] = s.GPUCount
+	}
+	if byID["sb-a"] != 120 {
+		t.Errorf("sb-a GPU-seconds = %d, want 120", byID["sb-a"])
+	}
+	if byID["sb-b"] != 60 {
+		t.Errorf("sb-b GPU-seconds = %d, want 60", byID["sb-b"])
+	}
+	if byID["sb-c"] != 0 {
+		t.Errorf("sb-c GPU-seconds = %d, want 0", byID["sb-c"])
+	}
+	if gpuByID["sb-b"] != 2 {
+		t.Errorf("sb-b GPU count = %d, want 2", gpuByID["sb-b"])
+	}
+	// Summed straight across forks: 120 + 60 + 0 = 180. Two forks of the same
+	// template do NOT deduplicate a GPU (each holds its own device).
+	if want := int64(180); report.TotalGPUSeconds != want {
+		t.Errorf("TotalGPUSeconds = %d, want %d", report.TotalGPUSeconds, want)
+	}
+}

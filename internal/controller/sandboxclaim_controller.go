@@ -462,7 +462,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Pick a node with a ready snapshot
-	node, snapshotID, err := r.selectNode(ctx, &pool, claim.Spec.NodeName)
+	node, snapshotID, err := r.selectNode(ctx, &pool, &template, claim.Spec.NodeName)
 	if err != nil {
 		// No node admits the fork under the overcommit policy: this is a real
 		// capacity shortage, not a missing snapshot. Pend with backpressure and
@@ -1279,9 +1279,25 @@ type forkResult struct {
 	ForkTimeMs float64
 }
 
-func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, preferredNode string) (*NodeInfo, string, error) {
+func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, preferredNode string) (*NodeInfo, string, error) {
 	templateName := pool.Spec.TemplateRef.Name
-	node, err := r.NodeRegistry.SelectNode(templateName, preferredNode)
+	req := ForkRequest{TemplateID: templateName, PreferredNode: preferredNode}
+	// Thread the template's explicit size and GPU demand into placement (issue
+	// #221): a large memory size is admitted only on a node with the RAM, and a
+	// GPU pool is pinned to GPU-capable nodes. A zero memory size falls back to
+	// the per-template CoW estimate (the legacy behavior).
+	if template != nil {
+		if mem := template.Spec.Resources.Memory; !mem.IsZero() {
+			if v, ok := mem.AsInt64(); ok {
+				req.MemoryBytes = v
+			}
+		}
+		if gpu := template.Spec.Resources.GPU; gpu != nil {
+			req.GPUCount = gpu.Count
+			req.GPUType = gpu.Type
+		}
+	}
+	node, err := r.NodeRegistry.SelectNodeForFork(req)
 	if err != nil {
 		return nil, "", err
 	}

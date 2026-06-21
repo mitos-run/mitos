@@ -252,6 +252,201 @@ func TestSelectNodeZeroMaxSandboxesMeansNoCountCeiling(t *testing.T) {
 	}
 }
 
+// --- Larger-size admission (issue #221) ---
+
+// TestSelectNodeForForkAdmitsLargeSizeThatFits asserts a large explicit memory
+// request (above the 8 GiB E2B class) is admitted against a node with the
+// capacity, even though the per-template CoW estimate alone is small. The
+// requested size, not just the projected fork cost, gates admission.
+func TestSelectNodeForForkAdmitsLargeSizeThatFits(t *testing.T) {
+	r := NewNodeRegistry()
+	// 64 GiB node, mostly free; ask for a 32 GiB sandbox (well above 8 GiB).
+	r.Register(warmNode("big", 64*gib, 2*gib, "py", 256*1024*1024, 8*1024*1024, 1))
+
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", MemoryBytes: 32 * gib})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork: %v", err)
+	}
+	if node.Name != "big" {
+		t.Fatalf("got %q want big", node.Name)
+	}
+}
+
+// TestSelectNodeForForkRejectsLargeSizeOverCapacity asserts a large request that
+// exceeds every node's headroom is rejected with ErrNoCapacity, even though the
+// small CoW estimate would otherwise admit.
+func TestSelectNodeForForkRejectsLargeSizeOverCapacity(t *testing.T) {
+	r := NewNodeRegistry()
+	// 8 GiB node with 6 GiB free; a 32 GiB request cannot fit.
+	r.Register(warmNode("small", 8*gib, 2*gib, "py", 256*1024*1024, 8*1024*1024, 1))
+
+	_, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", MemoryBytes: 32 * gib})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity for oversize request, got %v", err)
+	}
+}
+
+// TestSelectNodeForForkLargeSizeSpillsToBigNode asserts a large request spills
+// off a node that cannot fit it onto one that can.
+func TestSelectNodeForForkLargeSizeSpillsToBigNode(t *testing.T) {
+	r := NewNodeRegistry()
+	small := warmNode("small", 16*gib, 1*gib, "py", 256*1024*1024, 8*1024*1024, 5)
+	big := coldNode("big", 128*gib, 1*gib)
+	r.Register(small)
+	r.Register(big)
+
+	// 32 GiB request does not fit the warm small node (15 GiB free); spill to big.
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", MemoryBytes: 32 * gib})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork: %v", err)
+	}
+	if node.Name != "big" {
+		t.Fatalf("got %q want big (large size spills off small warm node)", node.Name)
+	}
+}
+
+// --- GPU-aware node selection (issue #221) ---
+
+// gpuNode builds a healthy GPU-capable node holding templateID.
+func gpuNode(name string, total, used int64, templateID, gpuType string, gpuTotal, gpuUsed int32) *NodeInfo {
+	n := warmNode(name, total, used, templateID, 256*1024*1024, 8*1024*1024, 1)
+	n.GPUType = gpuType
+	n.GPUTotal = gpuTotal
+	n.GPUUsed = gpuUsed
+	return n
+}
+
+// TestSelectNodeForForkGPUFiltersToGPUNodes asserts a GPU request is scheduled
+// ONLY onto a GPU-capable node, never a CPU-only node, mirroring how KVM node
+// selection pins to KVM nodes. No hardware is involved: GPU capability is a node
+// label/resource the registry mirrors.
+func TestSelectNodeForForkGPUFiltersToGPUNodes(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(coldNode("cpu-only", 128*gib, 1*gib)) // most free memory, but no GPU
+	r.Register(gpuNode("gpu", 64*gib, 2*gib, "py", "nvidia-a100", 4, 1))
+
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 1})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork: %v", err)
+	}
+	if node.Name != "gpu" {
+		t.Fatalf("got %q want gpu (GPU request must pin to a GPU node)", node.Name)
+	}
+}
+
+// TestSelectNodeForForkGPUNoGPUNodesIsNoCapacity asserts a GPU request when no
+// GPU node exists is ErrNoCapacity, not a silent CPU-node placement.
+func TestSelectNodeForForkGPUNoGPUNodesIsNoCapacity(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(coldNode("cpu1", 128*gib, 1*gib))
+	r.Register(coldNode("cpu2", 128*gib, 1*gib))
+
+	_, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 1})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity (no GPU node), got %v", err)
+	}
+}
+
+// TestSelectNodeForForkGPUTypeMatch asserts a typed GPU request matches only a
+// node advertising that GPU type.
+func TestSelectNodeForForkGPUTypeMatch(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(gpuNode("a100", 64*gib, 1*gib, "py", "nvidia-a100", 4, 0))
+	r.Register(gpuNode("h100", 64*gib, 1*gib, "py", "nvidia-h100", 4, 0))
+
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 1, GPUType: "nvidia-h100"})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork: %v", err)
+	}
+	if node.Name != "h100" {
+		t.Fatalf("got %q want h100 (typed GPU request)", node.Name)
+	}
+
+	if _, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 1, GPUType: "nvidia-v100"}); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity for unavailable GPU type, got %v", err)
+	}
+}
+
+// TestSelectNodeForForkGPUExhaustedDevices asserts a GPU node with no free
+// devices (GPUUsed at GPUTotal) does not admit a GPU request.
+func TestSelectNodeForForkGPUExhaustedDevices(t *testing.T) {
+	r := NewNodeRegistry()
+	// 4 GPUs, all in use: cannot take another GPU sandbox.
+	r.Register(gpuNode("gpu", 64*gib, 1*gib, "py", "nvidia-a100", 4, 4))
+
+	_, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 1})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity (GPU devices exhausted), got %v", err)
+	}
+}
+
+// TestSelectNodeForForkGPUMultiDeviceCount asserts a request for more GPUs than a
+// node has free is rejected, but one that fits is admitted.
+func TestSelectNodeForForkGPUMultiDeviceCount(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(gpuNode("gpu", 64*gib, 1*gib, "py", "nvidia-a100", 4, 2)) // 2 free
+
+	if _, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 4}); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity (asked 4, 2 free), got %v", err)
+	}
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py", GPUCount: 2})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork for 2 GPUs: %v", err)
+	}
+	if node.Name != "gpu" {
+		t.Fatalf("got %q want gpu", node.Name)
+	}
+}
+
+// TestSelectNodeForForkNonGPURequestPrefersCPUNode asserts a CPU-only request is
+// NOT pinned to GPU nodes; scarce GPU nodes are preserved for GPU work. A
+// non-GPU request schedules normally and is not forced off a GPU node, but the
+// packing must not waste GPU capacity unnecessarily; here we only assert a
+// CPU-only request still schedules when only a GPU node holds the warm template.
+func TestSelectNodeForForkNonGPURequestSchedulesAnywhere(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(gpuNode("gpu", 64*gib, 1*gib, "py", "nvidia-a100", 4, 0))
+
+	node, err := r.SelectNodeForFork(ForkRequest{TemplateID: "py"})
+	if err != nil {
+		t.Fatalf("SelectNodeForFork: %v", err)
+	}
+	if node.Name != "gpu" {
+		t.Fatalf("got %q want gpu (CPU-only request may use a warm GPU node)", node.Name)
+	}
+}
+
+// TestGPUFromNodeLabels asserts the node-label-to-scheduler mapping (issue #221)
+// reads GPU capability without any hardware: a "true" label means one device, an
+// integer label means that many, an absent or falsey label means CPU-only, and
+// the type label is carried through.
+func TestGPUFromNodeLabels(t *testing.T) {
+	cases := []struct {
+		name      string
+		labels    map[string]string
+		wantTotal int32
+		wantType  string
+	}{
+		{"absent", map[string]string{}, 0, ""},
+		{"false", map[string]string{"mitos.run/gpu": "false"}, 0, ""},
+		{"zero", map[string]string{"mitos.run/gpu": "0"}, 0, ""},
+		{"true single", map[string]string{"mitos.run/gpu": "true"}, 1, ""},
+		{"count 4 with type", map[string]string{"mitos.run/gpu": "4", "mitos.run/gpu-type": "nvidia-a100"}, 4, "nvidia-a100"},
+		{"garbage falls back to one", map[string]string{"mitos.run/gpu": "yes"}, 1, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			total, gpuType := GPUFromNodeLabels(tc.labels)
+			if total != tc.wantTotal {
+				t.Errorf("total = %d, want %d", total, tc.wantTotal)
+			}
+			if gpuType != tc.wantType {
+				t.Errorf("type = %q, want %q", gpuType, tc.wantType)
+			}
+		})
+	}
+}
+
 func TestSelectNodeUnknownBudgetTreatedUnlimited(t *testing.T) {
 	r := NewNodeRegistry()
 	// A node reporting MemoryTotal 0 (meminfo unavailable, e.g. darwin/dev)

@@ -34,6 +34,20 @@ type Sample struct {
 	// (unlike the CoW memory totals), so Aggregate echoes it into the row as-is.
 	// Zero when networking is disabled or the counter is unreadable.
 	EgressBytes int64
+
+	// GPUCount is the number of GPUs assigned EXCLUSIVELY to this sandbox (issue
+	// #221). A GPU is passthrough-attached to a single VM and is never CoW-shared
+	// across forks, so unlike the memory totals it is not deduplicated. Zero on a
+	// CPU-only sandbox (the common case).
+	GPUCount int32
+	// GPUSeconds is this sandbox's billable GPU-seconds so far: the wall-clock
+	// seconds the sandbox has held its assigned GPU(s), already multiplied by
+	// GPUCount (so a 2-GPU sandbox alive 60s reports 120). It is the billable unit
+	// the usage pipeline (#211) and Stripe metered billing (#212) charge on,
+	// mirroring vCPU-seconds. It is per-sandbox and summed straight, never
+	// deduplicated across forks (each fork holds its own device). The real
+	// per-device measurement is hardware-gated; this field is the accounting seam.
+	GPUSeconds int64
 }
 
 // SandboxMetering is the per-sandbox row in a Report. It echoes the sample so
@@ -48,6 +62,12 @@ type SandboxMetering struct {
 	DiskShared   int64
 	// EgressBytes echoes the sample's per-sandbox egress byte total (issue #219).
 	EgressBytes int64
+
+	// GPUCount and GPUSeconds echo the sample's per-sandbox GPU assignment and
+	// billable GPU-seconds (issue #221). Like EgressBytes they are per-sandbox and
+	// never deduplicated across forks.
+	GPUCount   int32
+	GPUSeconds int64
 }
 
 // TemplateMetering is the per-template row in a Report. SharedOnce is the
@@ -87,6 +107,12 @@ type Report struct {
 	DiskUsedNaive    int64
 	DiskCoWSavings   int64
 	DiskTotalUnique  int64
+
+	// TotalGPUSeconds is the sum of every sample's GPU-seconds (issue #221). GPUs
+	// are assigned exclusively per sandbox, never CoW-shared, so this is a plain
+	// sum (no dedup), the billable GPU usage the #211 pipeline and #212 Stripe
+	// metering charge on, alongside vCPU-seconds.
+	TotalGPUSeconds int64
 }
 
 // Aggregate folds per-sandbox samples into a CoW-aware Report. Forks are
@@ -118,6 +144,9 @@ func Aggregate(samples []Sample) Report {
 		report.UsedNaive += s.MemoryShared
 		report.DiskTotalUnique += s.DiskUnique
 		report.DiskUsedNaive += s.DiskShared
+		// GPU-seconds is summed straight: a GPU is exclusive per sandbox and never
+		// CoW-shared across forks, so there is nothing to deduplicate (issue #221).
+		report.TotalGPUSeconds += s.GPUSeconds
 
 		key := s.Template
 		if key == "" {

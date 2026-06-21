@@ -142,6 +142,34 @@ func (s *SandboxTemplateSpec) InitCommands() []string {
 type SandboxResources struct {
 	CPU    resource.Quantity `json:"cpu,omitempty"`
 	Memory resource.Quantity `json:"memory,omitempty"`
+
+	// GPU requests GPU passthrough for the sandbox (issue #221). When set the
+	// pool's sandboxes are scheduled ONLY onto GPU-capable nodes (the controller
+	// filters node selection by the GPU node label, mirroring the KVM node
+	// selection), and the requested device count and type are recorded for
+	// metering (GPU-seconds, internal/metering). The actual VFIO device-attach
+	// into the microVM and the fork-with-device behavior are HARDWARE-GATED and
+	// not validated here; see docs/platforms/gpu.md. A GPU sandbox is documented
+	// as NOT live-forkable while the device is attached.
+	// +optional
+	GPU *GPUResources `json:"gpu,omitempty"`
+}
+
+// GPUResources is the GPU request for a sandbox (issue #221). It is the
+// SCHEDULING and METERING shape; the device-attach + fork-with-device code is
+// hardware-gated (docs/platforms/gpu.md).
+type GPUResources struct {
+	// Count is the number of GPUs to attach, exclusively, to the sandbox. A GPU
+	// is passthrough-assigned to a single VM and is never CoW-shared across forks.
+	// +kubebuilder:validation:Minimum=1
+	Count int32 `json:"count"`
+
+	// Type names the GPU SKU the pool requires (for example "nvidia-a100",
+	// "nvidia-h100"). It is matched against the GPU node's advertised type label
+	// (mitos.run/gpu-type) during node selection. Empty means any GPU type on a
+	// GPU-capable node satisfies the request.
+	// +optional
+	Type string `json:"type,omitempty"`
 }
 
 type ForkPolicy string
