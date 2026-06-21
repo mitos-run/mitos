@@ -44,6 +44,14 @@ type VMConfig struct {
 	// build time; once baked, every fork restores it without any per-fork
 	// API call. DefaultVMConfig enables it. The field carries no secrets.
 	EntropyDevice bool
+	// HugePages selects the guest-memory page granularity baked into the
+	// template snapshot (issue #167). "" is the Firecracker default (4 KiB base
+	// pages); "2M" backs guest memory with 2 MiB hugetlbfs pages so each
+	// snapshot-restore fault moves 2 MiB instead of 4 KiB. It is set at the
+	// template build (the snapshot records the backing), so every fork restores
+	// with the same page size without a per-fork API call. The field is config
+	// (no secrets), safe to log.
+	HugePages string
 }
 
 // VolumeDrive is one placeholder block device a template build attaches before
@@ -87,6 +95,12 @@ type BootSource struct {
 type MachineConfig struct {
 	VcpuCount  int `json:"vcpu_count"`
 	MemSizeMib int `json:"mem_size_mib"`
+	// HugePages selects the backing page size for guest memory (issue #167).
+	// Empty means the Firecracker default (4 KiB base pages) and is omitted from
+	// the request so the wire form is byte-identical to the pre-field behavior;
+	// "2M" backs guest memory with 2 MiB hugetlbfs pages so each snapshot-restore
+	// fault moves 2 MiB instead of 4 KiB, cutting the lazy-fault count ~512x.
+	HugePages string `json:"huge_pages,omitempty"`
 }
 
 type Drive struct {

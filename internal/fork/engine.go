@@ -145,6 +145,14 @@ type Engine struct {
 	agentBinPath string
 	busyboxPath  string
 
+	// hugePages is the guest-memory page granularity baked into every template
+	// snapshot this engine builds (issue #167). "" is the Firecracker default
+	// (4 KiB base pages); "2M" backs guest memory with 2 MiB hugetlbfs pages so
+	// each restore fault moves 2 MiB instead of 4 KiB, cutting the lazy-fault
+	// tail. It is a template-build property: the snapshot records the backing, so
+	// every fork restores with the same page size with no per-fork API call.
+	hugePages string
+
 	// Encryption at rest is opt-in. When enableEncryption is set and both crypt
 	// and keyProvider are present, each template's snapshot is built inside a
 	// per-template LUKS container (mounted at the template dir) and crypto-shred
@@ -600,6 +608,12 @@ type EngineOpts struct {
 	// leaves http.DefaultClient; PullTemplate still works against a plaintext
 	// test server, but production pulls are TLS, so the daemon always sets it.
 	PullHTTPClient *http.Client
+	// HugePages backs every template snapshot's guest memory with the given page
+	// granularity (issue #167). "" is the Firecracker default (4 KiB base pages);
+	// "2M" uses 2 MiB hugetlbfs pages, requiring the host to have a 2 MiB hugepage
+	// pool reserved (vm.nr_hugepages). The snapshot records the backing, so every
+	// fork restores with the same page size. NewEngine rejects any other value.
+	HugePages string
 }
 
 type Template struct {
@@ -705,6 +719,14 @@ type VolumeRecord struct {
 // model); with JailerBin set every VM runs through the jailer with a
 // dedicated uid/gid from the configured range and a per-VM chroot.
 func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.JailerConfig, opts EngineOpts) (*Engine, error) {
+	// Validate config that does not need the host BEFORE the KVM check, so a
+	// misconfigured node fails fast at construction with an actionable error
+	// rather than booting an engine that refuses every template build (issue
+	// #167). HugePages "2M" additionally needs a reserved 2 MiB hugepage pool on
+	// the host; that runtime prerequisite is surfaced by `mitos doctor` (#174).
+	if err := firecracker.ValidateHugePages(opts.HugePages); err != nil {
+		return nil, err
+	}
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
@@ -797,6 +819,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		enableDNSEgres:       opts.EnableDNSEgress,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
+		hugePages:            opts.HugePages,
 		enableVolumes:        opts.EnableVolumes,
 		volBackend:           volBackend,
 		enableEncryption:     opts.EnableEncryption,
@@ -1907,6 +1930,10 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
 	cfg := firecracker.DefaultVMConfig()
+	// Bake the configured guest-memory page granularity into this template's
+	// snapshot (issue #167). "" leaves the Firecracker default (4 KiB); "2M"
+	// records 2 MiB hugetlbfs backing so every fork restores hugepage-backed.
+	cfg.HugePages = e.hugePages
 
 	// Compute the content-addressed build plan (issue #220). Each init command is
 	// a run step; the chained cache keys decide which steps a cached build could

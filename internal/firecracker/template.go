@@ -235,7 +235,7 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		return nil, fmt.Errorf("set boot source: %w", err)
 	}
 
-	if err := client.SetMachineConfig(cfg.VcpuCount, cfg.MemSizeMib); err != nil {
+	if err := client.SetMachineConfig(cfg.VcpuCount, cfg.MemSizeMib, cfg.HugePages); err != nil {
 		return nil, fmt.Errorf("set machine config: %w", err)
 	}
 
