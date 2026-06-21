@@ -174,6 +174,138 @@ func TestRealModeForkFailsClosedWhenGuestDoesNotReseed(t *testing.T) {
 	}
 }
 
+// createTemplateRequest POSTs /v1/templates with an optional Idempotency-Key
+// header and returns the recorder.
+func createTemplateRequest(t *testing.T, s *server, id, idempotencyKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"id": id})
+	r := httptest.NewRequest(http.MethodPost, "/v1/templates", bytes.NewReader(body))
+	if idempotencyKey != "" {
+		r.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	w := httptest.NewRecorder()
+	s.handleCreateTemplate(w, r)
+	return w
+}
+
+// forkRequestWithKey POSTs /v1/fork with an optional Idempotency-Key header.
+func forkRequestWithKey(t *testing.T, s *server, id, template, idempotencyKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"id": id, "template": template})
+	r := httptest.NewRequest(http.MethodPost, "/v1/fork", bytes.NewReader(body))
+	if idempotencyKey != "" {
+		r.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	w := httptest.NewRecorder()
+	s.handleFork(w, r)
+	return w
+}
+
+// TestCreateTemplateIdempotencyKeyReturnsSameResource proves that two
+// /v1/templates POSTs carrying the SAME Idempotency-Key but DIFFERENT bodies
+// return the SAME template (the first one): a retry never double-creates. A
+// different key creates a distinct template (issue #22 idempotency keys).
+func TestCreateTemplateIdempotencyKeyReturnsSameResource(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+
+	w1 := createTemplateRequest(t, s, "tmpl-a", "key-1")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first create: status %d body %s", w1.Code, w1.Body.String())
+	}
+	var first templateInfo
+	if err := json.Unmarshal(w1.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same key, different requested id: must return the FIRST template, and must
+	// not create a second one.
+	w2 := createTemplateRequest(t, s, "tmpl-b", "key-1")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("repeat create: status %d body %s", w2.Code, w2.Body.String())
+	}
+	var second templateInfo
+	if err := json.Unmarshal(w2.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("same Idempotency-Key must return the same template: got %q want %q", second.ID, first.ID)
+	}
+	s.mu.RLock()
+	_, createdB := s.templates["tmpl-b"]
+	count := len(s.templates)
+	s.mu.RUnlock()
+	if createdB {
+		t.Error("repeat with the same key must not create the second requested id")
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one template after an idempotent repeat, got %d", count)
+	}
+
+	// A different key creates a distinct template.
+	w3 := createTemplateRequest(t, s, "tmpl-c", "key-2")
+	if w3.Code != http.StatusOK {
+		t.Fatalf("new-key create: status %d body %s", w3.Code, w3.Body.String())
+	}
+	var third templateInfo
+	if err := json.Unmarshal(w3.Body.Bytes(), &third); err != nil {
+		t.Fatal(err)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("a different Idempotency-Key must create a new template; got %q", third.ID)
+	}
+}
+
+// TestForkIdempotencyKeyReturnsSameSandbox proves that two /v1/fork POSTs with
+// the same Idempotency-Key return the same sandbox in mock mode, and a different
+// key forks a new one.
+func TestForkIdempotencyKeyReturnsSameSandbox(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+	if w := createTemplateRequest(t, s, "python", ""); w.Code != http.StatusOK {
+		t.Fatalf("create template: %s", w.Body.String())
+	}
+
+	w1 := forkRequestWithKey(t, s, "sb-1", "python", "fork-key-1")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first fork: status %d body %s", w1.Code, w1.Body.String())
+	}
+	var first sandboxInfo
+	if err := json.Unmarshal(w1.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same key, different requested id: must return the FIRST sandbox.
+	w2 := forkRequestWithKey(t, s, "sb-2", "python", "fork-key-1")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("repeat fork: status %d body %s", w2.Code, w2.Body.String())
+	}
+	var second sandboxInfo
+	if err := json.Unmarshal(w2.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("same Idempotency-Key must return the same sandbox: got %q want %q", second.ID, first.ID)
+	}
+	s.mu.RLock()
+	count := len(s.sandboxes)
+	s.mu.RUnlock()
+	if count != 1 {
+		t.Errorf("expected exactly one sandbox after an idempotent repeat, got %d", count)
+	}
+
+	// A different key forks a new sandbox.
+	w3 := forkRequestWithKey(t, s, "sb-3", "python", "fork-key-2")
+	if w3.Code != http.StatusOK {
+		t.Fatalf("new-key fork: status %d body %s", w3.Code, w3.Body.String())
+	}
+	var third sandboxInfo
+	if err := json.Unmarshal(w3.Body.Bytes(), &third); err != nil {
+		t.Fatal(err)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("a different Idempotency-Key must fork a new sandbox; got %q", third.ID)
+	}
+}
+
 // TestResolveNetworkConfigSecureDefault asserts that a nil network config
 // resolves to the secure default: deny-by-default egress AND inbound (issue
 // #219). An untrusted sandbox with no policy can neither reach out nor be dialed.

@@ -389,6 +389,67 @@ def test_real_server_create_fork_terminate(real_server):
     sb2.terminate()
 
 
+def test_fork_idempotency_key_returns_same_sandbox(real_server):
+    """Against the actual Go mock server: two forks carrying the same
+    idempotency_key return the SAME sandbox (a retry never double-creates), and
+    a different key forks a new one (issue #22)."""
+    server = SandboxServer.from_auth(api_key="sk-test", base_url=real_server)
+    server.ensure_template("python")
+
+    sb1 = server.fork("python", id="sb-idem-1", idempotency_key="ik-1")
+    sb2 = server.fork("python", id="sb-idem-2", idempotency_key="ik-1")
+    assert sb2.id == sb1.id, "same idempotency_key must return the same sandbox"
+
+    sb3 = server.fork("python", id="sb-idem-3", idempotency_key="ik-2")
+    assert sb3.id != sb1.id, "a different idempotency_key must fork a new sandbox"
+
+    sb1.terminate()
+    sb3.terminate()
+
+
+def test_create_template_idempotency_key_returns_same_template(real_server):
+    """Two template creates with the same idempotency_key return the same
+    template; the SDK threads the key as the Idempotency-Key header."""
+    server = SandboxServer.from_auth(api_key="sk-test", base_url=real_server)
+    first = server.create_template("idem-tmpl-a", idempotency_key="tk-1")
+    second = server.create_template("idem-tmpl-b", idempotency_key="tk-1")
+    assert second["id"] == first["id"], "same idempotency_key must return the same template"
+
+
+def test_flat_create_auto_generates_idempotency_key(monkeypatch):
+    """The flat mitos.create() auto-generates an idempotency key when the caller
+    gives none, and sends it as the Idempotency-Key header on the fork POST so a
+    transparently retried create never double-creates. A caller-supplied key is
+    used verbatim."""
+    captured = {}
+
+    class _RecordingTransport(httpx.BaseTransport):
+        def handle_request(self, request):
+            if request.url.path == "/v1/templates":
+                return httpx.Response(200, json={"id": "python", "ready": True})
+            if request.url.path == "/v1/fork":
+                captured["fork_key"] = request.headers.get("idempotency-key")
+                body = json.loads(request.content)
+                return httpx.Response(
+                    200,
+                    json={"id": body["id"], "template_id": "python",
+                          "endpoint": "http://localhost", "fork_time_ms": 0.5},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+    server = SandboxServer(url="http://testserver", api_key="sk-test")
+    server._http = httpx.Client(transport=_RecordingTransport())
+
+    # Auto-generated: a key is sent even though the caller gave none.
+    server.ensure_template("python")
+    server.fork("python", id="auto-1")
+    assert captured["fork_key"], "fork must send an auto-generated Idempotency-Key header"
+
+    # Caller-supplied: used verbatim.
+    server.fork("python", id="explicit-1", idempotency_key="caller-key")
+    assert captured["fork_key"] == "caller-key"
+
+
 # ---------------------------------------------------------------------------
 # Async parity (mitos.aio): the flat handle over an ASGI transport.
 # ---------------------------------------------------------------------------
