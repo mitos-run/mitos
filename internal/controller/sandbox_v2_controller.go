@@ -450,7 +450,8 @@ func equalSandboxStatus(a, b *v1alpha2.SandboxStatus) bool {
 	if (ca == nil) != (cb == nil) {
 		return false
 	}
-	if ca != nil && (ca.Status != cb.Status || ca.Reason != cb.Reason || ca.Message != cb.Message) {
+	if ca != nil && (ca.Status != cb.Status || ca.Reason != cb.Reason || ca.Message != cb.Message ||
+		ca.ObservedGeneration != cb.ObservedGeneration) {
 		return false
 	}
 	return true
