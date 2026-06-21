@@ -110,6 +110,26 @@ func TestTimeoutFamilyCodesAreDistinct(t *testing.T) {
 	}
 }
 
+// TestBuildFailedNamesTheFailingStep asserts the build_failed code exists, is a
+// 422 (the build recipe was processed but a step failed), and its remediation
+// tells the caller to inspect the named failing step (issue #220).
+func TestBuildFailedNamesTheFailingStep(t *testing.T) {
+	e := Get(CodeBuildFailed)
+	if e.Code != string(CodeBuildFailed) {
+		t.Fatalf("code = %q, want build_failed", e.Code)
+	}
+	if e.Status != 422 {
+		t.Fatalf("status = %d, want 422", e.Status)
+	}
+	if e.Remediation == "" {
+		t.Fatal("build_failed must carry a remediation")
+	}
+	withCtx := e.WithContext(map[string]any{"step": 2, "step_kind": "run"})
+	if withCtx.Context["step"] != 2 {
+		t.Fatalf("context step not carried: %v", withCtx.Context)
+	}
+}
+
 func TestCatalogueEntriesAllCarryCodeAndRemediation(t *testing.T) {
 	for name, e := range Catalogue {
 		if e.Code == "" {

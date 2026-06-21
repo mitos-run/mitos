@@ -44,6 +44,57 @@ spec:
             type: object
           spec:
             properties:
+              buildSteps:
+                description: |-
+                  BuildSteps is an ordered, declarative recipe for the template build,
+                  authored code-first by the SDK Template builder (issue #220). Each step is
+                  one of run, env, or workdir (copy is reserved for the file-staging path and
+                  is carried as metadata only here). The build path flattens BuildSteps into
+                  the in-VM init commands, so a template may set either Init directly or
+                  BuildSteps, but BuildSteps is the recommended code-first form and is keyed
+                  for fast cached builds: a content-addressed cache key is chained over the
+                  base image and each step, so an unchanged prefix is reused and only the
+                  first changed step and everything after it rebuilds.
+                items:
+                  description: |-
+                    BuildStep is one ordered step of a declarative template build (issue #220).
+                    Exactly one shape is meaningful per Type. The build path flattens run, env,
+                    and workdir steps into the in-VM init commands in order; copy steps are
+                    staged by the file path. The whole ordered list feeds the chained,
+                    content-addressed cache key so an unchanged prefix is reused.
+                  properties:
+                    dest:
+                      type: string
+                    envName:
+                      description: EnvName and EnvValue are the variable name and
+                        value for an env step.
+                      type: string
+                    envValue:
+                      type: string
+                    run:
+                      description: Run is the shell command for a run step.
+                      type: string
+                    source:
+                      description: |-
+                        Source and Dest are the host source and in-image destination for a copy
+                        step.
+                      type: string
+                    type:
+                      description: 'Type selects the step kind: run, env, workdir,
+                        or copy.'
+                      enum:
+                      - run
+                      - env
+                      - workdir
+                      - copy
+                      type: string
+                    workdir:
+                      description: Workdir is the directory for a workdir step.
+                      type: string
+                  required:
+                  - type
+                  type: object
+                type: array
               command:
                 items:
                   type: string

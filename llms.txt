@@ -38,6 +38,9 @@ Every error is:
   body matching the endpoint contract.
 - `body_too_large` (HTTP 413): the body exceeds the size limit. Reduce the
   payload (file content is hex-encoded and bounded).
+- `build_failed` (HTTP 422): a declarative template build step failed, so no
+  snapshot was produced. The `context` names the failing `step` index and
+  `step_kind`; fix that step and rebuild (cached steps before it are reused).
 - `unauthorized` (HTTP 401): the per-sandbox bearer token is missing or invalid.
   Send `Authorization: Bearer <token>` with the per-sandbox token.
 - `not_found` (HTTP 404): no such sandbox. Confirm the sandbox id exists and is

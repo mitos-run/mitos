@@ -19,6 +19,9 @@ Usage:
   mitos sandbox terminate <id>                   destroy a sandbox
   mitos ws create|ls|log|diff|fork|revert|rm     workspace lifecycle (git verbs)
   mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
+  mitos template build --name N                  build a template from a
+    (--dockerfile F | --spec F)                    Dockerfile or declarative spec
+  mitos template push <name>                     publish a built template
   mitos dev up | down                            bring a local kind dev
                                                     cluster up or down
 
@@ -61,6 +64,12 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 			return 2
 		}
 		return cmdWorkspace(ctx, args[1:], backend.Workspace(), out, errw)
+	case "template":
+		if backend == nil {
+			fmt.Fprint(errw, "template: this backend does not support templates\n")
+			return 2
+		}
+		return cmdTemplate(ctx, args[1:], backend.Template(), out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
 	default:

@@ -12,6 +12,7 @@ from mitos.errors import (
     UnauthorizedError,
 )
 from mitos.sandbox import Sandbox
+from mitos.template import Template
 from mitos.types import (
     Execution,
     ExecResult,
@@ -38,6 +39,7 @@ __all__ = [
     "AsyncAgentRun",
     "AsyncSandbox",
     "Sandbox",
+    "Template",
     "ExecResult",
     "Execution",
     "ExecutionError",

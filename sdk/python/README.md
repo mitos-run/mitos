@@ -193,6 +193,33 @@ print(sandbox.exec("print(1 + 1)").stdout)
 sandbox.terminate()
 ```
 
+## Templates as code
+
+Author a custom environment from code with the fluent `Template` builder, in the
+shape E2B and Daytona use. It emits a `SandboxTemplate` spec; no server or KVM is
+needed to build the spec.
+
+```python
+from mitos import Template
+
+spec = (
+    Template()
+    .from_image("python:3.12")
+    .copy("app/", "/app")
+    .run("pip install -r requirements.txt")
+    .set_start("python app.py")
+    .to_spec()
+)
+
+# Or wrap it as a full object to apply to a cluster:
+obj = Template().from_image("node:24").run("npm ci").to_template("web")
+```
+
+The ordered steps (copy / run / env / workdir) map onto the CRD
+`spec.buildSteps` and feed a content-addressed, chained build cache so unchanged
+steps are reused. See docs/templates.md for the CLI (`mitos template build` /
+`push`) and the cache semantics.
+
 ## What is proven where
 
 The cluster examples (lazy default-pool creation, fork, from_name reconnect,

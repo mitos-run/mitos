@@ -503,7 +503,10 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
 		}
 	}
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
+	// InitCommands flattens the declarative BuildSteps (issue #220) into the
+	// in-VM init commands, falling back to the legacy Init list when no
+	// BuildSteps are set, so a template authored either way builds identically.
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.InitCommands(), template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil

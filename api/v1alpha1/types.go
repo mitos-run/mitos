@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,8 +20,21 @@ type SandboxTemplate struct {
 }
 
 type SandboxTemplateSpec struct {
-	Image     string           `json:"image"`
-	Init      []string         `json:"init,omitempty"`
+	Image string   `json:"image"`
+	Init  []string `json:"init,omitempty"`
+
+	// BuildSteps is an ordered, declarative recipe for the template build,
+	// authored code-first by the SDK Template builder (issue #220). Each step is
+	// one of run, env, or workdir (copy is reserved for the file-staging path and
+	// is carried as metadata only here). The build path flattens BuildSteps into
+	// the in-VM init commands, so a template may set either Init directly or
+	// BuildSteps, but BuildSteps is the recommended code-first form and is keyed
+	// for fast cached builds: a content-addressed cache key is chained over the
+	// base image and each step, so an unchanged prefix is reused and only the
+	// first changed step and everything after it rebuilds.
+	// +kubebuilder:validation:Optional
+	BuildSteps []BuildStep `json:"buildSteps,omitempty"`
+
 	Command   []string         `json:"command,omitempty"`
 	Env       []corev1.EnvVar  `json:"env,omitempty"`
 	Resources SandboxResources `json:"resources,omitempty"`
@@ -34,6 +49,94 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
 	Encrypted bool `json:"encrypted,omitempty"`
+}
+
+// BuildStepType is the kind of a declarative build step.
+type BuildStepType string
+
+const (
+	// BuildStepRun runs a shell command inside the booting template VM at build
+	// time, exactly as an Init command does.
+	BuildStepRun BuildStepType = "run"
+	// BuildStepEnv bakes an environment variable into the template by exporting it
+	// for the remaining build steps and persisting it to /etc/profile so it is
+	// present in every fork. The value is part of the cache key.
+	BuildStepEnv BuildStepType = "env"
+	// BuildStepWorkdir creates and changes into a working directory for the
+	// remaining build steps.
+	BuildStepWorkdir BuildStepType = "workdir"
+	// BuildStepCopy stages host files into the image. The actual file
+	// materialization is performed by the build path (KVM gated); the step is
+	// carried here so the cache key chains over the declared source and
+	// destination. Source is the host path, Dest the in-image path.
+	BuildStepCopy BuildStepType = "copy"
+)
+
+// BuildStep is one ordered step of a declarative template build (issue #220).
+// Exactly one shape is meaningful per Type. The build path flattens run, env,
+// and workdir steps into the in-VM init commands in order; copy steps are
+// staged by the file path. The whole ordered list feeds the chained,
+// content-addressed cache key so an unchanged prefix is reused.
+type BuildStep struct {
+	// Type selects the step kind: run, env, workdir, or copy.
+	// +kubebuilder:validation:Enum=run;env;workdir;copy
+	Type BuildStepType `json:"type"`
+
+	// Run is the shell command for a run step.
+	// +kubebuilder:validation:Optional
+	Run string `json:"run,omitempty"`
+
+	// EnvName and EnvValue are the variable name and value for an env step.
+	// +kubebuilder:validation:Optional
+	EnvName string `json:"envName,omitempty"`
+	// +kubebuilder:validation:Optional
+	EnvValue string `json:"envValue,omitempty"`
+
+	// Workdir is the directory for a workdir step.
+	// +kubebuilder:validation:Optional
+	Workdir string `json:"workdir,omitempty"`
+
+	// Source and Dest are the host source and in-image destination for a copy
+	// step.
+	// +kubebuilder:validation:Optional
+	Source string `json:"source,omitempty"`
+	// +kubebuilder:validation:Optional
+	Dest string `json:"dest,omitempty"`
+}
+
+// InitCommands returns the in-VM build-time commands that realize the spec's
+// declarative build. If BuildSteps is set its run, env, and workdir steps are
+// flattened in order (copy steps stage files outside the VM and contribute no
+// init command); otherwise the legacy Init list is returned unchanged. This is
+// the single mapping from the code-first BuildSteps form onto the existing
+// CreateTemplate init path, so a template authored either way builds the same.
+func (s *SandboxTemplateSpec) InitCommands() []string {
+	if len(s.BuildSteps) == 0 {
+		return s.Init
+	}
+	cmds := make([]string, 0, len(s.BuildSteps))
+	for i := range s.BuildSteps {
+		step := &s.BuildSteps[i]
+		switch step.Type {
+		case BuildStepRun:
+			if step.Run != "" {
+				cmds = append(cmds, step.Run)
+			}
+		case BuildStepEnv:
+			// Export for the remaining build and persist into /etc/profile so the
+			// variable is present in every fork. Single-quote the value so spaces
+			// and shell metacharacters are baked literally.
+			cmds = append(cmds, fmt.Sprintf("export %s='%s'; printf 'export %s=%%s\\n' '%s' >> /etc/profile",
+				step.EnvName, step.EnvValue, step.EnvName, step.EnvValue))
+		case BuildStepWorkdir:
+			if step.Workdir != "" {
+				cmds = append(cmds, fmt.Sprintf("mkdir -p '%s'; cd '%s'", step.Workdir, step.Workdir))
+			}
+		case BuildStepCopy:
+			// Copy is staged by the file path, not an in-VM command.
+		}
+	}
+	return cmds
 }
 
 type SandboxResources struct {

@@ -70,6 +70,13 @@ const (
 	CodeExecFailed Code = "exec_failed"
 	// CodeFileFailed: a file operation failed in the sandbox.
 	CodeFileFailed Code = "file_failed"
+	// CodeBuildFailed: a declarative template build step failed (issue #220). The
+	// build recipe was accepted but a step (a run command, an env or workdir step,
+	// or a copy) errored, so no snapshot was produced. The context names the
+	// failing step index and kind so the caller can fix exactly that step. This is
+	// a 422 (the request was well-formed but the recipe could not be carried out),
+	// distinct from exec_failed (a runtime command in a live sandbox).
+	CodeBuildFailed Code = "build_failed"
 	// CodeInternal: an unclassified internal error.
 	CodeInternal Code = "internal"
 )
@@ -211,6 +218,16 @@ var Catalogue = map[string]Error{
 		Message:     "the file operation failed in the sandbox",
 		Remediation: "Confirm the path exists and is writable; inspect the cause for the underlying error.",
 		Status:      http.StatusInternalServerError,
+	},
+	string(CodeBuildFailed): {
+		Code:    string(CodeBuildFailed),
+		Message: "a template build step failed",
+		// The remediation names the failing-step pattern: the build context carries
+		// the step index and kind, so the caller fixes exactly that step and
+		// rebuilds. Cached steps before it are reused, so a rebuild only re-runs the
+		// failing step and everything after it.
+		Remediation: "A declarative build step failed; no snapshot was produced. The context names the failing step (step index and step_kind) and carries its cause. Fix that step and rebuild; cached steps before it are reused.",
+		Status:      http.StatusUnprocessableEntity,
 	},
 	string(CodeInternal): {
 		Code:        string(CodeInternal),

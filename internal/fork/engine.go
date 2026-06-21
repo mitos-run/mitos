@@ -22,6 +22,7 @@ import (
 	"mitos.run/mitos/internal/network"
 	"mitos.run/mitos/internal/snapcompat"
 	"mitos.run/mitos/internal/storecrypt"
+	"mitos.run/mitos/internal/templatebuild"
 	"mitos.run/mitos/internal/volume"
 	"mitos.run/mitos/internal/vsock"
 )
@@ -90,6 +91,13 @@ type Engine struct {
 	// templateDigests caches the recorded manifest digest per template id so
 	// GetCapacity can report it to the controller without re-reading disk.
 	templateDigests map[string]cas.Digest
+
+	// buildCache, when set, is consulted by CreateTemplate to decide which
+	// declarative build steps a cached build could reuse (issue #220). Nil (the
+	// default) means no cache: every step is built, the current behavior. The
+	// actual layer reuse on a real boot is KVM gated; the engine computes and
+	// logs the plan, the firecracker suite asserts the reuse.
+	buildCache templatebuild.Cache
 
 	// Networking is opt-in. When both netMgr and netAlloc are set, a fork
 	// that carries NetworkOpts gets a distinct per-fork network identity:
@@ -1816,8 +1824,42 @@ func apparentSize(path string) int64 {
 // path unchanged; an OCI reference is pulled, the agent is injected, and a
 // rootfs.ext4 is built from it before boot. A nonzero init command aborts the
 // build so a broken template is never snapshotted or served.
+// logBuildPlan computes the content-addressed build plan for the init commands
+// (each treated as a run step) and logs which steps a cached build would reuse
+// (issue #220). With cache nil every step is BUILD, the unchanged default. This
+// wires the cache lookup into the build path; the real per-step skip on a live
+// boot is KVM gated and asserted in the firecracker suite. The command text is
+// NOT logged (it may carry a secret arg): only the step index and CACHED/BUILD.
+func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache) {
+	if len(initCommands) == 0 {
+		return
+	}
+	steps := make([]v1alpha1.BuildStep, len(initCommands))
+	for i, c := range initCommands {
+		steps[i] = v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: c}
+	}
+	plan := templatebuild.Plan(image, steps, cache)
+	cached := 0
+	for _, p := range plan {
+		if p.Cached {
+			cached++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "forkd: build plan for image %q: %d step(s), %d cached, %d to build\n",
+		image, len(plan), cached, len(plan)-cached)
+}
+
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
 	cfg := firecracker.DefaultVMConfig()
+
+	// Compute the content-addressed build plan (issue #220). Each init command is
+	// a run step; the chained cache keys decide which steps a cached build could
+	// reuse. The plan is computed and logged here so the cache lookup is wired
+	// into the build path; the ACTUAL layer reuse (skipping a cached step on a
+	// real boot) is engine and KVM gated and is asserted in the firecracker
+	// suite, not here. With no cache configured every step is BUILD, which is the
+	// current behavior unchanged.
+	logBuildPlan(image, initCommands, e.buildCache)
 
 	// The template rootfs runs the guest agent as PID 1 at /init: ociroot
 	// injects the agent there for image builds, and the hand-built file-path
