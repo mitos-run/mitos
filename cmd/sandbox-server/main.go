@@ -123,22 +123,59 @@ type idempotencyRecord struct {
 // returns the same resource. It mirrors the Stripe / RFC draft convention.
 const idempotencyHeader = "Idempotency-Key"
 
-// lookupIdempotent returns the resource id a prior creating call recorded under
-// key for kind, when the binding is present and unexpired. An empty key (no
-// header) never matches. Must be called with s.mu held.
-func (s *server) lookupIdempotent(key string, kind idempotencyKind) (string, bool) {
+// idempotencyStatus is the outcome of reserving an Idempotency-Key for a create.
+type idempotencyStatus int
+
+const (
+	// idemProceed: the caller holds the reservation and must perform the create,
+	// then record it on success or release it on failure.
+	idemProceed idempotencyStatus = iota
+	// idemReplay: a prior create under this key already completed; return its
+	// resource (the returned id) instead of creating again.
+	idemReplay
+	// idemInFlight: a concurrent create under this key is reserved but not yet
+	// complete; the caller must NOT start a second create.
+	idemInFlight
+)
+
+// beginIdempotent atomically resolves an Idempotency-Key before a create. The
+// lookup and the in-flight reservation happen under one exclusive lock, so two
+// concurrent calls with the same key cannot both observe "absent" and both
+// proceed to create (the TOCTOU the earlier RLock-then-release-then-create
+// allowed). An empty key (no header) always proceeds without reserving. On
+// idemProceed the caller MUST later call recordIdempotent (success, under s.mu)
+// or releaseIdempotent (failure) for the same key.
+func (s *server) beginIdempotent(key string, kind idempotencyKind) (string, idempotencyStatus) {
 	if key == "" {
-		return "", false
+		return "", idemProceed
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec, ok := s.idempotency[key]
-	if !ok || rec.kind != kind {
-		return "", false
+	if ok && rec.kind == kind && time.Since(rec.at) <= idempotencyTTL {
+		if rec.resourceID != "" {
+			return rec.resourceID, idemReplay
+		}
+		return "", idemInFlight
 	}
-	if time.Since(rec.at) > idempotencyTTL {
+	// Absent, expired, or a different kind: reserve this key in-flight (an empty
+	// resourceID) so a concurrent same-key create observes idemInFlight.
+	s.idempotency[key] = idempotencyRecord{kind: kind, at: time.Now()}
+	return "", idemProceed
+}
+
+// releaseIdempotent drops a still-in-flight reservation so a later retry can
+// proceed; a failed create does not consume the key. It never removes a
+// completed binding (non-empty resourceID). An empty key is a no-op.
+func (s *server) releaseIdempotent(key string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.idempotency[key]; ok && rec.resourceID == "" {
 		delete(s.idempotency, key)
-		return "", false
 	}
-	return rec.resourceID, true
 }
 
 // recordIdempotent binds key to resourceID for kind so a later repeat returns
@@ -339,16 +376,21 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	// before doing any creating work; a client retrying after a timeout must not
 	// drive a second create.
 	idemKey := r.Header.Get(idempotencyHeader)
-	s.mu.RLock()
-	existingID, hit := s.lookupIdempotent(idemKey, idempotencyTemplate)
-	var existing *templateInfo
-	if hit {
-		existing = s.templates[existingID]
-	}
-	s.mu.RUnlock()
-	if hit && existing != nil {
-		resp(w, existing)
+	existingID, idemSt := s.beginIdempotent(idemKey, idempotencyTemplate)
+	if idemSt == idemInFlight {
+		errResp(w, "a create with this Idempotency-Key is already in progress; retry shortly", 409)
 		return
+	}
+	if idemSt == idemReplay {
+		s.mu.RLock()
+		existing := s.templates[existingID]
+		s.mu.RUnlock()
+		if existing != nil {
+			resp(w, existing)
+			return
+		}
+		// The recorded template was since deleted; fall through and recreate under
+		// the same key (recordIdempotent below rebinds it).
 	}
 
 	// Resolve and validate the network posture (issue #219). A nil network means
@@ -357,6 +399,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	// parsed allowlist.
 	netCfg, nerr := resolveNetworkConfig(req.Network)
 	if nerr != nil {
+		s.releaseIdempotent(idemKey)
 		errResp(w, fmt.Sprintf("invalid network config: %v", nerr), 400)
 		return
 	}
@@ -368,6 +411,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		cfg := firecracker.DefaultVMConfig()
 		cfg.RootfsPath = s.rootfsPath
 		if _, err := s.templateMgr.CreateTemplate(req.ID, cfg, nil); err != nil {
+			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return
 		}
@@ -472,19 +516,27 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// returns the sandbox the first call forked, never a duplicate. Resolved
 	// before any forking work so a retry never drives a second restore.
 	idemKey := r.Header.Get(idempotencyHeader)
-	s.mu.RLock()
-	tmpl, ok := s.templates[req.Template]
-	existingID, hit := s.lookupIdempotent(idemKey, idempotencyFork)
-	var existing *sandboxInfo
-	if hit {
-		existing = s.sandboxes[existingID]
-	}
-	s.mu.RUnlock()
-	if hit && existing != nil {
-		resp(w, existing)
+	existingID, idemSt := s.beginIdempotent(idemKey, idempotencyFork)
+	if idemSt == idemInFlight {
+		errResp(w, "a fork with this Idempotency-Key is already in progress; retry shortly", 409)
 		return
 	}
+	if idemSt == idemReplay {
+		s.mu.RLock()
+		existing := s.sandboxes[existingID]
+		s.mu.RUnlock()
+		if existing != nil {
+			resp(w, existing)
+			return
+		}
+		// The recorded sandbox was since terminated; fall through and re-fork under
+		// the same key (recordIdempotent below rebinds it).
+	}
+	s.mu.RLock()
+	tmpl, ok := s.templates[req.Template]
+	s.mu.RUnlock()
 	if !ok {
+		s.releaseIdempotent(idemKey)
 		errResp(w, fmt.Sprintf("template %q not found", req.Template), 404)
 		return
 	}
@@ -516,6 +568,7 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
 		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
 			// Fail closed: a fork whose guest agent is unreachable cannot reseed.
+			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("fork %q: guest agent not connected: %v", req.ID, err), 500)
 			return
 		}
@@ -525,6 +578,7 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// shares CRNG state with its siblings is never served. The error
 			// carries no entropy or secret values.
 			s.sandboxAPI.UnregisterSandbox(req.ID)
+			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
 			return
 		}
