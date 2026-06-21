@@ -11,11 +11,11 @@ test missing or incomplete. `done` = implemented + test runs in the
 
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
-| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED on EVERY engine when the guest does not reseed | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`, `TestForkFailsWhenGuestDoesNotReseed`, `TestForkRunningFailsWhenGuestDoesNotReseed` (daemon), `TestRealModeForkFailsClosedWhenGuestDoesNotReseed` (sandbox-server); KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial** (guest reseed + reseed handshake done; virtio-rng device attachment NOT wired; KVM proof is guest-only. Fail-closed is enforced on ALL engines: the husk path (`internal/husk` `productionNotifier`), the raw-forkd path (`internal/daemon/sandbox_api.go` `NotifyForked` now RETURNS the guest response and `internal/daemon/server.go` `notifyForked` refuses to mark the sandbox Ready when it is nil or reports `ReseededRNG:false`), and sandbox-server real-mode (`cmd/sandbox-server/main.go` `reseedFork`, the same gate). A guest that signals `ReseededRNG:false` with `OK:true` is reaped, not served; a transport `OK:false` and a `ReseededRNG:false` both fail the fork. The `ReseededRNG:false` failure mode is now covered by the go tests listed above. Remaining for `done`: virtio-rng attachment and a KVM end-to-end forkd notify proof.) |
+| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED on EVERY engine when the guest does not reseed; PLUS a baked-in virtio-rng device for a continuous host entropy source in every fork | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`, `TestForkFailsWhenGuestDoesNotReseed`, `TestForkRunningFailsWhenGuestDoesNotReseed` (daemon), `TestRealModeForkFailsClosedWhenGuestDoesNotReseed` (sandbox-server), `TestEntropyRequestJSON` + `TestDefaultVMConfigEnablesEntropy` (firecracker, virtio-rng config builder); KVM: two forks of one snapshot assert distinct `/dev/urandom`, distinct kernel UUID (`/proc/sys/kernel/random/uuid`), and distinct TLS client random (32 bytes from getrandom) | **partial** (guest reseed + reseed handshake done; virtio-rng device NOW WIRED into the template build and baked into every snapshot, `firecracker.VMConfig.EntropyDevice` default-on, `Client.SetEntropy` -> `PUT /entropy`, darwin-unit-tested for the config/JSON shape, live behavior KVM-gated. Fail-closed is enforced on ALL engines: the husk path (`internal/husk` `productionNotifier`), the raw-forkd path (`internal/daemon/sandbox_api.go` `NotifyForked` now RETURNS the guest response and `internal/daemon/server.go` `notifyForked` refuses to mark the sandbox Ready when it is nil or reports `ReseededRNG:false`), and sandbox-server real-mode (`cmd/sandbox-server/main.go` `reseedFork`, the same gate). A guest that signals `ReseededRNG:false` with `OK:true` is reaped, not served; a transport `OK:false` and a `ReseededRNG:false` both fail the fork. The `ReseededRNG:false` failure mode is covered by the go tests listed above. The KVM fork-correctness phase now also asserts distinct UUID and distinct TLS client random across two forks (test code present; not yet observed on a KVM run). Remaining for `done`: a KVM end-to-end forkd notify proof and an observed KVM run of the new virtio-rng device plus the UUID/TLS assertions.) |
 | 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial; CLOCK_MONOTONIC residual documented (no step possible)** (guest wall-clock step done, 500ms tolerance; KVM proof is guest-only. The review finding on CLOCK_MONOTONIC is assessed and DOCUMENTED rather than "fixed": Linux rejects `clock_settime(CLOCK_MONOTONIC)` with EINVAL so a literal step is impossible, and a PAUSED-across-restore VM resumes the monotonic clock continuously so clean-restore monotonic timers do not mis-fire. The narrow residual is mixed wall/monotonic-derived deadlines, handled by the existing SIGUSR2 userspace reset signal. See section 2 for the full assessment; `guest/agent/notifyforked.go` `stepClock` carries the rationale inline.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
-| 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestUpdateMetricsPopulatesMemoryGauge`, `TestSampleMetricsTicksAndStopsOnContextCancel`; KVM growth assertion pending | **partial** (lifetime re-sampling wired: `Engine.Metering` re-stats `smaps_rollup` each pass and `Server.SampleMetrics` refreshes the gauge periodically; per-sandbox labels + KVM growth assertion open) |
+| 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestUpdateMetricsPopulatesMemoryGauge`, `TestSampleMetricsTicksAndStopsOnContextCancel`; KVM: `cmd/mem-smoke` forks, samples `Metering().TotalUnique` at T=0, touches 64 MiB in the guest, re-samples, asserts >= 32 MiB growth | **partial** (lifetime re-sampling wired: `Engine.Metering` re-stats `smaps_rollup` each pass and `Server.SampleMetrics` refreshes the gauge periodically; KVM growth assertion now present as test code (`cmd/mem-smoke`, wired into the `kvm-test.yaml` lifetime-memory phase) but NOT yet observed on a KVM run; per-sandbox labels still open) |
 | 6 | Incompatible snapshot restored (crash/corruption) | Refuse on load: the manifest records the producing environment (format version, Firecracker version, CPU model, kernel, config hash); require exact VMM match, exact CPU-model match, format version in the supported set (kernel informational); `--allow-incompatible-snapshots` dev escape hatch | go: `internal/snapcompat` `TestCheck*`, `internal/fork/compat_test.go`; KVM: record a real manifest, assert compatible passes and a VMM / format-version mismatch is refused | **done** (load-gate enforcement after the digest verify, before any Firecracker launch; CPU templates + live cross-version restore open) |
 | 7 | forkd crash orphans its own VMs (in-memory map lost on restart) | Persist a per-VM journal (`<dataDir>/sandboxes/<id>.json`, atomic write) on create, remove on clean terminate; `NewEngine` reconciles it before serving: re-adopt a still-running pre-crash VM into the live map (PID-recycle-guarded: `/proc/<pid>/exe` must resolve to the recorded firecracker binary, else comm is `firecracker`) so the GC can reconcile it, or reap a dead/recycled VM's leaked artifacts (jailer chroot, rootfs CoW clone, fork network, jailer uid, volume backings) and drop the record. The adopted VM's exact /30 network block is pinned from its recorded guest IP (`netconf.Allocator.MarkInUse`), not re-Acquired, so a later fresh fork cannot be handed the same /30 and Release frees the right block. Fail-open; the startup reap never kills (only adoption enables a later GC-driven kill). That GC-driven kill (`reapAdopted`) RE-RUNS the same PID-recycle guard against the recorded firecracker binary immediately before signalling, so a pid recycled to an unrelated process between adoption and Terminate is never SIGKILLed (its artifacts are still reaped). Journal holds ids/pids/paths/uids/IPs only, never secrets | go: `internal/fork/journal_test.go`, `internal/fork/reconcile_engine_test.go` (live-pid adopt, dead-pid reap, recycled-pid reject, fail-open, adopted-terminate reap, reap-adopted skips kill on recycled pid + kills when still ours, adopted network block pinned) and `internal/netconf/identity_test.go` (`TestMarkInUse*`) with injected pid/verifier seams; `internal/firecracker` `TestJailerState`, `TestUIDAllocatorMarkInUse` | **partial** (journal + reconcile + reap + TOCTOU re-verification + block pinning done and unit-verified on darwin; real-VM reap on KVM, start a sandbox, kill -9 forkd, restart forkd, assert the orphan FC is reaped (dead) or re-adopted + GC-terminated with no leaked process/chroot/uid, is a TARGET pending a kvm-test.yaml crash-reap phase (issue #12); typed claim condition for a GC'd re-adopted orphan open) |
 
@@ -125,9 +125,19 @@ entropy into the kernel CRNG via `RNDADDENTROPY`, records the generation at
 (`guest/agent/notifyforked.go`). VMGenID is not exposed by Firecracker, so this
 host-entropy-over-vsock hook is our equivalent.
 
-**Follow-up (not wired):** a virtio-rng device attached to every restored VM
-backed by host entropy is NOT implemented; the current path injects entropy
-only at fork time via NotifyForked, not continuously. Tracked as a follow-up.
+**Continuous virtio-rng device (wired):** in addition to the one-shot
+NotifyForked reseed at fork time, every template snapshot now bakes a virtio-rng
+device backed by the host RNG, so each restored fork has a CONTINUOUS host
+entropy source feeding its CRNG, not just the single credited injection at the
+instant of the fork. The device is attached before InstanceStart at template
+build (`firecracker.Client.SetEntropy` -> `PUT /entropy`, driven by
+`firecracker.VMConfig.EntropyDevice`, default-on via `DefaultVMConfig`); because
+Firecracker bakes its device model into the snapshot and cannot add a device on
+restore, every fork restores the device with no per-fork API call. The config
+and JSON-building logic is darwin-unit-tested (`TestEntropyRequestJSON`,
+`TestDefaultVMConfigEnablesEntropy`); the live in-guest behavior is KVM-gated.
+The NotifyForked credited reseed remains the fail-closed gate; the virtio-rng
+device is the continuous complement, not a replacement.
 
 **Fail-closed scope.** The reseed is fail-closed on EVERY engine. The husk path
 (`internal/husk` `productionNotifier`), the raw-forkd path
@@ -159,9 +169,15 @@ uncredited path reports failure (the host then reaps the fork).
 KVM (`kvm-test.yaml`): one snapshot is taken after the agent is up, two VMs are
 restored from it, and `test-agent --mode notify` runs against each. The phase
 asserts the two `URANDOM=` base64 samples differ (equal would be the shared-RNG
-bug). This proves the GUEST applies the reseed; forkd end-to-end notify is
-covered by the go tests above. The N=8 / `uuid.uuid4()` / TLS-ClientHello
-variants remain a follow-up.
+bug). It additionally asserts the two forks produce a DISTINCT kernel UUID
+(`/proc/sys/kernel/random/uuid`, the same CRNG draw `uuid.uuid4()` and systemd
+machine-id use) and a DISTINCT TLS client random (32 bytes from `getrandom`,
+modelling the ClientHello random a TLS handshake would put on the wire), so the
+proof covers machine identity and TLS nonces, not only the raw `/dev/urandom`
+stream. This proves the GUEST applies the reseed; forkd end-to-end notify is
+covered by the go tests above. These UUID and TLS assertions are present as test
+code and have NOT yet been observed on a KVM run. The N=8 variant remains a
+follow-up.
 
 **run_code kernel caveat.** A forked VM inherits the LIVE run_code kernel
 (`/opt/mitos/kernel_driver.py`, started lazily on the first `run_code`) and its
@@ -323,9 +339,12 @@ Required implementation:
 
 Test: `TestUpdateMetricsPopulatesMemoryGauge` and
 `TestSampleMetricsTicksAndStopsOnContextCancel` cover the periodic wiring
-locally. The KVM variant (fork, record T=0 unique bytes, run a write-heavy
-workload, assert the exported metric grows and `GetCapacity` reflects it)
-remains for the fork-correctness KVM phase.
+locally. The KVM variant is now present as test code: `cmd/mem-smoke` forks a
+sandbox, samples `Engine.Metering().TotalUnique` at T=0, allocates and TOUCHES
+64 MiB in the guest over the agent, re-samples, and asserts the metered unique
+bytes grew by at least a 32 MiB floor (a metric frozen at the T=0 footprint
+fails). It is wired into the `kvm-test.yaml` lifetime-memory phase. This has NOT
+yet been observed on a KVM run.
 
 ## 6. Snapshot compatibility on restore
 
@@ -364,13 +383,19 @@ See docs/snapshot-format.md for the full format-version and migration policy.
 
 `kvm-test.yaml` (GitHub Actions, KVM-capable runner) runs the RNG and clock
 proofs above on every PR touching `internal/firecracker/`, `internal/fork/`,
-`guest/`, `cmd/test-agent/`, or `internal/vsock/`. It takes one snapshot after
-the agent is up, restores two VMs from it, and asserts distinct `/dev/urandom`,
-each wall clock within 2s of the runner, and the fork-generation file matching
-the generation sent. A jailer-boot phase restores the same snapshot under the
-jailer to prove the chroot/uid mechanics (it does not prove the dropped
-capability set, since the runner is root; that sub-step is `continue-on-error`,
-see issue #2).
+`guest/`, `cmd/test-agent/`, `cmd/mem-smoke/`, or `internal/vsock/`. It takes one
+snapshot after the agent is up, restores two VMs from it, and asserts distinct
+`/dev/urandom`, distinct kernel UUID, distinct TLS client random, each wall
+clock within 2s of the runner, and the fork-generation file matching the
+generation sent. A separate lifetime-memory phase (`cmd/mem-smoke`) forks one
+sandbox, touches 64 MiB in the guest, and asserts the metered unique bytes grow
+(row 5). A jailer-boot phase restores the same snapshot under the jailer to
+prove the chroot/uid mechanics. It does NOT prove the dropped capability set,
+since the runner is root; the INTENDED capability list is computed in one tested
+place (`cmd/forkd` `jailerRequiredCapabilities`, unit-tested on darwin against
+the exact set CAP_SYS_ADMIN, CAP_CHOWN, CAP_SETUID, CAP_SETGID, CAP_MKNOD), and
+the kernel actually enforcing the drop of everything else stays the KVM /
+non-root-gated sub-step (`continue-on-error`, see issue #2).
 
 The same job also runs a husk activate-correctness phase: it activates two VMs
 from one bench template snapshot via two fresh dormant `cmd/husk-stub` processes

@@ -323,6 +323,27 @@ func runNotify(client *vsock.Client, generation uint64) {
 	fmt.Printf("URANDOM=%s\n", strings.TrimSpace(urandom))
 	fmt.Printf("WALLCLOCK_NS=%s\n", strings.TrimSpace(wallclock))
 	fmt.Printf("FORKGEN=%s\n", strings.TrimSpace(forkgen))
+
+	// Distinct machine identity and distinct TLS client random across forks.
+	// These sample two CRNG-derived values that a real workload would collide
+	// on if the reseed did NOT take, beyond the raw /dev/urandom stream:
+	//
+	//	UUID:      the kernel generates a fresh v4 UUID from its CRNG on every
+	//	           read of /proc/sys/kernel/random/uuid. This is the exact
+	//	           source uuid.uuid4 / systemd machine-id draw from, so two
+	//	           forks producing the SAME UUID would be the colliding-UUID
+	//	           bug fork-correctness section 1 names.
+	//	TLSRANDOM: a TLS ClientHello random is 32 bytes the TLS stack reads
+	//	           from the SAME kernel CRNG (crypto/rand -> getrandom). Sampling
+	//	           getrandom(2) directly (head -c 32 /dev/random) models exactly
+	//	           what the TLS handshake would put on the wire, so two forks
+	//	           producing the same value would mean identical ClientHello
+	//	           randoms (predictable-nonce hazard). /dev/random blocks until
+	//	           the CRNG is initialized, which a reseeded fork's pool is.
+	uuid := execOrDie(client, "cat /proc/sys/kernel/random/uuid")
+	tlsRandom := execOrDie(client, "head -c 32 /dev/random | base64 | tr -d '\\n'")
+	fmt.Printf("UUID=%s\n", strings.TrimSpace(uuid))
+	fmt.Printf("TLSRANDOM=%s\n", strings.TrimSpace(tlsRandom))
 }
 
 // runRead is the read-only sampler for the husk activate-correctness phase. The

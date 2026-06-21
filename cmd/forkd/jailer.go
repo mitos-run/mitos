@@ -9,6 +9,35 @@ import (
 	"mitos.run/mitos/internal/firecracker"
 )
 
+// jailerRequiredCapabilities is the EXACT, minimal capability set forkd must
+// retain to build each VM's jail through the Firecracker jailer. It is the
+// single source of truth the DaemonSet securityContext.capabilities.add and the
+// buildJailerConfig nonroot error message both derive from, so the intended
+// dropped-everything-else set is computed in one tested place:
+//
+//   - CAP_SYS_ADMIN: cgroup and namespace setup the jailer performs;
+//   - CAP_CHOWN:     hand the per-VM chroot files to the dedicated uid/gid;
+//   - CAP_SETUID:    drop the jailed Firecracker to the per-VM uid;
+//   - CAP_SETGID:    drop the jailed Firecracker to the per-VM gid;
+//   - CAP_MKNOD:     create the /dev/kvm and /dev/net/tun device nodes inside
+//     each chroot.
+//
+// The kernel actually ENFORCING the drop of every other capability is proven on
+// a non-root KVM runner, not here (the CI runner is root, so it cannot observe
+// the bounding set shrink); this function and its tests assert only that the
+// intended LIST is correct and stable. Order is part of the contract so the
+// list diffs cleanly. The set is intentionally narrow: widening it is a
+// threat-model change (docs/threat-model.md) and a reviewed diff.
+func jailerRequiredCapabilities() []string {
+	return []string{
+		"CAP_SYS_ADMIN",
+		"CAP_CHOWN",
+		"CAP_SETUID",
+		"CAP_SETGID",
+		"CAP_MKNOD",
+	}
+}
+
 // parseUIDRange parses the --uid-range flag, "low-high" inclusive.
 // uid 0 is refused: jailed VMs must never run as root.
 func parseUIDRange(s string) (uint32, uint32, error) {
@@ -63,7 +92,7 @@ func buildJailerConfig(jailerBin, chrootBase, uidRange, dataDir string, euid int
 	}
 
 	if euid != 0 {
-		return firecracker.JailerConfig{}, fmt.Errorf("--jailer requires forkd to run as root (euid 0, currently %d): the jailer needs CAP_SYS_ADMIN, CAP_CHOWN, CAP_SETUID, CAP_SETGID, and CAP_MKNOD to build each VM's jail; run unjailed only for development by omitting --jailer", euid)
+		return firecracker.JailerConfig{}, fmt.Errorf("--jailer requires forkd to run as root (euid 0, currently %d): the jailer needs %s to build each VM's jail; run unjailed only for development by omitting --jailer", euid, strings.Join(jailerRequiredCapabilities(), ", "))
 	}
 
 	for _, dir := range []string{chrootBase, dataDir} {

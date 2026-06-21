@@ -34,6 +34,16 @@ type VMConfig struct {
 	// the snapshot's baked placeholder NIC to its own tap. The zero value
 	// keeps the prior NIC-less behavior. The fields are safe to log.
 	Network *NetworkIdentity
+	// EntropyDevice, when true, attaches a virtio-rng device before
+	// InstanceStart so the snapshot bakes a CONTINUOUS host entropy source
+	// into every restored fork. This complements the one-shot NotifyForked
+	// CRNG reseed (fork-correctness row 1): the reseed credits fresh entropy
+	// at the instant of the fork, the virtio-rng device keeps feeding the
+	// guest CRNG afterwards. Firecracker bakes its device model at snapshot
+	// time and cannot add a device on restore, so the device must exist at
+	// build time; once baked, every fork restores it without any per-fork
+	// API call. DefaultVMConfig enables it. The field carries no secrets.
+	EntropyDevice bool
 }
 
 // VolumeDrive is one placeholder block device a template build attaches before
@@ -62,6 +72,10 @@ func DefaultVMConfig() VMConfig {
 		VcpuCount:      1,
 		MemSizeMib:     512,
 		BootArgs:       "console=ttyS0 reboot=k panic=1 pci=off",
+		// On by default: every template snapshot bakes a virtio-rng device so
+		// each fork inherits a continuous host entropy source (fork-correctness
+		// row 1). See VMConfig.EntropyDevice.
+		EntropyDevice: true,
 	}
 }
 
@@ -98,6 +112,34 @@ type DrivePatch struct {
 type Vsock struct {
 	GuestCID int    `json:"guest_cid"`
 	UdsPath  string `json:"uds_path"`
+}
+
+// Entropy is the PUT /entropy request body. It attaches a virtio-rng device
+// backed by the host RNG, giving the guest a continuous entropy source. The
+// rate_limiter is optional; omitting it (a nil pointer with omitempty) yields a
+// bare {} body, which Firecracker accepts as an unthrottled device. The device
+// is baked into the snapshot at build time, so every fork restores it without a
+// per-fork API call. No secrets: the device draws from the host RNG and the
+// request carries only an optional rate-limit shape, never any entropy bytes.
+type Entropy struct {
+	RateLimiter *RateLimiter `json:"rate_limiter,omitempty"`
+}
+
+// RateLimiter is the optional token-bucket shape Firecracker accepts on the
+// entropy (and other) devices. It is here for completeness; the engine attaches
+// the entropy device unthrottled (a nil RateLimiter), so this is currently only
+// exercised by callers that want to bound guest RNG draw. No secrets.
+type RateLimiter struct {
+	Bandwidth *TokenBucket `json:"bandwidth,omitempty"`
+	Ops       *TokenBucket `json:"ops,omitempty"`
+}
+
+// TokenBucket is one Firecracker token-bucket spec (size + refill time). No
+// secrets.
+type TokenBucket struct {
+	Size         int64 `json:"size"`
+	RefillTimeMs int64 `json:"refill_time"`
+	OneTimeBurst int64 `json:"one_time_burst,omitempty"`
 }
 
 type Action struct {

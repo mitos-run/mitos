@@ -270,6 +270,19 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		return nil, fmt.Errorf("set vsock: %w", err)
 	}
 
+	// Attach a virtio-rng device so the snapshot bakes a CONTINUOUS host
+	// entropy source into every fork (fork-correctness row 1). Firecracker
+	// cannot add a device on restore, so it must exist at snapshot time; once
+	// baked, every fork wakes with the device already wired to the host RNG,
+	// complementing the one-shot NotifyForked CRNG reseed each fork also runs.
+	// DefaultVMConfig enables this; a zero-value config keeps the prior
+	// device-less behavior so existing tests and callers are unaffected.
+	if cfg.EntropyDevice {
+		if err := client.SetEntropy(); err != nil {
+			return nil, fmt.Errorf("attach entropy (virtio-rng) device: %w", err)
+		}
+	}
+
 	// Attach a placeholder NIC when networking is enabled so the snapshot
 	// bakes a net device. Firecracker does NOT support hot-plugging a NIC
 	// after boot or adding one on restore, so the device must exist at
