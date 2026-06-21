@@ -75,6 +75,16 @@ Every error is:
   is writable; inspect `cause`.
 - `internal` (HTTP 500): an unclassified internal error. Retry; if it persists,
   inspect the forkd or sandbox-server logs.
+- `forbidden` (HTTP 403): the customer API key is valid but is not permitted for
+  this action: it lacks the required scope, or the targeted resource belongs to a
+  different organization (the public gateway org-isolation refusal). Use a key
+  for the owning organization with the required scope. Distinct from
+  `unauthorized` (no valid credential at all).
+- `quota_exceeded` (HTTP 429): the customer organization exceeded a hosted-plan
+  quota (concurrent sandboxes, monthly usage, or a rate ceiling) enforced by the
+  public gateway. Reduce concurrency or wait for the window to reset, or raise
+  the plan limit. Distinct from `budget_exhausted` (a per-sandbox creator-set
+  capability budget) and `rate_limited` (a per-sandbox request window).
 
 ## Examples corpus (in-context learning)
 

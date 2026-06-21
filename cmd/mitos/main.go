@@ -53,6 +53,13 @@ func run(args []string) int {
 		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
 	}
 
+	// The auth subcommands talk to the hosted account service, not the cluster,
+	// and must work without a kubeconfig. Wire a local account service and
+	// dispatch directly so `mitos auth login` does not require a cluster backend.
+	if rest[0] == "auth" {
+		return agentcli.Run(ctx, rest, withLocalAuth(nil), os.Stdout, os.Stderr)
+	}
+
 	backend, err := buildBackend(namespace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

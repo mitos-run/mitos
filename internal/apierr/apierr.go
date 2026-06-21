@@ -79,6 +79,20 @@ const (
 	CodeBuildFailed Code = "build_failed"
 	// CodeInternal: an unclassified internal error.
 	CodeInternal Code = "internal"
+	// CodeQuotaExceeded: the customer organization has exceeded a hosted quota
+	// (concurrent sandboxes, monthly usage, or a rate ceiling) enforced by the
+	// public gateway before the request reaches the control plane (issue #210,
+	// enforcer in issue #213). Distinct from budget_exhausted (a per-sandbox
+	// creator-set capability budget) and from rate_limited (a per-sandbox request
+	// window): this is an ORG-level hosted-plan quota at the front door.
+	CodeQuotaExceeded Code = "quota_exceeded"
+	// CodeForbidden: the authenticated customer key is valid but is not permitted
+	// to act on the targeted resource: it lacks the required scope, or the resource
+	// belongs to a different organization than the key (the org-isolation refusal
+	// at the public gateway, issue #210). Distinct from unauthorized (no valid
+	// credential at all): here the credential is valid but the action is not
+	// allowed for it.
+	CodeForbidden Code = "forbidden"
 )
 
 // Error is one LLM-legible error. Status is the HTTP status to send and is not
@@ -234,6 +248,25 @@ var Catalogue = map[string]Error{
 		Message:     "an internal error occurred",
 		Remediation: "Retry the request; if it persists, inspect the forkd or sandbox-server logs.",
 		Status:      http.StatusInternalServerError,
+	},
+	string(CodeQuotaExceeded): {
+		Code:    string(CodeQuotaExceeded),
+		Message: "the organization has exceeded a hosted-plan quota",
+		// Org-level hosted quota at the public gateway, distinct from the per-sandbox
+		// budget_exhausted and rate_limited. The context names the exceeded dimension
+		// and the limit so the caller knows which knob to raise.
+		Remediation: "The organization hit a hosted-plan quota (concurrent sandboxes, monthly usage, or a rate ceiling). Reduce concurrency or wait for the window to reset, or raise the plan limit for this organization. The context names the exceeded dimension and the limit.",
+		Status:      http.StatusTooManyRequests,
+	},
+	string(CodeForbidden): {
+		Code:    string(CodeForbidden),
+		Message: "the customer key is valid but not permitted for this action",
+		// The credential authenticated but the action is not allowed for it: a
+		// missing scope or a cross-organization resource. Distinct from unauthorized
+		// (no valid credential). The remediation names both causes without revealing
+		// which one applies, so a probe cannot map another org's resource ids.
+		Remediation: "The API key is valid but cannot perform this action: it either lacks the required scope or targets a resource owned by a different organization. Use a key for the owning organization with the required scope.",
+		Status:      http.StatusForbidden,
 	},
 }
 

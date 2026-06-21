@@ -996,6 +996,28 @@ operator has provisioned dedicated, tainted node pools and placed each tenant's
 pools onto them. This posture is recorded as a residual decision in
 docs/adr/0004-node-flat-snapshot-trust-domain.md.
 
+## 7b. Customer front door: accounts, orgs, and the public API gateway (issue #210)
+
+The hosted offering adds a NEW public attack surface layered ABOVE the internal
+mTLS and per-sandbox token plane: an internet-facing gateway (`cmd/gateway`,
+`internal/saas`), customer-presented API keys, external accounts and
+organizations, and cross-tenant (org) isolation. This surface does NOT replace
+the internal plane; it sits in front of it and forwards org-scoped, authenticated
+requests to the control plane. Design: docs/saas/accounts-gateway.md.
+
+PRODUCTION GATE: this front door is NOT cleared for production tenants until the
+external security review (issue #194) covers it. Until then it is a development
+and review artifact only.
+
+| Boundary | Status | Mechanism |
+|---|---|---|
+| Customer key authentication | partial | Prefix-tagged keys (`mitos_live_...`) hashed at rest with a process pepper, never stored in the clear, verified in CONSTANT TIME (`crypto/subtle`), with expiry, revocation, and scope checks. Only a masked prefix is shown after creation; the raw key is returned exactly once and is never logged or placed in an error. Unit-tested: verify rejects forged, malformed, expired, revoked, and wrong-scope keys (`internal/saas/keys_test.go`). The pepper is loaded from a secret in production (a follow-up); the default empty pepper still gives a sound sha256 hash. TLS termination and edge rate-limiting are follow-ups. |
+| Cross-org (tenant) isolation | partial | The `OrgID` the gateway forwards to the control plane is taken SOLELY from the verified key, never from the request body or path, so a key for org A cannot address org B's resources even by stuffing another org id into the body (`TestGatewayCrossOrgIsolation`). Key resolution maps a key to its own org only (`TestOrgAKeyCannotResolveOrgB`). The management verbs reject a non-member, so a user cannot mint, list, or revoke another org's keys (`internal/saas/account_test.go`). The control-plane forward target that enforces this org boundary inside the cluster is a documented follow-up; the seam and its contract are tested here against a fake. |
+| Public error surface | mitigated | The gateway maps every internal failure to the LLM-legible envelope (`internal/apierr`). A missing, malformed, unknown, expired, or revoked key all collapse to `unauthorized` so a probe cannot distinguish them; a valid-but-not-permitted key is `forbidden`; an org over a hosted quota is `quota_exceeded`. The two new codes are in sync with docs/api/errors.md, the JSON Schema, and llms.txt (the #28 sync tests are green). |
+| Hosted quota and abuse controls | open | The gateway calls a `QuotaEnforcer` seam after authn and org-resolution, before forwarding; this slice ships a default-allow stub. The real enforcer (concurrent-sandbox, monthly-usage, and rate ceilings, plus abuse controls) is issue #213. Until it lands, the gateway imposes no org-level limit beyond the request body size bound. |
+| Session and login | partial | Token-based session resolution, hashed at rest, constant-time (`internal/saas/session.go`). Browser-based OAuth login is a documented follow-up; `mitos auth login` is `--token` only today. |
+| Persistence | open | The account, org, membership, key, and session stores are IN-MEMORY for this slice (lost on restart, single-process). The Postgres store and its migrations are a documented follow-up behind the same `Store` interface. Do not run the front door as a stateful production service until that lands. |
+
 ## 8. What we explicitly do NOT claim
 
 - No pod-scoped Kubernetes mechanism (NetworkPolicy, PodSecurity, pod quotas)
@@ -1018,7 +1040,10 @@ docs/adr/0004-node-flat-snapshot-trust-domain.md.
 ## Review gate
 
 An external security review is required before any 1.0 (or "production-ready")
-claim. Tracking: not scheduled.
+claim. Tracking: not scheduled. The hosted customer front door (section 7b,
+issue #210: the public gateway, customer keys, and cross-org isolation) is
+explicitly gated on this review (issue #194) before it serves production
+tenants.
 
 ## Change discipline
 
