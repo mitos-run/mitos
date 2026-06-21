@@ -10,7 +10,8 @@ Two control loops cooperate:
 - the SandboxClaim reconciler (`internal/controller/sandboxclaim_controller.go`),
   event-driven per claim, owns the finalizer reap and the lifetime/idle reap;
 - the GarbageCollector (`internal/controller/gc.go`), a periodic Runnable that
-  runs every `Interval` (default 30s), owns NodeLost, the orphan sweep, and TTL.
+  runs every `Interval` (default 30s), owns NodeLost, the VM orphan sweep, the
+  volume orphan sweep, and TTL.
 
 Tunables and their defaults (see `gc.go`):
 
@@ -81,11 +82,42 @@ alive. A VM becomes a sweep candidate only once its claim object is gone (or its
 node is lost). This is a deliberate bound: a claim wedged in a non-terminal phase
 keeps its VM alive by design.
 
+When the sweep reaps a VM whose sandbox id still matches a present claim, that
+claim is necessarily in a terminal phase (a non-terminal claim by name is in the
+liveID net and never swept): the re-adopted-orphan case, where a claim reached
+its terminal transition but its VM lingered (a terminate that crashed or was
+missed, then re-adopted by a restarted forkd). The GC stamps a typed
+`OrphanReaped` condition (`Ready=False`) on that still-present claim so an
+operator or SDK can tell a GC reap apart from a graceful terminate. The stamp is
+idempotent.
+
 - Bound: a genuine orphan (no backing object) is reaped within one `Interval`
   once its uptime exceeds `OrphanGrace`.
 - Proving tests: `TestGCSweepsOrphanVMs` (orphan past grace swept; fresh orphan
   and backed VM left alone), `TestGCLiveClaimByNameNotSwept` (live claim's VM by
-  name not swept while the claim exists; swept after the claim is deleted).
+  name not swept while the claim exists; swept after the claim is deleted),
+  `TestGCStampsOrphanReapedConditionOnTerminalClaim` (a terminal claim whose
+  lingering VM is swept carries the typed `OrphanReaped` condition).
+
+### Volume orphan sweep: a backing-less volume backing is reclaimed
+
+Each pass, after the VM sweep, the GC lists per-sandbox volume backing
+directories on every healthy node (forkd `ListVolumes`, a disk scan of
+`<dataDir>/sandboxes/<id>/volumes` so a backing whose sandbox is gone is still
+reported) and reclaims (`ReclaimVolume`) any whose sandbox id is in neither the
+desired-alive set nor the liveID set and whose age exceeds `OrphanGrace`. A
+volume backing is keyed by the same sandbox id (the claim name) as the VM, so the
+same desired and liveID sets and the same grace and live-object nets apply
+unchanged: a backing for a non-terminal claim by name is left alone, a backing
+younger than the grace is left alone, and only healthy nodes are visited.
+`reclaimVolumeOnNode` is bounded and tolerant exactly like the VM
+`terminateOnNode`. This closes the gap where a terminate that crashed or was
+missed left the VM's backing files behind after the VM itself was reaped.
+
+- Bound: a genuine volume orphan (no backing object) is reclaimed within one
+  `Interval` once its age exceeds `OrphanGrace`.
+- Proving test: `TestGCSweepsOrphanVolumes` (volume orphan past grace reclaimed;
+  backed and fresh backings left alone).
 
 ### Controller-restart reconciliation: desired state is rebuilt from CRDs
 
@@ -186,26 +218,53 @@ Shipped (was open, now in main):
   then fails it with CapacityExhausted after a bounded MaxPendingDuration; a
   forkd ResourceExhausted or Unavailable re-pends rather than hard-failing.
 
+Shipped since (now in main, all from issue #163):
+
+- volume orphan GC: see the Volume orphan sweep guarantee above. A per-sandbox
+  volume backing whose claim object is gone is reclaimed past `OrphanGrace`,
+  mirroring the VM orphan sweep with the same live-object safety net.
+- typed condition on a GC-reaped re-adopted orphan: the `OrphanReaped` condition
+  documented under the orphan sweep guarantee.
+- snapshot rebuild elsewhere after a raw-forkd holder-node loss: a raw-forkd pool
+  holds only the per-node template snapshot (no standing VMs). When a snapshot
+  holder is lost, `readySnapshotCountOn` counts only healthy holders, so the
+  deficit reconcile (`createSnapshotsOnNodes`) redistributes the snapshot onto a
+  surviving node to restore the replica count, with no operator action. Proven by
+  `TestSnapshotRebuildsOnHolderNodeLoss`.
+
 The following remain OPEN and are tracked in epic #12:
 
-- pool replica rebuild after raw-forkd node loss: in the husk default the warm
-  pool self-heals a lost node's dormant slots, but a raw-forkd claim on a dead
-  node fails (NodeLost) with no automatic replacement (acceptable for ephemeral
-  sandboxes; the caller re-claims).
-- status-update rate-limiting and batching: PARTIAL. The SandboxPool reconcile
-  now elides a no-op status write: it writes (and stamps LastSnapshotTime) only
-  when a field an operator or the autoscaler reads actually changed
-  (`writePoolStatusIfChanged` / `poolStatusUnchanged`,
-  `internal/controller/sandboxpool_controller.go`), so the steady-state 30s
-  requeue no longer churns etcd or re-triggers the pool's own watch. The
-  SandboxClaim and SandboxFork reconcilers, and true rate-limiting/batching of
-  genuine transitions, are not yet done.
-- chaos CI suite: PARTIAL. test/cluster-e2e/chaos-e2e.sh runs on the multi-node
+- raw-forkd CLAIM auto-replacement after node loss: in the husk default the warm
+  pool self-heals a lost node's dormant slots and the claim re-pends onto a
+  surviving slot, but a raw-forkd claim on a dead node fails (NodeLost) with no
+  automatic replacement, because raw mode has no standing dormant capacity to
+  re-pend onto (its forks are ephemeral). This is acceptable for ephemeral
+  sandboxes; the caller re-claims. It is a product decision, not a missing
+  mechanism, and is held as the documented skip
+  `TestRawForkdClaimAutoReplacementAfterNodeLossOpen` with its design (re-issue
+  the fork on a surviving snapshot-holder, which the snapshot rebuild above
+  guarantees exists).
+- status-update rate-limiting and batching: the SandboxPool reconcile elides a
+  no-op status write (`writePoolStatusIfChanged` / `poolStatusUnchanged`), and
+  the SandboxClaim reconcile now does the same on its steady-state pend
+  re-asserts (`writeClaimStatusIfChanged`, the no-node, snapshot-not-yet,
+  NoCapacity, husk-raced, and activate-failed paths), so a stuck claim
+  re-reconciling every 1-5s no longer churns etcd or re-triggers its own watch
+  (proven by `TestWriteClaimStatusIfChangedElidesNoOp`). Still open: the
+  SandboxFork reconciler, and true coalescing/rate-limiting of genuine
+  transitions (today only exact no-op writes are elided, not a bounded update
+  interval).
+- chaos CI suite: test/cluster-e2e/chaos-e2e.sh runs on the multi-node
   self-hosted KVM cluster via the cluster-e2e workflow and exercises pod-loss
   recovery, warm-pool self-heal, cross-node failover (stage 5: cordon a claim's
   node, assert the claim recovers on another node, uncordon), AND component
   kill -9 under load (stage 6: SIGKILL the controller + forkd with
   --grace-period=0 --force while a 3-claim storm activates, assert every claim
-  still converges, the pre-existing claim is undisturbed, and the components
-  recover). Still open: kill -9 of the GUEST agent process inside the VM (harder
-  to reach from the runner), and process-crash variants beyond SIGKILL.
+  still converges, the pre-existing claim is undisturbed, the components recover,
+  zero claims are permanently stuck, and zero orphan VMs survive once the storm
+  claims are deleted). The controller-restart-under-storm invariant (a fresh GC
+  reconciles a storm purely from CRDs with zero orphans and zero stuck claims) is
+  additionally proven without KVM in `TestGCChaosStormNoOrphansNoStuckClaims`.
+  Still KVM-gated and open: kill -9 of the GUEST agent process inside the VM and
+  the real-forkd-with-VMs crash (both need a real cluster and KVM, unreachable
+  from GitHub-hosted CI), and process-crash variants beyond SIGKILL.
