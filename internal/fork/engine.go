@@ -145,6 +145,12 @@ type Engine struct {
 	agentBinPath string
 	busyboxPath  string
 
+	// kernelStaged checks that the guest kernel is present before a template build
+	// boots from it (issue #174). NewEngine sets it to ensureGuestKernelStaged;
+	// tests that construct an Engine directly with a fake builder (no real boot)
+	// leave it nil, which skips the check. Production always sets it.
+	kernelStaged func(kernelPath string) error
+
 	// hugePages is the guest-memory page granularity baked into every template
 	// snapshot this engine builds (issue #167). "" is the Firecracker default
 	// (4 KiB base pages); "2M" backs guest memory with 2 MiB hugetlbfs pages so
@@ -825,6 +831,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
 		hugePages:            opts.HugePages,
+		kernelStaged:         ensureGuestKernelStaged,
 		enableVolumes:        opts.EnableVolumes,
 		volBackend:           volBackend,
 		enableEncryption:     opts.EnableEncryption,
@@ -1977,8 +1984,11 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.
-	if err := ensureGuestKernelStaged(e.kernelPath); err != nil {
-		return fmt.Errorf("create template %s: %w", id, err)
+	// Skipped when the seam is unset (tests with a fake builder that never boots).
+	if e.kernelStaged != nil {
+		if err := e.kernelStaged(e.kernelPath); err != nil {
+			return fmt.Errorf("create template %s: %w", id, err)
+		}
 	}
 
 	cfg := firecracker.DefaultVMConfig()
