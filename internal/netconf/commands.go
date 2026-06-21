@@ -91,6 +91,15 @@ func NftDeleteSandboxAllowSetArgs(tap string) []string {
 	return []string{"nft", "delete", "set", "inet", SharedTableName(), SandboxAllowSetName(tap)}
 }
 
+// NftDeleteSandboxEgressCounterArgs builds the argv to remove this sandbox's
+// egress counter from the shared table: nft delete counter inet <table>
+// sb_<tap>_egress. Run after the per-sandbox chain is deleted (the chain's
+// counting rule references the counter), so a tap reused for a later sandbox
+// starts with a fresh zeroed counter and never inherits stale byte totals.
+func NftDeleteSandboxEgressCounterArgs(tap string) []string {
+	return []string{"nft", "delete", "counter", "inet", SharedTableName(), SandboxEgressCounterName(tap)}
+}
+
 // MasqueradeAddArgs builds the argv to add a MASQUERADE rule for the sandbox
 // subnet on the uplink interface. This is optional (the node may already NAT
 // the subnet); callers gate it behind a flag.

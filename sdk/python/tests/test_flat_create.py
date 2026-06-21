@@ -39,7 +39,7 @@ from mitos.direct import DirectSandbox, SandboxServer
 
 
 def _make_fake_server():
-    state = {"templates": set(), "sandboxes": {}, "files": {}}
+    state = {"templates": set(), "sandboxes": {}, "files": {}, "template_network": {}}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # silence test server logging
@@ -78,7 +78,11 @@ def _make_fake_server():
                     self._err(409, "template exists")
                     return
                 state["templates"].add(tid)
-                self._json(200, {"id": tid, "ready": True})
+                # Record the network posture so tests can assert what the SDK sent
+                # (issue #219); echo it back the way the real server does.
+                net = req.get("network")
+                state["template_network"][tid] = net
+                self._json(200, {"id": tid, "ready": True, "network": net})
             elif self.path == "/v1/fork":
                 tpl = req.get("template")
                 if tpl not in state["templates"]:
@@ -273,6 +277,60 @@ def test_context_manager(fake_server):
     assert sid not in state["sandboxes"]
 
 
+def test_network_knobs_sent_on_create(fake_server):
+    """A Network(...) passed to create reaches the server's template-create body
+    with all egress/ingress knobs (issue #219)."""
+    import mitos
+
+    url, state = fake_server
+    net = mitos.Network(
+        block=False,
+        egress="deny",
+        allow_domains=["api.example.com:443"],
+        allow_cidrs=["10.0.0.0/8"],
+        inbound="allow",
+        inbound_cidrs=["203.0.113.0/24"],
+    )
+    sb = mitos.create("python", api_key="sk-test", base_url=url, network=net)
+    sent = state["template_network"]["python"]
+    assert sent["allow_domains"] == ["api.example.com:443"]
+    assert sent["allow_cidrs"] == ["10.0.0.0/8"]
+    assert sent["inbound"] == "allow"
+    assert sent["inbound_cidrs"] == ["203.0.113.0/24"]
+    sb.terminate()
+
+
+def test_network_block_total_deny(fake_server):
+    """Network(block=True) is the total-deny knob (Modal block_network=True)."""
+    import mitos
+
+    url, state = fake_server
+    sb = mitos.create("python", api_key="sk-test", base_url=url, network=mitos.Network(block=True))
+    assert state["template_network"]["python"]["block"] is True
+    sb.terminate()
+
+
+def test_no_network_omits_field_secure_default(fake_server):
+    """Omitting network sends no network field; the server applies the secure
+    deny-by-default in both directions (issue #219)."""
+    import mitos
+
+    url, state = fake_server
+    sb = mitos.create("python", api_key="sk-test", base_url=url)
+    assert state["template_network"]["python"] is None
+    sb.terminate()
+
+
+def test_network_to_dict_omits_secure_defaults():
+    """Network.to_dict omits empty/false defaults so the secure default is
+    server-applied and the request stays minimal."""
+    import mitos
+
+    assert mitos.Network().to_dict() == {}
+    assert mitos.Network(egress="allow").to_dict() == {"egress": "allow"}
+    assert mitos.Network(inbound="allow").to_dict() == {"inbound": "allow"}
+
+
 def test_pty_url_carries_no_key(fake_server):
     url, _ = fake_server
     sb = mitos.create("python", api_key="sk-secret", base_url=url)
@@ -442,4 +500,51 @@ async def test_async_fork():
     assert len({c.id for c in children}) == 2
     for c in children:
         await c._http.aclose()
+    await sb._http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_create_sends_network():
+    """Async parity: mitos.aio.create threads a Network(...) into the template
+    create body (issue #219)."""
+    import mitos
+    import mitos.aio as aio
+
+    captured = {}
+
+    async def app(scope, receive, send):
+        body = b""
+        while True:
+            msg = await receive()
+            body += msg.get("body", b"")
+            if not msg.get("more_body"):
+                break
+        req = json.loads(body or b"{}")
+        path = scope["path"]
+        if path == "/v1/templates":
+            captured["network"] = req.get("network")
+            payload = {"id": req["id"], "ready": True}
+        elif path == "/v1/fork":
+            payload = {"id": req["id"], "template_id": req["template"],
+                       "endpoint": "http://sb", "fork_time_ms": 0.8}
+        else:
+            payload = {}
+        data = json.dumps(payload).encode()
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": data})
+
+    transport = httpx.ASGITransport(app=app)
+    # Patch the module's AsyncClient so create uses the ASGI transport.
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = lambda *a, **k: orig(transport=transport, base_url="http://sb")
+    try:
+        sb = await aio.create(
+            "python", api_key="sk-test", base_url="http://sb",
+            network=mitos.Network(block=True, allow_cidrs=["10.0.0.0/8"]),
+        )
+    finally:
+        httpx.AsyncClient = orig
+    assert captured["network"]["block"] is True
+    assert captured["network"]["allow_cidrs"] == ["10.0.0.0/8"]
     await sb._http.aclose()

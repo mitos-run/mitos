@@ -2463,6 +2463,21 @@ jobs:
           echo "  Real-nft two-sandbox install validated"
           echo "================================"
 
+      # Network-posture dimensions proof (issue #219): install a block_network
+      # sandbox (total deny) and a CIDR-allow sandbox through the REAL Manager and
+      # assert the live nft ruleset proves each dimension: block_network accepts
+      # nothing it was given, the CIDR allow renders a daddr accept, and both
+      # carry their per-sandbox egress byte counter. Drives the production
+      # Manager, never a fake. REQUIRED gate.
+      - name: Network-posture dimensions validation against real nft
+        run: |
+          set -e
+          go build -o /tmp/net-smoke ./cmd/net-smoke/
+          sudo /tmp/net-smoke validate-policy
+          echo "================================"
+          echo "  Real-nft block_network + CIDR allow + egress counters validated"
+          echo "================================"
+
       # Guest egress enforcement proof: boot ONE Firecracker VM whose NIC is on
       # a per-sandbox tap, apply the host-side nftables allowlist (via the same
       # Manager.Setup forkd uses) permitting exactly one destination IP:port and

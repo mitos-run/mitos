@@ -463,12 +463,17 @@ func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
 	if c == nil {
 		return nil
 	}
-	if c.EgressPolicy == "" && len(c.AllowList) == 0 {
+	if c.EgressPolicy == "" && len(c.AllowList) == 0 && !c.BlockNetwork &&
+		len(c.AllowCidrs) == 0 && c.Inbound == "" && len(c.InboundCidrs) == 0 {
 		return nil
 	}
 	return &fork.NetworkOpts{
 		EgressPolicy: c.EgressPolicy,
 		AllowList:    c.AllowList,
+		BlockNetwork: c.BlockNetwork,
+		AllowCIDRs:   c.AllowCidrs,
+		Inbound:      c.Inbound,
+		InboundCIDRs: c.InboundCidrs,
 	}
 }
 

@@ -173,3 +173,71 @@ func TestRealModeForkFailsClosedWhenGuestDoesNotReseed(t *testing.T) {
 		t.Fatal("un-reseeded fork must not be left registered")
 	}
 }
+
+// TestResolveNetworkConfigSecureDefault asserts that a nil network config
+// resolves to the secure default: deny-by-default egress AND inbound (issue
+// #219). An untrusted sandbox with no policy can neither reach out nor be dialed.
+func TestResolveNetworkConfigSecureDefault(t *testing.T) {
+	got, err := resolveNetworkConfig(nil)
+	if err != nil {
+		t.Fatalf("resolveNetworkConfig(nil): %v", err)
+	}
+	if got.Egress != "deny" {
+		t.Errorf("default egress = %q, want deny", got.Egress)
+	}
+	if got.Inbound != "deny" {
+		t.Errorf("default inbound = %q, want deny-by-default", got.Inbound)
+	}
+}
+
+// TestResolveNetworkConfigValidatesCIDRs asserts a malformed CIDR is rejected
+// fail-closed rather than silently dropped, and that the knobs round-trip.
+func TestResolveNetworkConfigValidatesCIDRs(t *testing.T) {
+	if _, err := resolveNetworkConfig(&networkConfig{AllowCIDRs: []string{"not-a-cidr"}}); err == nil {
+		t.Error("expected error for malformed allow_cidrs")
+	}
+	if _, err := resolveNetworkConfig(&networkConfig{Inbound: "allow", InboundCIDRs: []string{"bad"}}); err == nil {
+		t.Error("expected error for malformed inbound_cidrs")
+	}
+	got, err := resolveNetworkConfig(&networkConfig{
+		Block:        true,
+		Egress:       "deny",
+		AllowCIDRs:   []string{"10.0.0.0/8"},
+		Inbound:      "allow",
+		InboundCIDRs: []string{"203.0.113.0/24"},
+		AllowDomains: []string{"api.example.com:443"},
+	})
+	if err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	if !got.Block || len(got.AllowCIDRs) != 1 || got.Inbound != "allow" {
+		t.Errorf("config did not round-trip: %+v", got)
+	}
+}
+
+// TestToNetworkPolicyMapsAllKnobs asserts the REST networkConfig maps onto the
+// CRD NetworkPolicy that drives the datapath, so the standalone and k8s paths
+// share one policy model (issue #219).
+func TestToNetworkPolicyMapsAllKnobs(t *testing.T) {
+	p := toNetworkPolicy(&networkConfig{
+		Block:        true,
+		Egress:       "allow",
+		AllowDomains: []string{"api.example.com:443"},
+		AllowCIDRs:   []string{"10.0.0.0/8"},
+		Inbound:      "allow",
+		InboundCIDRs: []string{"203.0.113.0/24"},
+	})
+	if !p.BlockNetwork {
+		t.Error("block not mapped")
+	}
+	if string(p.Egress) != "allow" || len(p.Allow) != 1 || len(p.AllowCIDRs) != 1 {
+		t.Errorf("egress/allow not mapped: %+v", p)
+	}
+	if string(p.Inbound) != "allow" || len(p.InboundCIDRs) != 1 {
+		t.Errorf("inbound not mapped: %+v", p)
+	}
+	// A nil config maps to the fail-closed default deny policy.
+	if d := toNetworkPolicy(nil); string(d.Egress) != "deny" {
+		t.Errorf("nil config must map to deny, got %q", d.Egress)
+	}
+}

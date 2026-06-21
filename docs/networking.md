@@ -94,6 +94,42 @@ runner). The Go unit tests assert command order and idempotency with a fake
 runner; the darwin gap (no `nft` to accept the rendered syntax) is closed by the
 KVM CI phases below.
 
+## Network-posture knobs (issue #219)
+
+The per-sandbox `NetworkPolicy` (CRD `template.Spec.networkPolicy`, proto
+`NetworkConfig`, SDK `Network`) expresses the full posture, threaded unchanged
+into the per-tap datapath above:
+
+- **`egress` (`deny` | `allow`).** The default verdict for traffic matching no
+  allow rule. `deny` is the secure default.
+- **`allow` (host:port allowlist).** Literal IP:port entries become static chain
+  accepts; DNS-name entries are enforced via the controlled resolver below.
+- **`blockNetwork` (total deny, Modal `block_network=True`).** Drops ALL egress,
+  v4 and v6, with no accept of any kind; overrides `egress` and every allowlist.
+- **`allowCidrs` (CIDR egress allowlist, Modal `outbound_cidr_allowlist`).** A
+  destination IP inside an allowed block is accepted (v4 saddr-pinned, v6
+  family-scoped). Parsed fail-closed: a malformed CIDR fails the whole setup.
+- **`inbound` (`deny` | `allow`) and `inboundCidrs` (Modal
+  `inbound_cidr_allowlist`).** Govern unsolicited inbound to the guest on the
+  input hook. `deny` (the secure default) drops everything; `allow` accepts
+  inbound to the guest, optionally narrowed to source CIDRs. Return traffic for
+  the guest's own egress is always accepted via the forward chain's
+  established,related rule, so deny-by-default inbound never breaks outbound.
+
+**Secure default.** For an untrusted sandbox the default, applied by the SDK and
+the sandbox-server when no `network` is supplied, is **deny-by-default in BOTH
+directions**: egress `deny` with no allows, inbound `deny`. The sandbox can
+neither reach out nor be dialed into until the policy explicitly opens a path.
+
+**Egress byte counter.** Each per-sandbox chain carries a named nftables counter
+(`sb_<tap>_egress`) incremented on every guest-sourced egress packet, so the
+metering pipeline (#211) reads per-sandbox egress bytes by name. It is a passive
+counting rule with no verdict, so it never affects enforcement.
+
+The rule RENDERING of each dimension is unit-tested in `internal/netconf`
+(`RenderSandboxChainSpec`, `RenderSandboxInputChainSpec`); the real packet
+enforcement reuses the SAME KVM-gated datapath as the existing egress allowlist.
+
 ## Name-based egress: the controlled DNS resolver
 
 A literal `ip daddr . tcp dport` rule cannot enforce a NAME, because nftables

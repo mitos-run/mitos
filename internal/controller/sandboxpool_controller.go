@@ -247,7 +247,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// programs is the guarantee. A failure is logged but does NOT block husk
 		// pod creation, so a CNI without NetworkPolicy support never stalls the
 		// warm pool.
-		_, npAllow := huskEgressConfig(&template)
+		npAllow := huskEgressConfig(&template).Allow
 		if err := r.ensureHuskNetworkPolicy(ctx, &pool, npAllow); err != nil {
 			logger.Error(err, "ensure husk network policy (best effort; in-pod filter is the guarantee)")
 		}

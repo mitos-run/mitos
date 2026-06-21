@@ -28,6 +28,12 @@ type Sample struct {
 	MemoryShared int64
 	DiskUnique   int64
 	DiskShared   int64
+	// EgressBytes is this sandbox's total egress bytes read from its per-sandbox
+	// nftables egress counter (issue #219), the metering seam #211 attributes
+	// network usage from. It is per-sandbox and never deduplicated across forks
+	// (unlike the CoW memory totals), so Aggregate echoes it into the row as-is.
+	// Zero when networking is disabled or the counter is unreadable.
+	EgressBytes int64
 }
 
 // SandboxMetering is the per-sandbox row in a Report. It echoes the sample so
@@ -40,6 +46,8 @@ type SandboxMetering struct {
 	MemoryShared int64
 	DiskUnique   int64
 	DiskShared   int64
+	// EgressBytes echoes the sample's per-sandbox egress byte total (issue #219).
+	EgressBytes int64
 }
 
 // TemplateMetering is the per-template row in a Report. SharedOnce is the

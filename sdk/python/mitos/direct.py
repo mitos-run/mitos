@@ -35,7 +35,7 @@ import httpx
 
 from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.errors import AgentRunError
-from mitos.types import Execution, ExecResult, FileInfo, Result
+from mitos.types import Execution, ExecResult, FileInfo, Network, Result
 from mitos.sandbox import _parse_run_code_stream, _validate_timeout
 
 
@@ -191,6 +191,7 @@ class DirectSandbox:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         id: Optional[str] = None,
+        network: Optional[Network] = None,
     ) -> "DirectSandbox":
         """Flat one-liner: return a READY sandbox handle for image.
 
@@ -199,9 +200,15 @@ class DirectSandbox:
         returns the running DirectSandbox. The standalone sandbox-server is
         tokenless; the hosted path (#210) verifies the same Authorization
         header server-side without an SDK change.
+
+        network is the per-sandbox network posture (issue #219): pass a
+        ``Network(...)`` to set egress/ingress allowlists, ``block`` total-deny,
+        or CIDR rules. The SECURE DEFAULT when network is omitted is
+        deny-by-default in both directions (the server applies it), so an
+        untrusted sandbox cannot reach out or be dialed into unless you opt in.
         """
         server = SandboxServer.from_auth(api_key=api_key, base_url=base_url)
-        server.ensure_template(image)
+        server.ensure_template(image, network=network)
         return server.fork(image, id=id)
 
     def _auth_headers(self) -> dict[str, str]:
@@ -406,20 +413,40 @@ class SandboxServer:
         raise_for_status(resp, token=self._api_key)
         return resp.json()
 
-    def create_template(self, id: str, init_wait_seconds: int = 5) -> dict:
+    def create_template(
+        self,
+        id: str,
+        init_wait_seconds: int = 5,
+        network: Optional[Network] = None,
+    ) -> dict:
+        """Create the template for id, optionally attaching a per-sandbox network
+        posture (issue #219). The network applies to every sandbox forked from
+        the template. Omit it for the secure default (deny-by-default both ways,
+        applied server-side)."""
+        body: dict = {"id": id, "init_wait_seconds": init_wait_seconds}
+        if network is not None:
+            body["network"] = network.to_dict()
         resp = self._http.post(
             f"{self.url}/v1/templates",
-            json={"id": id, "init_wait_seconds": init_wait_seconds},
+            json=body,
             headers=self._auth_headers(),
         )
         raise_for_status(resp, token=self._api_key)
         return resp.json()
 
-    def ensure_template(self, id: str, init_wait_seconds: int = 5) -> dict:
+    def ensure_template(
+        self,
+        id: str,
+        init_wait_seconds: int = 5,
+        network: Optional[Network] = None,
+    ) -> dict:
         """get-or-create the template for id. A 409 (already exists) is treated
-        as success so the flat create path is idempotent across calls."""
+        as success so the flat create path is idempotent across calls. network
+        is the per-sandbox posture attached at create time (issue #219)."""
         try:
-            return self.create_template(id, init_wait_seconds=init_wait_seconds)
+            return self.create_template(
+                id, init_wait_seconds=init_wait_seconds, network=network
+            )
         except AgentRunError as exc:
             if exc.status == 409:
                 return {"id": id, "ready": True}
@@ -455,6 +482,7 @@ def create(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     id: Optional[str] = None,
+    network: Optional[Network] = None,
 ) -> DirectSandbox:
     """Flat one-liner native onboarding: return a READY sandbox handle.
 
@@ -463,6 +491,11 @@ def create(
     creates the template for image, and returns a running DirectSandbox that
     exposes exec / run_code / files / pty / fork / terminate.
 
+    network is the per-sandbox egress/ingress posture (issue #219); see
+    ``mitos.Network``. Omitting it applies the secure deny-by-default both ways.
+
     The k8s operator path stays available as AgentRun(...).sandbox(...).
     """
-    return DirectSandbox.create(image, api_key=api_key, base_url=base_url, id=id)
+    return DirectSandbox.create(
+        image, api_key=api_key, base_url=base_url, id=id, network=network
+    )

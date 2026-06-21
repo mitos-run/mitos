@@ -69,6 +69,18 @@ type ActivateRequest struct {
 	// and name entries the in-pod DNS proxy enforces (ParseNameAllowList). It is
 	// config, not a secret, and is safe to log.
 	Allow []string `json:"allow,omitempty"`
+	// BlockNetwork drops ALL egress for the sandbox (Modal block_network=True),
+	// overriding Egress and the allowlists. Config, not a secret.
+	BlockNetwork bool `json:"block_network,omitempty"`
+	// AllowCIDRs is the egress CIDR allowlist (Modal outbound_cidr_allowlist):
+	// destination IPs inside these blocks are accepted. v4 or v6. Config.
+	AllowCIDRs []string `json:"allow_cidrs,omitempty"`
+	// Inbound governs unsolicited inbound to the guest: "deny" (the secure
+	// default, deny-by-default) or "allow". Empty means deny. Config.
+	Inbound string `json:"inbound,omitempty"`
+	// InboundCIDRs narrows an Inbound=allow to source CIDRs (Modal
+	// inbound_cidr_allowlist). Config.
+	InboundCIDRs []string `json:"inbound_cidrs,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded

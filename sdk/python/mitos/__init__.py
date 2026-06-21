@@ -18,6 +18,7 @@ from mitos.types import (
     ExecutionError,
     FileInfo,
     ForkPolicy,
+    Network,
     Result,
 )
 
@@ -43,4 +44,5 @@ __all__ = [
     "Result",
     "FileInfo",
     "ForkPolicy",
+    "Network",
 ]

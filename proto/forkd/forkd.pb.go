@@ -2808,9 +2808,21 @@ func (x *SecretVar) GetValue() string {
 }
 
 type NetworkConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EgressPolicy  string                 `protobuf:"bytes,1,opt,name=egress_policy,json=egressPolicy,proto3" json:"egress_policy,omitempty"`
-	AllowList     []string               `protobuf:"bytes,2,rep,name=allow_list,json=allowList,proto3" json:"allow_list,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	EgressPolicy string                 `protobuf:"bytes,1,opt,name=egress_policy,json=egressPolicy,proto3" json:"egress_policy,omitempty"`
+	AllowList    []string               `protobuf:"bytes,2,rep,name=allow_list,json=allowList,proto3" json:"allow_list,omitempty"`
+	// block_network drops ALL egress for the sandbox, overriding egress_policy and
+	// the allowlists (Modal block_network=True).
+	BlockNetwork bool `protobuf:"varint,3,opt,name=block_network,json=blockNetwork,proto3" json:"block_network,omitempty"`
+	// allow_cidrs is the egress CIDR allowlist: a destination IP inside any of
+	// these blocks is accepted (Modal outbound_cidr_allowlist). v4 or v6 CIDRs.
+	AllowCidrs []string `protobuf:"bytes,4,rep,name=allow_cidrs,json=allowCidrs,proto3" json:"allow_cidrs,omitempty"`
+	// inbound governs unsolicited inbound to the guest: "deny" (the secure
+	// default, deny-by-default) or "allow". Empty means deny.
+	Inbound string `protobuf:"bytes,5,opt,name=inbound,proto3" json:"inbound,omitempty"`
+	// inbound_cidrs narrows an inbound=allow to source CIDRs (Modal
+	// inbound_cidr_allowlist). Only meaningful when inbound is allow.
+	InboundCidrs  []string `protobuf:"bytes,6,rep,name=inbound_cidrs,json=inboundCidrs,proto3" json:"inbound_cidrs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2855,6 +2867,34 @@ func (x *NetworkConfig) GetEgressPolicy() string {
 func (x *NetworkConfig) GetAllowList() []string {
 	if x != nil {
 		return x.AllowList
+	}
+	return nil
+}
+
+func (x *NetworkConfig) GetBlockNetwork() bool {
+	if x != nil {
+		return x.BlockNetwork
+	}
+	return false
+}
+
+func (x *NetworkConfig) GetAllowCidrs() []string {
+	if x != nil {
+		return x.AllowCidrs
+	}
+	return nil
+}
+
+func (x *NetworkConfig) GetInbound() string {
+	if x != nil {
+		return x.Inbound
+	}
+	return ""
+}
+
+func (x *NetworkConfig) GetInboundCidrs() []string {
+	if x != nil {
+		return x.InboundCidrs
 	}
 	return nil
 }
@@ -3083,11 +3123,16 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"3\n" +
 	"\tSecretVar\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"S\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xd8\x01\n" +
 	"\rNetworkConfig\x12#\n" +
 	"\regress_policy\x18\x01 \x01(\tR\fegressPolicy\x12\x1d\n" +
 	"\n" +
-	"allow_list\x18\x02 \x03(\tR\tallowList2\xe5\t\n" +
+	"allow_list\x18\x02 \x03(\tR\tallowList\x12#\n" +
+	"\rblock_network\x18\x03 \x01(\bR\fblockNetwork\x12\x1f\n" +
+	"\vallow_cidrs\x18\x04 \x03(\tR\n" +
+	"allowCidrs\x12\x18\n" +
+	"\ainbound\x18\x05 \x01(\tR\ainbound\x12#\n" +
+	"\rinbound_cidrs\x18\x06 \x03(\tR\finboundCidrs2\xe5\t\n" +
 	"\n" +
 	"ForkDaemon\x12M\n" +
 	"\x0eCreateTemplate\x12\x1c.forkd.CreateTemplateRequest\x1a\x1d.forkd.CreateTemplateResponse\x12M\n" +

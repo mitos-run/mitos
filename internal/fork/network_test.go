@@ -79,11 +79,16 @@ func TestPrepareForkNetworkSetupAndOverride(t *testing.T) {
 		t.Fatalf("expected 1 Setup call, got %d", len(fm.SetupLog))
 	}
 	call := fm.SetupLog[0]
-	if call.Policy != v1alpha1.EgressDeny {
-		t.Errorf("policy = %q, want deny", call.Policy)
+	if call.Policy.Egress != v1alpha1.EgressDeny {
+		t.Errorf("policy = %q, want deny", call.Policy.Egress)
 	}
-	if len(call.Allow) != 1 || !call.Allow[0].IP.Equal(net.ParseIP("10.0.0.5")) || call.Allow[0].Port != 443 {
-		t.Errorf("allow = %+v, want [10.0.0.5:443]", call.Allow)
+	if len(call.Policy.Allow) != 1 || !call.Policy.Allow[0].IP.Equal(net.ParseIP("10.0.0.5")) || call.Policy.Allow[0].Port != 443 {
+		t.Errorf("allow = %+v, want [10.0.0.5:443]", call.Policy.Allow)
+	}
+	// The egress byte counter is always wired so the metering pipeline (#211)
+	// can read per-sandbox egress bytes.
+	if !call.Policy.Counter {
+		t.Error("expected the egress counter to be wired on the fork's network policy")
 	}
 	if !call.ResolverIP.Equal(net.ParseIP("10.200.0.1")) {
 		t.Errorf("resolver = %v, want 10.200.0.1", call.ResolverIP)
@@ -114,6 +119,36 @@ func TestPrepareForkNetworkSetupAndOverride(t *testing.T) {
 	}
 	if fn.guestNet.PrefixLen != 30 {
 		t.Errorf("prefix = %d, want 30", fn.guestNet.PrefixLen)
+	}
+}
+
+// TestPrepareForkNetworkThreadsNewDimensions asserts block_network, the CIDR
+// allowlist, and the inbound policy from NetworkOpts reach the Manager's
+// SandboxPolicy (issue #219).
+func TestPrepareForkNetworkThreadsNewDimensions(t *testing.T) {
+	e, fm, _ := newNetEngine(t)
+	opts := ForkOpts{Network: &NetworkOpts{
+		EgressPolicy: "deny",
+		BlockNetwork: true,
+		AllowCIDRs:   []string{"10.0.0.0/8"},
+		Inbound:      "allow",
+		InboundCIDRs: []string{"203.0.113.0/24"},
+	}}
+	if _, err := e.prepareForkNetwork("sb1", opts); err != nil {
+		t.Fatalf("prepareForkNetwork: %v", err)
+	}
+	if len(fm.SetupLog) != 1 {
+		t.Fatalf("expected 1 Setup call, got %d", len(fm.SetupLog))
+	}
+	p := fm.SetupLog[0].Policy
+	if !p.BlockNetwork {
+		t.Error("block_network not threaded to Manager")
+	}
+	if len(p.AllowCIDRs) != 1 || p.AllowCIDRs[0] != "10.0.0.0/8" {
+		t.Errorf("allow_cidrs not threaded: %v", p.AllowCIDRs)
+	}
+	if p.Inbound != "allow" || len(p.InboundCIDRs) != 1 {
+		t.Errorf("inbound not threaded: %q %v", p.Inbound, p.InboundCIDRs)
 	}
 }
 

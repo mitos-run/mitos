@@ -481,6 +481,46 @@ husk-network KVM cluster e2e (see the status note below). The datapath is:
   (`internal/controller/sandboxclaim_controller.go`,
   `husk.ActivateRequest.Egress`/`Allow`). IP:port entries become static chain
   accepts; name entries are resolved + pinned by the in-pod DNS proxy.
+- **First-class network-posture knobs (issue #219): block_network, CIDR
+  allowlists, deny-by-default inbound.** The per-sandbox `NetworkPolicy`
+  (`api/v1alpha1`, threaded through `husk.ActivateRequest` and the proto
+  `NetworkConfig`) now also expresses, in addition to the egress policy + name
+  allowlist above:
+  - **`blockNetwork` (total deny).** When set, the per-tap chain drops ALL
+    egress, v4 and v6, with NO accept of any kind (not even established/related):
+    the Modal `block_network=True` primitive for a sandbox that must never reach
+    the network. It overrides the egress policy and every allowlist. Rendered by
+    `netconf.RenderSandboxChainSpec` (the block branch emits only the metadata
+    block and the v4/v6 drops).
+  - **`allowCidrs` (CIDR egress allowlist).** A destination IP inside an allowed
+    block is accepted, v4 saddr-pinned and v6 family-scoped, exactly like the
+    static IP:port accepts. The CIDR list is parsed fail-closed
+    (`netconf.ParseCIDRList`): a malformed CIDR fails the whole activation rather
+    than silently dropping the rule, so a sandbox never comes up with a partially
+    applied allowlist.
+  - **Deny-by-default INBOUND (`inbound`, `inboundCidrs`).** The input-hook chain
+    (above) already dropped all guest-sourced pod-local traffic except DNS; the
+    secure default is now made explicit as `inbound: deny`. `inbound: allow`
+    (optionally narrowed to `inboundCidrs` source blocks) accepts unsolicited
+    inbound to the guest IP for a sandbox that intentionally hosts a listener.
+    Return traffic for the guest's own egress is always accepted via the forward
+    chain's established,related rule, so deny-by-default inbound never breaks the
+    guest's outbound flows. The SECURE DEFAULT for an untrusted sandbox, applied
+    by the SDK and the sandbox-server when no policy is supplied, is
+    deny-by-default in BOTH directions: egress `deny` (no allows) and inbound
+    `deny`. The rule rendering of each new dimension is unit-tested in
+    `internal/netconf` (`TestRenderSandboxChainBlockNetwork`,
+    `TestRenderSandboxChainCIDRAllowlist`, `TestRenderSandboxInputChainAllowCIDR`,
+    and the deny-by-default cases); the real in-VM packet enforcement is KVM-gated
+    by the existing husk-network e2e (the new dimensions reuse the SAME proven
+    datapath: per-tap dispatch, `ip saddr` anti-spoof, terminal drop).
+- **Per-sandbox egress byte counter (the #211 metering seam).** Each sandbox's
+  chain carries a named nftables counter (`sb_<tap>_egress`) incremented on every
+  guest-sourced egress packet at the top of the chain, so the metering pipeline
+  (#211) reads per-sandbox egress bytes by name (`netconf.NftReadEgressCounterArgs`
+  + `ParseEgressCounterBytes`, surfaced via `metering.Sample.EgressBytes`). It is
+  a passive counting rule with no verdict, so it never changes enforcement; it is
+  a usage-accounting and abuse-signal source, not a security control.
 - **SNAT masquerade plus IPv4 forwarding let allowed traffic egress and return.**
   An nftables SNAT masquerade scoped to the guest source address, plus IPv4
   forwarding enabled in the pod netns, let allowed traffic reach the internet and

@@ -160,3 +160,26 @@ func TestAggregateSandboxOrdering(t *testing.T) {
 		}
 	}
 }
+
+// TestAggregatePassesEgressBytes asserts each sample's per-sandbox egress byte
+// count (the #211 metering seam fed from the nftables egress counter) is carried
+// through into its SandboxMetering row unchanged. Egress bytes are per-sandbox
+// and never deduplicated across forks (unlike CoW memory), so the row simply
+// echoes the sample.
+func TestAggregatePassesEgressBytes(t *testing.T) {
+	samples := []Sample{
+		{ID: "sb-a", Template: "tmpl", MemoryUnique: 10, EgressBytes: 4096},
+		{ID: "sb-b", Template: "tmpl", MemoryUnique: 10, EgressBytes: 0},
+	}
+	report := Aggregate(samples)
+	byID := map[string]int64{}
+	for _, s := range report.Sandboxes {
+		byID[s.ID] = s.EgressBytes
+	}
+	if byID["sb-a"] != 4096 {
+		t.Errorf("sb-a egress bytes = %d, want 4096", byID["sb-a"])
+	}
+	if byID["sb-b"] != 0 {
+		t.Errorf("sb-b egress bytes = %d, want 0", byID["sb-b"])
+	}
+}

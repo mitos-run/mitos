@@ -209,6 +209,10 @@ func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
 	return &forkdpb.NetworkConfig{
 		EgressPolicy: string(n.Egress),
 		AllowList:    n.Allow,
+		BlockNetwork: n.BlockNetwork,
+		AllowCidrs:   n.AllowCIDRs,
+		Inbound:      string(n.Inbound),
+		InboundCidrs: n.InboundCIDRs,
 	}
 }
 

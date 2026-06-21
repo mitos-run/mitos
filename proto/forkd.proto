@@ -415,4 +415,16 @@ message SecretVar {
 message NetworkConfig {
   string egress_policy = 1;
   repeated string allow_list = 2;
+  // block_network drops ALL egress for the sandbox, overriding egress_policy and
+  // the allowlists (Modal block_network=True).
+  bool block_network = 3;
+  // allow_cidrs is the egress CIDR allowlist: a destination IP inside any of
+  // these blocks is accepted (Modal outbound_cidr_allowlist). v4 or v6 CIDRs.
+  repeated string allow_cidrs = 4;
+  // inbound governs unsolicited inbound to the guest: "deny" (the secure
+  // default, deny-by-default) or "allow". Empty means deny.
+  string inbound = 5;
+  // inbound_cidrs narrows an inbound=allow to source CIDRs (Modal
+  // inbound_cidr_allowlist). Only meaningful when inbound is allow.
+  repeated string inbound_cidrs = 6;
 }

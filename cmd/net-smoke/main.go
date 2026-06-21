@@ -57,6 +57,8 @@ func main() {
 	switch os.Args[1] {
 	case "validate":
 		err = runValidate()
+	case "validate-policy":
+		err = runValidatePolicy()
 	case "setup-one":
 		err = runSetupOne(os.Args[2:])
 	case "teardown-one":
@@ -64,7 +66,7 @@ func main() {
 	case "setup-name-egress":
 		err = runSetupNameEgress(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown subcommand %q (want validate|setup-one|teardown-one|setup-name-egress)", os.Args[1])
+		err = fmt.Errorf("unknown subcommand %q (want validate|validate-policy|setup-one|teardown-one|setup-name-egress)", os.Args[1])
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "net-smoke: %v\n", err)
@@ -111,10 +113,10 @@ func runValidate() error {
 		_ = mgr.Teardown(context.Background(), idB)
 	}()
 
-	if err := mgr.Setup(ctx, idA, v1alpha1.EgressDeny, allowA, nil); err != nil {
+	if err := mgr.Setup(ctx, idA, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allowA}, nil); err != nil {
 		return fmt.Errorf("setup sandbox A (real nft rejected the ruleset?): %w", err)
 	}
-	if err := mgr.Setup(ctx, idB, v1alpha1.EgressDeny, allowB, nil); err != nil {
+	if err := mgr.Setup(ctx, idB, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allowB}, nil); err != nil {
 		return fmt.Errorf("setup sandbox B (second-sandbox install disturbed the first?): %w", err)
 	}
 
@@ -173,6 +175,80 @@ func validate(ruleset string, idA, idB netconf.Identity) error {
 	return nil
 }
 
+// runValidatePolicy installs two sandbox identities through the REAL Manager to
+// prove the issue #219 dimensions render into a live nft ruleset: one with
+// block_network (total deny), one with a CIDR egress allowlist plus the egress
+// counter. It asserts the live `nft list ruleset` proves each dimension. This is
+// KVM-gated (it needs real nft) and runs in the same CI phase as `validate`; it
+// drives the production Manager, never a fake, so it is honest enforcement-shape
+// proof, not a unit-render echo.
+func runValidatePolicy() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	mgr := network.NewManager(network.Options{SubnetCIDR: "10.201.0.0/16"})
+	idBlock := netconf.Identity{
+		TapName: "smkblk0", GuestMAC: "02:00:00:00:cc:01",
+		HostIP: net.ParseIP("10.201.251.1"), GuestIP: net.ParseIP("10.201.251.2"),
+	}
+	idCidr := netconf.Identity{
+		TapName: "smkcidr0", GuestMAC: "02:00:00:00:cc:02",
+		HostIP: net.ParseIP("10.201.251.5"), GuestIP: net.ParseIP("10.201.251.6"),
+	}
+	defer func() {
+		_ = mgr.Teardown(context.Background(), idBlock)
+		_ = mgr.Teardown(context.Background(), idCidr)
+	}()
+
+	if err := mgr.Setup(ctx, idBlock, netconf.SandboxPolicy{
+		Egress: v1alpha1.EgressAllow, BlockNetwork: true, Counter: true,
+		Allow: []netconf.HostPort{{IP: net.ParseIP("10.201.250.10"), Port: 443}},
+	}, nil); err != nil {
+		return fmt.Errorf("setup block_network sandbox (real nft rejected the ruleset?): %w", err)
+	}
+	if err := mgr.Setup(ctx, idCidr, netconf.SandboxPolicy{
+		Egress: v1alpha1.EgressDeny, AllowCIDRs: []string{"203.0.113.0/24"}, Counter: true,
+	}, nil); err != nil {
+		return fmt.Errorf("setup cidr-allow sandbox: %w", err)
+	}
+
+	ruleset, err := nftListRuleset(ctx)
+	if err != nil {
+		return err
+	}
+	return validatePolicy(ruleset, idBlock, idCidr)
+}
+
+// validatePolicy asserts the live ruleset proves the issue #219 dimensions: the
+// block_network chain accepts NOTHING it was given (its allow entry must not
+// appear) and ends in drop; the CIDR-allow chain accepts the CIDR daddr; and
+// both chains carry their egress counter.
+func validatePolicy(ruleset string, idBlock, idCidr netconf.Identity) error {
+	// block_network: the allow entry given to the block sandbox must NOT render an
+	// accept (total deny overrides it), and the chain must contain a drop.
+	if strings.Contains(ruleset, "10.201.250.10") {
+		return fmt.Errorf("block_network chain leaked an allow accept for 10.201.250.10; total deny not enforced")
+	}
+	mustContain := []string{
+		// CIDR allow rendered as a daddr accept.
+		"203.0.113.0/24",
+		// Both per-sandbox egress counters present.
+		netconf.SandboxEgressCounterName(idBlock.TapName),
+		netconf.SandboxEgressCounterName(idCidr.TapName),
+	}
+	var missing []string
+	for _, want := range mustContain {
+		if !strings.Contains(ruleset, want) {
+			missing = append(missing, want)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("live ruleset is missing expected policy fragments %v", missing)
+	}
+	fmt.Printf("net-smoke: block_network total-deny + CIDR allow + egress counters proven in live ruleset (%s, %s)\n", idBlock.TapName, idCidr.TapName)
+	return nil
+}
+
 // runSetupOne installs a single sandbox identity for the explicit addresses the
 // guest-VM egress phase boots a Firecracker NIC behind. The tap, host IP, guest
 // IP, and one allow entry are passed as flags so the workflow controls exactly
@@ -216,7 +292,7 @@ func runSetupOne(args []string) error {
 	mgr := network.NewManager(network.Options{EnableForwarding: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := mgr.Setup(ctx, id, v1alpha1.EgressDeny, []netconf.HostPort{hp}, nil); err != nil {
+	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: []netconf.HostPort{hp}}, nil); err != nil {
 		return fmt.Errorf("setup single identity: %w", err)
 	}
 	fmt.Printf("net-smoke: setup-one tap=%s host=%s guest=%s allow=%s:%d\n",
@@ -316,7 +392,7 @@ func runSetupNameEgress(args []string) error {
 	mgr := network.NewManager(network.Options{EnableForwarding: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := mgr.Setup(ctx, id, v1alpha1.EgressDeny, nil, resolverIP); err != nil {
+	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, resolverIP); err != nil {
 		return fmt.Errorf("setup name-egress identity: %w", err)
 	}
 	fmt.Printf("net-smoke: setup-name-egress tap=%s host=%s guest=%s resolver=%s name-allow=%s upstream=%s\n",

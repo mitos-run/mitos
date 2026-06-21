@@ -19,7 +19,7 @@ from mitos.sandbox import (
     _parse_run_code_stream,
     _validate_timeout,
 )
-from mitos.types import Execution, ExecResult, FileInfo, Result, SandboxPhase
+from mitos.types import Execution, ExecResult, FileInfo, Network, Result, SandboxPhase
 
 POLL_INTERVAL = 0.05
 
@@ -700,19 +700,27 @@ async def create(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     id: Optional[str] = None,
+    network: Optional[Network] = None,
 ) -> AsyncDirectSandbox:
     """Async flat one-liner native onboarding (issue #217). Resolves the API
     key and base URL (explicit arg, else MITOS_API_KEY / MITOS_BASE_URL),
     gets-or-creates the template for image, forks it, and returns a running
     AsyncDirectSandbox. The standalone server is tokenless; the hosted front
-    door (#210) verifies the same Authorization header server-side later."""
+    door (#210) verifies the same Authorization header server-side later.
+
+    network is the per-sandbox egress/ingress posture (issue #219); see
+    ``mitos.Network``. Omitting it applies the secure deny-by-default both ways.
+    This is the async parity of ``mitos.create``."""
     key, url = _resolve_auth(api_key, base_url)
     http = httpx.AsyncClient(timeout=60.0)
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
         # get-or-create the template; a 409 (exists) is success so create is idempotent.
+        tmpl_body: dict = {"id": image, "init_wait_seconds": 5}
+        if network is not None:
+            tmpl_body["network"] = network.to_dict()
         resp = await http.post(
-            f"{url}/v1/templates", json={"id": image, "init_wait_seconds": 5}, headers=headers,
+            f"{url}/v1/templates", json=tmpl_body, headers=headers,
         )
         if resp.status_code != 409:
             raise_for_status(resp, token=key)

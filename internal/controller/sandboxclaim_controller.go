@@ -792,15 +792,19 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	}
 
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
-	egress, allow := huskEgressConfig(template)
+	netCfg := huskEgressConfig(template)
 	req := husk.ActivateRequest{
 		SnapshotDir:    HuskSnapshotDir,
 		ExpectedDigest: expectedDigest,
 		Env:            env,
 		Secrets:        secretVals,
 		Network:        huskNotifyNetwork(template),
-		Egress:         egress,
-		Allow:          allow,
+		Egress:         netCfg.Egress,
+		Allow:          netCfg.Allow,
+		BlockNetwork:   netCfg.BlockNetwork,
+		AllowCIDRs:     netCfg.AllowCIDRs,
+		Inbound:        netCfg.Inbound,
+		InboundCIDRs:   netCfg.InboundCIDRs,
 		Token:          apiToken,
 	}
 	tlsConf, err := r.huskDialTLS(ctx, pod.Namespace)
@@ -914,18 +918,41 @@ func huskNotifyNetwork(_ *v1alpha1.SandboxTemplate) *vsock.NotifyForkedNetwork {
 	}
 }
 
-// huskEgressConfig extracts the egress policy string and raw allowlist from the
-// template, defaulting to fail-closed deny with no allows when the template
-// carries no NetworkPolicy. Egress and Allow are config, not secrets.
-func huskEgressConfig(template *v1alpha1.SandboxTemplate) (egress string, allow []string) {
+// huskNetworkConfig is the resolved per-sandbox network posture the controller
+// threads into the husk ActivateRequest: the egress default verdict, the raw
+// allowlist, the block_network total-deny, the CIDR allowlists, and the inbound
+// policy. All fields are config, not secrets, and are safe to log.
+type huskNetworkConfig struct {
+	Egress       string
+	Allow        []string
+	BlockNetwork bool
+	AllowCIDRs   []string
+	Inbound      string
+	InboundCIDRs []string
+}
+
+// huskEgressConfig extracts the full network posture from the template,
+// defaulting to the secure fail-closed posture when the template carries no
+// NetworkPolicy: egress deny with no allows, and inbound deny-by-default. The
+// inbound default is left empty (the stub and renderer treat empty as deny), so
+// an untrusted sandbox with no policy gets deny-by-default in both directions.
+func huskEgressConfig(template *v1alpha1.SandboxTemplate) huskNetworkConfig {
 	if template == nil || template.Spec.Network == nil {
-		return string(v1alpha1.EgressDeny), nil
+		return huskNetworkConfig{Egress: string(v1alpha1.EgressDeny)}
 	}
-	e := template.Spec.Network.Egress
+	n := template.Spec.Network
+	e := n.Egress
 	if e == "" {
 		e = v1alpha1.EgressDeny
 	}
-	return string(e), template.Spec.Network.Allow
+	return huskNetworkConfig{
+		Egress:       string(e),
+		Allow:        n.Allow,
+		BlockNetwork: n.BlockNetwork,
+		AllowCIDRs:   n.AllowCIDRs,
+		Inbound:      string(n.Inbound),
+		InboundCIDRs: n.InboundCIDRs,
+	}
 }
 
 // writeClaimStatusIfChanged writes the claim status only when it differs from

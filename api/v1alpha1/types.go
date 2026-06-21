@@ -107,9 +107,65 @@ const (
 	EgressAllow EgressPolicy = "allow"
 )
 
+// InboundPolicy governs unsolicited inbound connections to the guest (packets
+// that are NOT part of an egress-initiated, established connection). The secure
+// default for an untrusted sandbox is deny-by-default: nothing may dial into the
+// guest. An operator that runs a server inside the sandbox and wants to reach it
+// sets Inbound to allow, optionally scoped by InboundCIDRs.
+type InboundPolicy string
+
+const (
+	// InboundDeny drops every unsolicited inbound connection to the guest. This
+	// is the secure default; return traffic for the guest's own egress flows is
+	// still accepted via the ct established,related rule, so deny-by-default
+	// inbound never breaks the guest's outbound connections.
+	InboundDeny InboundPolicy = "deny"
+	// InboundAllow accepts unsolicited inbound connections, optionally narrowed
+	// to InboundCIDRs. Only meaningful for a sandbox that hosts a listener.
+	InboundAllow InboundPolicy = "allow"
+)
+
+// NetworkPolicy is the per-sandbox network posture, threaded from the template
+// through the Fork RPC to the per-tap nftables datapath (docs/networking.md).
+//
+// The dimensions compose as follows, in priority order:
+//   - BlockNetwork, when true, drops ALL egress unconditionally; the allowlists
+//     and Egress policy below are then inert. This is the total-deny knob (Modal
+//     block_network=True).
+//   - Otherwise Egress (deny or allow) is the default verdict for traffic that
+//     matches no allow rule. Under deny (the secure default), only the allowlists
+//     pass; under allow, everything passes except the unconditional metadata block.
+//   - Allow is the host:port allowlist: literal IP:port entries become static
+//     chain accepts; DNS-name entries are enforced via the controlled resolver.
+//   - AllowCIDRs accepts egress whose destination IP is inside one of the named
+//     CIDR blocks (the CIDR allowlist; Modal outbound_cidr_allowlist).
+//   - Inbound governs unsolicited inbound to the guest; the secure default is
+//     deny-by-default (InboundDeny). InboundCIDRs narrows an InboundAllow to
+//     source CIDRs (Modal inbound_cidr_allowlist).
 type NetworkPolicy struct {
 	Egress EgressPolicy `json:"egress,omitempty"`
 	Allow  []string     `json:"allow,omitempty"`
+
+	// BlockNetwork drops ALL egress for the sandbox, overriding Egress and the
+	// allowlists. It is the total-deny primitive (Modal block_network=True): a
+	// sandbox that must never reach the network at all.
+	BlockNetwork bool `json:"blockNetwork,omitempty"`
+
+	// AllowCIDRs is the egress CIDR allowlist: a destination IP inside any of
+	// these blocks is accepted (Modal outbound_cidr_allowlist). Entries are
+	// CIDR notation, IPv4 or IPv6 (e.g. "10.0.0.0/8", "2001:db8::/32"). Ignored
+	// when BlockNetwork is true.
+	AllowCIDRs []string `json:"allowCidrs,omitempty"`
+
+	// Inbound governs unsolicited inbound connections to the guest. Empty means
+	// the secure default, deny-by-default (InboundDeny): nothing may dial in.
+	// Return traffic for the guest's own egress is always accepted regardless.
+	Inbound InboundPolicy `json:"inbound,omitempty"`
+
+	// InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
+	// inbound_cidr_allowlist). Only meaningful when Inbound is allow; empty under
+	// InboundAllow means any source may dial in.
+	InboundCIDRs []string `json:"inboundCidrs,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -220,13 +220,60 @@ spec:
                   type: string
                 type: array
               networkPolicy:
+                description: |-
+                  NetworkPolicy is the per-sandbox network posture, threaded from the template
+                  through the Fork RPC to the per-tap nftables datapath (docs/networking.md).
+
+                  The dimensions compose as follows, in priority order:
+                    - BlockNetwork, when true, drops ALL egress unconditionally; the allowlists
+                      and Egress policy below are then inert. This is the total-deny knob (Modal
+                      block_network=True).
+                    - Otherwise Egress (deny or allow) is the default verdict for traffic that
+                      matches no allow rule. Under deny (the secure default), only the allowlists
+                      pass; under allow, everything passes except the unconditional metadata block.
+                    - Allow is the host:port allowlist: literal IP:port entries become static
+                      chain accepts; DNS-name entries are enforced via the controlled resolver.
+                    - AllowCIDRs accepts egress whose destination IP is inside one of the named
+                      CIDR blocks (the CIDR allowlist; Modal outbound_cidr_allowlist).
+                    - Inbound governs unsolicited inbound to the guest; the secure default is
+                      deny-by-default (InboundDeny). InboundCIDRs narrows an InboundAllow to
+                      source CIDRs (Modal inbound_cidr_allowlist).
                 properties:
                   allow:
                     items:
                       type: string
                     type: array
+                  allowCidrs:
+                    description: |-
+                      AllowCIDRs is the egress CIDR allowlist: a destination IP inside any of
+                      these blocks is accepted (Modal outbound_cidr_allowlist). Entries are
+                      CIDR notation, IPv4 or IPv6 (e.g. "10.0.0.0/8", "2001:db8::/32"). Ignored
+                      when BlockNetwork is true.
+                    items:
+                      type: string
+                    type: array
+                  blockNetwork:
+                    description: |-
+                      BlockNetwork drops ALL egress for the sandbox, overriding Egress and the
+                      allowlists. It is the total-deny primitive (Modal block_network=True): a
+                      sandbox that must never reach the network at all.
+                    type: boolean
                   egress:
                     type: string
+                  inbound:
+                    description: |-
+                      Inbound governs unsolicited inbound connections to the guest. Empty means
+                      the secure default, deny-by-default (InboundDeny): nothing may dial in.
+                      Return traffic for the guest's own egress is always accepted regardless.
+                    type: string
+                  inboundCidrs:
+                    description: |-
+                      InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
+                      inbound_cidr_allowlist). Only meaningful when Inbound is allow; empty under
+                      InboundAllow means any source may dial in.
+                    items:
+                      type: string
+                    type: array
                 type: object
               resources:
                 properties:

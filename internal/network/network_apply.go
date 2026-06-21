@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 
-	"mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -44,8 +43,7 @@ func setup(
 	run runner,
 	enableForward forwardEnabler,
 	id netconf.Identity,
-	policy v1alpha1.EgressPolicy,
-	allow []netconf.HostPort,
+	policy netconf.SandboxPolicy,
 	resolverIP net.IP,
 	opts applyOptions,
 ) error {
@@ -73,7 +71,21 @@ func setup(
 	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedTable()); err != nil {
 		return fmt.Errorf("apply shared egress table for tap %s: %w", id.TapName, err)
 	}
-	chain := netconf.RenderSandboxChain(id.TapName, id.GuestIP, policy, allow, resolverIP)
+	cidrV4, cidrV6, err := netconf.ParseCIDRList(policy.AllowCIDRs)
+	if err != nil {
+		return fmt.Errorf("parse CIDR allowlist for tap %s: %w", id.TapName, err)
+	}
+	chain := netconf.RenderSandboxChainSpec(netconf.ChainSpec{
+		Tap:          id.TapName,
+		GuestIP:      id.GuestIP,
+		Egress:       policy.Egress,
+		Allow:        policy.Allow,
+		AllowCIDRsV4: cidrV4,
+		AllowCIDRsV6: cidrV6,
+		ResolverIP:   resolverIP,
+		BlockNetwork: policy.BlockNetwork,
+		Counter:      policy.Counter,
+	})
 	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
 		return fmt.Errorf("apply egress chain for tap %s: %w", id.TapName, err)
 	}
@@ -117,6 +129,12 @@ func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOp
 	// stops a reused tap from inheriting stale pinned (ip . port) elements.
 	if err := run(ctx, netconf.NftDeleteSandboxAllowSetArgs(id.TapName), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("delete egress allow set for tap %s: %w", id.TapName, err)
+	}
+	// Delete the per-sandbox egress counter after its chain (the counting rule
+	// references it), so a reused tap starts with a fresh zeroed counter. The
+	// counter may not exist (it is opt-in), so this is best-effort like the rest.
+	if err := run(ctx, netconf.NftDeleteSandboxEgressCounterArgs(id.TapName), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete egress counter for tap %s: %w", id.TapName, err)
 	}
 	return firstErr
 }

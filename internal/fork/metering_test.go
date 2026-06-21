@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/volume"
 )
 
@@ -121,5 +122,37 @@ func TestMeteringResamplesLiveMemory(t *testing.T) {
 	report := e.Metering()
 	if report.TotalUnique != 9*mib {
 		t.Errorf("TotalUnique = %d, want %d (the live re-sampled value, not the T=0 fork-time 1MiB)", report.TotalUnique, 9*mib)
+	}
+}
+
+// TestMeteringReadsEgressBytes proves Metering reads each networked sandbox's
+// egress counter via the injected egressBytes seam and carries the byte total
+// into its per-sandbox row (issue #219, the #211 metering seam). A sandbox with
+// no tap (networking off) reports zero and the reader is not consulted for it.
+func TestMeteringReadsEgressBytes(t *testing.T) {
+	e := &Engine{
+		sandboxes: map[string]*Sandbox{
+			"net":   {ID: "net", TemplateID: "tmpl", Pid: 1, netID: netconf.Identity{TapName: "sbtapnet"}},
+			"nonet": {ID: "nonet", TemplateID: "tmpl", Pid: 2},
+		},
+		memStat: func(pid int) (int64, int64) { return 0, 0 },
+		egressBytes: func(tap string) int64 {
+			if tap == "sbtapnet" {
+				return 8192
+			}
+			t.Errorf("egressBytes called with unexpected tap %q", tap)
+			return 0
+		},
+	}
+	report := e.Metering()
+	byID := map[string]int64{}
+	for _, s := range report.Sandboxes {
+		byID[s.ID] = s.EgressBytes
+	}
+	if byID["net"] != 8192 {
+		t.Errorf("net egress bytes = %d, want 8192", byID["net"])
+	}
+	if byID["nonet"] != 0 {
+		t.Errorf("nonet egress bytes = %d, want 0 (no tap, reader not consulted)", byID["nonet"])
 	}
 }

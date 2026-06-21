@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,6 +48,14 @@ type Engine struct {
 	// readMemoryStats (/proc/<pid>/smaps_rollup); a seam so Metering's lifetime
 	// re-sample is unit-testable without a real VM.
 	memStat func(pid int) (unique, shared int64)
+
+	// egressBytes reads a sandbox's total egress bytes from its per-tap nftables
+	// egress counter (issue #219, the #211 metering seam). Nil disables the read
+	// (Metering reports zero egress bytes), which is the default when networking
+	// is off. A seam so the metering rollup is unit-testable without nft; the
+	// production reader runs `nft -j list counter` and parses it via
+	// netconf.ParseEgressCounterBytes.
+	egressBytes func(tap string) int64
 
 	// casStore content-addresses every template snapshot for integrity
 	// verification (issue #9) and incremental transfer (Task 4). Rooted at
@@ -424,7 +433,19 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		guestResolver = e.resolverIP.String()
 	}
 
-	if err := e.netMgr.Setup(context.Background(), id, policy, allow, e.resolverIP); err != nil {
+	sbPolicy := netconf.SandboxPolicy{
+		Egress:       policy,
+		Allow:        allow,
+		AllowCIDRs:   opts.Network.AllowCIDRs,
+		BlockNetwork: opts.Network.BlockNetwork,
+		Inbound:      v1alpha1.InboundPolicy(opts.Network.Inbound),
+		InboundCIDRs: opts.Network.InboundCIDRs,
+		// Always wire the per-sandbox egress counter so the metering pipeline
+		// (#211) can read this sandbox's egress bytes by name. It is a passive
+		// counting rule with no verdict, so it never changes enforcement.
+		Counter: true,
+	}
+	if err := e.netMgr.Setup(context.Background(), id, sbPolicy, e.resolverIP); err != nil {
 		e.netAlloc.Release(sandboxID)
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
 	}
@@ -776,6 +797,15 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	}
 	if e.meminfoReader == nil {
 		e.meminfoReader = procMeminfoReader
+	}
+	// Wire the production egress-byte reader when networking is enabled so the
+	// metering rollup (#211 seam) attributes per-sandbox egress bytes from the
+	// nftables counter installed in each fork's chain. It reads the counter by
+	// tap and parses the JSON; any read error reports zero (best-effort, never
+	// blocks the metering endpoint). When networking is off this stays nil and
+	// Metering reports zero egress bytes.
+	if e.networkEnabled() {
+		e.egressBytes = readEgressCounterBytes
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
@@ -1646,6 +1676,9 @@ type meteringSnapshot struct {
 	memoryShared int64
 	hasVolumes   bool
 	volumes      []volume.Spec
+	// tap is the sandbox's network tap name when networking is on (empty
+	// otherwise). Metering reads this sandbox's egress counter by tap.
+	tap string
 }
 
 // memStatFn returns the engine's memory-stat reader (the seam tests inject).
@@ -1694,6 +1727,7 @@ func (e *Engine) Metering() metering.Report {
 			memoryShared: s.MemoryShared,
 			hasVolumes:   s.hasVolumes,
 			volumes:      vols,
+			tap:          s.netID.TapName,
 		})
 	}
 	e.mu.RUnlock()
@@ -1708,6 +1742,10 @@ func (e *Engine) Metering() metering.Report {
 	for _, sn := range snaps {
 		du, ds := e.diskFootprint(sn)
 		mu, ms := stat(sn.pid)
+		var egress int64
+		if e.egressBytes != nil && sn.tap != "" {
+			egress = e.egressBytes(sn.tap)
+		}
 		samples = append(samples, metering.Sample{
 			ID:           sn.id,
 			Template:     sn.template,
@@ -1715,6 +1753,7 @@ func (e *Engine) Metering() metering.Report {
 			MemoryShared: ms,
 			DiskUnique:   du,
 			DiskShared:   ds,
+			EgressBytes:  egress,
 		})
 	}
 	return metering.Aggregate(samples)
@@ -1824,7 +1863,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 			HostIP:   placeholderHostIP,
 			GuestIP:  placeholderGuestIP,
 		}
-		if err := e.netMgr.Setup(context.Background(), placeholderID, v1alpha1.EgressDeny, nil, nil); err != nil {
+		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
 		defer func() {
@@ -2056,6 +2095,36 @@ type ForkOpts struct {
 type NetworkOpts struct {
 	EgressPolicy string
 	AllowList    []string
+	// BlockNetwork drops ALL egress (Modal block_network=True), overriding the
+	// egress policy and the allowlists.
+	BlockNetwork bool
+	// AllowCIDRs is the egress CIDR allowlist (Modal outbound_cidr_allowlist).
+	AllowCIDRs []string
+	// Inbound governs unsolicited inbound to the guest: "deny" (the secure
+	// default, deny-by-default) or "allow". Empty means deny.
+	Inbound string
+	// InboundCIDRs narrows an inbound=allow to source CIDRs (Modal
+	// inbound_cidr_allowlist).
+	InboundCIDRs []string
+}
+
+// readEgressCounterBytes is the production egress-byte reader: it runs
+// `nft -j list counter inet <table> sb_<tap>_egress` and parses the byte total
+// (issue #219). Best-effort: any error (nft missing, counter absent, parse
+// failure) returns zero so the metering endpoint never fails on a counter read.
+// The argv and parser are unit-tested in internal/netconf; this thin wrapper
+// runs the command, so its real exercise is in KVM CI where nft exists.
+func readEgressCounterBytes(tap string) int64 {
+	argv := netconf.NftReadEgressCounterArgs(tap)
+	out, err := exec.Command(argv[0], argv[1:]...).Output()
+	if err != nil {
+		return 0
+	}
+	bytes, err := netconf.ParseEgressCounterBytes(string(out))
+	if err != nil {
+		return 0
+	}
+	return bytes
 }
 
 func readMemoryStats(pid int) (unique, shared int64) {
