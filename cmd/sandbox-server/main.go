@@ -155,7 +155,13 @@ func main() {
 	apiHandler := s.sandboxAPI.Handler()
 	mux.Handle("POST /v1/exec", apiHandler)
 	mux.Handle("POST /v1/exec/stream", apiHandler)
+	mux.Handle("POST /v1/run_code/stream", apiHandler)
 	mux.Handle("POST /v1/files/", apiHandler)
+	// Live lifecycle controls (issue #218): adjust a running sandbox's TTL, and
+	// pause/resume. These go through the same SandboxAPI handler forkd serves.
+	mux.Handle("POST /v1/set_timeout", apiHandler)
+	mux.Handle("POST /v1/pause", apiHandler)
+	mux.Handle("POST /v1/resume", apiHandler)
 	// The PTY route lives on the SandboxAPI's own outer mux (registered there
 	// outside requireBearer); delegate the WebSocket upgrade GET to it.
 	mux.Handle("GET /v1/pty", apiHandler)

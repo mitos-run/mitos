@@ -30,6 +30,12 @@ type MockEngine struct {
 	ForkErr error
 	// PausedSources records source sandbox IDs that were "paused" during ForkRunning.
 	PausedSources []string
+	// pausedSandboxes records sandbox ids currently held paused via Pause
+	// (issue #218); Resume clears them. pauseCycles counts how many times each
+	// sandbox has been paused so a test can assert repeated pause/resume cycles
+	// were driven. Both guarded by mu.
+	pausedSandboxes map[string]bool
+	pauseCycles     map[string]int
 	// terminated records every sandbox ID passed to Terminate, in call order,
 	// so tests can assert a VM was reaped even after it leaves the live map.
 	terminated []string
@@ -478,6 +484,56 @@ func (e *MockEngine) findTemplateBySnapshot(snapshotID string) (*Template, bool)
 		}
 	}
 	return nil, false
+}
+
+// Pause simulates a full-state checkpoint + pause of a running sandbox
+// (issue #218). The mock prepares no real snapshot, so it records the pause and
+// increments the per-sandbox cycle count, standing in for the real engine's
+// memory+fs snapshot. The mock cannot assert real state preservation across
+// cycles (that is the KVM bar); it lets the daemon pause path and the
+// repeated-cycle bookkeeping be exercised without KVM.
+func (e *MockEngine) Pause(sandboxID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.sandboxes[sandboxID]; !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if e.pausedSandboxes == nil {
+		e.pausedSandboxes = make(map[string]bool)
+		e.pauseCycles = make(map[string]int)
+	}
+	if !e.pausedSandboxes[sandboxID] {
+		e.pausedSandboxes[sandboxID] = true
+		e.pauseCycles[sandboxID]++
+	}
+	return nil
+}
+
+// Resume simulates restoring a paused sandbox to RUNNING (issue #218).
+func (e *MockEngine) Resume(sandboxID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.sandboxes[sandboxID]; !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	delete(e.pausedSandboxes, sandboxID)
+	return nil
+}
+
+// IsPaused reports whether the mock currently holds sandboxID paused.
+func (e *MockEngine) IsPaused(sandboxID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.pausedSandboxes[sandboxID]
+}
+
+// PauseCycles returns how many times sandboxID has been paused, so a test can
+// assert repeated pause/resume cycles were driven (the E2B repeated-cycle bug
+// this issue beats).
+func (e *MockEngine) PauseCycles(sandboxID string) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.pauseCycles[sandboxID]
 }
 
 // ForkRunning simulates checkpoint-and-fork of a running sandbox.

@@ -245,6 +245,39 @@ export class Sandbox {
     };
   }
 
+  /**
+   * Adjusts this RUNNING sandbox's TTL to now + timeoutSeconds (issue #218).
+   * Returns the new absolute deadline as a unix timestamp. A value over the
+   * server ceiling throws a typed TimeoutTooLargeError; the server never
+   * silently clamps it (issue #216). This is the native method the E2B compat
+   * shim (#206) maps its setTimeout onto.
+   */
+  async setTimeout(timeoutSeconds: number): Promise<number> {
+    validateTimeout(timeoutSeconds);
+    const resp = await this.http.post<{ deadline_unix?: number }>(
+      "/v1/set_timeout",
+      { sandbox: this.id, timeout_seconds: timeoutSeconds },
+    );
+    return resp.deadline_unix ?? 0;
+  }
+
+  /**
+   * Pauses this sandbox: snapshots full state (memory + filesystem) and stops
+   * the clock (issue #218). A paused sandbox is never idle-reaped. resume()
+   * restores it.
+   */
+  async pause(): Promise<void> {
+    await this.http.post<{ status?: string }>("/v1/pause", { sandbox: this.id });
+  }
+
+  /**
+   * Resumes a paused sandbox: restores its full state and restarts the clock
+   * (issue #218).
+   */
+  async resume(): Promise<void> {
+    await this.http.post<{ status?: string }>("/v1/resume", { sandbox: this.id });
+  }
+
   private async streamExec(
     command: string,
     opts: {

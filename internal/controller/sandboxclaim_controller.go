@@ -1155,25 +1155,42 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 		}
 	}
 
-	// Idle check needs last-activity from forkd. An unreachable node means we
-	// cannot evaluate idle this pass; requeue and try again.
+	// Idle and live-deadline checks need the work-aware activity signal from
+	// forkd. An unreachable node means we cannot evaluate them this pass; requeue
+	// and try again. We fetch the signal once when either is in play: a live
+	// set_timeout deadline (issue #218) is honored even without Spec.IdleTimeout.
 	requeue := time.Duration(0)
 	if hasIdle {
-		_, lastActivity, ok := sandboxActivity(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
+		sig, ok := fetchActivitySignal(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
 		if !ok {
 			logger.Info("cannot evaluate idle, node unreachable; requeueing", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
-		last := startedAt
-		if lastActivity.After(last) {
-			last = lastActivity
+		// A live set_timeout deadline takes authority over the idle clock
+		// (issue #218): the caller explicitly bounded this running sandbox's TTL.
+		// A deadline in the past reaps; a deadline in the future EXTENDS the TTL,
+		// so the idle window is not consulted at all (this is how set_timeout
+		// keeps an otherwise-idle sandbox alive, the #206 shim seam).
+		if !sig.Deadline.IsZero() {
+			if deadlineExpired(sig, now) {
+				return r.terminateLifetime(ctx, claim, "TimeoutExpired",
+					"live set_timeout deadline expired")
+			}
+			requeue = time.Until(sig.Deadline)
+		} else {
+			// Work-aware idle (issue #218): a paused sandbox or one with a live
+			// background job (an open stream) is NOT idle, so an unattended job is
+			// never reaped mid-run.
+			if idleExpired(sig, startedAt, claim.Spec.IdleTimeout.Duration, now) {
+				return r.terminateLifetime(ctx, claim, "IdleTimeout",
+					fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
+			}
+			last := startedAt
+			if sig.LastActivity.After(last) {
+				last = sig.LastActivity
+			}
+			requeue = time.Until(last.Add(claim.Spec.IdleTimeout.Duration))
 		}
-		idleDeadline := last.Add(claim.Spec.IdleTimeout.Duration)
-		if now.After(idleDeadline) {
-			return r.terminateLifetime(ctx, claim, "IdleTimeout",
-				fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
-		}
-		requeue = time.Until(idleDeadline)
 	}
 
 	// Requeue at the nearest deadline.

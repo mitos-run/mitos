@@ -277,6 +277,18 @@ message SandboxInfo {
   // zero when never accessed
   int64 last_activity_unix = 3;
   int64 uptime_seconds = 4;
+  // deadline_unix is the live TTL deadline set via set_timeout (issue #218);
+  // zero when no live timeout has been set. The controller's lifetime reaper
+  // honors it as the running-sandbox TTL.
+  int64 deadline_unix = 5;
+  // active_streams is the count of OPEN streams (streaming exec, run_code, PTY)
+  // for this sandbox: the work-aware idle signal (issue #218). A non-zero count
+  // means a background job is running, so the idle reaper must NOT reap the
+  // sandbox even when there has been no inbound API interaction.
+  int32 active_streams = 6;
+  // paused is true when the sandbox has been paused (issue #218): its clock is
+  // stopped and it must never be idle-reaped while held.
+  bool paused = 7;
 }
 
 // --- Volume reclamation ---

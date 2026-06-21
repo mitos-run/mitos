@@ -14,6 +14,12 @@ type ForkEngine interface {
 	Fork(snapshotID, sandboxID string, opts fork.ForkOpts) (*fork.ForkResult, error)
 	ForkRunning(sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error)
 	Terminate(sandboxID string) error
+	// Pause snapshots a sandbox's full state (memory + filesystem) and pauses the
+	// VM so a later Resume restores it (issue #218). Resume restores a paused
+	// sandbox to RUNNING. Both are idempotent and back the sandbox HTTP API's
+	// pause/resume endpoints; on the mock engine they track the held state only.
+	Pause(sandboxID string) error
+	Resume(sandboxID string) error
 	GetCapacity() fork.Capacity
 	// Metering returns the full CoW-aware metering report (per-sandbox and
 	// per-template memory plus disk) for the operator/billing endpoint. Unlike

@@ -551,7 +551,13 @@ out of capacity. Chaos suite in CI.
   still open.
 - ✅ Claim TTLs: `maxLifetime` and `idleTimeout` reap to a terminal
   `Terminated` phase with status conditions; `idleTimeout` reads activity
-  via the forkd `ListSandboxes` primitive.
+  via the forkd `ListSandboxes` primitive. The idle clock is WORK-AWARE
+  (issue #218): a sandbox with a live background process (an open stream) or a
+  paused sandbox is not idle-reaped, and a live `set_timeout` deadline takes
+  authority over the idle clock. Live `set_timeout` and first-class
+  pause/resume (full memory + filesystem state) ship on the sandbox HTTP API
+  and both SDKs; pause/resume correctness across N cycles is the KVM bar
+  (`TestEnginePauseResumePreservesStateKVM`). See `docs/lifecycle.md`.
 - 🔨 etcd hygiene: TTL of finished objects, including early-failed claims,
   is done. Rate-limiting and batching of status updates is still open.
 - ✅ Saturation behavior: queue with backpressure then a typed fail-fast

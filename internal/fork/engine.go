@@ -1363,6 +1363,65 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{}, false)
 }
 
+// Pause snapshots a running sandbox's FULL state (memory + filesystem) to its
+// checkpoint dir and pauses the VM, so a later Resume restores it exactly
+// (issue #218). The snapshot is a Firecracker Full snapshot: the vCPU and device
+// state plus the guest memory file, paired with the copy-on-write rootfs that
+// already holds the filesystem, so repeated pause/resume cycles preserve both
+// memory AND filesystem. The CORRECTNESS of that preservation across N cycles
+// is the KVM acceptance bar (engine_pause_kvm_test.go); this method is the
+// engine primitive the daemon pause endpoint drives.
+//
+// A paused VM keeps its host resources (memory file, drives, tap) reserved; it
+// is held, not reaped. Pause is idempotent: pausing an already-paused VM is a
+// no-op success.
+func (e *Engine) Pause(sandboxID string) error {
+	e.mu.RLock()
+	sandbox, ok := e.sandboxes[sandboxID]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.fcClient == nil {
+		// An adopted or mock-backed sandbox has no live Firecracker client to
+		// pause; the daemon's API-level paused flag still holds the clock.
+		return nil
+	}
+	if err := sandbox.fcClient.Pause(); err != nil {
+		return fmt.Errorf("pause sandbox %s: %w", sandboxID, err)
+	}
+	checkpointDir := filepath.Join(e.dataDir, "sandboxes", sandboxID, "pause")
+	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
+		return fmt.Errorf("create pause checkpoint dir: %w", err)
+	}
+	memFile := filepath.Join(checkpointDir, "mem")
+	vmStateFile := filepath.Join(checkpointDir, "vmstate")
+	if err := sandbox.fcClient.CreateSnapshot(memFile, vmStateFile); err != nil {
+		return fmt.Errorf("checkpoint paused sandbox %s: %w", sandboxID, err)
+	}
+	return nil
+}
+
+// Resume restores a paused sandbox to RUNNING (issue #218). On the real engine
+// it resumes the paused Firecracker VM in place, so the exact memory and
+// filesystem state captured at Pause continues. Resume is idempotent: resuming
+// a running VM is a no-op success.
+func (e *Engine) Resume(sandboxID string) error {
+	e.mu.RLock()
+	sandbox, ok := e.sandboxes[sandboxID]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.fcClient == nil {
+		return nil
+	}
+	if err := sandbox.fcClient.Resume(); err != nil {
+		return fmt.Errorf("resume sandbox %s: %w", sandboxID, err)
+	}
+	return nil
+}
+
 // Terminate kills a sandbox and releases its resources.
 func (e *Engine) Terminate(sandboxID string) error {
 	e.mu.Lock()

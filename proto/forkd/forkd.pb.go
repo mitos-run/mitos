@@ -1714,8 +1714,20 @@ type SandboxInfo struct {
 	// zero when never accessed
 	LastActivityUnix int64 `protobuf:"varint,3,opt,name=last_activity_unix,json=lastActivityUnix,proto3" json:"last_activity_unix,omitempty"`
 	UptimeSeconds    int64 `protobuf:"varint,4,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// deadline_unix is the live TTL deadline set via set_timeout (issue #218);
+	// zero when no live timeout has been set. The controller's lifetime reaper
+	// honors it as the running-sandbox TTL.
+	DeadlineUnix int64 `protobuf:"varint,5,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"`
+	// active_streams is the count of OPEN streams (streaming exec, run_code, PTY)
+	// for this sandbox: the work-aware idle signal (issue #218). A non-zero count
+	// means a background job is running, so the idle reaper must NOT reap the
+	// sandbox even when there has been no inbound API interaction.
+	ActiveStreams int32 `protobuf:"varint,6,opt,name=active_streams,json=activeStreams,proto3" json:"active_streams,omitempty"`
+	// paused is true when the sandbox has been paused (issue #218): its clock is
+	// stopped and it must never be idle-reaped while held.
+	Paused        bool `protobuf:"varint,7,opt,name=paused,proto3" json:"paused,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SandboxInfo) Reset() {
@@ -1774,6 +1786,27 @@ func (x *SandboxInfo) GetUptimeSeconds() int64 {
 		return x.UptimeSeconds
 	}
 	return 0
+}
+
+func (x *SandboxInfo) GetDeadlineUnix() int64 {
+	if x != nil {
+		return x.DeadlineUnix
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetActiveStreams() int32 {
+	if x != nil {
+		return x.ActiveStreams
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
 }
 
 type ListVolumesRequest struct {
@@ -2969,13 +3002,16 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds\"\x16\n" +
 	"\x14ListSandboxesRequest\"I\n" +
 	"\x15ListSandboxesResponse\x120\n" +
-	"\tsandboxes\x18\x01 \x03(\v2\x12.forkd.SandboxInfoR\tsandboxes\"\xa9\x01\n" +
+	"\tsandboxes\x18\x01 \x03(\v2\x12.forkd.SandboxInfoR\tsandboxes\"\x8d\x02\n" +
 	"\vSandboxInfo\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x12,\n" +
 	"\x12last_activity_unix\x18\x03 \x01(\x03R\x10lastActivityUnix\x12%\n" +
-	"\x0euptime_seconds\x18\x04 \x01(\x03R\ruptimeSeconds\"\x14\n" +
+	"\x0euptime_seconds\x18\x04 \x01(\x03R\ruptimeSeconds\x12#\n" +
+	"\rdeadline_unix\x18\x05 \x01(\x03R\fdeadlineUnix\x12%\n" +
+	"\x0eactive_streams\x18\x06 \x01(\x05R\ractiveStreams\x12\x16\n" +
+	"\x06paused\x18\a \x01(\bR\x06paused\"\x14\n" +
 	"\x12ListVolumesRequest\"B\n" +
 	"\x13ListVolumesResponse\x12+\n" +
 	"\avolumes\x18\x01 \x03(\v2\x11.forkd.VolumeInfoR\avolumes\"L\n" +

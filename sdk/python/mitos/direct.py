@@ -282,6 +282,42 @@ class DirectSandbox:
 
         return PtyHandle(url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data)
 
+    def set_timeout(self, timeout_seconds: int) -> int:
+        """Adjust this RUNNING sandbox's TTL to now + timeout_seconds (issue
+        #218). Returns the new absolute deadline as a unix timestamp. A value
+        over the server ceiling raises TimeoutTooLargeError; the server never
+        silently clamps it (issue #216). This is the native method the E2B
+        compat shim (#206) maps its setTimeout onto."""
+        _validate_timeout(timeout_seconds)
+        resp = self._http.post(
+            f"{self._server_url}/v1/set_timeout",
+            json={"sandbox": self.id, "timeout_seconds": timeout_seconds},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+        return int(resp.json().get("deadline_unix", 0))
+
+    def pause(self) -> None:
+        """Pause this sandbox: snapshot full state (memory + filesystem) and
+        stop the clock (issue #218). On a real forkd the VM is snapshotted and
+        held; a paused sandbox is never idle-reaped. Resume restores it."""
+        resp = self._http.post(
+            f"{self._server_url}/v1/pause",
+            json={"sandbox": self.id},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+
+    def resume(self) -> None:
+        """Resume a paused sandbox: restore its full state and restart the
+        clock (issue #218)."""
+        resp = self._http.post(
+            f"{self._server_url}/v1/resume",
+            json={"sandbox": self.id},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._api_key)
+
     def fork(self, n: int = 1, id: Optional[str] = None) -> list["DirectSandbox"]:
         """Fork this sandbox into n independent sibling copies on the server.
 

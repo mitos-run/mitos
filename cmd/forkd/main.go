@@ -310,6 +310,9 @@ func main() {
 	sandboxAPI := daemon.NewSandboxAPI(dataDir)
 	sandboxAPI.SetMaxStreamsPerSandbox(maxStreamsPerSandbox)
 	sandboxAPI.SetMaxExecTimeoutSeconds(maxExecTimeoutSecs)
+	// Drive the real engine's pause/resume (full memory+fs snapshot and restore)
+	// from the sandbox API's pause/resume endpoints (issue #218).
+	sandboxAPI.SetEnginePauser(engine)
 	auditor, auditCloser, err := daemon.AuditorFromFlag(auditLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)

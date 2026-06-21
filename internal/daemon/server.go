@@ -409,11 +409,23 @@ func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
 		if !rec.CreatedAt.IsZero() {
 			uptimeSeconds = int64(now.Sub(rec.CreatedAt).Seconds())
 		}
+		// Surface the work-aware idle signals (issue #218): the live set_timeout
+		// deadline, the count of OPEN streams (a non-zero count is a running
+		// background job), and the paused flag, so the controller's lifetime
+		// reaper honors the running-sandbox TTL and never reaps a sandbox that is
+		// doing actual work or is held by a pause.
+		var deadlineUnix int64
+		if dl, ok := s.sandboxAPI.Deadline(rec.ID); ok {
+			deadlineUnix = dl.Unix()
+		}
 		out = append(out, &forkdpb.SandboxInfo{
 			SandboxId:        rec.ID,
 			CreatedAtUnix:    rec.CreatedAt.Unix(),
 			LastActivityUnix: lastActivityUnix,
 			UptimeSeconds:    uptimeSeconds,
+			DeadlineUnix:     deadlineUnix,
+			ActiveStreams:    int32(s.sandboxAPI.ActiveStreams(rec.ID)),
+			Paused:           s.sandboxAPI.IsPaused(rec.ID),
 		})
 	}
 	return out

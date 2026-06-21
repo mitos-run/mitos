@@ -73,8 +73,25 @@ type SandboxAPI struct {
 	// openStreams counts the currently OPEN streams per sandbox id, guarded by
 	// mu. acquireStream increments on open and the returned release decrements on
 	// close, deleting the entry at zero so the map does not grow across sandbox
-	// lifetimes.
+	// lifetimes. A non-zero count is the work-aware idle signal (issue #218): a
+	// sandbox with a live streaming exec, run_code, or PTY (a background job) is
+	// running ACTUAL work, so the idle reaper must not reap it mid-run.
 	openStreams map[string]int
+	// deadlines records a live TTL deadline per sandbox id set via set_timeout
+	// (issue #218), guarded by mu. It is the running-sandbox TTL the lifetime
+	// reaper reads through ListSandboxes; absent until the first set_timeout. The
+	// value is the absolute wall-clock instant the sandbox should be reaped.
+	deadlines map[string]time.Time
+	// paused records sandbox ids whose clock is stopped by a pause (issue #218),
+	// guarded by mu. A paused sandbox is held (full state snapshotted on a real
+	// engine) and must never be idle-reaped: its idle clock does not run while
+	// paused. resume clears the entry.
+	paused map[string]bool
+	// enginePauser, when set (forkd), drives the real engine's pause/resume
+	// (full memory+fs snapshot and restore) from the pause/resume HTTP
+	// endpoints. nil on the standalone server and in unit tests, where the
+	// endpoints record the held state only. Set via SetEnginePauser.
+	enginePauser EnginePauser
 	// maxExecTimeout is the ceiling (seconds) on a requested exec or run_code
 	// timeout (issue #216). A request over the ceiling is REJECTED with the typed
 	// timeout_too_large code, never silently reduced, so a requested deadline is
@@ -101,6 +118,8 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		now:            time.Now,
 		auditor:        NopAuditor{},
 		openStreams:    make(map[string]int),
+		deadlines:      make(map[string]time.Time),
+		paused:         make(map[string]bool),
 		maxExecTimeout: defaultMaxExecTimeoutSeconds,
 	}
 }
@@ -153,11 +172,12 @@ func (api *SandboxAPI) SetMaxStreamsPerSandbox(n int) {
 // dialed; it is a single map lookup under mu and never touches the activate or
 // fork hot path. maxStreams<=0 disables the cap.
 func (api *SandboxAPI) acquireStream(sandboxID string) (release func(), ok bool) {
-	if api.maxStreams <= 0 {
-		return func() {}, true
-	}
 	api.mu.Lock()
-	if api.openStreams[sandboxID] >= api.maxStreams {
+	// Enforce the cap only when set; the open-stream count is tracked
+	// unconditionally because it is also the work-aware idle signal (issue
+	// #218): a live stream means a background job is running, so the idle reaper
+	// must not reap the sandbox even with the cap disabled.
+	if api.maxStreams > 0 && api.openStreams[sandboxID] >= api.maxStreams {
 		api.mu.Unlock()
 		return nil, false
 	}
@@ -323,6 +343,8 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	delete(api.tokens, sandboxID)
 	delete(api.lastActivity, sandboxID)
 	delete(api.streamPaths, sandboxID)
+	delete(api.deadlines, sandboxID)
+	delete(api.paused, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -409,6 +431,9 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
 	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
 	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
+	mux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
+	mux.HandleFunc("POST /v1/pause", api.handlePause)
+	mux.HandleFunc("POST /v1/resume", api.handleResume)
 
 	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
 	// body-peeking requireBearer middleware; it authenticates itself in

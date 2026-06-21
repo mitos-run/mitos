@@ -54,16 +54,26 @@ maxLifetime does not depend on a reachable forkd for the decision.
 ### idleTimeout: an inactive Ready claim is reaped
 
 A Ready claim with `spec.idleTimeout` set is reaped once it has been idle past
-the timeout, measured from the later of `StartedAt` and last activity. Activity
-comes from forkd via the `ListSandboxes` primitive, which reports each sandbox's
-last exec or file activity. A claim kept active is not reaped within the window;
-an unreachable node defers the decision (requeue) rather than reaping blindly.
-Reason on the `Terminated` condition is `IdleTimeout`.
+the timeout, measured from the later of `StartedAt` and last activity. Idle is
+WORK-AWARE (issue #218): activity comes from forkd via the `ListSandboxes`
+primitive, which reports each sandbox's last exec or file activity AND the
+work-aware signals: the count of OPEN streams (a running background job) and the
+paused flag. A sandbox with a live background process, or one that is paused, is
+NOT idle, so an unattended job is never reaped mid-run. A live `set_timeout`
+deadline takes authority over the idle clock: while it is set and in the future
+the sandbox is not idle-reaped, and a past live deadline reaps with the
+`TimeoutExpired` reason. A claim kept active is not reaped within the window; an
+unreachable node defers the decision (requeue) rather than reaping blindly.
+Reason on the `Terminated` condition is `IdleTimeout`. See `docs/lifecycle.md`
+for the full lifecycle reference (timeouts, pause/resume, expiry).
 
 - Bound: terminal within a reconcile after the idle deadline, given a reachable
   forkd.
 - Proving tests: `TestClaimIdleTimeoutReaped`,
-  `TestClaimIdleTimeoutNotReapedWhenActive`.
+  `TestClaimIdleTimeoutNotReapedWhenActive`,
+  `TestClaimIdleTimeoutNotReapedWithBackgroundJob`,
+  `TestClaimSetTimeoutExtendsLiveTTL`, and the pure decision unit tests in
+  `internal/controller/idle_decision_test.go`.
 
 ### Orphan sweep: a backing-less VM is reaped, with a live-claim-by-name net
 

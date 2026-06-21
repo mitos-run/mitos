@@ -459,6 +459,40 @@ class Sandbox:
             exec_time_ms=data.get("exec_time_ms", 0),
         )
 
+    def set_timeout(self, timeout_seconds: int) -> int:
+        """Adjust this RUNNING sandbox's TTL to now + timeout_seconds (issue
+        #218). Returns the new absolute deadline as a unix timestamp. A value
+        over the server ceiling raises TimeoutTooLargeError; the server never
+        silently clamps it (issue #216)."""
+        _validate_timeout(timeout_seconds)
+        resp = self._http.post(
+            f"{self._base_url}/set_timeout",
+            json={"sandbox": self._sandbox_ref, "timeout_seconds": timeout_seconds},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+        return int(resp.json().get("deadline_unix", 0))
+
+    def pause(self) -> None:
+        """Pause this sandbox: snapshot full state (memory + filesystem) and
+        stop the clock (issue #218). A paused sandbox is never idle-reaped."""
+        resp = self._http.post(
+            f"{self._base_url}/pause",
+            json={"sandbox": self._sandbox_ref},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+
+    def resume(self) -> None:
+        """Resume a paused sandbox: restore its full state and restart the
+        clock (issue #218)."""
+        resp = self._http.post(
+            f"{self._base_url}/resume",
+            json={"sandbox": self._sandbox_ref},
+            headers=self._auth_headers(),
+        )
+        raise_for_status(resp, token=self._token)
+
     def run_code(
         self,
         code: str,
