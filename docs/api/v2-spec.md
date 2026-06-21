@@ -206,6 +206,8 @@ Still absent on purpose: `Delete` of *other* sandboxes, pool mutation, workspace
 
 The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** (v1's `SandboxTemplate` is inlined into the pool with an optional `templateRef` for reuse, the Deployment-embeds-PodSpec pattern; v1's `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.)
 
+The consolidation decision (four v1alpha1 kinds to three v2 nouns), the coordination with ADR 0001's deferred rename so there is exactly one breaking `mitos.run` rename before 1.0, and the migration path are recorded in docs/adr/0007-api-v2-three-noun-consolidation.md. The field-by-field v1alpha1 to v2 conversion contract is docs/api/v2-migration.md. As of this writing the four v1alpha1 kinds remain in force and unchanged; section 5 below is the target shape, not yet the served API.
+
 ### SandboxPool
 
 ```yaml
