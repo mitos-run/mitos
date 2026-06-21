@@ -68,7 +68,28 @@ go build -o /tmp/bench ./cmd/bench/
   --kernel <data-dir>/vmlinux \
   --iterations 100 --warmup 10 \
   --summary --json execrt.json
+
+# 1-to-N live fork fan-out (issue #207): fork ONE warmed base into N children
+/tmp/bench \
+  --mode fork-fanout \
+  --template <id> \
+  --data-dir <data-dir> \
+  --firecracker /usr/local/bin/firecracker \
+  --kernel <data-dir>/vmlinux \
+  --fanout-n 1,4,16,64 \
+  --summary --json fanout.json
 ```
+
+`fork-fanout` forks one base into N children at each N in `--fanout-n` (default
+`1,4,16,64`), measuring each child's fork -> first-exec on a shared wall clock. It
+reports, per N, the per-child time-to-ready distribution and the
+wall-clock-to-N-ready (the headline number for the sub-second 1-to-N COW fan-out
+claim). For a representative number the template snapshot must be a WARMED base
+(repo loaded, deps installed) so each child forks useful state; see the fan-out
+section in [`../BENCHMARKS.md`](../BENCHMARKS.md) for the prerequisites and the
+honest writeup scaffold. The result JSON carries the raw per-child samples
+alongside the summary. Aggregation is the pure, unit-tested
+`internal/benchstat.AggregateFanOut`.
 
 `--summary` prints the count/min/p50/p90/p99/max/mean table to stdout. `--json`
 writes the same distribution as machine-readable JSON (durations in
@@ -78,13 +99,14 @@ nanoseconds) so results can be archived or diffed across hardware.
 
 | flag | meaning |
 | --- | --- |
-| `--mode` | `fork-exec` or `exec-rt` |
+| `--mode` | `fork-exec`, `exec-rt`, `metering`, or `fork-fanout` |
 | `--iterations` | measured iterations (default 50) |
 | `--warmup` | warmup iterations, discarded (default 5) |
 | `--template` | template (snapshot) id under the data dir (required) |
 | `--data-dir` | data directory holding template snapshots |
 | `--firecracker` | Firecracker binary path |
 | `--kernel` | guest kernel path |
+| `--fanout-n` | `fork-fanout` mode: comma-separated fan-out widths N (default `1,4,16,64`) |
 | `--json` | optional path to write results JSON |
 | `--summary` | print the summary table to stdout |
 
@@ -131,3 +153,16 @@ reproducer fills in for their own deployment (they exit non-zero until then, so 
 run can never emit a fabricated competitor number). The honesty rule (no invented
 competitor numbers; vendor-published figures are labeled as such) is in
 `bench/competitors/README.md`.
+
+For the contested 1-to-N fan-out claim (issue #207),
+`run-fanout-comparison.sh <adapter.sh> [n1,n2,...]` measures the SAME fan-out
+shape (one warmed base into N children, reporting wall-clock-to-N-ready and the
+per-child time-to-ready distribution) on each system. `adapters/mitos-fanout.sh`
+is wired to `cmd/bench --mode fork-fanout`; `adapters/modal-fanout.sh` (Modal
+snapshot/fork, the headline competitor), `adapters/daytona-fanout.sh`, and
+`adapters/e2b-fanout.sh` (cold-start baseline) are placeholders that exit
+non-zero until filled in. Modal is not self-hostable, so a Modal number comes
+from its hosted service, not the reference node; that asymmetry is recorded with
+any Modal figure. The fan-out comparison will plainly record whether mitos fork
+beats Modal branching, and if it does not, that the wedge is self-hosting plus
+per-fork network isolation rather than raw speed; no conclusion is pre-written.
