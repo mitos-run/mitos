@@ -19,9 +19,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mitos.run/mitos/internal/benchstat"
@@ -319,29 +319,70 @@ func printMeteringSummary(report metering.Report, forks int) {
 // fault count per resume and the claim->first-exec span, and hands both arms to
 // AggregatePrefetch; the aggregation and JSON shape are testable today.
 func runPrefetch(engine *fork.Engine, cfg config) error {
-	_ = engine
-	// Drive the real capture seam. On a KVM host the engine constructed above; the
-	// missing piece is the userfaultfd fault-count source, so CaptureHotPages
-	// returns an actionable not-yet-wired error rather than a fabricated trace. We
-	// surface that directly so the mode never invents a fault count or latency.
-	// The off-vs-on aggregation that would consume the counts is the pure,
-	// unit-tested benchstat.AggregatePrefetch.
-	memPath := filepath.Join(cfg.dataDir, "templates", cfg.template, "snapshot", "mem")
-	_, err := fork.CaptureHotPages(fork.PrefetchConfig{
-		MemPath:       memPath,
-		File:          "mem",
-		PageSizeBytes: 2 << 20,
-	})
-	if err != nil {
-		return fmt.Errorf(
-			"prefetch mode (issue #167) cannot measure yet: %w; the off-vs-on aggregation (benchstat.AggregatePrefetch) and the manifest hot-page descriptor are in place, the bare-metal userfaultfd handler is the remaining work (template=%q, iterations=%d)",
-			err, cfg.template, cfg.iterations,
-		)
+	// Capture the template's hot-page working set once (off the measured path),
+	// stamping it onto the snapshot manifest, then run two arms over the real
+	// UFFD-backed restore: OFF disables preload (lazy faults), ON preloads the
+	// captured set before resume. Each arm records the per-resume page-fault count
+	// the userfaultfd handler serviced and the claim->first-exec latency; the pure,
+	// unit-tested benchstat.AggregatePrefetch turns the two arms into the headline
+	// fault reduction. No number is fabricated: the fault counts come from the real
+	// handler, and off any non-KVM host the engine failed to construct in run().
+	if _, err := engine.CaptureTemplateHotPages(cfg.template, 0); err != nil {
+		return fmt.Errorf("prefetch mode (#167): capture hot-page set for %q: %w", cfg.template, err)
 	}
-	// Unreachable until the handler is wired; kept so the aggregation type is
-	// referenced from the driver it belongs to.
-	_ = benchstat.PrefetchComparison{}
+
+	off, err := prefetchArm(engine, cfg, true)
+	if err != nil {
+		return fmt.Errorf("prefetch OFF arm: %w", err)
+	}
+	on, err := prefetchArm(engine, cfg, false)
+	if err != nil {
+		return fmt.Errorf("prefetch ON arm: %w", err)
+	}
+
+	cmp := benchstat.AggregatePrefetch(off, on)
+	if cfg.summary {
+		fmt.Print(cmp.Table())
+	}
+	if cfg.jsonPath != "" {
+		f, err := os.Create(cfg.jsonPath)
+		if err != nil {
+			return fmt.Errorf("create json output: %w", err)
+		}
+		defer f.Close()
+		if err := benchstat.WritePrefetchJSON(f, cmp); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// prefetchArm forks the template cfg.iterations times (after cfg.warmup discarded
+// warmups), execs a trivial command to mark first-exec, and records the per-resume
+// page-fault count and claim->first-exec latency. disablePrefetch selects the OFF
+// arm (lazy faults) vs the ON arm (hot-page set preloaded before resume).
+func prefetchArm(engine *fork.Engine, cfg config, disablePrefetch bool) (benchstat.PrefetchArm, error) {
+	arm := benchstat.PrefetchArm{}
+	tag := "on"
+	if disablePrefetch {
+		tag = "off"
+	}
+	for i := 0; i < cfg.warmup; i++ {
+		id := fmt.Sprintf("pf-%s-warm-%d", tag, i)
+		if _, _, err := onePrefetchForkExec(engine, cfg.template, id, disablePrefetch); err != nil {
+			return arm, fmt.Errorf("warmup %d: %w", i, err)
+		}
+	}
+	for i := 0; i < cfg.iterations; i++ {
+		id := fmt.Sprintf("pf-%s-%d", tag, i)
+		faults, elapsed, err := onePrefetchForkExec(engine, cfg.template, id, disablePrefetch)
+		if err != nil {
+			return arm, fmt.Errorf("iteration %d: %w", i, err)
+		}
+		arm.FaultCounts = append(arm.FaultCounts, faults)
+		arm.ClaimToExec = append(arm.ClaimToExec, elapsed)
+	}
+	return arm, nil
 }
 
 // runPinning measures the dynamic CPU pinning + launch RT priority win (issue
@@ -360,23 +401,93 @@ func runPrefetch(engine *fork.Engine, cfg config) error {
 // scheduler state (darwin) or when the claim-storm harness is not yet wired
 // (the bare-metal follow-up, #16). No number is fabricated.
 func runPinning(engine *fork.Engine, cfg config) error {
-	_ = engine
 	if !cpupin.NewApplier().Supported() {
 		return fmt.Errorf(
-			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM + bare metal (template=%q, iterations=%d)",
+			"pinning mode (issue #168) cannot measure on this platform: CPU pinning and RT scheduling priority are Linux-only and the applier is a no-op here; the on-vs-off aggregation (benchstat.AggregatePinning) is in place and unit-tested, the real claim-storm measurement needs Linux + KVM (template=%q, iterations=%d)",
 			cfg.template, cfg.iterations,
 		)
 	}
-	// On a supporting (Linux/KVM) host the remaining piece is the claim-storm
-	// driver that forks under contention with pinning off then on, records each
-	// activation's ActivateOutcome, and hands both arms to AggregatePinning. That
-	// driver is the bare-metal follow-up (#16, tied to the chaos suite #163), so
-	// we surface a clear not-yet-wired signal rather than inventing outcomes.
-	_ = benchstat.PinningComparison{}
-	return fmt.Errorf(
-		"pinning mode (issue #168): the claim-storm activate-success driver is the bare-metal follow-up (#16, chaos suite #163); the pin-plan logic (internal/cpupin), the Linux-gated applier, and the on-vs-off aggregation (benchstat.AggregatePinning) are in place and unit-tested (template=%q, iterations=%d)",
-		cfg.template, cfg.iterations,
-	)
+	// Real claim storm: each round forks cfg.forks sandboxes CONCURRENTLY (the
+	// contention that makes pinning matter), execs each to first-exec, and records
+	// the per-activation outcome (success + latency). The OFF arm leaves forks
+	// unpinned; the ON arm pins each fork's vCPU threads after guest-ready
+	// (sibling-paired). benchstat.AggregatePinning turns the two arms into the
+	// success-rate lift and the activate-latency distributions. Outcomes come from
+	// the real engine under real contention; nothing is fabricated.
+	off, err := pinningStormArm(engine, cfg, nil)
+	if err != nil {
+		return fmt.Errorf("pinning OFF arm: %w", err)
+	}
+	on, err := pinningStormArm(engine, cfg, &cpupin.Config{Enabled: true, SiblingPairing: true})
+	if err != nil {
+		return fmt.Errorf("pinning ON arm: %w", err)
+	}
+	cmp := benchstat.AggregatePinning(off, on)
+	if cfg.summary {
+		fmt.Print(cmp.Table())
+	}
+	if cfg.jsonPath != "" {
+		f, err := os.Create(cfg.jsonPath)
+		if err != nil {
+			return fmt.Errorf("create json output: %w", err)
+		}
+		defer f.Close()
+		if err := benchstat.WritePinningJSON(f, cmp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pinningStormArm runs cfg.iterations storm rounds; each round forks cfg.forks
+// sandboxes CONCURRENTLY (a claim storm), execs each to first-exec, and records
+// one ActivateOutcome per fork. pin nil leaves the round unpinned (OFF arm); a
+// non-nil pin enables post-ready CPU pinning (ON arm). All forks in a round are
+// torn down before the next round so contention is per-round, not cumulative.
+func pinningStormArm(engine *fork.Engine, cfg config, pin *cpupin.Config) (benchstat.PinningArm, error) {
+	arm := benchstat.PinningArm{}
+	for round := 0; round < cfg.iterations; round++ {
+		outcomes := make([]benchstat.ActivateOutcome, cfg.forks)
+		var wg sync.WaitGroup
+		for i := 0; i < cfg.forks; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				id := fmt.Sprintf("storm-r%d-%d", round, idx)
+				outcomes[idx] = oneStormActivate(engine, cfg.template, id, pin)
+			}(i)
+		}
+		wg.Wait()
+		arm.Outcomes = append(arm.Outcomes, outcomes...)
+	}
+	return arm, nil
+}
+
+// oneStormActivate forks one sandbox (optionally pinned), execs a trivial command
+// to mark first-exec, and returns the activation outcome (success + fork->exec
+// latency). Any fork/connect/exec failure is recorded as a failed activation, so
+// the storm's success RATE is meaningful under contention. The sandbox is always
+// torn down.
+func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpupin.Config) benchstat.ActivateOutcome {
+	t0 := time.Now()
+	opts := fork.ForkOpts{VCPUs: 1}
+	if pin != nil {
+		opts.CPUPinning = pin
+	}
+	res, err := engine.Fork(template, sandboxID, opts)
+	if err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	defer func() { _ = engine.Terminate(sandboxID) }()
+	client, err := connectWithRetry(res.VsockPath)
+	if err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	defer client.Close()
+	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
+		return benchstat.ActivateOutcome{OK: false}
+	}
+	return benchstat.ActivateOutcome{OK: true, Latency: time.Since(t0)}
 }
 
 // runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork
@@ -549,6 +660,37 @@ func oneForkExec(engine *fork.Engine, template, sandboxID string) (time.Duration
 	client.Close()
 	cleanup() // teardown is NOT part of elapsed
 	return elapsed, nil
+}
+
+// onePrefetchForkExec forks one sandbox (UFFD-backed; disablePrefetch selects the
+// lazy OFF arm vs the preloaded ON arm), execs a trivial command to mark
+// first-exec, and returns the userfaultfd lazy-fault count for the resume and the
+// claim->first-exec latency. The sandbox is always torn down before returning so
+// no iteration leaks a VM. The fault count is read AFTER the exec (faults accrue
+// as the guest runs) and BEFORE teardown.
+func onePrefetchForkExec(engine *fork.Engine, template, sandboxID string, disablePrefetch bool) (int, time.Duration, error) {
+	t0 := time.Now()
+	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{DisablePrefetch: disablePrefetch})
+	if err != nil {
+		return 0, 0, fmt.Errorf("fork: %w", err)
+	}
+	cleanup := func() { _ = engine.Terminate(sandboxID) }
+
+	client, err := connectWithRetry(res.VsockPath)
+	if err != nil {
+		cleanup()
+		return 0, 0, fmt.Errorf("connect: %w", err)
+	}
+	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
+		client.Close()
+		cleanup()
+		return 0, 0, fmt.Errorf("exec: %w", err)
+	}
+	elapsed := time.Since(t0)
+	faults := int(engine.FaultsServed(sandboxID))
+	client.Close()
+	cleanup()
+	return faults, elapsed, nil
 }
 
 // benchExecRT forks one sandbox, warms it, then measures M trivial exec

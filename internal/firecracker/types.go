@@ -44,6 +44,14 @@ type VMConfig struct {
 	// build time; once baked, every fork restores it without any per-fork
 	// API call. DefaultVMConfig enables it. The field carries no secrets.
 	EntropyDevice bool
+	// HugePages selects the guest-memory page granularity baked into the
+	// template snapshot (issue #167). "" is the Firecracker default (4 KiB base
+	// pages); "2M" backs guest memory with 2 MiB hugetlbfs pages so each
+	// snapshot-restore fault moves 2 MiB instead of 4 KiB. It is set at the
+	// template build (the snapshot records the backing), so every fork restores
+	// with the same page size without a per-fork API call. The field is config
+	// (no secrets), safe to log.
+	HugePages string
 }
 
 // VolumeDrive is one placeholder block device a template build attaches before
@@ -87,6 +95,12 @@ type BootSource struct {
 type MachineConfig struct {
 	VcpuCount  int `json:"vcpu_count"`
 	MemSizeMib int `json:"mem_size_mib"`
+	// HugePages selects the backing page size for guest memory (issue #167).
+	// Empty means the Firecracker default (4 KiB base pages) and is omitted from
+	// the request so the wire form is byte-identical to the pre-field behavior;
+	// "2M" backs guest memory with 2 MiB hugetlbfs pages so each snapshot-restore
+	// fault moves 2 MiB instead of 4 KiB, cutting the lazy-fault count ~512x.
+	HugePages string `json:"huge_pages,omitempty"`
 }
 
 type Drive struct {
@@ -158,7 +172,7 @@ type SnapshotCreate struct {
 
 type SnapshotLoad struct {
 	SnapshotPath        string `json:"snapshot_path"`
-	MemFilePath         string `json:"mem_file_path"`
+	MemFilePath         string `json:"mem_file_path,omitempty"`
 	EnableDiffSnapshots bool   `json:"enable_diff_snapshots"`
 	ResumeVM            bool   `json:"resume_vm"`
 	// NetworkOverrides remaps each snapshot network interface to a fresh
@@ -168,6 +182,20 @@ type SnapshotLoad struct {
 	// Omitted (nil) restores the device against its baked host_dev_name,
 	// preserving the prior behavior for snapshots taken without a NIC.
 	NetworkOverrides []NetworkOverride `json:"network_overrides,omitempty"`
+	// MemBackend selects the guest-memory restore backend (issue #167). Nil (the
+	// default) means the file-mapping backend via MemFilePath, unchanged. A "Uffd"
+	// backend points Firecracker at a userfaultfd handler socket and is REQUIRED
+	// to restore a hugetlbfs-backed snapshot and to preload a hot-page set. When
+	// set, MemFilePath is omitted (Firecracker rejects both at once).
+	MemBackend *MemBackend `json:"mem_backend,omitempty"`
+}
+
+// MemBackend is the guest-memory restore backend on PUT /snapshot/load. BackendType
+// is "File" (path is the mem file) or "Uffd" (path is a unix socket the external
+// userfaultfd handler listens on). All fields are config, safe to log.
+type MemBackend struct {
+	BackendType string `json:"backend_type"`
+	BackendPath string `json:"backend_path"`
 }
 
 // NetworkOverride remaps one snapshot network interface (identified by its

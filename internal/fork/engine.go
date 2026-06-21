@@ -145,6 +145,14 @@ type Engine struct {
 	agentBinPath string
 	busyboxPath  string
 
+	// hugePages is the guest-memory page granularity baked into every template
+	// snapshot this engine builds (issue #167). "" is the Firecracker default
+	// (4 KiB base pages); "2M" backs guest memory with 2 MiB hugetlbfs pages so
+	// each restore fault moves 2 MiB instead of 4 KiB, cutting the lazy-fault
+	// tail. It is a template-build property: the snapshot records the backing, so
+	// every fork restores with the same page size with no per-fork API call.
+	hugePages string
+
 	// Encryption at rest is opt-in. When enableEncryption is set and both crypt
 	// and keyProvider are present, each template's snapshot is built inside a
 	// per-template LUKS container (mounted at the template dir) and crypto-shred
@@ -600,6 +608,12 @@ type EngineOpts struct {
 	// leaves http.DefaultClient; PullTemplate still works against a plaintext
 	// test server, but production pulls are TLS, so the daemon always sets it.
 	PullHTTPClient *http.Client
+	// HugePages backs every template snapshot's guest memory with the given page
+	// granularity (issue #167). "" is the Firecracker default (4 KiB base pages);
+	// "2M" uses 2 MiB hugetlbfs pages, requiring the host to have a 2 MiB hugepage
+	// pool reserved (vm.nr_hugepages). The snapshot records the backing, so every
+	// fork restores with the same page size. NewEngine rejects any other value.
+	HugePages string
 }
 
 type Template struct {
@@ -633,6 +647,11 @@ type Sandbox struct {
 	// enabled and the fork requested it; the zero value (empty TapName) means
 	// no host network was set up and Terminate skips teardown.
 	netID netconf.Identity
+	// uffd is the userfaultfd memory backend serving this fork's guest memory
+	// when it was restored via UFFD (issue #167: hugepage-backed snapshots and
+	// hot-page prefetch). It runs a Serve goroutine for the life of the VM and is
+	// Closed by Terminate. Nil for file-backed restores (the default path).
+	uffd *uffdHandler
 	// hasVolumes records whether this sandbox had per-fork volume backings
 	// prepared, so Terminate cleans them up. False means Terminate skips the
 	// volume cleanup entirely (no backend call for sandboxes without volumes).
@@ -705,6 +724,14 @@ type VolumeRecord struct {
 // model); with JailerBin set every VM runs through the jailer with a
 // dedicated uid/gid from the configured range and a per-VM chroot.
 func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.JailerConfig, opts EngineOpts) (*Engine, error) {
+	// Validate config that does not need the host BEFORE the KVM check, so a
+	// misconfigured node fails fast at construction with an actionable error
+	// rather than booting an engine that refuses every template build (issue
+	// #167). HugePages "2M" additionally needs a reserved 2 MiB hugepage pool on
+	// the host; that runtime prerequisite is surfaced by `mitos doctor` (#174).
+	if err := firecracker.ValidateHugePages(opts.HugePages); err != nil {
+		return nil, err
+	}
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
 	}
@@ -797,6 +824,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		enableDNSEgres:       opts.EnableDNSEgress,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
+		hugePages:            opts.HugePages,
 		enableVolumes:        opts.EnableVolumes,
 		volBackend:           volBackend,
 		enableEncryption:     opts.EnableEncryption,
@@ -963,6 +991,9 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 		CPUModel:              e.env.CPUModel,
 		KernelVersion:         e.env.KernelVersion,
 		ConfigHash:            snapcompat.ConfigHash(cfg.VcpuCount, cfg.MemSizeMib, e.kernelPath, ""),
+		// Record the guest-memory page backing so the snapshot is self-describing:
+		// any node restoring it knows it must use the UFFD backend (issue #167).
+		HugePages: cfg.HugePages,
 	}
 }
 
@@ -1229,8 +1260,15 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// (the FC process, the per-fork network, and the per-fork volume backings) on
 	// any failure between here and commit. os.RemoveAll(sandboxDir) also removes the
 	// per-fork rootfs clone so it never outlives a failed fork.
+	// uffd is the userfaultfd backend handler when this fork restores via UFFD
+	// (issue #167); declared here so cleanupFork can tear it down on any failure
+	// after it is created.
+	var uffd *uffdHandler
 	cleanupFork := func() {
 		_ = fcClient.Kill()
+		if uffd != nil {
+			_ = uffd.Close()
+		}
 		if fnet != nil {
 			e.teardownForkNetwork(sandboxID, fnet.identity)
 		}
@@ -1250,7 +1288,29 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// this; the network analog of the relative vsock uds_path). nil overrides
 	// restores exactly as before. This mirrors the husk activate path's
 	// load-paused, rebind-rootfs, resume order.
-	if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+	// Decide the memory restore backend (issue #167). A hugetlbfs-backed snapshot
+	// can ONLY be restored through userfaultfd (Firecracker refuses to file-map
+	// one), and a captured hot-page set is preloaded through the same backend, so
+	// use UFFD when this node is configured for hugepages OR the template carries a
+	// non-empty hot-page set. Otherwise keep the file-mapping backend unchanged.
+	hot, snapHugePages := e.templateMemBacking(snapshotID)
+	useUFFD := e.hugePages != "" || snapHugePages != "" || !isEmptyHot(hot) || opts.CaptureHotPages
+	preloadSet := hot
+	// A capture fork must NOT preload: it measures the lazy faults that BECOME the
+	// hot set, so preloading would hide them (and a stale set with a mismatched
+	// page size would break the copy). The OFF benchmark arm likewise disables
+	// preload to measure the lazy baseline.
+	if opts.DisablePrefetch || opts.CaptureHotPages {
+		preloadSet = nil
+	}
+	if useUFFD {
+		h, err := e.loadSnapshotUFFD(fcClient, sandboxDir, memFile, vmStateFile, overrides, preloadSet, opts.CaptureHotPages)
+		if err != nil {
+			cleanupFork()
+			return nil, err
+		}
+		uffd = h
+	} else if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		cleanupFork()
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
@@ -1325,6 +1385,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		VsockPath:  vsockPath,
 		rootfsPath: rootfsPath,
 		volumes:    opts.Volumes,
+		uffd:       uffd,
 	}
 	var guestNet *vsock.NotifyForkedNetwork
 	if fnet != nil {
@@ -1538,6 +1599,13 @@ func (e *Engine) Terminate(sandboxID string) error {
 		// recorded pid + jailer artifacts: kill the process, return its uid, and
 		// remove its jailer workspace, mirroring firecracker.Client.Kill.
 		e.reapAdopted(sandbox)
+	}
+
+	// Close the userfaultfd backend (issue #167) AFTER the VM is killed so no
+	// further faults arrive: this ends the Serve goroutine, unmaps the mem file,
+	// and removes the per-fork socket. No-op for file-backed restores (uffd nil).
+	if sandbox.uffd != nil {
+		_ = sandbox.uffd.Close()
 	}
 
 	// Release the per-fork host network (tap + egress ruleset) and the
@@ -1907,6 +1975,10 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
 	cfg := firecracker.DefaultVMConfig()
+	// Bake the configured guest-memory page granularity into this template's
+	// snapshot (issue #167). "" leaves the Firecracker default (4 KiB); "2M"
+	// records 2 MiB hugetlbfs backing so every fork restores hugepage-backed.
+	cfg.HugePages = e.hugePages
 
 	// Compute the content-addressed build plan (issue #220). Each init command is
 	// a run step; the chained cache keys decide which steps a cached build could
@@ -2202,6 +2274,19 @@ type ForkOpts struct {
 	// VCPUs is the fork's vCPU count, used to size the pin plan (one physical core
 	// per vCPU). Zero means unknown and defaults to 1 in the pin hook.
 	VCPUs int
+
+	// DisablePrefetch skips preloading the template's captured hot-page set on a
+	// UFFD-backed restore (issue #167), so the guest faults its working set in
+	// lazily. It is the OFF arm of the prefetch benchmark; the restore still uses
+	// the UFFD backend (so faults are counted), just without the upfront preload.
+	// The default (false) preloads when a hot-page set is present.
+	DisablePrefetch bool
+
+	// CaptureHotPages restores through the UFFD backend in CAPTURE mode: the
+	// handler records every fault it services so the working set can be reduced to
+	// a hot-page set and stamped onto the manifest. Used by CaptureTemplateHotPages
+	// off the tenant claim path; the default (false) never records.
+	CaptureHotPages bool
 }
 
 type NetworkOpts struct {

@@ -47,6 +47,8 @@ func main() {
 	expectFile := flag.String("expect-file", "", "file the init command must have created in the VM")
 	expectContent := flag.String("expect-content", "", "substring the expect-file must contain")
 	expectCmd := flag.String("expect-cmd", "", "a command that must succeed in the fork, proving the image filesystem is present")
+	hugePages := flag.String("huge-pages", "", "guest-memory page granularity baked into the snapshot: \"\" (4KiB default) or \"2M\" (2MiB hugetlbfs, issue #167)")
+	templateID := flag.String("template-id", "smoke-tmpl", "template id to create (lets a 4KiB and a 2M template coexist for comparison)")
 	flag.Parse()
 
 	if *image == "" || *dataDir == "" || *kernel == "" || *agentBin == "" {
@@ -65,6 +67,8 @@ func main() {
 		expectFile:    *expectFile,
 		expectContent: *expectContent,
 		expectCmd:     *expectCmd,
+		hugePages:     *hugePages,
+		templateID:    *templateID,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "tmpl-smoke: FAIL: %v\n", err)
 		os.Exit(1)
@@ -75,6 +79,7 @@ func main() {
 type opts struct {
 	image, initCmd, dataDir, fcBin, kernel, agentBin, busyboxBin string
 	expectFile, expectContent, expectCmd                         string
+	hugePages, templateID                                        string
 }
 
 func run(o opts) error {
@@ -85,6 +90,7 @@ func run(o opts) error {
 		AllowUnverified: true,
 		AgentBinPath:    o.agentBin,
 		BusyboxPath:     o.busyboxBin,
+		HugePages:       o.hugePages,
 	})
 	if err != nil {
 		return fmt.Errorf("new engine: %w", err)
@@ -95,15 +101,18 @@ func run(o opts) error {
 		initCommands = []string{o.initCmd}
 	}
 
-	templateID := "smoke-tmpl"
-	fmt.Printf("tmpl-smoke: building template %q from image %q (init=%v)\n", templateID, o.image, initCommands)
+	templateID := o.templateID
+	if templateID == "" {
+		templateID = "smoke-tmpl"
+	}
+	fmt.Printf("tmpl-smoke: building template %q from image %q (init=%v, huge_pages=%q)\n", templateID, o.image, initCommands, o.hugePages)
 	buildStart := time.Now()
 	if err := engine.CreateTemplate(templateID, o.image, initCommands, nil); err != nil {
 		return fmt.Errorf("create template from image: %w", err)
 	}
 	fmt.Printf("tmpl-smoke: template built in %s\n", time.Since(buildStart).Round(time.Millisecond))
 
-	sandboxID := "smoke-fork-1"
+	sandboxID := templateID + "-fork-1"
 	fmt.Printf("tmpl-smoke: forking sandbox %q from template\n", sandboxID)
 	res, err := engine.Fork(templateID, sandboxID, fork.ForkOpts{})
 	if err != nil {

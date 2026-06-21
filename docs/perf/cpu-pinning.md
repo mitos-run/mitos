@@ -130,11 +130,40 @@ needs Linux + KVM + bare metal + a real claim storm:
   chaos suite (#163), forks under contention with pinning off then on, records
   each `ActivateOutcome`, and hands both arms to `AggregatePinning`.
 
-Targets to validate on #16 (NOT measured, motivated by the Browser Use numbers):
+Targets to validate (NOT yet met, motivated by the Browser Use numbers):
 
 - activate success rate under a claim storm: pinning ON >= pinning OFF, with the
   gap widening as storm intensity rises (their launch loss went 17% -> 0%).
 - higher and more predictable density (tighter activate-latency p99) under pack.
+
+## First measured run (2026-06-21, NOT the target node)
+
+The claim-storm driver now exists and was run on a Hetzner i7-6700 (4 physical
+cores / 8 threads, KVM, NVMe XFS-reflink), python:3.12-slim template, 4 KiB
+file-backed restore. This is a real measured datapoint, NOT the bare-metal
+reference node (#16), and the result is honest-neutral, the win is NOT reproduced
+on this hardware:
+
+| storm | arm | success-rate | activate p50 | activate p99 |
+| --- | --- | --- | --- | --- |
+| 8 concurrent x 5 | off | 100.0% | 110.98 ms | 127.99 ms |
+| 8 concurrent x 5 | on  | 100.0% | 125.28 ms | 139.60 ms |
+| 24 concurrent x 3 | off | 100.0% | 168.80 ms | 204.44 ms |
+| 24 concurrent x 3 | on  | 100.0% | 183.25 ms | 208.82 ms |
+
+Reading: at both storm intensities every activation SUCCEEDED in both arms
+(success-rate-lift 0.0%), so there is no launch loss for pinning to recover on
+this box, and pinning ON was slightly SLOWER (~14 ms p50). Why: with only 4
+physical cores the pin planner exhausts cores after 4 forks and fail-opens for
+the rest (logged "4 reserved, 0 free"), so a heavy storm is mostly unpinned
+anyway, and pinning the first few onto an oversubscribed machine adds affinity
+overhead without the headroom to help. The Browser Use 17% -> 0% launch-loss win
+is driven by the RT scheduling class during the launch burst, which is GATED to a
+nice-level bump in our applier (the true `SCHED_FIFO` switch needs `CAP_SYS_NICE`
+and a host RT budget; see threat-model). So this run is consistent with the
+design: affinity alone, on a small oversubscribed box, is neutral-to-slightly
+negative; the success-rate lift needs the RT lever and/or more cores. Recorded so
+the goalposts and the honest current state are explicit, not as a published win.
 
 ## Remaining bare-metal work
 
