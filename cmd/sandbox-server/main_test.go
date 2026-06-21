@@ -373,3 +373,44 @@ func TestToNetworkPolicyMapsAllKnobs(t *testing.T) {
 		t.Errorf("nil config must map to deny, got %q", d.Egress)
 	}
 }
+
+// TestIdempotencyReserveBlocksConcurrentCreate proves the check-and-reserve is
+// atomic: a second caller arriving with the same key while the first create is
+// still in flight is told in-flight, NOT allowed to proceed to a second create.
+// The previous lookup-then-release-then-create left a window where two concurrent
+// requests both missed and both created, defeating idempotency.
+func TestIdempotencyReserveBlocksConcurrentCreate(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+
+	id, st := s.beginIdempotent("k1", idempotencyTemplate)
+	if st != idemProceed || id != "" {
+		t.Fatalf("first caller must proceed with no prior id, got st=%v id=%q", st, id)
+	}
+	if _, st2 := s.beginIdempotent("k1", idempotencyTemplate); st2 != idemInFlight {
+		t.Fatalf("a concurrent same-key caller must see in-flight, not proceed to a second create, got %v", st2)
+	}
+
+	s.mu.Lock()
+	s.recordIdempotent("k1", idempotencyTemplate, "tmpl-1")
+	s.mu.Unlock()
+
+	id3, st3 := s.beginIdempotent("k1", idempotencyTemplate)
+	if st3 != idemReplay || id3 != "tmpl-1" {
+		t.Fatalf("after completion a repeat must replay tmpl-1, got st=%v id=%q", st3, id3)
+	}
+}
+
+// TestIdempotencyReleaseAllowsRetryAfterFailure proves a failed create does not
+// consume the key: after releaseIdempotent a retry proceeds rather than being
+// stuck reporting in-flight forever.
+func TestIdempotencyReleaseAllowsRetryAfterFailure(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+
+	if _, st := s.beginIdempotent("k1", idempotencyFork); st != idemProceed {
+		t.Fatalf("first caller must proceed")
+	}
+	s.releaseIdempotent("k1")
+	if _, st := s.beginIdempotent("k1", idempotencyFork); st != idemProceed {
+		t.Fatalf("after release a retry must proceed, not stay in-flight, got %v", st)
+	}
+}
