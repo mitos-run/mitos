@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1alpha1 "mitos.run/mitos/api/v1alpha1"
@@ -474,11 +475,13 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// transient placement precondition the pool reconciler is expected to
 		// resolve. Pend and retry indefinitely (no bounded fail).
 		logger.Info("no node available for placement, pending", "error", err.Error())
+		beforeStatus := claim.Status.DeepCopy()
 		r.clearPendingSince(&claim)
 		claim.Status.Phase = v1alpha1.SandboxPending
 		recordClaimPending()
-		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		// Best-effort status write, elided on a no-op re-pend; the return below
+		// already requeues or surfaces the error.
+		_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
@@ -555,9 +558,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// that node yet; transient while the pool reconciler catches up.
 		if isNotFound(err) {
 			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
+			beforeStatus := claim.Status.DeepCopy()
 			claim.Status.Phase = v1alpha1.SandboxPending
-			// Best-effort status write; the return below already requeues or surfaces the error.
-			_ = r.Status().Update(ctx, &claim)
+			// Best-effort status write, elided on a no-op re-pend; the return below
+			// already requeues or surfaces the error.
+			_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		// The node rejected the fork on its sandbox-count cap (ResourceExhausted,
@@ -752,6 +757,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+			beforeStatus := claim.Status.DeepCopy()
 			claim.Status.Phase = v1alpha1.SandboxPending
 			setCondition(&claim.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
@@ -760,7 +766,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 				Reason:             "HuskPodRaced",
 				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
 			})
-			_ = r.Status().Update(ctx, claim)
+			_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
 		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
@@ -819,6 +825,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		if uerr := r.unmarkHuskPodClaimed(ctx, pod); uerr != nil {
 			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
 		}
+		beforeStatus := claim.Status.DeepCopy()
 		claim.Status.Phase = v1alpha1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
@@ -827,7 +834,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 			Reason:             "ActivateFailed",
 			Message:            msg + "; the claim will retry",
 		})
-		_ = r.Status().Update(ctx, claim)
+		_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 
@@ -921,6 +928,32 @@ func huskEgressConfig(template *v1alpha1.SandboxTemplate) (egress string, allow 
 	return string(e), template.Spec.Network.Allow
 }
 
+// writeClaimStatusIfChanged writes the claim status only when it differs from
+// the before snapshot, eliding the redundant status write a steady-state pend
+// requeue would otherwise issue every pass. The claim reconciler re-reconciles a
+// stuck claim every 1-5s (no node, snapshot-not-yet, NoCapacity, husk-raced,
+// activate-failed), and each of those paths re-asserts an identical Phase=Pending
+// plus condition. setCondition carries an unchanged condition's
+// LastTransitionTime forward, so on a true no-op the status deep-compares equal
+// and the write (and the etcd churn and the object's own watch re-trigger) is
+// skipped. This is the claim-side counterpart to writePoolStatusIfChanged
+// (issue #163, status-update rate-limiting under churn).
+//
+// Unlike the pool status there is no per-reconcile heartbeat field to exclude:
+// the only claim status timestamps (StartedAt, FinishedAt) are stamped once on a
+// genuine transition, never per pass, so a plain deep-compare is correct.
+// apiequality.Semantic compares metav1.Time by value (handling the
+// monotonic-clock and location pitfalls of a raw DeepEqual). It is used only on
+// the best-effort pend re-assert paths; a genuine transition (Ready, a terminal
+// Failed/Terminated) flips Phase and so always compares unequal and always
+// writes.
+func (r *SandboxClaimReconciler) writeClaimStatusIfChanged(ctx context.Context, claim *v1alpha1.SandboxClaim, before *v1alpha1.SandboxClaimStatus) error {
+	if apiequality.Semantic.DeepEqual(before, &claim.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, claim)
+}
+
 // reconcileNoCapacity handles a placement that no node admits under the
 // overcommit policy. It pends the claim with an LLM-legible NoCapacity
 // condition and backs off, stamping the first-pending instant. Once the claim
@@ -980,6 +1013,7 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 	}
 
 	// Within the bounded wait: pend with backpressure and retry.
+	beforeStatus := claim.Status.DeepCopy()
 	claim.Status.Phase = v1alpha1.SandboxPending
 	recordClaimPending()
 	setCondition(&claim.Status.Conditions, metav1.Condition{
@@ -992,8 +1026,11 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 			causeClause, waited.Round(time.Second), maxWait, remediation,
 		),
 	})
-	// Best-effort status write; the return below requeues regardless.
-	_ = r.Status().Update(ctx, claim)
+	// Best-effort status write, elided on a no-op re-pend; the return below
+	// requeues regardless. The waited-duration text in the message is rounded to
+	// the second, so a re-pend within the same second compares equal and is
+	// skipped, while a real progression of the wait writes.
+	_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 }
 
