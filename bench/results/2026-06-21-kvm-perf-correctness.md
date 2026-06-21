@@ -79,14 +79,19 @@ needs the RT class and/or more cores.
 - All non-KVM `internal/fork` tests PASS (per-fork rootfs CoW isolation, volume
   reflink/share, network prepare/teardown, crash reconcile/adopt/reap, CAS
   pull/verify integrity gates).
-- ONE genuine, reproducible FAILURE: `TestEnginePauseResumePreservesStateKVM`
-  hangs on a BACKGROUNDED exec (`sh -c 'sleep 600 & echo $! > /sleeper.pid'`).
-  The agent's exec waits on the stdout fd, which the backgrounded `sleep` holds
-  open, so the host vsock recv times out (~66 s). The preceding non-backgrounded
-  exec succeeds. This is a pre-existing guest-agent exec-semantics gap (handling
-  of commands that background a child holding the output fd), independent of the
-  #167/#168 work and not on the UFFD path. It must be resolved (or the test/agent
-  exec contract reconciled) before the fork-correctness gate is green on KVM.
+- ONE test FAILED IN THIS ENVIRONMENT ONLY: `TestEnginePauseResumePreservesStateKVM`
+  hangs on a BACKGROUNDED exec (`sh -c 'sleep 600 & echo $! > /sleeper.pid'`); the
+  agent's exec waits on the stdout fd, which the backgrounded `sleep` holds open,
+  so the host vsock recv times out (~66 s). IMPORTANT: this test EXISTS on main and
+  main's `firecracker-test` CI is GREEN, so it PASSES on the CI runner (standard
+  ubuntu kernel, the CI's template image). The failure here is environment-specific
+  to this box: the Hetzner rescue kernel (custom 6.12.67) and the `busybox:stable`
+  image's `sh` (busybox `sh` handles the backgrounded-child stdout fd differently
+  than the CI image's shell). So this is NOT a confirmed product regression, it is
+  a note that backgrounded-exec-over-vsock is sensitive to the guest shell/kernel
+  and worth hardening (close/don't-wait-on inherited fds for backgrounded children),
+  not a gate this PR introduces. It is unrelated to the #167/#168 work and not on
+  the UFFD path.
 
 ## #167 hugepage + prefetch (NOT measured here; blocked on kernel)
 
