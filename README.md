@@ -181,9 +181,10 @@ Drop a mitos sandbox into the agent framework you already use; each adapter is a
 |---|---|---|
 | LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | [#203](https://github.com/mitos-run/mitos/issues/203) |
 | OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | [#204](https://github.com/mitos-run/mitos/issues/204) |
+| VibeKit / ZenML | `from mitos.integrations.vibekit import MitosVibeKitProvider` | [#205](https://github.com/mitos-run/mitos/issues/205) |
 | E2B (self-hosting migration) | `from mitos.e2b import Sandbox` | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 
-The E2B shim is a "change one import" migration bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface (`commands.run`, `files.*`, `run_code`, `set_timeout`, `kill`, `create` / `connect` / `list`) over the standalone sandbox-server. One method, `get_host`, depends on preview URLs ([#126](https://github.com/mitos-run/mitos/issues/126)) and is not built yet, so it raises a typed error instead of fabricating a URL. See the full support table in [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md).
+The E2B shim is a "change one import" migration bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface (`commands.run`, `files.*`, `run_code`, `set_timeout`, `kill`, `create` / `connect` / `list`, `get_host`) over the standalone sandbox-server. `get_host(port)` returns a signed, expiring preview URL served by the per-sandbox preview proxy ([#126](https://github.com/mitos-run/mitos/issues/126)); the URL resolves once that proxy is deployed (it is not part of the default install yet). See the full support table in [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md).
 
 ### On a cluster
 

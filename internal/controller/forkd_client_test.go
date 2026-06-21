@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -14,6 +15,7 @@ import (
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/volume"
+	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
 // startFakeForkd runs a real forkd gRPC server with a MockEngine on 127.0.0.1:0
@@ -40,6 +42,99 @@ func startFakeForkd(t *testing.T, templates ...string) (string, *fork.MockEngine
 	return lis.Addr().String(), engine
 }
 
+// startForkRequestRecordingForkd runs a fake forkd that records the last
+// ForkRequest it received (via a unary interceptor) so a test can assert what
+// the controller put on the wire. Returns the address and a getter.
+func startForkRequestRecordingForkd(t *testing.T, templates ...string) (string, func() *forkdpb.ForkRequest) {
+	t.Helper()
+	engine := fork.NewMockEngine()
+	engine.ForkDelay = 0
+	for _, tmpl := range templates {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := daemon.NewServer(engine, daemon.NewSandboxAPI(t.TempDir()))
+
+	var mu sync.Mutex
+	var last *forkdpb.ForkRequest
+	intercept := func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if fr, ok := req.(*forkdpb.ForkRequest); ok {
+			mu.Lock()
+			last = fr
+			mu.Unlock()
+		}
+		return handler(ctx, req)
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer(grpc.UnaryInterceptor(intercept))
+	daemon.RegisterForkDaemonServer(gs, srv)
+	go gs.Serve(lis)
+	t.Cleanup(gs.Stop)
+	getter := func() *forkdpb.ForkRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	}
+	return lis.Addr().String(), getter
+}
+
+// TestForkOnNodeCarriesVitalsLabels asserts the controller threads the
+// claim/pool/workspace/namespace identity through the Fork RPC so the node can
+// label the sandbox's guest telemetry (issue #164, the label plumbing).
+func TestForkOnNodeCarriesVitalsLabels(t *testing.T) {
+	addr, lastReq := startForkRequestRecordingForkd(t, "py")
+
+	registry := NewNodeRegistry()
+	registry.Register(&NodeInfo{Name: "n1", Endpoint: addr, HTTPEndpoint: "10.0.0.1:9091", TemplateIDs: []string{"py"}})
+	node, err := registry.SelectNode("py", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	labels := &forkdpb.VitalsLabels{Claim: "claim-a", Pool: "pool-x", Workspace: "ws-1", Namespace: "team-ns"}
+	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	if _, err := r.forkOnNode(context.Background(), node, "py", "claim-a", nil, nil, nil, nil, "tok", nil, "", labels); err != nil {
+		t.Fatalf("forkOnNode: %v", err)
+	}
+
+	got := lastReq()
+	if got == nil || got.VitalsLabels == nil {
+		t.Fatalf("Fork request carried no vitals labels: %+v", got)
+	}
+	if got.VitalsLabels.Claim != "claim-a" || got.VitalsLabels.Pool != "pool-x" ||
+		got.VitalsLabels.Workspace != "ws-1" || got.VitalsLabels.Namespace != "team-ns" {
+		t.Errorf("vitals labels on the wire = %+v, want claim-a/pool-x/ws-1/team-ns", got.VitalsLabels)
+	}
+}
+
+// TestClaimVitalsLabels asserts the controller derives the Fork vitals labels
+// from the claim it is reconciling: claim name, pool, workspace (empty when the
+// claim has no workspaceRef), and namespace.
+func TestClaimVitalsLabels(t *testing.T) {
+	claim := &v1alpha1.SandboxClaim{}
+	claim.Name = "my-claim"
+	claim.Namespace = "team-ns"
+	claim.Spec.PoolRef = v1alpha1.LocalObjectReference{Name: "my-pool"}
+	claim.Spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: "my-ws"}
+
+	got := claimVitalsLabels(claim)
+	want := &forkdpb.VitalsLabels{Claim: "my-claim", Pool: "my-pool", Workspace: "my-ws", Namespace: "team-ns"}
+	if got.Claim != want.Claim || got.Pool != want.Pool || got.Workspace != want.Workspace || got.Namespace != want.Namespace {
+		t.Errorf("claimVitalsLabels = %+v, want %+v", got, want)
+	}
+
+	// A claim with no workspaceRef labels an empty workspace, never a guess.
+	claim.Spec.WorkspaceRef = nil
+	if got := claimVitalsLabels(claim); got.Workspace != "" {
+		t.Errorf("workspace = %q, want empty for a workspaceless claim", got.Workspace)
+	}
+}
+
 func TestForkOnNode(t *testing.T) {
 	addr, _ := startFakeForkd(t, "py")
 
@@ -51,7 +146,7 @@ func TestForkOnNode(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1", nil, "")
+	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1", nil, "", nil)
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -84,7 +179,7 @@ func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
 		Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
 	}
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok", nil, ""); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok", nil, "", nil); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 
@@ -119,7 +214,7 @@ func TestForkOnNodeNilNetworkPolicy(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok", nil, ""); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok", nil, "", nil); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 	if got := engine.LastForkNetwork(); got != nil {
@@ -137,7 +232,7 @@ func TestForkRunningOnNode(t *testing.T) {
 	}
 
 	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent", nil, ""); err != nil {
+	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent", nil, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +256,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb", nil, ""); err == nil {
+	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb", nil, "", nil); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
 		t.Fatalf("expected NotFound through the wrap, got: %v", err)

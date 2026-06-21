@@ -175,6 +175,26 @@ message ForkRequest {
   // select the matching KEK to unwrap. It is NOT secret and may be logged.
   // Empty when the source template is not encrypted.
   string kek_id = 9;
+  // vitals_labels is the control-plane identity (claim, pool, workspace,
+  // namespace) the controller attaches to this fork so the node can LABEL the
+  // sandbox's Layer 3 guest telemetry (issue #164): forkd records the labels
+  // per-sandbox and returns them in the /v1/vitals response that
+  // `kubectl sandbox ps --processes` consumes. The fields are Kubernetes object
+  // names, never secrets, and any may be empty when the controller does not know
+  // it (e.g. a poolless or workspaceless fork). Absent leaves the sandbox's
+  // vitals unlabeled.
+  VitalsLabels vitals_labels = 10;
+}
+
+// VitalsLabels is the per-sandbox control-plane identity the node attaches to a
+// sandbox's guest telemetry so an operator can attribute in-guest processes and
+// steal to a specific claim. Every field is a Kubernetes object name, never a
+// secret value; any field may be empty.
+message VitalsLabels {
+  string claim = 1;
+  string pool = 2;
+  string workspace = 3;
+  string namespace = 4;
 }
 
 message VolumeMount {

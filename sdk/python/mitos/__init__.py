@@ -1,3 +1,4 @@
+from mitos import guest
 from mitos.aio import AsyncAgentRun, AsyncSandbox
 from mitos.client import AgentRun
 from mitos.direct import DirectSandbox, SandboxServer, create
@@ -47,4 +48,5 @@ __all__ = [
     "FileInfo",
     "ForkPolicy",
     "Network",
+    "guest",
 ]

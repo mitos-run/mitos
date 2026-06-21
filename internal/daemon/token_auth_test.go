@@ -226,7 +226,7 @@ func TestForkRegistersTokenOnServer(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "sb-tok", nil, nil, nil, nil, "tok-fork"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-tok", nil, nil, nil, nil, "tok-fork", VitalsLabels{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -259,7 +259,7 @@ func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "sb-naked", nil, nil, nil, nil, ""); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-naked", nil, nil, nil, nil, "", VitalsLabels{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,7 +283,7 @@ func TestForkRunningRegistersToken(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "parent", nil, nil, nil, nil, "tok-parent"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "parent", nil, nil, nil, nil, "tok-parent", VitalsLabels{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := srv.ForkRunning(context.Background(), "parent", "child", false, "tok-child"); err != nil {

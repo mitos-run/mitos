@@ -7,14 +7,26 @@ docs/adr/0002-workspace-not-csi.md, docs/conditions.md.
 This is the conversion contract for the API v2 three-noun consolidation. ADR 0007
 records the DECISION; this document records the field-by-field MAPPING so the
 v1alpha1 surface MAY break but NEVER silently. Every breaking change has a row
-here. Nothing in code changes yet: the four v1alpha1 kinds
-(`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`) remain in
-force and unchanged until the migration follow-up lands the conversion webhook
-and storage migration.
+here.
+
+Implementation status: the first, additive, non-destabilizing slice has landed.
+The `v1alpha2` package (`api/v1alpha2`) now serves the consolidated `SandboxPool`
+and `Sandbox` types ALONGSIDE the unchanged four v1alpha1 kinds; a SandboxPool
+conversion webhook (v1alpha1 is the Hub / storage version) translates per the
+tables below; and an opt-in consolidated `Sandbox` reconciler maps a Sandbox onto
+the existing SandboxClaim/SandboxFork engine. The four v1alpha1 kinds
+(`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`) remain in force
+and unchanged; both surfaces serve. The breaking steps (the storage-version flip
+to v1alpha2, the removal of `SandboxTemplate`/`SandboxFork`, the cross-kind
+storage migration, and the SDK/facade cutover) are the staged continuation.
 
 The v2 (`v1alpha2`) Go types named below (`PoolTemplateSpec`, `SandboxSource`,
-`SandboxLifetime`, etc.) are TARGET shapes; they do not exist in `api/v1alpha1`
-today and are not added in this slice.
+`SandboxLifetime`, etc.) are now the shapes in `api/v1alpha2`. A few names
+shifted in implementation: the migration's `SandboxPoolSpec.template.network`
+maps from the v1alpha1 `networkPolicy` field, and the v2 pool's snapshot fan-out
+fields live under `spec.snapshots` (replicasPerNode, snapshotAfter, snapshotDelay,
+scaleDownAfterSnapshot, storage) with the warm autoscaler under `spec.warm`
+(min, max, targetPending, cooldownSeconds), exactly preserving every v1 value.
 
 ## Summary of breaking changes
 

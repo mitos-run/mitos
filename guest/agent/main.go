@@ -57,6 +57,12 @@ func main() {
 	}
 	defer listener.Close()
 
+	// Start the in-guest self-service socket (issue #22, API v2 section 2.2)
+	// alongside the vsock accept loop. It is best-effort and non-fatal: a listen
+	// failure is logged inside the helper and exec/files over vsock are
+	// unaffected.
+	startSelfServiceSocket()
+
 	fmt.Println("sandbox-agent: ready")
 
 	for {

@@ -31,6 +31,13 @@ type server struct {
 	templates   map[string]*templateInfo
 	sandboxes   map[string]*sandboxInfo
 	mockMode    bool
+	// idempotency maps an Idempotency-Key header value to the resource id a prior
+	// creating call (template create or fork) returned under that key, with the
+	// time it was recorded so an entry expires after idempotencyTTL. A repeat with
+	// the same key returns the SAME resource instead of creating a duplicate
+	// (issue #22). Agents and scripts retry aggressively and must never double
+	// create. Guarded by mu, the same lock the resource maps use.
+	idempotency map[string]idempotencyRecord
 	sandboxAPI  *daemon.SandboxAPI
 	// maxStreamsPerSandbox is the per-sandbox concurrent-stream ceiling applied
 	// to sandboxAPI at construction. Retained so the flag plumbing is observable
@@ -61,6 +68,7 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, 
 		rootfsPath:           rootfsPath,
 		templates:            make(map[string]*templateInfo),
 		sandboxes:            make(map[string]*sandboxInfo),
+		idempotency:          make(map[string]idempotencyRecord),
 		mockMode:             mockMode,
 		sandboxAPI:           daemon.NewSandboxAPI(dataDir),
 		maxStreamsPerSandbox: maxStreamsPerSandbox,
@@ -84,6 +92,63 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, 
 	// reduced. The same ceiling forkd enforces.
 	s.sandboxAPI.SetMaxExecTimeoutSeconds(maxExecTimeoutSecs)
 	return s
+}
+
+// idempotencyTTL is how long an Idempotency-Key binding is honored. A repeat
+// within the window returns the prior resource; after it the key is free to
+// bind a fresh resource. It outlives a client's retry budget without pinning
+// keys forever in an in-memory map.
+const idempotencyTTL = 24 * time.Hour
+
+// idempotencyKind discriminates the two creating endpoints so a key reused
+// across different endpoints cannot cross the streams (a template key never
+// resolves a fork and vice versa).
+type idempotencyKind string
+
+const (
+	idempotencyTemplate idempotencyKind = "template"
+	idempotencyFork     idempotencyKind = "fork"
+)
+
+// idempotencyRecord remembers the resource id a creating call returned under an
+// Idempotency-Key, with the recording time so the entry expires after
+// idempotencyTTL. It holds an id only, never any secret value.
+type idempotencyRecord struct {
+	kind       idempotencyKind
+	resourceID string
+	at         time.Time
+}
+
+// idempotencyHeader is the request header a creating call may carry so a retry
+// returns the same resource. It mirrors the Stripe / RFC draft convention.
+const idempotencyHeader = "Idempotency-Key"
+
+// lookupIdempotent returns the resource id a prior creating call recorded under
+// key for kind, when the binding is present and unexpired. An empty key (no
+// header) never matches. Must be called with s.mu held.
+func (s *server) lookupIdempotent(key string, kind idempotencyKind) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	rec, ok := s.idempotency[key]
+	if !ok || rec.kind != kind {
+		return "", false
+	}
+	if time.Since(rec.at) > idempotencyTTL {
+		delete(s.idempotency, key)
+		return "", false
+	}
+	return rec.resourceID, true
+}
+
+// recordIdempotent binds key to resourceID for kind so a later repeat returns
+// the same resource. An empty key is a no-op (the call was not idempotency
+// scoped). Must be called with s.mu held.
+func (s *server) recordIdempotent(key string, kind idempotencyKind, resourceID string) {
+	if key == "" {
+		return
+	}
+	s.idempotency[key] = idempotencyRecord{kind: kind, resourceID: resourceID, at: time.Now()}
 }
 
 type templateInfo struct {
@@ -269,6 +334,23 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		req.InitWaitSecs = 5
 	}
 
+	// Idempotency (issue #22): a repeat with the same Idempotency-Key returns the
+	// template the first call created, never a duplicate. Resolve the binding
+	// before doing any creating work; a client retrying after a timeout must not
+	// drive a second create.
+	idemKey := r.Header.Get(idempotencyHeader)
+	s.mu.RLock()
+	existingID, hit := s.lookupIdempotent(idemKey, idempotencyTemplate)
+	var existing *templateInfo
+	if hit {
+		existing = s.templates[existingID]
+	}
+	s.mu.RUnlock()
+	if hit && existing != nil {
+		resp(w, existing)
+		return
+	}
+
 	// Resolve and validate the network posture (issue #219). A nil network means
 	// the secure default: deny-by-default egress and inbound. A malformed CIDR is
 	// rejected here (fail-closed) so a sandbox never comes up with a partially
@@ -299,6 +381,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.templates[req.ID] = info
+	s.recordIdempotent(idemKey, idempotencyTemplate, req.ID)
 	s.mu.Unlock()
 
 	log.Printf("template %q created in %.0fms", req.ID, info.TimeMs)
@@ -385,9 +468,22 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Idempotency (issue #22): a repeat fork with the same Idempotency-Key
+	// returns the sandbox the first call forked, never a duplicate. Resolved
+	// before any forking work so a retry never drives a second restore.
+	idemKey := r.Header.Get(idempotencyHeader)
 	s.mu.RLock()
 	tmpl, ok := s.templates[req.Template]
+	existingID, hit := s.lookupIdempotent(idemKey, idempotencyFork)
+	var existing *sandboxInfo
+	if hit {
+		existing = s.sandboxes[existingID]
+	}
 	s.mu.RUnlock()
+	if hit && existing != nil {
+		resp(w, existing)
+		return
+	}
 	if !ok {
 		errResp(w, fmt.Sprintf("template %q not found", req.Template), 404)
 		return
@@ -436,6 +532,7 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.sandboxes[req.ID] = info
+	s.recordIdempotent(idemKey, idempotencyFork, req.ID)
 	s.mu.Unlock()
 
 	log.Printf("fork %q from %q in %.2fms", req.ID, req.Template, info.ForkTimeMs)

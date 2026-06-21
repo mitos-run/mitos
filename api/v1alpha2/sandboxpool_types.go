@@ -1,0 +1,255 @@
+package v1alpha2
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+)
+
+// SandboxPool is the v1alpha2 (consolidated) pool kind. It inlines the former
+// SandboxTemplate into spec.template (ADR 0007); spec.templateRef survives as
+// the optional reuse alternative (the Deployment-embeds-PodSpec pattern). A pool
+// sets EXACTLY ONE of spec.template or spec.templateRef.
+//
+// v1alpha2 SandboxPool is DEFINED BUT NOT SERVED in the deployed CRD: the Go
+// types and the conversion code stay for the staged migration, but the deployed
+// sandboxpools.mitos.run CRD serves only v1alpha1 (the storage version) until
+// the conversion webhook ships by default. Serving v1alpha2 with conversion
+// strategy None would let the API server prune v1alpha1-only fields against the
+// v1alpha2 schema. The +kubebuilder:unservedversion marker keeps this version
+// out of the served set.
+//
+// +kubebuilder:object:root=true
+// +kubebuilder:unservedversion
+// +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.warm.min,statuspath=.status.readySnapshots
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readySnapshots`
+// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.template.image`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+type SandboxPool struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec is the desired pool configuration: the template (inline or by
+	// reference), the snapshot fan-out, the warm-pod autoscaler, and placement.
+	Spec SandboxPoolSpec `json:"spec"`
+
+	// Status reports snapshot and warm-pool readiness. It is unchanged from
+	// v1alpha1 (the migration re-homes only spec fields).
+	Status v1alpha1.SandboxPoolStatus `json:"status,omitempty"`
+}
+
+// SandboxPoolSpec is the v1alpha2 pool spec. Exactly one of Template (inline) or
+// TemplateRef (a reference to a shared template-shaped object) is set.
+type SandboxPoolSpec struct {
+	// Template is the inline pool template carrying every field a v1alpha1
+	// SandboxTemplate carried (image, init, command, env, resources, volumes,
+	// network, encrypted). It is the common path; mutually exclusive with
+	// TemplateRef. Exactly one of Template or TemplateRef must be set.
+	// +optional
+	Template *PoolTemplateSpec `json:"template,omitempty"`
+
+	// TemplateRef references a shared template-shaped object by name, for the
+	// rarer case of several pools sharing one template definition. Mutually
+	// exclusive with Template. Exactly one of Template or TemplateRef must be set.
+	// +optional
+	TemplateRef *v1alpha1.LocalObjectReference `json:"templateRef,omitempty"`
+
+	// Snapshots configures the per-node snapshot fan-out: how many warm snapshot
+	// restores each node holds, the prefetch posture, and the refresh schedule.
+	// It folds the v1alpha1 snapshotAfter, snapshotDelay, scaleDownAfterSnapshot,
+	// and snapshotStorage fields into one block.
+	// +optional
+	Snapshots *PoolSnapshots `json:"snapshots,omitempty"`
+
+	// Warm is the husk-pod autoscaler: the floor, ceiling, and target pending
+	// headroom of DORMANT warm husk pods. It re-homes the v1alpha1
+	// replicas/autoscale fields into one block (warm.min carries the fixed
+	// replicas count for back-compat).
+	// +optional
+	Warm *PoolWarm `json:"warm,omitempty"`
+
+	// DrainPolicy governs an active sandbox when its backing husk pod is lost
+	// (drain, eviction, deletion). Kill (the default) re-pends the sandbox onto a
+	// replacement dormant slot; Checkpoint attempts a live-VM snapshot first where
+	// the VMM still runs, then re-pends. Carried unchanged from v1alpha1.
+	// +kubebuilder:validation:Enum=Kill;Checkpoint
+	// +kubebuilder:default=Kill
+	// +optional
+	DrainPolicy v1alpha1.HuskDrainPolicy `json:"drainPolicy,omitempty"`
+
+	// Placement pins this pool's husk pods (and the sandbox VMs they run) to a
+	// dedicated set of nodes for hard tenant separation (issue #172). Carried
+	// unchanged from v1alpha1.
+	// +optional
+	Placement *v1alpha1.PoolPlacement `json:"placement,omitempty"`
+
+	// CPUPinning configures dynamic post-ready CPU pinning and a launch-time
+	// scheduling-priority bump for this pool's sandbox VMs (issue #168). Carried
+	// unchanged from v1alpha1.
+	// +optional
+	CPUPinning *v1alpha1.CPUPinningSpec `json:"cpuPinning,omitempty"`
+}
+
+// PoolTemplateSpec is the inline pool template: every field of the v1alpha1
+// SandboxTemplateSpec (now built into the pool, ADR 0007) plus the new
+// DefaultBudget inherited by sandboxes from this pool.
+type PoolTemplateSpec struct {
+	// Image is the OCI base image the template snapshot is built from.
+	Image string `json:"image"`
+
+	// Init is the ordered list of build-time shell commands run inside the
+	// booting template VM. Pool-build only; never per-sandbox.
+	// +optional
+	Init []string `json:"init,omitempty"`
+
+	// BuildSteps is the ordered, declarative build recipe (issue #220), the
+	// code-first alternative to Init. Carried unchanged from v1alpha1.
+	// +optional
+	BuildSteps []v1alpha1.BuildStep `json:"buildSteps,omitempty"`
+
+	// Command overrides the container entrypoint inside the sandbox.
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// Env are environment variables baked into the template at build time.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Resources is the per-sandbox CPU and memory request (and optional GPU).
+	// +optional
+	Resources v1alpha1.SandboxResources `json:"resources,omitempty"`
+
+	// Volumes are the backing drives attached to each sandbox, with per-volume
+	// fork policies (Fresh, Share, Clone, Snapshot).
+	// +optional
+	Volumes []v1alpha1.SandboxVolume `json:"volumes,omitempty"`
+
+	// Network is the per-sandbox egress/inbound posture enforced by the per-tap
+	// nftables datapath. Mapped from the v1alpha1 networkPolicy field.
+	// +optional
+	Network *v1alpha1.NetworkPolicy `json:"network,omitempty"`
+
+	// Encrypted requests at-rest encryption of the template snapshot and every
+	// fork built from it. Carried unchanged from v1alpha1.
+	// +kubebuilder:default=false
+	// +optional
+	Encrypted bool `json:"encrypted,omitempty"`
+
+	// MinIsolationTier requires the sandbox to be scheduled only onto a node
+	// whose isolation assurance meets this floor (issue #40). Carried unchanged
+	// from v1alpha1.
+	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
+	// +optional
+	MinIsolationTier string `json:"minIsolationTier,omitempty"`
+
+	// RequireHardwareKvm is a convenience equivalent to
+	// minIsolationTier=hardware-kvm (issue #40). Carried unchanged from v1alpha1.
+	// +kubebuilder:default=false
+	// +optional
+	RequireHardwareKvm bool `json:"requireHardwareKvm,omitempty"`
+
+	// DefaultBudget is the pool's default capability budget inherited by a
+	// Sandbox created from this pool when the Sandbox sets no budget of its own
+	// (v2-spec section 3). NEW v2 surface; default empty (no budget). Runtime
+	// enforcement is issue #25.
+	// +optional
+	DefaultBudget *SandboxBudget `json:"defaultBudget,omitempty"`
+}
+
+// PoolSnapshots is the per-node snapshot fan-out configuration. It folds the
+// v1alpha1 snapshotAfter / snapshotDelay / scaleDownAfterSnapshot /
+// snapshotStorage fields into one block (the v2 presentation regrouping; the
+// conversion preserves every v1 value, see docs/api/v2-migration.md).
+type PoolSnapshots struct {
+	// ReplicasPerNode is the number of warm snapshot restores each holder node
+	// keeps. It carries the v1alpha1 spec.replicas value on conversion.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReplicasPerNode int32 `json:"replicasPerNode,omitempty"`
+
+	// Prefetch is the snapshot prefetch posture (for example "full"): how much of
+	// the snapshot is pulled onto a node before it is considered ready.
+	// +optional
+	Prefetch string `json:"prefetch,omitempty"`
+
+	// SnapshotAfter is the trigger condition before a snapshot is taken (for
+	// example Ready). Re-homed from v1alpha1 spec.snapshotAfter.
+	// +optional
+	SnapshotAfter v1alpha1.SnapshotTrigger `json:"snapshotAfter,omitempty"`
+
+	// SnapshotDelay is the delay after the trigger before the snapshot is taken,
+	// allowing init scripts to finish. Re-homed from v1alpha1 spec.snapshotDelay.
+	// +optional
+	SnapshotDelay *metav1.Duration `json:"snapshotDelay,omitempty"`
+
+	// ScaleDownAfterSnapshot scales down the source sandbox after the snapshot is
+	// taken. Re-homed from v1alpha1 spec.scaleDownAfterSnapshot.
+	// +optional
+	ScaleDownAfterSnapshot bool `json:"scaleDownAfterSnapshot,omitempty"`
+
+	// Storage is where snapshot artifacts are stored on the node. Re-homed from
+	// v1alpha1 spec.snapshotStorage.
+	// +optional
+	Storage string `json:"storage,omitempty"`
+
+	// Refresh schedules a periodic snapshot rebuild (for example a nightly cron),
+	// so a pool's snapshots track a moving base image. NEW v2 surface; empty
+	// leaves snapshots fixed until the template changes.
+	// +optional
+	Refresh *PoolSnapshotRefresh `json:"refresh,omitempty"`
+}
+
+// PoolSnapshotRefresh schedules periodic snapshot rebuilds for a pool.
+type PoolSnapshotRefresh struct {
+	// Schedule is a cron expression (for example "0 4 * * *") for the rebuild.
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+}
+
+// PoolWarm is the husk-pod autoscaler block. It re-homes the v1alpha1
+// replicas/autoscale fields: Min carries the fixed replicas floor for
+// back-compat, and the v1alpha1 autoscale.minWarm/maxWarm/targetSpare/
+// scaleDownCooldownSeconds map onto Min/Max/TargetPending and Cooldown.
+type PoolWarm struct {
+	// Min is the floor: the dormant warm husk pod count held when fully idle. It
+	// carries the v1alpha1 autoscale.minWarm (or, when no autoscale was set, the
+	// fixed spec.replicas) on conversion.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Min int32 `json:"min,omitempty"`
+
+	// Max is the ceiling: the dormant warm husk pod count never exceeds this. It
+	// carries the v1alpha1 autoscale.maxWarm on conversion. Zero means no
+	// autoscaler ceiling (the fixed-pool back-compat shape).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Max int32 `json:"max,omitempty"`
+
+	// TargetPending is the headroom of spare dormant pods kept ready on top of
+	// the in-use count, so a claim burst hits a warm pod instead of cold-starting.
+	// It carries the v1alpha1 autoscale.targetSpare on conversion.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TargetPending int32 `json:"targetPending,omitempty"`
+
+	// CooldownSeconds is the anti-thrash window after a scale-down before the pool
+	// may scale down again. It carries the v1alpha1
+	// autoscale.scaleDownCooldownSeconds on conversion.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CooldownSeconds int32 `json:"cooldownSeconds,omitempty"`
+}
+
+// SandboxPoolList is the list type for SandboxPool.
+//
+// +kubebuilder:object:root=true
+type SandboxPoolList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SandboxPool `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&SandboxPool{}, &SandboxPoolList{})
+}

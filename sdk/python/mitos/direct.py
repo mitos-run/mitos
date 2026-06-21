@@ -192,6 +192,7 @@ class DirectSandbox:
         base_url: Optional[str] = None,
         id: Optional[str] = None,
         network: Optional[Network] = None,
+        idempotency_key: Optional[str] = None,
     ) -> "DirectSandbox":
         """Flat one-liner: return a READY sandbox handle for image.
 
@@ -209,7 +210,7 @@ class DirectSandbox:
         """
         server = SandboxServer.from_auth(api_key=api_key, base_url=base_url)
         server.ensure_template(image, network=network)
-        return server.fork(image, id=id)
+        return server.fork(image, id=id, idempotency_key=idempotency_key)
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer auth for the sandbox API; empty when no key is configured.
@@ -370,13 +371,21 @@ class DirectSandbox:
             children.append(child)
         return children
 
-    def _fork_one(self, child_id: Optional[str]) -> "DirectSandbox":
+    def _fork_one(
+        self, child_id: Optional[str], idempotency_key: Optional[str] = None
+    ) -> "DirectSandbox":
         if child_id is None:
             child_id = f"sandbox-{uuid.uuid4().hex[:8]}"
+        # Auto-generate a key when the caller gave none so a transparently
+        # retried fork never double-creates a sibling (issue #22).
+        if idempotency_key is None:
+            idempotency_key = uuid.uuid4().hex
+        headers = self._auth_headers()
+        headers["Idempotency-Key"] = idempotency_key
         resp = self._http.post(
             f"{self._server_url}/v1/fork",
             json={"template": self.template, "id": child_id},
-            headers=self._auth_headers(),
+            headers=headers,
         )
         raise_for_status(resp, token=self._api_key)
         data = resp.json()
@@ -431,6 +440,19 @@ class SandboxServer:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
+    def _creating_headers(self, idempotency_key: Optional[str]) -> dict[str, str]:
+        """Auth headers plus an optional Idempotency-Key for a creating call.
+
+        A creating call (template create, fork) that carries an idempotency key
+        is safe to retry: the server returns the resource the first call created
+        instead of a duplicate (issue #22). The key VALUE is an opaque caller
+        token, never a secret, so it travels as a plain header.
+        """
+        headers = self._auth_headers()
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        return headers
+
     def health(self) -> dict:
         resp = self._http.get(f"{self.url}/v1/health", headers=self._auth_headers())
         raise_for_status(resp, token=self._api_key)
@@ -446,18 +468,22 @@ class SandboxServer:
         id: str,
         init_wait_seconds: int = 5,
         network: Optional[Network] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Create the template for id, optionally attaching a per-sandbox network
         posture (issue #219). The network applies to every sandbox forked from
         the template. Omit it for the secure default (deny-by-default both ways,
-        applied server-side)."""
+        applied server-side).
+
+        idempotency_key (issue #22): when set, a retried create with the same key
+        returns the template the first call created instead of a duplicate."""
         body: dict = {"id": id, "init_wait_seconds": init_wait_seconds}
         if network is not None:
             body["network"] = network.to_dict()
         resp = self._http.post(
             f"{self.url}/v1/templates",
             json=body,
-            headers=self._auth_headers(),
+            headers=self._creating_headers(idempotency_key),
         )
         raise_for_status(resp, token=self._api_key)
         return resp.json()
@@ -467,26 +493,42 @@ class SandboxServer:
         id: str,
         init_wait_seconds: int = 5,
         network: Optional[Network] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """get-or-create the template for id. A 409 (already exists) is treated
         as success so the flat create path is idempotent across calls. network
-        is the per-sandbox posture attached at create time (issue #219)."""
+        is the per-sandbox posture attached at create time (issue #219).
+        idempotency_key (issue #22) makes a retried create safe server-side."""
         try:
             return self.create_template(
-                id, init_wait_seconds=init_wait_seconds, network=network
+                id,
+                init_wait_seconds=init_wait_seconds,
+                network=network,
+                idempotency_key=idempotency_key,
             )
         except AgentRunError as exc:
             if exc.status == 409:
                 return {"id": id, "ready": True}
             raise
 
-    def fork(self, template: str, id: Optional[str] = None) -> DirectSandbox:
+    def fork(
+        self,
+        template: str,
+        id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> DirectSandbox:
+        """Fork template into a fresh sandbox. idempotency_key (issue #22): when
+        set, a retried fork with the same key returns the sandbox the first call
+        created instead of a duplicate; when None one is auto-generated so a
+        transparently retried fork never double-creates."""
         if id is None:
             id = f"sandbox-{uuid.uuid4().hex[:8]}"
+        if idempotency_key is None:
+            idempotency_key = uuid.uuid4().hex
         resp = self._http.post(
             f"{self.url}/v1/fork",
             json={"template": template, "id": id},
-            headers=self._auth_headers(),
+            headers=self._creating_headers(idempotency_key),
         )
         raise_for_status(resp, token=self._api_key)
         data = resp.json()
@@ -511,6 +553,7 @@ def create(
     base_url: Optional[str] = None,
     id: Optional[str] = None,
     network: Optional[Network] = None,
+    idempotency_key: Optional[str] = None,
 ) -> DirectSandbox:
     """Flat one-liner native onboarding: return a READY sandbox handle.
 
@@ -522,8 +565,18 @@ def create(
     network is the per-sandbox egress/ingress posture (issue #219); see
     ``mitos.Network``. Omitting it applies the secure deny-by-default both ways.
 
+    idempotency_key (issue #22): a creating call accepts an optional key so a
+    retried create returns the SAME sandbox instead of a duplicate. When None,
+    the fork step auto-generates one, so even a transparently retried create is
+    safe; pass your own to make a retry across processes idempotent.
+
     The k8s operator path stays available as AgentRun(...).sandbox(...).
     """
     return DirectSandbox.create(
-        image, api_key=api_key, base_url=base_url, id=id, network=network
+        image,
+        api_key=api_key,
+        base_url=base_url,
+        id=id,
+        network=network,
+        idempotency_key=idempotency_key,
     )

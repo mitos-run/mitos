@@ -24,6 +24,7 @@ rules:
       - mitos.run
     resources:
       - sandboxclaims
+      - sandboxes
       - sandboxforks
       - sandboxpools
       - workspacerevisions
@@ -51,6 +52,7 @@ rules:
       - mitos.run
     resources:
       - sandboxclaims/finalizers
+      - sandboxes/finalizers
       - sandboxforks/finalizers
     verbs:
       - update
@@ -64,6 +66,7 @@ rules:
       - mitos.run
     resources:
       - sandboxclaims/status
+      - sandboxes/status
       - sandboxforks/status
       - sandboxpools/status
       - workspacerevisions/status

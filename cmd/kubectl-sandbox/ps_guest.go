@@ -44,6 +44,7 @@ type labeledVitals struct {
 	Claim     string      `json:"claim"`
 	Pool      string      `json:"pool"`
 	Workspace string      `json:"workspace"`
+	Namespace string      `json:"namespace"`
 	Vitals    guestVitals `json:"vitals"`
 }
 
@@ -113,8 +114,8 @@ func runPsProcesses(namespace, name string) error {
 // with the claim/pool/workspace labels in a header. RSS is shown in MiB.
 func renderGuestProcesses(v labeledVitals) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CLAIM %s  POOL %s  WORKSPACE %s\n",
-		orDash(v.Claim), orDash(v.Pool), orDash(v.Workspace))
+	fmt.Fprintf(&b, "NAMESPACE %s  CLAIM %s  POOL %s  WORKSPACE %s\n",
+		orDash(v.Namespace), orDash(v.Claim), orDash(v.Pool), orDash(v.Workspace))
 	fmt.Fprintf(&b, "STEAL %.1f%%  MEM %d/%d MiB used  BALLOON %d MiB reclaimed\n\n",
 		v.Vitals.StealFraction*100,
 		v.Vitals.MemUsedKB/1024, v.Vitals.MemTotalKB/1024,

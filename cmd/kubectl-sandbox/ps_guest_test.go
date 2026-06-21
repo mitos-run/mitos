@@ -20,7 +20,7 @@ func TestFetchGuestVitals_RealProcesses(t *testing.T) {
 		sawSandbox = string(body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"claim":"claim-a","pool":"pool-x","workspace":"ws-1",
+			"claim":"claim-a","pool":"pool-x","workspace":"ws-1","namespace":"team-ns",
 			"vitals":{"steal_fraction":0.1,"mem_total_kb":2048000,"mem_used_kb":1024000,
 			"balloon_reclaimed_kb":512000,
 			"processes":[{"pid":1,"comm":"agent","state":"S","cpu_jiffies":42,"rss_kb":4096},
@@ -42,6 +42,9 @@ func TestFetchGuestVitals_RealProcesses(t *testing.T) {
 	if v.Claim != "claim-a" {
 		t.Errorf("claim = %q, want claim-a", v.Claim)
 	}
+	if v.Namespace != "team-ns" {
+		t.Errorf("namespace = %q, want team-ns", v.Namespace)
+	}
 	if len(v.Vitals.Processes) != 2 || v.Vitals.Processes[1].Comm != "python" {
 		t.Errorf("processes = %+v, want 2 incl python", v.Vitals.Processes)
 	}
@@ -60,7 +63,8 @@ func TestFetchGuestVitals_Unreachable(t *testing.T) {
 // user sees from `kubectl sandbox ps <name> --processes`.
 func TestRenderGuestProcesses(t *testing.T) {
 	v := labeledVitals{
-		Claim: "claim-a",
+		Claim:     "claim-a",
+		Namespace: "team-ns",
 		Vitals: guestVitals{
 			Processes: []guestProcess{
 				{PID: 1, Comm: "agent", State: "S", CPUJiffies: 42, RSSKB: 4096},
@@ -69,7 +73,7 @@ func TestRenderGuestProcesses(t *testing.T) {
 		},
 	}
 	out := renderGuestProcesses(v)
-	for _, want := range []string{"PID", "COMMAND", "STATE", "RSS", "agent", "python", "99"} {
+	for _, want := range []string{"NAMESPACE", "team-ns", "PID", "COMMAND", "STATE", "RSS", "agent", "python", "99"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

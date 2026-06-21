@@ -26,6 +26,7 @@ type VitalsLabels struct {
 	Claim     string `json:"claim,omitempty"`
 	Pool      string `json:"pool,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // LabeledVitals is the /v1/vitals response: the guest snapshot plus the host's

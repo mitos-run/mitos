@@ -17,6 +17,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1alpha2 "mitos.run/mitos/api/v1alpha2"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
@@ -440,6 +441,10 @@ func TestMain(m *testing.M) {
 
 	scheme = runtime.NewScheme()
 	_ = v1alpha1.AddToScheme(scheme)
+	// v1alpha2: the consolidated three-noun API (issue #23). The Sandbox
+	// reconciler maps a v1alpha2 Sandbox onto the existing SandboxClaim/SandboxFork
+	// engine; its conformance envtest needs the v2 types in the scheme.
+	_ = v1alpha2.AddToScheme(scheme)
 	// core/v1 too: the claim and fork reconcilers create token Secrets.
 	_ = clientgoscheme.AddToScheme(scheme)
 
@@ -702,6 +707,17 @@ func TestMain(m *testing.M) {
 		return false, nil
 	})
 	if err := wsReconciler.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+
+	// The consolidated v1alpha2 Sandbox reconciler (issue #23): maps a Sandbox
+	// onto an owned SandboxClaim (source.poolRef, the claim equivalent) or
+	// SandboxFork (source.fromSandbox, the fork equivalent). It is additive; the
+	// existing claim/fork reconcilers above are untouched and handle the children.
+	if err := (&controller.SandboxReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
 
