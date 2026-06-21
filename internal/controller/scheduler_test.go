@@ -433,6 +433,11 @@ func TestGPUFromNodeLabels(t *testing.T) {
 		{"true single", map[string]string{"mitos.run/gpu": "true"}, 1, ""},
 		{"count 4 with type", map[string]string{"mitos.run/gpu": "4", "mitos.run/gpu-type": "nvidia-a100"}, 4, "nvidia-a100"},
 		{"garbage falls back to one", map[string]string{"mitos.run/gpu": "yes"}, 1, ""},
+		// A value that overflows int32 must fall back to 1, never wrap to a
+		// negative or truncated count (CWE-190 guard).
+		{"overflow falls back to one", map[string]string{"mitos.run/gpu": "99999999999"}, 1, ""},
+		{"max int32 honored", map[string]string{"mitos.run/gpu": "2147483647"}, 2147483647, ""},
+		{"negative falls back to one", map[string]string{"mitos.run/gpu": "-4"}, 1, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

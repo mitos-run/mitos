@@ -138,7 +138,9 @@ func GPUFromNodeLabels(labels map[string]string) (total int32, gpuType string) {
 	case "true":
 		total = 1
 	default:
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		// ParseInt with bitSize 32 fails closed on an out-of-range value, so the
+		// int32 conversion can never overflow on a hostile or malformed label.
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil && n > 0 {
 			total = int32(n)
 		} else {
 			total = 1

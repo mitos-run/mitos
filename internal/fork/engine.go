@@ -1463,6 +1463,20 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 // already holds the filesystem, so repeated pause/resume cycles preserve both
 // memory AND filesystem. The CORRECTNESS of that preservation across N cycles
 // is the KVM acceptance bar (engine_pause_kvm_test.go); this method is the
+// safeSandboxIDComponent reports whether id is safe to use as a single path
+// component under the data dir: a non-empty name that is not "." or ".." and
+// contains no path separators, so a sandbox id can never escape the sandboxes
+// directory via traversal. filepath.IsLocal is the final guard.
+func safeSandboxIDComponent(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return false
+	}
+	return filepath.IsLocal(id)
+}
+
 // engine primitive the daemon pause endpoint drives.
 //
 // A paused VM keeps its host resources (memory file, drives, tap) reserved; it
@@ -1482,6 +1496,12 @@ func (e *Engine) Pause(sandboxID string) error {
 	}
 	if err := sandbox.fcClient.Pause(); err != nil {
 		return fmt.Errorf("pause sandbox %s: %w", sandboxID, err)
+	}
+	// Defense in depth: the sandbox id reached us from the API and is used as a
+	// path component below, so reject anything that is not a safe single segment
+	// before it can escape the data dir (a path-traversal guard).
+	if !safeSandboxIDComponent(sandboxID) {
+		return fmt.Errorf("invalid sandbox id %q", sandboxID)
 	}
 	checkpointDir := filepath.Join(e.dataDir, "sandboxes", sandboxID, "pause")
 	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
