@@ -99,6 +99,18 @@ type SandboxAPI struct {
 	// chosen to clear the exec_background one-day default. <=0 disables the
 	// ceiling (any timeout honored). Set via SetMaxExecTimeoutSeconds.
 	maxExecTimeout int
+	// forwards tracks the live host-side port forwards per sandbox id (issue
+	// #228), guarded by mu. Each forward is a host TCP listener bridged over a
+	// vsock tunnel to a guest loopback port. UnregisterSandbox closes all of a
+	// sandbox's forwards so no host listener or tunnel goroutine outlives the
+	// sandbox. Absent until the first ForwardPort.
+	forwards map[string][]*portForward
+	// maxForwards is the per-sandbox ceiling on concurrent OPEN port forwards
+	// (issue #228). Each forward holds a host TCP listener plus a tunnel goroutine
+	// per accepted connection; without a cap one sandbox could exhaust host
+	// sockets. A NEW forward over the cap is rejected. Zero or negative disables
+	// the cap. Set via SetMaxForwardsPerSandbox; defaults to defaultMaxForwards.
+	maxForwards int
 	// vitalsLabels records the claim/pool/workspace identity per sandbox id,
 	// guarded by mu. The forkd Fork path sets it so the /v1/vitals guest
 	// telemetry snapshot (Layer 3, issue #164) is labeled with the same identity
@@ -129,6 +141,8 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		paused:         make(map[string]bool),
 		maxExecTimeout: defaultMaxExecTimeoutSeconds,
 		vitalsLabels:   make(map[string]VitalsLabels),
+		forwards:       make(map[string][]*portForward),
+		maxForwards:    defaultMaxForwards,
 	}
 }
 
@@ -343,6 +357,11 @@ func (api *SandboxAPI) RegisterSandbox(sandboxID, vsockPath string) error {
 // UnregisterSandbox closes the agent connection and clears the sandbox's
 // bearer token.
 func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
+	// Close any live host-side port forwards first (issue #228): each holds a
+	// host TCP listener and tunnel goroutines that must not outlive the sandbox.
+	// CloseForwards takes mu itself, so call it before the lock below.
+	api.CloseForwards(sandboxID)
+
 	api.mu.Lock()
 	if client, ok := api.agents[sandboxID]; ok {
 		client.Close()
@@ -693,6 +712,33 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 		Env:        req.Env,
 		Timeout:    timeout,
 	}, onChunk)
+}
+
+// RunExecStream is the exported bridge the Connect Sandbox service (issue #24,
+// internal/sandboxrpc) drives so its streaming Exec reuses the SAME exec path
+// the HTTP /v1/exec/stream route uses: a dedicated vsock connection to the guest
+// agent, with each output chunk delivered incrementally through onChunk, then
+// the terminal exit code and execution time. It does not reimplement vsock; it
+// adapts runExecStream to a transport-neutral signature (string stream name,
+// plain return values) so the Connect handler need not import the vsock types.
+// onChunk's first argument is "stdout" or "stderr". A returned error is a spawn
+// or transport failure; the caller maps it to the protocol's terminal error.
+func (api *SandboxAPI) RunExecStream(ctx context.Context, sandboxID, command, workingDir string, env map[string]string, timeoutSeconds int, onChunk func(stream string, data []byte) error) (exitCode int, execTimeMs float64, err error) {
+	api.touch(sandboxID)
+	req := execRequest{
+		Sandbox:    sandboxID,
+		Command:    command,
+		WorkingDir: workingDir,
+		Env:        env,
+		Timeout:    timeoutSeconds,
+	}
+	frame, err := api.runExecStream(ctx, req, func(stream vsock.StreamName, data []byte) error {
+		return onChunk(string(stream), data)
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return frame.ExitCode, frame.ExecTimeMs, nil
 }
 
 func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) {

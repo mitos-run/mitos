@@ -641,6 +641,50 @@ spec:
                   - type
                   type: object
                 type: array
+              effectiveBudget:
+                description: |-
+                  EffectiveBudget is the controller-computed, attenuated capability budget
+                  this sandbox actually holds: the per-field minimum (intersection) of its own
+                  resolved budget and its parent's effective-remaining budget when it is a
+                  self-initiated fork (source.fromSandbox), or its resolved spec/pool budget
+                  otherwise. It is depth-aggregate: because each level intersects with its
+                  parent's remaining, a descendant can never hold a budget wider than the root
+                  has left, so the whole fork subtree is bounded by the root (issue #25, the
+                  never-widen attenuation invariant). A nil dimension means unlimited. This is
+                  STATUS only; the controller never mutates the user-owned spec.budget. NEW v2
+                  field.
+                properties:
+                  maxCheckpoints:
+                    description: MaxCheckpoints bounds the self-initiated checkpoints
+                      the sandbox may take.
+                    format: int32
+                    type: integer
+                  maxCpuSeconds:
+                    description: MaxCpuSeconds bounds the cumulative CPU seconds the
+                      sandbox may consume.
+                    format: int64
+                    type: integer
+                  maxEgressBytes:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxEgressBytes bounds the cumulative egress bytes the sandbox may send. It
+                      is a Kubernetes quantity (for example "1Gi").
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxForks:
+                    description: |-
+                      MaxForks bounds the self-initiated forks (depth-aggregate) the sandbox may
+                      create at runtime.
+                    format: int32
+                    type: integer
+                  maxLifetimeExtension:
+                    description: |-
+                      MaxLifetimeExtension bounds the total lifetime extension the sandbox may
+                      request at runtime.
+                    type: string
+                type: object
               endpoint:
                 description: Endpoint is the sandbox API address (host:port). Unchanged
                   from v1alpha1.
