@@ -16,10 +16,20 @@ prose: every failure is a structured envelope, branch on `code` and follow
 
 ## Connecting
 
-The hosted production mitos is at `https://mitos.run`. Set `MITOS_API_KEY` to a
-key from `https://mitos.run`. The Python and TypeScript SDKs and `mitos-mcp` all
-DEFAULT to the hosted endpoint, so the examples below need no base URL: a key in
-the environment is enough. To target a self-hosted cluster or a local standalone
+The hosted production mitos is at `https://mitos.run`. The simplest path is one
+login: run `mitos auth login --token <session>` once and it writes a shared
+credential file (`~/.config/mitos/credentials.json`, honoring `MITOS_CONFIG_DIR`).
+The Python and TypeScript SDKs, the `mitos` CLI, and `mitos-mcp` all pick up the
+bearer token from that file, so one login authenticates every agent-facing
+surface. The token resolution precedence is: an explicit argument (the SDK
+`api_key` / the `--token` flag), then `MITOS_API_KEY`, then the credential file,
+then none (the standalone `sandbox-server` runs tokenless). The credential
+file's token is sent as the `Authorization: Bearer` value and the hosted gateway
+decides its validity; if your deployment requires an API key minted with
+`mitos auth keys create`, set that as `MITOS_API_KEY` or pass it explicitly.
+
+All three SDK/mcp surfaces DEFAULT to the hosted endpoint, so the examples below
+need no base URL. To target a self-hosted cluster or a local standalone
 `sandbox-server`, set `MITOS_BASE_URL` (for example `http://localhost:8080`); it
 overrides the hosted default. The `mitos` CLI drives a Kubernetes cluster and
 resolves its connection from your kubeconfig.
