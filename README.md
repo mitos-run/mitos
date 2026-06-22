@@ -438,6 +438,7 @@ Per-topic docs in [`docs/`](docs/):
 | Snapshot distribution (content-addressed transfer) | [docs/snapshot-distribution.md](docs/snapshot-distribution.md) |
 | Guest networking and egress | [docs/networking.md](docs/networking.md) |
 | Encryption at rest and crypto-shredding | [docs/encryption.md](docs/encryption.md) |
+| Secrets management (multi-tenant) | [docs/secrets.md](docs/secrets.md) |
 | CoW-aware metering | [docs/metering.md](docs/metering.md) |
 | Density and scheduling | [docs/scheduling.md](docs/scheduling.md) |
 | Observability (traces, metrics, audit, plugin) | [docs/observability.md](docs/observability.md) |
