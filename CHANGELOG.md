@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0](https://github.com/mitos-run/mitos/compare/v0.10.0...v0.11.0) (2026-06-22)
+
+
+### Features
+
+* **chart:** deployable SandboxPool conversion webhook behind a gated value ([#22](https://github.com/mitos-run/mitos/issues/22)) ([#254](https://github.com/mitos-run/mitos/issues/254)) ([4f3706e](https://github.com/mitos-run/mitos/commit/4f3706e20e0d4572ab021801460bc239d0374ca6))
+* **sandbox-server:** implement real-mode fork+exec via internal/fork.Engine ([#22](https://github.com/mitos-run/mitos/issues/22)) ([#257](https://github.com/mitos-run/mitos/issues/257)) ([b7a9b85](https://github.com/mitos-run/mitos/commit/b7a9b8503561902d7f1fb3d0254c9bfd8278160a))
+
+
+### Bug Fixes
+
+* **ci:** give the sdk-conformance mock server a distinct data-dir ([#22](https://github.com/mitos-run/mitos/issues/22)) ([#260](https://github.com/mitos-run/mitos/issues/260)) ([63a91a6](https://github.com/mitos-run/mitos/commit/63a91a643e8f87d6faa3eef38a7dfa8e66f2f9e6))
+* **sdk-ts:** send Idempotency-Key on createTemplate and fork ([#22](https://github.com/mitos-run/mitos/issues/22)) ([#251](https://github.com/mitos-run/mitos/issues/251)) ([7c33381](https://github.com/mitos-run/mitos/commit/7c333812308f46019d2bddc312dc1258bc10d633))
+* **sdk:** lazy-load kubernetes so direct mode needs only httpx ([#22](https://github.com/mitos-run/mitos/issues/22)) ([#258](https://github.com/mitos-run/mitos/issues/258)) ([9efbd79](https://github.com/mitos-run/mitos/commit/9efbd798864a7bc7e9527c082e67e500ee1a4cdf))
+
 ## [0.10.0](https://github.com/mitos-run/mitos/compare/v0.9.0...v0.10.0) (2026-06-22)
 
 
