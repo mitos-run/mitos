@@ -44,6 +44,10 @@ var (
 		Name: "mitos_memory_unique_bytes",
 		Help: "Per-fork unique memory (dirty pages) summed over all sandboxes",
 	})
+	memoryUniquePerSandbox = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "mitos_sandbox_memory_unique_bytes",
+		Help: "Per-sandbox unique (CoW-private) memory in bytes, sampled over the sandbox lifetime, labeled by sandbox and template (issue #3 row 5)",
+	}, []string{"sandbox", "template"})
 	cowMemorySavings = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mitos_cow_memory_savings_bytes",
 		Help: "Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware)",
@@ -55,7 +59,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique, cowMemorySavings, meteredDisk)
+	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique, memoryUniquePerSandbox, cowMemorySavings, meteredDisk)
 }
 
 // RequestKeyStasher is the seam the gRPC handlers use to hand the controller-
@@ -589,4 +593,12 @@ func (s *Server) UpdateMetrics() {
 	memoryUnique.Set(float64(report.TotalUnique))
 	cowMemorySavings.Set(float64(report.CoWSavings))
 	meteredDisk.Set(float64(report.DiskUsedCoWAware))
+
+	// Per-sandbox lifetime unique memory (issue #3 row 5). Reset each pass so a
+	// terminated sandbox (absent from this report) drops its series rather than
+	// leaving a stale value behind; then set one labeled series per live sandbox.
+	memoryUniquePerSandbox.Reset()
+	for _, sb := range report.Sandboxes {
+		memoryUniquePerSandbox.WithLabelValues(sb.ID, sb.Template).Set(float64(sb.MemoryUnique))
+	}
 }
