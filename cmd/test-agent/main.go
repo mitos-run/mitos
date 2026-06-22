@@ -344,6 +344,15 @@ func runNotify(client *vsock.Client, generation uint64) {
 	tlsRandom := execOrDie(client, "head -c 32 /dev/random | base64 | tr -d '\\n'")
 	fmt.Printf("UUID=%s\n", strings.TrimSpace(uuid))
 	fmt.Printf("TLSRANDOM=%s\n", strings.TrimSpace(tlsRandom))
+
+	// The baked virtio-rng device (fork-correctness section 1): a continuous host
+	// entropy source in every fork. With the device present and the guest kernel's
+	// CONFIG_HW_RANDOM_VIRTIO driver bound, the kernel exposes it under
+	// /sys/class/misc/hw_random; the active source name is `virtio_rng.N`. Emitting
+	// the current source lets the KVM phase assert the device is actually present
+	// and selected in the restored guest, not merely configured in the VM JSON.
+	hwrng := execOrDie(client, "cat /sys/class/misc/hw_random/rng_current 2>/dev/null || echo none")
+	fmt.Printf("HWRNG=%s\n", strings.TrimSpace(hwrng))
 }
 
 // runRead is the read-only sampler for the husk activate-correctness phase. The
