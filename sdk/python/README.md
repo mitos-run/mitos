@@ -24,9 +24,11 @@ sb.terminate()
 ```
 
 `mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
-else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`) and returns a
-`DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`, and
-`terminate`. `Sandbox.create(...)` is an alias for the same call.
+else `MITOS_API_KEY`, else the CLI login credential file written by
+`mitos auth login`, so one login authenticates the SDK too) and base URL
+(argument, else `MITOS_BASE_URL`) and returns a `DirectSandbox` exposing `exec`,
+`run_code`, `files`, `pty`, `fork`, and `terminate`. `Sandbox.create(...)` is an
+alias for the same call.
 
 ```python
 import mitos

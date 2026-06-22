@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"mitos.run/mitos/internal/credfile"
 	"mitos.run/mitos/internal/mcp"
 )
 
@@ -30,6 +31,17 @@ func main() {
 	token := flag.String("token", defaultToken, "Bearer token; scopes what this server may do (env MITOS_API_KEY). Never logged.")
 	enableWorkspace := flag.Bool("enable-workspace-tools", false, "Advertise the workspace tools in tools/list (dispatch deferred, issue #21).")
 	flag.Parse()
+
+	// Precedence: --token (or its MITOS_API_KEY default) wins; when both are
+	// empty, fall back to the CLI login profile written by `mitos auth login`,
+	// so one login authenticates the mcp server too. A missing file is not an
+	// error: the server then runs tokenless against a standalone server. The
+	// token VALUE is never logged.
+	if *token == "" {
+		if t, err := credfile.Token(); err == nil {
+			*token = t
+		}
+	}
 
 	// Log to stderr only: stdout is the MCP JSON-RPC channel. Never log the token.
 	logger := log.New(os.Stderr, "mitos-mcp ", log.LstdFlags)

@@ -28,6 +28,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from typing import Callable, Optional
@@ -45,6 +46,51 @@ from mitos.sandbox import _parse_run_code_stream, _validate_timeout
 ENV_API_KEY = "MITOS_API_KEY"
 ENV_BASE_URL = "MITOS_BASE_URL"
 
+# Where `mitos auth login` writes its credential profile. MITOS_CONFIG_DIR
+# relocates it (used by tests and by users who move their config); otherwise it
+# lives under ~/.config/mitos/credentials.json. Kept in sync with the CLI's
+# credentialsPath() (internal/agentcli/auth.go).
+ENV_CONFIG_DIR = "MITOS_CONFIG_DIR"
+
+
+def _credentials_path() -> Optional[str]:
+    """Return the path of the CLI login profile, or None if it cannot be located.
+
+    Honors MITOS_CONFIG_DIR, else $HOME/.config/mitos/credentials.json. Returns
+    None when no home directory is resolvable rather than raising; a missing path
+    just means no credential file fallback is available.
+    """
+    config_dir = os.environ.get(ENV_CONFIG_DIR)
+    if config_dir:
+        return os.path.join(config_dir, "credentials.json")
+    home = os.path.expanduser("~")
+    if not home or home == "~":
+        return None
+    return os.path.join(home, ".config", "mitos", "credentials.json")
+
+
+def _token_from_credential_file() -> Optional[str]:
+    """Read the bearer token from the CLI login profile, or None.
+
+    A missing, unreadable, or non-JSON file (or one without a ``token``) is NOT
+    an error: it simply yields no token, so the SDK stays usable tokenless. The
+    token VALUE is never logged.
+    """
+    path = _credentials_path()
+    if not path:
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = data.get("token")
+    if isinstance(token, str) and token:
+        return token
+    return None
+
 # The hosted production control plane. When neither the base_url argument nor
 # MITOS_BASE_URL is set, the flat path targets the hosted endpoint so the
 # examples work without a base URL. Self-hosted or local standalone users opt
@@ -57,13 +103,25 @@ def _resolve_auth(
 ) -> tuple[Optional[str], str]:
     """Resolve the API key and base URL for the flat path.
 
+    Precedence for the API key: explicit ``api_key`` argument, then
+    MITOS_API_KEY, then the bearer token in the CLI login profile written by
+    ``mitos auth login`` (so one login authenticates the SDK too), then None
+    (tokenless). The credential file is read only as the last fallback and its
+    absence is never an error.
+
     Precedence for the base URL: explicit argument, then MITOS_BASE_URL, then
     the hosted production endpoint (DEFAULT_BASE_URL). The API key is optional
-    today (the standalone server is tokenless); when present it rides on the
-    Authorization header so the hosted front door (#210) can verify it later.
-    The key VALUE is never logged or placed in an error message.
+    (the standalone server is tokenless); when present it rides on the
+    Authorization header so the hosted front door (#210) can verify it. The
+    file token is sent as-is; the gateway decides its validity. The key VALUE is
+    never logged or placed in an error message.
     """
-    key = api_key if api_key is not None else os.environ.get(ENV_API_KEY)
+    if api_key is not None:
+        key: Optional[str] = api_key
+    else:
+        key = os.environ.get(ENV_API_KEY)
+        if key is None:
+            key = _token_from_credential_file()
     url = base_url if base_url is not None else os.environ.get(ENV_BASE_URL)
     if not url:
         url = DEFAULT_BASE_URL

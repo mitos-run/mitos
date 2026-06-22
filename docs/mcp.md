@@ -57,12 +57,30 @@ Flags and environment:
 | Flag | Environment | Default | Meaning |
 | --- | --- | --- | --- |
 | `--server` | `MITOS_BASE_URL` | `https://mitos.run` | Base URL of the sandbox-server; defaults to the hosted endpoint. |
-| `--token` | `MITOS_API_KEY` | empty | Bearer token sent on every backend request. |
+| `--token` | `MITOS_API_KEY` | credential file | Bearer token sent on every backend request. |
 | `--enable-workspace-tools` | | `false` | Advertise the deferred workspace tools. |
+
+### Token resolution
+
+`mitos-mcp` resolves its bearer token with the same precedence as the SDKs and
+the CLI, so one `mitos auth login` authenticates it too:
+
+1. the `--token` flag;
+2. the `MITOS_API_KEY` environment variable;
+3. the `token` field of `~/.config/mitos/credentials.json` (honoring
+   `MITOS_CONFIG_DIR`), written by `mitos auth login`;
+4. none, in which case `mitos-mcp` runs tokenless against a standalone
+   `sandbox-server`.
+
+A missing or unreadable credential file is not an error: it just means there is
+no file fallback. The file's token is sent verbatim as the bearer value and the
+hosted gateway decides its validity; if your deployment requires a scoped API
+key minted with `mitos auth keys create`, set it as `MITOS_API_KEY` or pass
+`--token`, which override the file.
 
 ### Token scoping
 
-The launch-time token is the server's only credential. Every backend request
+The resolved token is the server's only credential. Every backend request
 carries it as `Authorization: Bearer <token>`, so `mitos-mcp` can do exactly
 what that token authorizes on the sandbox-server and nothing more. Scope the
 token to scope the agent.

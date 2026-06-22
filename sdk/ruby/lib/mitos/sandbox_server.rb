@@ -36,7 +36,7 @@ module Mitos
 
     def initialize(url: nil, api_key: nil)
       @url = resolve_base_url(url)
-      @api_key = api_key.nil? ? ENV["MITOS_API_KEY"] : api_key
+      @api_key = resolve_api_key(api_key)
     end
 
     # Lists the templates known to the server.
@@ -115,6 +115,42 @@ module Mitos
       chosen = ENV["MITOS_BASE_URL"] if chosen.nil? || chosen.empty?
       chosen = DEFAULT_BASE_URL if chosen.nil? || chosen.empty?
       chosen.sub(%r{/+\z}, "")
+    end
+
+    # Resolves the bearer token: the +api_key+ argument, then ENV['MITOS_API_KEY'],
+    # then the CLI login credential (the token written by `mitos auth login` at
+    # ~/.config/mitos/credentials.json, honoring MITOS_CONFIG_DIR), then nil
+    # (tokenless, for the standalone server). The token value is never logged.
+    def resolve_api_key(api_key)
+      return api_key unless api_key.nil? || api_key.empty?
+
+      env = ENV["MITOS_API_KEY"]
+      return env unless env.nil? || env.empty?
+
+      token_from_credential_file
+    end
+
+    # Returns the "token" from the CLI credential file, or nil. A missing,
+    # unreadable, or non-JSON file is not an error.
+    def token_from_credential_file
+      path = credentials_path
+      return nil unless path && File.file?(path)
+
+      data = JSON.parse(File.read(path))
+      tok = data["token"]
+      tok.nil? || tok.empty? ? nil : tok
+    rescue StandardError
+      nil
+    end
+
+    def credentials_path
+      dir = ENV["MITOS_CONFIG_DIR"]
+      return File.join(dir, "credentials.json") unless dir.nil? || dir.empty?
+
+      home = Dir.home
+      home.nil? || home.empty? ? nil : File.join(home, ".config", "mitos", "credentials.json")
+    rescue StandardError
+      nil
     end
 
     def new_idempotency_key
