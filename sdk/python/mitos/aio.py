@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import uuid
-from typing import Awaitable, Callable, Optional, Union
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Union
 
 import httpx
-from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
-from kubernetes.client.rest import ApiException
 
+from mitos._k8s import k8s
 from mitos.client import API_GROUP, API_VERSION, default_pool_name
 from mitos.direct import _resolve_auth
 from mitos.errors import AgentRunError, ExecutionDeadlineError
@@ -20,6 +18,9 @@ from mitos.sandbox import (
     _validate_timeout,
 )
 from mitos.types import Execution, ExecResult, FileInfo, Network, Result, SandboxPhase
+
+if TYPE_CHECKING:
+    from kubernetes import client as k8s_client
 
 POLL_INTERVAL = 0.05
 
@@ -317,7 +318,7 @@ class AsyncSandbox:
             secret = self._core_api.read_namespaced_secret(
                 name=f"{self.name}-sandbox-token", namespace=self.namespace
             )
-        except ApiException:
+        except k8s().ApiException:
             return
         token_b64 = (secret.data or {}).get("token")
         if token_b64:
@@ -396,12 +397,13 @@ class AsyncAgentRun:
         in_cluster: bool = False,
         allow_default_pool: bool = True,
     ):
+        _k8s = k8s()
         if in_cluster:
-            k8s_config.load_incluster_config()
+            _k8s.config.load_incluster_config()
         else:
-            k8s_config.load_kube_config(config_file=kubeconfig)
-        self._api = k8s_client.CustomObjectsApi()
-        self._core_api = k8s_client.CoreV1Api()
+            _k8s.config.load_kube_config(config_file=kubeconfig)
+        self._api = _k8s.client.CustomObjectsApi()
+        self._core_api = _k8s.client.CoreV1Api()
         self._namespace = namespace
         self._allow_default_pool = allow_default_pool
 
@@ -475,7 +477,7 @@ class AsyncAgentRun:
                 plural="sandboxpools", name=name,
             )
             return name
-        except ApiException as exc:
+        except k8s().ApiException as exc:
             if exc.status != 404:
                 raise
         template = {
@@ -498,7 +500,7 @@ class AsyncAgentRun:
                 group=API_GROUP, version=API_VERSION, namespace=self._namespace,
                 plural=plural, body=body,
             )
-        except ApiException as exc:
+        except k8s().ApiException as exc:
             if exc.status != 409:
                 raise
 
