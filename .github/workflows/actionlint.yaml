@@ -31,3 +31,23 @@ jobs:
           set -euo pipefail
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -color -shellcheck=
+
+  shellcheck-install:
+    # The universal installer (install.sh) is piped to `sh`, so it must stay
+    # POSIX-clean. shellcheck gates it; a self-test exercises the OS/arch
+    # detection without any network access. Issue #253.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck install.sh
+        run: |
+          set -euo pipefail
+          shellcheck install.sh
+      - name: install.sh self-test (OS/arch detection, no download)
+        env:
+          MITOS_SELF_TEST: "1"
+        run: |
+          set -euo pipefail
+          out=$(sh install.sh)
+          echo "$out"
+          echo "$out" | grep -q '^os=.* arch=.* archive=mitos_<version>_.*\.tar\.gz$'
