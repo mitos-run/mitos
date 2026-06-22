@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/vsock"
 )
@@ -102,6 +104,65 @@ func fakeAgent(t *testing.T, sockPath string, reseeded bool) *[]*vsock.NotifyFor
 	return &notifies
 }
 
+// flakyAgent is like fakeAgent but DROPS the connection without replying on the
+// first failFirst notify_forked requests it sees (across reconnects), then
+// behaves normally (reply OK with ReseededRNG:true). It models the post-restore
+// readiness race: after a snapshot restore the guest agent resets its vsock
+// listener, so the host's first connection can be stale and NotifyForked sees
+// "connection closed". A robust fork path must reconnect and retry. No secrets
+// or entropy are ever logged.
+func flakyAgent(t *testing.T, sockPath string, failFirst int) *int32 {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lis.Close() })
+	var seen int32
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				sc.Buffer(make([]byte, 1<<20), 1<<20)
+				for sc.Scan() {
+					var req vsock.Request
+					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
+						return
+					}
+					if req.Type == vsock.TypeNotifyForked {
+						if atomic.AddInt32(&seen, 1) <= int32(failFirst) {
+							// Drop the connection without replying: the caller must
+							// reconnect and retry.
+							return
+						}
+						out, _ := json.Marshal(vsock.Response{
+							OK:           true,
+							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: true},
+						})
+						if _, err := c.Write(append(out, '\n')); err != nil {
+							return
+						}
+						continue
+					}
+					out, _ := json.Marshal(vsock.Response{OK: true})
+					if _, err := c.Write(append(out, '\n')); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return &seen
+}
+
 // realServerWithAgent builds a real-mode server whose sandboxAPI dials a fake
 // guest agent for sandboxID at the standalone server's fixed vsock path. The
 // real-mode handleFork resolves the vsock UDS under dataDir/sandboxes/<id>;
@@ -171,6 +232,43 @@ func TestRealModeForkFailsClosedWhenGuestDoesNotReseed(t *testing.T) {
 	s.mu.RUnlock()
 	if registered {
 		t.Fatal("un-reseeded fork must not be left registered")
+	}
+}
+
+// TestRealModeForkRetriesReseedOnTransientFailure proves the standalone server
+// RETRIES the reseed handshake when the guest agent drops the first connection
+// without replying. After a snapshot restore the guest resets its vsock listener,
+// so the first NotifyForked can see "connection closed"; this is a readiness
+// race, not a reseed refusal, and the fork must reconnect and retry rather than
+// fail. The agent here drops the first two notify attempts, then reseeds; the
+// fork must still succeed.
+func TestRealModeForkRetriesReseedOnTransientFailure(t *testing.T) {
+	const id = "sb-flaky"
+	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
+	_ = os.Remove(sock)
+	seen := flakyAgent(t, sock, 2) // drop the first two reseed attempts
+
+	dataDir, err := os.MkdirTemp("/tmp", "sbsrv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dataDir) })
+	s := newServer(dataDir, "", false, 16, 86400) // real mode
+	s.reseedBackoff = time.Millisecond            // keep the test fast
+	s.templates[id+"-tmpl"] = &templateInfo{ID: id + "-tmpl", Ready: true}
+
+	w := forkRequest(t, s, id, id+"-tmpl")
+	if w.Code != http.StatusOK {
+		t.Fatalf("fork must retry past a transient reseed failure; got status %d body %s", w.Code, w.Body.String())
+	}
+	if atomic.LoadInt32(seen) < 3 {
+		t.Fatalf("expected at least 3 notify attempts (2 dropped + 1 success), got %d", atomic.LoadInt32(seen))
+	}
+	s.mu.RLock()
+	_, registered := s.sandboxes[id]
+	s.mu.RUnlock()
+	if !registered {
+		t.Fatal("a fork that reseeded after retry must be registered")
 	}
 }
 
