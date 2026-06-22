@@ -55,24 +55,28 @@ key plus a base URL and you have a Ready sandbox. No Kubernetes required.
 ```python
 import mitos
 
-# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+# Set MITOS_API_KEY (a key from https://mitos.run). The base URL defaults to the
+# hosted endpoint https://mitos.run, so no base URL is needed.
 sb = mitos.create("python")                      # Ready sandbox handle
 print(sb.exec("echo hello").stdout)              # hello
 sb.terminate()
 ```
 
 `mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
-else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`), then returns
-a `DirectSandbox` that exposes `exec`, `run_code`, `files`, `pty`, `fork`, and
-`terminate` directly. The standalone `sandbox-server` runs tokenless and ignores
-the key; the hosted control plane verifies the same `Authorization: Bearer`
-header server-side ([#210](https://github.com/mitos-run/mitos/issues/210)). The
-key value is never logged. `Sandbox.create(...)` is an alias for the same call.
+else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`, else the
+hosted endpoint `https://mitos.run`), then returns a `DirectSandbox` that exposes
+`exec`, `run_code`, `files`, `pty`, `fork`, and `terminate` directly. The hosted
+control plane verifies the same `Authorization: Bearer` header server-side
+([#210](https://github.com/mitos-run/mitos/issues/210)); the standalone
+`sandbox-server` runs tokenless and ignores the key. To target a local
+standalone server or a self-hosted cluster, set `base_url` (or `MITOS_BASE_URL`),
+for example `base_url="http://localhost:8080"`. The key value is never logged.
+`Sandbox.create(...)` is an alias for the same call.
 
 ```python
 import mitos
 
-sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+sb = mitos.create("python", api_key="sk-...")
 
 # Files, stateful code, and fork all work on the flat handle.
 sb.files.write("/workspace/plan.txt", "draft")
@@ -144,7 +148,23 @@ The TypeScript SDK (`@mitos/sdk`) exposes the same one-liner `sandbox(image)`, `
 
 ### CLI
 
+Install the `mitos` CLI. The full per-OS matrix, the env vars the installer
+honors, and checksum verification are in [docs/install.md](docs/install.md).
+
+| Method | Status |
+| --- | --- |
+| `go install mitos.run/mitos/cmd/mitos@latest` | Works today (needs a Go toolchain). |
+| `curl -fsSL https://get.mitos.run \| sh` | Available from the first tagged release (downloads + verifies the release archive). |
+| Manual release binary (download, checksum, extract) | Available from the first tagged release. |
+| Homebrew (`brew install mitos-run/tap/mitos`) | Coming with releases (publishes once the tap is wired). |
+| Debian/RPM packages (`.deb`, `.rpm`) | Coming with releases (built from the first tagged release). |
+| Windows (`scoop`, `winget`) | Coming with releases. |
+
 ```bash
+# Works today with a Go toolchain:
+go install mitos.run/mitos/cmd/mitos@latest
+
+# Or build from a checkout:
 go build -o mitos ./cmd/mitos/
 
 mitos sandbox create --pool dev-default
@@ -152,7 +172,7 @@ mitos run echo hello --pool dev-default
 mitos sandbox ls
 ```
 
-`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools so any MCP-speaking agent can use them with zero SDK integration. See [docs/cli.md](docs/cli.md) and [docs/mcp.md](docs/mcp.md).
+`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools so any MCP-speaking agent can use them with zero SDK integration. A first-class Agent Skill ([`skills/mitos/SKILL.md`](skills/mitos/SKILL.md)) teaches skill-aware agents the workflow (fork vs. fresh, best-of-N, isolation, cost) to pair with those tools. See [docs/cli.md](docs/cli.md) and [docs/mcp.md](docs/mcp.md).
 
 ### Beyond exec
 
@@ -427,6 +447,7 @@ Per-topic docs in [`docs/`](docs/):
 | Threat model | [docs/threat-model.md](docs/threat-model.md) |
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
+| Agent Skill | [skills/mitos/SKILL.md](skills/mitos/SKILL.md) |
 | Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |

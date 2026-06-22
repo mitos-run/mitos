@@ -1,0 +1,117 @@
+# goreleaser configuration for the mitos CLI (cmd/mitos).
+#
+# Schema: goreleaser v2. Validate locally with `goreleaser check`.
+#
+# A tagged release (push of a v* tag) runs `goreleaser release` from
+# .github/workflows/release.yaml and produces, for cmd/mitos only:
+#   - cross-compiled binaries (linux/darwin/windows x amd64/arm64)
+#   - tar.gz archives (unix) and zip archives (windows), each bundling LICENSE
+#     and README.md
+#   - a SHA256 checksums file (consumed by install.sh for verification)
+#   - deb and rpm packages for linux amd64/arm64
+#   - a Homebrew formula pushed to the tap repo mitos-run/homebrew-tap
+#
+# MAINTAINER PREREQUISITES (see docs/install.md, MAINTAINER section):
+#   - The tap repo mitos-run/homebrew-tap must exist.
+#   - A HOMEBREW_TAP_TOKEN secret (a PAT with contents:write on that tap repo)
+#     must be set on this repo. Without it the brew publish is skipped by the
+#     release workflow so the rest of the release still succeeds.
+version: 2
+
+project_name: mitos
+
+builds:
+  - id: mitos
+    main: ./cmd/mitos
+    binary: mitos
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: mitos
+    ids:
+      - mitos
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    # Windows users get a zip; everything else gets a tar.gz. install.sh only
+    # handles unix archives (Windows is out of scope for the shell installer).
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+nfpms:
+  - id: mitos
+    package_name: mitos
+    ids:
+      - mitos
+    vendor: mitos.run
+    homepage: https://mitos.run
+    maintainer: mitos maintainers <maintainers@mitos.run>
+    description: Snapshot-fork sandboxes for AI agents on Kubernetes (CLI).
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    # nfpms inherits the build matrix; deb and rpm are produced for the linux
+    # amd64 and arm64 binaries.
+
+# Homebrew tap publish. goreleaser is phasing `brews` out in favor of
+# `homebrew_casks`, so the cask form is used here. A user installs with:
+#   brew install mitos-run/tap/mitos
+homebrew_casks:
+  - name: mitos
+    ids:
+      - mitos
+    repository:
+      owner: mitos-run
+      name: homebrew-tap
+      # The tap publish uses a dedicated token (a PAT scoped to the tap repo).
+      # The release workflow only sets this when the secret exists, so a release
+      # cut before the tap is created still succeeds (the brew step is skipped).
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://mitos.run
+    description: Snapshot-fork sandboxes for AI agents on Kubernetes (CLI).
+    # The released binaries are not notarized, so strip the macOS quarantine
+    # attribute on install; otherwise Gatekeeper blocks the first run.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mitos"]
+          end
+
+release:
+  github:
+    owner: mitos-run
+    name: mitos
+  # The CHANGELOG.md is maintained by the release-please flow; do not let
+  # goreleaser regenerate release notes from commit history.
+  draft: false
+  prerelease: auto
+
+changelog:
+  disable: true

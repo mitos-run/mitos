@@ -124,7 +124,7 @@ Agents are first-class API consumers. Three commitments follow.
 
 ### 2.2 In-guest self-service endpoint
 
-Inside every sandbox: `AGENTRUN_SOCKET=/run/mitos.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
+Inside every sandbox: `MITOS_SOCKET=/run/mitos.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
 
 ```python
 # from inside the sandbox: e.g. an agent doing best-of-N over its own state
