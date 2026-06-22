@@ -1,0 +1,108 @@
+/* Fluorescence base + primitives, adapted for instrumentation-grade app UI
+   (dense tables/forms) per .interface-design/system.md. Imports tokens + fonts
+   so a consumer needs only `@mitos/brand/base.css`.
+
+   Hard rules enforced here: near-black field (never #000); elevation by
+   lightness ladder, never drop-shadow; magenta only as emitted signal; glow is
+   additive/white-cored via mix-blend-mode: screen; text is white-at-opacity. */
+@import './tokens.css';
+@import './fonts.css';
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--field);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--step-0);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The fixed sensor field: faint reticle + grain, < a few % luminance. */
+.field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.02) 50%, transparent 51%),
+    radial-gradient(1px 1px at 70% 60%, rgba(255, 255, 255, 0.02) 50%, transparent 51%);
+}
+
+h1, h2, h3 {
+  font-weight: 400;
+  letter-spacing: var(--track-display);
+  line-height: var(--lh-tight);
+  margin: 0 0 var(--space-3);
+}
+
+code, kbd, pre, .mono { font-family: var(--mono); }
+
+/* Surfaces: elevation by the lightness ladder + a single hairline. Never a
+   hairline AND a shadow on the same element. */
+.card {
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  padding: var(--space-5);
+}
+
+/* Buttons. Primary = magenta fill with additive emission on hover; ghost =
+   hairline → magenta. Imperative labels only. */
+.btn {
+  font: inherit;
+  border-radius: var(--r-md);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  transition: box-shadow var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.btn-primary {
+  background: var(--magenta);
+  color: var(--field);
+  border: none;
+}
+.btn-primary:hover {
+  /* additive, white-cored glow via screen blend; never animate blur radius */
+  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px rgba(255, 69, 200, 0.5);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+}
+.btn-ghost:hover { border-color: var(--magenta); }
+
+/* Terminal block: dotted bar + mono body, signal-colored output. */
+.terminal {
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  overflow: hidden;
+}
+.terminal-bar {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--hairline);
+}
+.terminal-bar span { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.terminal-body { padding: var(--space-3); white-space: pre-wrap; color: var(--ink-2); }
+.t-fork { color: var(--magenta); }
+.t-ok { color: var(--green); }
+.t-dim { color: var(--ink-3); }
+
+/* Data table: rule-divided, dense, no zebra. */
+.tbl { width: 100%; border-collapse: collapse; font-size: var(--step--1); }
+.tbl th, .tbl td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--hairline); }
+.tbl th { color: var(--ink-3); font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* Status dots: color encodes a real entity (alive=green, fork=magenta). */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot-ready { background: var(--green); }
+.dot-fork { background: var(--magenta); }
+.dot-parent { background: var(--cyan); }
+.dot-warn { background: var(--amber); }

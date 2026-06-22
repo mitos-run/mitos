@@ -1,0 +1,55 @@
+/* Fluorescence design tokens — single source of truth.
+   Spec: docs/superpowers/specs/2026-06-22-fluorescence-brand-book-design.md
+   Edit tokens here ONLY. Pages/components reference var(--*), never raw hex. */
+:root {
+  /* ---- Field (canvas). Elevation = lightness ladder, never shadow. ---- */
+  --field: #04050A;            /* base void. never #000 */
+  --field-1: #0A0C12;          /* raised panel / card */
+  --field-2: #11141C;          /* raised +2: popover / inset */
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.14);
+  --mark-bg: #04050A;          /* the brand mark's ring-cut = the field */
+
+  /* ---- Ink: white at opacity, never gray hex ---- */
+  --ink: rgba(236, 240, 250, 0.94);
+  --ink-2: rgba(236, 240, 250, 0.62);
+  --ink-3: rgba(236, 240, 250, 0.40);
+
+  /* ---- Signal channels: color = meaning only ---- */
+  --magenta: #FF45C8;          /* PRIMARY signature: division / spindle / fork */
+  --cyan: #3DDCFF;             /* secondary: genome / parent / steady "alive" */
+  --green: #4DF0A0;            /* tertiary: live / ready */
+  --amber: #FFC24B;            /* tertiary: warning / winner */
+  --signal-core: #FFFFFF;      /* white-hot emission core; cyan+magenta overlap */
+
+  /* ---- Typography ---- */
+  --sans: 'Satoshi', system-ui, -apple-system, sans-serif;
+  --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* modular scale ~1.25, light display weights live in base.css */
+  --step--1: 0.8rem;
+  --step-0: 1rem;
+  --step-1: 1.25rem;
+  --step-2: 1.563rem;
+  --step-3: 1.953rem;
+  --step-4: 2.441rem;
+  --step-5: clamp(2.6rem, 5vw, 3.815rem);
+  --step-6: clamp(3.2rem, 7vw, 5.96rem);
+  --lh-tight: 1.02;
+  --lh-body: 1.5;
+  --track-display: -0.03em;
+
+  /* ---- Spacing (8px base) ---- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+  --space-9: 96px; --space-10: 128px;
+
+  /* ---- Radii: tight, deliberate ---- */
+  --r-sm: 4px; --r-md: 8px; --r-lg: 12px;
+
+  /* ---- Motion ---- */
+  --ease: cubic-bezier(.2, 1, .2, 1);
+  --dur: 240ms;
+
+  /* ---- Layout ---- */
+  --maxw: 1140px;
+}
