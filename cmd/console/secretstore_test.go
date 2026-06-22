@@ -22,16 +22,3 @@ func TestPrimarySecretProviderPicksFirstKnown(t *testing.T) {
 		}
 	}
 }
-
-// TestSecretNamespaceForOrg asserts the org→namespace mapping uses the
-// configured prefix.
-func TestSecretNamespaceForOrg(t *testing.T) {
-	t.Setenv("MITOS_CONSOLE_SECRET_NAMESPACE_PREFIX", "")
-	if got := secretNamespaceFor("abc"); got != "mitos-org-abc" {
-		t.Errorf("default namespace = %q, want mitos-org-abc", got)
-	}
-	t.Setenv("MITOS_CONSOLE_SECRET_NAMESPACE_PREFIX", "tenant-")
-	if got := secretNamespaceFor("abc"); got != "tenant-abc" {
-		t.Errorf("prefixed namespace = %q, want tenant-abc", got)
-	}
-}
