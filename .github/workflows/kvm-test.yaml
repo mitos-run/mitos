@@ -31,6 +31,14 @@ on:
       - 'internal/storecrypt/**'
       - 'internal/pki/**'
       - 'internal/daemon/**'
+      # The sdk-examples-kvm phase below executes the Python SDK direct-mode
+      # example against a real-mode sandbox-server, so changes to the server,
+      # the SDK, or the example itself must re-run this workflow (issue #11 /
+      # #22 "every README/SDK example executed in CI"). guest/** and
+      # internal/fork/** already gate this workflow above, and they also feed
+      # the example's agent + fork engine.
+      - 'cmd/sandbox-server/**'
+      - 'sdk/python/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -503,6 +511,153 @@ jobs:
           }
 
           kill $FC_PID 2>/dev/null || true
+
+      # SDK example executed end to end against a REAL KVM sandbox-server (issue
+      # #11, the #22 item "every README/SDK example executed in CI"). The
+      # Python SDK ships a direct-mode example (sdk/python/examples/direct.py)
+      # that talks to the standalone sandbox-server over plain HTTP: it creates
+      # a template, forks a sandbox, execs "echo hello from the sandbox",
+      # asserts exit 0 and the expected stdout, terminates, and prints "direct
+      # example OK". This phase RUNS that example, unmodified, against a
+      # real-mode sandbox-server so the documented one-liner is proven to work,
+      # not just to import.
+      #
+      # Real-mode sandbox-server forks real VMs through the SAME fork engine the
+      # other KVM smoke phases drive (internal/fork.Engine): CreateTemplate
+      # builds a snapshot template from the base rootfs, Fork restores it into a
+      # live microVM, exec rides vsock to the guest agent, Terminate reaps it.
+      #
+      # ROOTFS CHOICE: the engine's CreateTemplate uses a file-path --rootfs
+      # DIRECTLY as the template rootfs (it only injects --agent-bin as /init
+      # when building FROM an OCI image ref), so the rootfs passed here must
+      # already carry the guest agent as /init AND a static busybox so the
+      # example's "echo" resolves. The firecracker-test job does not keep one
+      # reusable agent+busybox rootfs at a stable path (each phase builds its
+      # own under its own workdir), so this phase builds a small dedicated
+      # rootfs the SAME proven way the "Inject agent into rootfs" phase above
+      # does, REUSING the already-built /tmp/mitos-test/agent and
+      # /tmp/mitos-test/busybox artifacts (both CI-proven to boot and exec over
+      # vsock earlier in this job). That reuse is the cheap path; only the small
+      # ext4 assembly is repeated.
+      #
+      # SDK DEPENDENCIES: the SDK lazy-loads kubernetes (#258), so direct mode
+      # needs ONLY httpx + websocket-client. "pip install ./sdk/python"
+      # therefore does NOT pull kubernetes; the example imports mitos.direct and
+      # runs with that minimal dependency set, exactly as a direct-mode user
+      # would install it.
+      #
+      # This phase GATES: the example exits non-zero (raises SystemExit) on any
+      # failure, and the step additionally asserts the output contains "direct
+      # example OK". The server is always stopped at the end, and its log is
+      # dumped on failure for debuggability.
+      - name: SDK direct-mode example executed end to end against a real KVM sandbox-server
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          sudo chmod 666 /dev/kvm
+
+          echo "=== build the standalone sandbox-server ==="
+          go build -o /tmp/sandbox-server ./cmd/sandbox-server/
+
+          echo "=== assemble an agent + static-busybox rootfs (agent as /init) ==="
+          WORKDIR=/tmp/mitos-test/sdk-example
+          ROOTFS="$WORKDIR/rootfs.ext4"
+          mkdir -p "$WORKDIR"
+          dd if=/dev/zero of="$ROOTFS" bs=1M count=256 status=none
+          mkfs.ext4 -q -F "$ROOTFS"
+          mkdir -p "$WORKDIR/mnt"
+          sudo mount -o loop "$ROOTFS" "$WORKDIR/mnt"
+          sudo mkdir -p "$WORKDIR"/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          # The guest agent built earlier in this job runs as PID 1 at /init.
+          sudo cp /tmp/mitos-test/agent "$WORKDIR/mnt/init"
+          sudo chmod +x "$WORKDIR/mnt/init"
+          # A static musl busybox so the example's "echo" (and the agent's
+          # /bin/sh -c wrapper) resolve inside the guest. Reuse the artifact the
+          # earlier phases downloaded; fall back to a fresh download if absent.
+          sudo cp /tmp/mitos-test/busybox "$WORKDIR/mnt/bin/busybox" 2>/dev/null || \
+            sudo curl -fsSL -o "$WORKDIR/mnt/bin/busybox" \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x "$WORKDIR/mnt/bin/busybox"
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox "$WORKDIR/mnt/bin/$cmd"
+          done
+          echo "sandbox" | sudo tee "$WORKDIR/mnt/etc/hostname" > /dev/null
+          sudo umount "$WORKDIR/mnt"
+          sudo chmod 666 /dev/kvm
+          ls -lh "$ROOTFS"
+
+          echo "=== start the real-mode sandbox-server in the background ==="
+          # The data dir is DISTINCT from the binary path; the engine writes its
+          # templates and per-fork state under it.
+          DATA_DIR="${RUNNER_TEMP:-/tmp}/sbx-examples-data"
+          rm -rf "$DATA_DIR"
+          SERVER_LOG=/tmp/sbx-examples.log
+          /tmp/sandbox-server \
+            --addr :8080 \
+            --kernel /tmp/mitos-test/vmlinux \
+            --rootfs "$ROOTFS" \
+            --agent-bin /tmp/mitos-test/agent \
+            --data-dir "$DATA_DIR" \
+            > "$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+
+          # Always stop the server, and dump its log if the step is failing.
+          cleanup() {
+            local rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "=== sandbox-server log (step failed, rc=$rc) ==="
+              cat "$SERVER_LOG" || true
+            fi
+            kill "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          echo "=== wait for the server to become healthy ==="
+          healthy=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then
+              healthy=1
+              echo "sandbox-server healthy after $i attempt(s)"
+              break
+            fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "FAIL: sandbox-server process exited before becoming healthy"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "FAIL: sandbox-server never became healthy on http://localhost:8080/v1/health"
+            exit 1
+          fi
+          curl -fsS http://localhost:8080/v1/health; echo
+
+          echo "=== install the SDK with ONLY its direct-mode deps (httpx + websocket-client; NOT kubernetes, lazy since #258) ==="
+          python3 -m pip install --upgrade pip
+          pip install ./sdk/python
+          # Prove the minimal dependency set: the example needs mitos.direct,
+          # and kubernetes must NOT have been pulled in (it is an optional
+          # [k8s] extra now). A present kubernetes here would mean the direct
+          # path silently regained the heavy dependency.
+          python3 -c "from mitos.direct import SandboxServer; print('mitos.direct import OK')"
+          if python3 -c "import kubernetes" 2>/dev/null; then
+            echo "FAIL: kubernetes was installed by 'pip install ./sdk/python'; direct mode must not require it (#258)"
+            exit 1
+          fi
+          echo "OK: kubernetes is absent, direct mode uses only httpx + websocket-client"
+
+          echo "=== run the SDK direct-mode example against the real KVM server ==="
+          # direct.py exits non-zero (raises SystemExit) on any failure, so this
+          # gates. Capture the output to additionally assert the success marker.
+          python3 sdk/python/examples/direct.py http://localhost:8080 | tee /tmp/sdk-example.out
+          if ! grep -q "direct example OK" /tmp/sdk-example.out; then
+            echo "FAIL: the example did not print 'direct example OK'"
+            exit 1
+          fi
+
+          echo "================================"
+          echo "  SDK direct-mode example proven end to end on a real KVM sandbox-server"
+          echo "================================"
 
       # Workspace hydrate/dehydrate data path proof (W4 slice 2). This phase
       # proves the bulk workspace tar transfer end to end on REAL VMs: it boots
