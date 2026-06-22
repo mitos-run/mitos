@@ -69,6 +69,9 @@ func main() {
 		// The active secret backend selected from config (kube / openbao), falling
 		// back to in-memory in dev. Capabilities advertise the same providers.
 		Secrets: buildSecretStore(logger, caps),
+		// The live-sandbox control: the org-scoped cluster query when in a cluster,
+		// in-memory otherwise. Shares the org→namespace boundary with secrets.
+		Sandboxes: buildSandboxControl(logger),
 		// The manage-subscription portal link (provider-neutral); nil keeps the
 		// console's no-portal default (community edition).
 		Portal: bill.portal,

@@ -1,0 +1,23 @@
+[package]
+name = "mitos"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Thin direct-mode Rust client for the mitos standalone and hosted sandbox-server REST API."
+license = "Apache-2.0"
+homepage = "https://mitos.run"
+documentation = "https://mitos.run/docs"
+repository = "https://github.com/mitos-run/mitos"
+readme = "README.md"
+keywords = ["mitos", "sandbox", "firecracker", "agents"]
+categories = ["api-bindings"]
+
+[dependencies]
+# Blocking HTTP with a small dependency tree; no async runtime is pulled in for
+# this thin client. Pinned to the 2.x line for a stable, lean transport.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Cryptographically strong bytes for the Idempotency-Key and the generated
+# "sandbox-<hex>" id. Tiny, no_std-friendly crate; avoids pulling in uuid.
+getrandom = "0.2"
