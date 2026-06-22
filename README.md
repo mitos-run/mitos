@@ -152,7 +152,7 @@ mitos run echo hello --pool dev-default
 mitos sandbox ls
 ```
 
-`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools so any MCP-speaking agent can use them with zero SDK integration. See [docs/cli.md](docs/cli.md) and [docs/mcp.md](docs/mcp.md).
+`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools so any MCP-speaking agent can use them with zero SDK integration. A first-class Agent Skill ([`skills/mitos/SKILL.md`](skills/mitos/SKILL.md)) teaches skill-aware agents the workflow (fork vs. fresh, best-of-N, isolation, cost) to pair with those tools. See [docs/cli.md](docs/cli.md) and [docs/mcp.md](docs/mcp.md).
 
 ### Beyond exec
 
@@ -427,6 +427,7 @@ Per-topic docs in [`docs/`](docs/):
 | Threat model | [docs/threat-model.md](docs/threat-model.md) |
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
+| Agent Skill | [skills/mitos/SKILL.md](skills/mitos/SKILL.md) |
 | Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |
