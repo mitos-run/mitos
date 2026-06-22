@@ -759,6 +759,15 @@ jobs:
           curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
             -H 'Content-Type: application/json' \
             -d "{\"guest_cid\": 3, \"uds_path\": \"vsock.sock\"}"
+          # Attach the virtio-rng device before boot, exactly as the engine's
+          # template build does (firecracker template.go SetEntropy -> PUT
+          # /entropy). Firecracker bakes the device into the snapshot, so every
+          # fork restores with it and the guest kernel (CONFIG_HW_RANDOM_VIRTIO)
+          # registers virtio_rng.0; the HWRNG assertion below reads it back per
+          # fork (verified on a real KVM host: rng_current=virtio_rng.0).
+          curl --unix-socket $SOCK -X PUT 'http://localhost/entropy' \
+            -H 'Content-Type: application/json' \
+            -d '{}'
           curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
             -H 'Content-Type: application/json' \
             -d '{"action_type": "InstanceStart"}'
