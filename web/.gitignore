@@ -1,0 +1,6 @@
+# Node / build artifacts for the console SPA workspace.
+node_modules/
+**/node_modules/
+app/dist/
+packages/*/dist/
+*.tsbuildinfo

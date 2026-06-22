@@ -1,0 +1,203 @@
+{{- /*
+The hosted/self-hosted web console (issue #214): the BFF + embedded SPA served
+by cmd/console. ONE image and ONE bundle for both editions; behavior is driven
+by the capabilities env below, which the binary serves at GET
+/console/capabilities. Gated by console.enabled.
+
+The #208 hard gate is enforced here: console.signup defaults false (waitlist
+mode) and billing defaults off; both are server-controlled env, never client
+flags, so no browser can flip on self-serve onboarding or billing.
+*/}}
+{{- if .Values.console.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-console
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+rules:
+  # The live-sandbox view reads the control-plane records, scoped to one org at
+  # query time. Read-only; the console never mutates the engine CRDs.
+  - apiGroups: ["mitos.run"]
+    resources: ["sandboxes", "sandboxclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mitos-console
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mitos-console
+subjects:
+  - kind: ServiceAccount
+    name: mitos-console
+    namespace: {{ include "mitos.namespace" . }}
+{{- if .Values.console.secrets.kube.enabled }}
+---
+{{- /*
+The kube secret provider manages org-namespaced Secrets. It binds to the
+existing mitos-pool-secrets ClusterRole (the same definition the controller
+uses) in the console's own namespace; per-org-namespace bindings are created by
+the tenancy track as org namespaces are provisioned.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mitos-console-secrets
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.controller.poolSecretsClusterRoleName | default "mitos-pool-secrets" }}
+subjects:
+  - kind: ServiceAccount
+    name: mitos-console
+    namespace: {{ include "mitos.namespace" . }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  replicas: {{ .Values.console.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "console") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "console") | nindent 8 }}
+    spec:
+      serviceAccountName: mitos-console
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: console
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.console.image) }}
+          imagePullPolicy: {{ .Values.console.image.pullPolicy }}
+          args:
+            - --addr=:8080
+          env:
+            # Capabilities the binary serves at /console/capabilities. ONE bundle,
+            # behavior driven entirely by these server-controlled values.
+            - name: MITOS_CONSOLE_EDITION
+              value: {{ .Values.console.edition | quote }}
+            - name: MITOS_CONSOLE_SIGNUP
+              value: {{ .Values.console.signup | quote }}
+            - name: MITOS_CONSOLE_BILLING
+              value: {{ .Values.console.billing.enabled | quote }}
+            - name: MITOS_CONSOLE_OIDC_ISSUER
+              value: {{ .Values.console.oidc.issuerURL | quote }}
+            - name: MITOS_CONSOLE_OIDC_CLIENT_ID
+              value: {{ .Values.console.oidc.clientID | quote }}
+            {{- if .Values.console.oidc.clientSecretRef }}
+            - name: MITOS_CONSOLE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.console.oidc.clientSecretRef }}
+                  key: client-secret
+            {{- end }}
+            - name: MITOS_CONSOLE_SECRET_PROVIDERS
+              value: {{ include "mitos.console.secretProviders" . | quote }}
+            {{- if .Values.console.secrets.openbao.enabled }}
+            - name: MITOS_CONSOLE_OPENBAO_ADDR
+              value: {{ .Values.console.secrets.openbao.address | quote }}
+            - name: MITOS_CONSOLE_OPENBAO_PER_ORG
+              value: {{ .Values.console.secrets.openbao.perOrg | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.console.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "console") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- if .Values.console.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+  {{- with .Values.console.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.console.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ required "console.ingress.host is required when console.ingress.enabled" .Values.console.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mitos-console
+                port:
+                  name: http
+{{- end }}
+{{- end }}

@@ -222,3 +222,84 @@ imagePullSecrets:
 
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}
+
+# Console (Deployment): the hosted/self-hosted web console (issue #214) — the BFF
+# plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
+# BOTH editions; behavior is driven entirely by the capabilities below, which the
+# binary advertises at GET /console/capabilities. Self-host runs the defaults
+# (community); the hosted SaaS installs the same chart with edition=hosted.
+console:
+  # Render the console Deployment, Service, (optional) Ingress, ServiceAccount,
+  # and RBAC.
+  enabled: true
+  # "community" (self-hosted default) or "hosted" (our SaaS). No build-time fork;
+  # this is a runtime value.
+  edition: community
+  image:
+    repository: mitos-console
+    tag: v0.4.0
+    pullPolicy: IfNotPresent
+  # Console replicas. The BFF is stateless; run more than one for HA.
+  replicas: 2
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  # Self-serve org signup. Defaults OFF (waitlist mode). Per the #208 hard gate,
+  # public self-serve untrusted multi-tenancy does not switch on until the
+  # production gates pass; this is server-controlled, never a client flag.
+  signup: false
+  # Browser-session OIDC. Self-host points this at the operator's issuer
+  # (Dex/Keycloak/Google); hosted points it at our IdP.
+  oidc:
+    issuerURL: ""
+    clientID: ""
+    # Name of an existing Secret with key "client-secret". Empty omits it.
+    clientSecretRef: ""
+  # Secret-store providers advertised in capabilities and wired into the binary.
+  secrets:
+    kube:
+      # The kube provider materializes org secrets as org-namespaced Secrets.
+      enabled: true
+    openbao:
+      # The OpenBao (or Vault) external provider.
+      enabled: false
+      address: ""
+      # Per-tenant isolation: "path" (KV path prefix + per-org policy) or
+      # "namespace" (one OpenBao namespace per org).
+      perOrg: path
+  billing:
+    # Stripe billing surface. Hosted sets true; community keeps it off so the
+    # billing routes never mount.
+    enabled: false
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+
+# Gateway (Deployment): the public customer API front door (issue #210) — API-key
+# auth, org resolution, quota, and forwarding to the control plane. The
+# programmatic counterpart to the console.
+gateway:
+  enabled: true
+  image:
+    repository: mitos-gateway
+    tag: v0.4.0
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}

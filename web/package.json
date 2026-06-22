@@ -1,0 +1,16 @@
+{
+  "name": "@mitos/web",
+  "private": true,
+  "version": "0.0.0",
+  "description": "mitos console SPA workspace (the @mitos/brand package + the console app).",
+  "scripts": {
+    "build": "pnpm -C app build",
+    "dev": "pnpm -C app dev",
+    "typecheck": "pnpm -C app typecheck"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

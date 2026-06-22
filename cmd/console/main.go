@@ -20,6 +20,9 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"html/template"
 	"log"
@@ -27,9 +30,11 @@ import (
 	"net/http"
 	"os"
 
+	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/usage"
 )
 
@@ -56,20 +61,34 @@ func main() {
 			Caps:   billing.NewMemSpendCapStore(),
 			Rates:  billing.DefaultRates(),
 		},
-		Log: logger,
+		// Edition + feature flags from the server-controlled environment the chart
+		// sets; the SAME binary serves both editions.
+		Capabilities: capabilitiesFromEnv(),
+		Log:          logger,
 	})
 
 	mux := http.NewServeMux()
-	// The BFF API. In production it is mounted behind the gateway / session
-	// middleware that attaches the verified org context; here the dev shim does it.
+	// The BFF API. In production it is mounted behind the session middleware that
+	// resolves the OIDC session cookie to the verified org context; here the dev
+	// shim does it from headers instead.
 	if *dev {
 		logger.Warn("console dev auth shim enabled; do not run this in production")
 		mux.Handle("/console/", devAuth(con))
 		mux.HandleFunc("/", indexPage(logger))
 	} else {
-		// Without the dev shim, the BFF expects an upstream auth layer to attach the
-		// org context. Mounting it bare lets that layer wrap this handler.
-		mux.Handle("/console/", con)
+		// Production: the session middleware attaches the verified caller from the
+		// OIDC session cookie, and the embedded SPA is served at the root. ONE
+		// binary serves the BFF and the UI. The login flow and the middleware share
+		// ONE session store so a session issued at /auth/callback resolves here.
+		sessionStore := saas.NewSessionStore()
+		sessions := saas.NewSessionService(sessionStore, accounts)
+		mux.Handle("/console/", console.SessionMiddleware(sessions)(con))
+		mux.Handle("/", spa.Handler())
+		if issuer := os.Getenv("MITOS_CONSOLE_OIDC_ISSUER"); issuer != "" {
+			mountAuth(mux, logger, accounts, sessionStore, issuer)
+		} else {
+			logger.Warn("MITOS_CONSOLE_OIDC_ISSUER unset; /auth login flow not mounted (BFF requires a session)")
+		}
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -81,6 +100,43 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// mountAuth discovers the OIDC issuer and mounts /auth/login, /auth/callback,
+// and /auth/logout. The LoginManager issues sessions into the SAME store the
+// SessionMiddleware reads. If issuer discovery fails the console still serves
+// (the operator can fix the issuer and restart); login is simply unavailable.
+func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store *saas.SessionStore, issuer string) {
+	verifier, exch, err := oidcauth.NewProvider(context.Background(), oidcauth.ProviderConfig{
+		IssuerURL:    issuer,
+		ClientID:     os.Getenv("MITOS_CONSOLE_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("MITOS_CONSOLE_OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("MITOS_CONSOLE_OIDC_REDIRECT_URL"),
+	})
+	if err != nil {
+		logger.Error("oidc provider discovery failed; /auth not mounted", "issuer", issuer, "err", err.Error())
+		return
+	}
+	lm := saas.NewLoginManager(verifier, accounts, store, newSessionToken)
+	ah := oidcauth.NewHandlers(oidcauth.Config{
+		Exchanger:          exch,
+		Login:              lm,
+		CookieName:         console.SessionCookieName,
+		RedirectAfterLogin: "/",
+		Secure:             true,
+	})
+	mux.HandleFunc("/auth/login", ah.Login)
+	mux.HandleFunc("/auth/callback", ah.Callback)
+	mux.HandleFunc("/auth/logout", ah.Logout)
+	logger.Info("oidc login flow mounted", "issuer", issuer)
+}
+
+// newSessionToken mints an opaque session token. It is stored hashed by the
+// SessionStore; the raw value is delivered to the browser as the session cookie.
+func newSessionToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // devAuth is the LOCAL-ONLY dev shim: it reads the caller account and org from

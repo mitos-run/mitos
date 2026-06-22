@@ -1,0 +1,17 @@
+/* Fluorescence typefaces. Satoshi + Geist Mono ONLY (system.md rule 7).
+   The woff2 files ship in this package so the console embeds them; the build
+   resolves ./fonts/* relative to the package. */
+@font-face {
+  font-family: 'Satoshi';
+  src: url('../fonts/Satoshi-Variable.woff2') format('woff2');
+  font-weight: 300 900;
+  font-display: swap;
+  font-style: normal;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+  font-style: normal;
+}

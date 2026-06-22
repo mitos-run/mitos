@@ -164,6 +164,10 @@ honors, and checksum verification are in [docs/install.md](docs/install.md).
 | Debian/RPM packages (`.deb`, `.rpm`) | Coming with releases (built from the first tagged release). |
 | Windows (`scoop`, `winget`) | Coming with releases. |
 
+How every artifact ships (images, CLI, and the four SDKs) and the one-time
+maintainer setup each registry needs are documented in
+[docs/releasing.md](docs/releasing.md).
+
 ```bash
 # Works today with a Go toolchain:
 go install mitos.run/mitos/cmd/mitos@latest
