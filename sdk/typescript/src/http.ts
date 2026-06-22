@@ -61,10 +61,10 @@ export class HttpClient {
    * POSTs a JSON body to `path` and decodes the JSON response into T. Throws
    * AgentRunError on a non-2xx status.
    */
-  async post<T>(path: string, body: unknown): Promise<T> {
+  async post<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const resp = await fetch(this.baseUrl + path, {
       method: "POST",
-      headers: this.headers(true),
+      headers: { ...this.headers(true), ...(extraHeaders ?? {}) },
       body: JSON.stringify(body),
     });
     return this.handle<T>(resp);

@@ -81,12 +81,16 @@ export class SandboxServer {
 
   async createTemplate(
     id: string,
-    opts?: { initWaitSeconds?: number },
+    opts?: { initWaitSeconds?: number; idempotencyKey?: string },
   ): Promise<Template> {
-    const out = await this.http.post<templateWire>("/v1/templates", {
-      id,
-      init_wait_seconds: opts?.initWaitSeconds ?? 5,
-    });
+    const out = await this.http.post<templateWire>(
+      "/v1/templates",
+      {
+        id,
+        init_wait_seconds: opts?.initWaitSeconds ?? 5,
+      },
+      { "Idempotency-Key": opts?.idempotencyKey ?? newIdempotencyKey() },
+    );
     return toTemplate(out);
   }
 
@@ -95,7 +99,7 @@ export class SandboxServer {
    * server (the per-sandbox bearer token applies only in cluster mode; direct
    * mode is tokenless). When `id` is omitted a random one is generated.
    */
-  async fork(template: string, id?: string): Promise<Sandbox> {
+  async fork(template: string, id?: string, opts?: { idempotencyKey?: string }): Promise<Sandbox> {
     const sandboxId = id ?? randomSandboxId();
     if (!validSandboxId(sandboxId)) {
       throw new AgentRunError(`invalid sandbox id: ${JSON.stringify(sandboxId)}`, {
@@ -105,10 +109,14 @@ export class SandboxServer {
           "Pass a sandbox id of alphanumerics, underscore, or hyphen, up to 64 chars.",
       });
     }
-    const out = await this.http.post<forkWire>("/v1/fork", {
-      template,
-      id: sandboxId,
-    });
+    const out = await this.http.post<forkWire>(
+      "/v1/fork",
+      {
+        template,
+        id: sandboxId,
+      },
+      { "Idempotency-Key": opts?.idempotencyKey ?? newIdempotencyKey() },
+    );
     const resolvedId = out.id || sandboxId;
     // Exec and files round-trip through the server URL (the returned endpoint is
     // the server's own address); terminate deletes via the server.
@@ -139,6 +147,14 @@ export class SandboxServer {
     }
     await this.http.del(`/v1/sandboxes/${encodeURIComponent(id)}`);
   }
+}
+
+// newIdempotencyKey returns a fresh client-side key so a retried creating call
+// (template build or fork) is de-duplicated by the server rather than creating a
+// second resource. Parity with the Python SDK, which sends one on every creating
+// call.
+function newIdempotencyKey(): string {
+  return globalThis.crypto.randomUUID().replace(/-/g, "");
 }
 
 function toTemplate(t: templateWire): Template {
