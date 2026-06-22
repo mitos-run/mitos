@@ -64,20 +64,39 @@ reference implementation (which simply calls this repo's own harness).
 | system | what a reproducer must deploy | "warm" state | source of any quoted number until measured |
 | --- | --- | --- | --- |
 | mitos (this repo) | a mitos cluster + warm SandboxPool, or a KVM host for `cmd/bench` | warm pool / loaded template snapshot | OUR harness (`bench/claim-first-exec-latency.sh`, `cmd/bench`) |
-| E2B (self-hosted) | the open-source E2B infra stack on the same hardware | pre-built E2B template, warm sandbox pool if configured | vendor-published until a maintainer runs `adapters/e2b.sh` here |
-| Daytona (OSS) | a self-hosted Daytona instance | pre-pulled workspace image | vendor-published until a maintainer runs `adapters/daytona.sh` here |
+| mitos (bare metal, no cluster) | a KVM host with firecracker + a guest `vmlinux` + a reflink-capable data dir | running `sandbox-server` with a pre-built template snapshot | OUR harness (`adapters/mitos-direct.sh`); MEASURED on bare-metal KVM, see `results/2026-06-22-matched-hardware.md` |
+| E2B (self-hosted) | the open-source E2B infra stack on the same hardware | pre-built E2B template, warm sandbox pool if configured | vendor-published until a maintainer runs `adapters/e2b.sh` here (out of timebox as of 2026-06-22, heavy multi-service stack) |
+| Daytona (OSS) | a self-hosted Daytona instance (`docker compose`) + a dashboard-minted API key | pre-pulled snapshot image, runner healthy | DEPLOYED 2026-06-22 (14/14 services up) but create -> first-exec blocked at headless auth; no number. See `results/2026-06-22-matched-hardware.md` and `adapters/daytona.sh` |
 | Agent Sandbox + Kata | the upstream Agent Sandbox controller with the Kata runtime class | pre-pulled image, Kata runtime ready | vendor-published until a maintainer runs `adapters/agent-sandbox-kata.sh` here |
+
+### Latest matched-hardware run
+
+The first matched-method, matched-hardware comparison was run on 2026-06-22 on
+two identical Hetzner bare-metal KVM boxes (Intel i7-6700, 4c/8t, 62 GiB, host
+kernel 6.1.0-49, firecracker v1.15.0). The mitos column is OUR measurement; the
+competitor column is recorded honestly (deployed, but blocked at headless auth,
+no fabricated number). Full record, raw samples, and reproduction steps:
+[`results/2026-06-22-matched-hardware.md`](results/2026-06-22-matched-hardware.md).
+
+| system | create -> first-exec | source |
+| --- | --- | --- |
+| mitos (mitos-direct, bare-metal KVM) | min 164 / P50 180 / P90 202 / P99 204 / max 204 ms (N=20) | OUR measurement (`adapters/mitos-direct.sh`) |
+| Daytona OSS (self-hosted) | blocked: Dex OIDC, no password grant, no headless API key in timebox | deployed, no number (`adapters/daytona.sh`) |
+| E2B (self-hosted) | not measured (out of timebox) | vendor-published until `adapters/e2b.sh` is run here |
 
 The adapter stubs in `adapters/` are intentionally non-functional placeholders
 for the competitor systems: they print the exact deploy + invoke steps a
 reproducer fills in, and exit non-zero so a comparison run can never silently
-emit a fabricated competitor number. Only `adapters/mitos.sh` is wired to a real
-harness (this repo's own).
+emit a fabricated competitor number. Two adapters are wired to a real system:
+`adapters/mitos.sh` (the cluster claim path) and `adapters/mitos-direct.sh` (the
+bare-metal, no-cluster `sandbox-server` path measured on 2026-06-22).
 
 ## What ships in-repo vs what is a reproducer step
 
-- In-repo and runnable now: the mitos side (`adapters/mitos.sh` -> this repo's
-  harness) and the driver (`run-comparison.sh`).
+- In-repo and runnable now: the mitos cluster side (`adapters/mitos.sh` -> this
+  repo's harness), the mitos bare-metal side (`adapters/mitos-direct.sh` -> this
+  repo's `sandbox-server`, needs only a KVM host, no cluster), and the driver
+  (`run-comparison.sh`).
 - Reproducer step (not in-repo, by design): standing up each competitor and
   filling in its adapter, then running it on the same hardware. The result table
   is then assembled by hand in `bench/results/` from the raw per-system outputs,
