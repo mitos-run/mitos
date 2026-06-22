@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -20,6 +21,8 @@ import (
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/preview"
+	"mitos.run/mitos/internal/sandboxrpc"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // sandbox-server is a standalone REST API. No Kubernetes required.
@@ -349,10 +352,77 @@ func main() {
 	// outside requireBearer); delegate the WebSocket upgrade GET to it.
 	mux.Handle("GET /v1/pty", apiHandler)
 
+	// Connect runtime protocol (issue #24): mount the Sandbox service under its
+	// own RPC path (/sandbox.v1.Sandbox/...), which does not overlap the /v1/*
+	// REST routes above, so the existing HTTP API and the mock-mode tests are
+	// untouched. This foundation slice serves a real streaming Exec (bridged to
+	// the SAME SandboxAPI -> vsock -> guest agent exec path) and a real unary
+	// Budget; every other RPC is an honest #24 follow-up. The handler is reached
+	// over Connect HTTP, including the gRPC and gRPC-Web protocols.
+	s.mountConnect(mux)
+
+	// Unencrypted HTTP/2 lets Connect bidi streams (Exec) work without TLS, while
+	// plain HTTP/1.1 requests to the /v1/* REST routes pass through unchanged: the
+	// server negotiates HTTP/1.1 or h2c per connection on the same mux, so the
+	// REST surface is unaffected.
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{Addr: addr, Handler: mux, Protocols: &protocols}
 	log.Printf("sandbox-server listening on %s (mock=%v)", addr, mockMode)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// connectSandboxHeader is the request header the Connect Sandbox handler reads
+// to resolve which sandbox a call targets, in the standalone server's
+// foundation slice. Under issue #25 this is replaced by an attenuated capability
+// token that implicitly scopes the call; until then the standalone edge is
+// tokenless (it already AllowTokenless()es the SandboxAPI), so the caller names
+// its sandbox explicitly via this header.
+const connectSandboxHeader = "Mitos-Sandbox"
+
+// sandboxIDContextKey carries the resolved sandbox id from the per-request
+// middleware to the Connect handler's resolver.
+type sandboxIDContextKey struct{}
+
+// mountConnect builds the Connect Sandbox handler over the SandboxAPI exec path
+// and mounts it on mux. The exec backend bridges to SandboxAPI.RunExecStream
+// (the same vsock streaming path /v1/exec/stream uses); the sandbox id is read
+// from the Mitos-Sandbox request header by a thin middleware so the handler's
+// resolver stays transport-neutral.
+func (s *server) mountConnect(mux *http.ServeMux) {
+	svc := sandboxrpc.NewService(
+		execBackend{api: s.sandboxAPI},
+		nil, // Budget provider is a follow-up; Budget reports an honest #24 Unimplemented until wired.
+		sandboxrpc.WithSandboxResolver(func(ctx context.Context) (string, error) {
+			id, _ := ctx.Value(sandboxIDContextKey{}).(string)
+			if id == "" {
+				return "", fmt.Errorf("no target sandbox: set the %s request header to the sandbox id", connectSandboxHeader)
+			}
+			return id, nil
+		}),
+	)
+	path, handler := sandboxv1connect.NewSandboxHandler(svc)
+	withSandbox := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get(connectSandboxHeader); id != "" {
+			r = r.WithContext(context.WithValue(r.Context(), sandboxIDContextKey{}, id))
+		}
+		handler.ServeHTTP(w, r)
+	})
+	mux.Handle(path, withSandbox)
+}
+
+// execBackend adapts the daemon SandboxAPI to the sandboxrpc.ExecBackend seam so
+// the Connect Exec handler reuses the existing vsock exec streaming path without
+// reimplementing it.
+type execBackend struct {
+	api *daemon.SandboxAPI
+}
+
+func (b execBackend) RunExecStream(ctx context.Context, sandboxID string, p sandboxrpc.ExecParams, onChunk func(stream string, data []byte) error) (int, float64, error) {
+	return b.api.RunExecStream(ctx, sandboxID, p.Command, p.WorkingDir, p.Env, p.TimeoutSeconds, onChunk)
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {

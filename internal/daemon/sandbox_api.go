@@ -695,6 +695,33 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 	}, onChunk)
 }
 
+// RunExecStream is the exported bridge the Connect Sandbox service (issue #24,
+// internal/sandboxrpc) drives so its streaming Exec reuses the SAME exec path
+// the HTTP /v1/exec/stream route uses: a dedicated vsock connection to the guest
+// agent, with each output chunk delivered incrementally through onChunk, then
+// the terminal exit code and execution time. It does not reimplement vsock; it
+// adapts runExecStream to a transport-neutral signature (string stream name,
+// plain return values) so the Connect handler need not import the vsock types.
+// onChunk's first argument is "stdout" or "stderr". A returned error is a spawn
+// or transport failure; the caller maps it to the protocol's terminal error.
+func (api *SandboxAPI) RunExecStream(ctx context.Context, sandboxID, command, workingDir string, env map[string]string, timeoutSeconds int, onChunk func(stream string, data []byte) error) (exitCode int, execTimeMs float64, err error) {
+	api.touch(sandboxID)
+	req := execRequest{
+		Sandbox:    sandboxID,
+		Command:    command,
+		WorkingDir: workingDir,
+		Env:        env,
+		Timeout:    timeoutSeconds,
+	}
+	frame, err := api.runExecStream(ctx, req, func(stream vsock.StreamName, data []byte) error {
+		return onChunk(string(stream), data)
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return frame.ExitCode, frame.ExecTimeMs, nil
+}
+
 func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) {
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
