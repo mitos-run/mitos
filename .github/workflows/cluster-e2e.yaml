@@ -4,7 +4,7 @@ name: Cluster e2e (self-hosted)
 # SECURITY: this workflow runs on a SELF-HOSTED runner that lives INSIDE the
 # maintainer's multi-node Talos KVM cluster. That runner can drive the cluster
 # (it has KVM via the husk pods and a scoped ServiceAccount). The repo
-# paperclipinc/mitos is PUBLIC. Therefore this job MUST NEVER execute code from
+# mitos-run/mitos is PUBLIC. Therefore this job MUST NEVER execute code from
 # an untrusted fork pull request: a malicious fork PR could otherwise own the
 # cluster.
 #
@@ -111,7 +111,7 @@ jobs:
           - name: mitos-forkd
             dockerfile: Dockerfile.forkd
     env:
-      IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
+      IMAGE: ghcr.io/mitos-run/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v6
       - name: Log in to GHCR
@@ -179,7 +179,7 @@ jobs:
       # pushed the controller and husk-stub for THIS commit under the per-commit
       # `e2e-<github.sha>` tag; we deploy that exact tag. This tag is gated and
       # ephemeral (test-only); a per-commit tag is sufficient, no digest pin.
-      IMAGE_REGISTRY: ghcr.io/paperclipinc
+      IMAGE_REGISTRY: ghcr.io/mitos-run
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
@@ -350,7 +350,7 @@ jobs:
     env:
       E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
       MITOS_NAMESPACE: mitos
-      IMAGE_REGISTRY: ghcr.io/paperclipinc
+      IMAGE_REGISTRY: ghcr.io/mitos-run
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
@@ -488,7 +488,7 @@ jobs:
     env:
       E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
       MITOS_NAMESPACE: mitos
-      IMAGE_REGISTRY: ghcr.io/paperclipinc
+      IMAGE_REGISTRY: ghcr.io/mitos-run
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:

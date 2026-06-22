@@ -1,6 +1,6 @@
 # Supply chain: image signing and SBOM verification
 
-The published `ghcr.io/paperclipinc/mitos-*` images are signed with cosign in
+The published `ghcr.io/mitos-run/mitos-*` images are signed with cosign in
 keyless mode and carry an SPDX SBOM attestation. Both are produced by
 `.github/workflows/publish.yaml` using the workflow GitHub OIDC identity, so
 there is no long-lived signing key: the signing identity IS the workflow that
@@ -9,9 +9,9 @@ command here is runnable against a published tag.
 
 ## Images
 
-- `ghcr.io/paperclipinc/mitos-controller`
-- `ghcr.io/paperclipinc/mitos-forkd`
-- `ghcr.io/paperclipinc/mitos-husk-stub`
+- `ghcr.io/mitos-run/mitos-controller`
+- `ghcr.io/mitos-run/mitos-forkd`
+- `ghcr.io/mitos-run/mitos-husk-stub`
 
 Each tag is pushed by digest; the signature and SBOM attestation are bound to
 the digest, not to the mutable tag.
@@ -22,9 +22,9 @@ Install cosign (https://docs.sigstore.dev/cosign/installation/), then:
 
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 Replace `VERSION` with the release tag (for example `v0.1.0`). A successful
@@ -37,9 +37,9 @@ repository; a signature from any other identity fails verification.
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 A successful verify confirms the SBOM was produced and signed by our publish
@@ -47,9 +47,9 @@ workflow. To read the SBOM contents, extract the predicate:
 
 ```bash
 cosign verify-attestation --type spdxjson \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION \
+  ghcr.io/mitos-run/mitos-controller:VERSION \
   | jq -r '.payload' | base64 -d | jq '.predicate'
 ```
 

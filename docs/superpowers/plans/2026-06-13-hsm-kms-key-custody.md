@@ -423,7 +423,7 @@ Modified files:
   	}
   }
   ```
-  Add the imports `"bytes"`, `"context"`, and `"github.com/paperclipinc/mitos/internal/kms"` to the test file if absent.
+  Add the imports `"bytes"`, `"context"`, and `"github.com/mitos-run/mitos/internal/kms"` to the test file if absent.
 - [ ] Run `go test ./internal/fork/ -run TestRequestKeyProvider` and confirm it fails to compile (`NewRequestKeyProvider` takes no arg today; `SetWrappedKey` does not exist).
 - [ ] Edit `internal/fork/encryption.go`. Replace the `RequestKeyProvider` definition so it holds the WRAPPED DEK + KEK id and an injected `kms.Wrapper`:
   ```go
@@ -493,7 +493,7 @@ Modified files:
   	delete(p.wrapped, scopeID)
   }
   ```
-  Add `"github.com/paperclipinc/mitos/internal/kms"` to the import block.
+  Add `"github.com/mitos-run/mitos/internal/kms"` to the import block.
 - [ ] The engine must zeroize the plaintext DEK after each cryptsetup call (since `KeyFor` now returns a freshly-unwrapped copy, not a cached one). In `internal/fork/encryption.go`, in `createTemplateContainer` add `defer key.Zeroize()` immediately after the `KeyFor` call (before `crypt.Create`), and in `ensureTemplateOpen` add `defer key.Zeroize()` immediately after its `KeyFor` call. Confirm `shredTemplateContainer` still calls `keyProvider.ForgetKey(id)` (now dropping the wrapped entry).
 - [ ] Add an optional `KMS kms.Wrapper` field to `EngineOpts` in `internal/fork/engine.go` with a doc comment ("the unwrapper for envelope-encrypted DEKs; required when EnableEncryption and a RequestKeyProvider are used") and store it on the `Engine` if the engine needs it directly (it does not unwrap itself; the provider does, so this field may be informational only. If unused, omit it and inject the KMS solely via `NewRequestKeyProvider` in `cmd/forkd`.). Prefer injecting via the provider only: do NOT add an unused `EngineOpts.KMS` field if the linter would flag it.
 - [ ] Run `go test ./internal/fork/ -run TestRequestKeyProvider` and confirm green. Run the full `go test ./internal/fork/` and fix any caller of `NewRequestKeyProvider()` inside fork tests to pass a `kms.NewLocalKEK(make([]byte,32))`-backed provider.
@@ -558,7 +558,7 @@ Modified files:
   engineOpts.KeyProvider = reqKeyProvider
   fmt.Printf("forkd: at-rest snapshot encryption ENABLED (envelope: the per-template DEK arrives WRAPPED over the mTLS RPC and is unwrapped by the local KEK %s; the plaintext DEK is never generated or persisted on the node)\n", wrapper.KEKID())
   ```
-  Add `"github.com/paperclipinc/mitos/internal/kms"` to the imports and declare `var kekFile string`.
+  Add `"github.com/mitos-run/mitos/internal/kms"` to the imports and declare `var kekFile string`.
 - [ ] Run `go build ./cmd/forkd/` and confirm it compiles.
 - [ ] Run `gofmt -l cmd/forkd/`, `golangci-lint run --timeout=5m ./cmd/forkd/...`, and `GOOS=linux golangci-lint run --timeout=5m ./cmd/forkd/...`.
 - [ ] `git add cmd/forkd/main.go`
@@ -576,7 +576,7 @@ Modified files:
   - On the NotFound branch: generate `dek := make([]byte, encKeyLen)`, `rand.Read(dek)`, `wrapped, werr := w.Wrap(ctx, dek)`, then zeroize the plaintext DEK (`for i := range dek { dek[i] = 0 }`) immediately. Store the Secret with `Data: map[string][]byte{encKeyWrappedDataKey: wrapped.Ciphertext, encKeyKEKIDDataKey: []byte(wrapped.KEKID)}`. Return `wrapped.Ciphertext, wrapped.KEKID, nil`. Never log the DEK or the wrapped bytes; only the KEK id (non-secret) and the Secret name may appear.
   - On the found branch and the create-race re-read branch: return `secret.Data[encKeyWrappedDataKey]` + `string(secret.Data[encKeyKEKIDDataKey])`; error if `wrapped-dek` is empty (do not regenerate, mirroring the existing logic).
   - Update the doc comment to describe envelope custody: the controller generates the DEK, wraps it with the KMS KEK, zeroizes the plaintext, and persists ONLY the wrapped DEK + KEK id. The plaintext DEK never persists to etcd or disk.
-  - Add `"github.com/paperclipinc/mitos/internal/kms"` to imports. `DeleteEncKey` is unchanged (deleting the Secret crypto-shreds the wrapped DEK).
+  - Add `"github.com/mitos-run/mitos/internal/kms"` to imports. `DeleteEncKey` is unchanged (deleting the Secret crypto-shreds the wrapped DEK).
 - [ ] Run the controller envtest (`eval $(~/go/bin/setup-envtest use 1.31 -p env) && go test ./internal/controller/ -run EncKey`) and confirm green.
 - [ ] Run `gofmt -l internal/controller/`, both lint invocations on `./internal/controller/...`.
 - [ ] `git add internal/controller/enc_key_secret.go internal/controller/enc_key_envtest_test.go`
@@ -590,7 +590,7 @@ Modified files:
 - [ ] Update `ensureTemplateBuilt` (`sandboxpool_controller.go:261`): change the local `var encKey []byte` plus the `EnsureEncKey` call to capture `wrappedDEK, kekID, keyErr := EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, template)`. Thread `wrappedDEK` and `kekID` into `createSnapshotsOnNodes`.
 - [ ] Update `createSnapshotsOnNodes` (`sandboxpool_controller.go:302`): change the `encKey []byte` parameter to `wrappedDEK []byte, kekID string`. The `distribute := len(encKey) == 0 ...` and the mTLS fail-closed guard (`if len(encKey) > 0 && !NodeMTLS ...`) now key off `len(wrappedDEK) > 0`. In the `CreateTemplateRequest`, set `EncryptionKey: wrappedDEK, KekId: kekID`. Keep all comments accurate (the field now carries the WRAPPED DEK).
 - [ ] Update the claim/fork path: `sandboxclaim_controller.go:432` calls `EnsureEncKey`; capture `wrappedDEK, kekID`. Thread them into `forkd_client.go` where `ForkRequest` is built (`forkd_client.go:101`): set `EncryptionKey: wrappedDEK, KekId: kekID`. Update the `forkOnNode` (or equivalent) signature to take `wrappedDEK []byte, kekID string`.
-- [ ] Update `cmd/controller/main.go`: add a `--kek-file` flag, build `kms.LoadLocalKEKFromFile` when set, and inject it into the reconcilers' `KMS` field. If encryption-enabled templates are reconciled without a KMS, `EnsureEncKey` will fail (w is nil) with a clear error; document the flag as required when any template sets `Encrypted: true`. Add `"github.com/paperclipinc/mitos/internal/kms"` import.
+- [ ] Update `cmd/controller/main.go`: add a `--kek-file` flag, build `kms.LoadLocalKEKFromFile` when set, and inject it into the reconcilers' `KMS` field. If encryption-enabled templates are reconciled without a KMS, `EnsureEncKey` will fail (w is nil) with a clear error; document the flag as required when any template sets `Encrypted: true`. Add `"github.com/mitos-run/mitos/internal/kms"` import.
 - [ ] Extend the fake forkd in the controller tests (the one recording `CreateTemplateRequest`/`ForkRequest`) to also record `KekId`, and assert the envtest sees a non-empty `EncryptionKey` (wrapped) AND a `KekId` equal to the injected KMS `KEKID()` for an Encrypted template, and empty for a plaintext one. Add this assertion in the same `enc_key_envtest_test.go` or the existing RPC-delivery test.
 - [ ] Run the controller envtest suite and confirm green.
 - [ ] Run `gofmt -l internal/controller/ cmd/controller/`, both lint invocations on `./internal/controller/...` and `./cmd/controller/...`.

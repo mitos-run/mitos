@@ -4,7 +4,13 @@
 # as unknown. These labels are carried by the in-cluster self-hosted GitHub
 # Actions runner (deploy/ci-runner/, issue #16); see docs/ci-runner.md. The
 # cluster-e2e workflow targets them with runs-on: [self-hosted, mitos-cluster].
+#
+# bare-metal and bench are carried by the dedicated bare-metal Hetzner KVM bench
+# boxes (issue #15 task 2); bench.yaml targets them with
+# runs-on: [self-hosted, bare-metal, kvm].
 self-hosted-runner:
   labels:
     - mitos-cluster
     - kvm
+    - bare-metal
+    - bench

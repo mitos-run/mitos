@@ -65,7 +65,7 @@ warm-claim activate number. It is reproducible with the script described in the
 - Storage: `/var/lib/mitos` on xfs.
 - Path: the default husk path (unprivileged pod, `/dev/kvm` via the device
   plugin).
-- Template: `ghcr.io/paperclipinc/sandbox-base-python:3.12-slim`.
+- Template: `ghcr.io/mitos-run/sandbox-base-python:3.12-slim`.
 - VMM: Firecracker v1.15.0, verify-at-Prepare (the integrity gate is paid in the
   dormant Prepare phase, so the activate is engine-speed; see the latency-fix
   section above).
@@ -146,7 +146,7 @@ warm pool with dormant pods available.
   to unprivileged pods via the device plugin, `/var/lib/mitos` on xfs.
 - The controller, forkd DaemonSet, and CRDs deployed per the README "On a
   cluster" steps.
-- A `SandboxTemplate` for `ghcr.io/paperclipinc/sandbox-base-python:3.12-slim`
+- A `SandboxTemplate` for `ghcr.io/mitos-run/sandbox-base-python:3.12-slim`
   and a `SandboxPool` referencing it, warmed (dormant husk pods prepared) before
   the run.
 - The restore samples come from the forkd / husk-stub logs for the same

@@ -6,7 +6,7 @@
 # + ip/nft):
 #   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bench ./cmd/bench/
 #   cat > Dockerfile <<EOF
-#   FROM ghcr.io/paperclipinc/mitos-forkd:<tag>
+#   FROM ghcr.io/mitos-run/mitos-forkd:<tag>
 #   COPY bench /usr/local/bin/bench
 #   ENTRYPOINT ["/usr/local/bin/bench"]
 #   EOF

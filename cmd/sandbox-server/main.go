@@ -70,6 +70,13 @@ type server struct {
 	previewSigner *preview.Signer
 	previewDomain string
 	previewTTL    time.Duration
+
+	// reseedBackoff is the base delay between reseed-handshake retries on a real
+	// fork (the delay grows linearly with the attempt). After a snapshot restore
+	// the guest agent resets its vsock listener, so the first NotifyForked can see
+	// a transient "connection closed"; the fork path retries register+reseed
+	// rather than failing the race. Tests set this to a tiny value.
+	reseedBackoff time.Duration
 }
 
 // newServer builds the standalone server and applies the SandboxAPI policy
@@ -86,6 +93,7 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, 
 		sandboxAPI:           daemon.NewSandboxAPI(dataDir),
 		maxStreamsPerSandbox: maxStreamsPerSandbox,
 		maxExecTimeoutSecs:   maxExecTimeoutSecs,
+		reseedBackoff:        250 * time.Millisecond,
 	}
 	// Standalone local-testing path: if the Firecracker vsock UDS does not
 	// exist, fall back to a guest agent running directly on the host
@@ -625,20 +633,11 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// fork is rejected and never registered. The mock mode has no guest, so it
 	// skips the handshake.
 	if !s.mockMode {
-		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
-			// Fail closed: a fork whose guest agent is unreachable cannot reseed.
-			s.releaseIdempotent(idemKey)
-			if s.engine != nil {
-				_ = s.engine.Terminate(req.ID)
-			}
-			errResp(w, fmt.Sprintf("fork %q: guest agent not connected: %v", req.ID, err), 500)
-			return
-		}
-		s.sandboxAPI.RegisterStreamPath(req.ID, vsockPath)
-		if err := s.reseedFork(req.ID); err != nil {
-			// Fail closed: drop the half-wired sandbox so an un-reseeded VM that
-			// shares CRNG state with its siblings is never served. The error
-			// carries no entropy or secret values. Reap the restored VM too.
+		if err := s.registerAndReseed(req.ID, vsockPath); err != nil {
+			// Fail closed: a fork that never confirmed a reseed (even after bounded
+			// retries) shares CRNG state with its siblings and is never served. Drop
+			// any half-wired registration and reap the restored VM so it does not
+			// leak. The error carries no entropy or secret values.
 			s.sandboxAPI.UnregisterSandbox(req.ID)
 			s.releaseIdempotent(idemKey)
 			if s.engine != nil {
@@ -667,6 +666,38 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 // and the caller refuses to serve the fork. This mirrors the daemon's
 // notifyForked and the husk productionNotifier. Entropy bytes are never logged;
 // only the boolean reseed result is inspected.
+// registerAndReseed connects to the fork's guest agent and runs the reseed
+// handshake, retrying a bounded number of times on a transient failure. After a
+// snapshot restore the guest agent resets its vsock listener, so the host's
+// first connection can be stale and the first NotifyForked sees "connection
+// closed"; that is a readiness race, not a reseed refusal. Each attempt gets a
+// FRESH connection (RegisterSandbox), so a retry recovers once the restored
+// agent is listening again. It FAILS CLOSED: if no attempt confirms a reseed
+// (ReseededRNG:true), the last error is returned and the caller never serves the
+// fork. The backoff grows linearly with the attempt (s.reseedBackoff base).
+func (s *server) registerAndReseed(sandboxID, vsockPath string) error {
+	const attempts = 6
+	var last error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+			last = fmt.Errorf("guest agent not connected: %w", err)
+		} else {
+			s.sandboxAPI.RegisterStreamPath(sandboxID, vsockPath)
+			if err := s.reseedFork(sandboxID); err != nil {
+				// Drop the stale registration before the next attempt redials.
+				s.sandboxAPI.UnregisterSandbox(sandboxID)
+				last = err
+			} else {
+				return nil
+			}
+		}
+		if attempt < attempts {
+			time.Sleep(time.Duration(attempt) * s.reseedBackoff)
+		}
+	}
+	return last
+}
+
 func (s *server) reseedFork(sandboxID string) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
