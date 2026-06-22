@@ -148,6 +148,8 @@ The TypeScript SDK (`@mitos/sdk`) exposes the same one-liner `sandbox(image)`, `
 
 The Ruby SDK is a thin, dependency-free (standard-library only) client for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, and terminate. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/ruby/README.md](sdk/ruby/README.md).
 
+The Go SDK is a thin, dependency-free (standard-library only) library for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, list, and terminate. It is a library distinct from the `mitos` CLI, ships in its own nested Go module (`github.com/mitos-run/mitos/sdk/go`) so importing it does not pull the controller into your build, is context-aware, and parses the server envelope into a typed, `errors.Is`-friendly `*mitos.Error`. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/go/README.md](sdk/go/README.md).
+
 ### CLI
 
 Install the `mitos` CLI. The full per-OS matrix, the env vars the installer
