@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/mitos-run/mitos/compare/v0.9.0...v0.10.0) (2026-06-22)
+
+
+### Features
+
+* **fork:** distinct guest MAC per fork; KVM-prove network identity; mark [#3](https://github.com/mitos-run/mitos/issues/3) row 4 done ([#248](https://github.com/mitos-run/mitos/issues/248)) ([788d872](https://github.com/mitos-run/mitos/commit/788d872edf4df46e0a446ca1e950fc2384204bdb))
+
 ## [0.9.0](https://github.com/mitos-run/mitos/compare/v0.8.1...v0.9.0) (2026-06-22)
 
 
