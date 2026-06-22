@@ -142,6 +142,17 @@ maps to a primitive mitos already has, plus mitos-only views.
 | **Members & roles** | `AccountService.ListMembers` (#210) | parity |
 | **Audit** | `AuditRecorder` seam | parity |
 
+**Billing provider abstraction (decided 2026-06-22).** Billing is abstracted
+behind a `billingprovider.Provider` seam — the same pattern as `SecretStore`.
+Stripe is the first provider; a **Merchant of Record** (Polar / Paddle / Lemon
+Squeezy) is the planned second and likely end state, because an MoR becomes the
+legal seller and handles global sales-tax/VAT so mitos does not. The console
+reads billing through the provider-neutral `BillingReader`; only the webhook
+(signature scheme + event names) and the portal/checkout link are
+provider-specific, and both live behind the seam. The neutral `WebhookHandler`
+(verify → resolve customer→org → `StatusStore.SetStatus`) and the dunning/status
+core never change when the provider does.
+
 Two dashboards ship in the chart and are different concerns:
 1. **Operational** — the existing Grafana `dashboard.json` (cluster metrics, for
    the operator). Unchanged.
