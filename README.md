@@ -452,6 +452,8 @@ Per-topic docs in [`docs/`](docs/):
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
 | Agent Skill | [skills/mitos/SKILL.md](skills/mitos/SKILL.md) |
+| Guest port forwarding | [docs/ports.md](docs/ports.md) |
+| Recipe: host an HTTP daemon / agent harness | [docs/recipes/agent-harness.md](docs/recipes/agent-harness.md) |
 | Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |
