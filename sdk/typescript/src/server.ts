@@ -7,6 +7,23 @@ import { HttpClient, validSandboxId } from "./http.js";
 import { Sandbox } from "./sandbox.js";
 import { AgentRunError } from "./errors.js";
 
+// The hosted production control plane. When neither a url argument nor
+// MITOS_BASE_URL is set, the client targets the hosted endpoint so the examples
+// work without a base URL. Self-hosted or local standalone users opt out by
+// setting MITOS_BASE_URL (e.g. http://localhost:8080). Mirrors the Python
+// DEFAULT_BASE_URL.
+const DEFAULT_BASE_URL = "https://mitos.run";
+
+// resolveBaseUrl applies the base-URL precedence: explicit argument, then
+// MITOS_BASE_URL, then the hosted production endpoint. Parity with the Python
+// SDK's _resolve_auth.
+function resolveBaseUrl(url?: string): string {
+  if (url) return url;
+  const env = globalThis.process?.env?.MITOS_BASE_URL;
+  if (env) return env;
+  return DEFAULT_BASE_URL;
+}
+
 // Wire shapes from cmd/sandbox-server.
 interface templateWire {
   id: string;
@@ -68,8 +85,8 @@ export class SandboxServer {
   readonly url: string;
   private readonly http: HttpClient;
 
-  constructor(url: string = "http://localhost:8080") {
-    this.url = url.replace(/\/+$/, "");
+  constructor(url?: string) {
+    this.url = resolveBaseUrl(url).replace(/\/+$/, "");
     // Tokenless: the standalone server has no token-minting control plane.
     this.http = new HttpClient(this.url);
   }

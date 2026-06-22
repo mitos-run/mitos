@@ -24,18 +24,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Go uses a manual build (go build ./...) rather than autobuild:
+          # autobuild did not compile the facade packages (cmd/facade,
+          # internal/facade), so their sigs.k8s.io/agent-sandbox imports showed
+          # as "packages could not be found" and those files were only partially
+          # analyzed. A full build extracts every package for complete coverage.
           - language: go
-            build-mode: autobuild
+            build-mode: manual
           - language: python
             build-mode: none
     steps:
       - uses: actions/checkout@v6
+      - name: Set up Go (manual build for full package coverage)
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
+      - name: Build all Go packages so CodeQL extracts the facade (agent-sandbox) deps
+        if: matrix.language == 'go'
+        run: go build ./...
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
