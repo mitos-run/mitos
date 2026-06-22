@@ -562,6 +562,11 @@ func (in *SandboxStatus) DeepCopyInto(out *SandboxStatus) {
 		*out = new(SandboxBudgetSpend)
 		**out = **in
 	}
+	if in.EffectiveBudget != nil {
+		in, out := &in.EffectiveBudget, &out.EffectiveBudget
+		*out = new(SandboxBudget)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Children != nil {
 		in, out := &in.Children, &out.Children
 		*out = make([]SandboxChild, len(*in))
