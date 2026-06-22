@@ -1,0 +1,326 @@
+name: Bench (bare metal)
+
+# Bare-metal counterpart to the "Bench harness, fork-exec and exec round-trip on
+# the KVM runner" phase in .github/workflows/kvm-test.yaml. That phase runs on
+# ubuntu-latest (a noisy, oversubscribed, shared GitHub runner) purely to prove
+# the cmd/bench harness runs end to end; its absolute numbers are explicitly NOT
+# representative of bare metal. THIS workflow runs the SAME proven recipe on a
+# self-hosted, dedicated bare-metal KVM box (Hetzner, 8c/16t, 62GB) so issue #15
+# task 2 ("CI runs the harness on at least one bare-metal-class machine") has a
+# real reference. The template-snapshot build and the cmd/bench invocation are
+# kept identical to the kvm-test.yaml recipe so this works on first run.
+#
+# The runner registration uses the labels: self-hosted, bare-metal, kvm, bench.
+# The runner process runs as root (RUNNER_ALLOW_RUNASROOT), so the sudo calls
+# below are defensive belt-and-braces; they succeed whether or not the step is
+# already root.
+#
+# Persistent-runner hygiene: this workflow builds everything it needs INSIDE the
+# job under a per-run directory in $RUNNER_TEMP and removes it in an always()
+# step. It does NOT depend on any pre-existing box state (firecracker binary,
+# kernel, prior templates) and must not leave any behind.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/bench/**'
+      - 'internal/fork/**'
+      - 'internal/benchstat/**'
+      - 'guest/agent/**'
+      - 'bench/**'
+      - '.github/workflows/bench.yaml'
+
+# Two self-hosted bench boxes share these labels; one bench run at a time keeps
+# the latency distributions clean and avoids two runs fighting over /dev/kvm.
+concurrency:
+  group: bench-bare-metal
+  cancel-in-progress: false
+
+jobs:
+  bench-bare-metal:
+    runs-on: [self-hosted, bare-metal, kvm]
+    timeout-minutes: 30
+    env:
+      # Pinned to match the kvm-test.yaml recipe exactly so the bare-metal
+      # numbers are produced by the same VMM and guest kernel as the shared-CI
+      # phase. A bump here is a reviewed diff alongside the kvm-test.yaml lines.
+      FC_VERSION: v1.15.0
+      KERNEL_VERSION: 6.1.155
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      # A single per-run directory under $RUNNER_TEMP holds the firecracker
+      # binary, the kernel, the agent, the bench template, and all JSON output.
+      # Scoping everything to one run-unique path is what lets the always()
+      # cleanup remove exactly THIS run's state (and only this run's leftover
+      # firecracker processes) without touching a concurrent or future run.
+      - name: Define the per-run workspace
+        run: |
+          set -euo pipefail
+          RUN_DIR="$RUNNER_TEMP/bench-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$RUN_DIR"
+          echo "RUN_DIR=$RUN_DIR" >> "$GITHUB_ENV"
+          echo "Per-run workspace: $RUN_DIR"
+
+      - name: Check KVM availability
+        run: |
+          set -euo pipefail
+          ls -la /dev/kvm
+          grep -cE '(vmx|svm)' /proc/cpuinfo
+          # The runner is root, but be defensive: ensure the bench can open KVM.
+          sudo chmod 666 /dev/kvm
+
+      # Build everything in-job: do NOT trust a firecracker binary that may be
+      # pre-installed on the box. Install the pinned release into the per-run
+      # dir so the box stays stateless and the version is exactly what the
+      # numbers were produced with.
+      - name: Install pinned Firecracker into the per-run dir
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUN_DIR/fc.tgz" \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf "$RUN_DIR/fc.tgz" -C "$RUN_DIR"
+          cp "$RUN_DIR/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" "$RUN_DIR/firecracker"
+          chmod +x "$RUN_DIR/firecracker"
+          echo "FIRECRACKER=$RUN_DIR/firecracker" >> "$GITHUB_ENV"
+          "$RUN_DIR/firecracker" --version | head -1
+
+      - name: Download pinned guest kernel into the per-run dir
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          # Same pinned guest kernel as kvm-test.yaml; recorded in
+          # docs/kernel-cve.md. Bumping is a reviewed diff to this and the
+          # matching kvm-test.yaml / ci.yaml lines, never a floating resolve.
+          KERNEL_KEY="firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
+          echo "Downloading pinned kernel: $KERNEL_KEY"
+          curl -fsSL -o "$RUN_DIR/vmlinux" \
+            "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
+          echo "KERNEL=$RUN_DIR/vmlinux" >> "$GITHUB_ENV"
+          ls -lh "$RUN_DIR/vmlinux"
+
+      - name: Build guest agent
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
+            -o "$RUN_DIR/agent" ./guest/agent/
+          ls -lh "$RUN_DIR/agent"
+
+      # Build the bench template snapshot using the EXACT recipe proven by the
+      # bench phase in kvm-test.yaml: a 256MiB ext4 rootfs with the guest agent
+      # as /init plus the busybox tools the agent's exec path needs, booted in
+      # its own cwd with the relative vsock uds_path the engine bakes at restore
+      # time, then Paused + Full-snapshotted directly into the engine's template
+      # layout (<dataDir>/templates/<id>/snapshot/{mem,vmstate} and rootfs.ext4),
+      # finished with the "verified" marker the Fork-time gate short-circuits on.
+      - name: Build the bench template snapshot
+        run: |
+          set -euo pipefail
+          BENCH_DATA="$RUN_DIR/bench-data"
+          TPL=bench
+          TPL_DIR="$BENCH_DATA/templates/$TPL"
+          WORKDIR="$RUN_DIR/bench-build"
+          mkdir -p "$WORKDIR" "$TPL_DIR/snapshot"
+          echo "BENCH_DATA=$BENCH_DATA" >> "$GITHUB_ENV"
+
+          sudo chmod 666 /dev/kvm
+
+          # Build a rootfs with the guest agent as /init plus the busybox tools
+          # the agent's exec path needs. The bench execs "/bin/true" through the
+          # agent's "/bin/sh -c" wrapper, so sh and true must resolve.
+          dd if=/dev/zero of="$WORKDIR/rootfs.ext4" bs=1M count=256 status=none
+          mkfs.ext4 -q -F "$WORKDIR/rootfs.ext4"
+          mkdir -p "$WORKDIR/mnt"
+          sudo mount -o loop "$WORKDIR/rootfs.ext4" "$WORKDIR/mnt"
+          sudo mkdir -p "$WORKDIR/mnt"/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp "$RUN_DIR/agent" "$WORKDIR/mnt/init"
+          sudo chmod +x "$WORKDIR/mnt/init"
+          sudo curl -fsSL -o "$WORKDIR/mnt/bin/busybox" \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x "$WORKDIR/mnt/bin/busybox"
+          for cmd in sh true echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox "$WORKDIR/mnt/bin/$cmd"
+          done
+          echo "sandbox" | sudo tee "$WORKDIR/mnt/etc/hostname" > /dev/null
+          sudo umount "$WORKDIR/mnt"
+
+          # The engine's Fork loads the snapshot from a RELATIVE vsock uds_path
+          # baked at snapshot time (firecracker.VsockRelPath = "vsock.sock"),
+          # resolved against each fork's per-sandbox working directory. The
+          # source VM is therefore booted in its own cwd with uds_path
+          # "vsock.sock" so the snapshot bakes the relative path the engine
+          # expects.
+          mkdir -p "$WORKDIR/src"
+          SOCK="$WORKDIR/source.sock"
+          ( cd "$WORKDIR/src" && exec "$FIRECRACKER" --api-sock "$SOCK" ) > "$WORKDIR/source-serial.log" 2>&1 &
+          SRC_PID=$!
+          sleep 1
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"$KERNEL\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"vsock.sock\"}"
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "Bench source VM booted, waiting for agent..."
+          sleep 8
+
+          # Pause and snapshot directly into the template layout the engine
+          # loads from: <dataDir>/templates/<id>/snapshot/{mem,vmstate} plus the
+          # template rootfs at <dataDir>/templates/<id>/rootfs.ext4.
+          curl --unix-socket "$SOCK" -X PATCH 'http://localhost/vm' \
+            -H 'Content-Type: application/json' \
+            -d '{"state": "Paused"}'
+          curl --unix-socket "$SOCK" -X PUT 'http://localhost/snapshot/create' \
+            -H 'Content-Type: application/json' \
+            -d "{\"snapshot_type\": \"Full\", \"snapshot_path\": \"$TPL_DIR/snapshot/vmstate\", \"mem_file_path\": \"$TPL_DIR/snapshot/mem\"}"
+          kill "$SRC_PID" 2>/dev/null || true
+          sleep 1
+          cp "$WORKDIR/rootfs.ext4" "$TPL_DIR/rootfs.ext4"
+
+          # The engine refuses to fork an unverified snapshot unless the cheap
+          # "verified" marker is present (internal/fork/verify.go isVerified is a
+          # single stat). This snapshot was built by the workflow directly (not
+          # via CreateTemplate, so no CAS digest is recorded); writing the marker
+          # is the supported way to tell the engine the template is trusted for
+          # this in-CI bench run. The engine's Fork-time gate then short-circuits
+          # on the marker without re-hashing.
+          touch "$TPL_DIR/verified"
+          echo "Bench template laid out:"
+          ls -lhR "$TPL_DIR"
+
+      # Run the three modes against the real KVM-backed engine. set -euo
+      # pipefail plus cmd/bench's own non-zero exit on any fork/exec failure is
+      # the GATE: a crash or zero samples fails the job. We do NOT mask it and we
+      # do NOT gate on any latency threshold.
+      - name: Run bench harness (fork-exec, exec-rt, metering)
+        run: |
+          set -euo pipefail
+          TPL=bench
+
+          go build -o "$RUN_DIR/bench" ./cmd/bench/
+
+          FC_VER="$("$FIRECRACKER" --version | head -1)"
+          KERNEL_VER="$KERNEL_VERSION"
+
+          {
+            echo ""
+            echo "## Bench harness, bare-metal reference (self-hosted Hetzner, 8c/16t)"
+            echo ""
+            echo "Runner: dedicated bare-metal Hetzner box (8c/16t, 62GB), labels \`self-hosted, bare-metal, kvm, bench\`. Firecracker \`${FC_VER}\`, guest kernel \`${KERNEL_VER}\`, busybox/agent rootfs. Reproducible per run; this is the bare-metal counterpart to the shared-CI phase in kvm-test.yaml (issue #15 task 2)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          run_mode() {
+            local mode=$1 json=$2
+            echo "================================"
+            echo "  bench --mode $mode"
+            echo "================================"
+            "$RUN_DIR/bench" \
+              --mode "$mode" \
+              --template "$TPL" \
+              --data-dir "$BENCH_DATA" \
+              --firecracker "$FIRECRACKER" \
+              --kernel "$KERNEL" \
+              --iterations 30 --warmup 5 \
+              --summary --json "$json" | tee "$RUN_DIR/bench-$mode.out"
+            {
+              echo ""
+              echo "### \`$mode\`"
+              echo '```'
+              cat "$RUN_DIR/bench-$mode.out"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # fork-exec: fork -> first-exec P50/P99.
+          run_mode fork-exec "$RUN_DIR/bench-fork.json"
+          # exec-rt: warm exec round-trip.
+          run_mode exec-rt "$RUN_DIR/bench-execrt.json"
+
+          # metering: CoW memory density, 4 real forks of one template. cmd/bench
+          # exits non-zero if a fork fails, so this is gated too.
+          echo "================================"
+          echo "  bench --mode metering --forks 4"
+          echo "================================"
+          "$RUN_DIR/bench" \
+            --mode metering \
+            --template "$TPL" \
+            --data-dir "$BENCH_DATA" \
+            --firecracker "$FIRECRACKER" \
+            --kernel "$KERNEL" \
+            --forks 4 --settle-ms 800 \
+            --summary --json "$RUN_DIR/bench-metering.json" | tee "$RUN_DIR/bench-metering.out"
+          {
+            echo ""
+            echo "### \`metering\` (--forks 4)"
+            echo '```'
+            cat "$RUN_DIR/bench-metering.out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "================================"
+          echo "  Bench harness ran (bare-metal reference numbers above)"
+          echo "================================"
+
+      # Stage the JSON into the workspace so upload-artifact (which globs under
+      # the workspace by default) can pick it up. We copy rather than point at
+      # $RUNNER_TEMP so the cleanup step can still wipe the per-run dir.
+      - name: Stage bench JSON for upload
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bench-artifacts"
+          if [ -n "${RUN_DIR:-}" ]; then
+            cp "$RUN_DIR"/bench-*.json "$GITHUB_WORKSPACE/bench-artifacts/" 2>/dev/null || true
+          fi
+          ls -lh "$GITHUB_WORKSPACE/bench-artifacts/" || true
+
+      - name: Upload bench JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-results-bare-metal
+          path: bench-artifacts/*.json
+          if-no-files-found: warn
+
+      # Persistent-runner hygiene. Always runs, even on failure or cancellation.
+      # Kills ONLY this run's leftover firecracker processes (matched by the
+      # run-unique api-sock path under $RUN_DIR) and removes the per-run dir and
+      # the staged artifacts. Scoping the pkill pattern to $RUN_DIR is what keeps
+      # a concurrent or unrelated firecracker on the box untouched.
+      - name: Cleanup per-run state
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${RUN_DIR:-}" ]; then
+            # Match the api-sock path this run booted firecracker with. The
+            # pattern includes $RUN_DIR so only THIS run's firecracker dies.
+            sudo pkill -f "firecracker --api-sock $RUN_DIR" 2>/dev/null || true
+            sleep 1
+            sudo pkill -9 -f "firecracker --api-sock $RUN_DIR" 2>/dev/null || true
+            # Any per-fork firecracker the engine spawned under the per-run data
+            # dir also carries $RUN_DIR in its path; sweep those too.
+            sudo pkill -9 -f "$RUN_DIR" 2>/dev/null || true
+            # Unmount any rootfs loop mount left behind by a failed build step.
+            mountpoint -q "$RUN_DIR/bench-build/mnt" && sudo umount "$RUN_DIR/bench-build/mnt" 2>/dev/null || true
+            sudo rm -rf "$RUN_DIR"
+            echo "Removed per-run workspace: $RUN_DIR"
+          fi
+          sudo rm -rf "$GITHUB_WORKSPACE/bench-artifacts" 2>/dev/null || true
+          # Surface any stray firecracker still running (should be none of ours).
+          pgrep -af firecracker || echo "no firecracker processes remain"
