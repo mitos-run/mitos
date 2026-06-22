@@ -47,8 +47,12 @@ type Deps struct {
 	Templates TemplateLister
 	Audit     AuditRecorder
 	Logs      LogStreamer
-	Log       *slog.Logger
-	Now       func() time.Time
+	// Capabilities is the deployment edition + feature flags the console
+	// advertises at GET /console/capabilities. Left zero, it defaults to the
+	// self-hosted community edition.
+	Capabilities Capabilities
+	Log          *slog.Logger
+	Now          func() time.Time
 }
 
 // Console is the org-scoped BFF. It reads the caller and org from the request
@@ -84,6 +88,9 @@ func New(deps Deps) *Console {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
+	if deps.Capabilities.Edition == "" {
+		deps.Capabilities = defaultCapabilities()
+	}
 	c := &Console{deps: deps}
 	c.routes()
 	return c
@@ -94,6 +101,7 @@ func New(deps Deps) *Console {
 // dispatch.
 func (c *Console) routes() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /console/capabilities", c.handleCapabilities)
 	mux.HandleFunc("GET /console/keys", c.handleListKeys)
 	mux.HandleFunc("POST /console/keys", c.handleCreateKey)
 	mux.HandleFunc("POST /console/keys/{id}/revoke", c.handleRevokeKey)
