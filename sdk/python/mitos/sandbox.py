@@ -5,12 +5,11 @@ import json
 import threading
 import time
 import uuid
-from typing import Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import httpx
-from kubernetes import client as k8s_client
-from kubernetes.client.rest import ApiException
 
+from mitos._k8s import k8s
 from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.errors import AgentRunError, ExecutionDeadlineError, TimeoutTooLargeError
 from mitos.pty import PtyHandle
@@ -25,6 +24,9 @@ from mitos.types import (
     SandboxInfo,
     SandboxPhase,
 )
+
+if TYPE_CHECKING:
+    from kubernetes import client as k8s_client
 
 
 def _decode_stream_bytes(value) -> str:
@@ -261,7 +263,7 @@ class Sandbox:
         self._api = api
         # Reads the <name>-sandbox-token Secret; defaults to a CoreV1Api on
         # the same loaded kube config the CustomObjectsApi came from.
-        self._core_api = core_api if core_api is not None else k8s_client.CoreV1Api()
+        self._core_api = core_api if core_api is not None else k8s().client.CoreV1Api()
         self._endpoint = _endpoint
         self._phase = _phase
         self._sandbox_id: Optional[str] = None
@@ -336,7 +338,7 @@ class Sandbox:
             secret = self._core_api.read_namespaced_secret(
                 name=f"{self.name}-sandbox-token", namespace=self.namespace
             )
-        except ApiException:
+        except k8s().ApiException:
             return
         data = secret.data or {}
         token_b64 = data.get("token")
