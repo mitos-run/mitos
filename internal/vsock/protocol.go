@@ -28,6 +28,16 @@ const (
 	// guest never includes process environments or command-line arguments, which
 	// could carry secrets, only the program name.
 	TypeVitals RequestType = "vitals"
+	// TypeTunnel opens a raw TCP-over-vsock tunnel to a guest loopback port
+	// (issue #228). Like exec_stream it uses a DEDICATED vsock connection: the
+	// host sends one TunnelRequest line, the guest dials 127.0.0.1:<port> inside
+	// the VM, replies with a single TunnelAck line, and on success the connection
+	// becomes a raw bidirectional byte pipe between the host and the guest TCP
+	// socket until either side closes. No further framing follows the ack, so a
+	// tunnel never multiplexes; one stream carries exactly one TCP connection.
+	// The guest dials ONLY loopback (any other target is refused) so the tunnel
+	// cannot be used to reach the guest's other interfaces or the host network.
+	TypeTunnel RequestType = "tunnel"
 )
 
 // MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
@@ -65,6 +75,28 @@ type Request struct {
 	RunCode      *RunCodeRequest      `json:"run_code,omitempty"`
 	Pty          *PtyRequest          `json:"pty,omitempty"`
 	Vitals       *VitalsRequest       `json:"vitals,omitempty"`
+	Tunnel       *TunnelRequest       `json:"tunnel,omitempty"`
+}
+
+// TunnelRequest opens a raw TCP-over-vsock tunnel (issue #228) to Port on the
+// guest's loopback interface (127.0.0.1:Port). It is sent once on a DEDICATED
+// vsock connection; the guest replies with a single TunnelAck line and, on
+// success, the connection becomes a raw bidirectional byte pipe to the guest
+// TCP socket. Port is a plain port number and is safe to log; the bytes that
+// flow afterward are the tunneled application traffic and are NEVER logged.
+type TunnelRequest struct {
+	Port int `json:"port"`
+}
+
+// TunnelAck is the single newline-delimited JSON line the guest writes in reply
+// to a TunnelRequest, BEFORE any raw bytes flow. OK true means the guest dialed
+// 127.0.0.1:Port successfully and the connection is now a raw byte pipe; OK
+// false means the dial was refused (the guest port is not listening, or the
+// target was not loopback) and Error carries the LLM-legible cause. Error never
+// carries a secret value: it is the guest dial error string only.
+type TunnelAck struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // VitalsRequest is the (currently empty) payload for a TypeVitals telemetry
