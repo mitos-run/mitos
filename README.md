@@ -148,6 +148,8 @@ The TypeScript SDK (`@mitos/sdk`) exposes the same one-liner `sandbox(image)`, `
 
 The Ruby SDK is a thin, dependency-free (standard-library only) client for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, and terminate. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/ruby/README.md](sdk/ruby/README.md).
 
+The Rust SDK is a thin, blocking (no async runtime) client for the standalone and hosted sandbox-server REST API with the same direct-mode surface: create a template, fork a sandbox, run `exec`, and terminate. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/rust/README.md](sdk/rust/README.md).
+
 The Java SDK is a thin, dependency-free (JDK standard library only) client for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, and terminate. It targets Java 17, covers direct mode only, and parses the server envelope into a structured `MitosException`. Cluster mode stays Python and TypeScript. See [sdk/java/README.md](sdk/java/README.md).
 
 ### CLI
@@ -303,7 +305,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (engine path; husk wiring tracked [#24](https://github.com/mitos-run/mitos/issues/24)) | [#24](https://github.com/mitos-run/mitos/issues/24) |
 | Code interpreter | `run_code` with a stateful kernel and rich multi-MIME results, in both SDKs and the MCP server; fail-closed `KernelUnavailable` until the kernel ships in the husk base image | [docs/mcp.md](docs/mcp.md) |
 | LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by both SDKs into a structured `AgentRunError` | [#28](https://github.com/mitos-run/mitos/issues/28) |
-| SDKs and surfaces | Python and TypeScript SDKs with a one-liner `sandbox(image)`, lazy default pool, `from_name` reconnect, and async Python client; a standard-library-only Ruby SDK for direct sandbox-server mode; plus the `mitos` CLI and an MCP server | [docs/cli.md](docs/cli.md) |
+| SDKs and surfaces | Python and TypeScript SDKs with a one-liner `sandbox(image)`, lazy default pool, `from_name` reconnect, and async Python client; a standard-library-only Ruby SDK and a thin blocking Rust SDK for direct sandbox-server mode; plus the `mitos` CLI and an MCP server | [docs/cli.md](docs/cli.md) |
 
 ### Kubernetes-native
 
@@ -340,6 +342,7 @@ flowchart TB
     PY["Python SDK"]
     TS["TypeScript SDK / @mitos/sdk"]
     RB["Ruby SDK (direct mode)"]
+    RS["Rust SDK (direct mode)"]
     CLI["mitos CLI / mitos-mcp"]
   end
 
