@@ -20,7 +20,9 @@ permissions:
 jobs:
   release-assets:
     # Build and attach the per-platform archives to the release. Needs
-    # contents: write to upload assets onto the GitHub Release.
+    # contents: write to upload assets onto the GitHub Release. Only runs for
+    # plugin releases tagged v*, so chart releases (mitos-*) are ignored.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
