@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/preview"
 )
@@ -25,12 +27,22 @@ import (
 // Both share the same fork engine and guest agent protocol.
 
 type server struct {
-	mu          sync.RWMutex
-	templateMgr *firecracker.TemplateManager
-	rootfsPath  string
-	templates   map[string]*templateInfo
-	sandboxes   map[string]*sandboxInfo
-	mockMode    bool
+	mu sync.RWMutex
+	// engine is the real, KVM-backed fork engine used in real mode to build
+	// templates, fork sandboxes (restore a snapshot), and reap them. It is the
+	// same proven path cmd/mem-smoke and cmd/crash-reap-smoke drive. It is nil
+	// in mock mode AND in real-mode unit tests built via newServer (which never
+	// touches KVM): every real-mode handler gates engine use on engine != nil so
+	// those tests keep using the local-agent fallback path. main() constructs and
+	// assigns it in real mode after newServer, because fork.NewEngine calls
+	// validateKVM and would fail on a non-KVM host (CI).
+	engine *fork.Engine
+	// dataDir roots the engine data directory and the per-sandbox vsock UDS paths.
+	dataDir    string
+	rootfsPath string
+	templates  map[string]*templateInfo
+	sandboxes  map[string]*sandboxInfo
+	mockMode   bool
 	// idempotency maps an Idempotency-Key header value to the resource id a prior
 	// creating call (template create or fork) returned under that key, with the
 	// time it was recorded so an entry expires after idempotencyTTL. A repeat with
@@ -65,6 +77,7 @@ type server struct {
 // the single construction seam main() and the flag-plumbing test share.
 func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, maxExecTimeoutSecs int) *server {
 	s := &server{
+		dataDir:              dataDir,
 		rootfsPath:           rootfsPath,
 		templates:            make(map[string]*templateInfo),
 		sandboxes:            make(map[string]*sandboxInfo),
@@ -219,6 +232,7 @@ func main() {
 		firecrackerBin       string
 		kernelPath           string
 		rootfsPath           string
+		agentBin             string
 		mockMode             bool
 		auditLog             string
 		maxStreamsPerSandbox int
@@ -231,7 +245,8 @@ func main() {
 	flag.StringVar(&dataDir, "data-dir", "/tmp/sandbox-server", "Data directory")
 	flag.StringVar(&firecrackerBin, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
 	flag.StringVar(&kernelPath, "kernel", "", "Guest kernel path (required unless --mock)")
-	flag.StringVar(&rootfsPath, "rootfs", "", "Guest rootfs path (required unless --mock)")
+	flag.StringVar(&rootfsPath, "rootfs", "", "Guest rootfs path the engine builds templates from (required unless --mock). The guest agent is supplied separately via --agent-bin and injected as /init by the engine; pass a plain rootfs here.")
+	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary the engine injects as /init when it builds a template rootfs (required unless --mock). Mirrors mem-smoke's --agent-bin.")
 	flag.BoolVar(&mockMode, "mock", false, "Mock mode (no KVM, simulated responses)")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the fork path. 0 disables the cap (unbounded, the prior behavior). Matches the forkd default of 16.")
@@ -240,8 +255,8 @@ func main() {
 	flag.IntVar(&previewTTLSecs, "preview-ttl-seconds", 3600, "How long a minted preview URL stays valid (issue #126). Default 3600 (1h).")
 	flag.Parse()
 
-	if !mockMode && (kernelPath == "" || rootfsPath == "") {
-		fmt.Fprintln(os.Stderr, "error: --kernel and --rootfs are required (or use --mock)")
+	if !mockMode && (kernelPath == "" || rootfsPath == "" || agentBin == "") {
+		fmt.Fprintln(os.Stderr, "error: --kernel, --rootfs and --agent-bin are required (or use --mock)")
 		os.Exit(1)
 	}
 
@@ -282,9 +297,23 @@ func main() {
 	s.sandboxAPI.SetAuditor(auditor)
 
 	if !mockMode {
-		// Standalone sandbox-server keeps the direct-exec dev path; the
-		// jailer launch path is wired through forkd.
-		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, firecracker.JailerConfig{})
+		// Real mode forks real VMs through the proven KVM-backed fork engine, the
+		// same path cmd/mem-smoke and cmd/crash-reap-smoke drive: CreateTemplate
+		// builds a snapshot template (injecting --agent-bin as /init and appending
+		// init=/init to the boot args), Fork restores it into a live microVM and
+		// returns the real per-fork vsock UDS, and Terminate reaps it. The engine
+		// is constructed HERE (not in newServer) because fork.NewEngine calls
+		// validateKVM and would fail on a non-KVM host; the real-mode unit tests
+		// build the server via newServer and never touch KVM.
+		engine, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, firecracker.JailerConfig{}, fork.EngineOpts{
+			AllowUnverified: true,
+			AgentBinPath:    agentBin,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: fork engine: %v\n", err)
+			os.Exit(1)
+		}
+		s.engine = engine
 	}
 
 	mux := http.NewServeMux()
@@ -407,10 +436,13 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	if s.mockMode {
 		time.Sleep(100 * time.Millisecond)
-	} else {
-		cfg := firecracker.DefaultVMConfig()
-		cfg.RootfsPath = s.rootfsPath
-		if _, err := s.templateMgr.CreateTemplate(req.ID, cfg, nil); err != nil {
+	} else if s.engine != nil {
+		// Real mode: build the snapshot template through the fork engine from the
+		// base rootfs. The engine injects the guest agent (--agent-bin) as /init
+		// and appends init=/init to the boot args, which the prior
+		// TemplateManager-direct path did not, so an agent-at-/init rootfs no
+		// longer panics with "no working init found".
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil); err != nil {
 			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return
@@ -546,13 +578,41 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(800 * time.Microsecond)
 	}
 
+	// vsockPath is the per-fork guest agent UDS exec/files dial through. In real
+	// mode with a live engine it is the REAL path the restore returned; otherwise
+	// (real-mode unit tests with no engine) it is derived from the data dir, which
+	// does not exist on disk so the standalone unix fallback routes the dial to the
+	// local agent. forkTimeMs is the measured restore time when the engine forks.
+	vsockPath := ""
+	forkTimeMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if !s.mockMode {
+		if s.engine != nil {
+			// Real fork: restore the snapshot into a live microVM through the proven
+			// engine path. On failure release the idempotency reservation and reap any
+			// partial VM so a failed fork never leaks a Firecracker process.
+			res, err := s.engine.Fork(req.Template, req.ID, fork.ForkOpts{})
+			if err != nil {
+				s.releaseIdempotent(idemKey)
+				_ = s.engine.Terminate(req.ID)
+				errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
+				return
+			}
+			vsockPath = res.VsockPath
+			forkTimeMs = res.ForkTimeMs
+		} else {
+			// No engine (real-mode unit tests): derive the vsock path from the data
+			// dir. It will not exist, so RegisterSandbox's unix fallback applies.
+			vsockPath = filepath.Join(s.dataDir, "sandboxes", req.ID, "vsock.sock")
+		}
+	}
+
 	// Inherit the template's network posture (issue #219). The same CRD-shaped
 	// NetworkPolicy drives the host nftables datapath on a real forkd; here it is
 	// recorded on the sandbox so the policy that governs its traffic is visible.
 	info := &sandboxInfo{
 		ID: req.ID, TemplateID: req.Template,
 		Endpoint: "http://localhost:8080", CreatedAt: time.Now(),
-		ForkTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
+		ForkTimeMs: forkTimeMs,
 		Network:    toNetworkPolicy(tmpl.Network),
 	}
 
@@ -565,10 +625,12 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// fork is rejected and never registered. The mock mode has no guest, so it
 	// skips the handshake.
 	if !s.mockMode {
-		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
 		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
 			// Fail closed: a fork whose guest agent is unreachable cannot reseed.
 			s.releaseIdempotent(idemKey)
+			if s.engine != nil {
+				_ = s.engine.Terminate(req.ID)
+			}
 			errResp(w, fmt.Sprintf("fork %q: guest agent not connected: %v", req.ID, err), 500)
 			return
 		}
@@ -576,9 +638,12 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		if err := s.reseedFork(req.ID); err != nil {
 			// Fail closed: drop the half-wired sandbox so an un-reseeded VM that
 			// shares CRNG state with its siblings is never served. The error
-			// carries no entropy or secret values.
+			// carries no entropy or secret values. Reap the restored VM too.
 			s.sandboxAPI.UnregisterSandbox(req.ID)
 			s.releaseIdempotent(idemKey)
+			if s.engine != nil {
+				_ = s.engine.Terminate(req.ID)
+			}
 			errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
 			return
 		}
@@ -643,6 +708,16 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sandboxAPI.UnregisterSandbox(id)
+	// Real mode: reap the live microVM through the engine (kills the Firecracker
+	// process, removes its working dir, drops the journal record), the same path
+	// crash-reap-smoke asserts. A terminate error is logged but does not fail the
+	// response: the sandbox is already unregistered and gone from our maps, and
+	// the engine's startup reconcile reaps any residue on a later restart.
+	if s.engine != nil {
+		if err := s.engine.Terminate(id); err != nil {
+			log.Printf("terminate sandbox %q: engine reap: %v", id, err)
+		}
+	}
 	log.Printf("terminated sandbox %q", id)
 	resp(w, map[string]string{"status": "terminated", "id": id})
 }

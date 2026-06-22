@@ -4,10 +4,7 @@ import re
 import uuid
 from typing import Optional
 
-from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
-from kubernetes.client.rest import ApiException
-
+from mitos._k8s import k8s
 from mitos.errors import AgentRunError
 from mitos.sandbox import Sandbox
 from mitos.types import PoolStatus, SandboxPhase
@@ -45,15 +42,16 @@ class AgentRun:
         in_cluster: bool = False,
         allow_default_pool: bool = True,
     ):
+        _k8s = k8s()
         if in_cluster:
-            k8s_config.load_incluster_config()
+            _k8s.config.load_incluster_config()
         else:
-            k8s_config.load_kube_config(config_file=kubeconfig)
+            _k8s.config.load_kube_config(config_file=kubeconfig)
 
-        self._api = k8s_client.CustomObjectsApi()
+        self._api = _k8s.client.CustomObjectsApi()
         # Same loaded config as the CustomObjectsApi; used to read the
         # per-sandbox bearer token Secrets.
-        self._core_api = k8s_client.CoreV1Api()
+        self._core_api = _k8s.client.CoreV1Api()
         self._namespace = namespace
         self._allow_default_pool = allow_default_pool
 
@@ -127,7 +125,7 @@ class AgentRun:
             )
             self._verify_pool_image(existing, name, image)
             return name
-        except ApiException as exc:
+        except k8s().ApiException as exc:
             if exc.status != 404:
                 raise
 
@@ -169,7 +167,7 @@ class AgentRun:
                 plural="sandboxtemplates",
                 name=template_name,
             )
-        except ApiException as exc:
+        except k8s().ApiException as exc:
             # Pool with no resolvable template: cannot prove the image, so fail
             # closed rather than risk the wrong image.
             raise AgentRunError(
@@ -198,7 +196,7 @@ class AgentRun:
                 plural=plural,
                 body=body,
             )
-        except ApiException as exc:
+        except k8s().ApiException as exc:
             if exc.status != 409:  # raced another creator; reuse it
                 raise
 
