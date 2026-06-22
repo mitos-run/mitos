@@ -17,7 +17,7 @@ These are load-bearing and were confirmed by reading the files:
 - `deploy/controller/namespace.yaml` is the only namespace manifest and carries NO `pod-security.kubernetes.io/*` labels.
 - `deploy/kustomization.yaml` lists every base resource; there is no pull-secret, no kernel-staging job, and no PSA labelling.
 - `deploy/rbac/serviceaccount.yaml` has no `imagePullSecrets`.
-- All images are `ghcr.io/paperclipinc/mitos-*` (controller, forkd, husk-stub, kvm-device-plugin).
+- All images are `ghcr.io/mitos-run/mitos-*` (controller, forkd, husk-stub, kvm-device-plugin).
 - `deploy/daemon/daemonset.yaml`: forkd has NO `--agent-bin` arg (cmd/forkd default is empty; image builds fail without it), NO `privileged: true` (it uses an explicit capability list), NO `DOCKER_CONFIG` env / docker-config mount, and DOES carry jailer args `--jailer`, `--chroot-base`, `--uid-range`. forkd default `--kernel=/var/lib/mitos/vmlinux`.
 - `internal/fork/imagebuild.go:19` errors when `--agent-bin` is empty and an OCI image build is requested. `Dockerfile.forkd` does not place an agent binary in the image.
 - `internal/controller/huskpod.go`: husk pods mount the kernel from `<DataDir>/vmlinux` (default `/var/lib/mitos/vmlinux`) and need the snapshot present on the node. The PKI secrets `mitos-forkd-tls` (leaf, key `tls.crt`/`tls.key`) and `mitos-ca` (key `ca.crt`) are mounted into husk pods in `pool.Namespace` (e.g. `default`).
@@ -246,7 +246,7 @@ Expected: FAIL (no output).
 Append to `deploy/rbac/serviceaccount.yaml` (after the `metadata:` block, at the top level of the document):
 
 ```yaml
-# The controller pulls ghcr.io/paperclipinc/mitos-controller. The pull
+# The controller pulls ghcr.io/mitos-run/mitos-controller. The pull
 # credential ships in deploy/imagepullsecret.yaml (populate it once); naming it
 # here means every controller pod gets it without a manual patch.
 imagePullSecrets:
@@ -420,7 +420,7 @@ Add the volume to the `volumes:` list (after the `ca` volume). The same `ghcr-pu
 forkd's pod spec has no serviceAccountName. Add the imagePullSecret directly on the pod spec (the forkd DaemonSet uses the default SA, which has no pull secret). Insert at the top of the forkd pod `spec:` (just under `spec:`, before `nodeSelector:`):
 
 ```yaml
-      # ghcr-pull so the kubelet can pull ghcr.io/paperclipinc/mitos-forkd.
+      # ghcr-pull so the kubelet can pull ghcr.io/mitos-run/mitos-forkd.
       imagePullSecrets:
         - name: ghcr-pull
 ```
@@ -632,7 +632,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/mitos-run/mitos/internal/controller"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

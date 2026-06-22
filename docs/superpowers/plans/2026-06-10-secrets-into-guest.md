@@ -312,7 +312,7 @@ with:
 	cmd.Env = guestenv.Merge(os.Environ(), configured, req.Env)
 ```
 
-(import `"github.com/paperclipinc/mitos/internal/guestenv"`.)
+(import `"github.com/mitos-run/mitos/internal/guestenv"`.)
 
 - [ ] **Step 2: Cross-compile check**
 
@@ -386,7 +386,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/mitos-run/mitos/internal/fork"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,
@@ -668,7 +668,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	v1alpha1 "github.com/mitos-run/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/meta"

@@ -11,7 +11,7 @@ def test_default_pool_name_slug():
     assert default_pool_name("python:3.12-slim") == "mitos-default-python-3.12-slim"
     assert default_pool_name("Python") == "mitos-default-python"  # lowercased
     # Slug is bounded to 40 chars after the prefix.
-    long = default_pool_name("ghcr.io/paperclipinc/agent-python-with-a-very-long-tag:3.12")
+    long = default_pool_name("ghcr.io/mitos-run/agent-python-with-a-very-long-tag:3.12")
     assert long.startswith("mitos-default-")
     assert len(long[len("mitos-default-"):]) <= 40
 

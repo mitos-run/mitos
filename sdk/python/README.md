@@ -1,6 +1,6 @@
 # mitos Python SDK
 
-Python client for [paperclipinc/mitos](https://github.com/paperclipinc/mitos):
+Python client for [mitos-run/mitos](https://github.com/mitos-run/mitos):
 snapshot-fork sandboxes for AI agents on Kubernetes.
 
 Two modes:
@@ -418,5 +418,5 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-See the [repository README](https://github.com/paperclipinc/mitos#readme)
+See the [repository README](https://github.com/mitos-run/mitos#readme)
 for project status; this SDK is pre-alpha and its API may change.

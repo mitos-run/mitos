@@ -31,7 +31,7 @@ spec:
               {{`{{ printf "%.3f" $value }}`}}/s for the reason {{`{{ $labels.reason }}`}}
               over the last 5m, sustained for 10m. This is a structural failure,
               not a transient requeue. Threshold is environment-tunable.
-            runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/ClaimErrorRateHigh.md"
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ClaimErrorRateHigh.md"
 
         - alert: ClaimsPendingSustained
           # A sustained pending-requeue rate is capacity exhaustion.
@@ -47,7 +47,7 @@ spec:
               {{`{{ printf "%.3f" $value }}`}}/s over 5m, sustained for 15m. The fleet
               cannot place new claims: warm pools are drained or nodes are full.
               Threshold is environment-tunable.
-            runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/ClaimsPendingSustained.md"
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ClaimsPendingSustained.md"
 
     - name: mitos-pools
       rules:
@@ -65,7 +65,7 @@ spec:
               The warm pool is starved; new claims into this pool will cold-fork
               or pend. Compare against the pool's desired warm count. Threshold
               is environment-tunable.
-            runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/WarmPoolStarved.md"
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/WarmPoolStarved.md"
 
     - name: mitos-gc
       rules:
@@ -83,7 +83,7 @@ spec:
               {{`{{ printf "%.4f" $value }}`}}/s over 15m, sustained for 15m. VMs are
               leaking and being cleaned up; investigate the source of the leak.
               Threshold is environment-tunable.
-            runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/OrphanSweepSpike.md"
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/OrphanSweepSpike.md"
 
     - name: mitos-fork-latency
       rules:
@@ -106,7 +106,7 @@ spec:
               cluster budget, sustained for 10m. The <=10ms p99 fork is a
               bare-metal target, not this threshold; this budget is
               environment-tunable. See the runbook for what drives fork latency.
-            runbook_url: "https://github.com/paperclipinc/mitos/blob/main/docs/runbooks/ForkLatencyHigh.md"
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ForkLatencyHigh.md"
 
     - name: mitos-distribution
       rules:

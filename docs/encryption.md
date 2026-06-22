@@ -3,7 +3,7 @@
 Status: mechanism done and CI-proven (PR1); key-custody hardening done (PR2).
 Issue #31 is addressed: mechanism in PR1, custody in PR2.
 
-This document describes how Paperclip encrypts template snapshots and volumes at
+This document describes how mitos encrypts template snapshots and volumes at
 rest, why copy-on-write (CoW) page sharing across forks is preserved, how
 erasure becomes crypto-shredding, and the PR1 vs PR2 split. It is the design
 reference behind the threat-model row "Encryption at rest + crypto-shredding"
