@@ -144,7 +144,23 @@ The TypeScript SDK (`@mitos/sdk`) exposes the same one-liner `sandbox(image)`, `
 
 ### CLI
 
+Install the `mitos` CLI. The full per-OS matrix, the env vars the installer
+honors, and checksum verification are in [docs/install.md](docs/install.md).
+
+| Method | Status |
+| --- | --- |
+| `go install mitos.run/mitos/cmd/mitos@latest` | Works today (needs a Go toolchain). |
+| `curl -fsSL https://get.mitos.run \| sh` | Available from the first tagged release (downloads + verifies the release archive). |
+| Manual release binary (download, checksum, extract) | Available from the first tagged release. |
+| Homebrew (`brew install mitos-run/tap/mitos`) | Coming with releases (publishes once the tap is wired). |
+| Debian/RPM packages (`.deb`, `.rpm`) | Coming with releases (built from the first tagged release). |
+| Windows (`scoop`, `winget`) | Coming with releases. |
+
 ```bash
+# Works today with a Go toolchain:
+go install mitos.run/mitos/cmd/mitos@latest
+
+# Or build from a checkout:
 go build -o mitos ./cmd/mitos/
 
 mitos sandbox create --pool dev-default

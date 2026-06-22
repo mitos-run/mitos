@@ -42,6 +42,13 @@ func run(args []string) int {
 		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
 	}
 
+	// version prints build metadata (injected via -ldflags at release time) and
+	// needs no cluster backend, so it is handled before any kubeconfig probe.
+	if rest[0] == "version" || rest[0] == "--version" || rest[0] == "-v" {
+		printVersion(os.Stdout)
+		return 0
+	}
+
 	// The dev subcommand orchestrates kind/kubectl and needs no cluster backend.
 	if rest[0] == "dev" {
 		return runDev(ctx, rest[1:])
