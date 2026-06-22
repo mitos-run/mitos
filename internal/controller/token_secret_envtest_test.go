@@ -259,3 +259,91 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 agent-missing", status, body)
 	}
 }
+
+// TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent proves the
+// per-fork credential reissue property for the platform bearer token
+// (fork-correctness row 3): a fork does NOT present its parent's bearer token,
+// each fork's token is freshly minted and DISTINCT from the source claim's, so a
+// fork cannot authenticate to the sandbox HTTP API as its parent. (Tenant Secret
+// values are a different class governed by the default-deny inheritance gate;
+// see TestLiveForkOfSecretHolderIsRejectedByDefault.)
+func TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent(t *testing.T) {
+	stop, err := controller.StartFakeForkdNode(testRegistry, "reissue-node-1", "reissue-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "reissue-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "reissue-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "reissue-tmpl"},
+			Replicas:    1,
+		},
+	}
+	claim := &v1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "reissue-claim", Namespace: "default"},
+		Spec: v1alpha1.SandboxClaimSpec{
+			PoolRef: v1alpha1.LocalObjectReference{Name: "reissue-pool"},
+		},
+	}
+	for _, obj := range []client.Object{template, pool, claim} {
+		if err := k8sClient.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, claim)
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	waitClaimReady(t, "reissue-claim")
+	c := newCoreClient(t)
+
+	// The parent's bearer token.
+	parentSecret := waitTokenSecret(t, c, "reissue-claim-sandbox-token")
+	parentToken := string(parentSecret.Data["token"])
+	assertHex64(t, parentToken)
+
+	forkObj := &v1alpha1.SandboxFork{
+		ObjectMeta: metav1.ObjectMeta{Name: "reissue-fork", Namespace: "default"},
+		Spec: v1alpha1.SandboxForkSpec{
+			SourceRef: v1alpha1.LocalObjectReference{Name: "reissue-claim"},
+			Replicas:  1,
+		},
+	}
+	if err := k8sClient.Create(ctx, forkObj); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, forkObj) })
+
+	var forkInfo *v1alpha1.ForkInfo
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var got v1alpha1.SandboxFork
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "reissue-fork", Namespace: "default"}, &got); err == nil {
+			if got.Status.ReadyForks >= 1 && len(got.Status.Forks) >= 1 {
+				forkInfo = &got.Status.Forks[0]
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if forkInfo == nil {
+		t.Fatal("fork did not become ready within 15s")
+	}
+
+	// The fork's bearer token: freshly minted and DISTINCT from the parent's.
+	forkSecret := waitTokenSecret(t, c, forkInfo.Name+"-sandbox-token")
+	forkToken := string(forkSecret.Data["token"])
+	assertHex64(t, forkToken)
+
+	if forkToken == parentToken {
+		t.Fatal("fork inherited the parent's bearer token: a fork could authenticate to the sandbox API as its parent (per-fork credential reissue violated)")
+	}
+}
