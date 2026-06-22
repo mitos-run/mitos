@@ -195,7 +195,7 @@ func configureNetwork(cfg *vsock.NotifyForkedNetwork) {
 		return
 	}
 	addr := fmt.Sprintf("%s/%d", cfg.GuestIP, cfg.PrefixLen)
-	if err := guestnet.Configure(guestNetIface, cfg.GuestIP, cfg.GatewayIP, cfg.PrefixLen); err != nil {
+	if err := guestnet.Configure(guestNetIface, cfg.GuestMAC, cfg.GuestIP, cfg.GatewayIP, cfg.PrefixLen); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox-agent: net config failed: %v\n", err)
 	}
 	// Point the guest at the controlled resolver so every name lookup goes

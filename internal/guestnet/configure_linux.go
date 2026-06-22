@@ -14,11 +14,15 @@ import (
 // configuration failure as "no network", which fails closed (no egress).
 const recvTimeoutSec = 5
 
-// Configure brings iface up, flushes its IPv4 addresses, assigns guestIP/prefix,
-// and replaces the default route via gatewayIP, all over a single rtnetlink
-// socket. It depends on no in-rootfs binary, so it works on arbitrary OCI-image
+// Configure sets iface's hardware address (when mac is non-empty), brings it up,
+// flushes its IPv4 addresses, assigns guestIP/prefix, and replaces the default
+// route via gatewayIP, all over a single rtnetlink socket. The MAC is applied
+// before the link comes up and the address is assigned, using the standard
+// down/set/up sequence the kernel requires for a hardware-address change. An
+// empty mac leaves the snapshot-baked address untouched (just link up + addr +
+// route). It depends on no in-rootfs binary, so it works on arbitrary OCI-image
 // templates that ship no `ip`.
-func Configure(iface, guestIP, gatewayIP string, prefixLen int) error {
+func Configure(iface, mac, guestIP, gatewayIP string, prefixLen int) error {
 	ip := net.ParseIP(guestIP)
 	if ip == nil || ip.To4() == nil {
 		return fmt.Errorf("guestnet: invalid guest ip %q", guestIP)
@@ -29,6 +33,14 @@ func Configure(iface, guestIP, gatewayIP string, prefixLen int) error {
 	}
 	if prefixLen < 0 || prefixLen > 32 {
 		return fmt.Errorf("guestnet: invalid prefix len %d", prefixLen)
+	}
+	var hw net.HardwareAddr
+	if mac != "" {
+		parsed, err := net.ParseMAC(mac)
+		if err != nil {
+			return fmt.Errorf("guestnet: invalid mac %q: %w", mac, err)
+		}
+		hw = parsed
 	}
 
 	ifi, err := net.InterfaceByName(iface)
@@ -52,6 +64,19 @@ func Configure(iface, guestIP, gatewayIP string, prefixLen int) error {
 
 	var seq uint32
 	next := func() uint32 { seq++; return seq }
+
+	// Apply the per-fork MAC before bringing the link up: the kernel requires
+	// the link down to change the hardware address on most drivers, so the
+	// sequence is down, set MAC, then up. When no MAC was delivered, skip the
+	// down/set steps and just bring the link up (unchanged legacy behavior).
+	if hw != nil {
+		if err := doRequest(s, buildSetLinkDown(next(), idx)); err != nil {
+			return fmt.Errorf("guestnet: link down: %w", err)
+		}
+		if err := doRequest(s, buildSetMAC(next(), idx, hw)); err != nil {
+			return fmt.Errorf("guestnet: set mac %s: %w", hw, err)
+		}
+	}
 
 	if err := doRequest(s, buildSetLinkUp(next(), idx)); err != nil {
 		return fmt.Errorf("guestnet: link up: %w", err)

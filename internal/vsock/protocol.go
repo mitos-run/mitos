@@ -166,13 +166,22 @@ type VolumeMountEntry struct {
 }
 
 // NotifyForkedNetwork is the per-fork eth0 configuration the guest agent
-// applies after a restore: assign GuestIP/PrefixLen to eth0 and install a
-// default route via GatewayIP (the host side of the per-sandbox /30). All
-// fields are plain addresses and safe to log.
+// applies after a restore: set eth0's hardware address to GuestMAC (when
+// present) before the address is assigned, then assign GuestIP/PrefixLen to
+// eth0 and install a default route via GatewayIP (the host side of the
+// per-sandbox /30). Every fork restores the same snapshot, which bakes one
+// shared placeholder MAC, so delivering a distinct GuestMAC per fork is what
+// gives each fork its own eth0 MAC. All fields are plain addresses and safe to
+// log.
 type NotifyForkedNetwork struct {
 	GuestIP   string `json:"guest_ip"`
 	GatewayIP string `json:"gateway_ip"`
 	PrefixLen int    `json:"prefix_len"`
+	// GuestMAC, when non-empty, is this fork's distinct eth0 hardware address
+	// (e.g. "02:..:.."). The guest agent sets it on eth0 before bringing the
+	// link up and assigning the address. Empty leaves the snapshot-baked MAC in
+	// place, so existing callers that do not deliver a MAC are unaffected.
+	GuestMAC string `json:"guest_mac,omitempty"`
 	// ResolverIP, when non-empty, is the node-wide DNS resolver the guest must
 	// query for name-based egress. The guest agent writes it as the sole
 	// nameserver in /etc/resolv.conf so every name lookup goes through the

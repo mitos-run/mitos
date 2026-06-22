@@ -506,6 +506,7 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 			GuestIP:    id.GuestIP.String(),
 			GatewayIP:  id.HostIP.String(),
 			PrefixLen:  30,
+			GuestMAC:   id.GuestMAC,
 			ResolverIP: guestResolver,
 		},
 	}, nil
