@@ -539,7 +539,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"github.com/mitos-run/mitos/internal/vsock"
 )
 
 // readFrames drives handleExecStream over an in-process socketpair: it writes
@@ -626,8 +626,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/mitos/internal/guestenv"
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"github.com/mitos-run/mitos/internal/guestenv"
+	"github.com/mitos-run/mitos/internal/vsock"
 )
 
 // streamChunkBytes bounds one stdout/stderr read before it is framed. 32 KiB
@@ -835,7 +835,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/vsock"
+	"github.com/mitos-run/mitos/internal/vsock"
 )
 
 // startFakeStreamUDS serves the Firecracker UDS preamble then writes the given

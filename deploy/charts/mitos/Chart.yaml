@@ -16,9 +16,9 @@ keywords:
   - fork
   - ai-agents
   - operator
-home: https://github.com/paperclipinc/mitos
+home: https://github.com/mitos-run/mitos
 sources:
-  - https://github.com/paperclipinc/mitos
+  - https://github.com/mitos-run/mitos
 maintainers:
-  - name: paperclipinc
-    url: https://github.com/paperclipinc/mitos
+  - name: mitos-run
+    url: https://github.com/mitos-run/mitos

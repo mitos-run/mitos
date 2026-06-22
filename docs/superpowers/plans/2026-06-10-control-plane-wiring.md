@@ -41,13 +41,13 @@ protoc --version   # expect: libprotoc 2x.x
 In `proto/forkd.proto` replace:
 
 ```proto
-option go_package = "github.com/paperclipinc/mitos/proto/forkd";
+option go_package = "github.com/mitos-run/mitos/proto/forkd";
 ```
 
 with:
 
 ```proto
-option go_package = "github.com/paperclipinc/mitos/proto/forkd;forkdpb";
+option go_package = "github.com/mitos-run/mitos/proto/forkd;forkdpb";
 ```
 
 - [x] **Step 3: Update the Makefile proto target**
@@ -57,8 +57,8 @@ Replace the existing `proto:` target with:
 ```makefile
 proto:
 	protoc \
-	  --go_out=. --go_opt=module=github.com/paperclipinc/mitos \
-	  --go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/mitos \
+	  --go_out=. --go_opt=module=github.com/mitos-run/mitos \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/mitos-run/mitos \
 	  proto/forkd.proto
 ```
 
@@ -313,8 +313,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
+	"github.com/mitos-run/mitos/internal/fork"
+	forkdpb "github.com/mitos-run/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -430,8 +430,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/fork"
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
+	"github.com/mitos-run/mitos/internal/fork"
+	forkdpb "github.com/mitos-run/mitos/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -537,7 +537,7 @@ func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
 }
 ```
 
-(add `forkdpb "github.com/paperclipinc/mitos/proto/forkd"` to imports) and fix the hardcoded vsock path in `Server.Fork` to use the engine's answer:
+(add `forkdpb "github.com/mitos-run/mitos/proto/forkd"` to imports) and fix the hardcoded vsock path in `Server.Fork` to use the engine's answer:
 
 ```go
 	// Connect to the guest agent so exec/files work
@@ -646,8 +646,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/mitos-run/mitos/internal/daemon"
+	"github.com/mitos-run/mitos/internal/fork"
 	"google.golang.org/grpc"
 )
 
@@ -746,7 +746,7 @@ import (
 	"context"
 	"fmt"
 
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
+	forkdpb "github.com/mitos-run/mitos/proto/forkd"
 )
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
@@ -925,7 +925,7 @@ func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]i
 }
 ```
 
-(imports: add `errors` and `forkdpb "github.com/paperclipinc/mitos/proto/forkd"`.)
+(imports: add `errors` and `forkdpb "github.com/mitos-run/mitos/proto/forkd"`.)
 
 Update `Reconcile` to use them: replace the deficit block and status lines:
 
@@ -989,8 +989,8 @@ package controller
 import (
 	"net"
 
-	"github.com/paperclipinc/mitos/internal/daemon"
-	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/mitos-run/mitos/internal/daemon"
+	"github.com/mitos-run/mitos/internal/fork"
 	"google.golang.org/grpc"
 )
 
@@ -1039,8 +1039,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
-	"github.com/paperclipinc/mitos/internal/controller"
+	v1alpha1 "github.com/mitos-run/mitos/api/v1alpha1"
+	"github.com/mitos-run/mitos/internal/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -1197,7 +1197,7 @@ import (
 	"fmt"
 	"time"
 
-	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
+	forkdpb "github.com/mitos-run/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"

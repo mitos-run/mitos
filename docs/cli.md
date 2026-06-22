@@ -236,7 +236,7 @@ pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
 plane (kind) there is no husk pod or no live guest, so the stub console is
 reported absent and the guest console states it needs a running sandbox: the
 guest serial/vsock console streams only from a live VMM (the
-[#18](https://github.com/paperclipinc/mitos/issues/18) boundary), not from this
+[#18](https://github.com/mitos-run/mitos/issues/18) boundary), not from this
 read-only operator path.
 
 ### exec
@@ -258,10 +258,10 @@ ergonomics longtail.
 ## Follow-ups
 
 - workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace
-  ([#21](https://github.com/paperclipinc/mitos/issues/21));
+  ([#21](https://github.com/mitos-run/mitos/issues/21));
 - `mitos pool create|refresh` beyond what `dev up` needs;
 - streaming exec / PTY (`exec_stream`) pending the Connect protocol
-  ([#23](https://github.com/paperclipinc/mitos/issues/23));
+  ([#23](https://github.com/mitos-run/mitos/issues/23));
 - a `curl | sh` installer and `get.mitos.run` distribution
-  ([#37](https://github.com/paperclipinc/mitos/issues/37));
+  ([#37](https://github.com/mitos-run/mitos/issues/37));
 - shell completions and a code-interpreter-compatible API shim.

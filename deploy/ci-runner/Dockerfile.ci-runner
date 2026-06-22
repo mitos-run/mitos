@@ -11,8 +11,8 @@
 #
 # Build + push (maintainer, on a trusted machine):
 #   docker build -f deploy/ci-runner/Dockerfile.ci-runner \
-#     -t ghcr.io/paperclipinc/mitos-ci-runner:<tag> .
-#   docker push ghcr.io/paperclipinc/mitos-ci-runner:<tag>
+#     -t ghcr.io/mitos-run/mitos-ci-runner:<tag> .
+#   docker push ghcr.io/mitos-run/mitos-ci-runner:<tag>
 # Then pin the deployment.yaml image to the pushed digest.
 
 # Pin the base by digest. Resolve the current digest with:

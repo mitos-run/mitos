@@ -48,7 +48,7 @@ spec:
           # :latest tag is a readability placeholder; replace it with an
           # immutable digest (image@sha256:...) before applying, so a moving tag
           # cannot swap the runner binary out from under the cluster.
-          image: ghcr.io/paperclipinc/mitos-ci-runner:v2@sha256:3abbba066bb4684521e64a4f98c9017888ab98996cbb8867172bdcb9b0f0028a
+          image: ghcr.io/mitos-run/mitos-ci-runner:v2@sha256:3abbba066bb4684521e64a4f98c9017888ab98996cbb8867172bdcb9b0f0028a
           imagePullPolicy: IfNotPresent
           # The custom registration entrypoint (deploy/ci-runner/entrypoint.sh,
           # baked into the image) reads these env vars: it exchanges ACCESS_TOKEN
@@ -62,7 +62,7 @@ spec:
             # PUBLIC repo: fork-PR gating lives in the workflow, see
             # .github/workflows/cluster-e2e.yaml.
             - name: REPO_URL
-              value: https://github.com/paperclipinc/mitos
+              value: https://github.com/mitos-run/mitos
             - name: RUNNER_SCOPE
               value: repo
             # Labels the workflow targets with runs-on: [self-hosted,

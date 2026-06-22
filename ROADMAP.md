@@ -254,7 +254,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     in-VM running-sandbox conformance + the measured bare-metal resume latency
     stay bare-metal targets (#16/#18); the our-API `Fork*` rename stays deferred
     to API v2 (the ADR).
-- **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
+- **W3: Paperclip/OpenClaw/Hermes integration.** `@mitos-run/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge
   egress as claim-time allowlist; claim-time secrets), paperclip-operator

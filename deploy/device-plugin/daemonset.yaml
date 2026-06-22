@@ -36,7 +36,7 @@ spec:
         - operator: Exists
       containers:
         - name: kvm-device-plugin
-          image: ghcr.io/paperclipinc/mitos-kvm-device-plugin:latest
+          image: ghcr.io/mitos-run/mitos-kvm-device-plugin:latest
           args:
             - --resource-name=mitos.run/kvm
             # 0 = auto: advertise a sane slot count (100) where /dev/kvm exists.

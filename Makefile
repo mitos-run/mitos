@@ -1,5 +1,5 @@
-IMG_CONTROLLER ?= ghcr.io/paperclipinc/mitos-controller:latest
-IMG_FORKD ?= ghcr.io/paperclipinc/mitos-forkd:latest
+IMG_CONTROLLER ?= ghcr.io/mitos-run/mitos-controller:latest
+IMG_FORKD ?= ghcr.io/mitos-run/mitos-forkd:latest
 
 .PHONY: all build test test-linux test-netlink generate manifests proto docker-build docker-push install deploy
 

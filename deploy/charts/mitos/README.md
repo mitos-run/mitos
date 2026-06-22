@@ -78,7 +78,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.registry` | `ghcr.io/paperclipinc` | Registry hosting every mitos image. |
+| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
 | `controller.image.tag` | `v0.4.0` | Controller image tag. |

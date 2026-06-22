@@ -9,7 +9,7 @@
 # per-component tag, or global.imageTag when set (global overrides all).
 image:
   # Container registry that hosts every mitos image.
-  registry: ghcr.io/paperclipinc
+  registry: ghcr.io/mitos-run
 
 # Global overrides applied across all components.
 global:
