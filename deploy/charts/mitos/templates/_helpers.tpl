@@ -71,6 +71,22 @@ block, and the global tag override. Call with a dict carrying "root" and
 {{- end -}}
 
 {{/*
+Comma-separated list of the secret-store providers the console advertises at
+GET /console/capabilities. kube is appended when enabled; openbao when
+configured. Order is stable (kube first).
+*/}}
+{{- define "mitos.console.secretProviders" -}}
+{{- $providers := list -}}
+{{- if .Values.console.secrets.kube.enabled -}}
+{{- $providers = append $providers "kube" -}}
+{{- end -}}
+{{- if .Values.console.secrets.openbao.enabled -}}
+{{- $providers = append $providers "openbao" -}}
+{{- end -}}
+{{- join "," $providers -}}
+{{- end -}}
+
+{{/*
 imagePullSecrets block shared by every workload pod spec.
 */}}
 {{- define "mitos.imagePullSecrets" -}}

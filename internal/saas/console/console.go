@@ -39,16 +39,22 @@ type BillingReader struct {
 // A nil seam is filled with its in-memory tested default so a caller can stand
 // up a working, org-scoped BFF with just the account service.
 type Deps struct {
-	Accounts  *saas.AccountService
-	Usage     usage.UsageStore
-	Prices    usage.PriceList
-	Billing   BillingReader
-	Sandboxes SandboxControl
-	Templates TemplateLister
-	Audit     AuditRecorder
-	Logs      LogStreamer
-	Log       *slog.Logger
-	Now       func() time.Time
+	Accounts    *saas.AccountService
+	Usage       usage.UsageStore
+	Prices      usage.PriceList
+	Billing     BillingReader
+	Sandboxes   SandboxControl
+	Templates   TemplateLister
+	Audit       AuditRecorder
+	Logs        LogStreamer
+	Secrets     SecretStore
+	Instruments InstrumentsSource
+	// Capabilities is the deployment edition + feature flags the console
+	// advertises at GET /console/capabilities. Left zero, it defaults to the
+	// self-hosted community edition.
+	Capabilities Capabilities
+	Log          *slog.Logger
+	Now          func() time.Time
 }
 
 // Console is the org-scoped BFF. It reads the caller and org from the request
@@ -72,6 +78,19 @@ func New(deps Deps) *Console {
 	if deps.Audit == nil {
 		deps.Audit = NewMemAuditLog()
 	}
+	if deps.Secrets == nil {
+		deps.Secrets = NewMemSecretStore()
+	}
+	if deps.Instruments == nil {
+		deps.Instruments = NewMemInstruments()
+	}
+	if deps.Logs == nil {
+		// Default to an authorizing streamer over the (already-defaulted)
+		// sandbox control with an empty transport: it enforces org ownership and
+		// streams nothing, so the endpoint is safe before the real forkd
+		// transport is wired in.
+		deps.Logs = NewAuthorizingLogStreamer(deps.Sandboxes, NewMemRawLogStreamer())
+	}
 	if (deps.Prices == usage.PriceList{}) {
 		deps.Prices = usage.DefaultPriceList()
 	}
@@ -84,6 +103,9 @@ func New(deps Deps) *Console {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
+	if deps.Capabilities.Edition == "" {
+		deps.Capabilities = defaultCapabilities()
+	}
 	c := &Console{deps: deps}
 	c.routes()
 	return c
@@ -94,6 +116,7 @@ func New(deps Deps) *Console {
 // dispatch.
 func (c *Console) routes() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /console/capabilities", c.handleCapabilities)
 	mux.HandleFunc("GET /console/keys", c.handleListKeys)
 	mux.HandleFunc("POST /console/keys", c.handleCreateKey)
 	mux.HandleFunc("POST /console/keys/{id}/revoke", c.handleRevokeKey)
@@ -102,9 +125,14 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
+	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/templates", c.handleListTemplates)
+	mux.HandleFunc("GET /console/secrets", c.handleListSecrets)
+	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
+	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
+	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
 	c.mux = mux
 }
 

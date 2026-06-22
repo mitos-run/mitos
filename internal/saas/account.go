@@ -2,6 +2,7 @@ package saas
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -65,6 +66,27 @@ func (s *AccountService) SignUp(ctx context.Context, email string) (Account, Org
 		return Account{}, Organization{}, fmt.Errorf("sign up: store membership: %w", err)
 	}
 	return acct, org, nil
+}
+
+// FindOrCreateByEmail returns the existing account for email, or signs up a new
+// one (which auto-creates its org). It is the idempotent entry point the OIDC
+// login flow uses: a returning user reuses their account, a first-time user is
+// provisioned. The email is assumed already verified by the caller (the OIDC
+// verifier); SignUp's conflict path is treated as "already exists" and re-read.
+func (s *AccountService) FindOrCreateByEmail(ctx context.Context, email string) (Account, error) {
+	if acct, err := s.store.GetAccountByEmail(ctx, email); err == nil {
+		return acct, nil
+	}
+	acct, _, err := s.SignUp(ctx, email)
+	if err == nil {
+		return acct, nil
+	}
+	// A concurrent first login may have created the account between our read and
+	// SignUp; re-read on conflict so the flow stays idempotent.
+	if errors.Is(err, ErrConflict) {
+		return s.store.GetAccountByEmail(ctx, email)
+	}
+	return Account{}, err
 }
 
 // Organizations returns the organizations an account belongs to, sorted by id so

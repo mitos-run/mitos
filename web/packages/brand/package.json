@@ -1,0 +1,24 @@
+{
+  "name": "@mitos/brand",
+  "version": "0.1.0",
+  "description": "Fluorescence design system — tokens, fonts, and primitives shared by the mitos site and console.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./base.css": "./src/base.css",
+    "./tokens.css": "./src/tokens.css",
+    "./fonts.css": "./src/fonts.css"
+  },
+  "files": [
+    "src",
+    "fonts"
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1"
+  }
+}
