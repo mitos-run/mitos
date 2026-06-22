@@ -53,12 +53,15 @@ jobs:
         # index.yaml so Artifact Hub can fetch it from https://mitos.run/charts.
         run: |
           set -euo pipefail
+          # chart-releaser has just pushed to the remote gh-pages, so work from
+          # origin/gh-pages rather than a stale local ref.
+          git fetch origin gh-pages
           tmp="$(mktemp -d)"
-          git worktree add "$tmp" gh-pages
+          git worktree add --detach "$tmp" origin/gh-pages
           cp deploy/charts/artifacthub-repo.yml "$tmp/artifacthub-repo.yml"
           git -C "$tmp" add artifacthub-repo.yml
           if ! git -C "$tmp" diff --cached --quiet; then
             git -C "$tmp" commit -m "chore: publish artifacthub-repo.yml"
-            git -C "$tmp" push origin gh-pages
+            git -C "$tmp" push origin HEAD:gh-pages
           fi
           git worktree remove "$tmp"
