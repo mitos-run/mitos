@@ -55,24 +55,28 @@ key plus a base URL and you have a Ready sandbox. No Kubernetes required.
 ```python
 import mitos
 
-# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+# Set MITOS_API_KEY (a key from https://mitos.run). The base URL defaults to the
+# hosted endpoint https://mitos.run, so no base URL is needed.
 sb = mitos.create("python")                      # Ready sandbox handle
 print(sb.exec("echo hello").stdout)              # hello
 sb.terminate()
 ```
 
 `mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
-else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`), then returns
-a `DirectSandbox` that exposes `exec`, `run_code`, `files`, `pty`, `fork`, and
-`terminate` directly. The standalone `sandbox-server` runs tokenless and ignores
-the key; the hosted control plane verifies the same `Authorization: Bearer`
-header server-side ([#210](https://github.com/mitos-run/mitos/issues/210)). The
-key value is never logged. `Sandbox.create(...)` is an alias for the same call.
+else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`, else the
+hosted endpoint `https://mitos.run`), then returns a `DirectSandbox` that exposes
+`exec`, `run_code`, `files`, `pty`, `fork`, and `terminate` directly. The hosted
+control plane verifies the same `Authorization: Bearer` header server-side
+([#210](https://github.com/mitos-run/mitos/issues/210)); the standalone
+`sandbox-server` runs tokenless and ignores the key. To target a local
+standalone server or a self-hosted cluster, set `base_url` (or `MITOS_BASE_URL`),
+for example `base_url="http://localhost:8080"`. The key value is never logged.
+`Sandbox.create(...)` is an alias for the same call.
 
 ```python
 import mitos
 
-sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+sb = mitos.create("python", api_key="sk-...")
 
 # Files, stateful code, and fork all work on the flat handle.
 sb.files.write("/workspace/plan.txt", "draft")

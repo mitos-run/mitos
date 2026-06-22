@@ -14,6 +14,16 @@ This skill teaches the workflow. To actually drive sandboxes, use the
 prose: every failure is a structured envelope, branch on `code` and follow
 `remediation` (see `llms.txt`).
 
+## Connecting
+
+The hosted production mitos is at `https://mitos.run`. Set `MITOS_API_KEY` to a
+key from `https://mitos.run`. The Python and TypeScript SDKs and `mitos-mcp` all
+DEFAULT to the hosted endpoint, so the examples below need no base URL: a key in
+the environment is enough. To target a self-hosted cluster or a local standalone
+`sandbox-server`, set `MITOS_BASE_URL` (for example `http://localhost:8080`); it
+overrides the hosted default. The `mitos` CLI drives a Kubernetes cluster and
+resolves its connection from your kubeconfig.
+
 ## When to fork vs. start fresh
 
 - Start fresh (`create`) when there is no shared setup to inherit: a clean

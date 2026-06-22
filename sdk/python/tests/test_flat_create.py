@@ -202,17 +202,40 @@ def test_explicit_args_override_env(monkeypatch, fake_server):
     sb.terminate()
 
 
-def test_missing_base_url_raises(monkeypatch):
+def test_default_base_url_is_hosted(monkeypatch):
+    """With neither the arg nor MITOS_BASE_URL set, the base URL defaults to the
+    hosted production endpoint (no error). The API key stays optional."""
+    from mitos.direct import _resolve_auth
+
     monkeypatch.delenv("MITOS_BASE_URL", raising=False)
     monkeypatch.delenv("MITOS_API_KEY", raising=False)
-    from mitos.errors import AgentRunError
+    key, url = _resolve_auth(None, None)
+    assert url == "https://mitos.run"
+    assert key is None
 
-    with pytest.raises(AgentRunError) as ei:
-        mitos.create("python")
-    assert ei.value.code == "missing_base_url"
-    # The remediation must not leak any key value.
-    assert "sk-" not in (ei.value.remediation or "")
-    assert "sk-" not in (ei.value.cause or "")
+
+def test_explicit_base_url_beats_default(monkeypatch):
+    monkeypatch.delenv("MITOS_BASE_URL", raising=False)
+    from mitos.direct import _resolve_auth
+
+    _, url = _resolve_auth(None, "http://localhost:8080")
+    assert url == "http://localhost:8080"
+
+
+def test_env_base_url_beats_default(monkeypatch):
+    from mitos.direct import _resolve_auth
+
+    monkeypatch.setenv("MITOS_BASE_URL", "http://from-env:9000")
+    _, url = _resolve_auth(None, None)
+    assert url == "http://from-env:9000"
+
+
+def test_explicit_base_url_beats_env(monkeypatch):
+    from mitos.direct import _resolve_auth
+
+    monkeypatch.setenv("MITOS_BASE_URL", "http://from-env:9000")
+    _, url = _resolve_auth(None, "http://explicit:1234")
+    assert url == "http://explicit:1234"
 
 
 def test_api_key_never_in_repr_or_error(fake_server):
@@ -515,17 +538,16 @@ def _async_direct():
 
 @pytest.mark.asyncio
 async def test_async_create_resolves_auth(monkeypatch):
-    """mitos.aio.create resolves the base URL from MITOS_BASE_URL and raises a
-    typed error when absent (no key leak)."""
-    import mitos.aio as aio
-    from mitos.errors import AgentRunError
+    """mitos.aio.create resolves the base URL from MITOS_BASE_URL, and with
+    neither the arg nor the env set it defaults to the hosted endpoint."""
+    from mitos.direct import _resolve_auth
 
     monkeypatch.delenv("MITOS_BASE_URL", raising=False)
     monkeypatch.delenv("MITOS_API_KEY", raising=False)
-    with pytest.raises(AgentRunError) as ei:
-        await aio.create("python")
-    assert ei.value.code == "missing_base_url"
-    assert "sk-" not in (ei.value.remediation or "")
+    # aio.create resolves via the same _resolve_auth seam; with nothing set it
+    # falls back to the hosted production endpoint rather than raising.
+    _, url = _resolve_auth(None, None)
+    assert url == "https://mitos.run"
 
 
 @pytest.mark.asyncio

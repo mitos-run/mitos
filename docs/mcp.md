@@ -41,7 +41,9 @@ and are not yet dispatched (issue #21).
 ## Launching it
 
 The HTTP backend talks to a running [sandbox-server](../cmd/sandbox-server)
-over its REST API.
+over its REST API. With no `--server` flag and no `AGENTRUN_SERVER` set it
+targets the hosted production endpoint `https://mitos.run`; point it at a
+self-hosted or local standalone server by overriding either one:
 
 ```bash
 mitos-mcp \
@@ -54,7 +56,7 @@ Flags and environment:
 
 | Flag | Environment | Default | Meaning |
 | --- | --- | --- | --- |
-| `--server` | `AGENTRUN_SERVER` | `http://localhost:8080` | Base URL of the sandbox-server. |
+| `--server` | `AGENTRUN_SERVER` | `https://mitos.run` | Base URL of the sandbox-server; defaults to the hosted endpoint. |
 | `--token` | `AGENTRUN_TOKEN` | empty | Bearer token sent on every backend request. |
 | `--enable-workspace-tools` | | `false` | Advertise the deferred workspace tools. |
 

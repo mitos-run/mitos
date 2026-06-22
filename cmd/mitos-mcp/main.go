@@ -21,7 +21,9 @@ import (
 )
 
 func main() {
-	defaultServer := envOr("AGENTRUN_SERVER", "http://localhost:8080")
+	// Default to the hosted production control plane. Self-hosted or local
+	// standalone users opt out by setting AGENTRUN_SERVER or passing --server.
+	defaultServer := envOr("AGENTRUN_SERVER", "https://mitos.run")
 	defaultToken := os.Getenv("AGENTRUN_TOKEN")
 
 	server := flag.String("server", defaultServer, "Base URL of the sandbox-server (env AGENTRUN_SERVER).")
