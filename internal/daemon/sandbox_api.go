@@ -99,6 +99,18 @@ type SandboxAPI struct {
 	// chosen to clear the exec_background one-day default. <=0 disables the
 	// ceiling (any timeout honored). Set via SetMaxExecTimeoutSeconds.
 	maxExecTimeout int
+	// forwards tracks the live host-side port forwards per sandbox id (issue
+	// #228), guarded by mu. Each forward is a host TCP listener bridged over a
+	// vsock tunnel to a guest loopback port. UnregisterSandbox closes all of a
+	// sandbox's forwards so no host listener or tunnel goroutine outlives the
+	// sandbox. Absent until the first ForwardPort.
+	forwards map[string][]*portForward
+	// maxForwards is the per-sandbox ceiling on concurrent OPEN port forwards
+	// (issue #228). Each forward holds a host TCP listener plus a tunnel goroutine
+	// per accepted connection; without a cap one sandbox could exhaust host
+	// sockets. A NEW forward over the cap is rejected. Zero or negative disables
+	// the cap. Set via SetMaxForwardsPerSandbox; defaults to defaultMaxForwards.
+	maxForwards int
 	// vitalsLabels records the claim/pool/workspace identity per sandbox id,
 	// guarded by mu. The forkd Fork path sets it so the /v1/vitals guest
 	// telemetry snapshot (Layer 3, issue #164) is labeled with the same identity
@@ -129,6 +141,8 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		paused:         make(map[string]bool),
 		maxExecTimeout: defaultMaxExecTimeoutSeconds,
 		vitalsLabels:   make(map[string]VitalsLabels),
+		forwards:       make(map[string][]*portForward),
+		maxForwards:    defaultMaxForwards,
 	}
 }
 
@@ -343,6 +357,11 @@ func (api *SandboxAPI) RegisterSandbox(sandboxID, vsockPath string) error {
 // UnregisterSandbox closes the agent connection and clears the sandbox's
 // bearer token.
 func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
+	// Close any live host-side port forwards first (issue #228): each holds a
+	// host TCP listener and tunnel goroutines that must not outlive the sandbox.
+	// CloseForwards takes mu itself, so call it before the lock below.
+	api.CloseForwards(sandboxID)
+
 	api.mu.Lock()
 	if client, ok := api.agents[sandboxID]; ok {
 		client.Close()
