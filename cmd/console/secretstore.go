@@ -5,13 +5,37 @@ import (
 	"os"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	sandboxv2 "mitos.run/mitos/api/v1alpha2"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/console/baosecrets"
 	"mitos.run/mitos/internal/saas/console/kubesecrets"
+	"mitos.run/mitos/internal/tenant"
 )
+
+// kubeClient builds a controller-runtime client over the ambient kube config
+// (in-cluster service account, or KUBECONFIG in dev) with the scheme the console
+// needs: core types (for org Secrets) plus the mitos.run/v1alpha2 Sandbox types
+// (for the org-scoped live-sandbox query). Shared by the kube secret store and
+// the cluster sandbox control.
+func kubeClient() (ctrlclient.Client, error) {
+	cfg, err := ctrlconfig.GetConfig()
+	if err != nil {
+		return nil, err
+	}
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		return nil, err
+	}
+	if err := sandboxv2.AddToScheme(s); err != nil {
+		return nil, err
+	}
+	return ctrlclient.New(cfg, ctrlclient.Options{Scheme: s})
+}
 
 // primarySecretProvider returns the provider the binary should construct: the
 // first recognized entry in the advertised list, defaulting to kube. Capability
@@ -25,15 +49,6 @@ func primarySecretProvider(providers []string) string {
 		}
 	}
 	return "kube"
-}
-
-// secretNamespaceFor maps an org id to the namespace its kube secrets live in.
-func secretNamespaceFor(orgID string) string {
-	prefix := os.Getenv("MITOS_CONSOLE_SECRET_NAMESPACE_PREFIX")
-	if prefix == "" {
-		prefix = "mitos-org-"
-	}
-	return prefix + orgID
 }
 
 // buildSecretStore constructs the active SecretStore from configuration. It
@@ -61,18 +76,15 @@ func buildSecretStore(logger *slog.Logger, caps console.Capabilities) console.Se
 	return console.NewMemSecretStore()
 }
 
-// buildKubeSecretStore builds the kube provider over the ambient kube config
-// (in-cluster service account, or KUBECONFIG in dev).
+// buildKubeSecretStore builds the kube provider over the shared kube client,
+// placing each org's Secrets in its hard-isolation namespace (tenant.NamespaceForOrg)
+// — the same boundary the sandbox control queries.
 func buildKubeSecretStore() (console.SecretStore, error) {
-	cfg, err := ctrlconfig.GetConfig()
+	c, err := kubeClient()
 	if err != nil {
 		return nil, err
 	}
-	c, err := ctrlclient.New(cfg, ctrlclient.Options{})
-	if err != nil {
-		return nil, err
-	}
-	return kubesecrets.New(c, secretNamespaceFor), nil
+	return kubesecrets.New(c, tenant.NamespaceForOrg), nil
 }
 
 // openbaoToken reads the OpenBao token from the env or a token file.
