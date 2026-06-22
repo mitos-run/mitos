@@ -760,6 +760,15 @@ jobs:
           curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
             -H 'Content-Type: application/json' \
             -d "{\"guest_cid\": 3, \"uds_path\": \"vsock.sock\"}"
+          # Attach the virtio-rng device before boot, exactly as the engine's
+          # template build does (firecracker template.go SetEntropy -> PUT
+          # /entropy). Firecracker bakes the device into the snapshot, so every
+          # fork restores with it and the guest kernel (CONFIG_HW_RANDOM_VIRTIO)
+          # registers virtio_rng.0; the HWRNG assertion below reads it back per
+          # fork (verified on a real KVM host: rng_current=virtio_rng.0).
+          curl --unix-socket $SOCK -X PUT 'http://localhost/entropy' \
+            -H 'Content-Type: application/json' \
+            -d '{}'
           curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
             -H 'Content-Type: application/json' \
             -d '{"action_type": "InstanceStart"}'
@@ -825,6 +834,8 @@ jobs:
           UUID2=$(grep '^UUID=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
           TLS1=$(grep '^TLSRANDOM=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
           TLS2=$(grep '^TLSRANDOM=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+          HWRNG1=$(grep '^HWRNG=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          HWRNG2=$(grep '^HWRNG=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
 
           echo "URANDOM1=$URANDOM1"
           echo "URANDOM2=$URANDOM2"
@@ -832,6 +843,7 @@ jobs:
           echo "GEN1=$GEN1 GEN2=$GEN2"
           echo "UUID1=$UUID1 UUID2=$UUID2"
           echo "TLS1=$TLS1 TLS2=$TLS2"
+          echo "HWRNG1=$HWRNG1 HWRNG2=$HWRNG2"
 
           if [ -z "$URANDOM1" ] || [ -z "$URANDOM2" ]; then
             echo "FAIL: missing URANDOM sample from a fork"
@@ -872,6 +884,21 @@ jobs:
             exit 1
           fi
           echo "PASS: forks produced distinct TLS client randoms"
+
+          # The baked virtio-rng device must be PRESENT and SELECTED in each
+          # restored guest (fork-correctness section 1: a continuous host entropy
+          # source per fork). The guest kernel binds CONFIG_HW_RANDOM_VIRTIO and
+          # exposes the active source at /sys/class/misc/hw_random/rng_current as
+          # `virtio_rng.N`; a guest that booted without the device reports `none`.
+          # This asserts the device is observed live on KVM, not merely set in the
+          # VM config JSON.
+          for pair in "1:$HWRNG1" "2:$HWRNG2"; do
+            n=${pair%%:*}; cur=${pair#*:}
+            case "$cur" in
+              virtio_rng*) echo "PASS: fork $n virtio-rng device active (rng_current=$cur)" ;;
+              *) echo "FAIL: fork $n has no virtio-rng device (rng_current=${cur:-empty}); the baked entropy source is missing"; exit 1 ;;
+            esac
+          done
 
           # Each guest wall clock must be within 2 seconds of the runner clock.
           for pair in "1:$WALL1" "2:$WALL2"; do
