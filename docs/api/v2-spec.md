@@ -1,4 +1,4 @@
-# paperclipinc/mitos: API Specification v2
+# mitos-run/mitos: API Specification v2
 
 Supersedes v1. Same engine, same load-bearing rule, re-weighted for the three personas in priority order: **the application developer** (adoption is won here), **the agent itself** (the genuinely new user of 2026), **the platform operator** (governance lives here). The Kubernetes layer remains the implementation substrate and the operator's interface; it is no longer the cover page.
 
@@ -124,7 +124,7 @@ Agents are first-class API consumers. Three commitments follow.
 
 ### 2.2 In-guest self-service endpoint
 
-Inside every sandbox: `AGENTRUN_SOCKET=/run/mitos.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
+Inside every sandbox: `MITOS_SOCKET=/run/mitos.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
 
 ```python
 # from inside the sandbox: e.g. an agent doing best-of-N over its own state
@@ -216,7 +216,7 @@ kind: SandboxPool
 metadata: { name: python-agent }
 spec:
   template:                                # inline (templateRef: optional alternative)
-    image: ghcr.io/paperclipinc/agent-python:3.12
+    image: ghcr.io/mitos-run/agent-python:3.12
     init: ["pip install numpy pandas", "claude-code --version"]   # pool-build only; never per-sandbox
     resources: { cpu: "1", memory: 512Mi, balloon: true }
     volumes:
@@ -292,7 +292,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 ## 6. Integration surfaces
 
 - **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `mitos.run/pool` only.
-- **Paperclip provider** (`@paperclipinc/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
+- **Paperclip provider** (`@mitos-run/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
 - **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
 - **Eventing**: CloudEvents (`dev.mitos.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
 

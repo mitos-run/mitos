@@ -257,3 +257,54 @@ func approx(a, b float64) bool {
 type staticSource struct{ samples []Sample }
 
 func (s *staticSource) Collect(_ context.Context) ([]Sample, error) { return s.samples, nil }
+
+// TestCounterResetNoNegativeBill proves a cumulative counter that RESETS within
+// a window (a sandbox restart zeroes its egress counter) never produces a
+// negative or under-counted bill: the in-window progress is the sum of the
+// positive steps, and the post-reset value counts as fresh progress from zero.
+// The old last-minus-first delta would bill 50-100 = -50 here.
+func TestCounterResetNoNegativeBill(t *testing.T) {
+	samples := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 0), VCPUs: 1, EgressBytes: 100, GPUSeconds: 10},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 20), VCPUs: 1, EgressBytes: 350, GPUSeconds: 40},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 40), VCPUs: 1, EgressBytes: 50, GPUSeconds: 5},
+	}
+	recs := Integrate(samples, DefaultConfig())
+	if len(recs) != 1 {
+		t.Fatalf("want 1 record, got %d", len(recs))
+	}
+	// progress = (350-100) + (50 after reset) = 300; never negative.
+	if recs[0].EgressBytes != 300 {
+		t.Errorf("EgressBytes = %d, want 300 (reset-aware, never negative)", recs[0].EgressBytes)
+	}
+	if recs[0].GPUSeconds != 35 {
+		t.Errorf("GPUSeconds = %d, want 35 (= (40-10)+5 reset-aware)", recs[0].GPUSeconds)
+	}
+	if recs[0].EgressBytes < 0 || recs[0].GPUSeconds < 0 {
+		t.Errorf("a counter reset must never bill negative: egress=%d gpu=%d", recs[0].EgressBytes, recs[0].GPUSeconds)
+	}
+}
+
+// TestOutOfOrderSamplesFold proves late/out-of-order samples integrate to the
+// same result as in-order delivery (the integrator sorts by timestamp), so a
+// delayed scrape is not lost or mis-bucketed.
+func TestOutOfOrderSamplesFold(t *testing.T) {
+	inOrder := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 0), VCPUs: 1, EgressBytes: 100},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 20), VCPUs: 1, EgressBytes: 200},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 40), VCPUs: 1, EgressBytes: 300},
+	}
+	shuffled := []Sample{inOrder[2], inOrder[0], inOrder[1]}
+	a := Integrate(inOrder, DefaultConfig())
+	b := Integrate(shuffled, DefaultConfig())
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("want 1 record each, got %d and %d", len(a), len(b))
+	}
+	if a[0].EgressBytes != b[0].EgressBytes || a[0].VCPUSeconds != b[0].VCPUSeconds {
+		t.Errorf("out-of-order result differs: in-order egress=%d vcpu-s=%g, shuffled egress=%d vcpu-s=%g",
+			a[0].EgressBytes, a[0].VCPUSeconds, b[0].EgressBytes, b[0].VCPUSeconds)
+	}
+	if a[0].EgressBytes != 200 {
+		t.Errorf("EgressBytes = %d, want 200 (300-100, monotonic)", a[0].EgressBytes)
+	}
+}

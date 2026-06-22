@@ -22,7 +22,10 @@ type fakeProbe struct {
 	psaPrivileged bool
 	psaLabelValue string
 	namespace     string
+	userfaultfd   bool
 }
+
+func (f *fakeProbe) Userfaultfd(context.Context) (bool, error) { return f.userfaultfd, nil }
 
 func (f *fakeProbe) KVMDevice(context.Context) (bool, error) { return f.kvmPresent, f.kvmErr }
 
@@ -66,6 +69,44 @@ func healthyProbe() *fakeProbe {
 		psaPrivileged: true,
 		psaLabelValue: "privileged",
 		namespace:     "mitos",
+		userfaultfd:   true,
+	}
+}
+
+// TestDoctorUserfaultfdMissingWarns proves the preflight surfaces a kernel without
+// userfaultfd (issue #167/#174): a minimal/rescue kernel built without
+// CONFIG_USERFAULTFD cannot restore hugepage-backed snapshots or run the prefetch
+// handler, so doctor must name userfaultfd and point at the kernel config, not
+// fail silently. It is a WARN (not FAIL) because 4 KiB file-backed restore still
+// works; only the #167 performance path is unavailable.
+func TestDoctorUserfaultfdMissingWarns(t *testing.T) {
+	p := healthyProbe()
+	p.userfaultfd = false
+	results := RunDoctorChecks(context.Background(), p)
+	var found *CheckResult
+	for i := range results {
+		if results[i].Name == "userfaultfd" {
+			found = &results[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a userfaultfd check in the doctor results")
+	}
+	if found.Status != CheckWarn {
+		t.Errorf("userfaultfd missing should WARN (4KiB restore still works), got %s", found.Status)
+	}
+	if !strings.Contains(found.Remediation, "CONFIG_USERFAULTFD") {
+		t.Errorf("remediation should name CONFIG_USERFAULTFD, got: %s", found.Remediation)
+	}
+}
+
+// TestDoctorUserfaultfdPresentPasses proves a kernel WITH userfaultfd passes.
+func TestDoctorUserfaultfdPresentPasses(t *testing.T) {
+	results := RunDoctorChecks(context.Background(), healthyProbe())
+	for _, r := range results {
+		if r.Name == "userfaultfd" && r.Status != CheckPass {
+			t.Errorf("userfaultfd present should pass, got %s: %s", r.Status, r.Detail)
+		}
 	}
 }
 

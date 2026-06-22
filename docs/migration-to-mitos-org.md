@@ -1,7 +1,7 @@
 # Migration runbook: move mitos to a dedicated GitHub org
 
 Status: prepared, not executed. This runbook moves the engine repo from
-`github.com/paperclipinc/mitos` to a dedicated GitHub org, stands up the OSS
+`github.com/mitos-run/mitos` to a dedicated GitHub org, stands up the OSS
 website, and adopts the `mitos.run/mitos` Go vanity import path so the org
 hosting the code can change without ever churning imports again.
 
@@ -32,7 +32,7 @@ Recommended sequence: Part 1 (org) -> Part 4 (transfer repo) -> Part 5 (images)
 - **Org name.** `mitos` may be taken (common word). Fallbacks: `mitos-run`,
   `mitoshq`, `getmitos`. The scaffold currently assumes `mitos-run`; if you pick
   something else, update the three places in Part 3.
-- **Ownership.** The org can be owned by Paperclip Inc; you do not need to settle
+- **Ownership.** The org can be owned by mitos.run; you do not need to settle
   entity structure now. A dedicated org is worth it purely for clean diligence
   optionality later.
 - **Vanity host.** `mitos.run` must be able to serve static content with rewrite
@@ -51,7 +51,7 @@ Recommended sequence: Part 1 (org) -> Part 4 (transfer repo) -> Part 5 (images)
 Branch: `chore/migrate-module-path-mitos-run`. What it changed (pure mechanical,
 no behavior change):
 
-- `go.mod`: `module github.com/paperclipinc/mitos` -> `module mitos.run/mitos`.
+- `go.mod`: `module github.com/mitos-run/mitos` -> `module mitos.run/mitos`.
 - All 417 `.go` files: import paths rewritten and re-sorted with `gofmt`.
 - `proto/forkd.proto`: `option go_package` updated; `Makefile` protoc
   `--go_opt=module=` / `--go-grpc_opt=module=` updated; stubs regenerated with
@@ -65,7 +65,7 @@ the GitHub org name, handled in Parts 4 and 5):
 - `CHANGELOG.md` (historical release links; leave as-is or let release-please
   manage going forward).
 - `README.md` badges and links.
-- `ghcr.io/paperclipinc/...` image paths (`Makefile`, `SECURITY.md`,
+- `ghcr.io/mitos-run/...` image paths (`Makefile`, `SECURITY.md`,
   `BENCHMARKS.md`, `deploy/`).
 
 ### How it was verified locally (CI-equivalent for a string rename)
@@ -117,7 +117,7 @@ in a SEPARATE private repo.
 Prefer GitHub's repo transfer over create-new-and-push: it preserves issues,
 PRs, stars, and sets up automatic redirects from the old path.
 
-1. Transfer `paperclipinc/mitos` -> `<org>/mitos` (Settings -> Danger Zone ->
+1. Transfer `mitos-run/mitos` -> `<org>/mitos` (Settings -> Danger Zone ->
    Transfer). Old git remotes, issue links, and PR links redirect automatically.
 2. Update local remotes: `git remote set-url origin git@github.com:<org>/mitos.git`.
 3. Note: redirects cover git/issues/PRs/stars; they do NOT cover hardcoded
@@ -128,9 +128,9 @@ the org and push; you lose automatic redirects and must announce the move.
 
 ## Part 5: move container images and registry references
 
-Images today: `ghcr.io/paperclipinc/mitos-controller`,
-`ghcr.io/paperclipinc/mitos-forkd`, `ghcr.io/paperclipinc/mitos-ci-runner`,
-`ghcr.io/paperclipinc/sandbox-base-python`.
+Images today: `ghcr.io/mitos-run/mitos-controller`,
+`ghcr.io/mitos-run/mitos-forkd`, `ghcr.io/mitos-run/mitos-ci-runner`,
+`ghcr.io/mitos-run/sandbox-base-python`.
 
 1. Rebuild/push (or re-tag and push) each under `ghcr.io/<org>/...`.
 2. Update references:
@@ -159,7 +159,7 @@ GitHub redirects do NOT carry CI configuration. Re-establish:
    and any release tokens. OIDC subject strings change with the org/repo path;
    update any trust policies that pin them.
 4. **Self-hosted bare-metal KVM CI runner** (`deploy/ci-runner/`): it is
-   registered to `https://github.com/paperclipinc/mitos`
+   registered to `https://github.com/mitos-run/mitos`
    (`deploy/ci-runner/deployment.yaml`, the `GITHUB` URL env) with a registration
    Secret. Re-register against the new repo URL, mint a new registration token,
    move the runner image to the new ghcr, and re-apply. Confirm the runner shows
@@ -186,14 +186,14 @@ GitHub redirects do NOT carry CI configuration. Re-establish:
 - [ ] Self-hosted KVM runner online; `cluster-e2e` green.
 - [ ] `docker pull ghcr.io/<org>/mitos-controller` (and forkd) succeed; images
       signed under the new identity.
-- [ ] Old `paperclipinc/mitos` URLs redirect to the new org.
+- [ ] Old `mitos-run/mitos` URLs redirect to the new org.
 - [ ] Module-path rename branch merged AFTER the vanity meta is live.
 - [ ] README badges and links resolve.
 
 ## Rollback
 
 - Module rename: revert the `chore/migrate-module-path-mitos-run` merge; imports
-  return to `github.com/paperclipinc/mitos`. Harmless if the vanity meta is also
+  return to `github.com/mitos-run/mitos`. Harmless if the vanity meta is also
   taken down.
 - Repo transfer is reversible by transferring back, but avoid thrashing; decide
   the org name once (Part 0) before transferring.

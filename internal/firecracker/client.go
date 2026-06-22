@@ -289,10 +289,35 @@ func (c *Client) SetBootSource(kernel string, bootArgs string) error {
 	})
 }
 
-func (c *Client) SetMachineConfig(vcpus int, memMB int) error {
+// ValidateHugePages checks a guest-memory page-granularity value (issue #167).
+// "" selects the Firecracker default (4 KiB base pages) and "2M" selects 2 MiB
+// hugetlbfs-backed memory; any other value returns an actionable, LLM-legible
+// error (issue #28) that names the bad value and the supported options, rather
+// than letting Firecracker refuse it later with an opaque 400. It is shared by
+// the client (request time) and the engine (construction time) so both reject
+// the same set.
+func ValidateHugePages(hugePages string) error {
+	switch hugePages {
+	case "", "2M":
+		return nil
+	default:
+		return fmt.Errorf("invalid huge_pages %q: want \"\" (default 4KiB base pages) or \"2M\" (2MiB hugetlbfs-backed)", hugePages)
+	}
+}
+
+// SetMachineConfig sets the guest vCPU count, memory size, and (issue #167)
+// the guest-memory page granularity. hugePages is "" for the Firecracker default
+// (4 KiB base pages) or "2M" for 2 MiB hugetlbfs-backed memory; any other value
+// is rejected here with an actionable error rather than forwarded for Firecracker
+// to refuse with an opaque 400 (issue #28).
+func (c *Client) SetMachineConfig(vcpus int, memMB int, hugePages string) error {
+	if err := ValidateHugePages(hugePages); err != nil {
+		return err
+	}
 	return c.put("/machine-config", MachineConfig{
 		VcpuCount:  vcpus,
 		MemSizeMib: memMB,
+		HugePages:  hugePages,
 	})
 }
 
@@ -468,6 +493,24 @@ func (c *Client) LoadSnapshotWithOverrides(memPath, snapshotPath string, resumeV
 		EnableDiffSnapshots: false,
 		ResumeVM:            resumeVM,
 		NetworkOverrides:    overrides,
+	})
+}
+
+// LoadSnapshotUFFD loads a snapshot through the userfaultfd memory backend (issue
+// #167): instead of a mem file path it points Firecracker at uffdSocketPath, a
+// unix socket an external handler is already listening on. Firecracker connects
+// to it during the load, creates the guest userfaultfd, and sends the handler the
+// region mappings and the uffd descriptor. This path is REQUIRED to restore a
+// hugetlbfs-backed snapshot (Firecracker refuses to file-map one) and is how a
+// hot-page set is preloaded before resume. It always loads paused (resume_vm
+// false): the engine preloads, then Resume()s. NetworkOverrides behave exactly as
+// in LoadSnapshotWithOverrides.
+func (c *Client) LoadSnapshotUFFD(snapshotPath, uffdSocketPath string, overrides []NetworkOverride) error {
+	return c.put("/snapshot/load", SnapshotLoad{
+		SnapshotPath:     snapshotPath,
+		ResumeVM:         false,
+		NetworkOverrides: overrides,
+		MemBackend:       &MemBackend{BackendType: "Uffd", BackendPath: uffdSocketPath},
 	})
 }
 

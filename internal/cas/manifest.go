@@ -83,6 +83,14 @@ type Manifest struct {
 	KernelVersion         string
 	ConfigHash            string
 	HotPages              *HotPageSet
+	// HugePages is the guest-memory page granularity the snapshot was captured
+	// with (issue #167): "" for the default 4 KiB base pages, "2M" for 2 MiB
+	// hugetlbfs. It makes the snapshot self-describing so any node restoring it
+	// knows it MUST use the userfaultfd backend (Firecracker refuses to file-map a
+	// hugetlbfs snapshot), even a node whose own config does not request hugepages
+	// (e.g. a pulled template). Empty is omitted from the canonical encoding, so a
+	// 4 KiB snapshot keeps the exact digest it had before the field existed (#32).
+	HugePages string
 }
 
 // Canonical returns a deterministic byte encoding of the manifest. Files are
@@ -158,6 +166,16 @@ func (m Manifest) Canonical() []byte {
 		buf.WriteString(`},`)
 	}
 
+	// hugePages is OPTIONAL and additive, like hotPages: emitted only when the
+	// snapshot uses a non-default page backing, so a 4 KiB snapshot's bytes (and
+	// digest) are identical to one built before the field existed (#32). It sorts
+	// after hotPages and before kernelVersion in the fixed alphabetical key order.
+	if m.HugePages != "" {
+		buf.WriteString(`"hugePages":`)
+		writeJSONString(&buf, m.HugePages)
+		buf.WriteByte(',')
+	}
+
 	buf.WriteString(`"kernelVersion":`)
 	writeJSONString(&buf, m.KernelVersion)
 	buf.WriteByte(',')
@@ -224,6 +242,10 @@ type Metadata struct {
 	// prefetch (issue #167). Nil when none was captured; in that case the built
 	// manifest is byte-identical to a pre-field one.
 	HotPages *HotPageSet
+	// HugePages is the guest-memory page granularity the snapshot was captured
+	// with (issue #167): "" for 4 KiB base pages, "2M" for 2 MiB hugetlbfs. Empty
+	// is omitted from the canonical encoding, preserving pre-field digests.
+	HugePages string
 }
 
 // BuildManifest chunks each file in the name to path map and assembles a
@@ -270,5 +292,6 @@ func manifestFrom(entries []FileEntry, meta Metadata) Manifest {
 		KernelVersion:         meta.KernelVersion,
 		ConfigHash:            meta.ConfigHash,
 		HotPages:              meta.HotPages,
+		HugePages:             meta.HugePages,
 	}
 }

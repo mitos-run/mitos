@@ -593,6 +593,125 @@ func (s *StreamConn) Pty(ctx context.Context, req *PtyRequest, onOutput OutputFu
 	return nil, fmt.Errorf("pty: connection closed before exit frame")
 }
 
+// TunnelConn is a raw bidirectional byte pipe to a guest loopback TCP port,
+// returned by StreamConn.Tunnel once the guest has acked the open. It satisfies
+// io.ReadWriteCloser plus a read deadline. Reads first drain any bytes that were
+// buffered alongside the ack line (the guest may coalesce early payload with its
+// ack in one TCP segment), then read straight from the underlying vsock conn;
+// writes and Close go straight to the conn. Closing it drops the vsock
+// connection, which the guest observes and uses to close its end of the guest
+// TCP socket, so no goroutine or fd leaks on either side.
+type TunnelConn struct {
+	conn     net.Conn
+	leftover []byte
+}
+
+// Read drains any leftover post-ack bytes first, then reads from the conn.
+func (t *TunnelConn) Read(p []byte) (int, error) {
+	if len(t.leftover) > 0 {
+		n := copy(p, t.leftover)
+		t.leftover = t.leftover[n:]
+		return n, nil
+	}
+	return t.conn.Read(p)
+}
+
+func (t *TunnelConn) Write(p []byte) (int, error) { return t.conn.Write(p) }
+
+func (t *TunnelConn) Close() error { return t.conn.Close() }
+
+// SetReadDeadline bounds a read on the tunnel; it forwards to the underlying
+// vsock conn. Used by callers (and tests) that must not block forever.
+func (t *TunnelConn) SetReadDeadline(d time.Time) error { return t.conn.SetReadDeadline(d) }
+
+// Tunnel opens a raw TCP-over-vsock tunnel to the guest's 127.0.0.1:port (issue
+// #228) over this DEDICATED stream connection. It sends one TunnelRequest line,
+// reads the guest's single TunnelAck line under a bounded deadline (so a wedged
+// guest cannot hang the caller), and on success returns a TunnelConn that is a
+// raw bidirectional byte pipe to the guest TCP socket. On a refused open (the
+// guest port is not listening, or the target was not loopback) it returns the
+// guest's LLM-legible dial error and the caller should Close the StreamConn. The
+// returned TunnelConn takes ownership of the connection; Close it to tear the
+// tunnel down.
+//
+// The ack line is read byte-at-a-time directly from the conn (NOT through the
+// StreamConn scanner) so the read never over-consumes into a buffer the raw pipe
+// cannot reach: every byte after the ack newline stays on the wire for the
+// TunnelConn. Any payload that arrived coalesced WITH the ack line is captured
+// as leftover and replayed on the first Read.
+func (s *StreamConn) Tunnel(port int) (*TunnelConn, error) {
+	data, err := json.Marshal(&Request{Type: TypeTunnel, Tunnel: &TunnelRequest{Port: port}})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.conn.Write(append(data, '\n')); err != nil {
+		return nil, fmt.Errorf("send tunnel open: %w", err)
+	}
+
+	// Bound only the ack read; the raw byte pipe that follows is long-lived and
+	// is torn down by Close, so clear the deadline once the ack is in.
+	_ = s.conn.SetReadDeadline(time.Now().Add(DefaultRequestTimeout))
+	line, leftover, rerr := readAckLine(s.conn)
+	_ = s.conn.SetReadDeadline(time.Time{})
+	if rerr != nil {
+		return nil, fmt.Errorf("recv tunnel ack: %w", rerr)
+	}
+
+	var ack TunnelAck
+	if err := json.Unmarshal(line, &ack); err != nil {
+		return nil, fmt.Errorf("decode tunnel ack: %w", err)
+	}
+	if !ack.OK {
+		return nil, fmt.Errorf("guest refused tunnel to 127.0.0.1:%d: %s", port, ack.Error)
+	}
+	return &TunnelConn{conn: s.conn, leftover: leftover}, nil
+}
+
+// readAckLine reads bytes from conn until the first newline, returning the line
+// WITHOUT the trailing newline and any bytes that arrived in the same read after
+// the newline (leftover, which belongs to the raw pipe that follows the ack). It
+// reads in small chunks so it cannot over-consume more than one OS read past the
+// newline, and that single over-read is preserved as leftover. The ack line is
+// bounded by maxAckLineBytes so a guest that never sends a newline cannot drive
+// an unbounded host allocation.
+func readAckLine(conn net.Conn) (line, leftover []byte, err error) {
+	var buf []byte
+	tmp := make([]byte, 512)
+	for {
+		n, rerr := conn.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if i := bytesIndexByte(buf, '\n'); i >= 0 {
+				return buf[:i], append([]byte(nil), buf[i+1:]...), nil
+			}
+			if len(buf) > maxAckLineBytes {
+				return nil, nil, fmt.Errorf("tunnel ack exceeded %d bytes without a newline", maxAckLineBytes)
+			}
+		}
+		if rerr != nil {
+			if len(buf) == 0 {
+				return nil, nil, fmt.Errorf("connection closed before ack")
+			}
+			return nil, nil, fmt.Errorf("connection closed mid-ack")
+		}
+	}
+}
+
+// maxAckLineBytes bounds the host's tunnel-ack read so a guest that connects but
+// never sends a newline-terminated ack cannot drive an unbounded allocation.
+const maxAckLineBytes = 64 << 10
+
+// bytesIndexByte returns the index of the first b in s, or -1. A tiny local
+// helper to avoid importing bytes solely for IndexByte in this file.
+func bytesIndexByte(s []byte, b byte) int {
+	for i := range s {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
 // SendInput writes one input frame (raw keystroke bytes) to the guest PTY. Safe
 // to call concurrently with Pty; the write is mutex-guarded.
 func (s *StreamConn) SendInput(data []byte) error {

@@ -1,0 +1,44 @@
+{
+  "description": "Shared SDK conformance scenario (issue #22). One ordered control-plane scenario both the Python SDK (sdk/python/mitos) and the TypeScript SDK (sdk/typescript) run against the SAME standalone sandbox-server in mock mode. Each runner asserts that its normalized result equals the expectation below, so the two languages prove byte-equal logical behavior for the shared control plane: create template, list templates, fork, list sandboxes, terminate. Exec / files / run_code are NOT in scope here: the mock engine has no guest VM (no vsock guest agent), so the conformance SURFACE is the control plane only; the in-VM data path is proven on the KVM CI job (kvm-test.yaml).",
+  "ids": {
+    "template": "conf-template",
+    "sandbox": "conf-sandbox"
+  },
+  "steps": [
+    {
+      "name": "create_template",
+      "op": "createTemplate",
+      "args": { "id": "conf-template", "init_wait_seconds": 1 },
+      "expect": { "id": "conf-template", "ready": true }
+    },
+    {
+      "name": "list_templates_contains",
+      "op": "listTemplates",
+      "expect_contains": { "id": "conf-template", "ready": true }
+    },
+    {
+      "name": "fork",
+      "op": "fork",
+      "args": { "template": "conf-template", "id": "conf-sandbox" },
+      "expect": { "id": "conf-sandbox", "endpoint_present": true }
+    },
+    {
+      "name": "list_sandboxes_contains",
+      "op": "listSandboxes",
+      "expect_contains": { "id": "conf-sandbox", "template_id": "conf-template" }
+    },
+    {
+      "name": "terminate",
+      "op": "terminate",
+      "args": { "id": "conf-sandbox" },
+      "expect_absent_from_sandboxes": "conf-sandbox"
+    }
+  ],
+  "normalization": {
+    "doc": "Normalization makes the two languages assert byte-equal logical results regardless of language casing or transport details. RULES: (1) compare only the stable keys named below; (2) ignore all timing fields (creation_time_ms / fork_time_ms / created_at / createdAt) since they vary per run; (3) the SDK-native camelCase keys (templateId, creationTimeMs) and the wire snake_case keys (template_id, creation_time_ms) are normalized to the snake_case keys used in this file; (4) endpoint is normalized to the boolean endpoint_present (the value is the server's own URL and is environment dependent), so both SDKs assert only that an endpoint string is present and non-empty.",
+    "template_keys": ["id", "ready"],
+    "sandbox_fork_keys": ["id", "endpoint_present"],
+    "sandbox_list_keys": ["id", "template_id"],
+    "ignore_keys": ["creation_time_ms", "creationTimeMs", "fork_time_ms", "forkTimeMs", "created_at", "createdAt", "endpoint", "network"]
+  }
+}

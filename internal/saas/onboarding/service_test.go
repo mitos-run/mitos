@@ -304,3 +304,41 @@ func TestDefaultModeIsWaitlist(t *testing.T) {
 		t.Fatalf("default mode = %q, want waitlist (the #208 gate)", svc.Mode())
 	}
 }
+
+// TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
+// when a PRIOR verify attempt provisioned the account but crashed before marking
+// the pending signup verified (e.g. the credit grant or key issue errored). The
+// pending stays unverified and the email is taken, so a naive re-verify calls
+// SignUp again and fails with a duplicate-email conflict, stranding the user. The
+// fix loads the existing account on conflict and completes onboarding.
+func TestVerifyRecoversFromHalfProvisionedAccount(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token")
+	}
+
+	// Simulate the prior verify attempt provisioning the account (email now taken)
+	// but never reaching MarkVerified: provision out-of-band over the same store.
+	accts := saas.NewAccountService(h.store, saas.NewKeyService(h.store))
+	if _, _, err := accts.SignUp(ctx, "dev@example.com"); err != nil {
+		t.Fatalf("seed half-provisioned account: %v", err)
+	}
+
+	// Re-verify with the original token must COMPLETE onboarding, not conflict.
+	res, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify after half-provision must recover, got error: %v", err)
+	}
+	if res.Account.ID == "" || res.Org.ID == "" {
+		t.Fatalf("verify must return account+org, got %+v", res)
+	}
+	if res.FirstKey.RawKey == "" {
+		t.Fatalf("verify must issue a usable first key, got %+v", res.FirstKey)
+	}
+}

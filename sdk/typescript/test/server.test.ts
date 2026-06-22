@@ -8,6 +8,7 @@ interface Recorded {
   method?: string;
   url?: string;
   body: unknown;
+  headers?: Record<string, string | string[] | undefined>;
 }
 
 let server: Server;
@@ -23,7 +24,7 @@ beforeEach(async () => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const parsed = body ? JSON.parse(body) : undefined;
-      recorded.push({ method: req.method, url: req.url, body: parsed });
+      recorded.push({ method: req.method, url: req.url, body: parsed, headers: req.headers });
       route(req, parsed, res);
     });
   });
@@ -102,6 +103,17 @@ describe("SandboxServer", () => {
     expect(recorded[0].method).toBe("GET");
   });
 
+  it("sends an Idempotency-Key on createTemplate and fork (parity with the Python SDK)", async () => {
+    const s = new SandboxServer(baseUrl);
+    await s.createTemplate("idem-tmpl");
+    const tmplCall = recorded.find((r) => r.method === "POST" && r.url === "/v1/templates");
+    expect(tmplCall?.headers?.["idempotency-key"]).toBeTruthy();
+
+    await s.fork("python", "sbx-idem");
+    const forkCall = recorded.find((r) => r.url === "/v1/fork");
+    expect(forkCall?.headers?.["idempotency-key"]).toBeTruthy();
+  });
+
   it("creates a template with an init wait", async () => {
     const s = new SandboxServer(baseUrl);
     const t = await s.createTemplate("node", { initWaitSeconds: 3 });
@@ -130,6 +142,41 @@ describe("SandboxServer", () => {
     const s = new SandboxServer(baseUrl);
     const sandbox = await s.fork("python");
     expect(sandbox.id).toMatch(/^sandbox-[0-9a-f]{8}$/);
+  });
+
+  it("defaults the base URL to the hosted production endpoint", () => {
+    const prev = process.env.MITOS_BASE_URL;
+    delete process.env.MITOS_BASE_URL;
+    try {
+      const s = new SandboxServer();
+      expect(s.url).toBe("https://mitos.run");
+    } finally {
+      if (prev !== undefined) process.env.MITOS_BASE_URL = prev;
+    }
+  });
+
+  it("an explicit url beats MITOS_BASE_URL and the hosted default", () => {
+    const prev = process.env.MITOS_BASE_URL;
+    process.env.MITOS_BASE_URL = "http://from-env:9000";
+    try {
+      const s = new SandboxServer("http://explicit:1234");
+      expect(s.url).toBe("http://explicit:1234");
+    } finally {
+      if (prev !== undefined) process.env.MITOS_BASE_URL = prev;
+      else delete process.env.MITOS_BASE_URL;
+    }
+  });
+
+  it("MITOS_BASE_URL beats the hosted default when no url is given", () => {
+    const prev = process.env.MITOS_BASE_URL;
+    process.env.MITOS_BASE_URL = "http://from-env:9000";
+    try {
+      const s = new SandboxServer();
+      expect(s.url).toBe("http://from-env:9000");
+    } finally {
+      if (prev !== undefined) process.env.MITOS_BASE_URL = prev;
+      else delete process.env.MITOS_BASE_URL;
+    }
   });
 
   it("terminate deletes the sandbox via the server", async () => {

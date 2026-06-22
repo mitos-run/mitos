@@ -1,6 +1,6 @@
 # mitos Python SDK
 
-Python client for [paperclipinc/mitos](https://github.com/paperclipinc/mitos):
+Python client for [mitos-run/mitos](https://github.com/mitos-run/mitos):
 snapshot-fork sandboxes for AI agents on Kubernetes.
 
 Two modes:
@@ -24,9 +24,11 @@ sb.terminate()
 ```
 
 `mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
-else `MITOS_API_KEY`) and base URL (argument, else `MITOS_BASE_URL`) and returns a
-`DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`, and
-`terminate`. `Sandbox.create(...)` is an alias for the same call.
+else `MITOS_API_KEY`, else the CLI login credential file written by
+`mitos auth login`, so one login authenticates the SDK too) and base URL
+(argument, else `MITOS_BASE_URL`) and returns a `DirectSandbox` exposing `exec`,
+`run_code`, `files`, `pty`, `fork`, and `terminate`. `Sandbox.create(...)` is an
+alias for the same call.
 
 ```python
 import mitos
@@ -418,5 +420,5 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-See the [repository README](https://github.com/paperclipinc/mitos#readme)
+See the [repository README](https://github.com/mitos-run/mitos#readme)
 for project status; this SDK is pre-alpha and its API may change.

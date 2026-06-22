@@ -14,7 +14,7 @@ HTTP/PTY API) works together on real hardware.
 ## Architecture
 
 ```
-GitHub (paperclipinc/mitos, PUBLIC)
+GitHub (mitos-run/mitos, PUBLIC)
   |
   |  trusted trigger only (push to main / workflow_dispatch / labeled same-repo PR)
   v
@@ -35,7 +35,7 @@ path). The runner only drives the cluster with `kubectl` and talks to each
 claim's sandbox HTTP API over the in-cluster pod network via the mitos Python
 SDK (`in_cluster=True`).
 
-Images are built and pushed to `ghcr.io/paperclipinc/mitos-{controller,husk-stub,...}`
+Images are built and pushed to `ghcr.io/mitos-run/mitos-{controller,husk-stub,...}`
 by the existing `docker-build` / publish pipeline on GitHub-hosted
 `ubuntu-latest`. This job only DEPLOYS those images; it never builds them on the
 runner (building untrusted Dockerfiles on a cluster-attached runner would be a
@@ -57,7 +57,7 @@ security hole).
 
 ## Security model (why fork PRs are excluded)
 
-The repo `paperclipinc/mitos` is PUBLIC. A self-hosted runner attached to the
+The repo `mitos-run/mitos` is PUBLIC. A self-hosted runner attached to the
 cluster is a high-value target: anyone who can run code on it inherits the
 runner's KVM-backed husk path and its cluster RBAC. A malicious fork pull
 request could, if its code ran here, own the cluster. So the job is gated to
@@ -150,12 +150,12 @@ GHCR:
 docker buildx imagetools inspect ghcr.io/actions/actions-runner:2.321.0
 
 docker build -f deploy/ci-runner/Dockerfile.ci-runner \
-  -t ghcr.io/paperclipinc/mitos-ci-runner:0.1.0 .
-docker push ghcr.io/paperclipinc/mitos-ci-runner:0.1.0
+  -t ghcr.io/mitos-run/mitos-ci-runner:0.1.0 .
+docker push ghcr.io/mitos-run/mitos-ci-runner:0.1.0
 ```
 
 Then pin `deploy/ci-runner/deployment.yaml`'s `image:` to the pushed digest
-(`ghcr.io/paperclipinc/mitos-ci-runner@sha256:...`) so a moving tag cannot swap
+(`ghcr.io/mitos-run/mitos-ci-runner@sha256:...`) so a moving tag cannot swap
 the runner binary.
 
 ### 2. Create the runner registration Secret
@@ -165,7 +165,7 @@ A fine-grained PAT is recommended because the official image can refresh
 short-lived registration tokens from it across ephemeral restarts.
 
 Create a fine-grained PAT at GitHub Settings -> Developer settings ->
-Fine-grained tokens, scoped to the `paperclipinc/mitos` repo with:
+Fine-grained tokens, scoped to the `mitos-run/mitos` repo with:
 
 - Repository permissions: `Administration: Read and write` ONLY (this is what
   grants self-hosted runner register/remove; the registration-token endpoint is
@@ -187,7 +187,7 @@ To rotate: re-create the Secret and restart the Deployment
 
 ### 3. Copy the ghcr image-pull Secret into `mitos-ci`
 
-The runner image is in the private `ghcr.io/paperclipinc` registry, and the
+The runner image is in the private `ghcr.io/mitos-run` registry, and the
 ServiceAccount references an `imagePullSecrets` entry named `ghcr`. Copy the
 existing `ghcr` Secret (already present in the `mitos` namespace) into the new
 `mitos-ci` namespace so the runner pod can pull. The namespace is created by the

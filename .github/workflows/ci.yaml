@@ -174,6 +174,75 @@ jobs:
       - run: npm run lint
       - run: npm pack --dry-run
 
+  sdk-conformance:
+    # SDK conformance parity (issue #22): prove the Python and TypeScript SDKs
+    # behave IDENTICALLY for the shared control plane (create template, list
+    # templates, fork, list sandboxes, terminate) against the SAME backend, the
+    # standalone sandbox-server in mock mode. Both runners drive the ONE shared
+    # scenario in sdk/conformance/scenario.json and assert the SAME normalized
+    # expectations. exec / files / run_code need a guest VM (vsock guest agent)
+    # the mock engine lacks, so they are out of scope here and proven on the KVM
+    # job (kvm-test.yaml). Toolchain setup mirrors the python-test and
+    # typescript-sdk jobs plus Go to build and run the server.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      - name: Build the standalone sandbox-server
+        run: go build -o /tmp/sandbox-server ./cmd/sandbox-server/
+      - name: Start sandbox-server in mock mode and wait for health
+        # Background the mock server on :8080, then poll /v1/health until it
+        # answers (the route the SDKs gate on). The PID is recorded so the
+        # cleanup step can stop it.
+        run: |
+          set -euo pipefail
+          # The binary lives at /tmp/sandbox-server, so the server's default
+          # --data-dir (also /tmp/sandbox-server) would collide with the binary
+          # file (mkdir: not a directory). Point it at a distinct data dir.
+          /tmp/sandbox-server --mock --addr :8080 --data-dir "${RUNNER_TEMP:-/tmp}/sandbox-server-data" &
+          echo "SANDBOX_SERVER_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then
+              echo "sandbox-server healthy after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "sandbox-server never became healthy"
+          exit 1
+      - name: Install the Python SDK
+        working-directory: sdk/python
+        run: pip install -e ".[dev]"
+      - name: Python conformance runner
+        working-directory: sdk/python
+        # MITOS_CONFORMANCE_URL un-skips the gated test against the live server.
+        env:
+          MITOS_CONFORMANCE_URL: http://localhost:8080
+        run: pytest tests/test_conformance.py -v
+      - name: Install the TypeScript SDK
+        working-directory: sdk/typescript
+        run: npm ci
+      - name: TypeScript conformance runner
+        working-directory: sdk/typescript
+        # The same env un-skips the IDENTICAL scenario in the TS runner.
+        env:
+          MITOS_CONFORMANCE_URL: http://localhost:8080
+        run: npx vitest run test/conformance.test.ts
+      - name: Stop sandbox-server
+        if: always()
+        run: |
+          if [ -n "${SANDBOX_SERVER_PID:-}" ]; then
+            kill "${SANDBOX_SERVER_PID}" 2>/dev/null || true
+          fi
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

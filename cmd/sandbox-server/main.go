@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,8 +18,11 @@ import (
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/preview"
+	"mitos.run/mitos/internal/sandboxrpc"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // sandbox-server is a standalone REST API. No Kubernetes required.
@@ -25,12 +30,22 @@ import (
 // Both share the same fork engine and guest agent protocol.
 
 type server struct {
-	mu          sync.RWMutex
-	templateMgr *firecracker.TemplateManager
-	rootfsPath  string
-	templates   map[string]*templateInfo
-	sandboxes   map[string]*sandboxInfo
-	mockMode    bool
+	mu sync.RWMutex
+	// engine is the real, KVM-backed fork engine used in real mode to build
+	// templates, fork sandboxes (restore a snapshot), and reap them. It is the
+	// same proven path cmd/mem-smoke and cmd/crash-reap-smoke drive. It is nil
+	// in mock mode AND in real-mode unit tests built via newServer (which never
+	// touches KVM): every real-mode handler gates engine use on engine != nil so
+	// those tests keep using the local-agent fallback path. main() constructs and
+	// assigns it in real mode after newServer, because fork.NewEngine calls
+	// validateKVM and would fail on a non-KVM host (CI).
+	engine *fork.Engine
+	// dataDir roots the engine data directory and the per-sandbox vsock UDS paths.
+	dataDir    string
+	rootfsPath string
+	templates  map[string]*templateInfo
+	sandboxes  map[string]*sandboxInfo
+	mockMode   bool
 	// idempotency maps an Idempotency-Key header value to the resource id a prior
 	// creating call (template create or fork) returned under that key, with the
 	// time it was recorded so an entry expires after idempotencyTTL. A repeat with
@@ -58,6 +73,13 @@ type server struct {
 	previewSigner *preview.Signer
 	previewDomain string
 	previewTTL    time.Duration
+
+	// reseedBackoff is the base delay between reseed-handshake retries on a real
+	// fork (the delay grows linearly with the attempt). After a snapshot restore
+	// the guest agent resets its vsock listener, so the first NotifyForked can see
+	// a transient "connection closed"; the fork path retries register+reseed
+	// rather than failing the race. Tests set this to a tiny value.
+	reseedBackoff time.Duration
 }
 
 // newServer builds the standalone server and applies the SandboxAPI policy
@@ -65,6 +87,7 @@ type server struct {
 // the single construction seam main() and the flag-plumbing test share.
 func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, maxExecTimeoutSecs int) *server {
 	s := &server{
+		dataDir:              dataDir,
 		rootfsPath:           rootfsPath,
 		templates:            make(map[string]*templateInfo),
 		sandboxes:            make(map[string]*sandboxInfo),
@@ -73,6 +96,7 @@ func newServer(dataDir, rootfsPath string, mockMode bool, maxStreamsPerSandbox, 
 		sandboxAPI:           daemon.NewSandboxAPI(dataDir),
 		maxStreamsPerSandbox: maxStreamsPerSandbox,
 		maxExecTimeoutSecs:   maxExecTimeoutSecs,
+		reseedBackoff:        250 * time.Millisecond,
 	}
 	// Standalone local-testing path: if the Firecracker vsock UDS does not
 	// exist, fall back to a guest agent running directly on the host
@@ -123,22 +147,59 @@ type idempotencyRecord struct {
 // returns the same resource. It mirrors the Stripe / RFC draft convention.
 const idempotencyHeader = "Idempotency-Key"
 
-// lookupIdempotent returns the resource id a prior creating call recorded under
-// key for kind, when the binding is present and unexpired. An empty key (no
-// header) never matches. Must be called with s.mu held.
-func (s *server) lookupIdempotent(key string, kind idempotencyKind) (string, bool) {
+// idempotencyStatus is the outcome of reserving an Idempotency-Key for a create.
+type idempotencyStatus int
+
+const (
+	// idemProceed: the caller holds the reservation and must perform the create,
+	// then record it on success or release it on failure.
+	idemProceed idempotencyStatus = iota
+	// idemReplay: a prior create under this key already completed; return its
+	// resource (the returned id) instead of creating again.
+	idemReplay
+	// idemInFlight: a concurrent create under this key is reserved but not yet
+	// complete; the caller must NOT start a second create.
+	idemInFlight
+)
+
+// beginIdempotent atomically resolves an Idempotency-Key before a create. The
+// lookup and the in-flight reservation happen under one exclusive lock, so two
+// concurrent calls with the same key cannot both observe "absent" and both
+// proceed to create (the TOCTOU the earlier RLock-then-release-then-create
+// allowed). An empty key (no header) always proceeds without reserving. On
+// idemProceed the caller MUST later call recordIdempotent (success, under s.mu)
+// or releaseIdempotent (failure) for the same key.
+func (s *server) beginIdempotent(key string, kind idempotencyKind) (string, idempotencyStatus) {
 	if key == "" {
-		return "", false
+		return "", idemProceed
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec, ok := s.idempotency[key]
-	if !ok || rec.kind != kind {
-		return "", false
+	if ok && rec.kind == kind && time.Since(rec.at) <= idempotencyTTL {
+		if rec.resourceID != "" {
+			return rec.resourceID, idemReplay
+		}
+		return "", idemInFlight
 	}
-	if time.Since(rec.at) > idempotencyTTL {
+	// Absent, expired, or a different kind: reserve this key in-flight (an empty
+	// resourceID) so a concurrent same-key create observes idemInFlight.
+	s.idempotency[key] = idempotencyRecord{kind: kind, at: time.Now()}
+	return "", idemProceed
+}
+
+// releaseIdempotent drops a still-in-flight reservation so a later retry can
+// proceed; a failed create does not consume the key. It never removes a
+// completed binding (non-empty resourceID). An empty key is a no-op.
+func (s *server) releaseIdempotent(key string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.idempotency[key]; ok && rec.resourceID == "" {
 		delete(s.idempotency, key)
-		return "", false
 	}
-	return rec.resourceID, true
 }
 
 // recordIdempotent binds key to resourceID for kind so a later repeat returns
@@ -182,6 +243,7 @@ func main() {
 		firecrackerBin       string
 		kernelPath           string
 		rootfsPath           string
+		agentBin             string
 		mockMode             bool
 		auditLog             string
 		maxStreamsPerSandbox int
@@ -194,7 +256,8 @@ func main() {
 	flag.StringVar(&dataDir, "data-dir", "/tmp/sandbox-server", "Data directory")
 	flag.StringVar(&firecrackerBin, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
 	flag.StringVar(&kernelPath, "kernel", "", "Guest kernel path (required unless --mock)")
-	flag.StringVar(&rootfsPath, "rootfs", "", "Guest rootfs path (required unless --mock)")
+	flag.StringVar(&rootfsPath, "rootfs", "", "Guest rootfs path the engine builds templates from (required unless --mock). The guest agent is supplied separately via --agent-bin and injected as /init by the engine; pass a plain rootfs here.")
+	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary the engine injects as /init when it builds a template rootfs (required unless --mock). Mirrors mem-smoke's --agent-bin.")
 	flag.BoolVar(&mockMode, "mock", false, "Mock mode (no KVM, simulated responses)")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the fork path. 0 disables the cap (unbounded, the prior behavior). Matches the forkd default of 16.")
@@ -203,8 +266,8 @@ func main() {
 	flag.IntVar(&previewTTLSecs, "preview-ttl-seconds", 3600, "How long a minted preview URL stays valid (issue #126). Default 3600 (1h).")
 	flag.Parse()
 
-	if !mockMode && (kernelPath == "" || rootfsPath == "") {
-		fmt.Fprintln(os.Stderr, "error: --kernel and --rootfs are required (or use --mock)")
+	if !mockMode && (kernelPath == "" || rootfsPath == "" || agentBin == "") {
+		fmt.Fprintln(os.Stderr, "error: --kernel, --rootfs and --agent-bin are required (or use --mock)")
 		os.Exit(1)
 	}
 
@@ -245,9 +308,23 @@ func main() {
 	s.sandboxAPI.SetAuditor(auditor)
 
 	if !mockMode {
-		// Standalone sandbox-server keeps the direct-exec dev path; the
-		// jailer launch path is wired through forkd.
-		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, firecracker.JailerConfig{})
+		// Real mode forks real VMs through the proven KVM-backed fork engine, the
+		// same path cmd/mem-smoke and cmd/crash-reap-smoke drive: CreateTemplate
+		// builds a snapshot template (injecting --agent-bin as /init and appending
+		// init=/init to the boot args), Fork restores it into a live microVM and
+		// returns the real per-fork vsock UDS, and Terminate reaps it. The engine
+		// is constructed HERE (not in newServer) because fork.NewEngine calls
+		// validateKVM and would fail on a non-KVM host; the real-mode unit tests
+		// build the server via newServer and never touch KVM.
+		engine, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, firecracker.JailerConfig{}, fork.EngineOpts{
+			AllowUnverified: true,
+			AgentBinPath:    agentBin,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: fork engine: %v\n", err)
+			os.Exit(1)
+		}
+		s.engine = engine
 	}
 
 	mux := http.NewServeMux()
@@ -257,6 +334,11 @@ func main() {
 	mux.HandleFunc("POST /v1/fork", s.handleFork)
 	mux.HandleFunc("GET /v1/sandboxes", s.handleListSandboxes)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", s.handleTerminate)
+	// Standalone guest-port forward (issue #228): open a host TCP listener that
+	// bridges to a guest loopback port over a vsock tunnel, returning the host
+	// address the caller dials. Real mode only; the Kubernetes Service/Ingress
+	// routing and the CRD port-declaration fields are tracked follow-ups.
+	mux.HandleFunc("POST /v1/sandboxes/{id}/forward", s.handleForward)
 	// Preview URLs (issue #126): mint a signed, expiring URL for get_host(port).
 	mux.HandleFunc("POST /v1/preview", s.handlePreview)
 
@@ -275,10 +357,77 @@ func main() {
 	// outside requireBearer); delegate the WebSocket upgrade GET to it.
 	mux.Handle("GET /v1/pty", apiHandler)
 
+	// Connect runtime protocol (issue #24): mount the Sandbox service under its
+	// own RPC path (/sandbox.v1.Sandbox/...), which does not overlap the /v1/*
+	// REST routes above, so the existing HTTP API and the mock-mode tests are
+	// untouched. This foundation slice serves a real streaming Exec (bridged to
+	// the SAME SandboxAPI -> vsock -> guest agent exec path) and a real unary
+	// Budget; every other RPC is an honest #24 follow-up. The handler is reached
+	// over Connect HTTP, including the gRPC and gRPC-Web protocols.
+	s.mountConnect(mux)
+
+	// Unencrypted HTTP/2 lets Connect bidi streams (Exec) work without TLS, while
+	// plain HTTP/1.1 requests to the /v1/* REST routes pass through unchanged: the
+	// server negotiates HTTP/1.1 or h2c per connection on the same mux, so the
+	// REST surface is unaffected.
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{Addr: addr, Handler: mux, Protocols: &protocols}
 	log.Printf("sandbox-server listening on %s (mock=%v)", addr, mockMode)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// connectSandboxHeader is the request header the Connect Sandbox handler reads
+// to resolve which sandbox a call targets, in the standalone server's
+// foundation slice. Under issue #25 this is replaced by an attenuated capability
+// token that implicitly scopes the call; until then the standalone edge is
+// tokenless (it already AllowTokenless()es the SandboxAPI), so the caller names
+// its sandbox explicitly via this header.
+const connectSandboxHeader = "Mitos-Sandbox"
+
+// sandboxIDContextKey carries the resolved sandbox id from the per-request
+// middleware to the Connect handler's resolver.
+type sandboxIDContextKey struct{}
+
+// mountConnect builds the Connect Sandbox handler over the SandboxAPI exec path
+// and mounts it on mux. The exec backend bridges to SandboxAPI.RunExecStream
+// (the same vsock streaming path /v1/exec/stream uses); the sandbox id is read
+// from the Mitos-Sandbox request header by a thin middleware so the handler's
+// resolver stays transport-neutral.
+func (s *server) mountConnect(mux *http.ServeMux) {
+	svc := sandboxrpc.NewService(
+		execBackend{api: s.sandboxAPI},
+		nil, // Budget provider is a follow-up; Budget reports an honest #24 Unimplemented until wired.
+		sandboxrpc.WithSandboxResolver(func(ctx context.Context) (string, error) {
+			id, _ := ctx.Value(sandboxIDContextKey{}).(string)
+			if id == "" {
+				return "", fmt.Errorf("no target sandbox: set the %s request header to the sandbox id", connectSandboxHeader)
+			}
+			return id, nil
+		}),
+	)
+	path, handler := sandboxv1connect.NewSandboxHandler(svc)
+	withSandbox := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get(connectSandboxHeader); id != "" {
+			r = r.WithContext(context.WithValue(r.Context(), sandboxIDContextKey{}, id))
+		}
+		handler.ServeHTTP(w, r)
+	})
+	mux.Handle(path, withSandbox)
+}
+
+// execBackend adapts the daemon SandboxAPI to the sandboxrpc.ExecBackend seam so
+// the Connect Exec handler reuses the existing vsock exec streaming path without
+// reimplementing it.
+type execBackend struct {
+	api *daemon.SandboxAPI
+}
+
+func (b execBackend) RunExecStream(ctx context.Context, sandboxID string, p sandboxrpc.ExecParams, onChunk func(stream string, data []byte) error) (int, float64, error) {
+	return b.api.RunExecStream(ctx, sandboxID, p.Command, p.WorkingDir, p.Env, p.TimeoutSeconds, onChunk)
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -339,16 +488,21 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	// before doing any creating work; a client retrying after a timeout must not
 	// drive a second create.
 	idemKey := r.Header.Get(idempotencyHeader)
-	s.mu.RLock()
-	existingID, hit := s.lookupIdempotent(idemKey, idempotencyTemplate)
-	var existing *templateInfo
-	if hit {
-		existing = s.templates[existingID]
-	}
-	s.mu.RUnlock()
-	if hit && existing != nil {
-		resp(w, existing)
+	existingID, idemSt := s.beginIdempotent(idemKey, idempotencyTemplate)
+	if idemSt == idemInFlight {
+		errResp(w, "a create with this Idempotency-Key is already in progress; retry shortly", 409)
 		return
+	}
+	if idemSt == idemReplay {
+		s.mu.RLock()
+		existing := s.templates[existingID]
+		s.mu.RUnlock()
+		if existing != nil {
+			resp(w, existing)
+			return
+		}
+		// The recorded template was since deleted; fall through and recreate under
+		// the same key (recordIdempotent below rebinds it).
 	}
 
 	// Resolve and validate the network posture (issue #219). A nil network means
@@ -357,6 +511,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	// parsed allowlist.
 	netCfg, nerr := resolveNetworkConfig(req.Network)
 	if nerr != nil {
+		s.releaseIdempotent(idemKey)
 		errResp(w, fmt.Sprintf("invalid network config: %v", nerr), 400)
 		return
 	}
@@ -364,10 +519,14 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	if s.mockMode {
 		time.Sleep(100 * time.Millisecond)
-	} else {
-		cfg := firecracker.DefaultVMConfig()
-		cfg.RootfsPath = s.rootfsPath
-		if _, err := s.templateMgr.CreateTemplate(req.ID, cfg, nil); err != nil {
+	} else if s.engine != nil {
+		// Real mode: build the snapshot template through the fork engine from the
+		// base rootfs. The engine injects the guest agent (--agent-bin) as /init
+		// and appends init=/init to the boot args, which the prior
+		// TemplateManager-direct path did not, so an agent-at-/init rootfs no
+		// longer panics with "no working init found".
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil); err != nil {
+			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return
 		}
@@ -472,19 +631,27 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// returns the sandbox the first call forked, never a duplicate. Resolved
 	// before any forking work so a retry never drives a second restore.
 	idemKey := r.Header.Get(idempotencyHeader)
-	s.mu.RLock()
-	tmpl, ok := s.templates[req.Template]
-	existingID, hit := s.lookupIdempotent(idemKey, idempotencyFork)
-	var existing *sandboxInfo
-	if hit {
-		existing = s.sandboxes[existingID]
-	}
-	s.mu.RUnlock()
-	if hit && existing != nil {
-		resp(w, existing)
+	existingID, idemSt := s.beginIdempotent(idemKey, idempotencyFork)
+	if idemSt == idemInFlight {
+		errResp(w, "a fork with this Idempotency-Key is already in progress; retry shortly", 409)
 		return
 	}
+	if idemSt == idemReplay {
+		s.mu.RLock()
+		existing := s.sandboxes[existingID]
+		s.mu.RUnlock()
+		if existing != nil {
+			resp(w, existing)
+			return
+		}
+		// The recorded sandbox was since terminated; fall through and re-fork under
+		// the same key (recordIdempotent below rebinds it).
+	}
+	s.mu.RLock()
+	tmpl, ok := s.templates[req.Template]
+	s.mu.RUnlock()
 	if !ok {
+		s.releaseIdempotent(idemKey)
 		errResp(w, fmt.Sprintf("template %q not found", req.Template), 404)
 		return
 	}
@@ -494,13 +661,41 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(800 * time.Microsecond)
 	}
 
+	// vsockPath is the per-fork guest agent UDS exec/files dial through. In real
+	// mode with a live engine it is the REAL path the restore returned; otherwise
+	// (real-mode unit tests with no engine) it is derived from the data dir, which
+	// does not exist on disk so the standalone unix fallback routes the dial to the
+	// local agent. forkTimeMs is the measured restore time when the engine forks.
+	vsockPath := ""
+	forkTimeMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if !s.mockMode {
+		if s.engine != nil {
+			// Real fork: restore the snapshot into a live microVM through the proven
+			// engine path. On failure release the idempotency reservation and reap any
+			// partial VM so a failed fork never leaks a Firecracker process.
+			res, err := s.engine.Fork(req.Template, req.ID, fork.ForkOpts{})
+			if err != nil {
+				s.releaseIdempotent(idemKey)
+				_ = s.engine.Terminate(req.ID)
+				errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
+				return
+			}
+			vsockPath = res.VsockPath
+			forkTimeMs = res.ForkTimeMs
+		} else {
+			// No engine (real-mode unit tests): derive the vsock path from the data
+			// dir. It will not exist, so RegisterSandbox's unix fallback applies.
+			vsockPath = filepath.Join(s.dataDir, "sandboxes", req.ID, "vsock.sock")
+		}
+	}
+
 	// Inherit the template's network posture (issue #219). The same CRD-shaped
 	// NetworkPolicy drives the host nftables datapath on a real forkd; here it is
 	// recorded on the sandbox so the policy that governs its traffic is visible.
 	info := &sandboxInfo{
 		ID: req.ID, TemplateID: req.Template,
 		Endpoint: "http://localhost:8080", CreatedAt: time.Now(),
-		ForkTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
+		ForkTimeMs: forkTimeMs,
 		Network:    toNetworkPolicy(tmpl.Network),
 	}
 
@@ -513,18 +708,16 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	// fork is rejected and never registered. The mock mode has no guest, so it
 	// skips the handshake.
 	if !s.mockMode {
-		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
-		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
-			// Fail closed: a fork whose guest agent is unreachable cannot reseed.
-			errResp(w, fmt.Sprintf("fork %q: guest agent not connected: %v", req.ID, err), 500)
-			return
-		}
-		s.sandboxAPI.RegisterStreamPath(req.ID, vsockPath)
-		if err := s.reseedFork(req.ID); err != nil {
-			// Fail closed: drop the half-wired sandbox so an un-reseeded VM that
-			// shares CRNG state with its siblings is never served. The error
-			// carries no entropy or secret values.
+		if err := s.registerAndReseed(req.ID, vsockPath); err != nil {
+			// Fail closed: a fork that never confirmed a reseed (even after bounded
+			// retries) shares CRNG state with its siblings and is never served. Drop
+			// any half-wired registration and reap the restored VM so it does not
+			// leak. The error carries no entropy or secret values.
 			s.sandboxAPI.UnregisterSandbox(req.ID)
+			s.releaseIdempotent(idemKey)
+			if s.engine != nil {
+				_ = s.engine.Terminate(req.ID)
+			}
 			errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
 			return
 		}
@@ -548,6 +741,38 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 // and the caller refuses to serve the fork. This mirrors the daemon's
 // notifyForked and the husk productionNotifier. Entropy bytes are never logged;
 // only the boolean reseed result is inspected.
+// registerAndReseed connects to the fork's guest agent and runs the reseed
+// handshake, retrying a bounded number of times on a transient failure. After a
+// snapshot restore the guest agent resets its vsock listener, so the host's
+// first connection can be stale and the first NotifyForked sees "connection
+// closed"; that is a readiness race, not a reseed refusal. Each attempt gets a
+// FRESH connection (RegisterSandbox), so a retry recovers once the restored
+// agent is listening again. It FAILS CLOSED: if no attempt confirms a reseed
+// (ReseededRNG:true), the last error is returned and the caller never serves the
+// fork. The backoff grows linearly with the attempt (s.reseedBackoff base).
+func (s *server) registerAndReseed(sandboxID, vsockPath string) error {
+	const attempts = 6
+	var last error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+			last = fmt.Errorf("guest agent not connected: %w", err)
+		} else {
+			s.sandboxAPI.RegisterStreamPath(sandboxID, vsockPath)
+			if err := s.reseedFork(sandboxID); err != nil {
+				// Drop the stale registration before the next attempt redials.
+				s.sandboxAPI.UnregisterSandbox(sandboxID)
+				last = err
+			} else {
+				return nil
+			}
+		}
+		if attempt < attempts {
+			time.Sleep(time.Duration(attempt) * s.reseedBackoff)
+		}
+	}
+	return last
+}
+
 func (s *server) reseedFork(sandboxID string) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
@@ -589,8 +814,76 @@ func (s *server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sandboxAPI.UnregisterSandbox(id)
+	// Real mode: reap the live microVM through the engine (kills the Firecracker
+	// process, removes its working dir, drops the journal record), the same path
+	// crash-reap-smoke asserts. A terminate error is logged but does not fail the
+	// response: the sandbox is already unregistered and gone from our maps, and
+	// the engine's startup reconcile reaps any residue on a later restart.
+	if s.engine != nil {
+		if err := s.engine.Terminate(id); err != nil {
+			log.Printf("terminate sandbox %q: engine reap: %v", id, err)
+		}
+	}
 	log.Printf("terminated sandbox %q", id)
 	resp(w, map[string]string{"status": "terminated", "id": id})
+}
+
+type forwardReq struct {
+	GuestPort int `json:"guest_port"`
+}
+
+// handleForward opens a host-side TCP forward to a guest loopback port (issue
+// #228, standalone slice): it asks the SandboxAPI to open a host TCP listener on
+// loopback bridged over a vsock tunnel to the guest's 127.0.0.1:guest_port, and
+// returns the host address (host:port) the caller dials. The host listener
+// inherits the standalone server's tokenless trust model and binds to loopback
+// only, so it is reachable only from the host running the server. The forward is
+// torn down when the sandbox is terminated (UnregisterSandbox closes it).
+//
+// It is REAL MODE only: mock mode has no guest agent to tunnel to, so it returns
+// a clean 501 unsupported rather than opening a dead listener. The Kubernetes
+// Service/Ingress routing and the CRD port-declaration fields are explicit
+// follow-ups of #228 and are not built here.
+func (s *server) handleForward(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.mockMode {
+		// Discriminable by HTTP status (501): port forwarding bridges a real guest
+		// TCP socket, which mock mode does not have.
+		e := apierr.Get(apierr.CodeInternal).WithCause("port forwarding is not supported in mock mode: it bridges a real guest TCP socket over vsock; run sandbox-server in real mode (a KVM-backed engine) to forward a guest port")
+		e.Status = http.StatusNotImplemented
+		apierr.Encode(w, e)
+		return
+	}
+
+	var req forwardReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errResp(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.GuestPort < 1 || req.GuestPort > 65535 {
+		errResp(w, fmt.Sprintf("guest_port %d out of range 1-65535", req.GuestPort), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	_, known := s.sandboxes[id]
+	s.mu.RUnlock()
+	if !known {
+		errResp(w, fmt.Sprintf("sandbox %q not found", id), http.StatusNotFound)
+		return
+	}
+
+	hostAddr, err := s.sandboxAPI.ForwardPort(id, req.GuestPort)
+	if err != nil {
+		// A forward for a sandbox with no connected agent surfaces here; report it
+		// as a 404 (the sandbox is not reachable) with an actionable cause. The
+		// cause names ids and ports only, never a secret value.
+		errResp(w, fmt.Sprintf("open forward for sandbox %q to guest port %d: %v", id, req.GuestPort, err), http.StatusNotFound)
+		return
+	}
+
+	log.Printf("opened forward for sandbox %q: host %s -> guest 127.0.0.1:%d", id, hostAddr, req.GuestPort)
+	resp(w, map[string]any{"host": hostAddr, "guest_port": req.GuestPort})
 }
 
 type previewReq struct {

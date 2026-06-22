@@ -56,6 +56,11 @@ type DoctorProbe interface {
 	// KernelModuleLoaded reports whether the named kernel module is loaded (or
 	// built in). name is one of nf_tables, vhost_vsock, tun.
 	KernelModuleLoaded(ctx context.Context, name string) (bool, error)
+	// Userfaultfd reports whether the kernel supports the userfaultfd(2) syscall
+	// (CONFIG_USERFAULTFD), which the hugepage-backed restore and the snapshot
+	// prefetch handler require (issue #167). A minimal/rescue kernel often lacks
+	// it. The probe attempts the syscall; off Linux it reports "cannot verify".
+	Userfaultfd(ctx context.Context) (bool, error)
 	// GuestKernelStaged reports whether the guest kernel image is staged at the
 	// path forkd boots from, and returns that path for the remediation message.
 	GuestKernelStaged(ctx context.Context) (present bool, path string, err error)
@@ -91,6 +96,7 @@ func RunDoctorChecks(ctx context.Context, probe DoctorProbe) []CheckResult {
 		results = append(results, checkKernelModule(ctx, probe, m))
 	}
 	results = append(results,
+		checkUserfaultfd(ctx, probe),
 		checkGuestKernel(ctx, probe),
 		checkPKI(ctx, probe),
 		checkPullSecret(ctx, probe),
@@ -156,6 +162,33 @@ func moduleRemediation(name string) string {
 	default:
 		return "Required kernel module " + name + " is missing. " + load
 	}
+}
+
+// checkUserfaultfd reports whether the kernel supports userfaultfd(2), which the
+// hugepage-backed restore and the snapshot-resume prefetch handler require (issue
+// #167). It is a WARN, not a FAIL: a kernel without it still serves 4 KiB
+// file-backed restores, only the #167 performance path (hugepages + prefetch) is
+// unavailable. A minimal or rescue kernel (built without CONFIG_USERFAULTFD) is
+// the common culprit.
+func checkUserfaultfd(ctx context.Context, probe DoctorProbe) CheckResult {
+	ok, err := probe.Userfaultfd(ctx)
+	if err != nil {
+		return CheckResult{
+			Name:        "userfaultfd",
+			Status:      CheckWarn,
+			Detail:      fmt.Sprintf("could not probe userfaultfd: %v", err),
+			Remediation: "Could not verify userfaultfd support (only meaningful on a Linux KVM node). The hugepage-backed restore and snapshot prefetch (issue #167) need a kernel built with CONFIG_USERFAULTFD=y.",
+		}
+	}
+	if !ok {
+		return CheckResult{
+			Name:        "userfaultfd",
+			Status:      CheckWarn,
+			Detail:      "userfaultfd(2) is unavailable on this kernel",
+			Remediation: "This kernel lacks userfaultfd (CONFIG_USERFAULTFD=y). The 4 KiB file-backed restore still works, but hugepage-backed guest memory and snapshot-resume prefetch (issue #167) cannot run: Firecracker refuses to restore a hugetlbfs snapshot without uffd. Use a stock distro kernel (Debian/Ubuntu enable CONFIG_USERFAULTFD=y); minimal/rescue kernels commonly omit it. See docs/platforms/host-prerequisites.md.",
+		}
+	}
+	return CheckResult{Name: "userfaultfd", Status: CheckPass, Detail: "userfaultfd(2) available"}
 }
 
 func checkGuestKernel(ctx context.Context, probe DoctorProbe) CheckResult {

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from kubernetes import client as k8s_client
-from kubernetes.client.rest import ApiException
-
+from mitos._k8s import k8s
 from mitos.errors import AgentRunError
+
+if TYPE_CHECKING:
+    from kubernetes import client as k8s_client
 
 API_GROUP = "mitos.run"
 API_VERSION = "v1alpha1"
@@ -54,7 +56,7 @@ class Workspace:
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
                 plural="workspaces", name=self.name,
             )
-        except ApiException as e:
+        except k8s().ApiException as e:
             raise AgentRunError(
                 f"workspace {self.name} not found", code="workspace_not_found",
                 cause=str(e.reason), status=e.status,

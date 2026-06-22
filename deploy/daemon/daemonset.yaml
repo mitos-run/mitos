@@ -25,7 +25,7 @@ spec:
         prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
-      # ghcr-pull so the kubelet can pull ghcr.io/paperclipinc/mitos-forkd.
+      # ghcr-pull so the kubelet can pull ghcr.io/mitos-run/mitos-forkd.
       imagePullSecrets:
         - name: ghcr-pull
       nodeSelector:
@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: forkd
-          image: ghcr.io/paperclipinc/mitos-forkd:latest
+          image: ghcr.io/mitos-run/mitos-forkd:latest
           args:
             - --listen=:9090
             - --data-dir=/var/lib/mitos

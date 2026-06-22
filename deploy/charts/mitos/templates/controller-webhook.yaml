@@ -1,0 +1,127 @@
+{{- if include "mitos.controllerWebhookEnabled" . }}
+{{- /*
+  Controller webhook wiring. The controller exposes ONE webhook server on
+  .Values.admissionWebhook.port, so a SINGLE serving cert backs every webhook it
+  registers. This file renders that shared cert once and points each enabled
+  webhook config at it:
+
+    - admissionWebhook.enabled            -> the principal ValidatingWebhookConfiguration
+                                             (binds SandboxClaim.spec.serviceAccount to RBAC).
+    - apiV2.poolConversionWebhook.enabled -> the SandboxPool conversion webhook
+                                             (CRD conversion: strategy: Webhook + v1alpha2 served).
+
+  Certs: a self-signed serving cert via the sprig genSignedCert helper, with the
+  CA injected into each webhook's caBundle. The cert covers BOTH webhook Service
+  DNS names and is regenerated on every `helm upgrade` (Helm templating is
+  stateless), which bounces the webhook server briefly; for production rotation
+  prefer cert-manager and supply your own Certificate/Issuer. This path keeps the
+  chart dependency-free.
+*/}}
+{{- $ns := include "mitos.namespace" . }}
+{{- $principalSvc := "mitos-principal-webhook" }}
+{{- $conversionSvc := "mitos-pool-conversion-webhook" }}
+{{- $altNames := list
+      (printf "%s.%s.svc" $principalSvc $ns)
+      (printf "%s.%s.svc.cluster.local" $principalSvc $ns)
+      (printf "%s.%s.svc" $conversionSvc $ns)
+      (printf "%s.%s.svc.cluster.local" $conversionSvc $ns) }}
+{{- $ca := genCA "mitos-controller-webhook-ca" 3650 }}
+{{- $cert := genSignedCert $principalSvc nil $altNames 3650 $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mitos-controller-webhook-cert
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller-webhook
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $cert.Cert | b64enc | quote }}
+  tls.key: {{ $cert.Key | b64enc | quote }}
+{{- if .Values.admissionWebhook.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $principalSvc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: principal-webhook
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 4 }}
+  ports:
+    - port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: mitos-principal
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: principal-webhook
+webhooks:
+  - name: principal.mitos.run
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Fail closed by default: a claim is rejected if the webhook is unreachable,
+    # so the self-asserted principal can never slip past while the webhook is
+    # down. Override to Ignore only if availability outranks the guarantee.
+    failurePolicy: {{ .Values.admissionWebhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ $principalSvc }}
+        namespace: {{ $ns }}
+        path: /validate-mitos-run-v1alpha1-sandboxclaim
+        port: 443
+      caBundle: {{ $ca.Cert | b64enc | quote }}
+    rules:
+      - apiGroups: ["mitos.run"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxclaims"]
+        scope: Namespaced
+{{- end }}
+{{- if .Values.apiV2.poolConversionWebhook.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $conversionSvc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pool-conversion-webhook
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 4 }}
+  ports:
+    - port: 443
+      targetPort: webhook
+---
+{{- /*
+  CRD conversion enablement. The default (kustomize) install and the chart's
+  static crds/ copy keep v1alpha2 unserved with no conversion stanza. When the
+  pool conversion webhook is enabled we re-render the SandboxPool CRD from the
+  vendored copy with two edits, gated entirely by this value:
+
+    1. inject a top-level conversion: strategy: Webhook stanza routing to the
+       controller's /convert endpoint via the conversion Service, with the
+       shared CA in caBundle;
+    2. flip the single v1alpha2 `served: false` line to `served: true`.
+
+  v1alpha1 stays the storage version (storage: true is untouched). NOTE: Helm
+  does not upgrade objects under crds/, and it does not template them. This
+  templated copy is what carries the conversion stanza into the cluster; apply it
+  with the chart (helm upgrade) so the API server starts routing conversions.
+*/}}
+{{- $raw := .Files.Get "crds/mitos.run_sandboxpools.yaml" }}
+{{- $conversionStanza := printf "  conversion:\n    strategy: Webhook\n    webhook:\n      conversionReviewVersions: [\"v1\"]\n      clientConfig:\n        service:\n          name: %s\n          namespace: %s\n          path: /convert\n          port: 443\n        caBundle: %s\n" $conversionSvc $ns ($ca.Cert | b64enc) }}
+{{- $withConversion := $raw | replace "  scope: Namespaced\n" (printf "  scope: Namespaced\n%s" $conversionStanza) }}
+{{- $served := $withConversion | replace "    served: false\n" "    served: true\n" }}
+{{ $served }}
+{{- end }}
+{{- end }}

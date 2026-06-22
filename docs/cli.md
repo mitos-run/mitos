@@ -35,6 +35,28 @@ mitos doctor [-n namespace]                    run the node + install preflight
                                                   and print remediation
 ```
 
+### Authentication: `mitos auth login`
+
+`mitos auth login --token <session>` writes a credential profile to
+`~/.config/mitos/credentials.json` (mode `0600`, honoring `MITOS_CONFIG_DIR`).
+The profile holds the session token, the resolved email, and the default org.
+
+One login authenticates every agent-facing surface. The Python and TypeScript
+SDKs and `mitos-mcp` resolve the bearer token with this precedence:
+
+1. an explicit argument (the SDK `api_key`, the `mitos-mcp --token` flag);
+2. the `MITOS_API_KEY` environment variable;
+3. the `token` field of `~/.config/mitos/credentials.json` (honoring
+   `MITOS_CONFIG_DIR`);
+4. none, in which case the surface runs tokenless (the standalone
+   `sandbox-server` accepts that).
+
+The credential file's token is sent verbatim as the `Authorization: Bearer`
+value; the hosted gateway decides whether it is valid. If your deployment
+requires a scoped API key minted with `mitos auth keys create` rather than the
+raw login session, set that key as `MITOS_API_KEY` or pass it explicitly; it
+overrides the file. The token VALUE is never logged or echoed in an error.
+
 ### Preflight: `mitos doctor`
 
 `mitos doctor` runs an install/node preflight (issue #174) and prints a report
@@ -236,7 +258,7 @@ pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
 plane (kind) there is no husk pod or no live guest, so the stub console is
 reported absent and the guest console states it needs a running sandbox: the
 guest serial/vsock console streams only from a live VMM (the
-[#18](https://github.com/paperclipinc/mitos/issues/18) boundary), not from this
+[#18](https://github.com/mitos-run/mitos/issues/18) boundary), not from this
 read-only operator path.
 
 ### exec
@@ -258,10 +280,10 @@ ergonomics longtail.
 ## Follow-ups
 
 - workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace
-  ([#21](https://github.com/paperclipinc/mitos/issues/21));
+  ([#21](https://github.com/mitos-run/mitos/issues/21));
 - `mitos pool create|refresh` beyond what `dev up` needs;
 - streaming exec / PTY (`exec_stream`) pending the Connect protocol
-  ([#23](https://github.com/paperclipinc/mitos/issues/23));
+  ([#23](https://github.com/mitos-run/mitos/issues/23));
 - a `curl | sh` installer and `get.mitos.run` distribution
-  ([#37](https://github.com/paperclipinc/mitos/issues/37));
+  ([#37](https://github.com/mitos-run/mitos/issues/37));
 - shell completions and a code-interpreter-compatible API shim.

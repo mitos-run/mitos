@@ -1,9 +1,24 @@
 # Snapshot-resume page-fault prefetch
 
-Tracking: issue #167. Status: DESIGN plus the capture/ship structure and a
-Linux-gated handler skeleton. Every latency and fault-count figure in this
-document is a TARGET until measured on the bare-metal reference node (#16).
-Nothing here is a measured claim (CLAUDE.md operating principle 1).
+Tracking: issue #167. Status: IMPLEMENTED and MEASURED. The hugepage build-time
+plumbing, the Firecracker userfaultfd restore backend, the manifest hot-page +
+hugepage descriptors, capture-at-template, and the off-vs-on prefetch benchmark
+are all in place, and the fault-count + claim->first-exec numbers are measured on
+a userfaultfd-capable node (see the Measured section below and
+`bench/results/2026-06-21-kvm-perf-correctness.md`). The remaining open item is
+concurrent-density measurement under a real claim storm.
+
+## Critical prerequisite (learned on real hardware)
+
+Firecracker REFUSES to restore a hugetlbfs-backed snapshot through the plain
+file-mapping backend: it returns "Cannot restore hugetlbfs backed snapshot by
+mapping the memory file. Please use uffd." The two levers below are therefore
+COUPLED on the restore path: hugepage restore is impossible WITHOUT the
+userfaultfd backend, and both require a kernel built with `CONFIG_USERFAULTFD=y`.
+A minimal/rescue kernel commonly omits it (the Hetzner rescue kernel has
+`# CONFIG_USERFAULTFD is not set`, so `userfaultfd(2)` returns ENOSYS and
+Firecracker fails restore with "Failed to UFFD object: System error"). `mitos
+doctor` checks for this; see docs/platforms/host-prerequisites.md.
 
 ## The problem
 
@@ -173,18 +188,24 @@ prefetch` fails with a clear not-yet-measurable message rather than emitting a
 fabricated number. Off any non-KVM host the engine fails to construct before the
 mode runs at all, so no number is ever invented off bare metal.
 
-### Targets (NOT measured)
+### Measured (2026-06-21, userfaultfd-capable node)
 
-These are the numbers the bare-metal run is expected to move; they are targets,
-restated here so the goalposts are explicit, and will be replaced with measured
-figures (and a `bench/results/` entry) only once produced on #16:
+Measured on an i7-6700 reinstalled to stock Debian 12 (CONFIG_USERFAULTFD=y),
+python:3.12-slim, N=20. Full table and analysis in
+`bench/results/2026-06-21-kvm-perf-correctness.md`. Headline:
 
-- Fault count per resume: large reduction (hugepages cut the count, prefetch
-  pays the rest up front), order-of-magnitude in the spirit of the Browser Use
-  ~100k -> ~1.1k figure, on the mitos template workload.
-- claim->first-exec P50/P99: lower with prefetch on, by the fault-tail span.
-
-No figure above is published or reproducible yet; none is a claim.
+- Fault count per resume: hugepages alone cut it ~78x (1877 base-page faults vs
+  24 huge-page faults at the same workload, prefetch off). Prefetch cuts the
+  residual further: 1877 -> 45 on 4 KiB, 24 -> 2 on 2 MiB.
+- claim->first-exec p50 improves with prefetch WITHIN the UFFD path: 153 -> 117 ms
+  on 4 KiB, 116 -> 109 ms on 2 MiB.
+- Honest nuance: the UFFD path adds per-fault handler overhead, so its absolute
+  claim->exec (108-153 ms) is higher than the plain file-mapped 4 KiB baseline
+  (~51-67 ms). The win is the fault-count collapse (the per-fault cost is what
+  scales under concurrent load) plus the within-UFFD prefetch latency gain;
+  hugepage restore has no file-mapped alternative, so for hugepages the UFFD path
+  is the only path. Concurrent-density gains under a real claim storm remain to be
+  measured (this run measures single-fork resume).
 
 ## Security surface
 
@@ -201,24 +222,48 @@ actual userfaultfd handler is a security-sensitive restore-path change and gets
 its threat-model review when its syscall wiring lands (it is gated and not wired
 in this slice).
 
+## How the userfaultfd backend works (implemented)
+
+On a UFFD-backed restore the engine (`internal/fork/uffd_engine.go`,
+`uffd_linux.go`) binds a private per-fork unix socket under the sandbox dir and
+points Firecracker at it via `mem_backend` (`backend_type: "Uffd"`) on
+`/snapshot/load` (paused). Firecracker connects, creates the userfaultfd over the
+guest memory, and sends the handler ONE handshake message: the region mappings as
+JSON plus the userfaultfd descriptor as SCM_RIGHTS ancillary data. The handler
+mmaps the snapshot mem file read-only, PRELOADS the captured hot-page set (if any)
+with `UFFDIO_COPY` before the engine resumes, then serves the remaining faults
+lazily for the life of the VM, sourcing each page from the mem file. The engine
+chooses the UFFD backend when the node is configured for hugepages, the snapshot's
+manifest records a hugepage backing, or a hot-page set is present; the handler is
+closed on Terminate and on any fork failure.
+
+The snapshot is SELF-DESCRIBING: `cas.Manifest.HugePages` records the page backing
+(omitempty, #32-safe like `HotPages`), so any node, even one whose own config does
+not request hugepages, knows it must restore a hugepage snapshot through UFFD.
+
 ## What is implemented now vs deferred
 
-Implemented and tested (darwin and Linux):
+Implemented and tested (darwin unit + Linux build; KVM integration on a
+userfaultfd-capable node):
 
-- `cas.HotPageSet` manifest field, optional and additive, content-addressed when
-  present, identity-neutral when empty (#32-safe).
-- `fork.SelectHotPages` capture-selection (dedupe, page-align, hotness cap,
-  ascending order).
-- `benchstat.AggregatePrefetch` / `PrefetchComparison` bench aggregation and
-  JSON round-trip.
-- `cmd/bench --mode prefetch` dispatch that fails honestly until the handler is
-  wired.
+- `cas.HotPageSet` and `cas.Manifest.HugePages` manifest descriptors, optional and
+  additive, content-addressed when present, identity-neutral when empty (#32-safe).
+- `fork.SelectHotPages` capture-selection and the pure region/offset arithmetic
+  (`internal/fork/uffd.go`), unit-tested on any host.
+- The Firecracker userfaultfd restore backend: handshake (SCM_RIGHTS recv +
+  mappings), `UFFDIO_COPY` preload and lazy serve, fault counting
+  (`internal/fork/uffd_linux.go`); engine restore-path integration and
+  `LoadSnapshotUFFD` (`mem_backend`).
+- Hugepage build-time plumbing (`huge_pages` machine-config, `tmpl-smoke
+  --huge-pages`).
+- `engine.CaptureTemplateHotPages` (capture-at-template, re-stamps the manifest).
+- `benchstat.AggregatePrefetch` / `PrefetchComparison` and `cmd/bench --mode
+  prefetch` real off-vs-on arms over the UFFD restore.
 
-Deferred to the bare-metal work (Linux/KVM, needs hugepages):
+Deferred:
 
-- The userfaultfd register / `UFFDIO_COPY` syscall wiring in
-  `internal/fork/prefetch_linux.go`.
-- Firecracker hugetlbfs configuration for the guest memory file.
-- Wiring capture mode into template build / first warm.
-- The real measurement on #16 and its `bench/results/` entry.
-```
+- The real fault-count + claim->first-exec MEASUREMENT and its `bench/results/`
+  entry, on a `CONFIG_USERFAULTFD=y` node (the Hetzner rescue kernel lacks it, so
+  the measurement runs on a stock-kernel install).
+- Capture-at-first-warm (refining the template set with a pool's real workload);
+  capture-at-template is implemented.

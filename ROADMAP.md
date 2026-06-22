@@ -254,7 +254,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     in-VM running-sandbox conformance + the measured bare-metal resume latency
     stay bare-metal targets (#16/#18); the our-API `Fork*` rename stays deferred
     to API v2 (the ADR).
-- **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
+- **W3: Paperclip/OpenClaw/Hermes integration.** `@mitos-run/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge
   egress as claim-time allowlist; claim-time secrets), paperclip-operator
@@ -765,14 +765,23 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   resume, to cut the lazy-fault tail (the "0.8ms restore + ~40ms lazy faults"
   in BENCHMARKS.md). Externally validated technique (Browser Use cut
   resume-to-ready 9.8s to 3.1s, page faults ~100k to ~1.1k). Tracked in #167.
-  DONE (off bare metal): design (docs/perf/snapshot-prefetch.md), the
-  content-addressed optional hot-page manifest descriptor (cas.HotPageSet,
-  additive and #32-safe), the pure capture-selection (fork.SelectHotPages:
-  dedupe, page-align, hotness cap, order), the Linux-gated userfaultfd handler
-  skeleton (internal/fork/prefetch_linux.go), and the bench aggregation +
-  cmd/bench --mode prefetch (benchstat.AggregatePrefetch). DEFERRED to the
-  bare-metal node (#16): the userfaultfd syscall wiring, Firecracker hugetlbfs,
-  and the real fault-count / claim->first-exec measurement (all TARGETS today).
+  DONE: design (docs/perf/snapshot-prefetch.md), the content-addressed optional
+  hot-page and hugepage manifest descriptors (cas.HotPageSet + Manifest.HugePages,
+  additive and #32-safe), the pure capture-selection and region arithmetic
+  (fork.SelectHotPages, internal/fork/uffd.go), the REAL Firecracker userfaultfd
+  restore backend (internal/fork/uffd_linux.go: SCM_RIGHTS handshake, UFFDIO_COPY
+  preload + lazy serve, fault counting) with engine restore-path integration and
+  LoadSnapshotUFFD (mem_backend), hugepage build-time plumbing (huge_pages
+  machine-config), capture-at-template (engine.CaptureTemplateHotPages), and the
+  real off-vs-on prefetch bench (cmd/bench --mode prefetch). KEY FINDING:
+  hugepage restore REQUIRES userfaultfd (Firecracker refuses to file-map a
+  hugetlbfs snapshot), and both need a CONFIG_USERFAULTFD=y kernel (mitos doctor
+  checks this; the Hetzner rescue kernel lacks it). MEASURED on a userfaultfd node
+  (bench/results/2026-06-21-kvm-perf-correctness.md): hugepages cut faults ~78x
+  (1877 -> 24 at the same workload), prefetch cuts the residual further (1877 ->
+  45 on 4 KiB, 24 -> 2 on 2 MiB), claim->first-exec p50 153 -> 117 ms (4 KiB) and
+  116 -> 109 ms (2 MiB). REMAINING: concurrent-density under a real claim storm
+  (single-fork resume is measured).
 - ⬜ Dynamic CPU pinning: pin a fork's vCPU threads AFTER guest-ready (not at
   launch), unpinned during the activate burst, sibling hyperthreads together,
   with an optional launch-window RT scheduling priority (Browser Use: launch

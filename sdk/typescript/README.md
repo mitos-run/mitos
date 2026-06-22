@@ -57,6 +57,13 @@ await sandbox.terminate();
 
 Full runnable example: [`examples/direct.ts`](examples/direct.ts).
 
+`new SandboxServer(url?, token?)` resolves the base URL (argument, else
+`MITOS_BASE_URL`, else the hosted endpoint) and the bearer token (argument, else
+`MITOS_API_KEY`, else the CLI login credential file written by `mitos auth
+login`, so one login authenticates the SDK too). The credential-file fallback is
+read only on Node; in a browser bundle it is skipped silently. The token VALUE is
+never logged.
+
 ## Cluster mode: AgentRun
 
 ```typescript

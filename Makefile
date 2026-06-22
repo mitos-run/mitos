@@ -1,5 +1,5 @@
-IMG_CONTROLLER ?= ghcr.io/paperclipinc/mitos-controller:latest
-IMG_FORKD ?= ghcr.io/paperclipinc/mitos-forkd:latest
+IMG_CONTROLLER ?= ghcr.io/mitos-run/mitos-controller:latest
+IMG_FORKD ?= ghcr.io/mitos-run/mitos-forkd:latest
 
 .PHONY: all build test test-linux test-netlink generate manifests proto docker-build docker-push install deploy
 
@@ -57,6 +57,7 @@ proto:
 	protoc \
 		--go_out=. --go_opt=module=mitos.run/mitos \
 		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
+		--connect-go_out=. --connect-go_opt=module=mitos.run/mitos \
 		proto/sandbox/v1/sandbox.proto
 
 docker-build:

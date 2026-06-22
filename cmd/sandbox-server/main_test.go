@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/vsock"
 )
@@ -102,6 +104,65 @@ func fakeAgent(t *testing.T, sockPath string, reseeded bool) *[]*vsock.NotifyFor
 	return &notifies
 }
 
+// flakyAgent is like fakeAgent but DROPS the connection without replying on the
+// first failFirst notify_forked requests it sees (across reconnects), then
+// behaves normally (reply OK with ReseededRNG:true). It models the post-restore
+// readiness race: after a snapshot restore the guest agent resets its vsock
+// listener, so the host's first connection can be stale and NotifyForked sees
+// "connection closed". A robust fork path must reconnect and retry. No secrets
+// or entropy are ever logged.
+func flakyAgent(t *testing.T, sockPath string, failFirst int) *int32 {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lis.Close() })
+	var seen int32
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				sc.Buffer(make([]byte, 1<<20), 1<<20)
+				for sc.Scan() {
+					var req vsock.Request
+					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
+						return
+					}
+					if req.Type == vsock.TypeNotifyForked {
+						if atomic.AddInt32(&seen, 1) <= int32(failFirst) {
+							// Drop the connection without replying: the caller must
+							// reconnect and retry.
+							return
+						}
+						out, _ := json.Marshal(vsock.Response{
+							OK:           true,
+							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: true},
+						})
+						if _, err := c.Write(append(out, '\n')); err != nil {
+							return
+						}
+						continue
+					}
+					out, _ := json.Marshal(vsock.Response{OK: true})
+					if _, err := c.Write(append(out, '\n')); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return &seen
+}
+
 // realServerWithAgent builds a real-mode server whose sandboxAPI dials a fake
 // guest agent for sandboxID at the standalone server's fixed vsock path. The
 // real-mode handleFork resolves the vsock UDS under dataDir/sandboxes/<id>;
@@ -171,6 +232,43 @@ func TestRealModeForkFailsClosedWhenGuestDoesNotReseed(t *testing.T) {
 	s.mu.RUnlock()
 	if registered {
 		t.Fatal("un-reseeded fork must not be left registered")
+	}
+}
+
+// TestRealModeForkRetriesReseedOnTransientFailure proves the standalone server
+// RETRIES the reseed handshake when the guest agent drops the first connection
+// without replying. After a snapshot restore the guest resets its vsock listener,
+// so the first NotifyForked can see "connection closed"; this is a readiness
+// race, not a reseed refusal, and the fork must reconnect and retry rather than
+// fail. The agent here drops the first two notify attempts, then reseeds; the
+// fork must still succeed.
+func TestRealModeForkRetriesReseedOnTransientFailure(t *testing.T) {
+	const id = "sb-flaky"
+	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
+	_ = os.Remove(sock)
+	seen := flakyAgent(t, sock, 2) // drop the first two reseed attempts
+
+	dataDir, err := os.MkdirTemp("/tmp", "sbsrv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dataDir) })
+	s := newServer(dataDir, "", false, 16, 86400) // real mode
+	s.reseedBackoff = time.Millisecond            // keep the test fast
+	s.templates[id+"-tmpl"] = &templateInfo{ID: id + "-tmpl", Ready: true}
+
+	w := forkRequest(t, s, id, id+"-tmpl")
+	if w.Code != http.StatusOK {
+		t.Fatalf("fork must retry past a transient reseed failure; got status %d body %s", w.Code, w.Body.String())
+	}
+	if atomic.LoadInt32(seen) < 3 {
+		t.Fatalf("expected at least 3 notify attempts (2 dropped + 1 success), got %d", atomic.LoadInt32(seen))
+	}
+	s.mu.RLock()
+	_, registered := s.sandboxes[id]
+	s.mu.RUnlock()
+	if !registered {
+		t.Fatal("a fork that reseeded after retry must be registered")
 	}
 }
 
@@ -371,5 +469,46 @@ func TestToNetworkPolicyMapsAllKnobs(t *testing.T) {
 	// A nil config maps to the fail-closed default deny policy.
 	if d := toNetworkPolicy(nil); string(d.Egress) != "deny" {
 		t.Errorf("nil config must map to deny, got %q", d.Egress)
+	}
+}
+
+// TestIdempotencyReserveBlocksConcurrentCreate proves the check-and-reserve is
+// atomic: a second caller arriving with the same key while the first create is
+// still in flight is told in-flight, NOT allowed to proceed to a second create.
+// The previous lookup-then-release-then-create left a window where two concurrent
+// requests both missed and both created, defeating idempotency.
+func TestIdempotencyReserveBlocksConcurrentCreate(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+
+	id, st := s.beginIdempotent("k1", idempotencyTemplate)
+	if st != idemProceed || id != "" {
+		t.Fatalf("first caller must proceed with no prior id, got st=%v id=%q", st, id)
+	}
+	if _, st2 := s.beginIdempotent("k1", idempotencyTemplate); st2 != idemInFlight {
+		t.Fatalf("a concurrent same-key caller must see in-flight, not proceed to a second create, got %v", st2)
+	}
+
+	s.mu.Lock()
+	s.recordIdempotent("k1", idempotencyTemplate, "tmpl-1")
+	s.mu.Unlock()
+
+	id3, st3 := s.beginIdempotent("k1", idempotencyTemplate)
+	if st3 != idemReplay || id3 != "tmpl-1" {
+		t.Fatalf("after completion a repeat must replay tmpl-1, got st=%v id=%q", st3, id3)
+	}
+}
+
+// TestIdempotencyReleaseAllowsRetryAfterFailure proves a failed create does not
+// consume the key: after releaseIdempotent a retry proceeds rather than being
+// stuck reporting in-flight forever.
+func TestIdempotencyReleaseAllowsRetryAfterFailure(t *testing.T) {
+	s := newServer(t.TempDir(), "", true, 16, 86400)
+
+	if _, st := s.beginIdempotent("k1", idempotencyFork); st != idemProceed {
+		t.Fatalf("first caller must proceed")
+	}
+	s.releaseIdempotent("k1")
+	if _, st := s.beginIdempotent("k1", idempotencyFork); st != idemProceed {
+		t.Fatalf("after release a retry must proceed, not stay in-flight, got %v", st)
 	}
 }

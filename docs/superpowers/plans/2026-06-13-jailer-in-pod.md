@@ -328,7 +328,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/mitos-run/mitos/internal/firecracker"
 )
 
 // parseHuskUIDRange parses "low-high" (inclusive). uid 0 is refused: jailed VMs
@@ -760,7 +760,7 @@ func buildHuskVMConfigForTest(t *testing.T, jailerBin, chrootBase, uidRange stri
 }
 ```
 
-(Add `"github.com/paperclipinc/mitos/internal/firecracker"` to the test file imports.)
+(Add `"github.com/mitos-run/mitos/internal/firecracker"` to the test file imports.)
 
 - [ ] **Step 2: Run test to verify it fails**
 

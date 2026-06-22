@@ -8,8 +8,7 @@
 # image.registry / <component>.image.repository : <tag>, where the tag is the
 # per-component tag, or global.imageTag when set (global overrides all).
 image:
-  # Container registry that hosts every mitos image. The images publish to the
-  # mitos-run org; the image migration must land before this default resolves.
+  # Container registry that hosts every mitos image.
   registry: ghcr.io/mitos-run
 
 # Global overrides applied across all components.
@@ -142,6 +141,32 @@ admissionWebhook:
   # if availability outranks the principal guarantee.
   failurePolicy: Fail
 
+# API v2 (mitos.run/v1alpha2) staged rollout knobs (issue #23, ADR 0007).
+apiV2:
+  # SandboxPool conversion webhook. When enabled, the chart wires the controller
+  # to serve the SandboxPool conversion at /convert and re-renders the
+  # sandboxpools CRD with conversion: strategy: Webhook and v1alpha2 served:true,
+  # so the API server can translate SandboxPool between v1alpha1 and v1alpha2.
+  #
+  # PRODUCTION CUTOVER. Enabling this puts the conversion webhook in the API
+  # server path for EVERY SandboxPool read and write: if the controller (and thus
+  # the webhook) is down, SandboxPool get/list/create/update/delete FAIL until it
+  # recovers. Run the controller HA (controller.replicas >= 2) before enabling,
+  # and treat the flip as a one-way cutover.
+  #
+  # v1alpha1 stays the STORAGE version; the webhook only translates between the
+  # two served versions, it does not migrate stored objects.
+  #
+  # This shares the controller's single webhook serving cert and port
+  # (admissionWebhook.port) with the principal webhook; it does NOT require
+  # admissionWebhook.enabled, and it is NOT coupled to controller v2 Sandbox
+  # reconciler flags (--enable-v2-sandbox stays separately gated).
+  #
+  # Default false: the chart renders exactly as before (v1alpha2 unserved, no
+  # conversion stanza, no conversion webhook).
+  poolConversionWebhook:
+    enabled: false
+
 # Facade (Deployment): the agents.x-k8s.io conformance facade. Opt-in.
 facade:
   # Gate the facade Deployment plus its ServiceAccount and RBAC.
@@ -197,3 +222,84 @@ imagePullSecrets:
 
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}
+
+# Console (Deployment): the hosted/self-hosted web console (issue #214) — the BFF
+# plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
+# BOTH editions; behavior is driven entirely by the capabilities below, which the
+# binary advertises at GET /console/capabilities. Self-host runs the defaults
+# (community); the hosted SaaS installs the same chart with edition=hosted.
+console:
+  # Render the console Deployment, Service, (optional) Ingress, ServiceAccount,
+  # and RBAC.
+  enabled: true
+  # "community" (self-hosted default) or "hosted" (our SaaS). No build-time fork;
+  # this is a runtime value.
+  edition: community
+  image:
+    repository: mitos-console
+    tag: v0.12.0
+    pullPolicy: IfNotPresent
+  # Console replicas. The BFF is stateless; run more than one for HA.
+  replicas: 2
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  # Self-serve org signup. Defaults OFF (waitlist mode). Per the #208 hard gate,
+  # public self-serve untrusted multi-tenancy does not switch on until the
+  # production gates pass; this is server-controlled, never a client flag.
+  signup: false
+  # Browser-session OIDC. Self-host points this at the operator's issuer
+  # (Dex/Keycloak/Google); hosted points it at our IdP.
+  oidc:
+    issuerURL: ""
+    clientID: ""
+    # Name of an existing Secret with key "client-secret". Empty omits it.
+    clientSecretRef: ""
+  # Secret-store providers advertised in capabilities and wired into the binary.
+  secrets:
+    kube:
+      # The kube provider materializes org secrets as org-namespaced Secrets.
+      enabled: true
+    openbao:
+      # The OpenBao (or Vault) external provider.
+      enabled: false
+      address: ""
+      # Per-tenant isolation: "path" (KV path prefix + per-org policy) or
+      # "namespace" (one OpenBao namespace per org).
+      perOrg: path
+  billing:
+    # Stripe billing surface. Hosted sets true; community keeps it off so the
+    # billing routes never mount.
+    enabled: false
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+
+# Gateway (Deployment): the public customer API front door (issue #210) — API-key
+# auth, org resolution, quota, and forwarding to the control plane. The
+# programmatic counterpart to the console.
+gateway:
+  enabled: true
+  image:
+    repository: mitos-gateway
+    tag: v0.12.0
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}

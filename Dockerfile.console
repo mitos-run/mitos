@@ -1,0 +1,29 @@
+# Multi-stage build for cmd/console: build the SPA with Node, embed it into the
+# Go binary, ship one static distroless image. No Node at runtime.
+
+# 1) Build the SPA bundle from the web/ pnpm workspace.
+FROM node:22-bookworm AS spa
+WORKDIR /web
+RUN corepack enable
+# Install with the lockfile first for caching, then build.
+COPY web/pnpm-workspace.yaml web/package.json web/pnpm-lock.yaml ./
+COPY web/packages ./packages
+COPY web/app ./app
+RUN pnpm install --frozen-lockfile && pnpm -C app build
+
+# 2) Build the Go binary, embedding the freshly built SPA over the placeholder.
+FROM golang:1.26-bookworm AS builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Replace the committed placeholder dist with the real bundle so go:embed picks
+# it up.
+RUN rm -rf cmd/console/spa/dist
+COPY --from=spa /web/app/dist ./cmd/console/spa/dist
+RUN CGO_ENABLED=0 go build -o console ./cmd/console/
+
+# 3) Minimal runtime.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /build/console /console
+ENTRYPOINT ["/console"]

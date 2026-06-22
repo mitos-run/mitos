@@ -393,7 +393,7 @@ and add a default after the `s.readyTimeout` default block:
 	}
 ```
 
-Add the import `"github.com/paperclipinc/mitos/internal/volume"` to the import block. `volume.New("")` is only a holder for the `ReflinkCopy` method (which uses absolute src/dst and never touches the backend root), so the empty root is intentional and harmless.
+Add the import `"github.com/mitos-run/mitos/internal/volume"` to the import block. `volume.New("")` is only a holder for the `ReflinkCopy` method (which uses absolute src/dst and never touches the backend root), so the empty root is intentional and harmless.
 
 In `Prepare`, after the `prepareVerified` block and before `s.state = StateDormant`, add the clone:
 
@@ -995,7 +995,7 @@ Expected: `testing: warning: no tests to run` / `ok ... [no tests to run]` (the 
 On a Linux node whose temp dir filesystem has `cp --reflink` available:
 
 Run: `go test -tags reflink_integration ./internal/volume/ -run TestReflinkCopyRealFilesystem -v`
-Expected: `--- PASS: TestReflinkCopyRealFilesystem` then `ok github.com/paperclipinc/mitos/internal/volume`. On a non-reflink filesystem the production `ReflinkCopy` logs the `WARNING reflink CoW unavailable` line and still PASSES via the full-copy fallback (byte-equality holds).
+Expected: `--- PASS: TestReflinkCopyRealFilesystem` then `ok github.com/mitos-run/mitos/internal/volume`. On a non-reflink filesystem the production `ReflinkCopy` logs the `WARNING reflink CoW unavailable` line and still PASSES via the full-copy fallback (byte-equality holds).
 
 - [ ] **Step 4: Lint (linux only; the tag is linux-relevant)**
 
