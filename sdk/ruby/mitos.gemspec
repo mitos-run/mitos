@@ -23,6 +23,9 @@ Gem::Specification.new do |spec|
   # No runtime dependencies: the SDK uses only the Ruby standard library
   # (net/http, json, uri, securerandom).
   spec.metadata = {
-    "source_code_uri" => "https://github.com/mitos-run/mitos/tree/main/sdk/ruby"
+    "homepage_uri" => "https://mitos.run",
+    "documentation_uri" => "https://mitos.run/docs",
+    "source_code_uri" => "https://github.com/mitos-run/mitos/tree/main/sdk/ruby",
+    "bug_tracker_uri" => "https://github.com/mitos-run/mitos/issues"
   }
 end
