@@ -40,6 +40,18 @@ kubectl label namespace mitos \
 helm install mitos deploy/charts/mitos -n mitos --set namespace.create=false
 ```
 
+The command above installs from a checkout. To install the published chart from
+the mitos.run Helm repository instead:
+
+```
+helm repo add mitos https://mitos.run/charts
+helm repo update
+helm install mitos mitos/mitos -n mitos --set namespace.create=false
+```
+
+The published chart is indexed on Artifact Hub at
+https://artifacthub.io/packages/helm/mitos/mitos.
+
 The `crds/` directory installs the CRDs before the templated resources. Helm does
 not upgrade or delete CRDs on chart upgrade or uninstall; manage CRD schema
 changes out of band.
@@ -78,7 +90,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.registry` | `ghcr.io/paperclipinc` | Registry hosting every mitos image. |
+| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
 | `controller.image.tag` | `v0.4.0` | Controller image tag. |

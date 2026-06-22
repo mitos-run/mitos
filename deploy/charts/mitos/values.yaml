@@ -8,8 +8,9 @@
 # image.registry / <component>.image.repository : <tag>, where the tag is the
 # per-component tag, or global.imageTag when set (global overrides all).
 image:
-  # Container registry that hosts every mitos image.
-  registry: ghcr.io/paperclipinc
+  # Container registry that hosts every mitos image. The images publish to the
+  # mitos-run org; the image migration must land before this default resolves.
+  registry: ghcr.io/mitos-run
 
 # Global overrides applied across all components.
 global:
