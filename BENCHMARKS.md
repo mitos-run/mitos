@@ -155,7 +155,7 @@ reproducible source in `bench/`.
 - OS / cluster: Talos Linux, kernel 6.18.33-talos; `/var/lib/mitos` on xfs.
 - Path: the default husk path (unprivileged pod, `/dev/kvm` via the device
   plugin).
-- Template: `ghcr.io/paperclipinc/sandbox-base-python:3.12-slim`.
+- Template: `ghcr.io/mitos-run/sandbox-base-python:3.12-slim`.
 - VMM: Firecracker v1.15.0, verify-at-Prepare (the integrity gate is paid in the
   dormant Prepare phase, so the activate runs at engine speed).
 
@@ -500,7 +500,7 @@ Concretely OPEN pending #16:
 ## Open (not yet measured)
 
 These remain out of scope for the current harnesses and are tracked in
-[#15](https://github.com/paperclipinc/mitos/issues/15) / roadmap section 4:
+[#15](https://github.com/mitos-run/mitos/issues/15) / roadmap section 4:
 
 - **Bare-metal reference numbers** on the Hetzner + Talos reference node. A first
   reference run is recorded in the "Bare-metal reference node (#16)" section above

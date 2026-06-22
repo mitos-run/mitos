@@ -5,7 +5,7 @@
 Please do not file public issues for vulnerabilities.
 
 - **Preferred**: GitHub private vulnerability reporting. Go to the Security tab of this repository and click "Report a vulnerability". MAINTAINER TODO: enable private vulnerability reporting in the repository Security settings if it is not already on.
-- **Fallback**: email the security contact. MAINTAINER TODO: confirm or replace this address: `security@paperclip.inc` (placeholder; currently routes to `jannes@paperclip.inc`).
+- **Fallback**: email the security contact. MAINTAINER TODO: confirm or replace this address: `security@mitos.run` (placeholder; currently routes to `jannes@mitos.run`).
 
 We will acknowledge your report within 72 hours and keep you informed of progress toward a fix and disclosure.
 
@@ -25,7 +25,7 @@ for a pre-1.0 project run by a small team, not a contractual SLA.
 ## Supported Versions
 
 This project is pre-1.0. Only the latest tagged release
-(`ghcr.io/paperclipinc/mitos-*`) receives security fixes. There is no
+(`ghcr.io/mitos-run/mitos-*`) receives security fixes. There is no
 backport window for older pre-1.0 tags: upgrade to the latest release to pick
 up a security fix. The guest kernel we ship has its own currency process; see
 [docs/kernel-cve.md](docs/kernel-cve.md).
@@ -46,8 +46,8 @@ This project executes untrusted code in microVMs. The following are explicitly i
 
 ## Verifying releases
 
-Published images (`ghcr.io/paperclipinc/mitos-controller`,
-`ghcr.io/paperclipinc/mitos-forkd`, `ghcr.io/paperclipinc/mitos-husk-stub`) are
+Published images (`ghcr.io/mitos-run/mitos-controller`,
+`ghcr.io/mitos-run/mitos-forkd`, `ghcr.io/mitos-run/mitos-husk-stub`) are
 signed with cosign in keyless mode using the publish workflow's GitHub OIDC
 identity, and each carries an SPDX SBOM attestation. There is no long-lived
 signing key. Verify the signature (replace `VERSION` with the release tag, for
@@ -57,7 +57,7 @@ example `v0.1.0`):
 COSIGN_EXPERIMENTAL=1 cosign verify \
   --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 Verify the SBOM attestation:
@@ -67,7 +67,7 @@ COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
   --type spdxjson \
   --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 A successful verify pins the signer to OUR publish workflow on OUR repository

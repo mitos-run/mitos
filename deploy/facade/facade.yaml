@@ -139,7 +139,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: facade
-          image: ghcr.io/paperclipinc/mitos-facade:latest
+          image: ghcr.io/mitos-run/mitos-facade:latest
           # --default-pool is the mitos.run pool a Sandbox binds to when it
           # carries no mitos.run/pool bridge annotation. Set it to one of your
           # pools; a Sandbox with neither the annotation nor a default reports

@@ -112,7 +112,7 @@ describe("defaultPoolName", () => {
 
   it("bounds the slug to 40 chars after the prefix", () => {
     const long = defaultPoolName(
-      "ghcr.io/paperclipinc/agent-python-with-a-very-long-tag:3.12",
+      "ghcr.io/mitos-run/agent-python-with-a-very-long-tag:3.12",
     );
     expect(long.startsWith("mitos-default-")).toBe(true);
     expect(long.slice("mitos-default-".length).length).toBeLessThanOrEqual(40);

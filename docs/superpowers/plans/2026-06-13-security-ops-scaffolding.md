@@ -4,9 +4,9 @@
 
 **Goal:** Stand up the engineering-tractable half of a real vulnerability-response posture for a project that ships Firecracker plus a guest kernel plus a guest agent: keyless cosign signing and SBOM attestation of the published container images, a CVE/dependency pipeline (govulncheck as a required job, Trivy image scan, a dependabot audit), a kernel-CVE tracking doc that pins the vmlinux we ship, a SECURITY.md gap-fill, and a documented human-review-required-paths policy backed by CODEOWNERS.
 
-**Architecture:** All the moving parts are CI jobs and docs, so the "test" for each is a concrete verification command run locally (or via `act` / a CI dry run) rather than a Go unit test: `cosign verify`, `cosign verify-attestation`, `syft scan`, `govulncheck ./...`, `trivy image`, `kubeconform`/`actionlint` for YAML, and `grep` for the dash rule. The docker-build job currently builds `mitos-controller`, `mitos-forkd`, and `mitos-husk-stub` only with local `:ci` tags and NEVER pushes; signing and attestation need real published images, so we add a separate `publish` workflow that builds, pushes to `ghcr.io/paperclipinc/mitos-*` by digest, signs keyless via OIDC, and attaches an SBOM attestation, while the existing `docker-build` PR job stays a fast local-build gate and gains govulncheck + a Trivy scan of the locally-built images. The human-policy pieces (the actual disclosure mailbox, the real reviewer org membership, the published response SLA commitment) are flagged in a Human-gated section, not implemented as tasks.
+**Architecture:** All the moving parts are CI jobs and docs, so the "test" for each is a concrete verification command run locally (or via `act` / a CI dry run) rather than a Go unit test: `cosign verify`, `cosign verify-attestation`, `syft scan`, `govulncheck ./...`, `trivy image`, `kubeconform`/`actionlint` for YAML, and `grep` for the dash rule. The docker-build job currently builds `mitos-controller`, `mitos-forkd`, and `mitos-husk-stub` only with local `:ci` tags and NEVER pushes; signing and attestation need real published images, so we add a separate `publish` workflow that builds, pushes to `ghcr.io/mitos-run/mitos-*` by digest, signs keyless via OIDC, and attaches an SBOM attestation, while the existing `docker-build` PR job stays a fast local-build gate and gains govulncheck + a Trivy scan of the locally-built images. The human-policy pieces (the actual disclosure mailbox, the real reviewer org membership, the published response SLA commitment) are flagged in a Human-gated section, not implemented as tasks.
 
-**Tech Stack:** GitHub Actions, `sigstore/cosign-installer` + `cosign` (keyless, GitHub OIDC), `anchore/sbom-action` (syft), `aquasecurity/trivy-action`, `golang/govulncheck-action` (or `go run golang.org/x/vuln/cmd/govulncheck`), `docker/build-push-action` + `docker/metadata-action`, `actionlint` for workflow linting. Go 1.26.2. Repo: `paperclipinc/mitos`.
+**Tech Stack:** GitHub Actions, `sigstore/cosign-installer` + `cosign` (keyless, GitHub OIDC), `anchore/sbom-action` (syft), `aquasecurity/trivy-action`, `golang/govulncheck-action` (or `go run golang.org/x/vuln/cmd/govulncheck`), `docker/build-push-action` + `docker/metadata-action`, `actionlint` for workflow linting. Go 1.26.2. Repo: `mitos-run/mitos`.
 
 **Context for the implementer:**
 
@@ -22,7 +22,7 @@
 
 New and modified files, each with one clear responsibility:
 
-- `.github/workflows/publish.yaml` (CREATE): on tag push (and `workflow_dispatch`), build + push the three images to `ghcr.io/paperclipinc/mitos-*` by digest, cosign keyless sign, generate + attest an SBOM. This is the only place that needs registry write + OIDC `id-token: write`.
+- `.github/workflows/publish.yaml` (CREATE): on tag push (and `workflow_dispatch`), build + push the three images to `ghcr.io/mitos-run/mitos-*` by digest, cosign keyless sign, generate + attest an SBOM. This is the only place that needs registry write + OIDC `id-token: write`.
 - `.github/workflows/ci.yaml` (MODIFY): add a `govulncheck` job (required), and add a Trivy filesystem-and-image scan step to the existing `docker-build` job (scans the locally built `:ci` images, no registry needed).
 - `.github/workflows/actionlint.yaml` (CREATE): lint all workflow YAML so a malformed signing/scan job fails fast.
 - `SECURITY.md` (MODIFY): fix the disclosure address ownership, add a supported-versions statement tied to releases, add explicit response SLAs, and add the verification-of-signed-images section plus a pointer to the review policy and kernel-CVE doc.
@@ -303,7 +303,7 @@ permissions:
 jobs:
   publish:
     # Build, push, cosign keyless-sign, and SBOM-attest the three mitos images
-    # under ghcr.io/paperclipinc (supply chain, issue #35). Keyless signing
+    # under ghcr.io/mitos-run (supply chain, issue #35). Keyless signing
     # uses the workflow GitHub OIDC identity (id-token: write); there is NO
     # private key in the repo or in secrets. Each image is pushed by digest and
     # the signature and SBOM attestation are bound to that digest.
@@ -324,7 +324,7 @@ jobs:
             dockerfile: Dockerfile.husk-stub
     env:
       REGISTRY: ghcr.io
-      IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
+      IMAGE: ghcr.io/mitos-run/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
       - name: Log in to GHCR
@@ -497,7 +497,7 @@ Create `docs/supply-chain.md`:
 ```markdown
 # Supply chain: image signing and SBOM verification
 
-The published `ghcr.io/paperclipinc/mitos-*` images are signed with cosign in
+The published `ghcr.io/mitos-run/mitos-*` images are signed with cosign in
 keyless mode and carry an SPDX SBOM attestation. Both are produced by
 `.github/workflows/publish.yaml` using the workflow GitHub OIDC identity, so
 there is no long-lived signing key: the signing identity IS the workflow that
@@ -506,9 +506,9 @@ command here is runnable against a published tag.
 
 ## Images
 
-- `ghcr.io/paperclipinc/mitos-controller`
-- `ghcr.io/paperclipinc/mitos-forkd`
-- `ghcr.io/paperclipinc/mitos-husk-stub`
+- `ghcr.io/mitos-run/mitos-controller`
+- `ghcr.io/mitos-run/mitos-forkd`
+- `ghcr.io/mitos-run/mitos-husk-stub`
 
 Each tag is pushed by digest; the signature and SBOM attestation are bound to
 the digest, not to the mutable tag.
@@ -519,9 +519,9 @@ Install cosign (https://docs.sigstore.dev/cosign/installation/), then:
 
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 Replace `VERSION` with the release tag (for example `v0.1.0`). A successful
@@ -534,9 +534,9 @@ repository; a signature from any other identity fails verification.
 ```bash
 COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION
+  ghcr.io/mitos-run/mitos-controller:VERSION
 ```
 
 A successful verify confirms the SBOM was produced and signed by our publish
@@ -544,9 +544,9 @@ workflow. To read the SBOM contents, extract the predicate:
 
 ```bash
 cosign verify-attestation --type spdxjson \
-  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-identity-regexp "https://github.com/mitos-run/mitos/.github/workflows/publish.yaml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/paperclipinc/mitos-controller:VERSION \
+  ghcr.io/mitos-run/mitos-controller:VERSION \
   | jq -r '.payload' | base64 -d | jq '.predicate'
 ```
 
@@ -852,7 +852,7 @@ with:
 ## Supported Versions
 
 This project is pre-1.0. Only the latest tagged release
-(`ghcr.io/paperclipinc/mitos-*`) receives security fixes. There is no
+(`ghcr.io/mitos-run/mitos-*`) receives security fixes. There is no
 backport window for older pre-1.0 tags: upgrade to the latest release to pick
 up a security fix. The guest kernel we ship has its own currency process; see
 [docs/kernel-cve.md](docs/kernel-cve.md).
@@ -1117,7 +1117,7 @@ What landed:
 - Pinned the guest kernel to an exact firecracker-ci version (was a floating latest resolve) in ci.yaml and kvm-test.yaml.
 - govulncheck added as a required CI job.
 - Trivy scan of the built images added to docker-build (HIGH/CRITICAL fixable gate, .trivyignore for accepted CVEs).
-- New publish.yaml: builds and pushes ghcr.io/paperclipinc/mitos-* by digest, cosign keyless (OIDC) signing, SPDX SBOM generation + attestation.
+- New publish.yaml: builds and pushes ghcr.io/mitos-run/mitos-* by digest, cosign keyless (OIDC) signing, SPDX SBOM generation + attestation.
 - actionlint job so a malformed supply-chain workflow fails fast.
 - docs/supply-chain.md (verify signature + SBOM), docs/kernel-cve.md (pinned version + CVE-watch + re-pin), docs/security-review-policy.md.
 - SECURITY.md: response targets, release-tied supported-versions, verification pointer, review-policy pointer, internal/vsock added to the AI-review path list.
@@ -1151,7 +1151,7 @@ Expected: `govulncheck`, `docker-build` (now with Trivy steps), and `actionlint`
 - The kernel "pin" finding (it was floating, not fixed) is handled as a real code change in Task 1 so Task 7's doc references a true value.
 - The signing/SBOM pieces required a real published image, so a new `publish.yaml` was added rather than retrofitting the local-only `docker-build` job; `docker-build` stays a fast PR gate and gains the no-registry Trivy scan.
 - Every CI/doc artifact has a concrete verification command (cosign verify, govulncheck, trivy image, syft via sbom-action, actionlint, kubeconform-style YAML parse, dash grep) in place of an awkward unit test.
-- Type/name consistency: `KERNEL_VERSION` is used identically in Tasks 1, 7; the image names `mitos-controller`/`mitos-forkd`/`mitos-husk-stub` and the registry `ghcr.io/paperclipinc` are consistent across Tasks 3, 4, 6, 10, 12; the cosign identity regexp is identical in Task 6 and the SECURITY.md/threat-model references.
+- Type/name consistency: `KERNEL_VERSION` is used identically in Tasks 1, 7; the image names `mitos-controller`/`mitos-forkd`/`mitos-husk-stub` and the registry `ghcr.io/mitos-run` are consistent across Tasks 3, 4, 6, 10, 12; the cosign identity regexp is identical in Task 6 and the SECURITY.md/threat-model references.
 
 ---
 
@@ -1159,9 +1159,9 @@ Expected: `govulncheck`, `docker-build` (now with Trivy steps), and `actionlint`
 
 These are deliberately excluded from the tasks above. They are policy/identity commitments, not code:
 
-1. **The disclosure mailbox.** SECURITY.md lists `jannes@paperclip.inc` as the email fallback, but the repository is now `paperclipinc/mitos`. A human must confirm which address is actually monitored and update the fallback line. GitHub private vulnerability reporting (the preferred path) must be enabled in repo Settings by a maintainer.
-2. **The CODEOWNERS reviewer identity.** CODEOWNERS uses `@stubbi`. For the review gate to be real, that login must be a member of the `paperclipinc` org with write access, and branch protection on `main` must require review from Code Owners. A human assigns the real reviewer(s) and enables the branch-protection setting; consider a small `@paperclipinc/security` team rather than a single login (bus factor).
+1. **The disclosure mailbox.** SECURITY.md lists `jannes@mitos.run` as the email fallback, but the repository is now `mitos-run/mitos`. A human must confirm which address is actually monitored and update the fallback line. GitHub private vulnerability reporting (the preferred path) must be enabled in repo Settings by a maintainer.
+2. **The CODEOWNERS reviewer identity.** CODEOWNERS uses `@stubbi`. For the review gate to be real, that login must be a member of the `mitos-run` org with write access, and branch protection on `main` must require review from Code Owners. A human assigns the real reviewer(s) and enables the branch-protection setting; consider a small `@mitos-run/security` team rather than a single login (bus factor).
 3. **The published response-SLA commitment.** Task 10 adds aspirational response targets. Committing to them publicly is a team decision; a human signs off that the team can meet them or edits the numbers.
-4. **OIDC/registry permissions for publish.yaml.** Pushing to `ghcr.io/paperclipinc/*` requires the package to allow the repo's `GITHUB_TOKEN` write access (or org package settings); a maintainer confirms package visibility and permissions before the first tag.
+4. **OIDC/registry permissions for publish.yaml.** Pushing to `ghcr.io/mitos-run/*` requires the package to allow the repo's `GITHUB_TOKEN` write access (or org package settings); a maintainer confirms package visibility and permissions before the first tag.
 5. **Automated kernel-CVE feed.** Task 7 documents a manual CVE-watch process. Wiring an automated feed (a scheduled job that diffs the pinned 6.1.y against the latest stable and opens an issue) is a possible follow-up, flagged here, not built.
 6. **Admission-time signature enforcement defaults.** Whether the shipped deploy manifests should REQUIRE signed images (policy-controller/Kyverno) by default is an operator-experience decision, not implemented here.
