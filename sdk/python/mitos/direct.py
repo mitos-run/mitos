@@ -9,7 +9,8 @@ The headline one-liner is ``mitos.create(...)`` (aliased as
 
 Auth resolution (issue #217): the API key comes from the explicit ``api_key``
 argument, else ``MITOS_API_KEY``; the base URL from ``base_url``, else
-``MITOS_BASE_URL``. The key is sent as ``Authorization: Bearer <key>`` on every
+``MITOS_BASE_URL``, else the hosted production endpoint ``https://mitos.run``.
+The key is sent as ``Authorization: Bearer <key>`` on every
 request and is NEVER logged or placed in an error message. The standalone
 sandbox-server runs tokenless and ignores the header today; the hosted SaaS
 front door (#210) will verify the same header without any SDK change, so the
@@ -44,30 +45,28 @@ from mitos.sandbox import _parse_run_code_stream, _validate_timeout
 ENV_API_KEY = "MITOS_API_KEY"
 ENV_BASE_URL = "MITOS_BASE_URL"
 
+# The hosted production control plane. When neither the base_url argument nor
+# MITOS_BASE_URL is set, the flat path targets the hosted endpoint so the
+# examples work without a base URL. Self-hosted or local standalone users opt
+# out by setting MITOS_BASE_URL (e.g. http://localhost:8080).
+DEFAULT_BASE_URL = "https://mitos.run"
+
 
 def _resolve_auth(
     api_key: Optional[str], base_url: Optional[str]
 ) -> tuple[Optional[str], str]:
     """Resolve the API key and base URL for the flat path.
 
-    Precedence: explicit argument, then environment. The base URL is required;
-    a missing one raises a typed AgentRunError whose remediation names the arg
-    and the env var but NEVER echoes any key value. The API key is optional
+    Precedence for the base URL: explicit argument, then MITOS_BASE_URL, then
+    the hosted production endpoint (DEFAULT_BASE_URL). The API key is optional
     today (the standalone server is tokenless); when present it rides on the
     Authorization header so the hosted front door (#210) can verify it later.
+    The key VALUE is never logged or placed in an error message.
     """
     key = api_key if api_key is not None else os.environ.get(ENV_API_KEY)
     url = base_url if base_url is not None else os.environ.get(ENV_BASE_URL)
     if not url:
-        raise AgentRunError(
-            "no base URL for the mitos control plane",
-            code="missing_base_url",
-            cause=f"neither the base_url argument nor {ENV_BASE_URL} was set",
-            remediation=(
-                f"Pass base_url=... to mitos.create(), or set {ENV_BASE_URL} "
-                "(for the standalone sandbox-server, e.g. http://localhost:8080)."
-            ),
-        )
+        url = DEFAULT_BASE_URL
     return key, url.rstrip("/")
 
 
@@ -422,7 +421,7 @@ class SandboxServer:
     DirectSandbox it produces sends the same Authorization header.
     """
 
-    def __init__(self, url: str = "http://localhost:8080", api_key: Optional[str] = None):
+    def __init__(self, url: str = DEFAULT_BASE_URL, api_key: Optional[str] = None):
         self.url = url.rstrip("/")
         self._api_key = api_key
         self._http = httpx.Client(timeout=60.0)
