@@ -79,3 +79,16 @@ imagePullSecrets:
 {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end -}}
+
+{{/*
+True (non-empty) when the controller serves ANY webhook: the principal admission
+webhook or the SandboxPool conversion webhook. The controller exposes a single
+webhook server on .Values.admissionWebhook.port, so the serving port, the cert
+volume, and the cert mount on the controller Deployment are rendered once when
+either feature is on.
+*/}}
+{{- define "mitos.controllerWebhookEnabled" -}}
+{{- if or .Values.admissionWebhook.enabled .Values.apiV2.poolConversionWebhook.enabled -}}
+true
+{{- end -}}
+{{- end -}}

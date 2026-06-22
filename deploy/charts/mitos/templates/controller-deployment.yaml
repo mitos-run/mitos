@@ -44,6 +44,15 @@ spec:
             {{- if .Values.admissionWebhook.enabled }}
             - --enable-principal-webhook
             {{- end }}
+            {{- if .Values.apiV2.poolConversionWebhook.enabled }}
+            # SandboxPool conversion webhook (issue #23, ADR 0007). Served on the
+            # same webhook server as the principal webhook; v1alpha1 stays the
+            # storage version. NOT coupled to --enable-v2-sandbox: serving
+            # v1alpha2 SandboxPool via conversion is independent of the v2
+            # Sandbox reconciler, so enabling the conversion webhook alone never
+            # silently turns on the v2 Sandbox surface.
+            - --enable-pool-conversion-webhook
+            {{- end }}
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -52,7 +61,7 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
-            {{- if .Values.admissionWebhook.enabled }}
+            {{- if include "mitos.controllerWebhookEnabled" . }}
             - name: webhook
               containerPort: {{ .Values.admissionWebhook.port }}
             {{- end }}
@@ -64,7 +73,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- if .Values.admissionWebhook.enabled }}
+          {{- if include "mitos.controllerWebhookEnabled" . }}
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/k8s-webhook-server/serving-certs
@@ -82,9 +91,9 @@ spec:
               port: health
             initialDelaySeconds: 15
             periodSeconds: 20
-      {{- if .Values.admissionWebhook.enabled }}
+      {{- if include "mitos.controllerWebhookEnabled" . }}
       volumes:
         - name: webhook-certs
           secret:
-            secretName: mitos-principal-webhook-cert
+            secretName: mitos-controller-webhook-cert
       {{- end }}

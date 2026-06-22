@@ -141,6 +141,32 @@ admissionWebhook:
   # if availability outranks the principal guarantee.
   failurePolicy: Fail
 
+# API v2 (mitos.run/v1alpha2) staged rollout knobs (issue #23, ADR 0007).
+apiV2:
+  # SandboxPool conversion webhook. When enabled, the chart wires the controller
+  # to serve the SandboxPool conversion at /convert and re-renders the
+  # sandboxpools CRD with conversion: strategy: Webhook and v1alpha2 served:true,
+  # so the API server can translate SandboxPool between v1alpha1 and v1alpha2.
+  #
+  # PRODUCTION CUTOVER. Enabling this puts the conversion webhook in the API
+  # server path for EVERY SandboxPool read and write: if the controller (and thus
+  # the webhook) is down, SandboxPool get/list/create/update/delete FAIL until it
+  # recovers. Run the controller HA (controller.replicas >= 2) before enabling,
+  # and treat the flip as a one-way cutover.
+  #
+  # v1alpha1 stays the STORAGE version; the webhook only translates between the
+  # two served versions, it does not migrate stored objects.
+  #
+  # This shares the controller's single webhook serving cert and port
+  # (admissionWebhook.port) with the principal webhook; it does NOT require
+  # admissionWebhook.enabled, and it is NOT coupled to controller v2 Sandbox
+  # reconciler flags (--enable-v2-sandbox stays separately gated).
+  #
+  # Default false: the chart renders exactly as before (v1alpha2 unserved, no
+  # conversion stanza, no conversion webhook).
+  poolConversionWebhook:
+    enabled: false
+
 # Facade (Deployment): the agents.x-k8s.io conformance facade. Opt-in.
 facade:
   # Gate the facade Deployment plus its ServiceAccount and RBAC.
