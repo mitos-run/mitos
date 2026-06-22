@@ -52,6 +52,7 @@ func main() {
 	keys := saas.NewKeyService(store)
 	accounts := saas.NewAccountService(store, keys)
 
+	caps := capabilitiesFromEnv()
 	con := console.New(console.Deps{
 		Accounts: accounts,
 		Usage:    usage.NewMemUsageStore(),
@@ -61,9 +62,12 @@ func main() {
 			Caps:   billing.NewMemSpendCapStore(),
 			Rates:  billing.DefaultRates(),
 		},
+		// The active secret backend selected from config (kube / openbao), falling
+		// back to in-memory in dev. Capabilities advertise the same providers.
+		Secrets: buildSecretStore(logger, caps),
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
-		Capabilities: capabilitiesFromEnv(),
+		Capabilities: caps,
 		Log:          logger,
 	})
 
