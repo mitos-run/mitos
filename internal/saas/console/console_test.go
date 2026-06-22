@@ -27,6 +27,7 @@ type fixture struct {
 	sandboxes *MemSandboxControl
 	templates *MemTemplateLister
 	audit     *MemAuditLog
+	instr     *MemInstruments
 
 	aliceAcct, bobAcct string
 	aliceOrg, bobOrg   string
@@ -57,6 +58,7 @@ func newFixture(t *testing.T) *fixture {
 		sandboxes: NewMemSandboxControl(),
 		templates: NewMemTemplateLister(),
 		audit:     NewMemAuditLog(),
+		instr:     NewMemInstruments(),
 		aliceAcct: alice.ID, bobAcct: bob.ID,
 		aliceOrg: aliceOrg.ID, bobOrg: bobOrg.ID,
 	}
@@ -90,14 +92,19 @@ func newFixture(t *testing.T) *fixture {
 	f.templates.Add(TemplateView{Name: "alice-tmpl", OrgID: aliceOrg.ID, Image: "alice/img"})
 	f.templates.Add(TemplateView{Name: "bob-tmpl", OrgID: bobOrg.ID, Image: "bob/img"})
 
+	// Seed measured proof metrics per org (the instrument-panel source).
+	f.instr.Set(Instruments{OrgID: aliceOrg.ID, ActivateP50Millis: 27, ActivateP99Millis: 41, ForksServed: 10, CoWSavingsBytes: 2304 << 20, MarginalBytesPerFork: 3 << 20})
+	f.instr.Set(Instruments{OrgID: bobOrg.ID, ActivateP50Millis: 31, ActivateP99Millis: 52, ForksServed: 3, CoWSavingsBytes: 512 << 20, MarginalBytesPerFork: 4 << 20})
+
 	f.con = New(Deps{
-		Accounts:  accounts,
-		Usage:     f.usage,
-		Billing:   BillingReader{Ledger: f.ledger, Status: f.status, Caps: f.caps, Rates: billing.DefaultRates()},
-		Sandboxes: f.sandboxes,
-		Templates: f.templates,
-		Audit:     f.audit,
-		Now:       func() time.Time { return now },
+		Accounts:    accounts,
+		Usage:       f.usage,
+		Billing:     BillingReader{Ledger: f.ledger, Status: f.status, Caps: f.caps, Rates: billing.DefaultRates()},
+		Sandboxes:   f.sandboxes,
+		Templates:   f.templates,
+		Audit:       f.audit,
+		Instruments: f.instr,
+		Now:         func() time.Time { return now },
 	})
 	return f
 }

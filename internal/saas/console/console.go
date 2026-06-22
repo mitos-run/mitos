@@ -39,15 +39,16 @@ type BillingReader struct {
 // A nil seam is filled with its in-memory tested default so a caller can stand
 // up a working, org-scoped BFF with just the account service.
 type Deps struct {
-	Accounts  *saas.AccountService
-	Usage     usage.UsageStore
-	Prices    usage.PriceList
-	Billing   BillingReader
-	Sandboxes SandboxControl
-	Templates TemplateLister
-	Audit     AuditRecorder
-	Logs      LogStreamer
-	Secrets   SecretStore
+	Accounts    *saas.AccountService
+	Usage       usage.UsageStore
+	Prices      usage.PriceList
+	Billing     BillingReader
+	Sandboxes   SandboxControl
+	Templates   TemplateLister
+	Audit       AuditRecorder
+	Logs        LogStreamer
+	Secrets     SecretStore
+	Instruments InstrumentsSource
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -79,6 +80,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Secrets == nil {
 		deps.Secrets = NewMemSecretStore()
+	}
+	if deps.Instruments == nil {
+		deps.Instruments = NewMemInstruments()
 	}
 	if (deps.Prices == usage.PriceList{}) {
 		deps.Prices = usage.DefaultPriceList()
@@ -120,6 +124,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/secrets", c.handleListSecrets)
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
 	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
+	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
 	c.mux = mux
 }
 
