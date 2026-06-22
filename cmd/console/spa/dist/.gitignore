@@ -1,0 +1,6 @@
+# The real SPA bundle is built from web/app and copied here at image-build time
+# (Dockerfile.console). Only the placeholder index.html is tracked so the Go
+# binary always has something to embed without the JS toolchain.
+*
+!.gitignore
+!index.html

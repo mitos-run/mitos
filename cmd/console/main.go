@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 
+	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
@@ -56,20 +57,27 @@ func main() {
 			Caps:   billing.NewMemSpendCapStore(),
 			Rates:  billing.DefaultRates(),
 		},
-		Log: logger,
+		// Edition + feature flags from the server-controlled environment the chart
+		// sets; the SAME binary serves both editions.
+		Capabilities: capabilitiesFromEnv(),
+		Log:          logger,
 	})
 
 	mux := http.NewServeMux()
-	// The BFF API. In production it is mounted behind the gateway / session
-	// middleware that attaches the verified org context; here the dev shim does it.
+	// The BFF API. In production it is mounted behind the session middleware that
+	// resolves the OIDC session cookie to the verified org context; here the dev
+	// shim does it from headers instead.
 	if *dev {
 		logger.Warn("console dev auth shim enabled; do not run this in production")
 		mux.Handle("/console/", devAuth(con))
 		mux.HandleFunc("/", indexPage(logger))
 	} else {
-		// Without the dev shim, the BFF expects an upstream auth layer to attach the
-		// org context. Mounting it bare lets that layer wrap this handler.
-		mux.Handle("/console/", con)
+		// Production: the session middleware attaches the verified caller from the
+		// OIDC session cookie (the /auth/* login flow is wired separately), and the
+		// embedded SPA is served at the root. ONE binary serves the BFF and the UI.
+		sessions := saas.NewSessionService(saas.NewSessionStore(), accounts)
+		mux.Handle("/console/", console.SessionMiddleware(sessions)(con))
+		mux.Handle("/", spa.Handler())
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
