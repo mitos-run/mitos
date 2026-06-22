@@ -1,0 +1,78 @@
+name: Release
+
+# Cut a CLI release when a v* tag is pushed. The release-please flow lands the
+# `chore(main): release X` PR and tags the commit; that tag push triggers this
+# workflow, which runs goreleaser to build the cross-platform binaries, archives,
+# checksums, deb/rpm packages, and (when the tap token is present) the Homebrew
+# formula.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      # goreleaser uploads the release assets and may create the GitHub release.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # goreleaser needs full history and tags to compute the version and
+          # changelog context.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The Homebrew cask publish needs a token scoped to the tap repo. It is
+      # optional: when the secret is absent (for example before the maintainer
+      # creates mitos-run/homebrew-tap), the publish is skipped so the rest of
+      # the release still succeeds. This step exports a single env var the later
+      # steps read.
+      - name: Resolve tap publish state
+        id: tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "skip_brew=false" >> "$GITHUB_OUTPUT"
+            echo "Homebrew tap token present; the cask will be published."
+          else
+            echo "skip_brew=true" >> "$GITHUB_OUTPUT"
+            echo "No HOMEBREW_TAP_TOKEN secret; skipping the Homebrew cask publish."
+          fi
+
+      - name: Run goreleaser (with tap publish)
+        if: steps.tap.outputs.skip_brew == 'false'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Run goreleaser (skip tap publish)
+        if: steps.tap.outputs.skip_brew == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=homebrew
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The cask config references this env var; provide an empty value so
+          # template rendering does not fail even though the publish is skipped.
+          HOMEBREW_TAP_TOKEN: ""
