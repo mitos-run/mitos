@@ -1,0 +1,481 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: sandboxtemplates.mitos.run
+spec:
+  group: mitos.run
+  names:
+    kind: SandboxTemplate
+    listKind: SandboxTemplateList
+    plural: sandboxtemplates
+    singular: sandboxtemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              buildSteps:
+                description: |-
+                  BuildSteps is an ordered, declarative recipe for the template build,
+                  authored code-first by the SDK Template builder (issue #220). Each step is
+                  one of run, env, or workdir (copy is reserved for the file-staging path and
+                  is carried as metadata only here). The build path flattens BuildSteps into
+                  the in-VM init commands, so a template may set either Init directly or
+                  BuildSteps, but BuildSteps is the recommended code-first form and is keyed
+                  for fast cached builds: a content-addressed cache key is chained over the
+                  base image and each step, so an unchanged prefix is reused and only the
+                  first changed step and everything after it rebuilds.
+                items:
+                  description: |-
+                    BuildStep is one ordered step of a declarative template build (issue #220).
+                    Exactly one shape is meaningful per Type. The build path flattens run, env,
+                    and workdir steps into the in-VM init commands in order; copy steps are
+                    staged by the file path. The whole ordered list feeds the chained,
+                    content-addressed cache key so an unchanged prefix is reused.
+                  properties:
+                    dest:
+                      type: string
+                    envName:
+                      description: EnvName and EnvValue are the variable name and
+                        value for an env step.
+                      type: string
+                    envValue:
+                      type: string
+                    run:
+                      description: Run is the shell command for a run step.
+                      type: string
+                    source:
+                      description: |-
+                        Source and Dest are the host source and in-image destination for a copy
+                        step.
+                      type: string
+                    type:
+                      description: 'Type selects the step kind: run, env, workdir,
+                        or copy.'
+                      enum:
+                      - run
+                      - env
+                      - workdir
+                      - copy
+                      type: string
+                    workdir:
+                      description: Workdir is the directory for a workdir step.
+                      type: string
+                  required:
+                  - type
+                  type: object
+                type: array
+              command:
+                items:
+                  type: string
+                type: array
+              encrypted:
+                default: false
+                description: |-
+                  Encrypted requests at-rest encryption of the template snapshot and every
+                  fork built from it. When true the controller owns the per-template
+                  encryption key as a Kubernetes Secret and delivers it to the node over the
+                  mTLS RPC; the node never generates or persists the key. Defaults to false
+                  (plaintext snapshots, unchanged behavior).
+                type: boolean
+              env:
+                items:
+                  description: EnvVar represents an environment variable present in
+                    a Container.
+                  properties:
+                    name:
+                      description: |-
+                        Name of the environment variable.
+                        May consist of any printable ASCII characters except '='.
+                      type: string
+                    value:
+                      description: |-
+                        Variable references $(VAR_NAME) are expanded
+                        using the previously defined environment variables in the container and
+                        any service environment variables. If a variable cannot be resolved,
+                        the reference in the input string will be unchanged. Double $$ are reduced
+                        to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                        "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                        Escaped references will never be expanded, regardless of whether the variable
+                        exists or not.
+                        Defaults to "".
+                      type: string
+                    valueFrom:
+                      description: Source for the environment variable's value. Cannot
+                        be used if value is not empty.
+                      properties:
+                        configMapKeyRef:
+                          description: Selects a key of a ConfigMap.
+                          properties:
+                            key:
+                              description: The key to select.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap or its key
+                                must be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        fieldRef:
+                          description: |-
+                            Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                            spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                          properties:
+                            apiVersion:
+                              description: Version of the schema the FieldPath is
+                                written in terms of, defaults to "v1".
+                              type: string
+                            fieldPath:
+                              description: Path of the field to select in the specified
+                                API version.
+                              type: string
+                          required:
+                          - fieldPath
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        fileKeyRef:
+                          description: |-
+                            FileKeyRef selects a key of the env file.
+                            Requires the EnvFiles feature gate to be enabled.
+                          properties:
+                            key:
+                              description: |-
+                                The key within the env file. An invalid key will prevent the pod from starting.
+                                The keys defined within a source may consist of any printable ASCII characters except '='.
+                                During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                              type: string
+                            optional:
+                              default: false
+                              description: |-
+                                Specify whether the file or its key must be defined. If the file or key
+                                does not exist, then the env var is not published.
+                                If optional is set to true and the specified key does not exist,
+                                the environment variable will not be set in the Pod's containers.
+
+                                If optional is set to false and the specified key does not exist,
+                                an error will be returned during Pod creation.
+                              type: boolean
+                            path:
+                              description: |-
+                                The path within the volume from which to select the file.
+                                Must be relative and may not contain the '..' path or start with '..'.
+                              type: string
+                            volumeName:
+                              description: The name of the volume mount containing
+                                the env file.
+                              type: string
+                          required:
+                          - key
+                          - path
+                          - volumeName
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        resourceFieldRef:
+                          description: |-
+                            Selects a resource of the container: only resources limits and requests
+                            (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                          properties:
+                            containerName:
+                              description: 'Container name: required for volumes,
+                                optional for env vars'
+                              type: string
+                            divisor:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Specifies the output format of the exposed
+                                resources, defaults to "1"
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            resource:
+                              description: 'Required: resource to select'
+                              type: string
+                          required:
+                          - resource
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        secretKeyRef:
+                          description: Selects a key of a secret in the pod's namespace
+                          properties:
+                            key:
+                              description: The key of the secret to select from.  Must
+                                be a valid secret key.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret or its key must
+                                be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+              image:
+                type: string
+              init:
+                items:
+                  type: string
+                type: array
+              minIsolationTier:
+                description: |-
+                  MinIsolationTier requires the sandbox to be scheduled ONLY onto a node whose
+                  isolation assurance meets this floor (issue #40). Nodes declare their tier
+                  via the mitos.run/isolation-tier label; the controller filters node
+                  selection so a security-sensitive tenant never lands on a lower-assurance
+                  node. The tiers, strongest to weakest, are hardware-kvm (hardware
+                  virtualization microVM, the default posture), pvm (Firecracker on PVM,
+                  ring-3 pagetable isolation with no nested virt, a documented LOWER-assurance
+                  tier, evaluated not adopted, see docs/platforms/pvm-evaluation.md), and
+                  gvisor (userspace-kernel syscall interposition). A floor is a MINIMUM: a
+                  stronger node tier still satisfies a weaker floor. Empty means no floor (any
+                  healthy node), the default. See docs/threat-model.md.
+                enum:
+                - hardware-kvm
+                - pvm
+                - gvisor
+                type: string
+              networkPolicy:
+                description: |-
+                  NetworkPolicy is the per-sandbox network posture, threaded from the template
+                  through the Fork RPC to the per-tap nftables datapath (docs/networking.md).
+
+                  The dimensions compose as follows, in priority order:
+                    - BlockNetwork, when true, drops ALL egress unconditionally; the allowlists
+                      and Egress policy below are then inert. This is the total-deny knob (Modal
+                      block_network=True).
+                    - Otherwise Egress (deny or allow) is the default verdict for traffic that
+                      matches no allow rule. Under deny (the secure default), only the allowlists
+                      pass; under allow, everything passes except the unconditional metadata block.
+                    - Allow is the host:port allowlist: literal IP:port entries become static
+                      chain accepts; DNS-name entries are enforced via the controlled resolver.
+                    - AllowCIDRs accepts egress whose destination IP is inside one of the named
+                      CIDR blocks (the CIDR allowlist; Modal outbound_cidr_allowlist).
+                    - Inbound governs unsolicited inbound to the guest; the secure default is
+                      deny-by-default (InboundDeny). InboundCIDRs narrows an InboundAllow to
+                      source CIDRs (Modal inbound_cidr_allowlist).
+                properties:
+                  allow:
+                    items:
+                      type: string
+                    type: array
+                  allowCidrs:
+                    description: |-
+                      AllowCIDRs is the egress CIDR allowlist: a destination IP inside any of
+                      these blocks is accepted (Modal outbound_cidr_allowlist). Entries are
+                      CIDR notation, IPv4 or IPv6 (e.g. "10.0.0.0/8", "2001:db8::/32"). Ignored
+                      when BlockNetwork is true.
+                    items:
+                      type: string
+                    type: array
+                  blockNetwork:
+                    description: |-
+                      BlockNetwork drops ALL egress for the sandbox, overriding Egress and the
+                      allowlists. It is the total-deny primitive (Modal block_network=True): a
+                      sandbox that must never reach the network at all.
+                    type: boolean
+                  egress:
+                    type: string
+                  inbound:
+                    description: |-
+                      Inbound governs unsolicited inbound connections to the guest. Empty means
+                      the secure default, deny-by-default (InboundDeny): nothing may dial in.
+                      Return traffic for the guest's own egress is always accepted regardless.
+                    type: string
+                  inboundCidrs:
+                    description: |-
+                      InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
+                      inbound_cidr_allowlist). Only meaningful when Inbound is allow; empty under
+                      InboundAllow means any source may dial in.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              requireHardwareKvm:
+                default: false
+                description: |-
+                  RequireHardwareKvm is a convenience equivalent to
+                  minIsolationTier=hardware-kvm (issue #40): it pins the sandbox to a
+                  hardware-virtualization node and keeps it off any lower-assurance tier (PVM,
+                  gVisor). When both are set the STRONGER floor wins, so this flag can only
+                  tighten, never weaken, an explicit minIsolationTier. Defaults to false.
+                type: boolean
+              resources:
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  gpu:
+                    description: |-
+                      GPU requests GPU passthrough for the sandbox (issue #221). When set the
+                      pool's sandboxes are scheduled ONLY onto GPU-capable nodes (the controller
+                      filters node selection by the GPU node label, mirroring the KVM node
+                      selection), and the requested device count and type are recorded for
+                      metering (GPU-seconds, internal/metering). The actual VFIO device-attach
+                      into the microVM and the fork-with-device behavior are HARDWARE-GATED and
+                      not validated here; see docs/platforms/gpu.md. A GPU sandbox is documented
+                      as NOT live-forkable while the device is attached.
+                    properties:
+                      count:
+                        description: |-
+                          Count is the number of GPUs to attach, exclusively, to the sandbox. A GPU
+                          is passthrough-assigned to a single VM and is never CoW-shared across forks.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      type:
+                        description: |-
+                          Type names the GPU SKU the pool requires (for example "nvidia-a100",
+                          "nvidia-h100"). It is matched against the GPU node's advertised type label
+                          (mitos.run/gpu-type) during node selection. Empty means any GPU type on a
+                          GPU-capable node satisfies the request.
+                        type: string
+                    required:
+                    - count
+                    type: object
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              volumes:
+                items:
+                  properties:
+                    forkPolicy:
+                      type: string
+                    mountPath:
+                      type: string
+                    name:
+                      description: |-
+                        Name identifies the volume; it becomes the host backing-file name and the
+                        Firecracker drive id, so it is constrained to a path-safe shape (no dots,
+                        no slashes) to prevent traversal out of the sandbox volumes dir. The
+                        pattern omits the upper bound (a bounded {m,n} quantifier breaks the
+                        controller-gen marker parser on the comma); MaxLength caps the length at 64.
+                      maxLength: 64
+                      pattern: ^[a-zA-Z0-9][a-zA-Z0-9_-]*$
+                      type: string
+                    readOnly:
+                      type: boolean
+                    size:
+                      type: string
+                    snapshotClass:
+                      description: 'For Snapshot fork policy: the CSI snapshot class
+                        to use'
+                      type: string
+                    source:
+                      properties:
+                        gcs:
+                          properties:
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                          required:
+                          - bucket
+                          type: object
+                        git:
+                          properties:
+                            branch:
+                              type: string
+                            ref:
+                              type: string
+                            repo:
+                              type: string
+                          required:
+                          - repo
+                          type: object
+                        pvc:
+                          properties:
+                            claimName:
+                              type: string
+                          required:
+                          - claimName
+                          type: object
+                        s3:
+                          properties:
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                            region:
+                              type: string
+                          required:
+                          - bucket
+                          type: object
+                      type: object
+                    storageClass:
+                      description: 'For persistent volumes: the storage class'
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+            required:
+            - image
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
