@@ -47,6 +47,7 @@ type Deps struct {
 	Templates TemplateLister
 	Audit     AuditRecorder
 	Logs      LogStreamer
+	Secrets   SecretStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -75,6 +76,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Audit == nil {
 		deps.Audit = NewMemAuditLog()
+	}
+	if deps.Secrets == nil {
+		deps.Secrets = NewMemSecretStore()
 	}
 	if (deps.Prices == usage.PriceList{}) {
 		deps.Prices = usage.DefaultPriceList()
@@ -113,6 +117,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/templates", c.handleListTemplates)
+	mux.HandleFunc("GET /console/secrets", c.handleListSecrets)
+	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
+	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
 	c.mux = mux
 }
 
