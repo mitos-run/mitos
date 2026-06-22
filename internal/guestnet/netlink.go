@@ -50,6 +50,8 @@ const (
 	ifaAddress = 1
 	ifaLocal   = 2
 
+	iflaAddress = 1
+
 	rtaGateway = 5
 	rtaOIF     = 4
 
@@ -121,6 +123,34 @@ func buildSetLinkUp(seq uint32, ifindex int32) []byte {
 	nativeEndian.PutUint32(info[8:12], iffUp)  // flags
 	nativeEndian.PutUint32(info[12:16], iffUp) // change mask
 	b = append(b, info...)
+	return finalize(b)
+}
+
+// buildSetLinkDown builds an RTM_NEWLINK request that clears IFF_UP on ifindex.
+// Only the up bit is in the change mask, so other link flags are untouched.
+// Bringing the link down is the first step of changing its hardware address.
+func buildSetLinkDown(seq uint32, ifindex int32) []byte {
+	b := msgHeader(rtmNewLink, nlmFRequest|nlmFAck, seq)
+	info := make([]byte, ifInfoMsgLen)
+	info[0] = afUnspec
+	nativeEndian.PutUint32(info[4:8], uint32(ifindex))
+	nativeEndian.PutUint32(info[8:12], 0)      // flags: IFF_UP clear (down)
+	nativeEndian.PutUint32(info[12:16], iffUp) // change mask: only the up bit
+	b = append(b, info...)
+	return finalize(b)
+}
+
+// buildSetMAC builds an RTM_NEWLINK request that sets the hardware address of
+// ifindex via an IFLA_ADDRESS attribute. The link must be down for the kernel
+// to accept a MAC change on most drivers, so the caller brings it down first.
+func buildSetMAC(seq uint32, ifindex int32, hw net.HardwareAddr) []byte {
+	b := msgHeader(rtmNewLink, nlmFRequest|nlmFAck, seq)
+	info := make([]byte, ifInfoMsgLen)
+	info[0] = afUnspec
+	nativeEndian.PutUint32(info[4:8], uint32(ifindex))
+	// flags and change mask stay 0: this message only carries an attribute.
+	b = append(b, info...)
+	b = appendAttr(b, iflaAddress, hw)
 	return finalize(b)
 }
 

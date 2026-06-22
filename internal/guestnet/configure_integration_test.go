@@ -65,7 +65,7 @@ func dumpLoAddrs(t *testing.T) []addrEntry {
 func TestIntegrationConfigureAppliesAddressAndRoute(t *testing.T) {
 	requireNetAdmin(t)
 	const guestIP = "10.123.0.2"
-	if err := Configure("lo", guestIP, "10.123.0.1", 30); err != nil {
+	if err := Configure("lo", "", guestIP, "10.123.0.1", 30); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 	found := false
@@ -84,10 +84,10 @@ func TestIntegrationConfigureAppliesAddressAndRoute(t *testing.T) {
 // test's 10.123.0.0/16 range, not an accumulation across runs.
 func TestIntegrationConfigureIsIdempotent(t *testing.T) {
 	requireNetAdmin(t)
-	if err := Configure("lo", "10.123.0.2", "10.123.0.1", 30); err != nil {
+	if err := Configure("lo", "", "10.123.0.2", "10.123.0.1", 30); err != nil {
 		t.Fatalf("Configure first: %v", err)
 	}
-	if err := Configure("lo", "10.123.0.6", "10.123.0.5", 30); err != nil {
+	if err := Configure("lo", "", "10.123.0.6", "10.123.0.5", 30); err != nil {
 		t.Fatalf("Configure second: %v", err)
 	}
 	count := 0

@@ -22,6 +22,8 @@ on:
       - 'cmd/husk-stub/**'
       - 'cmd/mem-smoke/**'
       - 'cmd/crash-reap-smoke/**'
+      - 'cmd/net-fork-smoke/**'
+      - 'internal/guestnet/**'
       - 'internal/husk/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
@@ -1019,6 +1021,60 @@ jobs:
 
           echo "================================"
           echo "  forkd crash reconcile reaps orphans with no leak"
+          echo "================================"
+
+      # Per-fork network identity proof (fork-correctness row 4, issue #3). Two
+      # forks of one snapshot must wake with DISTINCT guest network identities,
+      # not the parent's. cmd/net-fork-smoke drives fork.NewEngine with per-fork
+      # networking enabled (NetManager + NetAllocator, exactly as forkd), forks
+      # two sandboxes, delivers each its NotifyForked network config, and reads
+      # each guest's eth0 over the agent: it asserts the two forks have DIFFERENT
+      # guest MAC addresses (each the locally-administered MAC derived from its
+      # sandbox id, NOT the shared placeholder baked in the snapshot) and
+      # DIFFERENT guest IPs from the per-fork /30s. A fork that woke with the
+      # parent's baked MAC, or two forks sharing a MAC/IP, fails the job. This
+      # needs the host network stack (tap + nftables), so it runs after the
+      # nftables tools are installed. GATES: exit 1 on a shared identity, exit 2
+      # on an engine/fork setup error.
+      - name: Per-fork network identity, two forks get distinct guest MAC and IP
+        timeout-minutes: 8
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo modprobe nf_tables 2>/dev/null || true
+
+          WORKDIR=/tmp/mitos-test/netfork-build
+          mkdir -p $WORKDIR/mnt
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=192 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/busybox $WORKDIR/mnt/bin/busybox 2>/dev/null || \
+            sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # net-fork-smoke reads eth0 via: cat, ip, awk (plus a shell).
+          for cmd in sh cat echo ls ip awk head tr grep; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/net-fork-smoke ./cmd/net-fork-smoke/
+
+          sudo /tmp/net-fork-smoke \
+            --image $WORKDIR/rootfs.ext4 \
+            --data-dir /tmp/mitos-test/net-fork-data \
+            --firecracker /usr/local/bin/firecracker \
+            --kernel /tmp/mitos-test/vmlinux \
+            --agent-bin /tmp/mitos-test/agent
+
+          echo "================================"
+          echo "  Two forks have distinct guest MAC + IP"
           echo "================================"
 
       # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE

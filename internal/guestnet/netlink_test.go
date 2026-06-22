@@ -133,6 +133,63 @@ func TestBuildDumpAddrIsDumpRequest(t *testing.T) {
 	}
 }
 
+// TestBuildSetLinkDownLayout proves the link-down builder requests RTM_NEWLINK
+// with IFF_UP cleared in the flags but set in the change mask, so only the up
+// bit is toggled off (a zero change mask would be a no-op). Bringing the link
+// down is the first step of changing the hardware address.
+func TestBuildSetLinkDownLayout(t *testing.T) {
+	msg := buildSetLinkDown(1, 7)
+	hdr, body := splitMsg(t, msg)
+	if hdr.Type != rtmNewLink {
+		t.Errorf("nlmsg type = %d, want RTM_NEWLINK(%d)", hdr.Type, rtmNewLink)
+	}
+	index := int32(nativeEndian.Uint32(body[4:8]))
+	flags := nativeEndian.Uint32(body[8:12])
+	change := nativeEndian.Uint32(body[12:16])
+	if index != 7 {
+		t.Errorf("ifinfomsg index = %d, want 7", index)
+	}
+	if flags&iffUp != 0 {
+		t.Errorf("flags=%#x, want IFF_UP clear (link down)", flags)
+	}
+	if change&iffUp == 0 {
+		t.Errorf("change=%#x, want IFF_UP set in change mask", change)
+	}
+}
+
+// TestBuildSetMACCarriesAddress proves the MAC builder emits an RTM_NEWLINK for
+// the target ifindex carrying an IFLA_ADDRESS attribute whose 6-byte payload is
+// exactly the hardware address passed in. This is what gives each restored fork
+// its own distinct eth0 MAC instead of the shared snapshot placeholder.
+func TestBuildSetMACCarriesAddress(t *testing.T) {
+	hw, err := net.ParseMAC("02:11:22:33:44:55")
+	if err != nil {
+		t.Fatalf("ParseMAC: %v", err)
+	}
+	msg := buildSetMAC(1, 7, hw)
+
+	hdr, body := splitMsg(t, msg)
+	if hdr.Type != rtmNewLink {
+		t.Errorf("nlmsg type = %d, want RTM_NEWLINK(%d)", hdr.Type, rtmNewLink)
+	}
+	if index := int32(nativeEndian.Uint32(body[4:8])); index != 7 {
+		t.Errorf("ifinfomsg index = %d, want 7", index)
+	}
+	attrs := walkAttrs(body[ifInfoMsgLen:])
+	got, ok := attrs[iflaAddress]
+	if !ok {
+		t.Fatalf("IFLA_ADDRESS attribute missing; attrs=%v", attrs)
+	}
+	if len(got) != len(hw) {
+		t.Fatalf("IFLA_ADDRESS len = %d, want %d", len(got), len(hw))
+	}
+	for i := range hw {
+		if got[i] != hw[i] {
+			t.Fatalf("IFLA_ADDRESS = %x, want %x", got, []byte(hw))
+		}
+	}
+}
+
 // TestBuildSetLinkUpLayout proves the link-up builder requests RTM_NEWLINK with
 // IFF_UP set in both the flags and the change mask, so only the up bit is
 // toggled (a zero change mask would be a no-op).
