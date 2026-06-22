@@ -7,7 +7,9 @@ This document describes how mitos encrypts template snapshots and volumes at
 rest, why copy-on-write (CoW) page sharing across forks is preserved, how
 erasure becomes crypto-shredding, and the PR1 vs PR2 split. It is the design
 reference behind the threat-model row "Encryption at rest + crypto-shredding"
-in `docs/threat-model.md`.
+in `docs/threat-model.md`. For the operator-facing summary of the whole secrets
+model (tenant secret delivery, per-fork reissue, multi-tenant isolation, and how
+this at-rest key custody fits in) see `docs/secrets.md`.
 
 Encryption is opt-in: forkd takes `--enable-encryption` (default off). With the
 flag off the behavior is exactly as before, plaintext snapshots on disk.

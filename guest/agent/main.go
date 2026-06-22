@@ -149,6 +149,17 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
+		if req.Type == vsock.TypeTunnel {
+			if req.Tunnel == nil {
+				writeResponse(conn, vsock.Response{OK: false, Error: "tunnel request is nil"})
+				return
+			}
+			// A tunnel owns its connection: the dedicated conn becomes a raw
+			// bidirectional byte pipe to the guest TCP socket after the ack.
+			handleTunnel(conn, req.Tunnel)
+			return
+		}
+
 		if req.Type == vsock.TypePty {
 			if req.Pty == nil {
 				writeResponse(conn, vsock.Response{OK: false, Error: "pty request is nil"})

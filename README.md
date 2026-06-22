@@ -146,6 +146,8 @@ await sb.terminate();
 
 The TypeScript SDK (`@mitos/sdk`) exposes the same one-liner `sandbox(image)`, `fromName` reconnect, streaming exec, and a server-envelope-aware `AgentRunError`. Parity table in [sdk/typescript/README.md](sdk/typescript/README.md).
 
+The Ruby SDK is a thin, dependency-free (standard-library only) client for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, and terminate. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/ruby/README.md](sdk/ruby/README.md).
+
 ### CLI
 
 Install the `mitos` CLI. The full per-OS matrix, the env vars the installer
@@ -159,6 +161,10 @@ honors, and checksum verification are in [docs/install.md](docs/install.md).
 | Homebrew (`brew install mitos-run/tap/mitos`) | Coming with releases (publishes once the tap is wired). |
 | Debian/RPM packages (`.deb`, `.rpm`) | Coming with releases (built from the first tagged release). |
 | Windows (`scoop`, `winget`) | Coming with releases. |
+
+How every artifact ships (images, CLI, and the four SDKs) and the one-time
+maintainer setup each registry needs are documented in
+[docs/releasing.md](docs/releasing.md).
 
 ```bash
 # Works today with a Go toolchain:
@@ -295,7 +301,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (engine path; husk wiring tracked [#24](https://github.com/mitos-run/mitos/issues/24)) | [#24](https://github.com/mitos-run/mitos/issues/24) |
 | Code interpreter | `run_code` with a stateful kernel and rich multi-MIME results, in both SDKs and the MCP server; fail-closed `KernelUnavailable` until the kernel ships in the husk base image | [docs/mcp.md](docs/mcp.md) |
 | LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by both SDKs into a structured `AgentRunError` | [#28](https://github.com/mitos-run/mitos/issues/28) |
-| SDKs and surfaces | Python and TypeScript SDKs with a one-liner `sandbox(image)`, lazy default pool, `from_name` reconnect, and async Python client; plus the `mitos` CLI and an MCP server | [docs/cli.md](docs/cli.md) |
+| SDKs and surfaces | Python and TypeScript SDKs with a one-liner `sandbox(image)`, lazy default pool, `from_name` reconnect, and async Python client; a standard-library-only Ruby SDK for direct sandbox-server mode; plus the `mitos` CLI and an MCP server | [docs/cli.md](docs/cli.md) |
 
 ### Kubernetes-native
 
@@ -331,6 +337,7 @@ flowchart TB
   subgraph SDKs["SDKs and surfaces"]
     PY["Python SDK"]
     TS["TypeScript SDK / @mitos/sdk"]
+    RB["Ruby SDK (direct mode)"]
     CLI["mitos CLI / mitos-mcp"]
   end
 
@@ -438,6 +445,7 @@ Per-topic docs in [`docs/`](docs/):
 | Snapshot distribution (content-addressed transfer) | [docs/snapshot-distribution.md](docs/snapshot-distribution.md) |
 | Guest networking and egress | [docs/networking.md](docs/networking.md) |
 | Encryption at rest and crypto-shredding | [docs/encryption.md](docs/encryption.md) |
+| Secrets management (multi-tenant) | [docs/secrets.md](docs/secrets.md) |
 | CoW-aware metering | [docs/metering.md](docs/metering.md) |
 | Density and scheduling | [docs/scheduling.md](docs/scheduling.md) |
 | Observability (traces, metrics, audit, plugin) | [docs/observability.md](docs/observability.md) |
@@ -448,6 +456,8 @@ Per-topic docs in [`docs/`](docs/):
 | `mitos` CLI | [docs/cli.md](docs/cli.md) |
 | MCP server | [docs/mcp.md](docs/mcp.md) |
 | Agent Skill | [skills/mitos/SKILL.md](skills/mitos/SKILL.md) |
+| Guest port forwarding | [docs/ports.md](docs/ports.md) |
+| Recipe: host an HTTP daemon / agent harness | [docs/recipes/agent-harness.md](docs/recipes/agent-harness.md) |
 | Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |

@@ -1,0 +1,450 @@
+name: Publish SDKs
+
+# Publish each language SDK to its registry when that SDK's declared version is
+# bumped on main. The SDK versions are independent of the root Go module that
+# release-please tracks; a maintainer bumps the version in the SDK's own manifest
+# and merges to main, and the matching job below publishes it.
+#
+# Every job is independent and safe to re-run:
+#
+#   1. It reads the version the SDK declares in its manifest.
+#   2. It asks the registry whether that exact version already exists; if so it
+#      logs "already published" and exits 0 (idempotent: a re-run never errors on
+#      a duplicate upload).
+#   3. If the registry token secret is empty it logs "token not configured" and
+#      exits 0, so the workflow never hard-fails before a maintainer wires the
+#      secrets. This mirrors the Homebrew-tap token skip in release.yaml.
+#
+# The four registries and the secrets they need:
+#
+#   Python      -> PyPI       secret PYPI_API_TOKEN
+#   TypeScript  -> npm        secret NPM_TOKEN
+#   Ruby        -> RubyGems   secret RUBYGEMS_API_KEY
+#   Rust        -> crates.io  secret CARGO_REGISTRY_TOKEN
+#
+# Path filters scope each push so a Python-only change does not run the npm job,
+# and workflow_dispatch lets a maintainer force one SDK (or all) by hand.
+#
+# See docs/releasing.md for the maintainer setup and the trigger workflow.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "sdk/python/**"
+      - "sdk/typescript/**"
+      - "sdk/ruby/**"
+      - "sdk/rust/**"
+      - ".github/workflows/publish-sdks.yaml"
+  workflow_dispatch:
+    inputs:
+      sdk:
+        description: "Force one SDK (python, typescript, ruby, rust) or all"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - python
+          - typescript
+          - ruby
+          - rust
+
+permissions:
+  contents: read
+
+# Only the latest push to main matters for publishing; cancel superseded runs.
+concurrency:
+  group: publish-sdks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Decide which SDK jobs should run. On a push we trust the path filter that let
+  # the workflow start plus the per-job paths-filter; on workflow_dispatch we honor
+  # the chosen SDK (or "all"). This keeps the per-job conditions readable.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.decide.outputs.python }}
+      typescript: ${{ steps.decide.outputs.typescript }}
+      ruby: ${{ steps.decide.outputs.ruby }}
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Need the previous commit so the path filter can diff what changed on
+          # this push.
+          fetch-depth: 2
+
+      - name: Decide which SDKs to publish
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SDK: ${{ github.event.inputs.sdk }}
+        run: |
+          set -euo pipefail
+
+          want() {
+            # On manual dispatch, run the chosen SDK (or all). On push, run the
+            # SDK only when its files changed in the pushed range.
+            local name="$1" path="$2"
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              if [ "${DISPATCH_SDK}" = "all" ] || [ "${DISPATCH_SDK}" = "${name}" ]; then
+                echo "true"
+              else
+                echo "false"
+              fi
+              return
+            fi
+            # push event: diff against the previous commit.
+            if git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- "${path}" | grep -q .; then
+              echo "true"
+            else
+              echo "false"
+            fi
+          }
+
+          {
+            echo "python=$(want python sdk/python)"
+            echo "typescript=$(want typescript sdk/typescript)"
+            echo "ruby=$(want ruby sdk/ruby)"
+            echo "rust=$(want rust sdk/rust)"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Publish plan:"
+          cat "$GITHUB_OUTPUT"
+
+  python:
+    needs: plan
+    if: needs.plan.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # id-token: write is NOT required for the API-token publish below. Once the
+      # PyPI project "mitos" is configured for Trusted Publishing (OIDC), the
+      # recommended migration is to add `id-token: write` here, drop the
+      # PYPI_API_TOKEN secret, and remove the `password:` line from the publish
+      # step so gh-action-pypi-publish mints a short-lived OIDC token instead.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read declared version
+        id: ver
+        run: |
+          set -euo pipefail
+          version="$(grep -E '^version\s*=' sdk/python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "${version}" ]; then
+            echo "Could not read version from sdk/python/pyproject.toml" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "mitos (PyPI) declared version: ${version}"
+
+      - name: Skip if already on PyPI
+        id: exists
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # HTTP 200 from the per-version JSON endpoint means the release exists.
+          code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mitos/${VERSION}/json")"
+          if [ "${code}" = "200" ]; then
+            echo "mitos ${VERSION} already published to PyPI; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "mitos ${VERSION} not on PyPI (HTTP ${code}); will build and publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if token not configured
+        id: token
+        if: steps.exists.outputs.publish == 'true'
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PYPI_API_TOKEN:-}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+            echo "PYPI_API_TOKEN present; will publish."
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "No PYPI_API_TOKEN secret; skipping the PyPI publish."
+          fi
+
+      - name: Build the distribution
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python -m build sdk/python --outdir sdk/python/dist
+          ls -l sdk/python/dist
+
+      - name: Publish to PyPI
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Belt and suspenders: even if two runs race, do not fail on a version
+          # that already exists on the index.
+          skip-existing: true
+
+  typescript:
+    needs: plan
+    if: needs.plan.outputs.typescript == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read declared version
+        id: ver
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "${name} (npm) declared version: ${version}"
+
+      - name: Skip if already on npm
+        id: exists
+        env:
+          PKG: ${{ steps.ver.outputs.name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # `npm view <pkg>@<version> version` prints the version when it exists
+          # and nothing (empty) when it does not. A 404 on a never-published
+          # package is expected, so do not let it fail the step.
+          published="$(npm view "${PKG}@${VERSION}" version 2>/dev/null || true)"
+          if [ -n "${published}" ]; then
+            echo "${PKG}@${VERSION} already published to npm; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${PKG}@${VERSION} not on npm; will build and publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if token not configured
+        id: token
+        if: steps.exists.outputs.publish == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN present; will publish."
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "No NPM_TOKEN secret; skipping the npm publish."
+          fi
+
+      - name: Install and build
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Publish to npm
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Scoped package (@mitos/sdk) must be published with public access.
+          npm publish --access public
+
+  ruby:
+    needs: plan
+    if: needs.plan.outputs.ruby == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Read declared version
+        id: ver
+        working-directory: sdk/ruby
+        run: |
+          set -euo pipefail
+          # Read the VERSION constant from lib/mitos/version.rb and the gem name
+          # from the gemspec without evaluating the gemspec.
+          version="$(ruby -e 'load "lib/mitos/version.rb"; print Mitos::VERSION')"
+          name="$(grep -E 'spec\.name' mitos.gemspec | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "${name} (RubyGems) declared version: ${version}"
+
+      - name: Skip if already on RubyGems
+        id: exists
+        env:
+          PKG: ${{ steps.ver.outputs.name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The versions API returns 404 for a gem that has never been published
+          # and a JSON array of versions otherwise. Treat the version as existing
+          # only when it appears as a "number" in that array.
+          body="$(curl -s -w '\n%{http_code}' "https://rubygems.org/api/v1/versions/${PKG}.json")"
+          code="$(printf '%s' "${body}" | tail -1)"
+          json="$(printf '%s' "${body}" | sed '$d')"
+          if [ "${code}" = "200" ] && printf '%s' "${json}" | grep -q "\"number\":\"${VERSION}\""; then
+            echo "${PKG} ${VERSION} already published to RubyGems; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${PKG} ${VERSION} not on RubyGems (HTTP ${code}); will build and publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if token not configured
+        id: token
+        if: steps.exists.outputs.publish == 'true'
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUBYGEMS_API_KEY:-}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+            echo "RUBYGEMS_API_KEY present; will publish."
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "No RUBYGEMS_API_KEY secret; skipping the RubyGems publish."
+          fi
+
+      - name: Build the gem
+        id: build
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        working-directory: sdk/ruby
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PKG: ${{ steps.ver.outputs.name }}
+        run: |
+          set -euo pipefail
+          gem build mitos.gemspec
+          echo "gem=${PKG}-${VERSION}.gem" >> "$GITHUB_OUTPUT"
+          ls -l ./*.gem
+
+      - name: Publish to RubyGems
+        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        working-directory: sdk/ruby
+        env:
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+          GEM_FILE: ${{ steps.build.outputs.gem }}
+        run: |
+          set -euo pipefail
+          gem push "${GEM_FILE}"
+
+  rust:
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Guard on missing manifest
+        id: guard
+        run: |
+          set -euo pipefail
+          # sdk/rust/Cargo.toml may not exist yet (it lands with PR #280). When it
+          # is absent, no-op cleanly so this job never fails the workflow.
+          if [ -f sdk/rust/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "sdk/rust/Cargo.toml is absent; nothing to publish for the Rust SDK."
+          fi
+
+      - name: Set up Rust toolchain
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Read declared version
+        id: ver
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          name="$(grep -E '^name\s*=' sdk/rust/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          version="$(grep -E '^version\s*=' sdk/rust/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "${name} (crates.io) declared version: ${version}"
+
+      - name: Skip if already on crates.io
+        id: exists
+        if: steps.guard.outputs.present == 'true'
+        env:
+          PKG: ${{ steps.ver.outputs.name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # crates.io requires a descriptive User-Agent; a bare request is
+          # rejected. HTTP 200 on the per-version endpoint means it exists.
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "mitos-publish-ci (https://github.com/mitos-run/mitos)" \
+            "https://crates.io/api/v1/crates/${PKG}/${VERSION}")"
+          if [ "${code}" = "200" ]; then
+            echo "${PKG} ${VERSION} already published to crates.io; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${PKG} ${VERSION} not on crates.io (HTTP ${code}); will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if token not configured
+        id: token
+        if: steps.guard.outputs.present == 'true' && steps.exists.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+            echo "CARGO_REGISTRY_TOKEN present; will publish."
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "No CARGO_REGISTRY_TOKEN secret; skipping the crates.io publish."
+          fi
+
+      - name: Publish to crates.io
+        if: steps.guard.outputs.present == 'true' && steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo publish --manifest-path sdk/rust/Cargo.toml

@@ -57,6 +57,7 @@ proto:
 	protoc \
 		--go_out=. --go_opt=module=mitos.run/mitos \
 		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
+		--connect-go_out=. --connect-go_opt=module=mitos.run/mitos \
 		proto/sandbox/v1/sandbox.proto
 
 docker-build:

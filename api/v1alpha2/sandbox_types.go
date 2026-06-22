@@ -311,6 +311,19 @@ type SandboxStatus struct {
 	// +optional
 	BudgetSpend *SandboxBudgetSpend `json:"budgetSpend,omitempty"`
 
+	// EffectiveBudget is the controller-computed, attenuated capability budget
+	// this sandbox actually holds: the per-field minimum (intersection) of its own
+	// resolved budget and its parent's effective-remaining budget when it is a
+	// self-initiated fork (source.fromSandbox), or its resolved spec/pool budget
+	// otherwise. It is depth-aggregate: because each level intersects with its
+	// parent's remaining, a descendant can never hold a budget wider than the root
+	// has left, so the whole fork subtree is bounded by the root (issue #25, the
+	// never-widen attenuation invariant). A nil dimension means unlimited. This is
+	// STATUS only; the controller never mutates the user-owned spec.budget. NEW v2
+	// field.
+	// +optional
+	EffectiveBudget *SandboxBudget `json:"effectiveBudget,omitempty"`
+
 	// ReadyReplicas is the ready child count for a replicas > 1 Sandbox. Maps
 	// from SandboxForkStatus.readyForks.
 	// +optional
