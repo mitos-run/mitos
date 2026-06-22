@@ -41,14 +41,14 @@ and are not yet dispatched (issue #21).
 ## Launching it
 
 The HTTP backend talks to a running [sandbox-server](../cmd/sandbox-server)
-over its REST API. With no `--server` flag and no `AGENTRUN_SERVER` set it
+over its REST API. With no `--server` flag and no `MITOS_BASE_URL` set it
 targets the hosted production endpoint `https://mitos.run`; point it at a
 self-hosted or local standalone server by overriding either one:
 
 ```bash
 mitos-mcp \
   --server https://sandbox.example.internal \
-  --token "$AGENTRUN_TOKEN" \
+  --token "$MITOS_API_KEY" \
   --enable-workspace-tools=false
 ```
 
@@ -56,8 +56,8 @@ Flags and environment:
 
 | Flag | Environment | Default | Meaning |
 | --- | --- | --- | --- |
-| `--server` | `AGENTRUN_SERVER` | `https://mitos.run` | Base URL of the sandbox-server; defaults to the hosted endpoint. |
-| `--token` | `AGENTRUN_TOKEN` | empty | Bearer token sent on every backend request. |
+| `--server` | `MITOS_BASE_URL` | `https://mitos.run` | Base URL of the sandbox-server; defaults to the hosted endpoint. |
+| `--token` | `MITOS_API_KEY` | empty | Bearer token sent on every backend request. |
 | `--enable-workspace-tools` | | `false` | Advertise the deferred workspace tools. |
 
 ### Token scoping
@@ -103,8 +103,8 @@ the binary and passes the backend URL and token through the environment:
     "mitos": {
       "command": "/usr/local/bin/mitos-mcp",
       "env": {
-        "AGENTRUN_SERVER": "https://sandbox.example.internal",
-        "AGENTRUN_TOKEN": "your-scoped-token"
+        "MITOS_BASE_URL": "https://sandbox.example.internal",
+        "MITOS_API_KEY": "your-scoped-token"
       }
     }
   }
