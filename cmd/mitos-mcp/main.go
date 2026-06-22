@@ -5,7 +5,7 @@
 //
 // It speaks MCP on stdin/stdout: stdout is the JSON-RPC channel and carries
 // nothing else. ALL logging goes to stderr. The launch-time bearer token
-// (--token / AGENTRUN_TOKEN) scopes what the server can do on the backend and
+// (--token / MITOS_API_KEY) scopes what the server can do on the backend and
 // is NEVER logged.
 package main
 
@@ -21,11 +21,13 @@ import (
 )
 
 func main() {
-	defaultServer := envOr("AGENTRUN_SERVER", "http://localhost:8080")
-	defaultToken := os.Getenv("AGENTRUN_TOKEN")
+	// Default to the hosted production control plane. Self-hosted or local
+	// standalone users opt out by setting MITOS_BASE_URL or passing --server.
+	defaultServer := envOr("MITOS_BASE_URL", "https://mitos.run")
+	defaultToken := os.Getenv("MITOS_API_KEY")
 
-	server := flag.String("server", defaultServer, "Base URL of the sandbox-server (env AGENTRUN_SERVER).")
-	token := flag.String("token", defaultToken, "Bearer token; scopes what this server may do (env AGENTRUN_TOKEN). Never logged.")
+	server := flag.String("server", defaultServer, "Base URL of the sandbox-server (env MITOS_BASE_URL).")
+	token := flag.String("token", defaultToken, "Bearer token; scopes what this server may do (env MITOS_API_KEY). Never logged.")
 	enableWorkspace := flag.Bool("enable-workspace-tools", false, "Advertise the workspace tools in tools/list (dispatch deferred, issue #21).")
 	flag.Parse()
 

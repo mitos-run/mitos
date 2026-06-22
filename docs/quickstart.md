@@ -13,7 +13,8 @@ pip install mitos
 ```python
 import mitos
 
-# MITOS_API_KEY and MITOS_BASE_URL come from the environment (explicit args override).
+# Set MITOS_API_KEY (get a key from https://mitos.run). The base URL defaults to
+# the hosted production endpoint https://mitos.run, so no base URL is needed.
 sb = mitos.create("python")                 # Ready sandbox handle
 print(sb.run_code("print(1 + 1)").text)     # 2
 sb.terminate()
@@ -22,16 +23,31 @@ sb.terminate()
 That is the whole thing: one `pip install mitos`, one import, one `create`, code
 execution, no second SDK to install. `mitos.create(image, api_key=..., base_url=...)`
 resolves the API key (argument, else `MITOS_API_KEY`) and the base URL (argument,
-else `MITOS_BASE_URL`), then returns a sandbox handle that exposes `exec`,
-`run_code`, `files`, `fork`, and `terminate` directly. The API key value is never
-logged. `Sandbox.create(...)` is an alias for the same call.
+else `MITOS_BASE_URL`, else the hosted endpoint `https://mitos.run`), then returns
+a sandbox handle that exposes `exec`, `run_code`, `files`, `fork`, and `terminate`
+directly. The API key value is never logged. `Sandbox.create(...)` is an alias for
+the same call.
+
+## Local or self-hosted standalone
+
+To target a local standalone `sandbox-server` or a self-hosted cluster instead of
+the hosted endpoint, set the base URL (argument or `MITOS_BASE_URL`). The
+standalone server runs tokenless, so no key is required:
+
+```python
+import mitos
+
+sb = mitos.create("python", base_url="http://localhost:8080")
+print(sb.run_code("print(1 + 1)").text)     # 2
+sb.terminate()
+```
 
 ## The full flat handle
 
 ```python
 import mitos
 
-sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
+sb = mitos.create("python", api_key="sk-...")
 
 # Files, stateful code, and fork all work on the same flat handle.
 sb.files.write("/workspace/plan.txt", "draft")
@@ -52,9 +68,10 @@ returns an async handle with the same `exec` / `run_code` / `files` / `fork` /
 
 ## Where the key comes from
 
-The standalone `sandbox-server` runs tokenless and ignores the key, so the
-quickstart works against a local server with no signup at all. The hosted
-control plane verifies the same `Authorization: Bearer` header server-side
+The hosted endpoint is the default, so the headline quickstart needs only an API
+key. The standalone `sandbox-server` runs tokenless and ignores the key, so the
+local variant above works against a local server with no signup at all. The
+hosted control plane verifies the same `Authorization: Bearer` header server-side
 ([#210](https://github.com/mitos-run/mitos/issues/210)), and you get a key from
 the self-serve onboarding funnel: sign up with an email, click the verification
 link, and your Personal organization, free-tier signup credit, and first API key
