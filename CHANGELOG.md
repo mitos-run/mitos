@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/mitos-run/mitos/compare/v0.11.0...v0.12.0) (2026-06-22)
+
+
+### Features
+
+* **api-v2:** Connect Sandbox service foundation with streaming Exec ([#24](https://github.com/mitos-run/mitos/issues/24)) ([#267](https://github.com/mitos-run/mitos/issues/267)) ([691a016](https://github.com/mitos-run/mitos/commit/691a0167e0cd5193c3a86ed91fe52ef5c5a3e302))
+* **auth:** one login authenticates the SDKs, mcp, and CLI ([#210](https://github.com/mitos-run/mitos/issues/210)-adjacent) ([#278](https://github.com/mitos-run/mitos/issues/278)) ([0ef2848](https://github.com/mitos-run/mitos/commit/0ef28487795cab1c083fd792fc765ead436da262))
+* **cli:** first-class packaging, goreleaser + install.sh + OS-aware docs ([#253](https://github.com/mitos-run/mitos/issues/253)) ([#268](https://github.com/mitos-run/mitos/issues/268)) ([5e7b3de](https://github.com/mitos-run/mitos/commit/5e7b3de03cb5c002d8f22b09acf449da13741b67))
+* **controller:** fork-budget attenuation, depth-aggregate + never-widen ([#25](https://github.com/mitos-run/mitos/issues/25)) ([#266](https://github.com/mitos-run/mitos/issues/266)) ([c73313b](https://github.com/mitos-run/mitos/commit/c73313bd3c58c94cdf4b25e90b28cd0224e46445))
+* **sandbox-server:** TCP-over-vsock guest port forwarding ([#228](https://github.com/mitos-run/mitos/issues/228)) ([#271](https://github.com/mitos-run/mitos/issues/271)) ([d3408c9](https://github.com/mitos-run/mitos/commit/d3408c99e9208166f45fce8027cb44d6f431ff48))
+* **sdk:** official Ruby SDK (direct mode, hosted mitos.run) ([#250](https://github.com/mitos-run/mitos/issues/250)) ([#273](https://github.com/mitos-run/mitos/issues/273)) ([3c0fabf](https://github.com/mitos-run/mitos/commit/3c0fabfe2ece4ce0cae74ec0d031bae2c418a6ad))
+* **skill,sdk,mcp:** Agent Skill + default agent surfaces to hosted mitos.run ([#252](https://github.com/mitos-run/mitos/issues/252)) ([#269](https://github.com/mitos-run/mitos/issues/269)) ([182c537](https://github.com/mitos-run/mitos/commit/182c537210fd2d62bf37281708f88e3645062135))
+
 ## [0.11.0](https://github.com/mitos-run/mitos/compare/v0.10.0...v0.11.0) (2026-06-22)
 
 
