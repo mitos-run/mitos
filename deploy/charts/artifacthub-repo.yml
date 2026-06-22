@@ -10,7 +10,7 @@
 #   1. Add the repository on Artifact Hub (kind: Helm, url: https://mitos.run/charts).
 #   2. Copy the generated repository ID into repositoryID below.
 #   3. Re-publish so this file ships with the ID, then claim ownership.
-repositoryID: REPLACE_WITH_ARTIFACT_HUB_REPOSITORY_ID
+repositoryID: ed2eda94-a171-4022-b6d4-de565edf4800
 owners:
   - name: mitos-run
     email: maintainers@mitos.run
