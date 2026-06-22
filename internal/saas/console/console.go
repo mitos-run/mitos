@@ -84,6 +84,13 @@ func New(deps Deps) *Console {
 	if deps.Instruments == nil {
 		deps.Instruments = NewMemInstruments()
 	}
+	if deps.Logs == nil {
+		// Default to an authorizing streamer over the (already-defaulted)
+		// sandbox control with an empty transport: it enforces org ownership and
+		// streams nothing, so the endpoint is safe before the real forkd
+		// transport is wired in.
+		deps.Logs = NewAuthorizingLogStreamer(deps.Sandboxes, NewMemRawLogStreamer())
+	}
 	if (deps.Prices == usage.PriceList{}) {
 		deps.Prices = usage.DefaultPriceList()
 	}
@@ -118,6 +125,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
+	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/templates", c.handleListTemplates)
