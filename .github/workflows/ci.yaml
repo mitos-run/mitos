@@ -204,7 +204,10 @@ jobs:
         # cleanup step can stop it.
         run: |
           set -euo pipefail
-          /tmp/sandbox-server --mock --addr :8080 &
+          # The binary lives at /tmp/sandbox-server, so the server's default
+          # --data-dir (also /tmp/sandbox-server) would collide with the binary
+          # file (mkdir: not a directory). Point it at a distinct data dir.
+          /tmp/sandbox-server --mock --addr :8080 --data-dir "${RUNNER_TEMP:-/tmp}/sandbox-server-data" &
           echo "SANDBOX_SERVER_PID=$!" >> "$GITHUB_ENV"
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then
