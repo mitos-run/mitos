@@ -295,4 +295,54 @@ class SandboxServerTest < Minitest::Test
     call = @stub.recorded.find { |r| r.method == "POST" && r.path == "/v1/templates" }
     assert_equal "Bearer sk-test-secret", call.headers["authorization"]
   end
+
+  # The bearer falls back to the CLI login credential (mitos auth login) when no
+  # arg and no MITOS_API_KEY are set. Precedence: arg > MITOS_API_KEY > file.
+  def with_config_dir(token)
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "credentials.json"), JSON.dump("token" => token, "email" => "a@b.c")) unless token.nil?
+      prev_dir = ENV["MITOS_CONFIG_DIR"]
+      prev_key = ENV["MITOS_API_KEY"]
+      ENV["MITOS_CONFIG_DIR"] = dir
+      ENV.delete("MITOS_API_KEY")
+      begin
+        yield
+      ensure
+        prev_dir.nil? ? ENV.delete("MITOS_CONFIG_DIR") : (ENV["MITOS_CONFIG_DIR"] = prev_dir)
+        ENV["MITOS_API_KEY"] = prev_key unless prev_key.nil?
+      end
+    end
+  end
+
+  def auth_header_for(call_server)
+    call_server.create_template("auth-probe")
+    call = @stub.recorded.find { |r| r.method == "POST" && r.path == "/v1/templates" }
+    call.headers["authorization"]
+  end
+
+  def test_token_falls_back_to_credential_file
+    with_config_dir("file-tok") do
+      assert_equal "Bearer file-tok", auth_header_for(server)
+    end
+  end
+
+  def test_env_overrides_credential_file
+    with_config_dir("file-tok") do
+      ENV["MITOS_API_KEY"] = "env-tok"
+      assert_equal "Bearer env-tok", auth_header_for(server)
+    end
+  end
+
+  def test_arg_overrides_credential_file
+    with_config_dir("file-tok") do
+      assert_equal "Bearer arg-tok", auth_header_for(server(api_key: "arg-tok"))
+    end
+  end
+
+  def test_no_credential_no_env_is_tokenless
+    with_config_dir(nil) do
+      assert_nil auth_header_for(server)
+    end
+  end
 end

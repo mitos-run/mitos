@@ -71,7 +71,7 @@ typed `not_found` error.
 
 | Method | HTTP | Returns | Notes |
 | --- | --- | --- | --- |
-| `Mitos.server(url:, api_key:)` | - | `SandboxServer` | Base URL: arg, else `MITOS_BASE_URL`, else `https://mitos.run`. API key: arg, else `MITOS_API_KEY` (optional). |
+| `Mitos.server(url:, api_key:)` | - | `SandboxServer` | Base URL: arg, else `MITOS_BASE_URL`, else `https://mitos.run`. API key: arg, else `MITOS_API_KEY`, else the `mitos auth login` credential (`~/.config/mitos/credentials.json`), else tokenless. |
 | `SandboxServer#create_template(id, init_wait_seconds:, idempotency_key:)` | `POST /v1/templates` | `Template` | Sends a fresh `Idempotency-Key`. |
 | `SandboxServer#list_templates` | `GET /v1/templates` | `Array<Template>` | |
 | `SandboxServer#fork(template, id:, idempotency_key:)` | `POST /v1/fork` | `Sandbox` | Generates a `sandbox-<hex>` id when `id` is nil; validates against the id allowlist. Sends a fresh `Idempotency-Key`. |
