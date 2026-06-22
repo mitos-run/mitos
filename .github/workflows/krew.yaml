@@ -1,0 +1,92 @@
+name: krew
+
+# On a published GitHub Release, cross-compile the kubectl-sandbox plugin for
+# the five krew-supported platforms, package each archive to match the URLs in
+# .krew.yaml, upload them as release assets, then run krew-release-bot to open
+# (or update) the PR against kubernetes-sigs/krew-index. Also runnable manually
+# via workflow_dispatch against an existing release tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build assets for (for example v0.4.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-assets:
+    # Build and attach the per-platform archives to the release. Needs
+    # contents: write to upload assets onto the GitHub Release.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: zip
+    env:
+      # The tag this run targets: the release tag on a release event, or the
+      # workflow_dispatch input on a manual run.
+      TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - name: Build and package
+        run: |
+          set -euo pipefail
+          os="${{ matrix.goos }}"
+          arch="${{ matrix.goarch }}"
+          ext="${{ matrix.ext }}"
+          bin="kubectl-sandbox"
+          if [ "$os" = "windows" ]; then
+            bin="kubectl-sandbox.exe"
+          fi
+          stage="$(mktemp -d)"
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            go build -ldflags "-s -w" -o "$stage/$bin" ./cmd/kubectl-sandbox/
+          cp LICENSE "$stage/LICENSE"
+          archive="kubectl-sandbox_${TAG}_${os}_${arch}.${ext}"
+          if [ "$ext" = "zip" ]; then
+            (cd "$stage" && zip -q -X "$OLDPWD/$archive" "$bin" LICENSE)
+          else
+            tar -C "$stage" -czf "$archive" "$bin" LICENSE
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Upload archive to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ARCHIVE" --clobber --repo "$GITHUB_REPOSITORY"
+
+  krew-release-bot:
+    # After the assets exist on the release, open/update the krew-index PR from
+    # .krew.yaml. The bot computes per-platform sha256 from the uploaded
+    # archives, so it must run after release-assets.
+    needs: release-assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Update the krew-index PR
+        uses: rajatjindal/krew-release-bot@v0.0.46
