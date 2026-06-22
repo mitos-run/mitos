@@ -5,7 +5,7 @@ name: Bench (bare metal)
 # ubuntu-latest (a noisy, oversubscribed, shared GitHub runner) purely to prove
 # the cmd/bench harness runs end to end; its absolute numbers are explicitly NOT
 # representative of bare metal. THIS workflow runs the SAME proven recipe on a
-# self-hosted, dedicated bare-metal KVM box (Hetzner, 8c/16t, 62GB) so issue #15
+# self-hosted, dedicated bare-metal KVM box (Hetzner, 4c/8t (i7-6700), 62GB) so issue #15
 # task 2 ("CI runs the harness on at least one bare-metal-class machine") has a
 # real reference. The template-snapshot build and the cmd/bench invocation are
 # kept identical to the kvm-test.yaml recipe so this works on first run.
@@ -220,9 +220,9 @@ jobs:
 
           {
             echo ""
-            echo "## Bench harness, bare-metal reference (self-hosted Hetzner, 8c/16t)"
+            echo "## Bench harness, bare-metal reference (self-hosted Hetzner, 4c/8t (i7-6700))"
             echo ""
-            echo "Runner: dedicated bare-metal Hetzner box (8c/16t, 62GB), labels \`self-hosted, bare-metal, kvm, bench\`. Firecracker \`${FC_VER}\`, guest kernel \`${KERNEL_VER}\`, busybox/agent rootfs. Reproducible per run; this is the bare-metal counterpart to the shared-CI phase in kvm-test.yaml (issue #15 task 2)."
+            echo "Runner: dedicated bare-metal Hetzner box (4c/8t (i7-6700), 62GB), labels \`self-hosted, bare-metal, kvm, bench\`. Firecracker \`${FC_VER}\`, guest kernel \`${KERNEL_VER}\`, busybox/agent rootfs. Reproducible per run; this is the bare-metal counterpart to the shared-CI phase in kvm-test.yaml (issue #15 task 2)."
           } >> "$GITHUB_STEP_SUMMARY"
 
           run_mode() {
