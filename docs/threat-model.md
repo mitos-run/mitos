@@ -5,6 +5,10 @@ to provide, and the current status of every boundary. It is written against the
 code in this repository, not the README. Statuses: **mitigated**, **partial**,
 **open**.
 
+For the operator-facing summary of how tenant secrets are delivered, isolated
+across tenants, and encrypted at rest (consolidated with `docs/encryption.md` and
+`docs/fork-correctness.md`), see `docs/secrets.md`.
+
 **Honest summary for the current codebase: do not run untrusted code with this
 project in production yet.** The KVM/Firecracker boundary is real, but several
 defense-in-depth layers around it are still open, and an extended security review
