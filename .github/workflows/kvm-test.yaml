@@ -21,6 +21,7 @@ on:
       - 'cmd/pull-smoke/**'
       - 'cmd/husk-stub/**'
       - 'cmd/mem-smoke/**'
+      - 'cmd/crash-reap-smoke/**'
       - 'internal/husk/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
@@ -970,6 +971,54 @@ jobs:
 
           echo "================================"
           echo "  Lifetime memory metering tracks fork growth after a workload"
+          echo "================================"
+
+      # forkd crash-reconcile proof (fork-correctness section 7, issues #3 and
+      # #12). A forkd that crashes loses its in-memory sandbox map; on restart it
+      # must RECONCILE the on-disk journal against reality: re-adopt a still-live
+      # pre-crash VM (so the GC can later kill it) or reap a dead VM's leaked
+      # artifacts. cmd/crash-reap-smoke proves both on a real Firecracker: it forks
+      # a sandbox with one engine, abandons that engine WITHOUT terminating
+      # (modelling the crash), then builds a SECOND engine on the same data dir
+      # whose startup reconcile must leave no orphan process and no leaked journal
+      # record or sandbox dir. adopt-reap re-adopts the live VM then Terminates it
+      # (the GC-driven kill of a re-adopted orphan); reap-dead kills the VM first
+      # so the reconcile reaps a dead orphan's artifacts. This phase GATES: a leak
+      # is exit 1; an engine/template/fork setup problem is exit 2.
+      - name: forkd crash reconcile, re-adopt or reap an orphaned VM after a simulated crash
+        timeout-minutes: 8
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          WORKDIR=/tmp/mitos-test/crash-build
+          mkdir -p $WORKDIR
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/crash-reap-smoke ./cmd/crash-reap-smoke/
+
+          for mode in adopt-reap reap-dead; do
+            echo "=== crash-reconcile mode: $mode ==="
+            sudo /tmp/crash-reap-smoke \
+              --image $WORKDIR/rootfs.ext4 \
+              --data-dir /tmp/mitos-test/crash-data-$mode \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/mitos-test/vmlinux \
+              --agent-bin /tmp/mitos-test/agent \
+              --mode $mode
+          done
+
+          echo "================================"
+          echo "  forkd crash reconcile reaps orphans with no leak"
           echo "================================"
 
       # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE
