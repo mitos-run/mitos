@@ -305,10 +305,6 @@ func (s *Service) Budget(ctx context.Context, req *connect.Request[sandboxv1.Bud
 // --- Honest #24 follow-ups: every RPC below rides the current HTTP/vsock
 // surface until its dedicated slice lands. ---
 
-func (s *Service) Archive(_ context.Context, _ *connect.Request[sandboxv1.ArchiveRequest], _ *connect.ServerStream[sandboxv1.Chunk]) error {
-	return followup("Archive")
-}
-
 func (s *Service) Fork(_ context.Context, _ *connect.Request[sandboxv1.ForkRequest]) (*connect.Response[sandboxv1.Operation], error) {
 	return nil, followup("Fork")
 }

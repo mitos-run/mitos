@@ -221,4 +221,15 @@ type GuestConn interface {
 	// Signal delivers POSIX signal number signal to the process with the given
 	// pid inside the sandbox.
 	Signal(ctx context.Context, pid int32, signal int32) error
+
+	// Archive tars the subtree at path and returns a stream of ArchiveChunk
+	// values. The stream is terminated by a chunk with Eof == true. The caller
+	// owns the stream and must call Close when done.
+	Archive(ctx context.Context, path string) (ArchiveStream, error)
+
+	// Upload reads raw tar bytes from chunks, extracts them at dest inside the
+	// sandbox, and returns the total bytes written. The channel is closed by the
+	// caller when all chunks have been sent; Upload must drain it fully before
+	// returning so the upstream goroutine can exit cleanly.
+	Upload(ctx context.Context, dest string, chunks <-chan []byte) (*UploadResult, error)
 }

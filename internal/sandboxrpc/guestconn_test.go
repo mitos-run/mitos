@@ -92,6 +92,17 @@ func (f *fakeGuest) Signal(_ context.Context, _ int32, _ int32) error {
 	return errors.New("Signal: unimplemented in fakeGuest")
 }
 
+func (f *fakeGuest) Archive(_ context.Context, _ string) (ArchiveStream, error) {
+	return nil, errors.New("Archive: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Upload(_ context.Context, _ string, chunks <-chan []byte) (*UploadResult, error) {
+	// Drain the channel so the caller's goroutine can exit cleanly.
+	for range chunks {
+	}
+	return nil, errors.New("Upload: unimplemented in fakeGuest")
+}
+
 // execResult collects the output of drainExec.
 type execResult struct {
 	stdout string
