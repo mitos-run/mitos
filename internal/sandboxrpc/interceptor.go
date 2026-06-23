@@ -19,6 +19,27 @@ import (
 // function may ignore this field entirely and return its single token.
 const sandboxIDHeader = "X-Sandbox-Id"
 
+// sandboxIDContextKey is the unexported context key type that carries the
+// authenticated sandbox id from the bearerInterceptor to the Service resolver.
+// Using an unexported type prevents collisions with keys from other packages.
+type sandboxIDContextKey struct{}
+
+// sandboxIDIntoContext returns a new context carrying sandboxID. It is called
+// by bearerInterceptor after a successful auth check so the Service resolver
+// can read the authenticated identity without re-reading the header.
+func sandboxIDIntoContext(ctx context.Context, sandboxID string) context.Context {
+	return context.WithValue(ctx, sandboxIDContextKey{}, sandboxID)
+}
+
+// SandboxIDFromContext returns the authenticated sandbox id that the
+// bearerInterceptor stashed in ctx, and true when it is present. It is used by
+// the sandbox resolver passed to WithSandboxResolver when mounting the Connect
+// handler on :9091.
+func SandboxIDFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(sandboxIDContextKey{}).(string)
+	return v, ok && v != ""
+}
+
 // bearerInterceptor enforces per-sandbox bearer tokens on every Connect RPC,
 // both unary and streaming. It is the Connect-transport mirror of the HTTP
 // requireBearer middleware in internal/daemon/sandbox_api.go and reproduces
@@ -47,10 +68,11 @@ func BearerInterceptor(lookup func(sandboxID string) (token string, ok bool)) co
 }
 
 // checkBearer validates the Authorization header in h against the registered
-// token for the sandbox identified by the X-Sandbox-Id header. It returns nil
-// on success and a CodeUnauthenticated error on any failure, never revealing
-// the token value or the registered token in the returned error.
-func (b *bearerInterceptor) checkBearer(h interface{ Get(string) string }) error {
+// token for the sandbox identified by the X-Sandbox-Id header. On success it
+// returns the authenticated sandbox id and nil. On failure it returns an empty
+// string and a CodeUnauthenticated error, never revealing the token value or the
+// registered token in the returned error.
+func (b *bearerInterceptor) checkBearer(h interface{ Get(string) string }) (string, error) {
 	sandboxID := h.Get(sandboxIDHeader)
 	token, ok := b.lookup(sandboxID)
 	if !ok || len(token) == 0 {
@@ -59,7 +81,7 @@ func (b *bearerInterceptor) checkBearer(h interface{ Get(string) string }) error
 		// an empty presented token ("Bearer " with nothing after it), so this
 		// public interceptor is self-enforcing even if a caller's lookup
 		// returns ("", true).
-		return connect.NewError(connect.CodeUnauthenticated,
+		return "", connect.NewError(connect.CodeUnauthenticated,
 			fmt.Errorf("unauthenticated: no token registered for sandbox; "+
 				"provide a valid bearer token in the Authorization header"))
 	}
@@ -68,29 +90,32 @@ func (b *bearerInterceptor) checkBearer(h interface{ Get(string) string }) error
 	presented, ok := strings.CutPrefix(auth, "Bearer ")
 	if !ok {
 		// Missing or malformed Authorization header.
-		return connect.NewError(connect.CodeUnauthenticated,
+		return "", connect.NewError(connect.CodeUnauthenticated,
 			fmt.Errorf("unauthenticated: bearer token required; "+
 				"set 'Authorization: Bearer <token>' on the request"))
 	}
 
 	if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
 		// Token mismatch. Do not echo the presented value or the expected token.
-		return connect.NewError(connect.CodeUnauthenticated,
+		return "", connect.NewError(connect.CodeUnauthenticated,
 			fmt.Errorf("unauthenticated: invalid token; "+
 				"verify the bearer token matches the one issued for this sandbox"))
 	}
-	return nil
+	return sandboxID, nil
 }
 
 // WrapUnary wraps a unary RPC handler with the bearer-token check. The check
 // runs against the request headers before the handler is called; on failure the
-// underlying handler is never invoked.
+// underlying handler is never invoked. On success the authenticated sandbox id
+// is injected into the context so the Service resolver can read it without
+// re-reading the header.
 func (b *bearerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if err := b.checkBearer(req.Header()); err != nil {
+		sandboxID, err := b.checkBearer(req.Header())
+		if err != nil {
 			return nil, err
 		}
-		return next(ctx, req)
+		return next(sandboxIDIntoContext(ctx, sandboxID), req)
 	}
 }
 
@@ -104,13 +129,15 @@ func (b *bearerInterceptor) WrapStreamingClient(next connect.StreamingClientFunc
 // The check runs against the connection's request headers before any messages
 // are received; on failure the handler is never invoked. This covers all
 // streaming shapes (client, server, bidi) because Connect delivers all request
-// headers at connection open, before any message body is read.
+// headers at connection open, before any message body is read. On success the
+// authenticated sandbox id is injected into the context.
 func (b *bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		if err := b.checkBearer(conn.RequestHeader()); err != nil {
+		sandboxID, err := b.checkBearer(conn.RequestHeader())
+		if err != nil {
 			return err
 		}
-		return next(ctx, conn)
+		return next(sandboxIDIntoContext(ctx, sandboxID), conn)
 	}
 }
 

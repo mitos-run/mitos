@@ -14,8 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/sandboxrpc"
 	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // SandboxAPI exposes HTTP endpoints for exec/files on sandboxes managed by this forkd.
@@ -447,31 +450,99 @@ func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {
 	return client, nil
 }
 
-// Handler returns an http.Handler for the sandbox exec/files API. Every
-// route is wrapped in the per-sandbox bearer-token middleware.
+// Handler returns an http.Handler for the sandbox exec/files API. The handler
+// combines three distinct auth surfaces on a single mux:
+//
+//  1. Legacy JSON /v1/* routes: wrapped in requireBearer (body-peeking HTTP
+//     middleware that reads the "sandbox" field from the JSON body).
+//  2. Connect Sandbox service (issue #24, Task 3.2): mounted on the outer mux
+//     WITHOUT the body-peeking wrapper, because Connect auth is handled at the
+//     interceptor level via the "Authorization: Bearer <token>" and
+//     "X-Sandbox-Id" HTTP headers. BearerInterceptor enforces the same
+//     per-sandbox token security as requireBearer.
+//  3. PTY WebSocket: similarly outside requireBearer (bodyless GET); auth is
+//     handled by ptyAuth (?sandbox= + Authorization: Bearer query/header).
+//
+// The legacy JSON routes stay active (deprecated-but-working) so existing SDK
+// callers are not broken.
 func (api *SandboxAPI) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/exec", api.handleExec)
-	mux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
-	mux.HandleFunc("POST /v1/run_code/stream", api.handleRunCodeStream)
-	mux.HandleFunc("POST /v1/files/read", api.handleReadFile)
-	mux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
-	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
-	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
-	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
-	mux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
-	mux.HandleFunc("POST /v1/pause", api.handlePause)
-	mux.HandleFunc("POST /v1/resume", api.handleResume)
-	mux.HandleFunc("POST /v1/vitals", api.handleVitals)
+	jsonMux := http.NewServeMux()
+	jsonMux.HandleFunc("POST /v1/exec", api.handleExec)
+	jsonMux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
+	jsonMux.HandleFunc("POST /v1/run_code/stream", api.handleRunCodeStream)
+	jsonMux.HandleFunc("POST /v1/files/read", api.handleReadFile)
+	jsonMux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
+	jsonMux.HandleFunc("POST /v1/files/list", api.handleListDir)
+	jsonMux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
+	jsonMux.HandleFunc("POST /v1/files/remove", api.handleRemove)
+	jsonMux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
+	jsonMux.HandleFunc("POST /v1/pause", api.handlePause)
+	jsonMux.HandleFunc("POST /v1/resume", api.handleResume)
+	jsonMux.HandleFunc("POST /v1/vitals", api.handleVitals)
 
-	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
-	// body-peeking requireBearer middleware; it authenticates itself in
-	// handlePty (ptyAuth: ?sandbox= + Authorization: Bearer). It is mounted on
-	// a separate outer mux that is NOT wrapped.
+	// Connect Sandbox service (issue #24, Task 3.2). The BearerInterceptor
+	// enforces the same per-sandbox bearer-token security as requireBearer, but
+	// operates on HTTP headers (not the JSON body), so the Connect handler is
+	// mounted on the outer mux OUTSIDE the body-peeking requireBearer wrapper.
+	// When allowTokenless is true (standalone sandbox-server only),
+	// AllowTokenlessInterceptor is used. The interceptor injects the authenticated
+	// sandbox id into the request context; the resolver reads it back.
+	var authIC connect.Interceptor
+	if api.allowTokenless {
+		authIC = sandboxrpc.AllowTokenlessInterceptor()
+	} else {
+		authIC = sandboxrpc.BearerInterceptor(api.connectLookupToken)
+	}
+	svc := sandboxrpc.NewService(
+		// ExecBackend is unused when Guest is set; pass a nil-safe adapter.
+		(*connectExecAdapter)(api),
+		nil,
+		sandboxrpc.WithSandboxResolver(func(ctx context.Context) (string, error) {
+			id, ok := sandboxrpc.SandboxIDFromContext(ctx)
+			if !ok {
+				// allowTokenless path or AllowTokenlessInterceptor: the interceptor
+				// did not inject an id. Fall back to empty (single-sandbox mode).
+				return "", nil
+			}
+			return api.resolveSandboxID(id), nil
+		}),
+	)
+	// Wire the GuestConn factory: returns a daemonGuestConn for the given
+	// sandbox id so Exec delegates through RunExecStream -> vsock -> guest.
+	svc.Guest = func(sandboxID string) (sandboxrpc.GuestConn, error) {
+		return newDaemonGuestConn(api, sandboxID), nil
+	}
+	connectPath, connectHandler := sandboxv1connect.NewSandboxHandler(svc, connect.WithInterceptors(authIC))
+
+	// outer combines all three auth surfaces. The order of Handle calls matters:
+	// more specific prefixes (Connect, PTY) take precedence over the catch-all "/".
 	outer := http.NewServeMux()
 	outer.HandleFunc("GET /v1/pty", api.handlePty)
-	outer.Handle("/", api.requireBearer(mux))
+	outer.Handle(connectPath, connectHandler)
+	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
+}
+
+// connectLookupToken is the token lookup function passed to BearerInterceptor
+// for the Connect Sandbox handler. It reads the registered token for sandboxID
+// from the same token map as the JSON /v1/* routes. Token values are never
+// logged or placed in error messages.
+func (api *SandboxAPI) connectLookupToken(sandboxID string) (string, bool) {
+	api.mu.RLock()
+	token, ok := api.tokens[sandboxID]
+	api.mu.RUnlock()
+	return token, ok
+}
+
+// connectExecAdapter wraps *SandboxAPI to satisfy sandboxrpc.ExecBackend. It
+// is passed to NewService but is ONLY called on the legacy ExecBackend path
+// (when svc.Guest is nil). Since svc.Guest is always set in Handler(), this
+// adapter is never invoked in production; it exists only to satisfy the
+// NewService signature.
+type connectExecAdapter SandboxAPI
+
+func (a *connectExecAdapter) RunExecStream(ctx context.Context, sandboxID string, p sandboxrpc.ExecParams, onChunk func(stream string, data []byte) error) (int, float64, error) {
+	return (*SandboxAPI)(a).RunExecStream(ctx, sandboxID, p.Command, p.WorkingDir, p.Env, p.TimeoutSeconds, onChunk)
 }
 
 // maxAuthBodyBytes bounds how much request body the auth middleware buffers.
