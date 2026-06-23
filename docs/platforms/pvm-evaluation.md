@@ -196,6 +196,47 @@ green fork-correctness run under PVM, on top of the unchanged kernel-maintenance
 and lower-assurance-tier costs. The run-anywhere story is materially more
 plausible than before this spike; it is not free.
 
+## Performance: the shadow-paging tax (measured 2026-06-23)
+
+PVM uses shadow paging, so the open question was whether the penalty on
+pagetable-heavy work is tolerable for the mitos workload (forking sandboxes,
+agents running pip installs). Measured by running one static microbenchmark
+(`bench/pvm/pagetable-bench.c`) both natively on the host and inside a PVM guest
+(1 vCPU). Native is a fair proxy for the hardware-KVM-guest ceiling: with NPT,
+faults and fork run close to native, so native-vs-PVM approximates
+PVM-vs-hardware-KVM.
+
+| workload | host native | PVM guest | ratio |
+|---|---|---|---|
+| cpu (no pagetable activity) | 0.412 s | 0.422 s | 1.02x (native) |
+| page-fault storm (524k minor faults) | 0.882 s | 7.99 s | 9.1x |
+| fork storm (20k fork + wait) | 1.54 s | 14.35 s | 9.3x |
+
+The shape is unambiguous: ring-3 CPU work runs at native speed (PVM has no tax
+when the guest is not touching page tables), but pagetable-heavy work pays about
+9x because every minor fault and every fork is a VM exit to rebuild shadow page
+tables. That 9x lands squarely on the mitos workload.
+
+Snapshot-restore latency itself is fine: restoring the 256 MiB heartbeat snapshot
+and resuming was a median of 18.6 ms over 25 iterations (min 9.0, p90 23.3, max
+24.5). But restore returns fast because guest RAM is lazily copy-on-write mapped;
+the shadow-paging tax is deferred to AFTER restore, when the freshly forked
+sandbox touches its working set and forks processes. So the fork CLAIM is cheap;
+sustained execution in the forked guest is what pays the 9x.
+
+Caveats (directional, not a published benchmark, per principle 1): one shared
+2-vCPU cloud box, one run per workload (25 for restore), native is a proxy for
+the hardware-KVM ceiling not a measured KVM guest. The order of magnitude, not
+the third digit, is the result.
+
+Decision impact: a ~9x penalty on fork and page faults is severe for an
+interactive sandbox tier. It does not kill the run-anywhere idea, but it bounds
+it hard: PVM suits burst capacity for workloads that are CPU-bound or
+fault-light, and is a poor fit for fork-heavy or allocation-heavy sandboxes
+unless the penalty is reduced (a future PVM with hardware-assisted paging, or
+mainlining, would change this number). Measure again on the target workload
+before committing.
+
 ## Upstream mainlining: revisit when merged
 
 PVM is an RFC and is NOT mainlined as of this evaluation. The out-of-tree-kernel
