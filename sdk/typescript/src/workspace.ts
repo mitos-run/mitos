@@ -7,7 +7,7 @@ import { AgentRunError } from "./errors.js";
 import type { CustomObject, K8sApi } from "./k8s.js";
 
 const API_GROUP = "mitos.run";
-const API_VERSION = "v1alpha1";
+const API_VERSION = "v1";
 
 export interface RevisionInfo {
   name: string;

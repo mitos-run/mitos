@@ -8,7 +8,7 @@
 // the k8s client into its bundle.
 
 const API_GROUP = "mitos.run";
-const API_VERSION = "v1alpha1";
+const API_VERSION = "v1";
 
 /** A Kubernetes custom object as a plain JSON shape. */
 export interface CustomObject {
@@ -26,7 +26,7 @@ export interface CustomObjectList {
 
 /**
  * The minimal Kubernetes surface the cluster client needs. Operates on
- * SandboxClaim custom objects (plural "sandboxclaims") and core Secrets.
+ * Sandbox custom objects (plural "sandboxes", mitos.run/v1) and core Secrets.
  * Implemented for real by KubeConfigApi and by a fake in tests.
  */
 export interface K8sApi {
@@ -40,22 +40,15 @@ export interface K8sApi {
    * failure.
    */
   getPool(namespace: string, name: string): Promise<CustomObject>;
-  /** Creates a SandboxPool. */
+  /** Creates a SandboxPool with inline spec.template (mitos.run/v1). */
   createPool(namespace: string, pool: CustomObject): Promise<void>;
-  /** Creates a SandboxTemplate (the pool's templateRef target). */
-  createTemplate(namespace: string, template: CustomObject): Promise<void>;
-  /**
-   * Gets a SandboxTemplate. Used by the default-pool reuse path to confirm a
-   * reused pool runs the requested image (guarding against a slug collision).
-   */
-  getTemplate(namespace: string, name: string): Promise<CustomObject>;
   /**
    * Reads a Secret and returns its data as decoded UTF-8 strings keyed by the
    * Secret key. Values are held in memory only and must never be logged.
    */
   readSecret(namespace: string, name: string): Promise<Record<string, string>>;
 
-  // --- Workspace verbs (mitos.run/v1alpha1 Workspace and WorkspaceRevision) ---
+  // --- Workspace verbs (mitos.run/v1 Workspace and WorkspaceRevision) ---
 
   /** Creates a Workspace custom object. */
   createWorkspace(namespace: string, workspace: CustomObject): Promise<CustomObject>;
@@ -71,7 +64,7 @@ export interface K8sApi {
   getRevision(namespace: string, name: string): Promise<CustomObject>;
   /** Creates a WorkspaceRevision custom object (the fork/revert tip). */
   createRevision(namespace: string, revision: CustomObject): Promise<CustomObject>;
-  /** Merge-patches a SandboxClaim's spec (used by bind and terminate outputs). */
+  /** Merge-patches a Sandbox's spec (used by bind and terminate outputs). */
   patchClaim(namespace: string, name: string, patch: Record<string, unknown>): Promise<void>;
 }
 
@@ -110,7 +103,7 @@ export class KubeConfigApi implements K8sApi {
       group: API_GROUP,
       version: API_VERSION,
       namespace,
-      plural: "sandboxclaims",
+      plural: "sandboxes",
       body: claim,
     });
     return res as CustomObject;
@@ -122,7 +115,7 @@ export class KubeConfigApi implements K8sApi {
       group: API_GROUP,
       version: API_VERSION,
       namespace,
-      plural: "sandboxclaims",
+      plural: "sandboxes",
       name,
     });
     return res as CustomObject;
@@ -134,7 +127,7 @@ export class KubeConfigApi implements K8sApi {
       group: API_GROUP,
       version: API_VERSION,
       namespace,
-      plural: "sandboxclaims",
+      plural: "sandboxes",
       name,
     });
   }
@@ -145,7 +138,7 @@ export class KubeConfigApi implements K8sApi {
       group: API_GROUP,
       version: API_VERSION,
       namespace,
-      plural: "sandboxclaims",
+      plural: "sandboxes",
     });
     return res as CustomObjectList;
   }
@@ -171,29 +164,6 @@ export class KubeConfigApi implements K8sApi {
       plural: "sandboxpools",
       body: pool,
     });
-  }
-
-  async createTemplate(namespace: string, template: CustomObject): Promise<void> {
-    await this.ready;
-    await this.customApi.createNamespacedCustomObject({
-      group: API_GROUP,
-      version: API_VERSION,
-      namespace,
-      plural: "sandboxtemplates",
-      body: template,
-    });
-  }
-
-  async getTemplate(namespace: string, name: string): Promise<CustomObject> {
-    await this.ready;
-    const res = await this.customApi.getNamespacedCustomObject({
-      group: API_GROUP,
-      version: API_VERSION,
-      namespace,
-      plural: "sandboxtemplates",
-      name,
-    });
-    return res as CustomObject;
   }
 
   async readSecret(
@@ -303,12 +273,12 @@ export class KubeConfigApi implements K8sApi {
         group: API_GROUP,
         version: API_VERSION,
         namespace,
-        plural: "sandboxclaims",
+        plural: "sandboxes",
         name,
         body: patch,
       },
-      // A merge patch so spec.outputs/checkpointOnTerminate/workspaceRef are set
-      // without clobbering the rest of the claim spec.
+      // A merge patch so spec.lifetime.onTerminate.outputs/workspaceRef are set
+      // without clobbering the rest of the sandbox spec.
       undefined,
       undefined,
       undefined,

@@ -5,8 +5,8 @@ import { AgentRunError } from "../src/errors.js";
 import type { CustomObject, CustomObjectList, K8sApi } from "../src/k8s.js";
 
 // FakeK8s is a scriptable K8sApi so the cluster logic is tested without a live
-// cluster. getClaim returns a queued sequence of statuses; readSecret returns a
-// configured map; createClaim/deleteClaim record their inputs.
+// cluster. getSandbox returns a queued sequence of statuses; readSecret returns a
+// configured map; createSandbox/deleteSandbox record their inputs.
 // notFound builds an error carrying a 404 statusCode, matching how the real
 // KubeConfigApi surfaces a missing object so the client can tell absent from a
 // real failure.
@@ -20,7 +20,6 @@ class FakeK8s implements K8sApi {
   createdClaims: CustomObject[] = [];
   deletedClaims: string[] = [];
   createdPools: CustomObject[] = [];
-  createdTemplates: CustomObject[] = [];
   getPoolCalls = 0;
   getCalls = 0;
 
@@ -31,21 +30,26 @@ class FakeK8s implements K8sApi {
       secretThrows?: boolean;
       listItems?: CustomObject[];
       poolExists?: boolean;
-      // Image stored on the existing default pool's SandboxTemplate. When set
-      // (with poolExists), getPool returns a pool whose templateRef resolves to
-      // a SandboxTemplate carrying this image, so the reuse path can verify it.
+      // Image stored inline in the existing default pool's spec.template. When
+      // set (with poolExists), getPool returns a pool with spec.template.image
+      // so the reuse path can verify it.
       existingPoolImage?: string;
-      // When set, getTemplate rejects with this status code (template missing).
-      templateThrowsStatus?: number;
+      // When set, getPool rejects with this status code instead of returning a pool.
+      poolThrowsStatus?: number;
     },
   ) {}
 
   async getPool(_ns: string, name: string): Promise<CustomObject> {
     this.getPoolCalls += 1;
+    if (this.opts.poolThrowsStatus !== undefined) {
+      const e = new Error("pool error") as Error & { statusCode: number };
+      e.statusCode = this.opts.poolThrowsStatus;
+      throw e;
+    }
     if (this.opts.poolExists) {
       return {
         metadata: { name },
-        spec: { templateRef: { name } },
+        spec: { template: { image: this.opts.existingPoolImage }, replicas: 1 },
       };
     }
     throw notFound();
@@ -53,19 +57,6 @@ class FakeK8s implements K8sApi {
 
   async createPool(_ns: string, pool: CustomObject): Promise<void> {
     this.createdPools.push(pool);
-  }
-
-  async createTemplate(_ns: string, template: CustomObject): Promise<void> {
-    this.createdTemplates.push(template);
-  }
-
-  async getTemplate(_ns: string, name: string): Promise<CustomObject> {
-    if (this.opts.templateThrowsStatus !== undefined) {
-      const e = new Error("template not found") as Error & { statusCode: number };
-      e.statusCode = this.opts.templateThrowsStatus;
-      throw e;
-    }
-    return { metadata: { name }, spec: { image: this.opts.existingPoolImage } };
   }
 
   async createClaim(_ns: string, claim: CustomObject): Promise<CustomObject> {
@@ -94,6 +85,34 @@ class FakeK8s implements K8sApi {
     }
     return this.opts.secret ?? {};
   }
+
+  async createWorkspace(_ns: string, workspace: CustomObject): Promise<CustomObject> {
+    return workspace;
+  }
+
+  async getWorkspace(_ns: string, name: string): Promise<CustomObject> {
+    return { metadata: { name } };
+  }
+
+  async listWorkspaces(_ns: string): Promise<CustomObjectList> {
+    return { items: [] };
+  }
+
+  async deleteWorkspace(_ns: string, _name: string): Promise<void> {}
+
+  async listRevisions(_ns: string): Promise<CustomObjectList> {
+    return { items: [] };
+  }
+
+  async getRevision(_ns: string, name: string): Promise<CustomObject> {
+    return { metadata: { name } };
+  }
+
+  async createRevision(_ns: string, revision: CustomObject): Promise<CustomObject> {
+    return revision;
+  }
+
+  async patchClaim(_ns: string, _name: string, _patch: Record<string, unknown>): Promise<void> {}
 }
 
 const noSleep = async () => {};
@@ -126,7 +145,7 @@ describe("AgentRun construction", () => {
 });
 
 describe("AgentRun.create", () => {
-  it("builds the right claim spec, polls to Ready, reads the token, and binds the Sandbox", async () => {
+  it("builds the right sandbox spec, polls to Ready, reads the token, and binds the Sandbox", async () => {
     const fake = new FakeK8s({
       getResponses: [
         { phase: "Pending" },
@@ -143,16 +162,16 @@ describe("AgentRun.create", () => {
       timeout: "30m",
     });
 
-    // Claim spec is correct.
+    // Sandbox spec is correct.
     expect(fake.createdClaims).toHaveLength(1);
     const claim = fake.createdClaims[0];
-    expect(claim.apiVersion).toBe("mitos.run/v1alpha1");
-    expect(claim.kind).toBe("SandboxClaim");
+    expect(claim.apiVersion).toBe("mitos.run/v1");
+    expect(claim.kind).toBe("Sandbox");
     expect(claim.metadata).toEqual({ name: "sbx-1", namespace: "team-a" });
     expect(claim.spec).toEqual({
-      poolRef: { name: "python-pool" },
+      source: { poolRef: { name: "python-pool" } },
       env: [{ name: "FOO", value: "bar" }],
-      timeout: "30m",
+      lifetime: { ttl: "30m" },
     });
 
     // Polled until Ready.
@@ -163,7 +182,7 @@ describe("AgentRun.create", () => {
     expect(sandbox.endpoint).toBe("http://10.0.0.5:9091");
   });
 
-  it("times out with a clear error when the claim never becomes Ready", async () => {
+  it("times out with a clear error when the sandbox never becomes Ready", async () => {
     const fake = new FakeK8s({ getResponses: [{ phase: "Pending" }] });
     const run = new AgentRun({ k8s: fake, pollTimeoutMs: 5, sleep: noSleep });
 
@@ -180,7 +199,7 @@ describe("AgentRun.create", () => {
 
   it("never surfaces the token in a thrown error", async () => {
     const token = "ultra-secret-bearer";
-    // Claim goes Ready, secret is read, but a later exec fails with the token
+    // Sandbox goes Ready, secret is read, but a later exec fails with the token
     // echoed back. The token must not appear in the thrown error.
     const fake = new FakeK8s({
       getResponses: [{ phase: "Ready", endpoint: "127.0.0.1:1/will-refuse" }],
@@ -211,13 +230,13 @@ describe("AgentRun.create", () => {
     expect(sandbox.endpoint).toBe("http://10.0.0.9:9091");
   });
 
-  it("fails fast when the claim reaches Failed", async () => {
+  it("fails fast when the sandbox reaches Failed", async () => {
     const fake = new FakeK8s({ getResponses: [{ phase: "Failed" }] });
     const run = new AgentRun({ k8s: fake, sleep: noSleep });
     await expect(run.create("p")).rejects.toMatchObject({ code: "sandbox_failed" });
   });
 
-  it("terminate deletes the claim", async () => {
+  it("terminate deletes the sandbox", async () => {
     const fake = new FakeK8s({
       getResponses: [{ phase: "Ready", endpoint: "10.0.0.9:9091" }],
       secret: { token: "t" },
@@ -230,22 +249,22 @@ describe("AgentRun.create", () => {
 });
 
 describe("AgentRun.list", () => {
-  it("maps claims to SandboxInfo and filters by pool", async () => {
+  it("maps sandboxes to SandboxInfo and filters by pool", async () => {
     const items: CustomObject[] = [
       {
         metadata: { name: "a" },
-        spec: { poolRef: { name: "p1" } },
+        spec: { source: { poolRef: { name: "p1" } } },
         status: {
           phase: "Ready",
           endpoint: "10.0.0.1:9091",
           node: "n1",
           sandboxID: "sbx-a",
-          forkTimeMicros: 2500,
+          startupLatencyMs: 2.5,
         },
       },
       {
         metadata: { name: "b" },
-        spec: { poolRef: { name: "p2" } },
+        spec: { source: { poolRef: { name: "p2" } } },
         status: { phase: "Pending" },
       },
     ];
@@ -274,20 +293,20 @@ describe("AgentRun.list", () => {
 describe("AgentRun.sandbox(image) lazy default pool", () => {
   const ready = [{ phase: "Ready", endpoint: "10.0.0.5:9091", sandboxID: "sbx" }];
 
-  it("creates mitos-default-<image> when the pool is absent, then claims from it", async () => {
+  it("creates mitos-default-<image> with inline spec.template when the pool is absent, then claims from it", async () => {
     const fake = new FakeK8s({ getResponses: ready, poolExists: false });
     const c = new AgentRun({ k8s: fake, sleep: noSleep });
     const sb = await c.sandbox("python");
-    expect(fake.createdTemplates).toHaveLength(1);
-    expect(fake.createdTemplates[0].metadata?.name).toBe("mitos-default-python");
-    expect(fake.createdTemplates[0].spec).toEqual({ image: "python" });
+    // v1: one SandboxPool with inline spec.template; no separate SandboxTemplate.
     expect(fake.createdPools).toHaveLength(1);
     expect(fake.createdPools[0].metadata?.name).toBe("mitos-default-python");
     expect(fake.createdPools[0].spec).toEqual({
-      templateRef: { name: "mitos-default-python" },
+      template: { image: "python" },
       replicas: 1,
     });
-    expect(fake.createdClaims[0].spec).toEqual({ poolRef: { name: "mitos-default-python" } });
+    expect(fake.createdClaims[0].spec).toEqual({
+      source: { poolRef: { name: "mitos-default-python" } },
+    });
     expect(sb.id).toMatch(/^sandbox-/);
   });
 
@@ -300,7 +319,6 @@ describe("AgentRun.sandbox(image) lazy default pool", () => {
     const c = new AgentRun({ k8s: fake, sleep: noSleep });
     await c.sandbox("python");
     expect(fake.createdPools).toHaveLength(0);
-    expect(fake.createdTemplates).toHaveLength(0);
   });
 
   it("raises pool_image_mismatch when a colliding slug reuses a pool for a different image", async () => {
@@ -319,11 +337,11 @@ describe("AgentRun.sandbox(image) lazy default pool", () => {
     expect(fake.createdClaims).toHaveLength(0); // no sandbox was created
   });
 
-  it("fails closed when the reused pool's template cannot be read", async () => {
+  it("fails closed when the reused pool has no readable inline image", async () => {
     const fake = new FakeK8s({
       getResponses: ready,
       poolExists: true,
-      templateThrowsStatus: 404,
+      // existingPoolImage is undefined: pool returns spec.template.image = undefined
     });
     const c = new AgentRun({ k8s: fake, sleep: noSleep });
     await expect(c.sandbox("python")).rejects.toMatchObject({
@@ -337,7 +355,9 @@ describe("AgentRun.sandbox(image) lazy default pool", () => {
     await c.sandbox("python", { pool: "my-pool" });
     expect(fake.getPoolCalls).toBe(0);
     expect(fake.createdPools).toHaveLength(0);
-    expect(fake.createdClaims[0].spec).toEqual({ poolRef: { name: "my-pool" } });
+    expect(fake.createdClaims[0].spec).toEqual({
+      source: { poolRef: { name: "my-pool" } },
+    });
   });
 
   it("fromName reconnects a Ready sandbox", async () => {
