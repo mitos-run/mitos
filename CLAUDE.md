@@ -76,6 +76,7 @@ Secret VALUES are never logged, never in error messages, never in condition mess
 
 - Conventional commits: feat, fix, docs, ci, chore, refactor, test.
 - Branch naming: feat/, fix/, chore/, docs/, ci/, refactor/.
+- DCO: every commit MUST carry a `Signed-off-by: Name <email>` trailer (use `git commit -s`). The `dco-check` CI job fails the PR if any non-merge commit lacks one, so add it as you commit rather than rewriting history later.
 
 ### TDD
 
