@@ -1,14 +1,13 @@
-package v1alpha2
+package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
-// Sandbox is the v1alpha2 consolidated run-axis kind: one running sandbox. It
-// folds the v1alpha1 SandboxClaim and SandboxFork into one kind (ADR 0007). Its
+// Sandbox is the v1 consolidated run-axis kind: one running sandbox. It
+// folds the former SandboxClaim and SandboxFork into one kind (ADR 0007). Its
 // source is a required oneof selecting the origin (a pool snapshot, a live
 // sandbox to fork, or a workspace revision to resume); replicas carries the
 // fork fan-out. A Sandbox with source.poolRef and replicas 1 is the old claim;
@@ -274,8 +273,7 @@ type SandboxStatus struct {
 	// +optional
 	Phase v1alpha1.SandboxPhase `json:"phase,omitempty"`
 
-	// Endpoint is the sandbox API address (host:port). Unchanged from v1alpha1.
-	// +optional
+	// Endpoint is the sandbox API address (host:port). Unchanged from 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// Pod is the husk pod name backing the sandbox (for example
@@ -284,8 +282,7 @@ type SandboxStatus struct {
 	// +optional
 	Pod string `json:"pod,omitempty"`
 
-	// SandboxID is the engine-side sandbox identifier. Unchanged from v1alpha1.
-	// +optional
+	// SandboxID is the engine-side sandbox identifier. Unchanged from 	// +optional
 	SandboxID string `json:"sandboxID,omitempty"`
 
 	// StartupLatencyMs is the fork/activation latency in milliseconds. Renamed
@@ -293,13 +290,11 @@ type SandboxStatus struct {
 	// +optional
 	StartupLatencyMs int64 `json:"startupLatencyMs,omitempty"`
 
-	// StartedAt is when the sandbox became Ready. Unchanged from v1alpha1.
-	// +optional
+	// StartedAt is when the sandbox became Ready. Unchanged from 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
 	// FinishedAt is when the sandbox reached a terminal phase, driving the GC TTL
-	// pass. Unchanged from v1alpha1.
-	// +optional
+	// pass. Unchanged from 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
 
 	// Revision is the WorkspaceRevision produced on terminate. NEW v2 field.
@@ -346,8 +341,7 @@ type SandboxStatus struct {
 	CheckpointTime *metav1.Time `json:"checkpointTime,omitempty"`
 
 	// Conditions are the typed conditions with observedGeneration. Unchanged from
-	// v1alpha1.
-	// +optional
+	// 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

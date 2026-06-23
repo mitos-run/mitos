@@ -1,4 +1,4 @@
-package v1alpha2
+package v1
 
 // Never-widen budget primitives for capability attenuation (issue #25). These
 // mirror the internal/captoken Budget semantics (Remaining, Intersect) on the

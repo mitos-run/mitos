@@ -1,4 +1,4 @@
-package v1alpha2
+package v1
 
 // Unit tests for the never-widen budget primitives (issue #25): SandboxBudget
 // Remaining and Intersect. These are the load-bearing capability-attenuation

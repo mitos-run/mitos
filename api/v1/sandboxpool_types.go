@@ -1,26 +1,17 @@
-package v1alpha2
+package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
-// SandboxPool is the v1alpha2 (consolidated) pool kind. It inlines the former
+// SandboxPool is the v1 consolidated pool kind. It inlines the former
 // SandboxTemplate into spec.template (ADR 0007); spec.templateRef survives as
 // the optional reuse alternative (the Deployment-embeds-PodSpec pattern). A pool
 // sets EXACTLY ONE of spec.template or spec.templateRef.
 //
-// v1alpha2 SandboxPool is DEFINED BUT NOT SERVED in the deployed CRD: the Go
-// types and the conversion code stay for the staged migration, but the deployed
-// sandboxpools.mitos.run CRD serves only v1alpha1 (the storage version) until
-// the conversion webhook ships by default. Serving v1alpha2 with conversion
-// strategy None would let the API server prune v1alpha1-only fields against the
-// v1alpha2 schema. The +kubebuilder:unservedversion marker keeps this version
-// out of the served set.
-//
 // +kubebuilder:object:root=true
-// +kubebuilder:unservedversion
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.warm.min,statuspath=.status.readySnapshots
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readySnapshots`
@@ -72,22 +63,19 @@ type SandboxPoolSpec struct {
 	// DrainPolicy governs an active sandbox when its backing husk pod is lost
 	// (drain, eviction, deletion). Kill (the default) re-pends the sandbox onto a
 	// replacement dormant slot; Checkpoint attempts a live-VM snapshot first where
-	// the VMM still runs, then re-pends. Carried unchanged from v1alpha1.
-	// +kubebuilder:validation:Enum=Kill;Checkpoint
+	// the VMM still runs, then re-pends. Carried unchanged from 	// +kubebuilder:validation:Enum=Kill;Checkpoint
 	// +kubebuilder:default=Kill
 	// +optional
 	DrainPolicy v1alpha1.HuskDrainPolicy `json:"drainPolicy,omitempty"`
 
 	// Placement pins this pool's husk pods (and the sandbox VMs they run) to a
 	// dedicated set of nodes for hard tenant separation (issue #172). Carried
-	// unchanged from v1alpha1.
-	// +optional
+	// unchanged from 	// +optional
 	Placement *v1alpha1.PoolPlacement `json:"placement,omitempty"`
 
 	// CPUPinning configures dynamic post-ready CPU pinning and a launch-time
 	// scheduling-priority bump for this pool's sandbox VMs (issue #168). Carried
-	// unchanged from v1alpha1.
-	// +optional
+	// unchanged from 	// +optional
 	CPUPinning *v1alpha1.CPUPinningSpec `json:"cpuPinning,omitempty"`
 }
 
@@ -104,8 +92,7 @@ type PoolTemplateSpec struct {
 	Init []string `json:"init,omitempty"`
 
 	// BuildSteps is the ordered, declarative build recipe (issue #220), the
-	// code-first alternative to Init. Carried unchanged from v1alpha1.
-	// +optional
+	// code-first alternative to Init. Carried unchanged from 	// +optional
 	BuildSteps []v1alpha1.BuildStep `json:"buildSteps,omitempty"`
 
 	// Command overrides the container entrypoint inside the sandbox.
@@ -131,21 +118,18 @@ type PoolTemplateSpec struct {
 	Network *v1alpha1.NetworkPolicy `json:"network,omitempty"`
 
 	// Encrypted requests at-rest encryption of the template snapshot and every
-	// fork built from it. Carried unchanged from v1alpha1.
-	// +kubebuilder:default=false
+	// fork built from it. Carried unchanged from 	// +kubebuilder:default=false
 	// +optional
 	Encrypted bool `json:"encrypted,omitempty"`
 
 	// MinIsolationTier requires the sandbox to be scheduled only onto a node
 	// whose isolation assurance meets this floor (issue #40). Carried unchanged
-	// from v1alpha1.
-	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
+	// from 	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
 	// +optional
 	MinIsolationTier string `json:"minIsolationTier,omitempty"`
 
 	// RequireHardwareKvm is a convenience equivalent to
-	// minIsolationTier=hardware-kvm (issue #40). Carried unchanged from v1alpha1.
-	// +kubebuilder:default=false
+	// minIsolationTier=hardware-kvm (issue #40). Carried unchanged from 	// +kubebuilder:default=false
 	// +optional
 	RequireHardwareKvm bool `json:"requireHardwareKvm,omitempty"`
 

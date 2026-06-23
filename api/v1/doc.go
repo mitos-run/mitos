@@ -1,3 +1,4 @@
 // +kubebuilder:object:generate=true
 // +groupName=mitos.run
-package v1alpha2
+// +versionName=v1
+package v1
