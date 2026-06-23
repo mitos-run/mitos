@@ -1,0 +1,169 @@
+name: Release operator bundle
+
+# Build and publish the OLM operator bundle for a release, and (optionally) open
+# the version PR to k8s-operatorhub/community-operators. The committed bundle
+# under deploy/olm/bundle is the 0.4.0 base; this workflow rewrites it to the
+# release version in a throwaway workspace, validates it, pushes the bundle
+# image, and prepares the community-operators contribution.
+#
+# Prerequisites and notes:
+#   * Images must already be published to ghcr.io/mitos-run for the version.
+#   * The first community-operators listing is still a manual PR; this automates
+#     subsequent versions once a fork and token exist.
+#   * To open the PR automatically, set the COMMUNITY_OPERATORS_TOKEN secret to a
+#     PAT (repo scope) whose account has a fork of k8s-operatorhub/community-
+#     operators. Without it, the versioned bundle is uploaded as an artifact.
+#   * Pass `previous` so the bundle gets a spec.replaces upgrade edge.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Bundle version without leading v, for example 0.4.1"
+        required: true
+      previous:
+        description: "Previous bundle version for spec.replaces, for example 0.4.0"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      BUNDLE_IMAGE: ghcr.io/mitos-run/mitos-operator-bundle
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Derive version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ inputs.version }}"
+          fi
+          [ -n "$v" ] || { echo "no version resolved"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "previous=${{ inputs.previous }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install yq and operator-sdk
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          sudo curl -fsSL -o /usr/local/bin/operator-sdk \
+            https://github.com/operator-framework/operator-sdk/releases/latest/download/operator-sdk_linux_amd64
+          sudo chmod +x /usr/local/bin/operator-sdk
+
+      - name: Rewrite the bundle to the release version
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PREVIOUS: ${{ steps.ver.outputs.previous }}
+        run: |
+          set -euo pipefail
+          csv=deploy/olm/bundle/manifests/mitos.clusterserviceversion.yaml
+          BASE="$(yq '.spec.version' "$csv")"
+          export BASE
+          echo "rewriting bundle ${BASE} -> ${VERSION}"
+          yq -i '.metadata.name = "mitos.v" + strenv(VERSION)' "$csv"
+          yq -i '.spec.version = strenv(VERSION)' "$csv"
+          yq -i '.metadata.annotations.createdAt = (now | format_datetime("2006-01-02T15:04:05Z"))' "$csv"
+          # rewrite the controller image tag, the containerImage annotation, and
+          # the husk-stub image arg from :v$BASE to :v$VERSION.
+          yq -i '.metadata.annotations.containerImage |= sub(":v" + strenv(BASE), ":v" + strenv(VERSION))' "$csv"
+          yq -i '(.spec.install.spec.deployments[].spec.template.spec.containers[].image) |= sub(":v" + strenv(BASE), ":v" + strenv(VERSION))' "$csv"
+          yq -i '(.spec.install.spec.deployments[].spec.template.spec.containers[].args[]) |= sub(":v" + strenv(BASE), ":v" + strenv(VERSION))' "$csv"
+          if [ -n "${PREVIOUS}" ]; then
+            yq -i '.spec.replaces = "mitos.v" + strenv(PREVIOUS)' "$csv"
+          fi
+
+      - name: Validate the bundle
+        run: |
+          set -euo pipefail
+          operator-sdk bundle validate ./deploy/olm/bundle
+          operator-sdk bundle validate ./deploy/olm/bundle --select-optional suite=operatorframework
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_WRITE_USER || github.actor }}
+          password: ${{ secrets.GHCR_WRITE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the bundle image
+        id: push
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build -f deploy/olm/bundle/bundle.Dockerfile -t "${BUNDLE_IMAGE}:${VERSION}" deploy/olm/bundle
+          docker push "${BUNDLE_IMAGE}:${VERSION}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${BUNDLE_IMAGE}:${VERSION}" | cut -d@ -f2)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign keyless sign the bundle image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${BUNDLE_IMAGE}@${DIGEST}"
+
+      - name: Stage the community-operators contribution
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          dst="contribution/operators/mitos/${VERSION}"
+          mkdir -p "$dst"
+          cp -r deploy/olm/bundle/manifests "$dst/manifests"
+          cp -r deploy/olm/bundle/metadata "$dst/metadata"
+          echo "staged $dst"
+
+      - name: Upload the versioned bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: community-operators-mitos-${{ steps.ver.outputs.version }}
+          path: contribution/
+
+      - name: Open the community-operators PR
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          CO_TOKEN: ${{ secrets.COMMUNITY_OPERATORS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CO_TOKEN}" ]; then
+            echo "COMMUNITY_OPERATORS_TOKEN not set; skipping PR. The bundle is in the uploaded artifact."
+            exit 0
+          fi
+          export GH_TOKEN="${CO_TOKEN}"
+          owner="$(gh api user -q .login)"
+          # ensure the fork exists under the token owner.
+          gh repo fork k8s-operatorhub/community-operators --clone=false || true
+          git clone "https://x-access-token:${CO_TOKEN}@github.com/${owner}/community-operators" co
+          cd co
+          git remote add upstream https://github.com/k8s-operatorhub/community-operators
+          git fetch -q upstream
+          branch="mitos-${VERSION}"
+          git checkout -q -b "$branch" upstream/main
+          mkdir -p "operators/mitos/${VERSION}"
+          cp -r "../contribution/operators/mitos/${VERSION}/." "operators/mitos/${VERSION}/"
+          git config user.name "mitos-run"
+          git config user.email "maintainers@mitos.run"
+          git add "operators/mitos/${VERSION}"
+          # community-operators requires a DCO sign-off.
+          git commit -s -q -m "operator mitos (${VERSION})"
+          git push -q origin "$branch"
+          gh pr create --repo k8s-operatorhub/community-operators \
+            --base main --head "${owner}:${branch}" \
+            --title "operator mitos (${VERSION})" \
+            --body "Adds mitos ${VERSION}. Snapshot-fork sandboxes for AI agents on Kubernetes. https://mitos.run"

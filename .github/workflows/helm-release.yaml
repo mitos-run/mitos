@@ -1,0 +1,67 @@
+name: Release Helm chart
+
+# Package the mitos Helm chart and publish it to the gh-pages branch as a
+# classic HTTP Helm repository, plus attach the .tgz to a GitHub release. The
+# repository is served from https://mitos.run/charts via a Cloudflare rewrite to
+# this repo's GitHub Pages site (see docs/distribution.md). Artifact Hub then
+# indexes https://mitos.run/charts and the listing backlinks to mitos.run.
+#
+# chart-releaser only publishes a chart version that does not already have a
+# release, so bump deploy/charts/mitos/Chart.yaml `version` for each change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/charts/**"
+      - ".github/workflows/helm-release.yaml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # chart-releaser pushes to gh-pages and creates the chart release.
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: deploy/charts
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Artifact Hub repository metadata to gh-pages
+        # The repository ownership file must sit at the repo root next to
+        # index.yaml so Artifact Hub can fetch it from https://mitos.run/charts.
+        run: |
+          set -euo pipefail
+          # chart-releaser has just pushed to the remote gh-pages, so work from
+          # origin/gh-pages rather than a stale local ref.
+          git fetch origin gh-pages
+          tmp="$(mktemp -d)"
+          git worktree add --detach "$tmp" origin/gh-pages
+          cp deploy/charts/artifacthub-repo.yml "$tmp/artifacthub-repo.yml"
+          git -C "$tmp" add artifacthub-repo.yml
+          if ! git -C "$tmp" diff --cached --quiet; then
+            git -C "$tmp" commit -m "chore: publish artifacthub-repo.yml"
+            git -C "$tmp" push origin HEAD:gh-pages
+          fi
+          git worktree remove "$tmp"

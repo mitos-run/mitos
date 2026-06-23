@@ -9,13 +9,16 @@ on:
       tag:
         description: "Image tag to build and publish (for example v0.1.0)"
         required: true
+      ref:
+        description: "Git ref to build from. Defaults to the tag. Set to main to build current code when a tag predates a component Dockerfile."
+        required: false
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    # Build, push, cosign keyless-sign, and SBOM-attest the three mitos images
+    # Build, push, cosign keyless-sign, and SBOM-attest the seven mitos images
     # under ghcr.io/mitos-run (supply chain, issue #35). Keyless signing
     # uses the workflow GitHub OIDC identity (id-token: write); there is NO
     # private key in the repo or in secrets. Each image is pushed by digest and
@@ -37,6 +40,12 @@ jobs:
             dockerfile: Dockerfile.husk-stub
           - name: mitos-kvm-device-plugin
             dockerfile: Dockerfile.kvm-device-plugin
+          - name: mitos-facade
+            dockerfile: Dockerfile.facade
+          - name: mitos-console
+            dockerfile: Dockerfile.console
+          - name: mitos-gateway
+            dockerfile: Dockerfile.gateway
     env:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/mitos-run/${{ matrix.name }}
@@ -48,7 +57,7 @@ jobs:
           # the release tag with GITHUB_TOKEN, which does NOT auto-trigger
           # on: push: tags, so a release is published by dispatching this workflow
           # with the tag input.
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.ref || github.event.inputs.tag || github.ref }}
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:

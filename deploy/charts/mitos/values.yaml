@@ -23,7 +23,7 @@ controller:
     # Image repository for the controller (appended to image.registry).
     repository: mitos-controller
     # Image tag for the controller. Defaults to the chart appVersion.
-    tag: v0.4.0
+    tag: v0.13.0
     # Image pull policy for the controller container.
     pullPolicy: IfNotPresent
   # Number of controller replicas. Multiple replicas run HA with leader election.
@@ -68,7 +68,7 @@ controller:
 huskStub:
   image:
     repository: mitos-husk-stub
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
 
 # forkd (DaemonSet): the per-node privileged snapshot builder. Schedules only on
@@ -76,7 +76,7 @@ huskStub:
 forkd:
   image:
     repository: mitos-forkd
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
   # forkd container resource requests and limits.
   resources:
@@ -108,7 +108,7 @@ devicePlugin:
   enabled: true
   image:
     repository: mitos-kvm-device-plugin
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
 
 # Kernel provisioner (DaemonSet): stages the guest kernel into the node hostPath
@@ -173,7 +173,7 @@ facade:
   enabled: false
   image:
     repository: mitos-facade
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
   # The mitos.run pool a Sandbox binds to when it carries no bridge annotation.
   defaultPool: default
@@ -237,7 +237,7 @@ console:
   edition: community
   image:
     repository: mitos-console
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
   # Console replicas. The BFF is stateless; run more than one for HA.
   replicas: 2
@@ -288,7 +288,7 @@ gateway:
   enabled: true
   image:
     repository: mitos-gateway
-    tag: v0.4.0
+    tag: v0.13.0
     pullPolicy: IfNotPresent
   replicas: 2
   resources:

@@ -1,0 +1,16 @@
+# Artifact Hub repository metadata.
+#
+# Artifact Hub fetches this file from the ROOT of the published Helm repository,
+# i.e. https://mitos.run/charts/artifacthub-repo.yml. The helm-release workflow
+# copies it next to index.yaml on the gh-pages branch, so it is served from the
+# same origin as the chart index. It lets you CLAIM ownership of the repository
+# on Artifact Hub so the listing is verified and shows the mitos.run links.
+#
+# One-time setup:
+#   1. Add the repository on Artifact Hub (kind: Helm, url: https://mitos.run/charts).
+#   2. Copy the generated repository ID into repositoryID below.
+#   3. Re-publish so this file ships with the ID, then claim ownership.
+repositoryID: ed2eda94-a171-4022-b6d4-de565edf4800
+owners:
+  - name: mitos-run
+    email: maintainers@mitos.run
