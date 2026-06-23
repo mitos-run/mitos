@@ -24,7 +24,7 @@ on a real cluster through the released surface.
 
 ```bash
 # From a machine with kubectl + the mitos CLI + the Python SDK installed,
-# pointed at a running mitos cluster.
+# pointed at a running Mitos cluster.
 examples/sleep-consolidation/run.sh mitos-e2e ~/.kube/config
 ```
 

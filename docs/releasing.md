@@ -1,4 +1,4 @@
-# Releasing mitos
+# Releasing Mitos
 
 This page is the one place that documents every published artifact: the
 container images, the CLI, and the four language SDKs. It records what each

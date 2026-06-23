@@ -35,7 +35,7 @@ and every SDK is generated from it.
 
 The v2 spec names the runtime protocol "Connect" because the END STATE wants
 Connect's HTTP semantics so a browser can stream exec output with no proxy tier
-(docs/api/v2-spec.md section 4). The mitos repo does NOT currently depend on
+(docs/api/v2-spec.md section 4). The Mitos repo does NOT currently depend on
 connect-go: go.mod has `google.golang.org/grpc` and `google.golang.org/protobuf`
 and the `make proto` target runs plain `protoc` with `protoc-gen-go` and
 `protoc-gen-go-grpc` (no buf, no `connectrpc.com/connect`). The existing

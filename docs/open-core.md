@@ -39,5 +39,5 @@ entity. Contributions stay under the repository's Apache 2.0 license.
 
 ## Trademark
 
-The "mitos" name and any associated marks are reserved; see TRADEMARKS.md. The
+The "Mitos" name and any associated marks are reserved; see TRADEMARKS.md. The
 open-source code license (Apache 2.0) does not grant trademark rights.

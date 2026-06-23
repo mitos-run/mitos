@@ -1,6 +1,6 @@
-# Submitting mitos to OperatorHub.io
+# Submitting Mitos to OperatorHub.io
 
-This runbook covers packaging the mitos OLM bundle and submitting it to
+This runbook covers packaging the Mitos OLM bundle and submitting it to
 [operatorhub.io](https://operatorhub.io) via the
 [k8s-operatorhub/community-operators](https://github.com/k8s-operatorhub/community-operators)
 repository.
@@ -33,7 +33,7 @@ project is migrating its registry from `ghcr.io/paperclipinc` to
 image MUST be published and pullable under `ghcr.io/mitos-run`. Confirm this
 first; OLM will report ImagePullBackOff otherwise.
 
-mitos also requires KVM nodes and a privileged DaemonSet (see the README and
+Mitos also requires KVM nodes and a privileged DaemonSet (see the README and
 `docs/redhat-certification.md`). Community OperatorHub does not test against
 your hardware, but reviewers will read the CSV requirements section. Keep it
 honest.
@@ -183,7 +183,7 @@ validation green. Sign-off (`-s`) and the DCO check are required.
 
 ## Notes
 
-- Channel: `alpha` only, default `alpha`. mitos is pre-1.0 and the CSV maturity
+- Channel: `alpha` only, default `alpha`. Mitos is pre-1.0 and the CSV maturity
   is `alpha`.
 - For the next version, add `operators/mitos/0.5.0/` and set the CSV
   `spec.replaces: mitos.v0.4.0` (or `spec.skips`) so the update graph is

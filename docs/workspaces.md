@@ -269,7 +269,7 @@ docs/threat-model.md section 3.
 ## The revision change feed for external indexers
 
 The controller emits a CloudEvents 1.0 feed so an external indexer (a vector DB,
-a search index, an audit sink) can react to workspace changes WITHOUT mitos
+a search index, an audit sink) can react to workspace changes WITHOUT Mitos
 embedding any indexer of its own. There is no built-in vector store by design
 (ROADMAP.md, EPIC W4): indexing is the consumer's job, fed by this event.
 

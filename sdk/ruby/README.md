@@ -1,6 +1,6 @@
-# mitos Ruby SDK
+# Mitos Ruby SDK
 
-mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+Mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
 restore from snapshots and fork into parallel attempts, so an agent can branch a
 warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
@@ -117,7 +117,7 @@ error cause.
 ## Sandbox ids
 
 Sandbox ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (the same allowlist
-every mitos SDK enforces). `fork` and `terminate` validate the id and raise a
+every Mitos SDK enforces). `fork` and `terminate` validate the id and raise a
 typed `invalid_sandbox_id` error before sending any request.
 
 ## Tests
@@ -145,9 +145,9 @@ gem: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`), `run_code`,
 per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
 `get_host(port)` preview URLs.
 
-## The mitos SDK family
+## The Mitos SDK family
 
-mitos ships native clients in six languages. All of them share the same
+Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
 1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
 and TypeScript today and is planned for the rest, for full parity (#296).

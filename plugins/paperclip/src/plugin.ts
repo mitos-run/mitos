@@ -108,7 +108,7 @@ export function setClaimClientFactory(
 function requireClaimClient(config: SandboxDriverConfig): MitosClaimClient {
   if (!claimClientFactory) {
     throw new Error(
-      "claim backend selected but no mitos cluster client is wired. " +
+      "claim backend selected but no Mitos cluster client is wired. " +
         "Inject one via setClaimClientFactory (the @mitos/sdk AgentRun binding " +
         "ships in the Paperclip monorepo; see docs/integrations/paperclip.md).",
     );
@@ -118,7 +118,7 @@ function requireClaimClient(config: SandboxDriverConfig): MitosClaimClient {
 
 /**
  * Build the claim-time secret references from the lease params. Only Secret
- * REFERENCES travel; the mitos controller resolves the plaintext server-side,
+ * REFERENCES travel; the Mitos controller resolves the plaintext server-side,
  * so values never enter the plugin, the logs, or a pool snapshot.
  */
 function secretRefsFor(

@@ -36,7 +36,7 @@ Browser Use reported the shape of this on their stack: a "0.8ms restore plus
 2 MiB hugepages plus a userfaultfd handler that PRELOADS a captured hot-page
 working set before resume cut resume-to-ready from 9.8s to 3.1s and page faults
 from ~100k to ~1.1k. Those are their numbers on their workload; we cite them as
-the motivation, not as a mitos measurement.
+the motivation, not as a Mitos measurement.
 
 ## The two levers
 
@@ -55,7 +55,7 @@ it only exists on Linux/KVM.
 ### 2. userfaultfd prefetch of a captured hot-page set
 
 `userfaultfd(2)` lets a userspace handler service page faults for a memory
-range. On restore, mitos maps the guest memory file with userfaultfd registered
+range. On restore, Mitos maps the guest memory file with userfaultfd registered
 over its range and runs a handler. Before resuming the VM, the handler PRELOADS
 the snapshot's captured hot-page working set: it faults in exactly the pages the
 guest is known to touch first, so the post-resume fault storm is paid up front,

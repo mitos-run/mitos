@@ -11,7 +11,7 @@ docs/husk-pods.md.
 
 ## Context
 
-mitos has two per-sandbox execution engines:
+Mitos has two per-sandbox execution engines:
 
 - The HUSK pod (`cmd/husk-stub`): the default. One unprivileged, capability-
   dropped, PSA-restricted-minus-two pod per VM (ADR 0003).

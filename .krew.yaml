@@ -4,13 +4,13 @@ metadata:
   name: mitos
 spec:
   version: "{{ .TagName }}"
-  homepage: https://mitos.run
+  homepage: https://github.com/mitos-run/mitos
   shortDescription: Operate mitos.run sandboxes for AI agents
   description: |
     kubectl mitos inspects and operates mitos.run sandbox objects from your
     cluster: it lists sandbox claims and their copy-on-write forks, renders the
     fork lineage, reports per-sandbox memory metering, reads sandbox logs, and
-    runs commands inside a sandbox. mitos boots Firecracker microVMs and forks
+    runs commands inside a sandbox. Mitos boots Firecracker microVMs and forks
     them via memory snapshots into parallel attempts. The plugin reads the
     cluster connection from the standard kubeconfig resolution.
   caveats: |

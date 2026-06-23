@@ -1,6 +1,6 @@
 # KVM node prerequisites (any Kubernetes distribution)
 
-mitos is a standard Kubernetes operator: the controller, the forkd DaemonSet, the
+Mitos is a standard Kubernetes operator: the controller, the forkd DaemonSet, the
 husk pods, and the device plugin run on any conformant cluster. The constraints
 are on the **nodes that run sandboxes** (the KVM nodes) and on the **install
 namespace**, NOT on the Kubernetes distribution. This page is the distro-neutral
@@ -42,7 +42,7 @@ exit $fail
 
 ## Running on <distro>: support matrix
 
-mitos is a standard operator and runs on any conformant Kubernetes. The KVM
+Mitos is a standard operator and runs on any conformant Kubernetes. The KVM
 nodes need the kernel + data-dir + privileged-namespace prep below; the operator
 side (controller, forkd DaemonSet, device plugin, husk pods) is identical across
 distributions.

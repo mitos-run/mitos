@@ -1,22 +1,22 @@
-# Red Hat Certified Operators path for mitos
+# Red Hat Certified Operators path for Mitos
 
-This runbook covers submitting mitos to the
+This runbook covers submitting Mitos to the
 [Red Hat Certified Operators catalog](https://catalog.redhat.com) via
 [redhat-openshift-ecosystem/certified-operators](https://github.com/redhat-openshift-ecosystem/certified-operators).
 
 ## Read this first: the fit risk
 
-mitos may not be a good fit for the certified (OpenShift) path, and we should
+Mitos may not be a good fit for the certified (OpenShift) path, and we should
 not claim OpenShift compatibility we have not verified. The certified catalog
 exists to certify operators that run on OpenShift, and OpenShift is deliberately
-locked down. mitos pulls in the opposite direction:
+locked down. Mitos pulls in the opposite direction:
 
-- **KVM / nested virtualization.** mitos boots and forks real Firecracker
+- **KVM / nested virtualization.** Mitos boots and forks real Firecracker
   microVMs. The `forkd` DaemonSet needs `/dev/kvm` on every sandbox node. Many
   OpenShift clusters, especially managed ones, run on virtualized infrastructure
   without nested virtualization, so `/dev/kvm` is simply absent. OpenShift
   Virtualization (CNV) addresses VM workloads but is a different model than
-  mitos's host-level Firecracker forking and does not automatically grant mitos
+  Mitos's host-level Firecracker forking and does not automatically grant Mitos
   what it needs.
 - **Privileged DaemonSet.** `forkd` runs privileged, touches host paths, and
   needs device access. OpenShift gates this behind Security Context Constraints
@@ -27,7 +27,7 @@ locked down. mitos pulls in the opposite direction:
   than the certified catalog's typical audience.
 
 Net: pursuing certification is only worthwhile once there is real demand for
-mitos on OpenShift-on-bare-metal with KVM and a privileged SCC available. Until
+Mitos on OpenShift-on-bare-metal with KVM and a privileged SCC available. Until
 then, prioritize the community OperatorHub path (`docs/operatorhub.md`) and the
 Helm chart. Do not advertise OpenShift support before it is verified on a real
 OpenShift-on-bare-metal cluster with nested virt.
@@ -58,7 +58,7 @@ likely do not meet yet:
 
 - **UBI base image.** Each certified image must be built `FROM` a Red Hat
   Universal Base Image (`registry.access.redhat.com/ubi9/ubi-minimal` or
-  similar). The mitos Go binaries are statically linkable, so rebasing onto
+  similar). The Mitos Go binaries are statically linkable, so rebasing onto
   `ubi9-minimal` is feasible, but it is a real build change and must be done
   before submission.
 - **Required labels.** Each image must carry:
@@ -69,7 +69,7 @@ likely do not meet yet:
   - `summary`
   - `description`
   - `maintainer`
-  and ship a license file under `/licenses` (Apache-2.0 for mitos).
+  and ship a license file under `/licenses` (Apache-2.0 for Mitos).
 - **No critical/important unresolved CVEs.** Red Hat scans the image; the UBI
   base keeps this tractable because Red Hat patches it.
 

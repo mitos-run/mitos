@@ -4,7 +4,7 @@
 # snapshot/fork.
 #
 # This is a SCAFFOLD, not a runnable measurement. Modal markets a sandbox
-# snapshot and branch/fork capability, which is the closest competitor to mitos's
+# snapshot and branch/fork capability, which is the closest competitor to Mitos's
 # 1-to-N live copy-on-write fan-out, so it is the headline comparison for issue
 # #207. To produce a Modal number this repo can publish as OUR measurement, a
 # reproducer must:
@@ -19,9 +19,9 @@
 #        lines 2..N+1:  each child's time-to-ready MILLISECONDS (one per line)
 #
 # Modal is NOT self-hostable, so this comparison is necessarily run against
-# Modal's hosted service, not the same reference hardware as mitos. Record that
+# Modal's hosted service, not the same reference hardware as Mitos. Record that
 # asymmetry explicitly with any Modal number: it measures Modal's hosted fan-out,
-# and the mitos number measures self-hosted fan-out on the reference node. Until
+# and the Mitos number measures self-hosted fan-out on the reference node. Until
 # this adapter is filled in, any Modal figure is VENDOR-PUBLISHED (cite Modal's
 # own source), not our measurement.
 #
