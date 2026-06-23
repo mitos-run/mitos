@@ -1,0 +1,138 @@
+name: SDK tests
+
+# Run each newer language SDK's existing test suite so a wire-shape or
+# regression cannot land undetected. The Python and TypeScript SDKs are already
+# covered by the python-test, typescript-sdk and sdk-conformance jobs in
+# ci.yaml; this workflow adds the four SDKs that had tests but no CI gate: Ruby,
+# Rust, Java and Go.
+#
+# The workflow-level paths filter keeps these jobs off PRs that touch no SDK at
+# all. A single "changes" job (dorny/paths-filter) then sets a per-SDK boolean,
+# and each language job guards on it, so a Ruby-only change does not spend a Rust
+# or Java runner. Each language job is named for the SDK it gates (sdk-ruby,
+# sdk-rust, sdk-java, sdk-go) so it can be marked a required check; when its SDK
+# is untouched the job is skipped, which a required check treats as satisfied.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/ruby/**"
+      - "sdk/rust/**"
+      - "sdk/java/**"
+      - "sdk/go/**"
+      - ".github/workflows/sdk-tests.yaml"
+  pull_request:
+    paths:
+      - "sdk/ruby/**"
+      - "sdk/rust/**"
+      - "sdk/java/**"
+      - "sdk/go/**"
+      - ".github/workflows/sdk-tests.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    # Map the changed paths to one boolean per SDK so each language job runs only
+    # when its own files (or this workflow) move.
+    runs-on: ubuntu-latest
+    outputs:
+      ruby: ${{ steps.filter.outputs.ruby }}
+      rust: ${{ steps.filter.outputs.rust }}
+      java: ${{ steps.filter.outputs.java }}
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            ruby:
+              - "sdk/ruby/**"
+              - ".github/workflows/sdk-tests.yaml"
+            rust:
+              - "sdk/rust/**"
+              - ".github/workflows/sdk-tests.yaml"
+            java:
+              - "sdk/java/**"
+              - ".github/workflows/sdk-tests.yaml"
+            go:
+              - "sdk/go/**"
+              - ".github/workflows/sdk-tests.yaml"
+
+  sdk-ruby:
+    needs: changes
+    if: needs.changes.outputs.ruby == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/ruby
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The gemspec requires Ruby >= 2.6.0; 3.3 is a maintained line.
+          ruby-version: "3.3"
+      - name: Install test-only deps (webrick left the stdlib in Ruby 3.0)
+        run: gem install webrick --no-document
+      - name: minitest suite
+        run: ruby -Ilib -Itest test/sandbox_server_test.rb
+
+  sdk-rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/rust
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+      - name: cargo test
+        run: cargo test
+
+  sdk-java:
+    needs: changes
+    if: needs.changes.outputs.java == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/java
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Compile (release 17, no maven)
+        # Collect the sources into an argfile and pass it with @, so the file
+        # list is never word-split (no shellcheck SC2046) and a path with a
+        # space would still compile.
+        run: |
+          set -euo pipefail
+          find src -name '*.java' > sources.txt
+          javac --release 17 -d out @sources.txt
+      - name: Run SdkTest
+        run: java -cp out run.mitos.sdk.SdkTest
+
+  sdk-go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/go
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: sdk/go/go.mod
+      - name: go test
+        run: go test ./... -count=1
