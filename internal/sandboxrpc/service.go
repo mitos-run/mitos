@@ -59,6 +59,10 @@ type BudgetProvider interface {
 // The remaining overrides exist only to return an LLM-legible #24 follow-up
 // message instead of the generated default, so a caller learns WHY the RPC is
 // unavailable and where it is tracked.
+//
+// Guest, when non-nil, is the GuestConn port (Task 2.1 pattern). When it is
+// set, Service.Exec delegates through it instead of the ExecBackend. Tasks
+// 2.2-2.7 wire additional RPC groups through GuestConn.
 type Service struct {
 	sandboxv1connect.UnimplementedSandboxHandler
 	exec   ExecBackend
@@ -69,6 +73,10 @@ type Service struct {
 	// sandbox-server wiring can override it with WithSandboxResolver once
 	// per-sandbox routing lands.
 	resolve func(ctx context.Context) (string, error)
+	// Guest, when set, is the GuestConn factory used by the Task 2.1 path.
+	// Takes priority over exec when non-nil. Zero-value Service{Guest: ...}
+	// is valid for tests that drive the GuestConn seam directly.
+	Guest func(sandboxID string) (GuestConn, error)
 }
 
 // NewService builds the Connect Sandbox handler. exec is required (the streaming
@@ -109,13 +117,13 @@ func followup(rpc string) error {
 }
 
 // Exec runs a command and streams its IO over the Connect bidi stream. The first
-// client message MUST carry the open oneof; the handler bridges to the exec
-// backend (the existing SandboxAPI -> vsock -> guest agent path) and forwards
-// each output chunk as an ExecResponse stdout/stderr frame the instant it
-// arrives, then a terminal ExecExit. Stdin and PTY resize messages are accepted
-// by the protocol but not yet forwarded in this foundation slice (PTY end to end
-// and stdin streaming are #24 follow-ups); they are drained so the client is not
-// blocked.
+// client message MUST carry the open oneof; the handler bridges to either the
+// GuestConn port (when s.Guest is set, Task 2.1 path) or the ExecBackend
+// (legacy callback path) and forwards each output chunk as an ExecResponse
+// stdout/stderr frame the instant it arrives, then a terminal ExecExit. Stdin
+// and PTY resize messages are accepted by the protocol but not yet forwarded in
+// this foundation slice (PTY end to end and stdin streaming are #24 follow-ups);
+// they are drained so the client is not blocked.
 func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1.ExecRequest, sandboxv1.ExecResponse]) error {
 	first, err := stream.Receive()
 	if err != nil {
@@ -126,7 +134,12 @@ func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("first ExecRequest must carry the open oneof (command, env, cwd, pty), got %T", first.Msg))
 	}
 
-	sandboxID, err := s.resolve(ctx)
+	// GuestConn path (Task 2.1): delegate through the port when it is wired.
+	if s.Guest != nil {
+		return s.execViaGuest(ctx, stream, open)
+	}
+
+	sandboxID, err := s.resolveID(ctx)
 	if err != nil {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
 	}
@@ -184,6 +197,68 @@ func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1
 	}}})
 }
 
+// execViaGuest implements the Task 2.1 GuestConn path for Exec: opens an
+// ExecStream from the GuestConn and copies frames to the Connect response stream
+// until the terminal Done frame. Errors from the guest are surfaced as an
+// LLM-legible exit frame so the client always reads a clean terminal frame.
+func (s *Service) execViaGuest(ctx context.Context, stream *connect.BidiStream[sandboxv1.ExecRequest, sandboxv1.ExecResponse], open *sandboxv1.ExecOpen) error {
+	sandboxID, err := s.resolveID(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
+	}
+
+	conn, err := s.Guest(sandboxID)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+	}
+
+	es, err := conn.Exec(ctx, open)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest exec open failed: %w; check that the command is accessible in the sandbox filesystem", err))
+	}
+	defer es.Close()
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		frame, recvErr := es.Recv()
+		if recvErr != nil {
+			// io.EOF is handled by the Done frame below, not here; any other
+			// error is a transport failure surfaced as an LLM-legible exit.
+			_ = stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+				ExitCode: 1,
+				Error:    fmt.Sprintf("exec stream read error: %v; the guest agent may have crashed or the vsock connection was lost", recvErr),
+			}}})
+			return nil
+		}
+		if frame.Done {
+			return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+				ExitCode: frame.ExitCode,
+			}}})
+		}
+		if len(frame.Stdout) > 0 {
+			if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: frame.Stdout}}); err != nil {
+				return err
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: frame.Stderr}}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// resolveID returns the sandbox id from the resolver, or the empty string when
+// the resolver is nil (zero-value Service used in tests with the Guest field).
+func (s *Service) resolveID(ctx context.Context) (string, error) {
+	if s.resolve == nil {
+		return "", nil
+	}
+	return s.resolve(ctx)
+}
+
 // streamName mirrors the daemon/vsock stream identifiers so the handler does not
 // import the vsock package (keeping the transport seam clean).
 type streamName string
@@ -199,7 +274,7 @@ func (s *Service) Budget(ctx context.Context, req *connect.Request[sandboxv1.Bud
 	if s.budget == nil {
 		return nil, followup("Budget")
 	}
-	sandboxID, err := s.resolve(ctx)
+	sandboxID, err := s.resolveID(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
 	}
