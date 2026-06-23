@@ -7,18 +7,24 @@
 //! Only key counts are observable from outside.
 
 use std::collections::HashMap;
+use tokio::sync::RwLock;
 
 /// Configured environment state stored by the guest agent.
 ///
 /// Populated by the Configure RPC (host-trusted channel) at claim time.
 /// Secrets and plain env vars share the same map so the merge is uniform;
 /// the caller (Configure handler) is responsible for not logging values.
-#[derive(Debug, Default, Clone)]
+///
+/// The inner map is protected by a `tokio::sync::RwLock` so the type can be
+/// shared as `Arc<ConfiguredEnv>` across async tasks without external locking.
+/// `apply` takes a write lock; reads (`len`, `is_empty`, `snapshot`) take a
+/// read lock.
+#[derive(Debug, Default)]
 pub struct ConfiguredEnv {
     /// The combined configured env plus secrets. Stored together so the merge
     /// treats them identically to plain vars. Key count may be logged; values
     /// must not be logged.
-    vars: HashMap<String, String>,
+    vars: RwLock<HashMap<String, String>>,
 }
 
 impl ConfiguredEnv {
@@ -32,30 +38,36 @@ impl ConfiguredEnv {
     /// Later duplicates win (additive merge, matching handleConfigure in Go).
     /// Values are never logged; only the total key count after merge is safe to
     /// observe.
-    pub fn apply(&mut self, env: HashMap<String, String>, secrets: HashMap<String, String>) {
+    ///
+    /// Takes a write lock internally; `&self` allows sharing via `Arc<ConfiguredEnv>`.
+    pub async fn apply(&self, env: HashMap<String, String>, secrets: HashMap<String, String>) {
+        let mut guard = self.vars.write().await;
         for (k, v) in env {
-            self.vars.insert(k, v);
+            guard.insert(k, v);
         }
         for (k, v) in secrets {
-            self.vars.insert(k, v);
+            guard.insert(k, v);
         }
     }
 
     /// Return the number of configured keys. Safe to log.
-    pub fn len(&self) -> usize {
-        self.vars.len()
+    pub async fn len(&self) -> usize {
+        self.vars.read().await.len()
     }
 
     /// Returns true when no configured vars are set.
-    pub fn is_empty(&self) -> bool {
-        self.vars.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.vars.read().await.is_empty()
     }
 
-    /// Iterate over the configured key-value pairs.
+    /// Return a point-in-time snapshot of the configured key-value pairs.
+    ///
+    /// Returns owned `HashMap<String, String>` because the read lock cannot be
+    /// held across `await` points or returned as a borrow.
     ///
     /// Values are secret; callers must not log them.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    pub async fn snapshot(&self) -> HashMap<String, String> {
+        self.vars.read().await.clone()
     }
 }
 
@@ -68,18 +80,19 @@ impl ConfiguredEnv {
 ///   - Configured entries override base.
 ///   - Request entries override configured and base.
 ///
-/// The returned list is KEY=VALUE strings suitable for passing to Command::envs
-/// after splitting on '='.
+/// The returned list is KEY=VALUE strings. Consumers that need (key, value)
+/// pairs should call `split_once('=')` on each entry; a naive `split('=')`
+/// truncates values that themselves contain '=' (such as base64 tokens or URLs).
 ///
 /// Secret values (in configured or request) are never logged here. Callers
 /// are responsible for not logging the output vector.
 pub fn merge(
     base: &[String],
-    configured: &ConfiguredEnv,
+    configured_snapshot: &HashMap<String, String>,
     request: &HashMap<String, String>,
 ) -> Vec<String> {
     // Capacity hint: at most base.len() + configured.len() + request.len() entries.
-    let cap = base.len() + configured.len() + request.len();
+    let cap = base.len() + configured_snapshot.len() + request.len();
     let mut merged: HashMap<String, String> = HashMap::with_capacity(cap);
     // order tracks insertion order for deterministic output, mirroring the Go
     // implementation which preserves the first-seen ordering of keys.
@@ -102,7 +115,7 @@ pub fn merge(
     }
 
     // 2. Configured: overrides base.
-    for (k, v) in configured.iter() {
+    for (k, v) in configured_snapshot {
         set(k.to_string(), v.to_string());
     }
 
@@ -132,74 +145,80 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn base_only_passes_through() {
+    #[tokio::test]
+    async fn base_only_passes_through() {
         let base = vec!["FOO=1".to_string(), "BAR=2".to_string()];
         let configured = ConfiguredEnv::new();
         let request = HashMap::new();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         let m = to_map(&out);
         assert_eq!(m["FOO"], "1");
         assert_eq!(m["BAR"], "2");
     }
 
-    #[test]
-    fn configured_overrides_base() {
+    #[tokio::test]
+    async fn configured_overrides_base() {
         let base = vec!["FOO=base".to_string()];
-        let mut configured = ConfiguredEnv::new();
-        configured.apply(
-            [("FOO".to_string(), "configured".to_string())]
-                .into_iter()
-                .collect(),
-            HashMap::new(),
-        );
+        let configured = ConfiguredEnv::new();
+        configured
+            .apply(
+                [("FOO".to_string(), "configured".to_string())]
+                    .into_iter()
+                    .collect(),
+                HashMap::new(),
+            )
+            .await;
         let request = HashMap::new();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         let m = to_map(&out);
         assert_eq!(m["FOO"], "configured");
     }
 
-    #[test]
-    fn request_overrides_configured_and_base() {
+    #[tokio::test]
+    async fn request_overrides_configured_and_base() {
         let base = vec!["FOO=base".to_string()];
-        let mut configured = ConfiguredEnv::new();
-        configured.apply(
-            [("FOO".to_string(), "configured".to_string())]
-                .into_iter()
-                .collect(),
-            HashMap::new(),
-        );
+        let configured = ConfiguredEnv::new();
+        configured
+            .apply(
+                [("FOO".to_string(), "configured".to_string())]
+                    .into_iter()
+                    .collect(),
+                HashMap::new(),
+            )
+            .await;
         let request: HashMap<String, String> =
             [("FOO".to_string(), "request".to_string())].into_iter().collect();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         let m = to_map(&out);
         assert_eq!(m["FOO"], "request");
     }
 
-    #[test]
-    fn all_three_layers_merge_correctly() {
+    #[tokio::test]
+    async fn all_three_layers_merge_correctly() {
         // base: A=1 B=2
         // configured: B=cfg C=3
         // request: C=req D=4
         // expected: A=1 B=cfg C=req D=4
         let base = vec!["A=1".to_string(), "B=2".to_string()];
-        let mut configured = ConfiguredEnv::new();
-        configured.apply(
-            [
-                ("B".to_string(), "cfg".to_string()),
-                ("C".to_string(), "3".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            HashMap::new(),
-        );
+        let configured = ConfiguredEnv::new();
+        configured
+            .apply(
+                [
+                    ("B".to_string(), "cfg".to_string()),
+                    ("C".to_string(), "3".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                HashMap::new(),
+            )
+            .await;
         let request: HashMap<String, String> = [
             ("C".to_string(), "req".to_string()),
             ("D".to_string(), "4".to_string()),
         ]
         .into_iter()
         .collect();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         let m = to_map(&out);
         assert_eq!(m["A"], "1");
         assert_eq!(m["B"], "cfg");
@@ -208,51 +227,100 @@ mod tests {
         assert_eq!(m.len(), 4);
     }
 
-    #[test]
-    fn base_entry_without_equals_passes_through_verbatim() {
+    #[tokio::test]
+    async fn base_entry_without_equals_passes_through_verbatim() {
         // Go guestenv.Merge passes through entries without '=' verbatim.
         let base = vec!["NOEQUALS".to_string(), "KEY=val".to_string()];
         let configured = ConfiguredEnv::new();
         let request = HashMap::new();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         // The verbatim entry is in the output.
         assert!(out.contains(&"NOEQUALS".to_string()));
         let m = to_map(&out);
         assert_eq!(m["KEY"], "val");
     }
 
-    #[test]
-    fn secrets_in_configured_override_base() {
+    #[tokio::test]
+    async fn secrets_in_configured_override_base() {
         // Secrets go into configured.vars via apply(); they must override base.
         let base = vec!["SECRET_KEY=base_val".to_string()];
-        let mut configured = ConfiguredEnv::new();
-        configured.apply(
-            HashMap::new(),
-            [("SECRET_KEY".to_string(), "secret_val".to_string())]
-                .into_iter()
-                .collect(),
-        );
+        let configured = ConfiguredEnv::new();
+        configured
+            .apply(
+                HashMap::new(),
+                [("SECRET_KEY".to_string(), "secret_val".to_string())]
+                    .into_iter()
+                    .collect(),
+            )
+            .await;
         let request = HashMap::new();
-        let out = merge(&base, &configured, &request);
+        let out = merge(&base, &configured.snapshot().await, &request);
         let m = to_map(&out);
         // The secret value overrides the base value.
         assert_eq!(m["SECRET_KEY"], "secret_val");
     }
 
-    #[test]
-    fn configured_env_len_is_combined_count() {
-        let mut configured = ConfiguredEnv::new();
-        configured.apply(
-            [("A".to_string(), "1".to_string())].into_iter().collect(),
-            [("B".to_string(), "s".to_string())].into_iter().collect(),
-        );
+    #[tokio::test]
+    async fn configured_env_len_is_combined_count() {
+        let configured = ConfiguredEnv::new();
+        configured
+            .apply(
+                [("A".to_string(), "1".to_string())].into_iter().collect(),
+                [("B".to_string(), "s".to_string())].into_iter().collect(),
+            )
+            .await;
         // One env var + one secret = 2 total entries.
-        assert_eq!(configured.len(), 2);
+        assert_eq!(configured.len().await, 2);
     }
 
-    #[test]
-    fn empty_everything_returns_empty() {
-        let out = merge(&[], &ConfiguredEnv::new(), &HashMap::new());
+    #[tokio::test]
+    async fn empty_everything_returns_empty() {
+        let out = merge(&[], &ConfiguredEnv::new().snapshot().await, &HashMap::new());
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn value_containing_equals_preserved_via_split_once() {
+        // Values with embedded '=' (e.g. base64 tokens) must survive the merge.
+        // merge() stores key and value separately, so the reconstituted KEY=VALUE
+        // entry will contain the full original value including any '=' in it.
+        let base = vec!["TOKEN=abc==".to_string()];
+        let configured = ConfiguredEnv::new();
+        let request = HashMap::new();
+        let out = merge(&base, &configured.snapshot().await, &request);
+        // Use split_once (not split) to recover the pair correctly.
+        let entry = out.iter().find(|s| s.starts_with("TOKEN=")).unwrap();
+        let (key, val) = entry.split_once('=').unwrap();
+        assert_eq!(key, "TOKEN");
+        assert_eq!(val, "abc==");
+    }
+
+    #[tokio::test]
+    async fn concurrent_apply_and_snapshot_do_not_race() {
+        use std::sync::Arc;
+        let configured = Arc::new(ConfiguredEnv::new());
+        let c1 = Arc::clone(&configured);
+        let c2 = Arc::clone(&configured);
+        let w1 = tokio::spawn(async move {
+            c1.apply(
+                [("X".to_string(), "1".to_string())].into_iter().collect(),
+                HashMap::new(),
+            )
+            .await;
+        });
+        let w2 = tokio::spawn(async move {
+            c2.apply(
+                [("Y".to_string(), "2".to_string())].into_iter().collect(),
+                HashMap::new(),
+            )
+            .await;
+        });
+        w1.await.unwrap();
+        w2.await.unwrap();
+        let snap = configured.snapshot().await;
+        // Both writes must be visible; order of concurrent writes is unspecified.
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap["X"], "1");
+        assert_eq!(snap["Y"], "2");
     }
 }

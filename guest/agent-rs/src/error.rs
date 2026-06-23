@@ -37,6 +37,12 @@ pub enum AgentError {
     #[error("internal: {0}")]
     Internal(String),
 
+    /// An IO error from std::io. Converted automatically via the From impl,
+    /// allowing handlers to use `?` on std::io results without wrapping manually.
+    /// The OS error message is included; no secret values are present in IO errors.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
     /// The downstream service or transport was unavailable.
     #[error("unavailable: {0}")]
     Unavailable(String),
@@ -50,6 +56,7 @@ impl From<AgentError> for Status {
             AgentError::InvalidArgument(msg) => Status::new(Code::InvalidArgument, msg),
             AgentError::Unimplemented(msg) => Status::new(Code::Unimplemented, msg),
             AgentError::Internal(msg) => Status::new(Code::Internal, msg),
+            AgentError::Io(err) => Status::new(Code::Internal, err.to_string()),
             AgentError::Unavailable(msg) => Status::new(Code::Unavailable, msg),
         }
     }
@@ -106,6 +113,30 @@ mod tests {
         let s: Status = e.into();
         assert_eq!(s.code(), Code::Unavailable);
         assert!(s.message().contains("broken pipe"));
+    }
+
+    #[test]
+    fn io_error_maps_to_grpc_internal() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        let e: AgentError = io_err.into();
+        let s: Status = e.into();
+        assert_eq!(s.code(), Code::Internal);
+        assert!(s.message().contains("broken pipe"));
+    }
+
+    #[test]
+    fn io_error_question_mark_conversion() {
+        // Confirm that std::io::Error converts to AgentError via From,
+        // enabling ? in functions returning Result<_, AgentError>.
+        fn returns_agent_error() -> Result<(), AgentError> {
+            let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+            Err(io_err)?;
+            Ok(())
+        }
+        let result = returns_agent_error();
+        assert!(result.is_err());
+        let s: Status = result.unwrap_err().into();
+        assert_eq!(s.code(), Code::Internal);
     }
 
     #[test]
