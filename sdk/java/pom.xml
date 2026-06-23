@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>run.mitos</groupId>
+  <artifactId>mitos-sdk</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>mitos Java SDK</name>
+  <description>A thin, dependency-free Java client for the standalone and hosted mitos sandbox-server REST API: create templates, fork snapshot-fork sandboxes, run exec, and terminate. Mirrors the Python, TypeScript, Ruby, and Rust direct-mode SDKs. Kubernetes cluster mode is served by the Python and TypeScript SDKs only.</description>
+  <url>https://mitos.run</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>mitos-run</id>
+      <name>mitos</name>
+      <url>https://mitos.run</url>
+      <organization>mitos</organization>
+      <organizationUrl>https://mitos.run</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/mitos-run/mitos.git</connection>
+    <developerConnection>scm:git:git@github.com:mitos-run/mitos.git</developerConnection>
+    <url>https://github.com/mitos-run/mitos/tree/main/sdk/java</url>
+    <tag>HEAD</tag>
+  </scm>
+
+  <issueManagement>
+    <system>GitHub</system>
+    <url>https://github.com/mitos-run/mitos/issues</url>
+  </issueManagement>
+
+  <organization>
+    <name>mitos</name>
+    <url>https://mitos.run</url>
+  </organization>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>17</maven.compiler.release>
+  </properties>
+
+  <!--
+    No runtime dependencies: the SDK uses only the JDK standard library
+    (java.net.http.HttpClient for HTTP, java.nio for the credential file, and a
+    tiny hand-rolled JSON helper for the few flat wire shapes).
+  -->
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <release>17</release>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
