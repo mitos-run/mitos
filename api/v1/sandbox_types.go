@@ -267,13 +267,15 @@ const (
 
 // SandboxStatus consolidates SandboxClaimStatus and SandboxForkStatus.
 type SandboxStatus struct {
-	// Phase is the sandbox lifecycle phase. v2 phases: Pending, Hydrating, Ready,
-	// Terminating, NodeLost, Failed. v1 Restoring maps to Hydrating; v1
-	// Terminated is a terminal phase reaped by TTL.
+	// Phase is the sandbox lifecycle phase. The phase-name set is carried from
+	// v1alpha1 (Pending, Restoring, Ready, Terminating, Terminated, Failed);
+	// Terminated is a terminal phase reaped by TTL. The v2 phase rename
+	// (Hydrating, NodeLost) is deferred to a later task.
 	// +optional
 	Phase SandboxPhase `json:"phase,omitempty"`
 
-	// Endpoint is the sandbox API address (host:port). Unchanged from 	// +optional
+	// Endpoint is the sandbox API address (host:port). Unchanged from v1alpha1.
+	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// Pod is the husk pod name backing the sandbox (for example
@@ -282,7 +284,8 @@ type SandboxStatus struct {
 	// +optional
 	Pod string `json:"pod,omitempty"`
 
-	// SandboxID is the engine-side sandbox identifier. Unchanged from 	// +optional
+	// SandboxID is the engine-side sandbox identifier. Unchanged from v1alpha1.
+	// +optional
 	SandboxID string `json:"sandboxID,omitempty"`
 
 	// StartupLatencyMs is the fork/activation latency in milliseconds. Renamed
@@ -290,11 +293,13 @@ type SandboxStatus struct {
 	// +optional
 	StartupLatencyMs int64 `json:"startupLatencyMs,omitempty"`
 
-	// StartedAt is when the sandbox became Ready. Unchanged from 	// +optional
+	// StartedAt is when the sandbox became Ready. Unchanged from v1alpha1.
+	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
 	// FinishedAt is when the sandbox reached a terminal phase, driving the GC TTL
-	// pass. Unchanged from 	// +optional
+	// pass. Unchanged from v1alpha1.
+	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
 
 	// Revision is the WorkspaceRevision produced on terminate. NEW v2 field.
@@ -341,7 +346,8 @@ type SandboxStatus struct {
 	CheckpointTime *metav1.Time `json:"checkpointTime,omitempty"`
 
 	// Conditions are the typed conditions with observedGeneration. Unchanged from
-	// 	// +optional
+	// v1alpha1.
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

@@ -25,12 +25,11 @@ type SandboxPool struct {
 	// reference), the snapshot fan-out, the warm-pod autoscaler, and placement.
 	Spec SandboxPoolSpec `json:"spec"`
 
-	// Status reports snapshot and warm-pool readiness. It is unchanged from
-	// v1alpha1 (the migration re-homes only spec fields).
+	// Status reports snapshot and warm-pool readiness.
 	Status SandboxPoolStatus `json:"status,omitempty"`
 }
 
-// SandboxPoolSpec is the v1alpha2 pool spec. Exactly one of Template (inline) or
+// SandboxPoolSpec is the v1 pool spec. Exactly one of Template (inline) or
 // TemplateRef (a reference to a shared template-shaped object) is set.
 type SandboxPoolSpec struct {
 	// Template is the inline pool template carrying every field a v1alpha1
@@ -63,19 +62,22 @@ type SandboxPoolSpec struct {
 	// DrainPolicy governs an active sandbox when its backing husk pod is lost
 	// (drain, eviction, deletion). Kill (the default) re-pends the sandbox onto a
 	// replacement dormant slot; Checkpoint attempts a live-VM snapshot first where
-	// the VMM still runs, then re-pends. Carried unchanged from 	// +kubebuilder:validation:Enum=Kill;Checkpoint
+	// the VMM still runs, then re-pends. Carried unchanged from v1alpha1.
+	// +kubebuilder:validation:Enum=Kill;Checkpoint
 	// +kubebuilder:default=Kill
 	// +optional
 	DrainPolicy HuskDrainPolicy `json:"drainPolicy,omitempty"`
 
 	// Placement pins this pool's husk pods (and the sandbox VMs they run) to a
 	// dedicated set of nodes for hard tenant separation (issue #172). Carried
-	// unchanged from 	// +optional
+	// unchanged from v1alpha1.
+	// +optional
 	Placement *PoolPlacement `json:"placement,omitempty"`
 
 	// CPUPinning configures dynamic post-ready CPU pinning and a launch-time
 	// scheduling-priority bump for this pool's sandbox VMs (issue #168). Carried
-	// unchanged from 	// +optional
+	// unchanged from v1alpha1.
+	// +optional
 	CPUPinning *CPUPinningSpec `json:"cpuPinning,omitempty"`
 }
 
@@ -92,7 +94,8 @@ type PoolTemplateSpec struct {
 	Init []string `json:"init,omitempty"`
 
 	// BuildSteps is the ordered, declarative build recipe (issue #220), the
-	// code-first alternative to Init. Carried unchanged from 	// +optional
+	// code-first alternative to Init. Carried unchanged from v1alpha1.
+	// +optional
 	BuildSteps []BuildStep `json:"buildSteps,omitempty"`
 
 	// Command overrides the container entrypoint inside the sandbox.
@@ -118,18 +121,21 @@ type PoolTemplateSpec struct {
 	Network *NetworkPolicy `json:"network,omitempty"`
 
 	// Encrypted requests at-rest encryption of the template snapshot and every
-	// fork built from it. Carried unchanged from 	// +kubebuilder:default=false
+	// fork built from it. Carried unchanged from v1alpha1.
+	// +kubebuilder:default=false
 	// +optional
 	Encrypted bool `json:"encrypted,omitempty"`
 
 	// MinIsolationTier requires the sandbox to be scheduled only onto a node
 	// whose isolation assurance meets this floor (issue #40). Carried unchanged
-	// from 	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
+	// from v1alpha1.
+	// +kubebuilder:validation:Enum=hardware-kvm;pvm;gvisor
 	// +optional
 	MinIsolationTier string `json:"minIsolationTier,omitempty"`
 
 	// RequireHardwareKvm is a convenience equivalent to
-	// minIsolationTier=hardware-kvm (issue #40). Carried unchanged from 	// +kubebuilder:default=false
+	// minIsolationTier=hardware-kvm (issue #40). Carried unchanged from v1alpha1.
+	// +kubebuilder:default=false
 	// +optional
 	RequireHardwareKvm bool `json:"requireHardwareKvm,omitempty"`
 

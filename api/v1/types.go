@@ -71,10 +71,10 @@ type BuildStep struct {
 // InitCommands flattens a BuildStep slice into in-VM build-time commands.
 // run, env, and workdir steps produce commands in order; copy steps stage
 // files outside the VM and contribute no init command. When steps is empty,
-// init is returned unchanged.
-func InitCommands(steps []BuildStep, init []string) []string {
+// initCmds is returned unchanged.
+func InitCommands(steps []BuildStep, initCmds []string) []string {
 	if len(steps) == 0 {
-		return init
+		return initCmds
 	}
 	cmds := make([]string, 0, len(steps))
 	for i := range steps {
