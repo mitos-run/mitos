@@ -14,7 +14,7 @@ import (
 )
 
 // keyPrefix is the tag every raw key carries so a leaked key is greppable and a
-// scanner can recognize a mitos credential. The masked Prefix stored on ApiKey
+// scanner can recognize a Mitos credential. The masked Prefix stored on ApiKey
 // is this tag plus a short non-secret slug.
 const keyPrefix = "mitos_live_"
 
@@ -27,7 +27,7 @@ const rawKeyBytes = 32
 // while internal logging and tests can still discriminate. None of these errors
 // ever carries the raw key value.
 var (
-	// ErrKeyMalformed: the presented credential is not a mitos key shape.
+	// ErrKeyMalformed: the presented credential is not a Mitos key shape.
 	ErrKeyMalformed = errors.New("saas: api key is malformed")
 	// ErrKeyUnknown: the key does not resolve to any stored key.
 	ErrKeyUnknown = errors.New("saas: api key is not recognized")

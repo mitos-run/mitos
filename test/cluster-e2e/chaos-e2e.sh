@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mitos cluster CHAOS e2e (issue #163, ROADMAP G2 failure/GC semantics).
+# Mitos cluster CHAOS e2e (issue #163, ROADMAP G2 failure/GC semantics).
 #
 # Asserts the husk warm-pool's BORING FAILURE BEHAVIOR on real KVM:
 #   1. pool warms        a SandboxPool brings up dormant husk pods

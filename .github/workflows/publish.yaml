@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   publish:
-    # Build, push, cosign keyless-sign, and SBOM-attest the seven mitos images
+    # Build, push, cosign keyless-sign, and SBOM-attest the seven Mitos images
     # under ghcr.io/mitos-run (supply chain, issue #35). Keyless signing
     # uses the workflow GitHub OIDC identity (id-token: write); there is NO
     # private key in the repo or in secrets. Each image is pushed by digest and

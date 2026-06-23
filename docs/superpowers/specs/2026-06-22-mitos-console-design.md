@@ -1,4 +1,4 @@
-# mitos Console — design spec
+# Mitos Console — design spec
 
 Date: 2026-06-22
 Status: design (brainstorm output). Implementation plan is a follow-up.
@@ -9,7 +9,7 @@ two net-new sub-issues (see §11).
 
 ## Summary
 
-The mitos repo already has the SaaS spine: a public API gateway (`cmd/gateway`,
+The Mitos repo already has the SaaS spine: a public API gateway (`cmd/gateway`,
 #210), an org-scoped backend-for-frontend (`cmd/console`, #214) that joins keys,
 usage/cost, billing, live sandboxes, templates, members and audit behind tested
 cross-tenant isolation, plus `internal/saas/{account,billing,console,gateway,
@@ -21,7 +21,7 @@ This spec designs that dashboard so that **the hosted SaaS and any self-hosted
 install run the same binary and the same UI bundle**, differing only by a
 runtime capabilities document the server advertises. It also designs first-class,
 provider-backed **secret management** (default Kubernetes, recommended external
-provider OpenBao) and a **proof surface** that makes mitos's Pareto position
+provider OpenBao) and a **proof surface** that makes Mitos's Pareto position
 visible and verifiable in-product.
 
 ## Goals
@@ -31,7 +31,7 @@ visible and verifiable in-product.
 - On-brand: the dashboard renders in the website's "Fluorescence" design system,
   shared via a versioned `@mitos/brand` package.
 - Competitor-grade breadth (match Daytona, beat both Daytona and E2B on live
-  sandbox inspection), plus mitos-only views (live fork tree, forkable
+  sandbox inspection), plus Mitos-only views (live fork tree, forkable
   workspaces, first-class secrets, proof panel).
 - Per-tenant secret management with a pluggable provider backend.
 - Honor the project's gating rules and integrity discipline (no unverified
@@ -125,14 +125,14 @@ cmd/console (one Go binary, one image)
 ## 6. Information architecture (grounded in competitors, mapped to CRDs)
 
 Nav follows the category convention so it reads as best-practice, but each item
-maps to a primitive mitos already has, plus mitos-only views.
+maps to a primitive Mitos already has, plus Mitos-only views.
 
 | Console section | Backed by | vs Daytona / E2B |
 | --- | --- | --- |
 | **Overview / Instruments** (home) | usage/metering (#211/#33) + activate-latency source | net-new proof surface (§9) |
 | **Sandboxes** (live) | `Sandbox`/`SandboxClaim` via `SandboxControl` seam | parity; fork is first-class |
 | → detail tabs | Overview · Logs (LogStreamer) · Terminal (existing PTY) · Filesystem (existing files API) · Metrics · Spending · **Fork tree** | Fork tree is unique |
-| **Workspaces** | `Workspace`/`WorkspaceRevision` CRDs | Daytona "Volumes" are static; mitos workspaces fork |
+| **Workspaces** | `Workspace`/`WorkspaceRevision` CRDs | Daytona "Volumes" are static; Mitos workspaces fork |
 | **Templates** | `SandboxTemplate` CRD (ties to #209 DX epic) | = Daytona Snapshots |
 | **Registries** | image-pull secrets (already in chart) | parity |
 | **Secrets** | `SecretStore` provider registry (§8) | neither competitor has this |
@@ -146,7 +146,7 @@ maps to a primitive mitos already has, plus mitos-only views.
 behind a `billingprovider.Provider` seam — the same pattern as `SecretStore`.
 Stripe is the first provider; a **Merchant of Record** (Polar / Paddle / Lemon
 Squeezy) is the planned second and likely end state, because an MoR becomes the
-legal seller and handles global sales-tax/VAT so mitos does not. The console
+legal seller and handles global sales-tax/VAT so Mitos does not. The console
 reads billing through the provider-neutral `BillingReader`; only the webhook
 (signature scheme + event names) and the portal/checkout link are
 provider-specific, and both live behind the seam. The neutral `WebhookHandler`
@@ -191,7 +191,7 @@ backend.
 - **`openbao` (recommended external):** OpenBao (the Linux-Foundation
   open-source fork of Vault). The same driver speaks the Vault HTTP API, so it
   also covers HashiCorp Vault. OpenBao is the default-recommended external
-  provider deliberately — mitos's Pareto thesis is open-source + self-hostable,
+  provider deliberately — Mitos's Pareto thesis is open-source + self-hostable,
   so the recommended secret backend must not be BSL-licensed.
 - **`aws_secrets_manager`** (optional, parity with paperclip).
 
@@ -206,13 +206,13 @@ backend.
 
 **Managed modes (both providers):**
 - *copy-in*: value encrypted at rest by the active provider.
-- *external_reference* (strong default for OpenBao): mitos stores only
+- *external_reference* (strong default for OpenBao): Mitos stores only
   `{path, versionRef, fingerprint}`; the **controller resolves it at sandbox
   materialization** through the provider with binding context, writes a
   **short-lived, sandbox-scoped k8s Secret** the husk pod consumes via the
   existing `SandboxTemplate.env valueFrom secretKeyRef` path, then **GCs it on
   terminate**. One injection mechanism, any backend behind it, value never
-  persisted in mitos.
+  persisted in Mitos.
 
 **Bindings:** secrets are not auto-env. A secret is bound into a Template /
 Sandbox / Workspace env field by key (`OPENAI_API_KEY` ← stored secret, `latest`
@@ -222,7 +222,7 @@ or pinned version). Binding key ≠ stored name.
 server-side → injected immediately before use → never returned to the UI. Every
 resolution emits a non-sensitive `secret` audit event (id, version, provider,
 consumer = sandbox id, outcome) to `/console/audit`. Matches paperclip's custody
-chain and mitos's existing no-secret-logging rule. Provider-config validation
+chain and Mitos's existing no-secret-logging rule. Provider-config validation
 rejects credential-shaped fields so provider creds never land in the store.
 
 **Storage decision (no new CRD):** secret *metadata* + provider-vault config +
@@ -238,7 +238,7 @@ managed OpenBao (per-org namespaces) or a KMS. Same binary, same registry code.
 
 ## 9. Proof surface: making the Pareto position visible and verifiable
 
-The README's Pareto thesis: mitos is the only runtime that is simultaneously
+The README's Pareto thesis: Mitos is the only runtime that is simultaneously
 open-source · self-hostable · Kubernetes-native · does live N-way CoW fork of a
 running microVM · warm-claim activate in the tens-of-ms class (P50 ~27 ms,
 measured) · ~3 MiB marginal memory per fork via CoW · data stays on your infra.
@@ -255,7 +255,7 @@ thesis ("only measured signal emits light").
 2. **Fork tree as live Pareto evidence:** annotates each fork's private-dirty
    (unique) set against the shared parent snapshot, proving CoW page-sharing in
    the one view no competitor can render.
-3. **Pareto map, honest:** a "Why mitos" panel in onboarding / empty states
+3. **Pareto map, honest:** a "Why Mitos" panel in onboarding / empty states
    renders the README capability matrix framed exactly as the README frames it
    (the axis is the combination; any competitor number carries the
    vendor-published / not-head-to-head label verbatim). Each axis links to live
@@ -264,7 +264,7 @@ thesis ("only measured signal emits light").
 4. **"Reproduce this"** affordance on every headline metric → points at the
    in-repo harness. Integrity-as-feature.
 5. **Ownership / portability badge** in the chrome: self-host shows "Running on
-   your infrastructure · data never leaves"; hosted shows "Hosted by mitos ·
+   your infrastructure · data never leaves"; hosted shows "Hosted by Mitos ·
    same engine, same API" plus a first-class "export / self-host this" path (and
    the E2B-migration shim). No-lock-in rendered as a feature.
 

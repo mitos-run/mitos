@@ -929,7 +929,7 @@ surface so it is not silently expanded when the device path lands.
 
 ### Isolation tiers: not every node is the same assurance (issue #40)
 
-mitos's default and strongest isolation is the hardware-virtualization microVM
+Mitos's default and strongest isolation is the hardware-virtualization microVM
 (KVM + Firecracker). Two WEAKER mechanisms exist as run-anywhere or fallback
 tiers, and the threat model's job is to make sure they are NEVER silently treated
 as equivalent to hardware virt:

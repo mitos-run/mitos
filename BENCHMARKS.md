@@ -380,7 +380,7 @@ construction with a clear message and prints no number.
 
 ## 1-to-N live fork fan-out (issue #207)
 
-The defensible mitos claim is sub-second 1-to-N live copy-on-write fan-out:
+The defensible Mitos claim is sub-second 1-to-N live copy-on-write fan-out:
 forking ONE warmed base (the template snapshot, built with the repo loaded and
 deps installed) into N children cheaply, with each child a private COW fork of
 the same restored page set. This is a different shape from the single
@@ -426,12 +426,12 @@ unverifiable claim this harness exists to eliminate.**
 ## 1-to-N fan-out competitor comparison (issue #207)
 
 This is the contested-claim comparison. Benchmarking only against E2B would
-overstate the mitos edge (Daytona advertises 27-90 ms creates and Modal markets a
+overstate the Mitos edge (Daytona advertises 27-90 ms creates and Modal markets a
 sandbox snapshot/branch capability), so the honest comparison measures the SAME
 1-to-N fan-out shape on each system:
 
 - **Modal Sandboxes (snapshot/fork)** is the headline competitor: it is the
-  closest analogue to mitos's live COW fan-out (branch one snapshot into many).
+  closest analogue to Mitos's live COW fan-out (branch one snapshot into many).
   Modal is NOT self-hostable, so its number necessarily comes from Modal's hosted
   service, not the reference node; that asymmetry is recorded with any Modal
   figure.
@@ -449,9 +449,9 @@ honesty rule is the same as the create -> first-exec comparison: any competitor
 figure not measured here on the documented hardware is labeled
 **vendor-published** (with a citation), NOT our measurement.
 
-**What this comparison will plainly record.** It will record whether mitos fork
+**What this comparison will plainly record.** It will record whether Mitos fork
 actually beats Modal branching on wall-clock-to-N-ready and per-child
-time-to-ready. If mitos wins, the wedge includes raw fan-out speed. **If it does
+time-to-ready. If Mitos wins, the wedge includes raw fan-out speed. **If it does
 NOT win on raw speed, the wedge is self-hosting plus per-fork network isolation,
 not speed**, and this section will say so. No conclusion and no number is
 pre-written here: the result is OPEN, pending the #16 reference node and a
@@ -469,7 +469,7 @@ first-exec method, a reference adapter (`adapters/mitos.sh`) wired to this repo'
 own harness, and placeholder adapters for each competitor that a reproducer fills
 in (they exit non-zero until then, so a run can never emit a fabricated competitor
 number). The honesty rule is explicit in `bench/competitors/README.md`: we
-publish a mitos number only from our own harness on documented hardware, and any
+publish a Mitos number only from our own harness on documented hardware, and any
 competitor figure not measured here on the same hardware is labeled
 **vendor-published** (with a citation), NOT our measurement. **Status: scaffold +
 methodology in-repo; head-to-head numbers OPEN, pending the #16 reference node and

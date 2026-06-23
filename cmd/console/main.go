@@ -191,8 +191,8 @@ var indexLinks = []string{
 // plain quoted string (no raw string literal) so the HTML stays trivially
 // reviewable.
 var indexTmpl = template.Must(template.New("index").Parse(
-	"<!doctype html><html><head><title>mitos console</title></head><body>" +
-		"<h1>mitos console (dev)</h1>" +
+	"<!doctype html><html><head><title>Mitos console</title></head><body>" +
+		"<h1>Mitos console (dev)</h1>" +
 		"<p>This is the minimal wiring proof. The full SPA is a documented follow-up " +
 		"(docs/saas/console.md). Set the dev headers and call the BFF directly.</p>" +
 		"<ul>{{range .Links}}<li><a href=\"{{.}}\">{{.}}</a></li>{{end}}</ul>" +

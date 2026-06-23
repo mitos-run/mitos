@@ -19,7 +19,7 @@
 # it fails at client construction with a clear message and produces NO number
 # (CLAUDE.md operating principle 1: no unverified claims).
 #
-# Requirements: a running mitos cluster with the controller deployed and a warm
+# Requirements: a running Mitos cluster with the controller deployed and a warm
 # SandboxPool, plus Go (to build the harness) and a KUBECONFIG that can create
 # SandboxClaims and read the per-claim token Secret in the namespace.
 #

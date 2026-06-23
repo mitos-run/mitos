@@ -1,6 +1,6 @@
 # Distribution and registries
 
-How the mitos artifacts reach public registries, and what is automated versus
+How the Mitos artifacts reach public registries, and what is automated versus
 what is a one-time manual or account step. Every listing is configured to
 backlink to https://mitos.run.
 
@@ -105,7 +105,7 @@ annotation lists them so Artifact Hub scans them.
 
 See the per-channel runbooks linked in the table above. The OLM bundle under
 `deploy/olm/bundle` is shared by both OperatorHub.io and the Red Hat certified
-path. Note the technical fit caveat for the Red Hat path: mitos needs KVM and
+path. Note the technical fit caveat for the Red Hat path: Mitos needs KVM and
 nested virtualization plus a privileged DaemonSet, which OpenShift restricts; the
 certified path is gated on real OpenShift-on-bare-metal demand. Details in
 [redhat-certification.md](redhat-certification.md).

@@ -365,7 +365,7 @@ unit-tested without a cluster or KVM; the LIVE integrations are gated as noted.
 ### Layer 1: Cilium Hubble flow logs
 
 Hubble identifies an endpoint by its pod namespace, pod name, and pod labels.
-mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
+Mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
 `mitos.run/pool` labels, so `internal/observability.ResolveSandbox` maps a Hubble
 flow endpoint onto the claim it belongs to, and `ClassifyEgress` turns a flow
 into a per-sandbox egress event with a `Denied` flag (a `DROPPED` verdict is a
@@ -380,16 +380,16 @@ itself is unit-tested (`internal/observability/hubble_test.go`).
 
 ### Layer 2: OpenCost cost attribution
 
-OpenCost reports allocation cost per namespace. mitos meters each claim's
+OpenCost reports allocation cost per namespace. Mitos meters each claim's
 resource-seconds (cpu-core-seconds, memory-GB-seconds). `ReconcileNamespaceCost`
 prices the metered resource-seconds at the cluster rates and compares the sum
 against the OpenCost-reported namespace spend, flagging relative drift beyond a
-tolerance. This checks billing self-consistency: what mitos metered, priced at
+tolerance. This checks billing self-consistency: what Mitos metered, priced at
 cluster rates, should match what OpenCost attributes to the namespace.
 
 Enabling it (cluster-gated): install OpenCost, read the cluster pricing rates and
 the per-namespace allocation from its API, and feed the namespace spend plus the
-per-claim resource-seconds (from the mitos metering pipeline) into
+per-claim resource-seconds (from the Mitos metering pipeline) into
 `ReconcileNamespaceCost`. The namespace-spend-reconciles-within-tolerance
 acceptance test needs a live OpenCost cluster and is gated; the pricing and
 tolerance arithmetic is unit-tested (`internal/observability/opencost_test.go`).

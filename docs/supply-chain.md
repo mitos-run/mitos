@@ -55,7 +55,7 @@ cosign verify-attestation --type spdxjson \
 
 ## Optional: admission-time enforcement
 
-A cluster that wants to refuse unsigned mitos images can enforce the same
+A cluster that wants to refuse unsigned Mitos images can enforce the same
 identity with a policy controller (sigstore policy-controller or Kyverno
 `verifyImages`) using the identity regexp and issuer above. This is a
 deployment choice, not a default; the project ships the signatures, the

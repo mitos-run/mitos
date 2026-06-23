@@ -1,6 +1,6 @@
 package controller
 
-// Isolation tiers (issue #40). A mitos node isolates a sandbox with one of
+// Isolation tiers (issue #40). A Mitos node isolates a sandbox with one of
 // several mechanisms whose assurance levels are NOT equivalent, and the
 // controller must never silently treat a weaker tier as if it were a stronger
 // one. The tier is a property of the NODE (its kernel/runtime), declared via the
@@ -10,7 +10,7 @@ package controller
 // The assurance ordering, strongest to weakest:
 //
 //   - hardware-kvm: a hardware virtualization microVM (Firecracker on /dev/kvm
-//     backed by VMX/SVM). The strongest tier mitos offers and the default
+//     backed by VMX/SVM). The strongest tier Mitos offers and the default
 //     posture; the threat model's isolation assumptions (docs/threat-model.md)
 //     are written for it.
 //   - pvm: Firecracker on PVM (pagetable-based virtual machine, Ant/Alibaba), a

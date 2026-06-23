@@ -1,11 +1,11 @@
 ---
 name: mitos-sandboxes
-description: Use when an agent needs isolated, forkable compute, running untrusted or model-written code safely, or exploring several attempts in parallel (best-of-N) and keeping the winner. mitos boots Firecracker microVMs and forks a running VM via copy-on-write snapshots, so a fan-out is cheap and each attempt is hardware-isolated. Pairs with the mitos-mcp server (the tools) and the Python/TypeScript SDKs.
+description: Use when an agent needs isolated, forkable compute, running untrusted or model-written code safely, or exploring several attempts in parallel (best-of-N) and keeping the winner. Mitos boots Firecracker microVMs and forks a running VM via copy-on-write snapshots, so a fan-out is cheap and each attempt is hardware-isolated. Pairs with the mitos-mcp server (the tools) and the Python/TypeScript SDKs.
 ---
 
-# Using mitos snapshot-fork sandboxes
+# Using Mitos snapshot-fork sandboxes
 
-mitos gives an agent isolated, forkable computers. Each sandbox is a Firecracker
+Mitos gives an agent isolated, forkable computers. Each sandbox is a Firecracker
 microVM. Forking copies a running VM with copy-on-write, so spawning N attempts
 from a warm base is fast and you pay only for the memory each attempt dirties.
 
@@ -16,7 +16,7 @@ prose: every failure is a structured envelope, branch on `code` and follow
 
 ## Connecting
 
-The hosted production mitos is at `https://mitos.run`. The simplest path is one
+The hosted production Mitos is at `https://mitos.run`. The simplest path is one
 login: run `mitos auth login --token <session>` once and it writes a shared
 credential file (`~/.config/mitos/credentials.json`, honoring `MITOS_CONFIG_DIR`).
 The Python and TypeScript SDKs, the `mitos` CLI, and `mitos-mcp` all pick up the

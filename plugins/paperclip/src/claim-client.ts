@@ -1,4 +1,4 @@
-// The claim-mode orchestration: drives a minimal mitos cluster client through
+// The claim-mode orchestration: drives a minimal Mitos cluster client through
 // the Paperclip provider lifecycle (acquire -> assert installs -> teardown with
 // extract-then-delete). The MitosClaimClient interface is the thin seam this
 // logic talks to, so it is unit testable with a fake (no cluster, no Paperclip

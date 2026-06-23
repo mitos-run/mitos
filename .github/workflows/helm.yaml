@@ -1,6 +1,6 @@
 name: Helm chart
 
-# Lint and render the mitos Helm chart so it cannot drift from deploy/ or ship
+# Lint and render the Mitos Helm chart so it cannot drift from deploy/ or ship
 # broken. Runs on changes to the chart or the manifests it mirrors.
 on:
   push:

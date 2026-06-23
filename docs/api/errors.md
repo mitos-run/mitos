@@ -142,7 +142,7 @@ proxy 502, a raw transport failure), the SDK synthesizes a code from the HTTP
 status (for example `unavailable` for 503, `rate_limited` for 429) and a
 status-derived remediation, so a caller still gets `code` + `remediation`. Those
 synthesized codes are SDK-local fallbacks for non-enveloped responses; the codes
-in the table above are the ones the mitos servers actually emit.
+in the table above are the ones the Mitos servers actually emit.
 
 ## gRPC status details
 
