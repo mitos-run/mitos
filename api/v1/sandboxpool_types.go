@@ -27,7 +27,7 @@ type SandboxPool struct {
 
 	// Status reports snapshot and warm-pool readiness. It is unchanged from
 	// v1alpha1 (the migration re-homes only spec fields).
-	Status v1alpha1.SandboxPoolStatus `json:"status,omitempty"`
+	Status SandboxPoolStatus `json:"status,omitempty"`
 }
 
 // SandboxPoolSpec is the v1alpha2 pool spec. Exactly one of Template (inline) or
@@ -44,7 +44,7 @@ type SandboxPoolSpec struct {
 	// rarer case of several pools sharing one template definition. Mutually
 	// exclusive with Template. Exactly one of Template or TemplateRef must be set.
 	// +optional
-	TemplateRef *v1alpha1.LocalObjectReference `json:"templateRef,omitempty"`
+	TemplateRef *LocalObjectReference `json:"templateRef,omitempty"`
 
 	// Snapshots configures the per-node snapshot fan-out: how many warm snapshot
 	// restores each node holds, the prefetch posture, and the refresh schedule.
@@ -66,17 +66,17 @@ type SandboxPoolSpec struct {
 	// the VMM still runs, then re-pends. Carried unchanged from 	// +kubebuilder:validation:Enum=Kill;Checkpoint
 	// +kubebuilder:default=Kill
 	// +optional
-	DrainPolicy v1alpha1.HuskDrainPolicy `json:"drainPolicy,omitempty"`
+	DrainPolicy HuskDrainPolicy `json:"drainPolicy,omitempty"`
 
 	// Placement pins this pool's husk pods (and the sandbox VMs they run) to a
 	// dedicated set of nodes for hard tenant separation (issue #172). Carried
 	// unchanged from 	// +optional
-	Placement *v1alpha1.PoolPlacement `json:"placement,omitempty"`
+	Placement *PoolPlacement `json:"placement,omitempty"`
 
 	// CPUPinning configures dynamic post-ready CPU pinning and a launch-time
 	// scheduling-priority bump for this pool's sandbox VMs (issue #168). Carried
 	// unchanged from 	// +optional
-	CPUPinning *v1alpha1.CPUPinningSpec `json:"cpuPinning,omitempty"`
+	CPUPinning *CPUPinningSpec `json:"cpuPinning,omitempty"`
 }
 
 // PoolTemplateSpec is the inline pool template: every field of the v1alpha1
@@ -93,7 +93,7 @@ type PoolTemplateSpec struct {
 
 	// BuildSteps is the ordered, declarative build recipe (issue #220), the
 	// code-first alternative to Init. Carried unchanged from 	// +optional
-	BuildSteps []v1alpha1.BuildStep `json:"buildSteps,omitempty"`
+	BuildSteps []BuildStep `json:"buildSteps,omitempty"`
 
 	// Command overrides the container entrypoint inside the sandbox.
 	// +optional
@@ -105,17 +105,17 @@ type PoolTemplateSpec struct {
 
 	// Resources is the per-sandbox CPU and memory request (and optional GPU).
 	// +optional
-	Resources v1alpha1.SandboxResources `json:"resources,omitempty"`
+	Resources SandboxResources `json:"resources,omitempty"`
 
 	// Volumes are the backing drives attached to each sandbox, with per-volume
 	// fork policies (Fresh, Share, Clone, Snapshot).
 	// +optional
-	Volumes []v1alpha1.SandboxVolume `json:"volumes,omitempty"`
+	Volumes []SandboxVolume `json:"volumes,omitempty"`
 
 	// Network is the per-sandbox egress/inbound posture enforced by the per-tap
 	// nftables datapath. Mapped from the v1alpha1 networkPolicy field.
 	// +optional
-	Network *v1alpha1.NetworkPolicy `json:"network,omitempty"`
+	Network *NetworkPolicy `json:"network,omitempty"`
 
 	// Encrypted requests at-rest encryption of the template snapshot and every
 	// fork built from it. Carried unchanged from 	// +kubebuilder:default=false
@@ -160,7 +160,7 @@ type PoolSnapshots struct {
 	// SnapshotAfter is the trigger condition before a snapshot is taken (for
 	// example Ready). Re-homed from v1alpha1 spec.snapshotAfter.
 	// +optional
-	SnapshotAfter v1alpha1.SnapshotTrigger `json:"snapshotAfter,omitempty"`
+	SnapshotAfter SnapshotTrigger `json:"snapshotAfter,omitempty"`
 
 	// SnapshotDelay is the delay after the trigger before the snapshot is taken,
 	// allowing init scripts to finish. Re-homed from v1alpha1 spec.snapshotDelay.
