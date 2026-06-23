@@ -29,7 +29,7 @@ rules:
   # The live-sandbox view reads the control-plane records, scoped to one org at
   # query time. Read-only; the console never mutates the engine CRDs.
   - apiGroups: ["mitos.run"]
-    resources: ["sandboxes", "sandboxclaims"]
+    resources: ["sandboxes", "sandboxpools", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -1,7 +1,7 @@
 {{- if .Values.facade.enabled }}
 # agents.x-k8s.io conformance facade: opt-in via facade.enabled. Maps each
-# upstream agents.x-k8s.io/v1alpha1 Sandbox onto a husk-backed SandboxClaim. It
-# assumes the upstream agents.x-k8s.io Sandbox CRD is installed out of band.
+# upstream agents.x-k8s.io/v1alpha1 Sandbox onto a husk-backed mitos.run Sandbox.
+# It assumes the upstream agents.x-k8s.io Sandbox CRD is installed out of band.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -63,8 +63,7 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxclaims
-      - sandboxtemplates
+      - sandboxes
       - sandboxpools
     verbs:
       - create
@@ -77,6 +76,7 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
+      - sandboxes/status
       - sandboxpools/status
     verbs:
       - get
