@@ -289,7 +289,7 @@ class AsyncSandbox:
             obj = await asyncio.to_thread(
                 self._api.get_namespaced_custom_object,
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-                plural="sandboxclaims", name=self.name,
+                plural="sandboxes", name=self.name,
             )
             status = obj.get("status", {})
             self._phase = SandboxPhase(status.get("phase", "Pending"))
@@ -301,13 +301,13 @@ class AsyncSandbox:
             if self._phase == SandboxPhase.FAILED:
                 raise AgentRunError(
                     f"sandbox {self.name} failed", code="sandbox_failed",
-                    cause=f"claim {self.name} reached the Failed phase",
-                    remediation="Inspect the SandboxClaim status conditions and the pool capacity.",
+                    cause=f"sandbox {self.name} reached the Failed phase",
+                    remediation="Inspect the Sandbox status conditions and the pool capacity.",
                 )
             await asyncio.sleep(POLL_INTERVAL)
         raise AgentRunError(
             f"sandbox {self.name} not ready after {timeout}s", code="ready_timeout",
-            cause=f"claim {self.name} did not reach Ready within {timeout}s",
+            cause=f"sandbox {self.name} did not reach Ready within {timeout}s",
             remediation="Raise the timeout, or check the controller is reconciling and the pool has capacity.",
         )
 
@@ -329,23 +329,26 @@ class AsyncSandbox:
         returned handles are async (own httpx.AsyncClient each)."""
         fork_name = f"{self.name}-fork-{uuid.uuid4().hex[:6]}"
         fork_obj = {
-            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "SandboxFork",
+            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "Sandbox",
             "metadata": {"name": fork_name, "namespace": self.namespace},
-            "spec": {"sourceRef": {"name": self.name}, "replicas": n, "pauseSource": pause_source},
+            "spec": {
+                "source": {"fromSandbox": {"name": self.name, "pauseSource": pause_source}},
+                "replicas": n,
+            },
         }
         await asyncio.to_thread(
             self._api.create_namespaced_custom_object,
             group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-            plural="sandboxforks", body=fork_obj,
+            plural="sandboxes", body=fork_obj,
         )
         deadline = asyncio.get_event_loop().time() + 30.0
         while asyncio.get_event_loop().time() < deadline:
             obj = await asyncio.to_thread(
                 self._api.get_namespaced_custom_object,
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-                plural="sandboxforks", name=fork_name,
+                plural="sandboxes", name=fork_name,
             )
-            ready = [f for f in obj.get("status", {}).get("forks", []) if f.get("phase") == "Ready"]
+            ready = [f for f in obj.get("status", {}).get("children", []) if f.get("phase") == "Ready"]
             if len(ready) >= n:
                 out = []
                 for f in ready:
@@ -371,7 +374,7 @@ class AsyncSandbox:
             await asyncio.to_thread(
                 self._api.delete_namespaced_custom_object,
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-                plural="sandboxclaims", name=self.name,
+                plural="sandboxes", name=self.name,
             )
         await self.aclose()
 
@@ -428,15 +431,15 @@ class AsyncAgentRun:
             pool = await asyncio.to_thread(self._ensure_default_pool, image)
         if name is None:
             name = f"sandbox-{uuid.uuid4().hex[:8]}"
-        claim = {
-            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "SandboxClaim",
+        sandbox_body = {
+            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "Sandbox",
             "metadata": {"name": name, "namespace": self._namespace},
-            "spec": {"poolRef": {"name": pool}},
+            "spec": {"source": {"poolRef": {"name": pool}}},
         }
         await asyncio.to_thread(
             self._api.create_namespaced_custom_object,
             group=API_GROUP, version=API_VERSION, namespace=self._namespace,
-            plural="sandboxclaims", body=claim,
+            plural="sandboxes", body=sandbox_body,
         )
         sb = AsyncSandbox(
             id=name, endpoint="", namespace=self._namespace, pool=pool,
@@ -451,10 +454,10 @@ class AsyncAgentRun:
         obj = await asyncio.to_thread(
             self._api.get_namespaced_custom_object,
             group=API_GROUP, version=API_VERSION, namespace=self._namespace,
-            plural="sandboxclaims", name=name,
+            plural="sandboxes", name=name,
         )
         status = obj.get("status", {})
-        pool = obj.get("spec", {}).get("poolRef", {}).get("name", "")
+        pool = obj.get("spec", {}).get("source", {}).get("poolRef", {}).get("name", "")
         sb = AsyncSandbox(
             id=status.get("sandboxID") or name, endpoint=status.get("endpoint", ""),
             namespace=self._namespace, pool=pool, api=self._api, core_api=self._core_api,
@@ -466,10 +469,10 @@ class AsyncAgentRun:
         return sb
 
     def _ensure_default_pool(self, image: str) -> str:
-        """get-or-create the default SandboxTemplate + SandboxPool for an image.
-        Kept identical to the sync AgentRun._ensure_default_pool: the CRD splits
-        image (SandboxTemplate.spec.image) from the pool (SandboxPool.spec.
-        templateRef), so both objects are materialized under the same name."""
+        """get-or-create the default SandboxPool for an image. In v1 the
+        SandboxTemplate kind is removed; the image lives as inline
+        SandboxPool.spec.template.image. A pre-existing pool is reused
+        untouched; a missing one is created as a single SandboxPool."""
         name = default_pool_name(image)
         try:
             self._api.get_namespaced_custom_object(
@@ -480,16 +483,10 @@ class AsyncAgentRun:
         except k8s().ApiException as exc:
             if exc.status != 404:
                 raise
-        template = {
-            "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "SandboxTemplate",
-            "metadata": {"name": name, "namespace": self._namespace},
-            "spec": {"image": image},
-        }
-        self._create_or_reuse(template, "sandboxtemplates")
         pool = {
             "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "SandboxPool",
             "metadata": {"name": name, "namespace": self._namespace},
-            "spec": {"templateRef": {"name": name}, "replicas": 1},
+            "spec": {"template": {"image": image}, "replicas": 1},
         }
         self._create_or_reuse(pool, "sandboxpools")
         return name

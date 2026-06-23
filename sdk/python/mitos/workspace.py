@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from kubernetes import client as k8s_client
 
 API_GROUP = "mitos.run"
-API_VERSION = "v1alpha1"
+API_VERSION = "v1"
 
 
 @dataclass

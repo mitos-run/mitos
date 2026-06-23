@@ -72,6 +72,7 @@ def test_terminate_with_outputs_patches_and_returns_workspace():
     ws_name = sb.terminate(outputs=["/workspace/dist", {"diff": True}], checkpoint=True)
     assert ws_name == "proj-x"
     patch_body = api.patch_namespaced_custom_object.call_args.kwargs["body"]
-    assert patch_body["spec"]["outputs"] == [{"path": "/workspace/dist"}, {"diff": True}]
-    assert patch_body["spec"]["checkpointOnTerminate"] is True
+    # v1: outputs moved to lifetime.onTerminate.outputs; checkpoint -> lifetime.onTerminate.snapshot
+    assert patch_body["spec"]["lifetime"]["onTerminate"]["outputs"] == [{"path": "/workspace/dist"}, {"diff": True}]
+    assert patch_body["spec"]["lifetime"]["onTerminate"]["snapshot"] is True
     api.delete_namespaced_custom_object.assert_called_once()

@@ -33,38 +33,35 @@ def _agentrun_with_fake_api():
 
 def test_sandbox_image_creates_pool_when_missing():
     c = _agentrun_with_fake_api()
-    # get_namespaced_custom_object raises 404 -> template+pool absent -> create.
+    # get_namespaced_custom_object raises 404 -> pool absent -> create.
     from kubernetes.client.rest import ApiException
     c._api.get_namespaced_custom_object.side_effect = ApiException(status=404)
 
     with mock.patch.object(AgentRun, "create") as create:
         c.sandbox(image="python")
-        # The created objects: a SandboxTemplate (spec.image) and a SandboxPool
-        # referencing it (spec.templateRef).
+        # The created object: a single SandboxPool with inline spec.template.image
+        # (v1: SandboxTemplate is gone; the image lives in SandboxPool.spec.template).
         bodies = [kw["body"] for _, kw in c._api.create_namespaced_custom_object.call_args_list]
         kinds = {b["kind"]: b for b in bodies}
-        assert "SandboxTemplate" in kinds
         assert "SandboxPool" in kinds
-        assert kinds["SandboxTemplate"]["metadata"]["name"] == "mitos-default-python"
-        assert kinds["SandboxTemplate"]["spec"]["image"] == "python"
+        assert "SandboxTemplate" not in kinds
         assert kinds["SandboxPool"]["metadata"]["name"] == "mitos-default-python"
-        assert kinds["SandboxPool"]["spec"]["templateRef"]["name"] == "mitos-default-python"
-        # And a claim was created from that pool.
+        assert kinds["SandboxPool"]["spec"]["template"]["image"] == "python"
+        assert kinds["SandboxPool"]["apiVersion"] == "mitos.run/v1"
+        # And a sandbox was created from that pool.
         create.assert_called_once()
         assert create.call_args.kwargs["pool"] == "mitos-default-python"
 
 
 def _get_object_router(pool_image):
     """Routes get_namespaced_custom_object by plural: an existing default pool
-    whose templateRef points at a SandboxTemplate carrying pool_image."""
+    with an inline spec.template carrying pool_image (v1: no SandboxTemplate)."""
     name = "mitos-default-python"
 
     def _get(**kwargs):
         plural = kwargs["plural"]
         if plural == "sandboxpools":
-            return {"metadata": {"name": name}, "spec": {"templateRef": {"name": name}}}
-        if plural == "sandboxtemplates":
-            return {"metadata": {"name": name}, "spec": {"image": pool_image}}
+            return {"metadata": {"name": name}, "spec": {"template": {"image": pool_image}}}
         raise AssertionError(f"unexpected plural {plural}")
 
     return _get
@@ -94,14 +91,16 @@ def test_sandbox_image_reuse_with_colliding_slug_raises_mismatch():
 
 
 def test_sandbox_image_reuse_fails_closed_when_template_unreadable():
-    from kubernetes.client.rest import ApiException
-
+    # Pool exists but spec.template.image is absent (empty template): the client
+    # cannot prove the image matches, so it must fail closed rather than silently
+    # running the wrong image.
     c = _agentrun_with_fake_api()
 
     def _get(**kwargs):
         if kwargs["plural"] == "sandboxpools":
-            return {"metadata": {"name": "mitos-default-python"}, "spec": {"templateRef": {"name": "mitos-default-python"}}}
-        raise ApiException(status=404)
+            # Inline template present but image field is missing.
+            return {"metadata": {"name": "mitos-default-python"}, "spec": {"template": {}}}
+        raise AssertionError(f"unexpected plural {kwargs['plural']}")
 
     c._api.get_namespaced_custom_object.side_effect = _get
     with mock.patch.object(AgentRun, "create"):
