@@ -23,7 +23,7 @@ mod base64_bytes {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(data: &[u8]) -> String {
-        let mut out = Vec::with_capacity((data.len() + 2) / 3 * 4);
+        let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
         let mut chunks = data.chunks_exact(3);
         for chunk in chunks.by_ref() {
             let b0 = chunk[0] as usize;
