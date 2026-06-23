@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/mitos-run/mitos/compare/v0.14.0...v0.15.0) (2026-06-23)
+
+
+### Features
+
+* **api:** consolidate to stable mitos.run/v1 (three nouns), remove v1alpha1 ([#299](https://github.com/mitos-run/mitos/issues/299)) ([30a0484](https://github.com/mitos-run/mitos/commit/30a0484461b62c0758f81cb08ea140c494d97d6a))
+
+
+### Bug Fixes
+
+* **krew:** point plugin homepage at the GitHub repo for the stars badge ([#307](https://github.com/mitos-run/mitos/issues/307)) ([56f48e1](https://github.com/mitos-run/mitos/commit/56f48e1016f2dff310196c14c1883704f6ec8b34))
+
 ## [0.14.0](https://github.com/mitos-run/mitos/compare/v0.13.0...v0.14.0) (2026-06-23)
 
 
