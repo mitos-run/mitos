@@ -171,15 +171,26 @@ pub fn handle_exec(req: &ExecRequest, env: &Mutex<HashMap<String, String>>) -> R
     let timeout_secs = if req.timeout == 0 { 30 } else { req.timeout };
     let timeout = Duration::from_secs(timeout_secs as u64);
 
-    // Default to /workspace when no directory is specified (matches Go behavior).
-    // If /workspace does not exist (e.g., on a dev machine outside a VM),
-    // fall back to the system temp directory so unit tests can run cross-platform.
+    // Default to /workspace when no directory is specified. On Linux (the real
+    // target) /workspace is used unconditionally, matching Go: a missing dir
+    // yields exit_code 1 rather than silently succeeding in a temp dir.
+    // On macOS (dev-only, outside a VM) fall back to temp_dir so unit tests run.
     let working_dir = if req.working_dir.is_empty() {
-        let ws = std::path::Path::new("/workspace");
-        if ws.exists() {
+        #[cfg(target_os = "linux")]
+        {
             "/workspace".to_string()
-        } else {
-            std::env::temp_dir().to_string_lossy().into_owned()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Dev-only: /workspace does not exist on macOS outside a VM. On Linux
+            // (the real target) /workspace is used unconditionally, matching Go:
+            // a missing dir yields exit_code 1 rather than silently succeeding.
+            let ws = std::path::Path::new("/workspace");
+            if ws.exists() {
+                "/workspace".to_string()
+            } else {
+                std::env::temp_dir().to_string_lossy().into_owned()
+            }
         }
     } else {
         req.working_dir.clone()
@@ -196,41 +207,108 @@ pub fn handle_exec(req: &ExecRequest, env: &Mutex<HashMap<String, String>>) -> R
     let req_env = req.env.as_ref().unwrap_or(&empty_req_env);
     let merged = merge_env(&base_env, &configured_snapshot, req_env);
 
-    // Spawn the child; use a thread + channel pattern to enforce the timeout
-    // on macOS/Linux without relying on linux-only prctl tricks.
-    let command = req.command.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Spawn the child with piped stdout/stderr. We keep the Child handle here
+    // so we can call child.kill() on timeout, matching Go's exec.CommandContext
+    // which SIGKILLs the child when the deadline is hit (kill-on-deadline).
+    let mut child = match std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&req.command)
+        .current_dir(&working_dir)
+        .env_clear()
+        .envs(merged.iter().filter_map(|kv| {
+            kv.find('=').map(|eq| (&kv[..eq], &kv[eq + 1..]))
+        }))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Err(e) => {
+            return Response {
+                ok: true,
+                exec: Some(crate::protocol::ExecResponse {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exec_time_ms: start.elapsed().as_micros() as f64 / 1000.0,
+                }),
+                ..Default::default()
+            };
+        }
+        Ok(c) => c,
+    };
 
-    std::thread::spawn(move || {
-        let result = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&command)
-            .current_dir(&working_dir)
-            .env_clear()
-            .envs(merged.iter().filter_map(|kv| {
-                kv.find('=').map(|eq| (&kv[..eq], &kv[eq + 1..]))
-            }))
-            .output();
-        let _ = tx.send(result);
+    // Take ownership of the pipes and drain them on a thread so the child never
+    // blocks on a full pipe buffer. We keep `child` in the parent so we can
+    // call child.kill() on timeout, matching Go's exec.CommandContext
+    // kill-on-deadline behavior.
+    use std::sync::{Arc, Mutex as StdMutex};
+    let stdout_buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+    let stderr_buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+
+    let out_clone = Arc::clone(&stdout_buf);
+    let err_clone = Arc::clone(&stderr_buf);
+
+    // Drain both pipes concurrently on one thread each. Save handles so we can
+    // join them after the child exits or is killed, ensuring no output is lost.
+    let drain_stdout = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stdout_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *out_clone.lock().unwrap() = buf;
     });
+    let drain_stderr = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *err_clone.lock().unwrap() = buf;
+    });
+
+    // Poll child.try_wait() until it exits or the timeout elapses. On timeout,
+    // kill the child and reap it so nothing leaks. This mirrors Go's
+    // exec.CommandContext kill-on-deadline behavior.
+    let poll_interval = Duration::from_millis(10);
+    let deadline = std::time::Instant::now() + timeout;
+    let status_result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // Kill the child on timeout; ignore error if it already exited.
+                    let _ = child.kill();
+                    // Reap so no zombie is left.
+                    let _ = child.wait();
+                    break Err(())
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => break Err(()),
+        }
+    };
 
     let exit_code: i32;
     let stdout_str: String;
     let stderr_str: String;
 
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => {
-            exit_code = output.status.code().unwrap_or(1);
-            stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
-            stderr_str = String::from_utf8_lossy(&output.stderr).into_owned();
+    match status_result {
+        Ok(status) => {
+            // Join the pipe-draining threads so all output is captured before
+            // we read the shared buffers.
+            let _ = drain_stdout.join();
+            let _ = drain_stderr.join();
+            exit_code = status.code().unwrap_or(1);
+            stdout_str = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+            stderr_str = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
         }
-        Ok(Err(e)) => {
-            exit_code = 1;
-            stdout_str = String::new();
-            stderr_str = e.to_string();
-        }
-        Err(_) => {
-            // Timeout: exit code 124 (matches Go's ctx.Err() == DeadlineExceeded path).
+        Err(()) => {
+            // On timeout the child was already killed and reaped; drain threads
+            // will finish quickly as pipes are now closed.
+            let _ = drain_stdout.join();
+            let _ = drain_stderr.join();
             exit_code = 124;
             stdout_str = String::new();
             stderr_str = String::new();
@@ -492,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn configure_values_are_not_returned_or_logged() {
+    fn configure_secret_not_echoed_in_response() {
         let env = Mutex::new(HashMap::new());
         let req = serde_json::from_str(r#"{"type":"configure","configure":{"secrets":{"TOKEN":"s3cret"}}}"#).unwrap();
         let resp = dispatch(&req, &env);
@@ -509,5 +587,20 @@ mod tests {
         let resp = dispatch(&req, &env);
         assert!(!resp.ok);
         assert!(resp.error.contains("not implemented in spike agent"));
+    }
+
+    // Verify that a timed-out exec returns exit_code 124 and does not hang.
+    // Mirrors Go's exec.CommandContext kill-on-deadline: exit 124 on timeout.
+    #[test]
+    fn exec_timeout_returns_124_and_does_not_hang() {
+        let env = Mutex::new(HashMap::new());
+        // sleep 60 would block forever; timeout of 1 s kills it and returns 124.
+        let req = serde_json::from_str(
+            r#"{"type":"exec","exec":{"command":"sleep 60","timeout":1}}"#,
+        )
+        .unwrap();
+        let resp = dispatch(&req, &env);
+        assert!(resp.ok);
+        assert_eq!(resp.exec.unwrap().exit_code, 124);
     }
 }
