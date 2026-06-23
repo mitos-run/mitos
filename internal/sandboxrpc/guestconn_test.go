@@ -12,7 +12,8 @@ import (
 
 // fakeGuest implements GuestConn for tests. It emits a scripted sequence of
 // stdout chunks then a terminal exit code. All other GuestConn methods are
-// stubs that return an "unimplemented in fake" error.
+// stubs that return an "unimplemented in fake" error; Tasks 2.2+ override them
+// via embedding in fileGuest (and the other task-specific fake types).
 type fakeGuest struct {
 	execChunks []string
 	exit       int32
@@ -38,6 +39,32 @@ func (s *fakeExecStream) Close() error { return nil }
 
 func (f *fakeGuest) Exec(_ context.Context, _ *sandboxv1.ExecOpen) (ExecStream, error) {
 	return &fakeExecStream{chunks: f.execChunks, exit: f.exit}, nil
+}
+
+// File operation stubs. Tasks 2.2+ override these in embedding structs.
+
+func (f *fakeGuest) ReadFile(_ context.Context, _ string, _, _ int64) ([][]byte, error) {
+	return nil, errors.New("ReadFile: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) WriteFile(_ context.Context, _ string, _ [][]byte) (*WriteFileResult, error) {
+	return nil, errors.New("WriteFile: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) List(_ context.Context, _ string, _ int32, _ string, _ string) (*ListResult, error) {
+	return nil, errors.New("List: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Stat(_ context.Context, _ string) (*FileInfo, error) {
+	return nil, errors.New("Stat: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Mkdir(_ context.Context, _ string, _ bool) error {
+	return errors.New("Mkdir: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Remove(_ context.Context, _ string, _ bool) error {
+	return errors.New("Remove: unimplemented in fakeGuest")
 }
 
 // execResult collects the output of drainExec.
