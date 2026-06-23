@@ -47,7 +47,7 @@ func (f *fakeGuest) ReadFile(_ context.Context, _ string, _, _ int64) ([][]byte,
 	return nil, errors.New("ReadFile: unimplemented in fakeGuest")
 }
 
-func (f *fakeGuest) WriteFile(_ context.Context, _ string, _ [][]byte) (*WriteFileResult, error) {
+func (f *fakeGuest) WriteFile(_ context.Context, _ string, _ uint32, _ [][]byte) (*WriteFileResult, error) {
 	return nil, errors.New("WriteFile: unimplemented in fakeGuest")
 }
 

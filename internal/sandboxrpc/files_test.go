@@ -22,6 +22,7 @@ type fileGuest struct {
 
 	// WriteFile: recorded args and scripted result.
 	writeGotPath   string
+	writeGotMode   uint32
 	writeGotChunks [][]byte
 	writeResult    *WriteFileResult
 	writeErr       error
@@ -54,8 +55,9 @@ func (g *fileGuest) ReadFile(_ context.Context, _ string, _, _ int64) ([][]byte,
 	return g.readData, g.readErr
 }
 
-func (g *fileGuest) WriteFile(_ context.Context, path string, chunks [][]byte) (*WriteFileResult, error) {
+func (g *fileGuest) WriteFile(_ context.Context, path string, mode uint32, chunks [][]byte) (*WriteFileResult, error) {
 	g.writeGotPath = path
+	g.writeGotMode = mode
 	g.writeGotChunks = chunks
 	return g.writeResult, g.writeErr
 }
@@ -129,6 +131,9 @@ func TestWriteThenReadRoundTrips(t *testing.T) {
 	}
 	if g.writeGotPath != "/workspace/test.txt" {
 		t.Fatalf("write path = %q, want /workspace/test.txt", g.writeGotPath)
+	}
+	if g.writeGotMode != 0o644 {
+		t.Fatalf("write mode = %o, want 0644", g.writeGotMode)
 	}
 
 	// Verify data bytes reached the fake guest.
@@ -268,6 +273,9 @@ func TestMkdirForwardsPath(t *testing.T) {
 	}
 	if g.mkdirGotPath != "/workspace/newdir" {
 		t.Fatalf("mkdir path = %q, want /workspace/newdir", g.mkdirGotPath)
+	}
+	if !g.mkdirGotRecursive {
+		t.Fatal("mkdir recursive = false, want true")
 	}
 }
 

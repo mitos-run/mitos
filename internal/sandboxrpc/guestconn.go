@@ -99,9 +99,9 @@ type GuestConn interface {
 	ReadFile(ctx context.Context, path string, offset int64, length int64) ([][]byte, error)
 
 	// WriteFile writes the concatenated chunks to the file at path. mode is
-	// the file permission bits; 0 applies a guest default (0o644). Returns
-	// the total bytes written.
-	WriteFile(ctx context.Context, path string, chunks [][]byte) (*WriteFileResult, error)
+	// the file permission bits (e.g. 0o644); 0 applies a guest default.
+	// Returns the total bytes written.
+	WriteFile(ctx context.Context, path string, mode uint32, chunks [][]byte) (*WriteFileResult, error)
 
 	// List enumerates the directory at path. pageSize and pageToken implement
 	// AIP-158 pagination; filter is an optional glob or expression. Returns

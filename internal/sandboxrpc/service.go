@@ -1,12 +1,15 @@
 // Package sandboxrpc serves the Sandbox runtime protocol (proto/sandbox/v1,
-// issue #24) over Connect. This is the PROTOCOL FOUNDATION slice: it lands the
-// Connect transport plus a real, streaming Exec that bridges to the existing
-// sandbox-server exec path (SandboxAPI -> vsock -> guest agent), and a real
-// unary Budget. Every other RPC returns a CodeUnimplemented error with an
-// LLM-legible message naming issue #24, so the service compiles and is honestly
-// partial. The wire migration (guest agent JSON-lines -> this proto, the forkd
-// cluster-internal bridge, the vsock and browser transports, PTY end to end) is
-// a well-scoped set of follow-up slices (docs/api/runtime-protocol.md).
+// issue #24) over Connect. This is the PROTOCOL FOUNDATION slice plus the file
+// RPC group: it lands the Connect transport, a real streaming Exec that bridges
+// to the existing sandbox-server exec path (SandboxAPI -> vsock -> guest agent),
+// a real unary Budget, and the six file RPCs (ReadFile, WriteFile, List, Stat,
+// Mkdir, Remove) which are real when a GuestConn is wired (s.Guest != nil) and
+// otherwise report an LLM-legible CodeUnimplemented follow-up. The remaining
+// RPCs return a CodeUnimplemented error with an LLM-legible message naming issue
+// #24, so the service compiles and is honestly partial. The wire migration
+// (guest agent JSON-lines -> this proto, the forkd cluster-internal bridge, the
+// vsock and browser transports, PTY end to end) is a well-scoped set of
+// follow-up slices (docs/api/runtime-protocol.md).
 package sandboxrpc
 
 import (
@@ -111,8 +114,9 @@ func WithSandboxResolver(r func(ctx context.Context) (string, error)) Option {
 func followup(rpc string) error {
 	return connect.NewError(connect.CodeUnimplemented, fmt.Errorf(
 		"sandbox.v1.Sandbox/%s is not implemented yet: it is a tracked follow-up of issue #24 (Connect runtime protocol). "+
-			"The streaming Exec and the unary Budget RPCs are live on this transport; the remaining runtime surface "+
-			"(files, watch, archive, processes, signal, port-forward, fork/checkpoint/extend, vitals) still rides the "+
+			"The streaming Exec, the unary Budget, and the file RPCs (ReadFile, WriteFile, List, Stat, Mkdir, Remove) are "+
+			"live on this transport when a GuestConn is wired; the remaining runtime surface "+
+			"(watch, archive, processes, signal, port-forward, fork/checkpoint/extend, vitals) still rides the "+
 			"current JSON-over-HTTP sandbox API and the JSON-lines vsock protocol. See docs/api/runtime-protocol.md", rpc))
 }
 

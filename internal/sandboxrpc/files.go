@@ -81,6 +81,7 @@ func (s *Service) WriteFile(ctx context.Context, stream *connect.ClientStream[sa
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("first WriteFileRequest must carry the open oneof (path, mode), got a data frame"))
 	}
 	path := open.GetPath()
+	mode := open.GetMode()
 
 	// Collect all data chunks.
 	var chunks [][]byte
@@ -96,7 +97,7 @@ func (s *Service) WriteFile(ctx context.Context, stream *connect.ClientStream[sa
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("read WriteFile stream: %w", serr))
 	}
 
-	result, err := conn.WriteFile(ctx, path, chunks)
+	result, err := conn.WriteFile(ctx, path, mode, chunks)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("write file %q: %w; check the path is writable inside the sandbox", path, err))
 	}
