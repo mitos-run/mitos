@@ -702,36 +702,27 @@ jobs:
           docker exec "$worker" mkdir -p /var/lib/mitos
           docker cp /tmp/vmlinux "$worker:/var/lib/mitos/vmlinux"
           docker exec "$worker" ls -lh /var/lib/mitos/vmlinux
-      - name: Create a SandboxTemplate and a small SandboxPool
-        # The template references an OCI image (busybox); the pool asks for a
-        # small warm pool of husk pods. The controller in husk mode builds the
-        # snapshot on the KVM node AND maintains the husk pod warm pool pinned to
-        # the snapshot-holding node.
+      - name: Create a SandboxPool with inline template
+        # The pool inlines the v1 template (image, resources). The controller in
+        # husk mode builds the snapshot on the KVM node and maintains the warm
+        # husk pod pool pinned to the snapshot-holding node.
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
-          kind: SandboxTemplate
-          metadata:
-            name: husk-e2e
-            namespace: default
-          spec:
-            image: busybox:stable
-            resources:
-              cpu: "1"
-              memory: 512Mi
-          ---
-          apiVersion: mitos.run/v1alpha1
+          apiVersion: mitos.run/v1
           kind: SandboxPool
           metadata:
             name: husk-e2e
             namespace: default
           spec:
-            templateRef:
-              name: husk-e2e
-            replicas: 2
+            template:
+              image: busybox:stable
+              resources:
+                cpu: "1"
+                memory: 512Mi
+            snapshots:
+              replicasPerNode: 2
           YAML
-          kubectl -n default get sandboxtemplate.mitos.run husk-e2e
           kubectl -n default get sandboxpool husk-e2e
       - name: The pool creates husk pods that schedule onto the KVM node
         # GATE (cluster lifecycle): the controller's pool reconcile CREATES husk
@@ -769,7 +760,7 @@ jobs:
             # controller + forkd logs here so the reconcile error is captured.
             dump
             kubectl -n default describe sandboxpool husk-e2e || true
-            kubectl -n default get sandboxpool,sandboxtemplate -o yaml || true
+            kubectl -n default get sandboxpool -o yaml || true
             exit 1
           fi
 
