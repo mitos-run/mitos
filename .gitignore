@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+
+# Subagent-driven-development working dir (briefs, reports, review diffs): scratch, never committed. Plans and specs live under docs/superpowers/ and ARE tracked.
+.superpowers/
