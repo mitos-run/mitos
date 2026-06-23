@@ -177,8 +177,8 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   - ✅ FOUNDATION (slice 1, this slice): the facade controller maps an upstream
     `Sandbox` onto our husk-backed run path (`internal/facade` +
     `cmd/facade`, a separate opt-in binary): replicas 1 creates/owns our
-    `SandboxClaim` via the `mitos.run/pool` bridge annotation (or a
-    `--default-pool`), the claim Ready phase mirrors into the Sandbox Ready
+    `Sandbox` via the `mitos.run/pool` bridge annotation (or a
+    `--default-pool`), the sandbox Ready phase mirrors into the upstream Sandbox Ready
     condition + replicas + serviceFQDN, replicas 0 / deletion terminates.
     Proven in envtest (the create -> Ready -> delete lifecycle). The faithful
     path was taken: we vendor their Go types after a verified go 1.24 -> 1.26
@@ -277,7 +277,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   cache via Share policy, flagship reversible sleep-consolidation demo.
   Depends on §3; may land as alpha behind a flag with eager-fetch fallback.
   DONE (the declarative foundation): the `Workspace` and `WorkspaceRevision`
-  CRDs in mitos.run/v1alpha1, and the Workspace controller that manages
+  CRDs in mitos.run/v1, and the Workspace controller that manages
   the revision DAG (head/revisions/resumable status with typed conditions +
   observedGeneration), the Pending -> Committed transition with
   immutability of a committed revision, `fromWorkspaceRevision` lineage
@@ -287,14 +287,14 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   transfer on the guest agent (vsock `TarDir`/`UntarDir`, a workspace
   allowlist + traversal sanitize), the host `internal/workspace`
   Hydrate/Dehydrate helpers over the node content-addressed store, and the
-  sandbox<->workspace binding (`SandboxClaim.spec.workspaceRef`): the head
+  sandbox<->workspace binding (`Sandbox.spec.workspaceRef`): the head
   hydrates into `/workspace` on start, a new committed `WorkspaceRevision`
-  with `fromClaim` lineage dehydrates on terminate (the head advances),
+  with `fromSandbox` lineage dehydrates on terminate (the head advances),
   single-writer-per-workspace, and secrets excluded from revisions. PROVEN on
   KVM (the in-VM tar round trip byte-identical) and in envtest (the binding +
   revision lifecycle behind a transfer seam); see docs/workspaces.md.
   DONE (slice 3, outputs extraction + git rendezvous for fork-and-merge): a
-  claim `spec.outputs` narrows the dehydrate capture to the listed `/workspace`
+  sandbox `spec.lifetime.onTerminate.outputs` narrows the dehydrate capture to the listed `/workspace`
   subtrees (path filter; no path output captures the whole workspace) and a
   `{diff: true}` output records a content-hash diff of the new revision against
   the parent head on `status.diffSummary`; a `{git}` output renders a per-attempt
@@ -407,8 +407,8 @@ Format-freeze blockers:
   encryption (#31 follow-up, done for the local provider): the controller
   generates a per-template 256-bit DEK with `crypto/rand`, wraps it with a KMS
   KEK via `kms.Wrapper` (`internal/kms`), zeroizes the plaintext, and stores ONLY
-  the wrapped DEK plus the non-secret KEK id in a `<template>-enc-key` Secret
-  owner-referenced to the `SandboxTemplate` for GC crypto-shred; the plaintext DEK
+  the wrapped DEK plus the non-secret KEK id in a `<pool>-enc-key` Secret
+  owner-referenced to the `SandboxPool` for GC crypto-shred; the plaintext DEK
   never reaches etcd or disk. It delivers the wrapped DEK + KEK id to forkd over
   the mTLS gRPC `CreateTemplate` and `Fork` requests; forkd unwraps via its KEK
   (`--kek-file` local AES-256-GCM provider), uses the plaintext DEK for cryptsetup,
@@ -498,8 +498,8 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - 🔨 Clock resync after restore (NotifyForked steps CLOCK_REALTIME from the
   host wall clock, 500ms tolerance); kvm-test asserts each fork wall clock
   within 2s of the runner (post-snapshot TLS cert validation follow-up)
-- ✅ Live-fork secret policy: a fork of a secret-holding claim is rejected
-  without `allowSecretInheritance: true`, with a `SecretInheritanceDenied`
+- ✅ Live-fork secret policy: a fork of a secret-holding sandbox is rejected
+  without `secretInheritance: inherit`, with a `SecretInheritanceDenied`
   condition; envtest-proven in internal/controller/fork_secrets_test.go.
 - 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
   `privileged: true` for an explicit capability list (implemented; kvm-test
@@ -805,7 +805,7 @@ verified. In rough order of leverage:
   client in standard CI; see docs/mcp.md. Open: workspace tools (#21) and
   capability-budget advertisement (#24).
 - ✅ **mitos CLI + one-command local dev**: `mitos run` and `mitos
-  sandbox create|ls|exec|fork|terminate` drive the `SandboxClaim` path over
+  sandbox create|ls|exec|fork|terminate` drive the `Sandbox` path over
   kubeconfig with token-scoped exec; `mitos dev up|down` brings up a kind
   cluster running a mock control plane (controller `--mock
   --disable-pki-bootstrap`, forkd `--mock`, no KVM) from `deploy/dev/`. PROVEN in
@@ -847,11 +847,11 @@ verified. In rough order of leverage:
 - ⬜ File transfer ergonomics and operator port-forwarding beyond the runtime
   protocol above; the code-interpreter kernel baked into the husk cluster base
   image so `run_code` is live (not `KernelUnavailable`) by default.
-- ✅ `kubectl mitos` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
+- ✅ `kubectl mitos` plugin: ls (Sandboxes), ps (fork fan-outs), tree (the
   fork/lineage DAG), top (per-sandbox CoW-aware metering from forkd
   `/v1/metering`, honestly labeled, a dash on a missing datum), logs (the husk
   stub pod console plus the guest-console #18 note), and exec (token-scoped
-  operator exec over the sandbox API using the claim's `<claim>-sandbox-token`
+  operator exec over the sandbox API using the sandbox's `<name>-sandbox-token`
   Secret, the same gate the SDK uses) are done (pure formatters + the metering
   match and exec/token resolution unit-tested in CI; live over kubeconfig; the
   kind-e2e smoke proves ls/ps/tree object-level, with exec/top/logs of a running
@@ -873,7 +873,7 @@ verified. In rough order of leverage:
   carries a non-empty code and remediation and never a secret value; both SDKs
   parse it into a structured `AgentRunError`. The Python SDK gains the one-liner
   `AgentRun().sandbox("python")` backed by a lazy admin-disableable default pool
-  (a `SandboxTemplate` plus a `SandboxPool` under a deterministic name),
+  (a `SandboxPool` with an inline template, under a deterministic name),
   `from_name()` reconnect, `wait_until_ready()`, and an `AsyncAgentRun` over
   `httpx.AsyncClient` for the hot paths (exec, files, fork). The TypeScript SDK
   aligns to the same envelope and adds the same `sandbox(image)` and `fromName`,

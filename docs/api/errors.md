@@ -161,9 +161,9 @@ on CRD `status.conditions`. They are JOINT with this catalogue, not duplicative:
 | You see | Where | Read |
 | --- | --- | --- |
 | `not_found` on an exec/file call | sandbox API / SDK | this catalogue; the sandbox is gone or never became Ready |
-| A claim stuck not Ready | `SandboxClaim.status.conditions` | `docs/conditions.md` (`NoCapacity`, `NoHuskPod`, `ActivateFailed`, ...) |
+| A claim stuck not Ready | `Sandbox.status.conditions` | `docs/conditions.md` (`NoCapacity`, `NoHuskPod`, `ActivateFailed`, ...) |
 | `unauthorized` on a call | sandbox API / SDK | this catalogue; the per-sandbox token is wrong |
-| A fork rejected for secrets | `SandboxFork.status.conditions` | `docs/conditions.md` (`SecretInheritanceDenied`) |
+| A fork rejected for secrets | `Sandbox.status.conditions` | `docs/conditions.md` (`SecretInheritanceDenied`) |
 
 When a control-plane condition explains a runtime failure (a claim that never
 went Ready is why a later call returns `not_found`), the remediation here points
