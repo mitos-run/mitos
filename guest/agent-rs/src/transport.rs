@@ -46,27 +46,29 @@ pub fn read_line_bounded<R: std::io::BufRead>(
         }
         match available.iter().position(|&b| b == b'\n') {
             Some(i) => {
-                buf.extend_from_slice(&available[..=i]);
-                let consumed = i + 1;
-                reader.consume(consumed);
-                if buf.len() - start > limit {
+                let slice = &available[..=i];
+                if (buf.len() - start) + slice.len() > limit {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "line exceeds MaxMessageBytes",
                     ));
                 }
+                buf.extend_from_slice(slice);
+                let consumed = i + 1;
+                reader.consume(consumed);
                 return Ok(buf.len() - start);
             }
             None => {
-                buf.extend_from_slice(available);
-                let consumed = available.len();
-                reader.consume(consumed);
-                if buf.len() - start > limit {
+                let slice = available;
+                if (buf.len() - start) + slice.len() > limit {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "line exceeds MaxMessageBytes",
                     ));
                 }
+                buf.extend_from_slice(slice);
+                let consumed = slice.len();
+                reader.consume(consumed);
             }
         }
     }
@@ -305,7 +307,7 @@ pub fn handle_conn<S: std::io::Read + std::io::Write + Send + 'static>(stream: S
     struct ReadHalf<S>(Arc<Mutex<S>>);
     impl<S: std::io::Read> std::io::Read for ReadHalf<S> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().read(buf)
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).read(buf)
         }
     }
 
