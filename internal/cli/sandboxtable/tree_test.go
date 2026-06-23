@@ -5,39 +5,39 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
-func mkFork(name, source string, replicas, ready, total int32) v1alpha1.SandboxFork {
-	return v1alpha1.SandboxFork{
+func mkForkSandbox(name, source string, replicas, ready int32) v1.Sandbox {
+	return v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef: v1alpha1.LocalObjectReference{Name: source},
-			Replicas:  replicas,
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{
+				FromSandbox: &v1.FromSandboxSource{Name: source},
+			},
+			Replicas: replicas,
 		},
-		Status: v1alpha1.SandboxForkStatus{ReadyForks: ready, TotalForks: total},
+		Status: v1.SandboxStatus{ReadyReplicas: ready},
 	}
 }
 
 func TestBuildLineageMultiLevelChainAndSiblings(t *testing.T) {
 	now := metav1.Now().Time
-	claims := []v1alpha1.SandboxClaim{
-		mkClaim("root", "default", "web", v1alpha1.SandboxReady, "node-1", "ep", 0, now),
+	// root is a pool-sourced sandbox; fork-a and fork-b are children of root;
+	// fork-a1 is a child of fork-a (multi-level chain).
+	sandboxes := []v1.Sandbox{
+		mkSandbox("root", "default", "web", v1.SandboxReady, "node-1", "ep", 0, now),
+		mkForkSandbox("fork-b", "root", 1, 1),
+		mkForkSandbox("fork-a", "root", 2, 2),
+		mkForkSandbox("fork-a1", "fork-a", 1, 0),
 	}
-	// root -> fork-a (two siblings fork-a, fork-b off root); fork-a -> fork-a1
-	// (a second level), proving a fork can itself be a source.
-	forks := []v1alpha1.SandboxFork{
-		mkFork("fork-b", "root", 1, 1, 1),
-		mkFork("fork-a", "root", 2, 2, 2),
-		mkFork("fork-a1", "fork-a", 1, 0, 1),
-	}
-	roots := BuildLineage(claims, forks)
+	roots := BuildLineage(sandboxes)
 	if len(roots) != 1 {
 		t.Fatalf("expected 1 root, got %d", len(roots))
 	}
 	r := roots[0]
-	if r.Name != "root" || r.Kind != "claim" {
-		t.Fatalf("root = %q/%q, want root/claim", r.Name, r.Kind)
+	if r.Name != "root" || r.Kind != "sandbox" {
+		t.Fatalf("root = %q/%q, want root/sandbox", r.Name, r.Kind)
 	}
 	if len(r.Children) != 2 {
 		t.Fatalf("root should have 2 children, got %d", len(r.Children))
@@ -53,15 +53,13 @@ func TestBuildLineageMultiLevelChainAndSiblings(t *testing.T) {
 
 func TestFormatLineageRendersIndentedTree(t *testing.T) {
 	now := metav1.Now().Time
-	claims := []v1alpha1.SandboxClaim{
-		mkClaim("root", "default", "web", v1alpha1.SandboxReady, "node-1", "ep", 0, now),
+	sandboxes := []v1.Sandbox{
+		mkSandbox("root", "default", "web", v1.SandboxReady, "node-1", "ep", 0, now),
+		mkForkSandbox("fork-a", "root", 2, 2),
+		mkForkSandbox("fork-b", "root", 1, 0),
+		mkForkSandbox("fork-a1", "fork-a", 1, 1),
 	}
-	forks := []v1alpha1.SandboxFork{
-		mkFork("fork-a", "root", 2, 2, 2),
-		mkFork("fork-b", "root", 1, 0, 1),
-		mkFork("fork-a1", "fork-a", 1, 1, 1),
-	}
-	out := FormatLineage(BuildLineage(claims, forks))
+	out := FormatLineage(BuildLineage(sandboxes))
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 4 {
 		t.Fatalf("expected 4 lines, got %d:\n%s", len(lines), out)
@@ -70,7 +68,7 @@ func TestFormatLineageRendersIndentedTree(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "root") {
 		t.Errorf("line 0 should start with root: %q", lines[0])
 	}
-	if !strings.Contains(lines[0], "claim") || !strings.Contains(lines[0], "node-1") {
+	if !strings.Contains(lines[0], "sandbox") || !strings.Contains(lines[0], "node-1") {
 		t.Errorf("root line should carry kind+node: %q", lines[0])
 	}
 	// fork-a is a non-last child, so a tee glyph; fork-a1 nests one level deeper.
@@ -91,8 +89,10 @@ func TestFormatLineageRendersIndentedTree(t *testing.T) {
 }
 
 func TestFormatLineageMissingPhaseAndNodeAreDashes(t *testing.T) {
-	forks := []v1alpha1.SandboxFork{mkFork("lonely", "absent-source", 1, 0, 1)}
-	out := FormatLineage(BuildLineage(nil, forks))
+	// An orphan fork-sourced sandbox (source not in the supplied list) surfaces
+	// as a root with dashes for phase+node when status is empty.
+	sandboxes := []v1.Sandbox{mkForkSandbox("lonely", "absent-source", 1, 0)}
+	out := FormatLineage(BuildLineage(sandboxes))
 	// Orphan fork with no ready replicas and no node: phase + node are dashes.
 	if !strings.Contains(out, "lonely") {
 		t.Fatalf("orphan fork should appear: %q", out)
@@ -105,7 +105,7 @@ func TestFormatLineageMissingPhaseAndNodeAreDashes(t *testing.T) {
 }
 
 func TestFormatLineageEmpty(t *testing.T) {
-	out := FormatLineage(BuildLineage(nil, nil))
+	out := FormatLineage(BuildLineage(nil))
 	if !strings.Contains(out, "No sandboxes found") {
 		t.Errorf("empty lineage should report no sandboxes, got %q", out)
 	}

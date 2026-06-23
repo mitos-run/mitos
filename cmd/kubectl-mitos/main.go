@@ -4,11 +4,11 @@
 //
 // Subcommands:
 //
-//	ls    list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
-//	ps    list SandboxForks, or one claim's forks if a name is given
-//	tree  render the fork/lineage DAG (claims -> forks -> forks)
+//	ls    list Sandboxes (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
+//	ps    list fork Sandboxes, or one sandbox's forks if a name is given
+//	tree  render the fork/lineage DAG (sandboxes -> forks -> forks)
 //	top   per-sandbox CoW-aware metering (unique + shared-once memory)
-//	logs  husk stub pod console for a claim, plus the guest console note
+//	logs  husk stub pod console for a sandbox, plus the guest console note
 //	exec  run a command in a sandbox over the token-scoped sandbox API
 //
 // Flags: -n <namespace>, -A (all namespaces). The plugin reads the cluster
@@ -26,7 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cli/sandboxtable"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -35,18 +35,18 @@ import (
 var scheme = runtime.NewScheme()
 
 func init() {
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(v1.AddToScheme(scheme))
 }
 
 const usage = `kubectl mitos: inspect and operate mitos.run sandbox objects
 
 Usage:
-  kubectl mitos ls [-n namespace] [-A]         list SandboxClaims
-  kubectl mitos ps [name] [-n namespace] [-A]  list SandboxForks (or one claim's forks)
+  kubectl mitos ls [-n namespace] [-A]         list Sandboxes
+  kubectl mitos ps [name] [-n namespace] [-A]  list fork Sandboxes (or one sandbox's forks)
   kubectl mitos ps <name> --processes [-n ns]  show the REAL in-guest process table for one sandbox
   kubectl mitos tree [--pool name] [-n ns] [-A] render the fork/lineage DAG
   kubectl mitos top [-n namespace] [-A]        per-sandbox CoW-aware metering
-  kubectl mitos logs <sandbox> [-n namespace]  husk stub pod console for a claim
+  kubectl mitos logs <sandbox> [-n namespace]  husk stub pod console for a sandbox
   kubectl mitos exec <sandbox> [-n ns] -- cmd  run a command in a sandbox
 
 Flags:
@@ -158,7 +158,7 @@ func splitDoubleDash(args []string) (flagArgs, cmd []string) {
 }
 
 // newClient builds a controller-runtime client from the standard kubeconfig
-// resolution with the v1alpha1 scheme registered.
+// resolution with the v1 scheme registered.
 func newClient() (client.Client, error) {
 	cfg, err := ctrlconfig.GetConfig()
 	if err != nil {
@@ -188,11 +188,11 @@ func runLs(namespace string, allNamespaces bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var claims v1alpha1.SandboxClaimList
-	if err := c.List(ctx, &claims, listOpts(namespace, allNamespaces)...); err != nil {
-		return fmt.Errorf("list claims: %w", err)
+	var sandboxes v1.SandboxList
+	if err := c.List(ctx, &sandboxes, listOpts(namespace, allNamespaces)...); err != nil {
+		return fmt.Errorf("list sandboxes: %w", err)
 	}
-	fmt.Print(sandboxtable.FormatClaims(claims.Items, time.Now()))
+	fmt.Print(sandboxtable.FormatSandboxes(sandboxes.Items, time.Now()))
 	return nil
 }
 
@@ -204,15 +204,21 @@ func runPs(namespace string, allNamespaces bool, name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var forks v1alpha1.SandboxForkList
-	if err := c.List(ctx, &forks, listOpts(namespace, allNamespaces)...); err != nil {
-		return fmt.Errorf("list forks: %w", err)
+	var sandboxes v1.SandboxList
+	if err := c.List(ctx, &sandboxes, listOpts(namespace, allNamespaces)...); err != nil {
+		return fmt.Errorf("list sandboxes: %w", err)
 	}
-	items := forks.Items
+	// Filter to fork-sourced sandboxes only (source.fromSandbox set).
+	items := make([]v1.Sandbox, 0, len(sandboxes.Items))
+	for i := range sandboxes.Items {
+		if sandboxes.Items[i].Spec.Source.FromSandbox != nil {
+			items = append(items, sandboxes.Items[i])
+		}
+	}
 	if name != "" {
 		filtered := items[:0:0]
 		for i := range items {
-			if items[i].Spec.SourceRef.Name == name {
+			if items[i].Spec.Source.FromSandbox.Name == name {
 				filtered = append(filtered, items[i])
 			}
 		}

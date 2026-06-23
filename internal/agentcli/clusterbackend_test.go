@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -22,42 +22,42 @@ import (
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	utilruntime.Must(v1alpha1.AddToScheme(s))
+	utilruntime.Must(v1.AddToScheme(s))
 	utilruntime.Must(corev1.AddToScheme(s))
 	return s
 }
 
 func TestClusterBackendCreatePollsReady(t *testing.T) {
-	// Pre-seed a Ready claim so the poll returns immediately. The backend names
-	// the claim deterministically only for new objects; here we drive Create and
-	// then assert it created a claim and returned its name. To exercise the
+	// Pre-seed a Ready sandbox so the poll returns immediately. The backend names
+	// the sandbox deterministically only for new objects; here we drive Create and
+	// then assert it created a sandbox and returned its name. To exercise the
 	// Ready poll we use a fake client whose Create stores the object and a status
 	// that the backend can read back as Ready.
 	scheme := testScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.SandboxClaim{}).
+		WithStatusSubresource(&v1.Sandbox{}).
 		Build()
 
 	be := &ClusterBackend{
 		client:    c,
 		namespace: "default",
 		now:       time.Now,
-		// A short poll so the test stays fast; the backend flips the claim to
+		// A short poll so the test stays fast; the backend flips the sandbox to
 		// Ready via the readyHook injected for the test.
 		pollInterval: time.Millisecond,
 		pollTimeout:  2 * time.Second,
 	}
-	// readyHook simulates the controller reconciling the claim to Ready: as soon
-	// as the backend created the claim, mark it Ready with an endpoint.
+	// readyHook simulates the controller reconciling the sandbox to Ready: as
+	// soon as the backend created the sandbox, mark it Ready with an endpoint.
 	be.readyHook = func(ctx context.Context, name string) {
-		var claim v1alpha1.SandboxClaim
-		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &claim); err != nil {
+		var sandbox v1.Sandbox
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &sandbox); err != nil {
 			return
 		}
-		claim.Status.Phase = v1alpha1.SandboxReady
-		claim.Status.Endpoint = "10.0.0.5:9091"
-		_ = c.Status().Update(ctx, &claim)
+		sandbox.Status.Phase = v1.SandboxReady
+		sandbox.Status.Endpoint = "10.0.0.5:9091"
+		_ = c.Status().Update(ctx, &sandbox)
 	}
 
 	id, err := be.Create(context.Background(), "python-pool")
@@ -68,26 +68,28 @@ func TestClusterBackendCreatePollsReady(t *testing.T) {
 		t.Fatalf("Create returned an empty id")
 	}
 
-	var claim v1alpha1.SandboxClaim
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: id}, &claim); err != nil {
-		t.Fatalf("created claim not found: %v", err)
+	var sandbox v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: id}, &sandbox); err != nil {
+		t.Fatalf("created sandbox not found: %v", err)
 	}
-	if claim.Spec.PoolRef.Name != "python-pool" {
-		t.Fatalf("claim poolRef = %q, want python-pool", claim.Spec.PoolRef.Name)
+	if sandbox.Spec.Source.PoolRef == nil || sandbox.Spec.Source.PoolRef.Name != "python-pool" {
+		t.Fatalf("sandbox poolRef = %v, want python-pool", sandbox.Spec.Source.PoolRef)
 	}
 }
 
 func TestClusterBackendList(t *testing.T) {
 	scheme := testScheme(t)
 	created := metav1.NewTime(time.Now().Add(-90 * time.Second))
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default", CreationTimestamp: created},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "python"}},
-		Status: v1alpha1.SandboxClaimStatus{
-			Phase: v1alpha1.SandboxReady, Node: "node-a", Endpoint: "10.0.0.1:9091",
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python"}},
+		},
+		Status: v1.SandboxStatus{
+			Phase: v1.SandboxReady, Node: "node-a", Endpoint: "10.0.0.1:9091",
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
 
 	be := &ClusterBackend{client: c, namespace: "default", now: time.Now}
 	infos, err := be.List(context.Background(), "default")
@@ -108,20 +110,22 @@ func TestClusterBackendList(t *testing.T) {
 
 func TestClusterBackendTerminate(t *testing.T) {
 	scheme := testScheme(t)
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "p"}},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "p"}},
+		},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
 	be := &ClusterBackend{client: c, namespace: "default", now: time.Now}
 
 	if err := be.Terminate(context.Background(), "sbx-1"); err != nil {
 		t.Fatalf("Terminate: %v", err)
 	}
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "sbx-1"}, &got)
 	if err == nil {
-		t.Fatalf("claim still exists after Terminate")
+		t.Fatalf("sandbox still exists after Terminate")
 	}
 }
 
@@ -129,25 +133,27 @@ func TestClusterBackendForkCreatesFork(t *testing.T) {
 	scheme := testScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.SandboxFork{}).
+		WithStatusSubresource(&v1.Sandbox{}).
 		Build()
 	be := &ClusterBackend{
 		client: c, namespace: "default", now: time.Now,
 		pollInterval: time.Millisecond, pollTimeout: 2 * time.Second,
 	}
 	be.forkReadyHook = func(ctx context.Context, name string, n int) {
-		var fk v1alpha1.SandboxFork
-		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &fk); err != nil {
+		var sandbox v1.Sandbox
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &sandbox); err != nil {
 			return
 		}
-		forks := make([]v1alpha1.ForkInfo, 0, n)
+		children := make([]v1.SandboxChild, 0, n)
 		for i := 0; i < n; i++ {
-			forks = append(forks, v1alpha1.ForkInfo{Name: name + "-" + string(rune('a'+i)), Phase: v1alpha1.SandboxReady})
+			children = append(children, v1.SandboxChild{
+				Name:  name + "-" + string(rune('a'+i)),
+				Phase: v1.SandboxReady,
+			})
 		}
-		fk.Status.ReadyForks = int32(n)
-		fk.Status.TotalForks = int32(n)
-		fk.Status.Forks = forks
-		_ = c.Status().Update(ctx, &fk)
+		sandbox.Status.ReadyReplicas = int32(n)
+		sandbox.Status.Children = children
+		_ = c.Status().Update(ctx, &sandbox)
 	}
 
 	ids, err := be.Fork(context.Background(), "sbx-1", 2)
@@ -157,15 +163,17 @@ func TestClusterBackendForkCreatesFork(t *testing.T) {
 	if len(ids) != 2 {
 		t.Fatalf("Fork ids = %v, want 2", ids)
 	}
-	var forkList v1alpha1.SandboxForkList
-	if err := c.List(context.Background(), &forkList); err != nil {
-		t.Fatalf("list forks: %v", err)
+	var sandboxList v1.SandboxList
+	if err := c.List(context.Background(), &sandboxList); err != nil {
+		t.Fatalf("list sandboxes: %v", err)
 	}
-	if len(forkList.Items) != 1 {
-		t.Fatalf("want 1 SandboxFork created, got %d", len(forkList.Items))
+	// One Sandbox object should have been created (the fork parent).
+	if len(sandboxList.Items) != 1 {
+		t.Fatalf("want 1 Sandbox created, got %d", len(sandboxList.Items))
 	}
-	if forkList.Items[0].Spec.SourceRef.Name != "sbx-1" {
-		t.Fatalf("fork sourceRef = %q, want sbx-1", forkList.Items[0].Spec.SourceRef.Name)
+	forkSandbox := &sandboxList.Items[0]
+	if forkSandbox.Spec.Source.FromSandbox == nil || forkSandbox.Spec.Source.FromSandbox.Name != "sbx-1" {
+		t.Fatalf("fork source = %v, want sbx-1", forkSandbox.Spec.Source.FromSandbox)
 	}
 }
 
@@ -190,15 +198,15 @@ func TestClusterBackendExecSendsBearerAndRedactsToken(t *testing.T) {
 
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
 	scheme := testScheme(t)
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
-		Status:     v1alpha1.SandboxClaimStatus{Phase: v1alpha1.SandboxReady, Endpoint: endpoint},
+		Status:     v1.SandboxStatus{Phase: v1.SandboxReady, Endpoint: endpoint},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1-sandbox-token", Namespace: "default"},
 		Data:       map[string][]byte{"token": []byte(token), "endpoint": []byte(endpoint)},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, secret).Build()
 	be := &ClusterBackend{client: c, namespace: "default", now: time.Now, httpClient: srv.Client()}
 
 	_, err := be.Exec(context.Background(), "sbx-1", "echo hi", 10)
@@ -229,15 +237,15 @@ func TestClusterBackendExecSuccess(t *testing.T) {
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
 
 	scheme := testScheme(t)
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
-		Status:     v1alpha1.SandboxClaimStatus{Phase: v1alpha1.SandboxReady, Endpoint: endpoint},
+		Status:     v1.SandboxStatus{Phase: v1.SandboxReady, Endpoint: endpoint},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1-sandbox-token", Namespace: "default"},
 		Data:       map[string][]byte{"token": []byte(token)},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, secret).Build()
 	be := &ClusterBackend{client: c, namespace: "default", now: time.Now, httpClient: srv.Client()}
 
 	res, err := be.Exec(context.Background(), "sbx-1", "ls", 0)

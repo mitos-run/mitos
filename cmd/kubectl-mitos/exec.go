@@ -14,7 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -26,10 +26,10 @@ type execResult struct {
 	Stderr   string `json:"stderr"`
 }
 
-// runExec resolves the claim's endpoint and per-sandbox bearer token, then runs
-// the command over the sandbox HTTP API and streams the result to stdout/stderr.
-// The exit code of the in-sandbox command becomes this process's exit code so
-// scripts can branch on it.
+// runExec resolves the sandbox's endpoint and per-sandbox bearer token, then
+// runs the command over the sandbox HTTP API and streams the result to
+// stdout/stderr. The exit code of the in-sandbox command becomes this process's
+// exit code so scripts can branch on it.
 func runExec(namespace, name string, cmd []string) error {
 	c, err := newClient()
 	if err != nil {
@@ -59,36 +59,37 @@ func runExec(namespace, name string, cmd []string) error {
 	return nil
 }
 
-// resolveSandboxAuth reads the claim and its owned <claim>-sandbox-token Secret
-// to recover the sandbox ref, the forkd HTTP endpoint, and the bearer token the
-// sandbox API requires. The ref mirrors the SDK: Status.SandboxID, falling back
-// to the claim name. A missing claim, a not-running claim, or a missing token
-// Secret each returns a clear, actionable error rather than a hang.
+// resolveSandboxAuth reads the Sandbox and its owned <sandbox>-sandbox-token
+// Secret to recover the sandbox ref, the forkd HTTP endpoint, and the bearer
+// token the sandbox API requires. The ref mirrors the SDK: Status.SandboxID,
+// falling back to the sandbox name. A missing sandbox, a not-running sandbox,
+// or a missing token Secret each returns a clear, actionable error rather than
+// a hang.
 func resolveSandboxAuth(ctx context.Context, c client.Client, namespace, name string) (ref, endpoint, token string, err error) {
-	var claim v1alpha1.SandboxClaim
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &claim); err != nil {
+	var sandbox v1.Sandbox
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sandbox); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", "", "", fmt.Errorf("sandbox %q not found in namespace %q", name, namespace)
 		}
-		return "", "", "", fmt.Errorf("get claim: %w", err)
+		return "", "", "", fmt.Errorf("get sandbox: %w", err)
 	}
-	if claim.Status.Phase != v1alpha1.SandboxReady {
-		return "", "", "", fmt.Errorf("sandbox %q is %s, not Ready: exec needs a running sandbox", name, orUnknownPhase(claim.Status.Phase))
+	if sandbox.Status.Phase != v1.SandboxReady {
+		return "", "", "", fmt.Errorf("sandbox %q is %s, not Ready: exec needs a running sandbox", name, orUnknownPhase(sandbox.Status.Phase))
 	}
-	endpoint = claim.Status.Endpoint
+	endpoint = sandbox.Status.Endpoint
 	if endpoint == "" {
 		return "", "", "", fmt.Errorf("sandbox %q has no endpoint yet: exec needs a running sandbox", name)
 	}
-	ref = claim.Status.SandboxID
+	ref = sandbox.Status.SandboxID
 	if ref == "" {
-		ref = claim.Name
+		ref = sandbox.Name
 	}
 
 	secretName := name + "-sandbox-token"
 	var secret corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", "", "", fmt.Errorf("token Secret %q not found: the sandbox API requires a bearer token; wait for the claim to go Ready or check the controller", secretName)
+			return "", "", "", fmt.Errorf("token Secret %q not found: the sandbox API requires a bearer token; wait for the sandbox to go Ready or check the controller", secretName)
 		}
 		return "", "", "", fmt.Errorf("get token Secret %q: %w", secretName, err)
 	}
@@ -102,7 +103,7 @@ func resolveSandboxAuth(ctx context.Context, c client.Client, namespace, name st
 
 // orUnknownPhase renders a SandboxPhase, or "Unknown" when empty, so the
 // not-running error always names a phase.
-func orUnknownPhase(p v1alpha1.SandboxPhase) string {
+func orUnknownPhase(p v1.SandboxPhase) string {
 	if p == "" {
 		return "Unknown"
 	}
