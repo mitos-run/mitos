@@ -19,11 +19,11 @@ package controller_test
 // carry a nodeAffinity pinned to the snapshot-holding node.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -31,32 +31,26 @@ import (
 func TestHuskPoolBuildsSnapshotAndPlacesPods(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "huskbuild-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "huskbuild-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "huskbuild-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		for _, p := range listHuskPods(t, c, "huskbuild-pool") {
 			_ = c.Delete(ctx, &p)
 		}
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	// A fresh registry with no holder of the template yet: the husk reconcile
-	// must BUILD it on this fake forkd node before placing husk pods.
+	// must BUILD it on this fake forkd node before placing husk pods. The inline
+	// template's snapshot ID is the POOL NAME (poolTemplateID).
 	reg := controller.NewNodeRegistry()
 	stop, engine, _, err := controller.StartFakeForkdNodeRecording(reg, "kvm-node-A")
 	if err != nil {
@@ -73,28 +67,29 @@ func TestHuskPoolBuildsSnapshotAndPlacesPods(t *testing.T) {
 	}
 
 	// Re-fetch the pool so SetControllerReference has the server-populated UID.
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}
 
 	// First half: build the snapshot. No node holds it yet, so the husk reconcile
 	// must BUILD it via the forkd CreateTemplate path.
-	if err := r.EnsureTemplateBuiltForTest(ctx, &live, template); err != nil {
+	if err := r.EnsureTemplateBuiltForTest(ctx, &live, live.Spec.Template); err != nil {
 		t.Fatalf("ensureTemplateBuilt: %v", err)
 	}
 
 	// The snapshot was BUILT on the node: the mock engine recorded the template
-	// and the registry now reports the node as a holder.
-	if got := engine.GetCapacity().TemplateIDs; len(got) != 1 || got[0] != "huskbuild-tmpl" {
-		t.Fatalf("fake forkd templates = %v, want [huskbuild-tmpl] (the snapshot must be built in husk mode)", got)
+	// (keyed by the pool name for an inline template) and the registry now reports
+	// the node as a holder.
+	if got := engine.GetCapacity().TemplateIDs; len(got) != 1 || got[0] != "huskbuild-pool" {
+		t.Fatalf("fake forkd templates = %v, want [huskbuild-pool] (the snapshot must be built in husk mode)", got)
 	}
-	if holders := reg.NodesWithTemplate("huskbuild-tmpl"); len(holders) != 1 || holders[0].Name != "kvm-node-A" {
+	if holders := reg.NodesWithTemplate("huskbuild-pool"); len(holders) != 1 || holders[0].Name != "kvm-node-A" {
 		t.Fatalf("snapshot holders = %v, want [kvm-node-A]", holders)
 	}
 
 	// Second half: place the husk pods. They must pin to the snapshot-holding node.
-	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, template); err != nil {
+	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, live.Spec.Template); err != nil {
 		t.Fatalf("reconcileHuskPods: %v", err)
 	}
 
@@ -146,26 +141,21 @@ func TestHuskPoolBuildRespectsDedicatedNodes(t *testing.T) {
 	// dedicated node carries the placement label; the shared node does not.
 	dedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: dedicated, Labels: map[string]string{tenantLabel: "acme"}}}
 	sharedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: shared}}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "ded172-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ded172-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "ded172-tmpl"},
-			Replicas:    1,
-			Placement:   &v1alpha1.PoolPlacement{NodeSelector: map[string]string{tenantLabel: "acme"}},
+		Spec: v1.SandboxPoolSpec{
+			Template:  &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:      &v1.PoolWarm{Min: 1},
+			Placement: &v1.PoolPlacement{NodeSelector: map[string]string{tenantLabel: "acme"}},
 		},
 	}
-	for _, obj := range []client.Object{dedNode, sharedNode, template, pool} {
+	for _, obj := range []client.Object{dedNode, sharedNode, pool} {
 		if err := c.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 		_ = c.Delete(ctx, dedNode)
 		_ = c.Delete(ctx, sharedNode)
 	})
@@ -191,22 +181,23 @@ func TestHuskPoolBuildRespectsDedicatedNodes(t *testing.T) {
 		KVMResourceName: "mitos.run/kvm",
 	}
 
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.EnsureTemplateBuiltForTest(ctx, &live, template); err != nil {
+	if err := r.EnsureTemplateBuiltForTest(ctx, &live, live.Spec.Template); err != nil {
 		t.Fatalf("ensureTemplateBuilt: %v", err)
 	}
 
-	// The dedicated node built the snapshot; the shared node did not.
-	if got := engineD.GetCapacity().TemplateIDs; len(got) != 1 || got[0] != "ded172-tmpl" {
-		t.Fatalf("dedicated node templates = %v, want [ded172-tmpl]", got)
+	// The dedicated node built the snapshot; the shared node did not. The inline
+	// template's snapshot ID is the POOL NAME (poolTemplateID).
+	if got := engineD.GetCapacity().TemplateIDs; len(got) != 1 || got[0] != "ded172-pool" {
+		t.Fatalf("dedicated node templates = %v, want [ded172-pool]", got)
 	}
 	if got := engineS.GetCapacity().TemplateIDs; len(got) != 0 {
 		t.Fatalf("shared node (outside placement) built %v, want nothing", got)
 	}
-	holders := reg.NodesWithTemplate("ded172-tmpl")
+	holders := reg.NodesWithTemplate("ded172-pool")
 	if len(holders) != 1 || holders[0].Name != dedicated {
 		t.Fatalf("snapshot holders = %v, want [%s]", holders, dedicated)
 	}

@@ -6,7 +6,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/eventfeed"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -70,7 +70,7 @@ func (f emitFeed) sinkOrNop() eventfeed.Sink {
 // Now inside the sink. No secret values: the payload carries the workspace and
 // revision NAMES, the contentManifest DIGEST, lineage, and the memorySnapshotRef
 // pointer only.
-func (f emitFeed) emitRevisionCreated(ctx context.Context, rev *v1alpha1.WorkspaceRevision) {
+func (f emitFeed) emitRevisionCreated(ctx context.Context, rev *v1.WorkspaceRevision) {
 	logger := log.FromContext(ctx)
 
 	memRef := ""
@@ -111,7 +111,7 @@ func (f emitFeed) emitRevisionCreated(ctx context.Context, rev *v1alpha1.Workspa
 // NAMES and the old and new phase strings only. seq distinguishes successive
 // transitions on the same claim (the new phase), so the dedupe id is stable per
 // transition.
-func (f emitFeed) emitPhaseChanged(ctx context.Context, claim *v1alpha1.SandboxClaim, oldPhase, newPhase v1alpha1.SandboxPhase) {
+func (f emitFeed) emitPhaseChanged(ctx context.Context, claim *v1.Sandbox, oldPhase, newPhase v1.SandboxPhase) {
 	logger := log.FromContext(ctx)
 
 	ws := ""
@@ -139,7 +139,7 @@ func (f emitFeed) emitPhaseChanged(ctx context.Context, claim *v1alpha1.SandboxC
 // revisionLineage renders the human-legible lineage origin of a revision: the
 // claim it was dehydrated from, or the parent revision it forks from. Names
 // only; never a secret.
-func revisionLineage(rev *v1alpha1.WorkspaceRevision) string {
+func revisionLineage(rev *v1.WorkspaceRevision) string {
 	if rev.Spec.Source.FromClaim != "" {
 		return "fromClaim:" + rev.Spec.Source.FromClaim
 	}

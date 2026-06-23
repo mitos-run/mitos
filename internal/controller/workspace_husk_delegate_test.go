@@ -16,13 +16,13 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"sync"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
@@ -44,14 +44,14 @@ type huskWSDelegateRecorder struct {
 func (r *huskWSDelegateRecorder) install(t *testing.T, dehydrateDigest cas.Digest) {
 	r.dehydrateDigest = dehydrateDigest
 	setHuskWSDelegate(
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+		func(_ context.Context, _ *v1.Sandbox, manifest cas.Digest) error {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.hydrateCalls++
 			r.hydratedDigest = manifest
 			return nil
 		},
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths, _ []string) (cas.Digest, error) {
+		func(_ context.Context, _ *v1.Sandbox, excludePaths, _ []string) (cas.Digest, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.dehydrateCalls++
@@ -70,34 +70,26 @@ func (r *huskWSDelegateRecorder) snapshot() (hydrateCalls int, hydrated cas.Dige
 
 // makeHuskWorkspaceClaim creates a template, pool, dormant husk pod, and a
 // husk-test-labeled claim bound to wsName, and returns the claim.
-func makeHuskWorkspaceClaim(t *testing.T, prefix, wsName, podIP string, spec v1alpha1.SandboxClaimSpec) *v1alpha1.SandboxClaim {
+func makeHuskWorkspaceClaim(t *testing.T, prefix, wsName, podIP string, spec v1.SandboxSpec) *v1.Sandbox {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: prefix + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 	makeDormantHuskPod(t, prefix+"-pool", podIP)
 
-	spec.PoolRef = v1alpha1.LocalObjectReference{Name: prefix + "-pool"}
-	spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: wsName}
-	claim := &v1alpha1.SandboxClaim{
+	spec.Source.PoolRef = &v1.LocalObjectReference{Name: prefix + "-pool"}
+	spec.WorkspaceRef = &v1.LocalObjectReference{Name: wsName}
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      prefix + "-claim",
 			Namespace: "default",
@@ -122,15 +114,15 @@ func TestHuskClaimWorkspaceDehydrateDelegates(t *testing.T) {
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
 	wsName := uniqueName("hw-dehydrate-ws")
-	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, wsName, v1.WorkspaceRetention{})
 
-	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-de"), wsName, "10.20.0.1", v1alpha1.SandboxClaimSpec{
-		Timeout: &metav1.Duration{Duration: 2 * time.Second},
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-de"), wsName, "10.20.0.1", v1.SandboxSpec{
+		Lifetime: &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 2 * time.Second}},
 	})
-	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
+	waitBoundPhase(t, claim.Name, v1.SandboxReady)
 
 	// Lifetime expiry terminates the claim, which delegates the dehydrate.
-	waitBoundPhase(t, claim.Name, v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claim.Name, v1.SandboxTerminated)
 
 	// The dehydrate delegate must have been invoked with the secret exclude list.
 	deadline := time.Now().Add(10 * time.Second)
@@ -153,11 +145,11 @@ func TestHuskClaimWorkspaceDehydrateDelegates(t *testing.T) {
 	// The controller still owns the commit + head advance: a committed
 	// WorkspaceRevision with fromClaim lineage exists and the head advanced to the
 	// digest the delegate returned.
-	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after husk dehydrate")
 
-	var head v1alpha1.WorkspaceRevision
+	var head v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err != nil {
 		t.Fatalf("get head revision: %v", err)
 	}
@@ -189,7 +181,7 @@ func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
 		gotChild  cas.Digest
 		diffCalls int
 	)
-	setHuskWSDiff(func(_ context.Context, _ *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+	setHuskWSDiff(func(_ context.Context, _ *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error) {
 		diffMu.Lock()
 		defer diffMu.Unlock()
 		diffCalls++
@@ -207,28 +199,30 @@ func TestHuskClaimWorkspaceDiffDelegates(t *testing.T) {
 	// (envtest has no GC to cascade-delete it) cannot be adopted as this head.
 	wsName := uniqueName("hw-diff-ws")
 	parentRevName := wsName + "-r1"
-	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, wsName, v1.WorkspaceRetention{})
 	makeRevision(t, parentRevName, wsName, parentManifest, nil, nil)
-	waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head == parentRevName
 	}, "parent head committed")
 
-	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-diff"), wsName, "10.20.0.3", v1alpha1.SandboxClaimSpec{
-		Timeout: &metav1.Duration{Duration: 2 * time.Second},
-		Outputs: []v1alpha1.OutputSpec{{Diff: true}},
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-diff"), wsName, "10.20.0.3", v1.SandboxSpec{
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Outputs: []v1.OutputSpec{{Diff: true}}},
+		},
 	})
-	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
-	waitBoundPhase(t, claim.Name, v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claim.Name, v1.SandboxReady)
+	waitBoundPhase(t, claim.Name, v1.SandboxTerminated)
 
 	// The head advanced to a NEW revision (the dehydrated child) carrying the diff
 	// summary; the not-wired error never fired (else terminate would not commit).
-	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Head != parentRevName
 	}, "head advanced past the parent after husk diff dehydrate")
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var head v1alpha1.WorkspaceRevision
+		var head v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
 			if head.Status.DiffSummary != nil {
 				ds := head.Status.DiffSummary
@@ -275,14 +269,14 @@ func TestHuskClaimWorkspaceHydrateDelegates(t *testing.T) {
 	headManifest := testManifest(0x7c)
 	wsName := uniqueName("hw-hydrate-ws")
 	parentRevName := wsName + "-r1"
-	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, wsName, v1.WorkspaceRetention{})
 	makeRevision(t, parentRevName, wsName, headManifest, nil, nil)
-	waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head == parentRevName
 	}, "head committed")
 
-	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-hy"), wsName, "10.20.0.2", v1alpha1.SandboxClaimSpec{})
-	waitBoundPhase(t, claim.Name, v1alpha1.SandboxReady)
+	claim := makeHuskWorkspaceClaim(t, uniqueName("hw-hy"), wsName, "10.20.0.2", v1.SandboxSpec{})
+	waitBoundPhase(t, claim.Name, v1.SandboxReady)
 
 	// The hydrate delegate must have been invoked with the head's manifest.
 	deadline := time.Now().Add(10 * time.Second)

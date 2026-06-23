@@ -301,7 +301,7 @@ kubectl apply -k deploy/
 
 This installs:
 
-- the four CRDs (`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`)
+- the three CRDs (`SandboxPool`, `Sandbox`, `Workspace`)
 - the `mitos` namespace
 - the `mitos-controller` ServiceAccount, ClusterRole, and ClusterRoleBinding
 - the controller Deployment (two replicas, SA `mitos-controller`, probes on
@@ -354,60 +354,54 @@ Each pod should reach `Running` and pass its readiness probe (`GET /healthz` on
 
 ---
 
-## 6. Smoke test: create a SandboxPool, claim, and exec
+## 6. Smoke test: create a SandboxPool, sandbox, and exec
 
-### 6a. Create a SandboxTemplate and SandboxPool
+### 6a. Create a SandboxPool
 
-Create a minimal template using the busybox OCI image. The controller's
+Create a minimal pool using the busybox OCI image. The controller's
 `Engine.CreateTemplate` pulls the image, boots it in a microVM, runs
-`template.Spec.Init` inside the VM, and snapshots.
+`template.init` inside the VM, and snapshots.
 
 ```yaml
-# sandbox-template.yaml
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: busybox-basic
-  namespace: mitos
-spec:
-  image: busybox:stable
-  init: /bin/true
----
-apiVersion: mitos.run/v1alpha1
+# sandboxpool.yaml
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: busybox-pool
   namespace: mitos
 spec:
-  templateRef:
-    name: busybox-basic
-  size: 2
+  template:
+    image: busybox:stable
+    init: /bin/true
+  warm:
+    min: 2
 ```
 
 ```bash
-kubectl apply -f sandbox-template.yaml
-kubectl -n mitos get sandboxpool busybox-pool -w
+kubectl apply -f sandboxpool.yaml
+kubectl -n mitos get sandboxpools busybox-pool -w
 ```
 
-Wait for `readySnapshots: 2` (or the configured `size`) in the pool status.
+Wait for `readySnapshots: 2` (or the configured `warm.min`) in the pool status.
 
-### 6b. Create a SandboxClaim
+### 6b. Create a Sandbox
 
 ```yaml
-# sandbox-claim.yaml
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+# sandbox.yaml
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: smoke-test
   namespace: mitos
 spec:
-  poolRef:
-    name: busybox-pool
+  source:
+    poolRef:
+      name: busybox-pool
 ```
 
 ```bash
-kubectl apply -f sandbox-claim.yaml
-kubectl -n mitos get sandboxclaim smoke-test -w
+kubectl apply -f sandbox.yaml
+kubectl -n mitos get sandboxes smoke-test -w
 ```
 
 Wait for `.status.phase: Ready`.
@@ -435,9 +429,8 @@ print(result.stdout)  # hello
 ### 6d. Clean up
 
 ```bash
-kubectl -n mitos delete sandboxclaim smoke-test
+kubectl -n mitos delete sandbox smoke-test
 kubectl -n mitos delete sandboxpool busybox-pool
-kubectl -n mitos delete sandboxtemplate busybox-basic
 ```
 
 ---

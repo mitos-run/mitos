@@ -7,39 +7,35 @@ package controller_test
 // landed yet is never killed.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestGCSweepsOrphanVMs(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "gc-node-1", "gc1-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "gc-node-1", "gc1-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
 	// A claim that reaches Ready: its backing VM must NOT be swept.
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "gc1-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "gc1-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "gc1-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "gc1-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "gc1-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "gc1-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +43,6 @@ func TestGCSweepsOrphanVMs(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	ready := waitClaimReady(t, "gc1-claim")

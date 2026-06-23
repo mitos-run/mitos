@@ -240,31 +240,34 @@ breaking change on the conversion path being green.
 
 ## Status of the slice
 
-The DESIGN slice (this ADR and docs/api/v2-migration.md) landed first. The first
-IMPLEMENTATION slice has now landed too, additive and non-destabilizing:
+LANDED (breaking migration complete, 2026-06-23):
 
-PROVEN now:
+The breaking migration described in this ADR has shipped on branch
+`feat/api-v1-consolidation`. The served API group is now exactly `mitos.run/v1`;
+`v1alpha1` and `v1alpha2` are deleted. One served version equals stored version.
+No conversion webhook.
 
-- The `v1alpha2` Go types for the consolidated `SandboxPool` (inline `template`
-  plus optional `templateRef`, `snapshots`, `warm`, `placement`) and `Sandbox`
-  (`source` oneof poolRef/fromSandbox/fromRevision plus `replicas`, folding the
-  v1alpha1 SandboxClaim and SandboxFork into one kind) exist in `api/v1alpha2`.
-- v1alpha1 `SandboxPool` is the conversion Hub (storage version); v1alpha2
-  `SandboxPool` implements `conversion.Convertible` with PURE ConvertTo/
-  ConvertFrom per the migration table, covered by round-trip unit tests and a
-  conversion-webhook envtest that serves both versions through the API server.
-- An opt-in consolidated `Sandbox` reconciler maps a Sandbox onto the EXISTING
-  SandboxClaim/SandboxFork engine (additive), with a conformance envtest proving
-  a Sandbox{source.poolRef} reaches Ready (claim equivalent) and a
-  Sandbox{source.fromSandbox, replicas:N} produces N children (fork equivalent)
-  on the mock engine.
-- The four v1alpha1 kinds remain in force and unchanged; their CRDs do not drift
-  (the sandboxpools CRD gains an additive v1alpha2 version; a new sandboxes CRD
-  is added). Both surfaces serve.
+What landed:
 
-OPEN (the breaking migration follow-up, issue #23 continuation): the
-storage-version flip to v1alpha2; the removal of `SandboxTemplate` and
-`SandboxFork`; the cross-kind storage migration (SandboxClaim/SandboxFork ->
-Sandbox); the facade re-target; the SDK cutover; and the conditions catalogue
-re-homing. Each rides the conversion-path-green gate before any production tenant
-sees it.
+- The `api/v1` package contains the consolidated `SandboxPool` (inline
+  `spec.template` plus optional `spec.templateRef`, `snapshots`, `warm`,
+  `placement`) and `Sandbox` (`source` oneof poolRef/fromSandbox/fromRevision plus
+  `replicas`), folding the former `SandboxClaim` and `SandboxFork` into one kind.
+- `SandboxTemplate`, `SandboxClaim`, `SandboxFork` are deleted as kinds and as Go
+  types. `api/v1alpha1` and `api/v1alpha2` are removed.
+- The controller reconciles `SandboxPool`, `Sandbox`, `Workspace`,
+  `WorkspaceRevision` directly from `api/v1` types. No delegation to
+  SandboxClaim/SandboxFork engine paths remains.
+- The four v1 CRDs (`sandboxes.mitos.run`, `sandboxpools.mitos.run`,
+  `workspaces.mitos.run`, `workspacerevisions.mitos.run`) are the only served
+  CRDs. The three former CRDs (`sandboxclaims`, `sandboxforks`,
+  `sandboxtemplates`) are removed.
+- RBAC, Helm chart, examples, and key docs (CLAUDE.md, README.md, this ADR,
+  docs/api/v2-spec.md) are updated to the v1 surface.
+- The facade re-targets `mitos.run/v1 Sandbox` (with `source.poolRef`) instead
+  of a SandboxClaim, discharging the ADR 0001 deferral in exactly one rename.
+- The SDK cluster-mode path uses the v1 Sandbox and SandboxPool kinds.
+
+The `source.fromRevision` field is declared in the v1 schema but NOT served by
+the reconciler yet: the reconciler reports a clear `NotReady` condition for it
+rather than silently dropping it. Full revision-resume is a tracked follow-up.

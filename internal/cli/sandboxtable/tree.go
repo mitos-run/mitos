@@ -4,14 +4,15 @@ import (
 	"sort"
 	"strings"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
-// TreeNode is one entry in the rendered fork/lineage DAG: a SandboxClaim or a
-// SandboxFork, with the children that name it as their source. Name is the
-// object name, Phase is its lifecycle phase (empty renders as a dash), Node is
-// the forkd node it landed on (empty renders as a dash), and Kind is "claim" or
-// "fork" so the renderer can label the lineage roots.
+// TreeNode is one entry in the rendered sandbox/lineage DAG. A Sandbox with
+// source.poolRef is a lineage root ("sandbox"); a Sandbox with
+// source.fromSandbox is a child of whatever Sandbox its FromSandbox.Name names.
+// Name is the object name, Phase is its lifecycle phase (empty renders as a
+// dash), Node is the forkd node it landed on (empty renders as a dash), and
+// Kind is "sandbox" or "fork" so the renderer can label the lineage roots.
 type TreeNode struct {
 	Name     string
 	Kind     string
@@ -21,47 +22,44 @@ type TreeNode struct {
 }
 
 // BuildLineage assembles the parent->child lineage DAG from the cluster's
-// SandboxClaims and SandboxForks. A claim is a lineage root; a fork is a child
-// of whatever object its Spec.SourceRef names (a claim OR another fork, so a
-// multi-level fork chain nests). Forks that name the same source are siblings.
-// A fork whose source is not among the supplied objects is treated as its own
-// root so it is never silently dropped. Output roots and children are sorted by
-// name for a deterministic tree.
-func BuildLineage(claims []v1alpha1.SandboxClaim, forks []v1alpha1.SandboxFork) []*TreeNode {
+// Sandboxes. A Sandbox with source.poolRef is a lineage root; a Sandbox with
+// source.fromSandbox is a child of whatever Sandbox its FromSandbox.Name names
+// (a sandbox OR another fork, so a multi-level fork chain nests). Forks that
+// name the same source are siblings. A fork whose source is not among the
+// supplied objects is treated as its own root so it is never silently dropped.
+// Output roots and children are sorted by name for a deterministic tree.
+func BuildLineage(sandboxes []v1.Sandbox) []*TreeNode {
 	nodes := make(map[string]*TreeNode)
 	var roots []*TreeNode
 
-	for i := range claims {
-		c := &claims[i]
-		nodes[c.Name] = &TreeNode{
-			Name:  c.Name,
-			Kind:  "claim",
-			Phase: string(c.Status.Phase),
-			Node:  c.Status.Node,
+	for i := range sandboxes {
+		s := &sandboxes[i]
+		kind := "sandbox"
+		if s.Spec.Source.FromSandbox != nil {
+			kind = "fork"
 		}
-	}
-	for i := range forks {
-		f := &forks[i]
-		nodes[f.Name] = &TreeNode{
-			Name: f.Name,
-			Kind: "fork",
-			// A SandboxFork carries no single Phase/Node of its own (it fans out
-			// to N forks); the per-fork detail lives in ps. The lineage view
-			// shows the readiness rollup as the phase so the tree stays honest
-			// about a fork that has not produced its replicas yet.
-			Phase: forkPhase(f),
+		nodes[s.Name] = &TreeNode{
+			Name:  s.Name,
+			Kind:  kind,
+			Phase: string(s.Status.Phase),
+			Node:  s.Status.Node,
 		}
 	}
 
-	// Link every fork under its source. Claims are always roots.
-	for i := range claims {
-		roots = append(roots, nodes[claims[i].Name])
-	}
-	for i := range forks {
-		f := &forks[i]
-		child := nodes[f.Name]
-		parent, ok := nodes[f.Spec.SourceRef.Name]
-		if ok && f.Spec.SourceRef.Name != "" {
+	// Link every fork-sourced sandbox under its source. Pool-sourced sandboxes
+	// are always roots.
+	for i := range sandboxes {
+		s := &sandboxes[i]
+		if s.Spec.Source.FromSandbox == nil {
+			// Pool-sourced or revision-sourced: root.
+			roots = append(roots, nodes[s.Name])
+			continue
+		}
+		// Fork-sourced: child of the source sandbox.
+		child := nodes[s.Name]
+		sourceName := s.Spec.Source.FromSandbox.Name
+		parent, ok := nodes[sourceName]
+		if ok && sourceName != "" {
 			parent.Children = append(parent.Children, child)
 			continue
 		}
@@ -72,20 +70,6 @@ func BuildLineage(claims []v1alpha1.SandboxClaim, forks []v1alpha1.SandboxFork) 
 
 	sortTree(roots)
 	return roots
-}
-
-// forkPhase renders a SandboxFork's readiness as a phase-like string: "Ready"
-// when every replica is ready, otherwise "<ready>/<total>". An unset total
-// falls back to the spec replica count.
-func forkPhase(f *v1alpha1.SandboxFork) string {
-	total := f.Status.TotalForks
-	if total == 0 {
-		total = f.Spec.Replicas
-	}
-	if total > 0 && f.Status.ReadyForks == total {
-		return string(v1alpha1.SandboxReady)
-	}
-	return ""
 }
 
 // sortTree sorts a node slice and every node's children by name, recursively,

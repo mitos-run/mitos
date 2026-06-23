@@ -1,21 +1,18 @@
 package controller
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
-
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 // TestHuskNotifyNetworkMapsTemplatePolicy asserts huskNotifyNetwork always
 // delivers a network config (never nil now) so the in-pod egress filter and DNS
 // proxy are driven, with the guest pointed at the in-pod resolver.
 func TestHuskNotifyNetworkMapsTemplatePolicy(t *testing.T) {
-	tmpl := &v1alpha1.SandboxTemplate{
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Network: &v1alpha1.NetworkPolicy{
-				Egress: v1alpha1.EgressDeny,
-				Allow:  []string{"api.example.com:443"},
-			},
+	tmpl := &v1.PoolTemplateSpec{
+		Network: &v1.NetworkPolicy{
+			Egress: v1.EgressDeny,
+			Allow:  []string{"api.example.com:443"},
 		},
 	}
 	got := huskNotifyNetwork(tmpl)
@@ -37,7 +34,7 @@ func TestHuskNotifyNetworkMapsTemplatePolicy(t *testing.T) {
 // NetworkPolicy still gets the fail-closed default-deny config (the stub
 // defaults Egress to deny).
 func TestHuskNotifyNetworkNilTemplateStillEnforces(t *testing.T) {
-	got := huskNotifyNetwork(&v1alpha1.SandboxTemplate{})
+	got := huskNotifyNetwork(&v1.PoolTemplateSpec{})
 	if got == nil {
 		t.Fatal("huskNotifyNetwork returned nil for a template with no NetworkPolicy; the filter must still run fail-closed")
 	}
@@ -46,10 +43,8 @@ func TestHuskNotifyNetworkNilTemplateStillEnforces(t *testing.T) {
 // TestHuskEgressAllowFromTemplate asserts the template egress policy + allowlist
 // are extracted for threading into the activate request.
 func TestHuskEgressAllowFromTemplate(t *testing.T) {
-	tmpl := &v1alpha1.SandboxTemplate{
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Network: &v1alpha1.NetworkPolicy{Egress: v1alpha1.EgressDeny, Allow: []string{"x:1"}},
-		},
+	tmpl := &v1.PoolTemplateSpec{
+		Network: &v1.NetworkPolicy{Egress: v1.EgressDeny, Allow: []string{"x:1"}},
 	}
 	cfg := huskEgressConfig(tmpl)
 	if cfg.Egress != "deny" || len(cfg.Allow) != 1 || cfg.Allow[0] != "x:1" {
@@ -61,7 +56,7 @@ func TestHuskEgressAllowFromTemplate(t *testing.T) {
 // fails closed to deny with no allows (and deny-by-default inbound, the empty
 // Inbound string which the renderer and stub treat as deny).
 func TestHuskEgressConfigDefaultsDeny(t *testing.T) {
-	for _, tmpl := range []*v1alpha1.SandboxTemplate{nil, {}} {
+	for _, tmpl := range []*v1.PoolTemplateSpec{nil, {}} {
 		cfg := huskEgressConfig(tmpl)
 		if cfg.Egress != "deny" || cfg.Allow != nil {
 			t.Errorf("egress=%q allow=%v, want deny nil", cfg.Egress, cfg.Allow)
@@ -76,15 +71,13 @@ func TestHuskEgressConfigDefaultsDeny(t *testing.T) {
 // the CIDR allowlist, and the inbound policy from the template's NetworkPolicy
 // are extracted for threading into the activate request (issue #219).
 func TestHuskEgressConfigThreadsNewDimensions(t *testing.T) {
-	tmpl := &v1alpha1.SandboxTemplate{
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Network: &v1alpha1.NetworkPolicy{
-				Egress:       v1alpha1.EgressDeny,
-				BlockNetwork: true,
-				AllowCIDRs:   []string{"10.0.0.0/8"},
-				Inbound:      v1alpha1.InboundAllow,
-				InboundCIDRs: []string{"203.0.113.0/24"},
-			},
+	tmpl := &v1.PoolTemplateSpec{
+		Network: &v1.NetworkPolicy{
+			Egress:       v1.EgressDeny,
+			BlockNetwork: true,
+			AllowCIDRs:   []string{"10.0.0.0/8"},
+			Inbound:      v1.InboundAllow,
+			InboundCIDRs: []string{"203.0.113.0/24"},
 		},
 	}
 	cfg := huskEgressConfig(tmpl)

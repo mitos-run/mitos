@@ -127,8 +127,8 @@ kernelProvisioner:
   #   curl -fsSL <kernelUrl> | sha256sum
   kernelSha256: ""
 
-# Validating admission webhook that binds SandboxClaim.spec.serviceAccount to
-# RBAC (the creator must be able to impersonate the named ServiceAccount).
+# Validating admission webhook that binds Sandbox.spec.serviceAccount to RBAC
+# (the creator must be able to impersonate the named ServiceAccount).
 # spec.serviceAccount is the principal a workspace memory-snapshot resume is
 # bound to, so without this it is self-asserted. STRONGLY RECOMMENDED to enable
 # alongside controller.workspaceMemorySnapshots in a multi-tenant cluster. Off by
@@ -141,29 +141,12 @@ admissionWebhook:
   # if availability outranks the principal guarantee.
   failurePolicy: Fail
 
-# API v2 (mitos.run/v1alpha2) staged rollout knobs (issue #23, ADR 0007).
+# API v1 migration completed (issue #23, ADR 0007). The conversion webhook and
+# staged-rollout knobs from v1alpha2 are no longer needed: mitos.run/v1 is the
+# only served group-version. This block is retained as a no-op placeholder so
+# existing values files that set apiV2.poolConversionWebhook.enabled do not
+# cause Helm render failures.
 apiV2:
-  # SandboxPool conversion webhook. When enabled, the chart wires the controller
-  # to serve the SandboxPool conversion at /convert and re-renders the
-  # sandboxpools CRD with conversion: strategy: Webhook and v1alpha2 served:true,
-  # so the API server can translate SandboxPool between v1alpha1 and v1alpha2.
-  #
-  # PRODUCTION CUTOVER. Enabling this puts the conversion webhook in the API
-  # server path for EVERY SandboxPool read and write: if the controller (and thus
-  # the webhook) is down, SandboxPool get/list/create/update/delete FAIL until it
-  # recovers. Run the controller HA (controller.replicas >= 2) before enabling,
-  # and treat the flip as a one-way cutover.
-  #
-  # v1alpha1 stays the STORAGE version; the webhook only translates between the
-  # two served versions, it does not migrate stored objects.
-  #
-  # This shares the controller's single webhook serving cert and port
-  # (admissionWebhook.port) with the principal webhook; it does NOT require
-  # admissionWebhook.enabled, and it is NOT coupled to controller v2 Sandbox
-  # reconciler flags (--enable-v2-sandbox stays separately gated).
-  #
-  # Default false: the chart renders exactly as before (v1alpha2 unserved, no
-  # conversion stanza, no conversion webhook).
   poolConversionWebhook:
     enabled: false
 

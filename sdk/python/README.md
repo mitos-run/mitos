@@ -118,8 +118,8 @@ sandbox.terminate()
 
 ## Cluster mode: AgentRun
 
-Cluster mode drives the Kubernetes CRDs (`SandboxTemplate`, `SandboxPool`,
-`SandboxClaim`, `SandboxFork`) and execs through the forkd sandbox API. It is for
+Cluster mode drives the Kubernetes CRDs (`SandboxPool`, `Sandbox`, `Workspace`)
+in API group `mitos.run/v1` and execs through the forkd sandbox API. It is for
 operators who run the mitos cluster themselves.
 
 ```python
@@ -135,8 +135,8 @@ sb.terminate()
 ```
 
 `c.sandbox("python")` ensures a deterministic default pool
-`mitos-default-python` (a `SandboxTemplate` carrying the image plus a
-`SandboxPool` that references it), creating both if absent. It is
+`mitos-default-python` (a `SandboxPool` carrying the image in its inline
+`spec.template`), creating it if absent. It is
 admin-disableable with `AgentRun(allow_default_pool=False)`, which makes the
 image path raise instead of creating anything.
 
@@ -251,7 +251,8 @@ id (the explicit one or the generated `sandbox-<hex>`) and raises
 ## Templates as code
 
 Author a custom environment from code with the fluent `Template` builder. It
-emits a `SandboxTemplate` spec; no server or KVM is needed to build the spec.
+emits a pool template spec (the inline `spec.template` of a `SandboxPool`); no
+server or KVM is needed to build the spec.
 
 ```python
 from mitos import Template

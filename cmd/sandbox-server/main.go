@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
@@ -233,7 +233,7 @@ type sandboxInfo struct {
 	// template (issue #219), echoed so a caller can confirm what governs the
 	// sandbox's traffic. On a real forkd this same policy drives the host
 	// nftables datapath; the standalone mock path records it for visibility.
-	Network *v1alpha1.NetworkPolicy `json:"network,omitempty"`
+	Network *v1.NetworkPolicy `json:"network,omitempty"`
 }
 
 func main() {
@@ -558,20 +558,20 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 func resolveNetworkConfig(in *networkConfig) (*networkConfig, error) {
 	if in == nil {
 		// Secure default: deny egress, deny-by-default inbound.
-		return &networkConfig{Egress: string(v1alpha1.EgressDeny), Inbound: string(v1alpha1.InboundDeny)}, nil
+		return &networkConfig{Egress: string(v1.EgressDeny), Inbound: string(v1.InboundDeny)}, nil
 	}
 	out := *in
 	if out.Egress == "" {
-		out.Egress = string(v1alpha1.EgressDeny)
+		out.Egress = string(v1.EgressDeny)
 	}
-	if out.Egress != string(v1alpha1.EgressDeny) && out.Egress != string(v1alpha1.EgressAllow) {
-		return nil, fmt.Errorf("egress must be %q or %q, got %q", v1alpha1.EgressDeny, v1alpha1.EgressAllow, out.Egress)
+	if out.Egress != string(v1.EgressDeny) && out.Egress != string(v1.EgressAllow) {
+		return nil, fmt.Errorf("egress must be %q or %q, got %q", v1.EgressDeny, v1.EgressAllow, out.Egress)
 	}
 	if out.Inbound == "" {
-		out.Inbound = string(v1alpha1.InboundDeny)
+		out.Inbound = string(v1.InboundDeny)
 	}
-	if out.Inbound != string(v1alpha1.InboundDeny) && out.Inbound != string(v1alpha1.InboundAllow) {
-		return nil, fmt.Errorf("inbound must be %q or %q, got %q", v1alpha1.InboundDeny, v1alpha1.InboundAllow, out.Inbound)
+	if out.Inbound != string(v1.InboundDeny) && out.Inbound != string(v1.InboundAllow) {
+		return nil, fmt.Errorf("inbound must be %q or %q, got %q", v1.InboundDeny, v1.InboundAllow, out.Inbound)
 	}
 	if _, _, err := netconf.ParseCIDRList(out.AllowCIDRs); err != nil {
 		return nil, fmt.Errorf("allow_cidrs: %w", err)
@@ -587,20 +587,20 @@ func resolveNetworkConfig(in *networkConfig) (*networkConfig, error) {
 // path drive the SAME datapath from the SAME policy model. The domain and CIDR
 // allowlists both flow through (domains via the controlled resolver, CIDRs via
 // the static chain rules). A nil input yields the fail-closed default policy.
-func toNetworkPolicy(in *networkConfig) *v1alpha1.NetworkPolicy {
+func toNetworkPolicy(in *networkConfig) *v1.NetworkPolicy {
 	if in == nil {
-		return &v1alpha1.NetworkPolicy{Egress: v1alpha1.EgressDeny}
+		return &v1.NetworkPolicy{Egress: v1.EgressDeny}
 	}
-	egress := v1alpha1.EgressPolicy(in.Egress)
+	egress := v1.EgressPolicy(in.Egress)
 	if egress == "" {
-		egress = v1alpha1.EgressDeny
+		egress = v1.EgressDeny
 	}
-	return &v1alpha1.NetworkPolicy{
+	return &v1.NetworkPolicy{
 		Egress:       egress,
 		Allow:        in.AllowDomains,
 		BlockNetwork: in.Block,
 		AllowCIDRs:   in.AllowCIDRs,
-		Inbound:      v1alpha1.InboundPolicy(in.Inbound),
+		Inbound:      v1.InboundPolicy(in.Inbound),
 		InboundCIDRs: in.InboundCIDRs,
 	}
 }

@@ -8,10 +8,10 @@ package controller_test
 // revision carries no annotation (tracing was disabled).
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
 )
@@ -34,15 +34,15 @@ func revisionCreatedData(t *testing.T, sink *recordingSink) eventfeed.RevisionCr
 func TestRevisionCreatedCarriesTraceID(t *testing.T) {
 	const traceID = "7b743a0c9f1cedb209c9e796151158aa"
 	sink := &recordingSink{}
-	rev := &v1alpha1.WorkspaceRevision{
+	rev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "ws-x-abcde",
 			Namespace:   "default",
 			Annotations: map[string]string{"mitos.run/trace-id": traceID},
 		},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "ws-x"},
-			Source:          v1alpha1.RevisionSource{FromClaim: "claim-x"},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:    v1.LocalObjectReference{Name: "ws-x"},
+			Source:          v1.RevisionSource{FromClaim: "claim-x"},
 			ContentManifest: "deadbeef",
 		},
 	}
@@ -59,11 +59,11 @@ func TestRevisionCreatedCarriesTraceID(t *testing.T) {
 // when the revision carries no mitos.run/trace-id annotation (tracing off).
 func TestRevisionCreatedTraceIDEmptyWithoutAnnotation(t *testing.T) {
 	sink := &recordingSink{}
-	rev := &v1alpha1.WorkspaceRevision{
+	rev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "ws-y-fghij", Namespace: "default"},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "ws-y"},
-			Source:          v1alpha1.RevisionSource{FromClaim: "claim-y"},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:    v1.LocalObjectReference{Name: "ws-y"},
+			Source:          v1.RevisionSource{FromClaim: "claim-y"},
 			ContentManifest: "cafef00d",
 		},
 	}

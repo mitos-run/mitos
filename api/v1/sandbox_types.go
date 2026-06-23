@@ -1,14 +1,13 @@
-package v1alpha2
+package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
-// Sandbox is the v1alpha2 consolidated run-axis kind: one running sandbox. It
-// folds the v1alpha1 SandboxClaim and SandboxFork into one kind (ADR 0007). Its
+// Sandbox is the v1 consolidated run-axis kind: one running sandbox. It
+// folds the former SandboxClaim and SandboxFork into one kind (ADR 0007). Its
 // source is a required oneof selecting the origin (a pool snapshot, a live
 // sandbox to fork, or a workspace revision to resume); replicas carries the
 // fork fan-out. A Sandbox with source.poolRef and replicas 1 is the old claim;
@@ -67,12 +66,12 @@ type SandboxSpec struct {
 	// Secrets are the secret mounts delivered to the sandbox. Carried unchanged
 	// from SandboxClaim.secrets.
 	// +optional
-	Secrets []v1alpha1.SecretMount `json:"secrets,omitempty"`
+	Secrets []SecretMount `json:"secrets,omitempty"`
 
 	// VolumeOverrides override per-volume fork policies for this sandbox. Carried
 	// unchanged from SandboxClaim.volumeOverrides / SandboxFork.volumeOverrides.
 	// +optional
-	VolumeOverrides []v1alpha1.VolumeOverride `json:"volumeOverrides,omitempty"`
+	VolumeOverrides []VolumeOverride `json:"volumeOverrides,omitempty"`
 
 	// SecretInheritance governs whether a fork (source.fromSandbox) inherits the
 	// source sandbox's in-memory secrets. reissue (the default) gives each fork
@@ -88,7 +87,7 @@ type SandboxSpec struct {
 	// WorkspaceRef binds this sandbox to a durable Workspace (single-writer).
 	// Carried unchanged from SandboxClaim.workspaceRef.
 	// +optional
-	WorkspaceRef *v1alpha1.LocalObjectReference `json:"workspaceRef,omitempty"`
+	WorkspaceRef *LocalObjectReference `json:"workspaceRef,omitempty"`
 
 	// ServiceAccount is the principal this sandbox runs as: the identity workspace
 	// grants are evaluated against and a memory snapshot is bound to. Carried
@@ -126,7 +125,7 @@ type SandboxSource struct {
 	// PoolRef starts a fresh sandbox from a pool snapshot (the old SandboxClaim
 	// path). Maps from SandboxClaim.poolRef.
 	// +optional
-	PoolRef *v1alpha1.LocalObjectReference `json:"poolRef,omitempty"`
+	PoolRef *LocalObjectReference `json:"poolRef,omitempty"`
 
 	// FromSandbox forks a live sandbox (the old SandboxFork path). Maps from
 	// SandboxFork.sourceRef. With replicas greater than 1 it fans out into that
@@ -232,7 +231,7 @@ type OnTerminate struct {
 	// sandbox /workspace into the new WorkspaceRevision. Carried unchanged in
 	// shape from SandboxClaim.outputs (path, diff, git).
 	// +optional
-	Outputs []v1alpha1.OutputSpec `json:"outputs,omitempty"`
+	Outputs []OutputSpec `json:"outputs,omitempty"`
 
 	// Snapshot is a retention directive (for example "retain-last-3") that
 	// generalizes the v1alpha1 SandboxClaim.checkpointOnTerminate boolean: a
@@ -268,11 +267,12 @@ const (
 
 // SandboxStatus consolidates SandboxClaimStatus and SandboxForkStatus.
 type SandboxStatus struct {
-	// Phase is the sandbox lifecycle phase. v2 phases: Pending, Hydrating, Ready,
-	// Terminating, NodeLost, Failed. v1 Restoring maps to Hydrating; v1
-	// Terminated is a terminal phase reaped by TTL.
+	// Phase is the sandbox lifecycle phase. The phase-name set is carried from
+	// v1alpha1 (Pending, Restoring, Ready, Terminating, Terminated, Failed);
+	// Terminated is a terminal phase reaped by TTL. The v2 phase rename
+	// (Hydrating, NodeLost) is deferred to a later task.
 	// +optional
-	Phase v1alpha1.SandboxPhase `json:"phase,omitempty"`
+	Phase SandboxPhase `json:"phase,omitempty"`
 
 	// Endpoint is the sandbox API address (host:port). Unchanged from v1alpha1.
 	// +optional
@@ -280,9 +280,17 @@ type SandboxStatus struct {
 
 	// Pod is the husk pod name backing the sandbox (for example
 	// "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
-	// OpenCost. NEW explicit v2 field; the node is derivable from the pod.
+	// OpenCost. NEW explicit v2 field. On the husk path the node is derivable
+	// from the pod; on the raw-forkd path the node is carried in Node below.
 	// +optional
 	Pod string `json:"pod,omitempty"`
+
+	// Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
+	// engine placement identity distinct from SandboxID: the GC orphan sweep,
+	// NodeLost detection, and the terminate/idle engine calls key off it on the
+	// raw-forkd path, where it is not derivable from a husk pod.
+	// +optional
+	Node string `json:"node,omitempty"`
 
 	// SandboxID is the engine-side sandbox identifier. Unchanged from v1alpha1.
 	// +optional
@@ -363,7 +371,7 @@ type SandboxChild struct {
 	// Node is the node the child runs on.
 	Node string `json:"node"`
 	// Phase is the child's lifecycle phase.
-	Phase v1alpha1.SandboxPhase `json:"phase"`
+	Phase SandboxPhase `json:"phase"`
 	// StartupLatencyMs is the child's fork latency in milliseconds.
 	// +optional
 	StartupLatencyMs int64 `json:"startupLatencyMs,omitempty"`

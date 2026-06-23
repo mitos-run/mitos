@@ -7,54 +7,50 @@ package controller_test
 // their name, mount path, and fork policy.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/volume"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestClaimPlumbsVolumesToForkd(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "vol-node", "vol-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "vol-node", "vol-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "vol-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image: "python:3.12-slim",
-			Volumes: []v1alpha1.SandboxVolume{
-				{
-					Name:       "scratch",
-					Size:       "512Mi",
-					MountPath:  "/scratch",
-					ForkPolicy: v1alpha1.ForkPolicyFresh,
-				},
-				{
-					Name:       "cache",
-					MountPath:  "/cache",
-					ForkPolicy: v1alpha1.ForkPolicySnapshot,
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "vol-pool", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image: "python:3.12-slim",
+				Volumes: []v1.SandboxVolume{
+					{
+						Name:       "scratch",
+						Size:       "512Mi",
+						MountPath:  "/scratch",
+						ForkPolicy: v1.ForkPolicyFresh,
+					},
+					{
+						Name:       "cache",
+						MountPath:  "/cache",
+						ForkPolicy: v1.ForkPolicySnapshot,
+					},
 				},
 			},
+			Warm: &v1.PoolWarm{Min: 1},
 		},
 	}
-	pool := &v1alpha1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "vol-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "vol-tmpl"},
-			Replicas:    1,
-		},
-	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "vol-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "vol-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "vol-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +58,6 @@ func TestClaimPlumbsVolumesToForkd(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	waitClaimReady(t, "vol-claim")

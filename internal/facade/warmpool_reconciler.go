@@ -12,18 +12,20 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 )
 
 // SandboxWarmPoolReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our mitos.run
-// SandboxPool. It owns exactly one of our SandboxPool objects per upstream
-// warm pool (same name + namespace, owner-referenced for GC), setting
-// Spec.Replicas from their spec.replicas (re-read EVERY reconcile so an HPA that
-// scales their warm pool is honored) and pointing the pool at our template
-// resolved from their sandboxTemplateRef (the template reconciler creates our
-// template under the same name). It mirrors our pool's ready/warm count back
-// into their status (replicas + readyReplicas + selector).
+// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our consolidated
+// mitos.run/v1 SandboxPool. It owns exactly one of our SandboxPool objects per
+// upstream warm pool (same name + namespace, owner-referenced for GC), setting
+// spec.warm.min from their spec.replicas (re-read EVERY reconcile so an HPA that
+// scales their warm pool is honored) and pointing the pool at our template-pool
+// resolved from their sandboxTemplateRef via spec.templateRef (ADR 0007: the
+// template reconciler creates a SandboxPool with an inline template under the
+// same name, so spec.templateRef resolves the shared inline template). It
+// mirrors our pool's ready/warm count back into their status (replicas +
+// readyReplicas + selector).
 //
 // Their UpdateStrategy (Recreate / OnReplenish) is a documented justified
 // exception: our husk warm pool self-heals dormant slots and rebuilds on a
@@ -40,7 +42,7 @@ type SandboxWarmPoolReconciler struct {
 // +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools/status,verbs=get
 
 // Reconcile ensures our mitos.run SandboxPool mirrors the upstream warm pool
-// at the requested replicas and mirrors our pool status back. Deletion is
+// at the requested warm-slot count and mirrors our pool status back. Deletion is
 // handled by the owner-reference garbage collector.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -64,12 +66,14 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // ensurePool creates or updates our SandboxPool for an upstream warm pool. The
 // pool is named after the warm pool, lives in the same namespace, is
-// owner-referenced to it, points at our template (their sandboxTemplateRef
-// resolved by name, since the template reconciler mirrors under the same name),
-// and carries the requested replica count. The replica count is read EVERY
-// reconcile so an HPA-controlled change to their spec.replicas is propagated.
-func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1alpha1.SandboxWarmPool) (*runv1alpha1.SandboxPool, error) {
-	pool := &runv1alpha1.SandboxPool{
+// owner-referenced to it, points at our template-pool (their sandboxTemplateRef
+// resolved by name via spec.templateRef, since the template reconciler mirrors a
+// SandboxPool with an inline template under the same name), and carries the
+// requested warm-slot count under spec.warm.min. The warm-slot count is read
+// EVERY reconcile so an HPA-controlled change to their spec.replicas is
+// propagated.
+func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1alpha1.SandboxWarmPool) (*runv1.SandboxPool, error) {
+	pool := &runv1.SandboxPool{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
 
@@ -79,8 +83,11 @@ func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1al
 		}
 		pool.Annotations[WarmPoolAnnotation] = src.Name
 		pool.Annotations[TemplateAnnotation] = src.Spec.TemplateRef.Name
-		pool.Spec.TemplateRef = runv1alpha1.LocalObjectReference{Name: src.Spec.TemplateRef.Name}
-		pool.Spec.Replicas = src.Spec.Replicas
+		pool.Spec.TemplateRef = &runv1.LocalObjectReference{Name: src.Spec.TemplateRef.Name}
+		if pool.Spec.Warm == nil {
+			pool.Spec.Warm = &runv1.PoolWarm{}
+		}
+		pool.Spec.Warm.Min = src.Spec.Replicas
 		return controllerutil.SetControllerReference(src, pool, r.Scheme)
 	})
 	if err != nil {
@@ -102,10 +109,11 @@ const (
 // mirrorStatus writes our pool's warm-slot counts back into the upstream warm
 // pool status (replicas + readyReplicas + the scale selector), idempotently (no
 // write when nothing changed). Our pool reports ReadySnapshots/TotalSnapshots;
-// we mirror ReadySnapshots into readyReplicas and the desired replica count into
-// replicas, matching the upstream scale subresource contract.
-func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1alpha1.SandboxWarmPool, pool *runv1alpha1.SandboxPool) error {
-	wantReplicas := pool.Spec.Replicas
+// we mirror ReadySnapshots into readyReplicas and the desired warm-slot count
+// (spec.warm.min) into replicas, matching the upstream scale subresource
+// contract.
+func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1alpha1.SandboxWarmPool, pool *runv1.SandboxPool) error {
+	wantReplicas := poolWarmMin(pool)
 	wantReady := pool.Status.ReadySnapshots
 	// The scale-subresource selector must match the pool's husk pods, NOT a
 	// mitos.run/warmpool label (no pod carries one). buildHuskPod labels each
@@ -128,11 +136,19 @@ func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1
 	return nil
 }
 
+// poolWarmMin reads the warm-slot floor (spec.warm.min) of our pool nil-safely.
+func poolWarmMin(pool *runv1.SandboxPool) int32 {
+	if pool.Spec.Warm != nil {
+		return pool.Spec.Warm.Min
+	}
+	return 0
+}
+
 // SetupWithManager wires the reconciler to watch upstream SandboxWarmPools and
 // own our SandboxPool objects so a pool status change re-queues the warm pool.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extv1alpha1.SandboxWarmPool{}).
-		Owns(&runv1alpha1.SandboxPool{}).
+		Owns(&runv1.SandboxPool{}).
 		Complete(r)
 }

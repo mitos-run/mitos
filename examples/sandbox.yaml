@@ -1,0 +1,23 @@
+# One running sandbox claimed from a pool snapshot. This is the v1 equivalent
+# of the former SandboxClaim: source.poolRef selects the pool to restore from,
+# env and secrets are injected at claim time over vsock, and lifetime.timeout
+# sets the maximum run duration.
+apiVersion: mitos.run/v1
+kind: Sandbox
+metadata:
+  name: agent-session-1
+spec:
+  source:
+    poolRef:
+      name: python-agent-pool
+  env:
+    - name: SESSION_ID
+      value: "abc-123"
+  secrets:
+    - name: openai-key
+      secretRef:
+        name: agent-secrets
+        key: OPENAI_API_KEY
+      envVar: OPENAI_API_KEY
+  lifetime:
+    timeout: 30m

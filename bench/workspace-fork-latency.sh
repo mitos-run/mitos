@@ -74,7 +74,7 @@ for i in $(seq 1 "$ITERS"); do
   branch="fork-bench-${RUN_ID}-${i}"
   mitos ws create "$branch" >/dev/null 2>&1 || \
     kubectl -n "$NAMESPACE" apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: Workspace
 metadata:
   name: ${branch}

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"net"
 	"reflect"
 	"sync"
@@ -11,7 +12,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/volume"
@@ -97,7 +97,7 @@ func TestForkOnNodeCarriesVitalsLabels(t *testing.T) {
 	}
 
 	labels := &forkdpb.VitalsLabels{Claim: "claim-a", Pool: "pool-x", Workspace: "ws-1", Namespace: "team-ns"}
-	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	r := &SandboxReconciler{NodeRegistry: registry}
 	if _, err := r.forkOnNode(context.Background(), node, "py", "claim-a", nil, nil, nil, nil, "tok", nil, "", labels); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -116,11 +116,11 @@ func TestForkOnNodeCarriesVitalsLabels(t *testing.T) {
 // from the claim it is reconciling: claim name, pool, workspace (empty when the
 // claim has no workspaceRef), and namespace.
 func TestClaimVitalsLabels(t *testing.T) {
-	claim := &v1alpha1.SandboxClaim{}
+	claim := &v1.Sandbox{}
 	claim.Name = "my-claim"
 	claim.Namespace = "team-ns"
-	claim.Spec.PoolRef = v1alpha1.LocalObjectReference{Name: "my-pool"}
-	claim.Spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: "my-ws"}
+	claim.Spec.Source.PoolRef = &v1.LocalObjectReference{Name: "my-pool"}
+	claim.Spec.WorkspaceRef = &v1.LocalObjectReference{Name: "my-ws"}
 
 	got := claimVitalsLabels(claim)
 	want := &forkdpb.VitalsLabels{Claim: "my-claim", Pool: "my-pool", Workspace: "my-ws", Namespace: "team-ns"}
@@ -145,7 +145,7 @@ func TestForkOnNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	r := &SandboxReconciler{NodeRegistry: registry}
 	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1", nil, "", nil)
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
@@ -174,11 +174,11 @@ func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	policy := &v1alpha1.NetworkPolicy{
-		Egress: v1alpha1.EgressDeny,
+	policy := &v1.NetworkPolicy{
+		Egress: v1.EgressDeny,
 		Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
 	}
-	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	r := &SandboxReconciler{NodeRegistry: registry}
 	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok", nil, "", nil); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
 	if got == nil {
 		t.Fatal("engine recorded no NetworkOpts; policy was not plumbed through")
 	}
-	if got.EgressPolicy != string(v1alpha1.EgressDeny) {
+	if got.EgressPolicy != string(v1.EgressDeny) {
 		t.Fatalf("egress policy = %q, want deny", got.EgressPolicy)
 	}
 	want := []string{"10.0.0.5:443", "api.example.com:443"}
@@ -213,7 +213,7 @@ func TestForkOnNodeNilNetworkPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	r := &SandboxReconciler{NodeRegistry: registry}
 	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok", nil, "", nil); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -231,12 +231,12 @@ func TestForkRunningOnNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
+	claimRec := &SandboxReconciler{NodeRegistry: registry}
 	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent", nil, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
-	forkRec := &SandboxForkReconciler{NodeRegistry: registry}
+	forkRec := &SandboxReconciler{NodeRegistry: registry}
 	result, err := forkRec.forkRunningOnNode(context.Background(), node, "parent", "child", true, nil, "tok-child")
 	if err != nil {
 		t.Fatalf("forkRunningOnNode: %v", err)
@@ -255,7 +255,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	r := &SandboxReconciler{NodeRegistry: registry}
 	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb", nil, "", nil); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
@@ -311,8 +311,8 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	}
 
 	initCommands := []string{"echo ready"}
-	templateVols := []v1alpha1.SandboxVolume{
-		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1alpha1.ForkPolicyFresh},
+	templateVols := []v1.SandboxVolume{
+		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1.ForkPolicyFresh},
 	}
 	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5, nil)
 	if err != nil {

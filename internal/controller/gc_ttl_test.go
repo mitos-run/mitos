@@ -5,13 +5,13 @@ package controller_test
 // FinishedAt survives.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 )
 
@@ -24,22 +24,22 @@ func makeTerminatedClaim(t *testing.T, prefix string, ttlSeconds int32, finished
 	ready := makeReadyClaim(t, prefix, prefix+"-node")
 
 	// Set the spec TTL (a spec update, distinct from the status write below).
-	var withSpec v1alpha1.SandboxClaim
+	var withSpec v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: ready.Name, Namespace: "default"}, &withSpec); err != nil {
 		t.Fatal(err)
 	}
 	ttl := ttlSeconds
-	withSpec.Spec.TTLSecondsAfterFinished = &ttl
+	withSpec.Spec.Lifetime = &v1.SandboxLifetime{TTLSecondsAfterFinished: &ttl}
 	if err := k8sClient.Update(ctx, &withSpec); err != nil {
 		t.Fatal(err)
 	}
 
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: ready.Name, Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
 	finished := metav1.NewTime(finishedAt)
-	got.Status.Phase = v1alpha1.SandboxTerminated
+	got.Status.Phase = v1.SandboxTerminated
 	got.Status.FinishedAt = &finished
 	if err := k8sClient.Status().Update(ctx, &got); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func makeTerminatedClaim(t *testing.T, prefix string, ttlSeconds int32, finished
 }
 
 func TestGCTTLDeletesExpiredFinishedClaim(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "ttl1-node", "ttl1-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "ttl1-node", "ttl1-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestGCTTLDeletesExpiredFinishedClaim(t *testing.T) {
 }
 
 func TestGCTTLKeepsRecentFinishedClaim(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "ttl2-node", "ttl2-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "ttl2-node", "ttl2-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestGCTTLKeepsRecentFinishedClaim(t *testing.T) {
 	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry}
 	gc.RunOnce(ctx)
 
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: "ttl2-claim", Namespace: "default"}, &got)
 	if apierrors.IsNotFound(err) {
 		t.Fatal("recently-finished claim was deleted before its TTL")

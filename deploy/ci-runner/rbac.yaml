@@ -24,16 +24,14 @@ metadata:
     app.kubernetes.io/name: mitos
     app.kubernetes.io/component: ci-runner
 rules:
-  # Create the e2e template + pool, claim, and fork; delete them on teardown.
-  # SandboxTemplate is created by the e2e (the pool references it) and read
-  # back, so it carries create/delete here too rather than read-only.
+  # Create the e2e pool and sandboxes, delete them on teardown.
+  # The e2e creates Sandboxes (poolRef claims and fromSandbox forks) and reads
+  # them back, so sandboxes carries full verbs here.
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxtemplates
+      - sandboxes
       - sandboxpools
-      - sandboxclaims
-      - sandboxforks
       # The workspace e2e creates/forks/reverts/deletes Workspaces and reads back
       # the WorkspaceRevisions the controller commits (W4, #21).
       - workspaces
@@ -50,10 +48,8 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxtemplates/status
+      - sandboxes/status
       - sandboxpools/status
-      - sandboxclaims/status
-      - sandboxforks/status
       - workspaces/status
       - workspacerevisions/status
     verbs:

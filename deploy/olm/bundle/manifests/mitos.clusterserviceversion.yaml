@@ -17,94 +17,88 @@ metadata:
     alm-examples: |-
       [
         {
-          "apiVersion": "mitos.run/v1alpha1",
-          "kind": "SandboxTemplate",
-          "metadata": {
-            "name": "full-workspace-agent"
-          },
-          "spec": {
-            "image": "python:3.12-slim",
-            "init": [
-              "pip install numpy pandas scikit-learn"
-            ],
-            "resources": {
-              "cpu": "2",
-              "memory": "2Gi"
-            },
-            "volumes": [
-              {
-                "name": "datasets",
-                "mountPath": "/data",
-                "readOnly": true,
-                "forkPolicy": "Share",
-                "source": {
-                  "s3": {
-                    "bucket": "ml-datasets",
-                    "prefix": "/training",
-                    "region": "us-east-1"
-                  }
-                }
-              },
-              {
-                "name": "code",
-                "mountPath": "/workspace",
-                "size": "10Gi",
-                "storageClass": "btrfs-csi",
-                "forkPolicy": "Snapshot",
-                "snapshotClass": "btrfs-snapshots",
-                "source": {
-                  "git": {
-                    "repo": "https://github.com/org/agent-workspace",
-                    "branch": "main"
-                  }
-                }
-              },
-              {
-                "name": "state",
-                "mountPath": "/state",
-                "size": "2Gi",
-                "forkPolicy": "Clone"
-              },
-              {
-                "name": "scratch",
-                "mountPath": "/tmp",
-                "size": "1Gi",
-                "forkPolicy": "Fresh"
-              }
-            ],
-            "networkPolicy": {
-              "egress": "deny",
-              "allow": [
-                "api.openai.com:443",
-                "*.s3.amazonaws.com:443"
-              ]
-            }
-          }
-        },
-        {
-          "apiVersion": "mitos.run/v1alpha1",
+          "apiVersion": "mitos.run/v1",
           "kind": "SandboxPool",
           "metadata": {
             "name": "python-agent-pool"
           },
           "spec": {
-            "templateRef": {
-              "name": "python-agent"
+            "template": {
+              "image": "python:3.12-slim",
+              "init": [
+                "pip install numpy pandas scikit-learn"
+              ],
+              "resources": {
+                "cpu": "2",
+                "memory": "2Gi"
+              },
+              "volumes": [
+                {
+                  "name": "datasets",
+                  "mountPath": "/data",
+                  "readOnly": true,
+                  "forkPolicy": "Share",
+                  "source": {
+                    "s3": {
+                      "bucket": "ml-datasets",
+                      "prefix": "/training",
+                      "region": "us-east-1"
+                    }
+                  }
+                },
+                {
+                  "name": "code",
+                  "mountPath": "/workspace",
+                  "size": "10Gi",
+                  "storageClass": "btrfs-csi",
+                  "forkPolicy": "Snapshot",
+                  "snapshotClass": "btrfs-snapshots",
+                  "source": {
+                    "git": {
+                      "repo": "https://github.com/org/agent-workspace",
+                      "branch": "main"
+                    }
+                  }
+                },
+                {
+                  "name": "state",
+                  "mountPath": "/state",
+                  "size": "2Gi",
+                  "forkPolicy": "Clone"
+                },
+                {
+                  "name": "scratch",
+                  "mountPath": "/tmp",
+                  "size": "1Gi",
+                  "forkPolicy": "Fresh"
+                }
+              ],
+              "network": {
+                "egress": "deny",
+                "allow": [
+                  "api.openai.com:443",
+                  "*.s3.amazonaws.com:443"
+                ]
+              }
             },
-            "replicas": 10,
-            "snapshotAfter": "Ready",
-            "scaleDownAfterSnapshot": true
+            "snapshots": {
+              "replicasPerNode": 10,
+              "snapshotAfter": "Ready",
+              "scaleDownAfterSnapshot": true
+            }
           }
         },
         {
-          "apiVersion": "mitos.run/v1alpha1",
-          "kind": "SandboxClaim",
+          "apiVersion": "mitos.run/v1",
+          "kind": "Sandbox",
           "metadata": {
             "name": "agent-session-1"
           },
           "spec": {
-            "poolRef": {
-              "name": "python-agent-pool"
+            "source": {
+              "poolRef": {
+                "name": "python-agent-pool"
+              }
             },
             "env": [
               {
@@ -122,20 +116,9 @@ metadata:
                 "envVar": "OPENAI_API_KEY"
               }
             ],
-            "timeout": "30m"
-          }
-        },
-        {
-          "apiVersion": "mitos.run/v1alpha1",
-          "kind": "SandboxFork",
-          "metadata": {
-            "name": "parallel-attempt"
-          },
-          "spec": {
-            "sourceRef": {
-              "name": "agent-session-1"
-            },
-            "replicas": 3
+            "lifetime": {
+              "ttl": "30m"
+            }
           }
         }
       ]
@@ -167,18 +150,15 @@ spec:
 
     ### Custom resources
 
-    - **SandboxTemplate**: the immutable definition of a sandbox; image, init
-      steps, resources, volumes with per-volume fork policy, and an egress
-      allowlist.
-    - **SandboxPool**: a warm pool built from a template; pre-snapshots VMs so a
-      claim activates in place.
-    - **SandboxClaim**: a request for a Ready sandbox out of a pool, with
-      per-claim env and mounted Secrets.
-    - **SandboxFork**: an N-way copy-on-write fork of a running sandbox into
-      independent siblings.
-    - **Sandbox**: a single running sandbox instance.
-    - **Workspace** and **WorkspaceRevision**: durable, forkable workspace state
-      and its committed revisions.
+    - **SandboxPool**: a warm pool built from an inline template (image, init
+      steps, resources, volumes, and an egress allowlist); pre-snapshots VMs
+      so a Sandbox activates in place.
+    - **Sandbox**: a single running sandbox instance. Created from a pool
+      snapshot (source.poolRef), forked from a live sandbox
+      (source.fromSandbox), or resumed from a WorkspaceRevision
+      (source.fromRevision).
+    - **Workspace** and **WorkspaceRevision**: durable, forkable workspace
+      state and its committed revisions.
 
     ### Requirements (read before installing)
 
@@ -242,47 +222,27 @@ spec:
       supported: true
   customresourcedefinitions:
     owned:
-      - name: sandboxtemplates.mitos.run
-        kind: SandboxTemplate
-        version: v1alpha1
-        displayName: Sandbox Template
-        description: >-
-          The immutable definition of a sandbox: image, init steps, resources,
-          volumes with per-volume fork policy, and an egress allowlist. A
-          read-only input to pool, claim, and fork placement.
       - name: sandboxpools.mitos.run
         kind: SandboxPool
-        version: v1alpha1
+        version: v1
         displayName: Sandbox Pool
         description: >-
-          A warm pool built from a SandboxTemplate. Pre-snapshots VMs and
-          maintains warm capacity so a SandboxClaim activates in place rather
-          than booting from cold.
-      - name: sandboxclaims.mitos.run
-        kind: SandboxClaim
-        version: v1alpha1
-        displayName: Sandbox Claim
-        description: >-
-          A request for a Ready sandbox out of a pool, with per-claim
-          environment variables and mounted Secrets. Carries a timeout and a
-          terminate finalizer so a Ready sandbox is reaped cleanly.
-      - name: sandboxforks.mitos.run
-        kind: SandboxFork
-        version: v1alpha1
-        displayName: Sandbox Fork
-        description: >-
-          An N-way live copy-on-write fork of a running sandbox into independent
-          sibling sandboxes, for trying several approaches in parallel.
+          A warm pool of Firecracker microVM snapshots. Inlines the template
+          (image, init steps, resources, volumes, network policy) and governs
+          snapshot fan-out and the warm-pod autoscaler. Replaces the former
+          SandboxTemplate and SandboxPool pair.
       - name: sandboxes.mitos.run
         kind: Sandbox
-        version: v1alpha2
+        version: v1
         displayName: Sandbox
         description: >-
-          A single running sandbox instance: an isolated Firecracker microVM
-          with exec, file, and environment access.
+          A single running sandbox instance. Source is a required oneof:
+          poolRef (claim from a pool snapshot), fromSandbox (CoW fork of a
+          live sandbox), or fromRevision (resume from a WorkspaceRevision).
+          Replaces the former SandboxClaim and SandboxFork kinds.
       - name: workspaces.mitos.run
         kind: Workspace
-        version: v1alpha1
+        version: v1
         displayName: Workspace
         description: >-
           Durable, forkable workspace state. Tracks the head revision and the
@@ -290,7 +250,7 @@ spec:
           retention policy.
       - name: workspacerevisions.mitos.run
         kind: WorkspaceRevision
-        version: v1alpha1
+        version: v1
         displayName: Workspace Revision
         description: >-
           A committed revision of a Workspace, owner-referenced by its
@@ -305,9 +265,7 @@ spec:
             - apiGroups:
                 - mitos.run
               resources:
-                - sandboxclaims
                 - sandboxes
-                - sandboxforks
                 - sandboxpools
                 - workspacerevisions
                 - workspaces
@@ -322,25 +280,13 @@ spec:
             - apiGroups:
                 - mitos.run
               resources:
-                - sandboxtemplates
-              verbs:
-                - get
-                - list
-                - watch
-            - apiGroups:
-                - mitos.run
-              resources:
-                - sandboxclaims/finalizers
                 - sandboxes/finalizers
-                - sandboxforks/finalizers
               verbs:
                 - update
             - apiGroups:
                 - mitos.run
               resources:
-                - sandboxclaims/status
                 - sandboxes/status
-                - sandboxforks/status
                 - sandboxpools/status
                 - workspacerevisions/status
                 - workspaces/status

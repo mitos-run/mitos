@@ -56,7 +56,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/benchstat"
 )
 
@@ -102,7 +102,7 @@ func newClient(kubeconfig string) (client.Client, error) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register core scheme: %w", err)
 	}
-	if err := runv1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register mitos.run scheme: %w", err)
 	}
 	restCfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -174,11 +174,14 @@ func (h *harness) oneClaimExec(ctx context.Context, name string) (time.Duration,
 	return time.Since(t0), nil
 }
 
-// createClaim creates a minimal SandboxClaim bound to the configured pool.
+// createClaim creates a minimal Sandbox bound to the configured pool (the v1
+// equivalent of the former SandboxClaim: Spec.Source.PoolRef).
 func (h *harness) createClaim(ctx context.Context, name string) error {
-	claim := &runv1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.cfg.namespace},
-		Spec:       runv1alpha1.SandboxClaimSpec{PoolRef: runv1alpha1.LocalObjectReference{Name: h.cfg.pool}},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{
+			PoolRef: &v1.LocalObjectReference{Name: h.cfg.pool},
+		}},
 	}
 	if err := h.client.Create(ctx, claim); err != nil {
 		return fmt.Errorf("create claim %q: %w", name, err)
@@ -186,19 +189,19 @@ func (h *harness) createClaim(ctx context.Context, name string) error {
 	return nil
 }
 
-// waitReady polls the claim until status.phase == Ready (with a usable
+// waitReady polls the sandbox until status.phase == Ready (with a usable
 // endpoint) or the timeout elapses.
-func (h *harness) waitReady(ctx context.Context, name string) (*runv1alpha1.SandboxClaim, error) {
+func (h *harness) waitReady(ctx context.Context, name string) (*v1.Sandbox, error) {
 	deadline := time.Now().Add(h.cfg.timeout)
 	for time.Now().Before(deadline) {
-		claim := &runv1alpha1.SandboxClaim{}
+		claim := &v1.Sandbox{}
 		if err := h.client.Get(ctx, h.key(name), claim); err != nil {
 			if !apierrors.IsNotFound(err) {
 				return nil, fmt.Errorf("get claim %q: %w", name, err)
 			}
-		} else if claim.Status.Phase == runv1alpha1.SandboxReady && claim.Status.Endpoint != "" {
+		} else if claim.Status.Phase == v1.SandboxReady && claim.Status.Endpoint != "" {
 			return claim, nil
-		} else if claim.Status.Phase == runv1alpha1.SandboxFailed {
+		} else if claim.Status.Phase == v1.SandboxFailed {
 			return nil, fmt.Errorf("claim %q reached Failed before Ready", name)
 		}
 		if err := sleepCtx(ctx, pollInterval); err != nil {
@@ -310,14 +313,14 @@ func (h *harness) drainOne(ctx context.Context, live map[string]struct{}, comple
 	deadline := time.Now().Add(h.cfg.timeout)
 	for time.Now().Before(deadline) {
 		for name := range live {
-			claim := &runv1alpha1.SandboxClaim{}
+			claim := &v1.Sandbox{}
 			err := h.client.Get(ctx, h.key(name), claim)
 			if err != nil {
 				delete(live, name)
 				break
 			}
 			switch claim.Status.Phase {
-			case runv1alpha1.SandboxReady:
+			case v1.SandboxReady:
 				*completions = append(*completions, benchstat.Completion{
 					Offset:     time.Since(start),
 					Concurrent: len(live),
@@ -326,7 +329,7 @@ func (h *harness) drainOne(ctx context.Context, live map[string]struct{}, comple
 				h.deleteClaim(ctx, name)
 				delete(live, name)
 				return
-			case runv1alpha1.SandboxFailed:
+			case v1.SandboxFailed:
 				h.deleteClaim(ctx, name)
 				delete(live, name)
 				return
@@ -351,7 +354,7 @@ func (h *harness) drainOne(ctx context.Context, live map[string]struct{}, comple
 // snapshots ready again. The honest measurement is the propagation latency from
 // the spec change to ReadySnapshots == TotalSnapshots across the pool's nodes.
 func (h *harness) runPoolRebuild(ctx context.Context) error {
-	pool := &runv1alpha1.SandboxPool{}
+	pool := &v1.SandboxPool{}
 	if err := h.client.Get(ctx, h.key(h.cfg.pool), pool); err != nil {
 		return fmt.Errorf("get pool %q: %w", h.cfg.pool, err)
 	}
@@ -360,15 +363,18 @@ func (h *harness) runPoolRebuild(ctx context.Context) error {
 	fmt.Fprintf(h.out, "pool %q before rebuild: digest=%q nodes=%d ready=%d/%d\n",
 		h.cfg.pool, digestBefore, nodesBefore, pool.Status.ReadySnapshots, pool.Status.TotalSnapshots)
 
-	// Trigger the rebuild: bump replicas by one then restore. This forces the
-	// pool reconcile to re-evaluate snapshot distribution to every node. A
+	// Trigger the rebuild: bump spec.warm.min by one then restore. This forces
+	// the pool reconcile to re-evaluate snapshot distribution to every node. A
 	// maintainer who wants to measure a real template change instead points
 	// spec.templateRef at a new template before running; the method is the same.
 	start := time.Now()
-	orig := pool.Spec.Replicas
-	pool.Spec.Replicas = orig + 1
+	if pool.Spec.Warm == nil {
+		pool.Spec.Warm = &v1.PoolWarm{}
+	}
+	orig := pool.Spec.Warm.Min
+	pool.Spec.Warm.Min = orig + 1
 	if err := h.client.Update(ctx, pool); err != nil {
-		return fmt.Errorf("bump pool replicas to trigger rebuild: %w", err)
+		return fmt.Errorf("bump pool warm.min to trigger rebuild: %w", err)
 	}
 
 	if err := h.waitPoolReady(ctx); err != nil {
@@ -391,7 +397,7 @@ func (h *harness) runPoolRebuild(ctx context.Context) error {
 func (h *harness) waitPoolReady(ctx context.Context) error {
 	deadline := time.Now().Add(h.cfg.timeout)
 	for time.Now().Before(deadline) {
-		pool := &runv1alpha1.SandboxPool{}
+		pool := &v1.SandboxPool{}
 		if err := h.client.Get(ctx, h.key(h.cfg.pool), pool); err != nil {
 			return fmt.Errorf("get pool %q: %w", h.cfg.pool, err)
 		}
@@ -405,19 +411,22 @@ func (h *harness) waitPoolReady(ctx context.Context) error {
 	return fmt.Errorf("pool %q did not reach all-snapshots-ready within %s", h.cfg.pool, h.cfg.timeout)
 }
 
-// restorePoolReplicas best-effort resets the pool's replicas to n.
+// restorePoolWarmMin best-effort resets the pool's spec.warm.min to n.
 func (h *harness) restorePoolReplicas(ctx context.Context, n int32) {
-	pool := &runv1alpha1.SandboxPool{}
+	pool := &v1.SandboxPool{}
 	if err := h.client.Get(ctx, h.key(h.cfg.pool), pool); err != nil {
 		return
 	}
-	pool.Spec.Replicas = n
+	if pool.Spec.Warm == nil {
+		pool.Spec.Warm = &v1.PoolWarm{}
+	}
+	pool.Spec.Warm.Min = n
 	_ = h.client.Update(ctx, pool)
 }
 
-// deleteClaim best-effort deletes a claim so a run leaves no residue.
+// deleteClaim best-effort deletes a sandbox so a run leaves no residue.
 func (h *harness) deleteClaim(ctx context.Context, name string) {
-	claim := &runv1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.cfg.namespace}}
+	claim := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.cfg.namespace}}
 	_ = h.client.Delete(ctx, claim)
 }
 

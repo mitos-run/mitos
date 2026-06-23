@@ -16,7 +16,7 @@ import (
 // This file is the kubectl mitos ps consumer of the Layer 3 guest telemetry
 // bridge (issue #164): with --processes, ps fetches the REAL in-guest process
 // table from forkd's /v1/vitals endpoint (which asks the guest agent over vsock)
-// instead of listing SandboxFork objects. When the guest is unreachable the
+// instead of listing fork Sandbox objects. When the guest is unreachable the
 // caller falls back to the object listing, so ps never renders a fabricated
 // table.
 
@@ -85,9 +85,9 @@ func fetchGuestVitals(ctx context.Context, httpc *http.Client, endpoint, token, 
 
 // runPsProcesses fetches and prints the REAL in-guest process table for one
 // sandbox via forkd's /v1/vitals endpoint. When the guest is unreachable (the
-// claim is not running, the endpoint is down, or KVM is absent so no guest is
-// behind it) it falls back to the SandboxFork object listing for that claim, so
-// the command always shows something honest and never a fabricated table.
+// sandbox is not running, the endpoint is down, or KVM is absent so no guest is
+// behind it) it falls back to the fork sandbox listing for that sandbox, so the
+// command always shows something honest and never a fabricated table.
 func runPsProcesses(namespace, name string) error {
 	c, err := newClient()
 	if err != nil {
@@ -103,9 +103,9 @@ func runPsProcesses(namespace, name string) error {
 			fmt.Print(renderGuestProcesses(v))
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "note: guest telemetry unavailable (%v); falling back to SandboxFork listing\n", ferr)
+		fmt.Fprintf(os.Stderr, "note: guest telemetry unavailable (%v); falling back to fork sandbox listing\n", ferr)
 	} else if err != nil {
-		fmt.Fprintf(os.Stderr, "note: %v; falling back to SandboxFork listing\n", err)
+		fmt.Fprintf(os.Stderr, "note: %v; falling back to fork sandbox listing\n", err)
 	}
 	return runPs(namespace, false, name)
 }

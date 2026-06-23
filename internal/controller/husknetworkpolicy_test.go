@@ -1,14 +1,14 @@
 package controller
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func TestBuildHuskNetworkPolicyDefaultDeny(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
 	np := buildHuskNetworkPolicy(pool, nil)
 	if np.Spec.PodSelector.MatchLabels[huskLabel] != "true" {
 		t.Errorf("selector = %v, want mitos.run/husk=true", np.Spec.PodSelector.MatchLabels)
@@ -34,7 +34,7 @@ func TestBuildHuskNetworkPolicyDefaultDeny(t *testing.T) {
 }
 
 func TestBuildHuskNetworkPolicyAddsAllowDestinations(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
 	np := buildHuskNetworkPolicy(pool, []string{"10.0.0.5:5432"})
 	// DNS rule + one allow rule.
 	if len(np.Spec.Egress) != 2 {
@@ -50,7 +50,7 @@ func TestBuildHuskNetworkPolicyAddsAllowDestinations(t *testing.T) {
 // extra egress rule (NetworkPolicy has no name-based egress; the in-pod DNS
 // proxy enforces names). Only the DNS rule remains.
 func TestBuildHuskNetworkPolicySkipsNameAllow(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
 	np := buildHuskNetworkPolicy(pool, []string{"api.example.com:443"})
 	if len(np.Spec.Egress) != 1 {
 		t.Fatalf("egress rules = %d, want 1 (DNS only; name allow not expressible)", len(np.Spec.Egress))

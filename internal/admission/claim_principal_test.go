@@ -10,7 +10,7 @@ import (
 	authzv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -27,7 +27,7 @@ func sarClient(t *testing.T, allow func(*authzv1.ResourceAttributes) bool, seen 
 	if err := authzv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add authz scheme: %v", err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1alpha1 scheme: %v", err)
 	}
 	return fakeclient.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
@@ -47,9 +47,9 @@ func sarClient(t *testing.T, allow func(*authzv1.ResourceAttributes) bool, seen 
 
 func claimRequest(t *testing.T, sa, user string) admission.Request {
 	t.Helper()
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "tenant-a"},
-		Spec:       v1alpha1.SandboxClaimSpec{ServiceAccount: sa},
+		Spec:       v1.SandboxSpec{ServiceAccount: sa},
 	}
 	raw, err := json.Marshal(claim)
 	if err != nil {
@@ -66,7 +66,7 @@ func claimRequest(t *testing.T, sa, user string) admission.Request {
 func newValidatorForTest(t *testing.T, c client.Client) *ClaimServiceAccountValidator {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1alpha1 scheme: %v", err)
 	}
 	return &ClaimServiceAccountValidator{Client: c, Decoder: admission.NewDecoder(scheme)}

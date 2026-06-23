@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	v1 "mitos.run/mitos/api/v1"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/eventfeed"
@@ -41,86 +41,103 @@ func TraceIDAnnotationsForTest(ctx context.Context) map[string]string {
 
 // BuildHuskPodForTest exposes buildHuskPod to the external controller_test
 // package so the husk pod spec can be unit-tested.
-func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
+func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1.SandboxPool, template *v1.PoolTemplateSpec, opts HuskPodOptions) *corev1.Pod {
 	return r.buildHuskPod(pool, template, opts)
 }
 
 // BuildForkChildPodForTest exposes buildForkChildPod to the external
 // controller_test package so the fork child pod spec can be unit-tested.
-func BuildForkChildPodForTest(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+func BuildForkChildPodForTest(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
 	return buildForkChildPod(fork, childName, opts, scheme)
 }
 
 // SetForkSnapshotForTest installs the fork-snapshot seam (tests only).
-func (r *SandboxForkReconciler) SetForkSnapshotForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+func (r *SandboxReconciler) SetForkSnapshotForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
 	r.forkSnapshot = fn
 }
 
-// SetActivateForTest installs the activate seam on the fork reconciler (tests only).
-func (r *SandboxForkReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
-	r.activate = fn
-}
-
 // SetForkSnapshotRemoverForTest installs the remove seam (tests only).
-func (r *SandboxForkReconciler) SetForkSnapshotRemoverForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+func (r *SandboxReconciler) SetForkSnapshotRemoverForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
 	r.removeForkSnapshot = fn
 }
 
-// SkipForkLabel restricts the fork reconciler to forks WITHOUT the given label;
-// only used by the test harness so a raw and a husk fork reconciler can share one
-// manager.
-func (r *SandboxForkReconciler) SkipForkLabel(label string) {
-	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetLabels()[label] == ""
-	})
-	r.controllerName = "sandboxfork-raw"
-}
+// SkipForkLabel restricts the reconciler to sandboxes WITHOUT the given label,
+// for the husk-fork harness; an alias of SkipLabel on the consolidated reconciler.
+func (r *SandboxReconciler) SkipForkLabel(label string) { r.skipLabel(label, "sandbox-fork-raw") }
 
-// OnlyForkLabel restricts the fork reconciler to forks WITH the given label.
-func (r *SandboxForkReconciler) OnlyForkLabel(label string) {
-	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetLabels()[label] != ""
-	})
-	r.controllerName = "sandboxfork-husk"
-}
+// OnlyForkLabel restricts the reconciler to sandboxes WITH the given label.
+func (r *SandboxReconciler) OnlyForkLabel(label string) { r.onlyLabel(label, "sandbox-fork-husk") }
 
-// HuskTestClaimLabel marks a claim as owned by the husk-activation tests. The
-// suite registers the raw claim reconciler to SKIP these (so it does not fight a
+// HuskTestClaimLabel marks a Sandbox as owned by the husk-activation tests. The
+// suite registers the raw reconciler to SKIP these (so it does not fight a
 // manually driven husk reconciler over the same object) and a husk-enabled
 // reconciler to handle ONLY these.
 const HuskTestClaimLabel = "mitos.run/husk-test"
 
-// HuskForkTestLabel marks a SandboxFork as owned by the husk-fork tests. The
-// suite registers the raw fork reconciler to SKIP these and a husk-enabled fork
-// reconciler to handle ONLY these.
+// HuskForkTestLabel marks a Sandbox as owned by the husk-fork tests.
 const HuskForkTestLabel = "mitos.run/husk-fork-test"
 
-// SkipLabel restricts this reconciler to claims WITHOUT the given label; only
+// SkipLabel restricts this reconciler to sandboxes WITHOUT the given label; only
 // used by the test harness so a raw and a husk reconciler can share one manager.
-func (r *SandboxClaimReconciler) SkipLabel(label string) {
+func (r *SandboxReconciler) SkipLabel(label string) { r.skipLabel(label, "sandbox-raw") }
+
+// OnlyLabel restricts this reconciler to sandboxes WITH the given label.
+func (r *SandboxReconciler) OnlyLabel(label string) { r.onlyLabel(label, "sandbox-husk") }
+
+func (r *SandboxReconciler) skipLabel(label, name string) {
 	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetLabels()[label] == ""
 	})
-	r.controllerName = "sandboxclaim-raw"
+	r.controllerName = name
 }
 
-// OnlyLabel restricts this reconciler to claims WITH the given label.
-func (r *SandboxClaimReconciler) OnlyLabel(label string) {
+// SkipLabels restricts this reconciler to sandboxes carrying NONE of the given
+// labels (the raw reconciler skips every husk-driven object so it does not fight
+// the husk reconcilers on the consolidated single kind).
+func (r *SandboxReconciler) SkipLabels(labels ...string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		for _, l := range labels {
+			if o.GetLabels()[l] != "" {
+				return false
+			}
+		}
+		return true
+	})
+	r.controllerName = "sandbox-raw"
+}
+
+func (r *SandboxReconciler) onlyLabel(label, name string) {
 	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetLabels()[label] != ""
 	})
-	r.controllerName = "sandboxclaim-husk"
+	r.controllerName = name
+}
+
+// OnlyLabels restricts this reconciler to sandboxes carrying ANY of the given
+// labels. With the consolidated single kind, one husk reconciler handles both the
+// husk-claim and husk-fork test sandboxes (it owns both engines), so the husk pod
+// watch enqueues each sandbox on exactly one reconciler.
+func (r *SandboxReconciler) OnlyLabels(labels ...string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		for _, l := range labels {
+			if o.GetLabels()[l] != "" {
+				return true
+			}
+		}
+		return false
+	})
+	r.controllerName = "sandbox-husk"
 }
 
 // SetActivateForTest injects a fake husk activator (the test seam).
-func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
+func (r *SandboxReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	r.Activate = fn
 }
 
 // SetFeedForTest wires the change feed (the Kubernetes Event recorder, the
 // CloudEvents sink, and a pinned clock) so envtest can assert both the Event
 // mirror and the CloudEvents emit without a real webhook or wall clock.
-func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, sink eventfeed.Sink, clock func() time.Time) {
+func (r *SandboxReconciler) SetFeedForTest(recorder record.EventRecorder, sink eventfeed.Sink, clock func() time.Time) {
 	r.Feed = NewEmitFeed(recorder, sink, clock)
 }
 
@@ -128,14 +145,14 @@ func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, s
 // controller_test package so the revision.created payload mapping (including the
 // mitos.run/trace-id annotation -> TraceID correlation field) can be
 // unit-tested directly against a recording sink, without a full reconcile.
-func EmitRevisionCreatedForTest(recorder record.EventRecorder, sink eventfeed.Sink, rev *v1alpha1.WorkspaceRevision) {
+func EmitRevisionCreatedForTest(recorder record.EventRecorder, sink eventfeed.Sink, rev *v1.WorkspaceRevision) {
 	NewEmitFeed(recorder, sink, nil).emitRevisionCreated(context.Background(), rev)
 }
 
 // SetCheckpointForTest injects a fake live-VM checkpointer (the drain seam).
 // The fake records whether the Checkpoint drain policy routed through it and
 // returns the scripted captured/error. nil restores the default.
-func (r *SandboxClaimReconciler) SetCheckpointForTest(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)) {
+func (r *SandboxReconciler) SetCheckpointForTest(fn func(ctx context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error)) {
 	r.Checkpoint = fn
 }
 
@@ -145,12 +162,12 @@ func (r *SandboxClaimReconciler) SetCheckpointForTest(fn func(ctx context.Contex
 // records the exclude and capture lists it was passed; diff returns a scripted
 // content diff; rendezvous records the git push it was asked to make. A nil diff
 // or rendezvous leaves the production default in place.
-func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
-	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
-	diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error),
+func (r *SandboxReconciler) SetWorkspaceTransferForTest(
+	hydrate func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error),
+	diff func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error),
 	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error,
-	repoFiles func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error),
+	repoFiles func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error),
 ) {
 	r.HydrateWorkspace = hydrate
 	r.DehydrateWorkspace = dehydrate
@@ -165,9 +182,9 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 // (and the controller still commits the revision + advances the head) without a
 // real husk pod or vsock. hydrate records the manifest it was asked to restore;
 // dehydrate returns a scripted digest and records the excludes/captures.
-func (r *SandboxClaimReconciler) SetWorkspaceDelegateForTest(
-	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+func (r *SandboxReconciler) SetWorkspaceDelegateForTest(
+	hydrate func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error),
 ) {
 	r.WorkspaceHydrateDelegate = hydrate
 	r.WorkspaceDehydrateDelegate = dehydrate
@@ -179,8 +196,8 @@ func (r *SandboxClaimReconciler) SetWorkspaceDelegateForTest(
 // envtest prove the husk terminate path commits a revision WITH a diff summary
 // without a real husk pod or node CAS, and that the diff never routes through the
 // in-controller workspaceTransport seam.
-func (r *SandboxClaimReconciler) SetWorkspaceDehydrateDiffDelegateForTest(
-	fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error),
+func (r *SandboxReconciler) SetWorkspaceDehydrateDiffDelegateForTest(
+	fn func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error),
 ) {
 	r.WorkspaceDehydrateDiffDelegate = fn
 }
@@ -199,9 +216,9 @@ func NewMemSnapshotResult(ref, principal string) MemSnapshotResultForTest {
 // 2): the checkpoint-on-terminate capture, the resume-on-activate restore, and
 // the principal-bound existence check. envtest drives the pairing decision and
 // the resume/hydrate request without a real VM.
-func (r *SandboxClaimReconciler) SetMemorySnapshotForTest(
-	checkpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (MemSnapshotResultForTest, error),
-	resume func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error,
+func (r *SandboxReconciler) SetMemorySnapshotForTest(
+	checkpoint func(ctx context.Context, claim *v1.Sandbox) (MemSnapshotResultForTest, error),
+	resume func(ctx context.Context, claim *v1.Sandbox, ref string) error,
 	exists func(ctx context.Context, ref, principal string) (bool, error),
 ) {
 	r.CheckpointMemory = checkpoint
@@ -217,14 +234,14 @@ func (r *WorkspaceReconciler) SetSnapshotExistsForTest(exists func(ctx context.C
 
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test
 // package so the PDB create-or-update can be envtested directly.
-func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *v1alpha1.SandboxPool) error {
+func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *v1.SandboxPool) error {
 	return r.ensureHuskPDB(ctx, pool)
 }
 
 // EnsureHuskNetworkPolicyForTest exposes ensureHuskNetworkPolicy to the external
 // controller_test package so the best-effort NetworkPolicy create-or-update can
 // be envtested directly.
-func (r *SandboxPoolReconciler) EnsureHuskNetworkPolicyForTest(ctx context.Context, pool *v1alpha1.SandboxPool, allow []string) error {
+func (r *SandboxPoolReconciler) EnsureHuskNetworkPolicyForTest(ctx context.Context, pool *v1.SandboxPool, allow []string) error {
 	return r.ensureHuskNetworkPolicy(ctx, pool, allow)
 }
 
@@ -234,8 +251,8 @@ func HuskNetworkPolicyNameForTest(pool string) string { return huskNetworkPolicy
 
 // ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
 // controller_test package so the warm-pool lifecycle can be envtested.
-func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {
-	res, err := r.reconcileHuskPods(ctx, pool, template, pool.Spec.Replicas)
+func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec) (int32, error) {
+	res, err := r.reconcileHuskPods(ctx, pool, template, poolWarmMin(pool))
 	return res.dormant, err
 }
 
@@ -243,7 +260,7 @@ func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, po
 // controller_test package so the husk-mode "build the snapshot first" half can
 // be envtested without driving the full Reconcile (which would race the
 // manager's pool reconciler on the pool status subresource).
-func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) error {
+func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec) error {
 	nodeFilter, err := r.placementFilter(ctx, pool)
 	if err != nil {
 		return err

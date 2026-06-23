@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // This file holds the spec-based egress/ingress chain renderers that express
@@ -31,11 +31,11 @@ func SandboxEgressCounterName(tap string) string {
 // counter is wired. It is the single value threaded from the engine into the
 // Manager so the Setup signature does not grow one parameter per dimension.
 type SandboxPolicy struct {
-	Egress       v1alpha1.EgressPolicy
+	Egress       v1.EgressPolicy
 	Allow        []HostPort
 	AllowCIDRs   []string
 	BlockNetwork bool
-	Inbound      v1alpha1.InboundPolicy
+	Inbound      v1.InboundPolicy
 	InboundCIDRs []string
 	// Counter requests the per-sandbox egress byte counter (#211 metering seam).
 	Counter bool
@@ -53,7 +53,7 @@ type ChainSpec struct {
 	// Egress is the default verdict for traffic that matches no allow rule: drop
 	// under EgressDeny (the secure default), accept under EgressAllow. Inert when
 	// BlockNetwork is set.
-	Egress v1alpha1.EgressPolicy
+	Egress v1.EgressPolicy
 	// Allow is the static IP:port allowlist (name entries are enforced by the DNS
 	// proxy, not here).
 	Allow []HostPort
@@ -179,7 +179,7 @@ func RenderSandboxChainSpec(spec ChainSpec) string {
 	// Final verdict: drop under EgressDeny (the secure default), accept under
 	// EgressAllow. Terminal within this regular chain for this packet only.
 	final := "drop"
-	if spec.Egress == v1alpha1.EgressAllow {
+	if spec.Egress == v1.EgressAllow {
 		final = "accept"
 	}
 	fmt.Fprintf(&b, "add rule inet %s %s %s %s\n", table, chain, saddr, final)
@@ -200,7 +200,7 @@ type InputChainSpec struct {
 	Tap          string
 	GuestIP      net.IP
 	ResolverIP   net.IP
-	Inbound      v1alpha1.InboundPolicy
+	Inbound      v1.InboundPolicy
 	InboundCIDRs []string
 }
 
@@ -231,7 +231,7 @@ func RenderSandboxInputChainSpec(spec InputChainSpec) string {
 	// to the terminal drop below. Return traffic for the guest's own egress is
 	// matched by the forward chain's established,related accept, so deny-by-default
 	// inbound never breaks the guest's outbound flows.
-	if spec.Inbound == v1alpha1.InboundAllow {
+	if spec.Inbound == v1.InboundAllow {
 		if len(spec.InboundCIDRs) == 0 {
 			fmt.Fprintf(&b, "add rule inet %s %s %s accept\n", table, chain, guestDaddr)
 		} else {

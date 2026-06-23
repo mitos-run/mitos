@@ -7,35 +7,31 @@ package controller_test
 // healthy nodes, so a claim on a lost node is never swept.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func makeReadyClaim(t *testing.T, prefix, node string) *v1alpha1.SandboxClaim {
+func makeReadyClaim(t *testing.T, prefix, node string) *v1.Sandbox {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: prefix + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: prefix + "-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: prefix + "-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -43,13 +39,12 @@ func makeReadyClaim(t *testing.T, prefix, node string) *v1alpha1.SandboxClaim {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 	return waitClaimReady(t, prefix+"-claim")
 }
 
 func TestGCMarksNodeLost(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-1", "nl1-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-1", "nl1-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +65,11 @@ func TestGCMarksNodeLost(t *testing.T) {
 	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry}
 	gc.RunOnce(ctx)
 
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "nl1-claim", Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != v1alpha1.SandboxFailed {
+	if got.Status.Phase != v1.SandboxFailed {
 		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
 	}
 	c := meta.FindStatusCondition(got.Status.Conditions, "Ready")
@@ -96,7 +91,7 @@ func TestGCMarksNodeLost(t *testing.T) {
 // terminal Failed/NodeLost would defeat the husk self-heal, so the GC skips the
 // node-lost-fail entirely when EnableHuskPods is set.
 func TestGCInHuskModeDoesNotFailNodeLostClaim(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-3", "nl3-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-3", "nl3-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,17 +113,17 @@ func TestGCInHuskModeDoesNotFailNodeLostClaim(t *testing.T) {
 	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry, EnableHuskPods: true}
 	gc.RunOnce(ctx)
 
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "nl3-claim", Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase == v1alpha1.SandboxFailed {
+	if got.Status.Phase == v1.SandboxFailed {
 		t.Fatalf("husk-mode GC must NOT flip a node-lost claim to Failed; phase = %q", got.Status.Phase)
 	}
 }
 
 func TestGCLeavesHealthyNodeClaim(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-2", "nl2-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-2", "nl2-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,11 +134,11 @@ func TestGCLeavesHealthyNodeClaim(t *testing.T) {
 	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry}
 	gc.RunOnce(ctx)
 
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "nl2-claim", Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != v1alpha1.SandboxReady {
+	if got.Status.Phase != v1.SandboxReady {
 		t.Fatalf("phase = %q, want Ready (claim on healthy node must be untouched)", got.Status.Phase)
 	}
 }

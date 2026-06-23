@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // TestRenderMetadataBlock asserts the metadata-block fragment drops the cloud
@@ -28,7 +28,7 @@ func TestRenderMetadataBlock(t *testing.T) {
 // allowlist can never override the IMDS block.
 func TestRenderSandboxChainMetadataBeforeAllow(t *testing.T) {
 	allow := []HostPort{{IP: net.ParseIP("169.254.169.254"), Port: 80}}
-	for _, policy := range []v1alpha1.EgressPolicy{v1alpha1.EgressDeny, v1alpha1.EgressAllow} {
+	for _, policy := range []v1.EgressPolicy{v1.EgressDeny, v1.EgressAllow} {
 		out := RenderSandboxChain("sbtap0", net.ParseIP("10.200.0.2"), policy, allow, net.ParseIP("169.254.1.1"))
 		dropIdx := strings.Index(out, "ip daddr 169.254.169.254 drop")
 		if dropIdx < 0 {
@@ -130,7 +130,7 @@ func TestRenderSandboxChainContents(t *testing.T) {
 		{IP: net.ParseIP("192.168.1.10"), Port: 80},
 	}
 	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
-		v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+		v1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 
 	chain := SandboxChainName("sbabcd1234")
 	wantContains := []string{
@@ -187,9 +187,9 @@ func TestRenderSandboxChainContents(t *testing.T) {
 // so it can never terminate sandbox A's allowed traffic on tapA.
 func TestRenderSandboxChainsIndependent(t *testing.T) {
 	a := RenderSandboxChain("sbtapA", net.ParseIP("10.200.0.2"),
-		v1alpha1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}, net.ParseIP("10.200.0.1"))
+		v1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}, net.ParseIP("10.200.0.1"))
 	b := RenderSandboxChain("sbtapB", net.ParseIP("10.200.0.6"),
-		v1alpha1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.9"), Port: 8080}}, net.ParseIP("10.200.0.5"))
+		v1.EgressDeny, []HostPort{{IP: net.ParseIP("10.0.0.9"), Port: 8080}}, net.ParseIP("10.200.0.5"))
 
 	if SandboxChainName("sbtapA") == SandboxChainName("sbtapB") {
 		t.Fatal("chain names collide")
@@ -222,7 +222,7 @@ func TestRenderSandboxChainsIndependent(t *testing.T) {
 func TestRenderSandboxChainDynamicSet(t *testing.T) {
 	allow := []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}
 	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
-		v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+		v1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 
 	table := SharedTableName()
 	chain := SandboxChainName("sbabcd1234")
@@ -288,7 +288,7 @@ func TestRenderSandboxChainDynamicSet(t *testing.T) {
 // a v6 default-deny so any unpinned v6 destination is dropped under EgressDeny.
 func TestRenderSandboxChainV6DynamicSet(t *testing.T) {
 	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
-		v1alpha1.EgressDeny, nil, net.ParseIP("10.200.0.1"))
+		v1.EgressDeny, nil, net.ParseIP("10.200.0.1"))
 
 	table := SharedTableName()
 	set6 := SandboxAllowSet6Name("sbabcd1234")
@@ -312,7 +312,7 @@ func TestRenderSandboxChainV6DynamicSet(t *testing.T) {
 // final verdict is accept, mirroring v4, so a permissive sandbox is not boxed
 // in on v6 either.
 func TestRenderSandboxChainV6AllowPolicy(t *testing.T) {
-	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressAllow, nil, nil)
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1.EgressAllow, nil, nil)
 	if !strings.Contains(out, "meta nfproto ipv6 accept") {
 		t.Errorf("EgressAllow chain must end its v6 path in accept\n%s", out)
 	}
@@ -323,8 +323,8 @@ func TestRenderSandboxChainDeterministic(t *testing.T) {
 		{IP: net.ParseIP("10.0.0.5"), Port: 443},
 		{IP: net.ParseIP("192.168.1.10"), Port: 80},
 	}
-	a := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
-	b := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+	a := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+	b := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 	if a != b {
 		t.Errorf("render not deterministic:\n%s\n---\n%s", a, b)
 	}
@@ -347,7 +347,7 @@ func lastChainRule(t *testing.T, out, chain string) string {
 }
 
 func TestRenderSandboxChainNoResolverOmitsDNS(t *testing.T) {
-	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressDeny, nil, nil)
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1.EgressDeny, nil, nil)
 	if strings.Contains(out, "dport 53") {
 		t.Errorf("expected no DNS rule without a resolver IP\n%s", out)
 	}
@@ -359,7 +359,7 @@ func TestRenderSandboxChainNoResolverOmitsDNS(t *testing.T) {
 func TestRenderSandboxChainAllowPolicy(t *testing.T) {
 	// With EgressAllow the per-sandbox chain ends in accept, not drop, so a
 	// permissive sandbox is not boxed in by its own chain.
-	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressAllow, nil, nil)
+	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1.EgressAllow, nil, nil)
 	if !strings.HasSuffix(lastChainRule(t, out, SandboxChainName("sbx")), " accept") {
 		t.Errorf("EgressAllow chain must end in accept\n%s", out)
 	}

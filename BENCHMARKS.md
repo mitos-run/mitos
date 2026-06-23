@@ -187,9 +187,9 @@ is stated.
 bench/husk-activate-latency.sh <kubeconfig> <pool> [namespace] [iterations]
 ```
 
-The script creates N sequential `SandboxClaim`s against a warm pool, waits for
+The script creates N sequential `Sandbox`es against a warm pool, waits for
 Ready, parses the activate latency out of the Ready condition message, releases
-each claim between iterations, and prints min / P50 / P95 / max plus the raw
+each sandbox between iterations, and prints min / P50 / P95 / max plus the raw
 samples. The full node spec, sample set, restore samples, CoW basis, and cluster
 setup are in
 [`bench/results/2026-06-13-bare-metal-husk.md`](bench/results/2026-06-13-bare-metal-husk.md).
@@ -313,7 +313,7 @@ has no stateful hibernate field, so pause/resume IS that toggle). The harness is
 
 | system | resume = replicas 0 -> 1 does | dominant cost |
 | --- | --- | --- |
-| our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `SandboxClaim`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
+| our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `Sandbox`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
 | upstream reference (v0.4.6) | COLD-CREATES a pod: delete the pod on 0, create a fresh one on 1 | pod schedule + admission + image + container start + app boot, on the order of seconds |
 
 The facade resume re-activates a warm dormant VM; the upstream resume cold-creates
@@ -357,9 +357,9 @@ construction with a clear message and prints no number.
 - **Claim to first-exec end to end through the controller** (#15 item 1):
   `bench/claim-first-exec-latency.sh <kubeconfig> <pool> [ns] [iters]`, the
   `claim-exec` mode of the `bench/claim` Go harness. For each sequential claim it
-  creates a `SandboxClaim`, waits for the controller to drive it Ready, and runs
+  creates a `Sandbox`, waits for the controller to drive it Ready, and runs
   the FIRST exec over the sandbox HTTP API (the same endpoint + per-sandbox
-  bearer token kubectl-mitos and the SDK use), measuring claim-create ->
+  bearer token kubectl-mitos and the SDK use), measuring sandbox-create ->
   first-exec P50/P90/P99. This is the full controller + scheduler + pool path, NOT
   the engine data path `cmd/bench` measures. **Status: harness runnable on a
   cluster; numbers OPEN, pending the #16 reference node.**

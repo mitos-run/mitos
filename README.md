@@ -103,9 +103,8 @@ hosted signup, the free-tier credit, and the first API key come from the
 
 ### Python on Kubernetes (operators)
 
-On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxTemplate,
-SandboxPool, SandboxClaim, SandboxFork) directly. Use this when you run the mitos
-operator yourself.
+On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxPool,
+Sandbox, Workspace) directly. Use this when you run the mitos operator yourself.
 
 ```python
 from mitos import AgentRun
@@ -125,7 +124,7 @@ fork_b.exec("python -c \"open('/workspace/plan_b.txt','w').write('aggressive')\"
 sb.terminate()
 ```
 
-`c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxTemplate plus a SandboxPool) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
+`c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxPool with an inline template) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
 
 The async cluster client (`AsyncAgentRun`) mirrors the hot paths and adds `create_pty()` for an interactive terminal over WebSocket.
 
@@ -227,53 +226,49 @@ kubectl apply -k deploy/
 The self-contained kustomize base installs the CRDs, the controller in the default husk mode, the forkd builder DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`; the controller discovers forkd pods automatically. A Helm chart is planned ([#37](https://github.com/mitos-run/mitos/issues/37)).
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: python-agent
-spec:
-  image: python:3.12-slim
-  init:
-    - "pip install numpy pandas requests"
-  resources:
-    cpu: "1"
-    memory: "512Mi"
-  volumes:
-    - name: workspace
-      size: 5Gi
-      forkPolicy: Snapshot
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: python-agent-pool
 spec:
-  templateRef:
-    name: python-agent
-  replicas: 10
+  template:
+    image: python:3.12-slim
+    init:
+      - "pip install numpy pandas requests"
+    resources:
+      cpu: "1"
+      memory: "512Mi"
+    volumes:
+      - name: workspace
+        size: 5Gi
+        forkPolicy: Snapshot
+  warm:
+    min: 10
 ---
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: agent-session-1
 spec:
-  poolRef:
-    name: python-agent-pool
+  source:
+    poolRef:
+      name: python-agent-pool
   secrets:
     - name: anthropic-key
       secretRef:
         name: agent-secrets
         key: ANTHROPIC_API_KEY
 ---
-apiVersion: mitos.run/v1alpha1
-kind: SandboxFork
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: parallel-attempt
 spec:
-  sourceRef:
-    name: agent-session-1
+  source:
+    fromSandbox:
+      name: agent-session-1
   replicas: 3
-  allowSecretInheritance: true   # forks duplicate memory; opt in knowingly
+  secretInheritance: inherit   # forks duplicate memory; opt in knowingly
 ```
 
 ## Features
@@ -313,7 +308,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 
 | Capability | What you get | Docs |
 |---|---|---|
-| Declarative CRDs | `SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork` with volume topology and fork behavior | [docs/templates.md](docs/templates.md) |
+| Declarative CRDs | `SandboxPool` (inline template), `Sandbox` (poolRef/fromSandbox/fromRevision source), `Workspace`/`WorkspaceRevision` in `mitos.run/v1` with volume topology and fork behavior | [docs/templates.md](docs/templates.md) |
 | Pod-native execution (DEFAULT) | Each per-sandbox VM runs in an unprivileged pod (`/dev/kvm` from a device plugin, not `privileged`), so CPU/memory requests are scheduler truth and PSA governs the pod | [docs/threat-model.md](docs/threat-model.md) |
 | Capacity-aware scheduling | CoW bin-packing onto warm holders, an overcommit budget on CoW-aware accounting, a `MaxSandboxes` host-DoS ceiling with atomic slot reservation, and typed `NoCapacity` backpressure instead of OOMing a node | [docs/scheduling.md](docs/scheduling.md) |
 | Demand-driven autoscaling | `SandboxPool.spec.autoscale` scales the dormant husk-pod count to `clamp(inUse + targetSpare, minWarm, maxWarm)` with an anti-thrash cooldown; a fixed pool is just `minWarm == replicas` | [docs/scheduling.md](docs/scheduling.md) |
@@ -324,7 +319,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Capability | What you get | Docs |
 |---|---|---|
 | Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox; `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Verified end to end on a real KVM cluster: create -> commit -> fork, where the forked sandbox reads the committed state | [docs/workspaces.md](docs/workspaces.md) |
-| Outputs and diff | A claim `spec.outputs` narrows the dehydrate to listed subtrees; a `{diff: true}` output records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
+| Outputs and diff | A sandbox `spec.lifetime.onTerminate.outputs` narrows the dehydrate to listed subtrees; a `{diff: true}` output records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
 | Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (git is the merge layer; the engine pushes, a human/CI merges). On the husk path the push is currently best-effort; fully wiring it is tracked | [#21](https://github.com/mitos-run/mitos/issues/21) |
 
 ### Operable
@@ -349,7 +344,7 @@ flowchart TB
   end
 
   subgraph CP["Kubernetes control plane"]
-    CRD["SandboxTemplate -> SandboxPool -> SandboxClaim / SandboxFork / Workspace"]
+    CRD["SandboxPool -> Sandbox / Workspace (mitos.run/v1)"]
     CTRL["controller (Deployment): reconciles CRDs, picks nodes, calls forkd over gRPC"]
     CRD --> CTRL
   end
@@ -434,7 +429,7 @@ If an alternative beats us on an axis you care about and we have no roadmap line
 
 Early development, pre-1.0 (latest release `v0.3.0`). Do not run untrusted code with this project in production yet: there has been no external security review, and some isolation controls remain open (see the threat model). Husk network egress is now verified end to end on a real KVM cluster: the in-pod default-deny filter, the cloud-metadata (169.254.169.254) block, and the per-template allowlist are all proven inside a restored VM, with no node prerequisite. See [docs/threat-model.md](docs/threat-model.md) for the exact per-boundary status. The control plane is real end-to-end (claim to running sandbox, proven in CI against mock engines and real Firecracker VMs, and exercised on a single-node Talos KVM cluster).
 
-**Husk-default scope, verified on a real KVM cluster:** warm-claim activate, blocking exec (`/v1/exec` with correct stdout and exit code), `run_code` failing closed with a clean `KernelUnavailable` (the husk base image lacks the kernel), self-heal / re-pend, pool warming plus demand autoscaling, live `SandboxFork` (the source husk pod snapshots its running VM and N child husk pods restore it via CoW, each an independent Ready child), durable forkable workspaces (create -> commit -> fork where the forked sandbox reads the committed state, hydrate/dehydrate of `/workspace` over the content-addressed store), and pod egress isolation (an in-pod default-deny nftables filter with an unconditional cloud-metadata block and a per-template allowlist: metadata-blocked, default-deny, and an allowlisted name reachable, all proven inside a restored VM with no node prerequisite) all work end to end on the husk default.
+**Husk-default scope, verified on a real KVM cluster:** warm-claim activate, blocking exec (`/v1/exec` with correct stdout and exit code), `run_code` failing closed with a clean `KernelUnavailable` (the husk base image lacks the kernel), self-heal / re-pend, pool warming plus demand autoscaling, live sandbox fork (the source husk pod snapshots its running VM and N child husk pods restore it via CoW, each an independent Ready child), durable forkable workspaces (create -> commit -> fork where the forked sandbox reads the committed state, hydrate/dehydrate of `/workspace` over the content-addressed store), and pod egress isolation (an in-pod default-deny nftables filter with an unconditional cloud-metadata block and a per-template allowlist: metadata-blocked, default-deny, and an allowlisted name reachable, all proven inside a restored VM with no node prerequisite) all work end to end on the husk default.
 
 **Tracked tails not yet fully on the husk default:** streaming exec and the interactive PTY (the guest agent baked into the husk template snapshot predates the vsock streaming/PTY frame protocol and needs a template rebuild, [#24](https://github.com/mitos-run/mitos/issues/24)); live-VM memory snapshot hooks for resumable workspace heads (gated behind `--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection (the live transport defaults to the node content-addressed store); the husk `{git}` workspace push (best-effort on husk today, [#21](https://github.com/mitos-run/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/mitos-run/mitos/issues/3)).
 

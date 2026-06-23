@@ -18,12 +18,12 @@ package controller_test
 
 import (
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -35,30 +35,23 @@ import (
 // shape, so the controller can never select a pod for it and always takes the
 // NoHuskPod pend path.
 func TestHuskNoPodClaimDoesNotChurn(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "churn-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "churn-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "churn-tmpl"},
-			Replicas:    0,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 0},
 		},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "churn-claim",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "churn-pool"}},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "churn-pool"}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
@@ -66,12 +59,11 @@ func TestHuskNoPodClaimDoesNotChurn(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// Wait for the claim to reach Pending (NoHuskPod).
-	waitClaimPhase(t, claim.Name, func(cl *v1alpha1.SandboxClaim) bool {
-		return cl.Status.Phase == v1alpha1.SandboxPending
+	waitClaimPhase(t, claim.Name, func(cl *v1.Sandbox) bool {
+		return cl.Status.Phase == v1.SandboxPending
 	})
 
 	// Let it settle, then record the resourceVersion and confirm it does NOT keep
@@ -80,7 +72,7 @@ func TestHuskNoPodClaimDoesNotChurn(t *testing.T) {
 	// requeue is 5s, so a healthy reconciler writes nothing in between; a churning
 	// one bumps the resourceVersion many times per second.
 	time.Sleep(2 * time.Second)
-	var first v1alpha1.SandboxClaim
+	var first v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: "default"}, &first); err != nil {
 		t.Fatalf("get claim: %v", err)
 	}
@@ -88,7 +80,7 @@ func TestHuskNoPodClaimDoesNotChurn(t *testing.T) {
 	bumps := 0
 	for i := 0; i < 20; i++ {
 		time.Sleep(150 * time.Millisecond)
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: "default"}, &got); err != nil {
 			t.Fatalf("get claim: %v", err)
 		}
@@ -112,39 +104,31 @@ func TestHuskNoPodClaimDoesNotChurn(t *testing.T) {
 // --subresource=status --type=merge`). The controller must leave the Ready claim
 // Ready (its backing pod is healthy) and must not flap it to Restoring/Pending.
 func TestHuskClaimStampedReadyStaysReady(t *testing.T) {
-	emptyTemplate := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "stamp-empty-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	emptyPool := &v1alpha1.SandboxPool{
+	emptyPool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "stamp-empty-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "stamp-empty-tmpl"},
-			Replicas:    0,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 0},
 		},
-	}
-	if err := k8sClient.Create(ctx, emptyTemplate); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, emptyPool); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, emptyPool)
-		_ = k8sClient.Delete(ctx, emptyTemplate)
 	})
 
 	// A dormant pod in a DIFFERENT pool, borrowed to back the claim. It is labeled
 	// with the claim so checkHuskPodLost keys off it (pool independent).
 	backing := makeDormantHuskPod(t, "stamp-other-pool", "10.9.9.9")
 
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "stamp-ready-claim",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "stamp-empty-pool"}},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "stamp-empty-pool"}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
@@ -159,7 +143,7 @@ func TestHuskClaimStampedReadyStaysReady(t *testing.T) {
 	}
 	stamp := []byte(fmt.Sprintf(
 		`{"status":{"phase":%q,"node":%q,"endpoint":%q,"sandboxID":%q}}`,
-		v1alpha1.SandboxReady, backing.Spec.NodeName, backing.Status.PodIP+":9091", backing.Name,
+		v1.SandboxReady, backing.Spec.NodeName, backing.Status.PodIP+":9091", backing.Name,
 	))
 	if err := k8sClient.Status().Patch(ctx, claim, client.RawPatch(types.MergePatchType, stamp)); err != nil {
 		t.Fatalf("stamp claim Ready: %v", err)
@@ -171,12 +155,12 @@ func TestHuskClaimStampedReadyStaysReady(t *testing.T) {
 	stableSince := time.Time{}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: "default"}, &got); err != nil {
 			t.Fatalf("get claim: %v", err)
 		}
 		switch got.Status.Phase {
-		case v1alpha1.SandboxReady:
+		case v1.SandboxReady:
 			if got.Status.SandboxID != backing.Name {
 				t.Fatalf("Ready claim points at sandboxID %q, want the stamped pod %q", got.Status.SandboxID, backing.Name)
 			}

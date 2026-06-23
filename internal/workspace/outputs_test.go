@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 )
 
@@ -14,12 +14,12 @@ func TestCapturePaths(t *testing.T) {
 	if got := CapturePaths(nil); got != nil {
 		t.Fatalf("no outputs should capture the whole workspace (nil), got %v", got)
 	}
-	if got := CapturePaths([]v1alpha1.OutputSpec{{Diff: true}, {Git: &v1alpha1.GitOutput{}}}); got != nil {
+	if got := CapturePaths([]v1.OutputSpec{{Diff: true}, {Git: &v1.GitOutput{}}}); got != nil {
 		t.Fatalf("no Path outputs should capture the whole workspace (nil), got %v", got)
 	}
 
 	// Path outputs are normalized to workspace-relative slash prefixes.
-	got := CapturePaths([]v1alpha1.OutputSpec{
+	got := CapturePaths([]v1.OutputSpec{
 		{Path: "/workspace/dist"},
 		{Path: "/workspace/dist"}, // duplicate de-duped
 		{Path: "src/gen/"},

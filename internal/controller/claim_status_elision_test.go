@@ -2,12 +2,12 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -22,13 +22,13 @@ func TestWriteClaimStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"},
-		Status: v1alpha1.SandboxClaimStatus{
-			Phase: v1alpha1.SandboxPending,
+		Status: v1.SandboxStatus{
+			Phase: v1.SandboxPending,
 			Conditions: []metav1.Condition{{
 				Type: "Ready", Status: metav1.ConditionFalse, Reason: "NoCapacity",
 				Message: "no node had capacity; the claim will retry", LastTransitionTime: metav1.Now(),
@@ -37,13 +37,13 @@ func TestWriteClaimStatusIfChangedElidesNoOp(t *testing.T) {
 	}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.SandboxClaim{}).
+		WithStatusSubresource(&v1.Sandbox{}).
 		WithObjects(claim).
 		Build()
-	r := &SandboxClaimReconciler{Client: c}
+	r := &SandboxReconciler{Client: c}
 	ctx := context.Background()
 
-	var live v1alpha1.SandboxClaim
+	var live v1.Sandbox
 	if err := c.Get(ctx, client.ObjectKeyFromObject(claim), &live); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestWriteClaimStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := r.writeClaimStatusIfChanged(ctx, &live, before); err != nil {
 		t.Fatalf("writeClaimStatusIfChanged (no-op): %v", err)
 	}
-	var afterNoop v1alpha1.SandboxClaim
+	var afterNoop v1.Sandbox
 	if err := c.Get(ctx, client.ObjectKeyFromObject(claim), &afterNoop); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestWriteClaimStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := r.writeClaimStatusIfChanged(ctx, &live, before2); err != nil {
 		t.Fatalf("writeClaimStatusIfChanged (change): %v", err)
 	}
-	var afterChange v1alpha1.SandboxClaim
+	var afterChange v1.Sandbox
 	if err := c.Get(ctx, client.ObjectKeyFromObject(claim), &afterChange); err != nil {
 		t.Fatal(err)
 	}

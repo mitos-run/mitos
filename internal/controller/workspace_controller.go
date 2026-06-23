@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -95,7 +95,7 @@ func (r *WorkspaceReconciler) snapshotExists() memorySnapshotExistsFunc {
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var ws v1alpha1.Workspace
+	var ws v1.Workspace
 	if err := r.Get(ctx, req.NamespacedName, &ws); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -196,7 +196,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // ContentManifest is a valid content-addressed digest, and enforces
 // immutability of a committed manifest. It returns whether the revision's
 // lineage is valid (a broken edge degrades the workspace).
-func (r *WorkspaceReconciler) reconcileRevision(ctx context.Context, rev *v1alpha1.WorkspaceRevision) (bool, error) {
+func (r *WorkspaceReconciler) reconcileRevision(ctx context.Context, rev *v1.WorkspaceRevision) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	lineageOK, lineageMsg := r.validateLineage(ctx, rev)
@@ -213,19 +213,19 @@ func (r *WorkspaceReconciler) reconcileRevision(ctx context.Context, rev *v1alph
 	// revision is rejected here (logged, status left Committed). Validating
 	// admission of the change itself is a webhook in a later slice; this is the
 	// reconciler-side backstop.
-	desiredPhase := v1alpha1.WorkspaceRevisionPending
+	desiredPhase := v1.WorkspaceRevisionPending
 	switch {
-	case rev.Status.Phase == v1alpha1.WorkspaceRevisionCommitted:
+	case rev.Status.Phase == v1.WorkspaceRevisionCommitted:
 		if !manifestValid {
 			logger.Info("rejecting mutation of a committed revision's contentManifest; a committed revision is immutable",
 				"revision", rev.Name, "workspace", rev.Spec.WorkspaceRef.Name)
 		}
-		desiredPhase = v1alpha1.WorkspaceRevisionCommitted
+		desiredPhase = v1.WorkspaceRevisionCommitted
 	case manifestValid && lineageOK:
-		desiredPhase = v1alpha1.WorkspaceRevisionCommitted
+		desiredPhase = v1.WorkspaceRevisionCommitted
 	}
 
-	committed := desiredPhase == v1alpha1.WorkspaceRevisionCommitted
+	committed := desiredPhase == v1.WorkspaceRevisionCommitted
 	reason := ReasonRevisionCommitted
 	msg := "contentManifest is a valid content-addressed digest"
 	if !committed {
@@ -260,7 +260,7 @@ func (r *WorkspaceReconciler) reconcileRevision(ctx context.Context, rev *v1alph
 }
 
 // revisionStatusChanged reports whether the revision's status needs a write.
-func (r *WorkspaceReconciler) revisionStatusChanged(rev *v1alpha1.WorkspaceRevision, phase v1alpha1.WorkspaceRevisionPhase, reason, msg string, committed bool) bool {
+func (r *WorkspaceReconciler) revisionStatusChanged(rev *v1.WorkspaceRevision, phase v1.WorkspaceRevisionPhase, reason, msg string, committed bool) bool {
 	if rev.Status.Phase != phase || rev.Status.ObservedGeneration != rev.Generation {
 		return true
 	}
@@ -274,7 +274,7 @@ func (r *WorkspaceReconciler) revisionStatusChanged(rev *v1alpha1.WorkspaceRevis
 // adoptRevision stamps the workspace label and owner reference on a revision the
 // first time the reconciler sees it. The owner reference is what makes deleting
 // the workspace garbage-collect the revision. A no-op once both are present.
-func (r *WorkspaceReconciler) adoptRevision(ctx context.Context, rev *v1alpha1.WorkspaceRevision, ws *v1alpha1.Workspace) error {
+func (r *WorkspaceReconciler) adoptRevision(ctx context.Context, rev *v1.WorkspaceRevision, ws *v1.Workspace) error {
 	hasLabel := rev.Labels[WorkspaceLabel] == ws.Name
 	hasOwner := false
 	for _, o := range rev.OwnerReferences {
@@ -306,7 +306,7 @@ func (r *WorkspaceReconciler) adoptRevision(ctx context.Context, rev *v1alpha1.W
 // validateLineage reports whether a revision's FromWorkspaceRevision edge
 // resolves to an existing revision in the SAME workspace. A revision with no
 // FromWorkspaceRevision edge (a root, or one sourced FromClaim) is valid.
-func (r *WorkspaceReconciler) validateLineage(ctx context.Context, rev *v1alpha1.WorkspaceRevision) (bool, string) {
+func (r *WorkspaceReconciler) validateLineage(ctx context.Context, rev *v1.WorkspaceRevision) (bool, string) {
 	src := rev.Spec.Source.FromWorkspaceRevision
 	if src == nil {
 		return true, ""
@@ -317,7 +317,7 @@ func (r *WorkspaceReconciler) validateLineage(ctx context.Context, rev *v1alpha1
 	// this one). Both are valid within the namespace, which is the tenancy
 	// boundary. The edge must resolve to an existing revision that actually
 	// belongs to the workspace the edge names (src.Workspace).
-	var parent v1alpha1.WorkspaceRevision
+	var parent v1.WorkspaceRevision
 	if err := r.Get(ctx, types.NamespacedName{Namespace: rev.Namespace, Name: src.Revision}, &parent); err != nil {
 		return false, fmt.Sprintf("fromWorkspaceRevision references revision %q which does not exist", src.Revision)
 	}
@@ -330,12 +330,12 @@ func (r *WorkspaceReconciler) validateLineage(ctx context.Context, rev *v1alpha1
 // workspaceRevisions lists the revisions that belong to a workspace, matching on
 // spec.workspaceRef (which a revision carries from creation, before the
 // reconciler adopts it with the label).
-func (r *WorkspaceReconciler) workspaceRevisions(ctx context.Context, ws *v1alpha1.Workspace) ([]v1alpha1.WorkspaceRevision, error) {
-	var all v1alpha1.WorkspaceRevisionList
+func (r *WorkspaceReconciler) workspaceRevisions(ctx context.Context, ws *v1.Workspace) ([]v1.WorkspaceRevision, error) {
+	var all v1.WorkspaceRevisionList
 	if err := r.List(ctx, &all, client.InNamespace(ws.Namespace)); err != nil {
 		return nil, fmt.Errorf("list workspace %s revisions: %w", ws.Name, err)
 	}
-	out := make([]v1alpha1.WorkspaceRevision, 0, len(all.Items))
+	out := make([]v1.WorkspaceRevision, 0, len(all.Items))
 	for i := range all.Items {
 		if all.Items[i].Spec.WorkspaceRef.Name == ws.Name {
 			out = append(out, all.Items[i])
@@ -349,7 +349,7 @@ func (r *WorkspaceReconciler) workspaceRevisions(ctx context.Context, ws *v1alph
 // the head or any ancestor on the head's lineage path (walked via the
 // FromWorkspaceRevision chain), so a kept revision can always be reconstructed
 // from its ancestors. A zero/unset Revisions disables count-based pruning.
-func (r *WorkspaceReconciler) enforceRetention(ctx context.Context, ws *v1alpha1.Workspace, committed []v1alpha1.WorkspaceRevision, head *v1alpha1.WorkspaceRevision, logger logger) error {
+func (r *WorkspaceReconciler) enforceRetention(ctx context.Context, ws *v1.Workspace, committed []v1.WorkspaceRevision, head *v1.WorkspaceRevision, logger logger) error {
 	keep := ws.Spec.Retention.Revisions
 	if keep <= 0 || int32(len(committed)) <= keep {
 		return nil
@@ -358,7 +358,7 @@ func (r *WorkspaceReconciler) enforceRetention(ctx context.Context, ws *v1alpha1
 	protected := headLineage(committed, head)
 
 	// Order oldest first so we prune the oldest over-count revisions.
-	sorted := append([]v1alpha1.WorkspaceRevision(nil), committed...)
+	sorted := append([]v1.WorkspaceRevision(nil), committed...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return revisionLess(&sorted[i], &sorted[j])
 	})
@@ -390,12 +390,12 @@ func (r *WorkspaceReconciler) enforceRetention(ctx context.Context, ws *v1alpha1
 // headLineage returns the set of revision names on the head's ancestry path (the
 // head itself plus every ancestor reachable through FromWorkspaceRevision).
 // These are never pruned.
-func headLineage(committed []v1alpha1.WorkspaceRevision, head *v1alpha1.WorkspaceRevision) map[string]bool {
+func headLineage(committed []v1.WorkspaceRevision, head *v1.WorkspaceRevision) map[string]bool {
 	protected := map[string]bool{}
 	if head == nil {
 		return protected
 	}
-	byName := map[string]*v1alpha1.WorkspaceRevision{}
+	byName := map[string]*v1.WorkspaceRevision{}
 	for i := range committed {
 		byName[committed[i].Name] = &committed[i]
 	}
@@ -415,10 +415,10 @@ func headLineage(committed []v1alpha1.WorkspaceRevision, head *v1alpha1.Workspac
 }
 
 // committedRevisions filters a revision set to those in the Committed phase.
-func committedRevisions(revs []v1alpha1.WorkspaceRevision) []v1alpha1.WorkspaceRevision {
-	out := make([]v1alpha1.WorkspaceRevision, 0, len(revs))
+func committedRevisions(revs []v1.WorkspaceRevision) []v1.WorkspaceRevision {
+	out := make([]v1.WorkspaceRevision, 0, len(revs))
 	for i := range revs {
-		if revs[i].Status.Phase == v1alpha1.WorkspaceRevisionCommitted {
+		if revs[i].Status.Phase == v1.WorkspaceRevisionCommitted {
 			out = append(out, revs[i])
 		}
 	}
@@ -428,7 +428,7 @@ func committedRevisions(revs []v1alpha1.WorkspaceRevision) []v1alpha1.WorkspaceR
 // headRevision returns the latest committed revision, ordered by creation
 // timestamp then name (the deterministic tiebreaker). Returns nil for an empty
 // set.
-func headRevision(committed []v1alpha1.WorkspaceRevision) *v1alpha1.WorkspaceRevision {
+func headRevision(committed []v1.WorkspaceRevision) *v1.WorkspaceRevision {
 	if len(committed) == 0 {
 		return nil
 	}
@@ -444,7 +444,7 @@ func headRevision(committed []v1alpha1.WorkspaceRevision) *v1alpha1.WorkspaceRev
 // revisionLess reports whether a is older than b: earlier creation timestamp,
 // then lexicographically smaller name as a stable tiebreaker for revisions
 // created in the same instant.
-func revisionLess(a, b *v1alpha1.WorkspaceRevision) bool {
+func revisionLess(a, b *v1.WorkspaceRevision) bool {
 	at, bt := a.CreationTimestamp.Time, b.CreationTimestamp.Time
 	if at.Equal(bt) {
 		return a.Name < b.Name
@@ -452,7 +452,7 @@ func revisionLess(a, b *v1alpha1.WorkspaceRevision) bool {
 	return at.Before(bt)
 }
 
-func headName(head *v1alpha1.WorkspaceRevision) string {
+func headName(head *v1.WorkspaceRevision) string {
 	if head == nil {
 		return ""
 	}
@@ -483,10 +483,10 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// seam or dehydrate) to its workspace via spec.workspaceRef, so the first
 	// reconcile that adopts and commits it is event-driven, not poll-driven.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.Workspace{}).
-		Owns(&v1alpha1.WorkspaceRevision{}).
-		Watches(&v1alpha1.WorkspaceRevision{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
-			rev, ok := obj.(*v1alpha1.WorkspaceRevision)
+		For(&v1.Workspace{}).
+		Owns(&v1.WorkspaceRevision{}).
+		Watches(&v1.WorkspaceRevision{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+			rev, ok := obj.(*v1.WorkspaceRevision)
 			if !ok || rev.Spec.WorkspaceRef.Name == "" {
 				return nil
 			}

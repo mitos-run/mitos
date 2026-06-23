@@ -2,14 +2,13 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"testing"
-
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
-func adapterClaim(name, sa string) *v1alpha1.SandboxClaim {
-	c := &v1alpha1.SandboxClaim{}
+func adapterClaim(name, sa string) *v1.Sandbox {
+	c := &v1.Sandbox{}
 	c.Name = name
 	c.Spec.ServiceAccount = sa
 	return c
@@ -20,7 +19,7 @@ func adapterClaim(name, sa string) *v1alpha1.SandboxClaim {
 // revision's MemorySnapshotPrincipal binds the image to that principal.
 func TestWorkspaceMemorySnapshotAdapterCheckpointBindsPrincipal(t *testing.T) {
 	a := &WorkspaceMemorySnapshotAdapter{
-		CheckpointLiveVM: func(_ context.Context, _ *v1alpha1.SandboxClaim) (string, error) {
+		CheckpointLiveVM: func(_ context.Context, _ *v1.Sandbox) (string, error) {
 			return "snap-x", nil
 		},
 	}
@@ -56,8 +55,8 @@ func TestWorkspaceMemorySnapshotAdapterCheckpointFailsLoudWithoutLiveVM(t *testi
 func TestWorkspaceMemorySnapshotAdapterResumeRefusesCrossPrincipal(t *testing.T) {
 	restored := false
 	a := &WorkspaceMemorySnapshotAdapter{
-		CheckpointLiveVM: func(_ context.Context, _ *v1alpha1.SandboxClaim) (string, error) { return "snap-x", nil },
-		RestoreLiveVM: func(_ context.Context, _ *v1alpha1.SandboxClaim, _ string) error {
+		CheckpointLiveVM: func(_ context.Context, _ *v1.Sandbox) (string, error) { return "snap-x", nil },
+		RestoreLiveVM: func(_ context.Context, _ *v1.Sandbox, _ string) error {
 			restored = true
 			return nil
 		},
@@ -90,7 +89,7 @@ func TestWorkspaceMemorySnapshotAdapterResumeRefusesCrossPrincipal(t *testing.T)
 func TestWorkspaceMemorySnapshotAdapterExistsPrincipalBound(t *testing.T) {
 	present := map[string]bool{"snap-x": true}
 	a := &WorkspaceMemorySnapshotAdapter{
-		CheckpointLiveVM: func(_ context.Context, _ *v1alpha1.SandboxClaim) (string, error) { return "snap-x", nil },
+		CheckpointLiveVM: func(_ context.Context, _ *v1.Sandbox) (string, error) { return "snap-x", nil },
 		SnapshotPresent: func(_ context.Context, ref string) (bool, error) {
 			return present[ref], nil
 		},

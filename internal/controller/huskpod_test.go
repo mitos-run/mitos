@@ -15,6 +15,7 @@ package controller_test
 //     is documented in huskpod.go).
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,30 +24,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestBuildHuskPodSpec(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec-pool", Namespace: "default", UID: "pool-uid-1"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "spec-tmpl"}, Replicas: 2},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "spec-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image: "python:3.12-slim",
-			Resources: v1alpha1.SandboxResources{
-				CPU:    resource.MustParse("2"),
-				Memory: resource.MustParse("1Gi"),
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image: "python:3.12-slim",
+				Resources: v1.SandboxResources{
+					CPU:    resource.MustParse("2"),
+					Memory: resource.MustParse("1Gi"),
+				},
 			},
+			Warm: &v1.PoolWarm{Min: 2},
 		},
 	}
 
 	c := k8sClient
 	r := &controller.SandboxPoolReconciler{Client: c}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:       "mitos-husk-stub:test",
 		KVMResourceName: "mitos.run/kvm",
 	})
@@ -138,8 +137,8 @@ func TestBuildHuskPodSpec(t *testing.T) {
 // so the stub stays in IP-only allowlist mode.
 func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{}
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
-	tmpl := &v1alpha1.SandboxTemplate{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
 
 	withDNS := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
 		StubImage:   "img",
@@ -195,8 +194,8 @@ func argsContainPair(args []string, flag, val string) bool {
 // access (the pod is not hostNetwork and not privileged).
 func TestHuskPodHasNetAdminForInPodFirewall(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{}
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
-	tmpl := &v1alpha1.SandboxTemplate{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
 	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
 	sc := pod.Spec.Containers[0].SecurityContext
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
@@ -227,17 +226,16 @@ func TestHuskPodHasNetAdminForInPodFirewall(t *testing.T) {
 // proven object-level on kind in the conformance job; this unit test pins the
 // spec fields those exceptions and the satisfied controls correspond to.
 func TestBuildHuskPodPSARestricted(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "psa-pool", Namespace: "default", UID: "pool-uid-psa"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "psa-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "psa-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:  "mitos-husk-stub:test",
 		SnapshotID: "psa-tmpl",
 		DataDir:    "/var/lib/mitos",
@@ -332,17 +330,16 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 }
 
 func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ctl-pool", Namespace: "default", UID: "pool-uid-9"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "ctl-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "ctl-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:     "mitos-husk-stub:test",
 		SnapshotID:    "ctl-tmpl",
 		DataDir:       "/var/lib/mitos",
@@ -432,17 +429,16 @@ func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 // hatch), so the stub re-verifies the snapshot before loading (fail-closed).
 func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	const digest = "abc1230000000000000000000000000000000000000000000000000000000000"
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pool", Namespace: "default", UID: "pool-uid-v"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "verify-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "verify-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:      "mitos-husk-stub:test",
 		SnapshotID:     "verify-tmpl",
 		DataDir:        "/var/lib/mitos",
@@ -495,17 +491,16 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 }
 
 func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "cow-pool", Namespace: "default", UID: "pool-uid-cow"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "cow-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "cow-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:  "mitos-husk-stub:test",
 		SnapshotID: "cow-tmpl",
 		DataDir:    "/var/lib/mitos",
@@ -595,17 +590,16 @@ func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
 // digest the husk pod mounts no manifest and runs the stub's development escape
 // hatch so the warm pool still activates (the stub logs this loudly).
 func TestBuildHuskPodEscapeHatchWhenNoDigest(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "nodigest-pool", Namespace: "default", UID: "pool-uid-n"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "nodigest-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "nodigest-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage:  "mitos-husk-stub:test",
 		SnapshotID: "nodigest-tmpl",
 		DataDir:    "/var/lib/mitos",
@@ -623,20 +617,19 @@ func TestBuildHuskPodEscapeHatchWhenNoDigest(t *testing.T) {
 }
 
 func TestBuildHuskPodDefaultSizing(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "def-pool", Namespace: "default", UID: "pool-uid-2"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "def-tmpl"}, Replicas: 1},
-	}
 	// A template with no Resources: the builder must fall back to the
 	// documented default (1 cpu / 512Mi).
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "def-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "def-pool", Namespace: "default", UID: "pool-uid-2"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	c := k8sClient
 	r := &controller.SandboxPoolReconciler{Client: c}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{})
 
 	// Default kvm resource name when opts leaves it empty.
 	kvm := corev1.ResourceName("mitos.run/kvm")
@@ -667,21 +660,20 @@ func TestBuildHuskPodDefaultSizing(t *testing.T) {
 // request). cpu stays requests-only (a cpu limit would throttle and hurt the
 // activate latency).
 func TestBuildHuskPodMemoryLimitWithHeadroom(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "mem-pool", Namespace: "default", UID: "pool-uid-mem"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "mem-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "mem-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image:     "python:3.12-slim",
-			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("1Gi")},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image:     "python:3.12-slim",
+				Resources: v1.SandboxResources{Memory: resource.MustParse("1Gi")},
+			},
+			Warm: &v1.PoolWarm{Min: 1},
 		},
 	}
 
 	c := k8sClient
 	r := &controller.SandboxPoolReconciler{Client: c}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{})
 	ctr := pod.Spec.Containers[0]
 
 	// request stays the configured 1Gi (scheduler truth).
@@ -713,21 +705,20 @@ func TestBuildHuskPodMemoryLimitWithHeadroom(t *testing.T) {
 // component dominates for a large VM: a 16Gi request gets 25% = 4Gi of headroom
 // (not the 256Mi floor), so the absolute slack scales with the VM.
 func TestBuildHuskPodMemoryLimitProportionalForLargeVM(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "big-pool", Namespace: "default", UID: "pool-uid-big"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "big-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "big-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image:     "python:3.12-slim",
-			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("16Gi")},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image:     "python:3.12-slim",
+				Resources: v1.SandboxResources{Memory: resource.MustParse("16Gi")},
+			},
+			Warm: &v1.PoolWarm{Min: 1},
 		},
 	}
 
 	c := k8sClient
 	r := &controller.SandboxPoolReconciler{Client: c}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{})
 	ctr := pod.Spec.Containers[0]
 
 	// limit = 16Gi + max(256Mi, 25% of 16Gi=4Gi) = 16Gi + 4Gi = 20Gi.
@@ -743,22 +734,21 @@ func TestBuildHuskPodMemoryLimitProportionalForLargeVM(t *testing.T) {
 // flag): a 512Mi floor produces request + 512Mi for a small VM where the floor
 // dominates the percentage.
 func TestBuildHuskPodMemoryLimitConfigurableHeadroom(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "cfg-pool", Namespace: "default", UID: "pool-uid-cfg"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "cfg-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "cfg-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image:     "python:3.12-slim",
-			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("512Mi")},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image:     "python:3.12-slim",
+				Resources: v1.SandboxResources{Memory: resource.MustParse("512Mi")},
+			},
+			Warm: &v1.PoolWarm{Min: 1},
 		},
 	}
 
 	c := k8sClient
 	headroom := resource.MustParse("512Mi")
 	r := &controller.SandboxPoolReconciler{Client: c, HuskMemoryHeadroom: headroom}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{})
 	ctr := pod.Spec.Containers[0]
 
 	// limit = 512Mi + max(512Mi floor, 25% of 512Mi=128Mi) = 512Mi + 512Mi = 1Gi.
@@ -797,28 +787,21 @@ func waitHuskPodCount(t *testing.T, c client.Client, poolName string, want int) 
 func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "husk-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "husk-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "husk-tmpl"},
-			Replicas:    3,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 3},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		for _, p := range listHuskPods(t, c, "husk-pool") {
 			_ = c.Delete(ctx, &p)
 		}
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	r := &controller.SandboxPoolReconciler{
@@ -831,13 +814,13 @@ func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 
 	// Re-fetch the pool so the reconciler works against a server-populated UID
 	// (SetControllerReference requires the owner UID).
-	var got v1alpha1.SandboxPool
+	var got v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &got); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create: Replicas=3 -> 3 husk pod objects owned by the pool.
-	count, err := r.ReconcileHuskPodsForTest(ctx, &got, template)
+	// Create: warm.min=3 -> 3 husk pod objects owned by the pool.
+	count, err := r.ReconcileHuskPodsForTest(ctx, &got, got.Spec.Template)
 	if err != nil {
 		t.Fatalf("reconcileHuskPods (create): %v", err)
 	}
@@ -852,8 +835,8 @@ func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 		}
 	}
 
-	// Idempotent: a second reconcile at the same Replicas creates nothing new.
-	count, err = r.ReconcileHuskPodsForTest(ctx, &got, template)
+	// Idempotent: a second reconcile at the same warm.min creates nothing new.
+	count, err = r.ReconcileHuskPodsForTest(ctx, &got, got.Spec.Template)
 	if err != nil {
 		t.Fatalf("reconcileHuskPods (idempotent): %v", err)
 	}
@@ -862,9 +845,9 @@ func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 	}
 	waitHuskPodCount(t, c, "husk-pool", 3)
 
-	// Scale down: Replicas=1 -> 2 deleted.
-	got.Spec.Replicas = 1
-	count, err = r.ReconcileHuskPodsForTest(ctx, &got, template)
+	// Scale down: warm.min=1 -> 2 deleted.
+	got.Spec.Warm.Min = 1
+	count, err = r.ReconcileHuskPodsForTest(ctx, &got, got.Spec.Template)
 	if err != nil {
 		t.Fatalf("reconcileHuskPods (scale down): %v", err)
 	}
@@ -877,25 +860,18 @@ func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 func TestReconcileHuskPodsFlagOffCreatesNone(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "off-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "off-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "off-tmpl"},
-			Replicas:    2,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 2},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	// EnableHuskPods false: the pool reconcile runs the raw-forkd path through
@@ -912,8 +888,8 @@ func TestReconcileHuskPodsFlagOffCreatesNone(t *testing.T) {
 
 func TestBuildHuskPodMountsForksDir(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
-	tmpl := &v1alpha1.SandboxTemplate{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1.PoolTemplateSpec{}
 	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", SnapshotID: "tmpl-a", DataDir: "/data"})
 
 	var found bool
@@ -929,8 +905,8 @@ func TestBuildHuskPodMountsForksDir(t *testing.T) {
 
 func TestBuildHuskPodForkChildActivatesFromForkSnapshot(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
-	tmpl := &v1alpha1.SandboxTemplate{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1.PoolTemplateSpec{}
 	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
@@ -965,8 +941,8 @@ func TestBuildHuskPodForkChildActivatesFromForkSnapshot(t *testing.T) {
 // through ForkSourceRootfsPath; --template-rootfs (the clone SOURCE) must be it.
 func TestBuildHuskPodForkChildClonesFromSourceRootfs(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
-	tmpl := &v1alpha1.SandboxTemplate{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1.PoolTemplateSpec{}
 	srcRootfs := filepath.Join("/var/lib/mitos", "husk-rootfs", "src-pod-xyz", "rootfs.ext4")
 	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
 		StubImage:            "img",
@@ -1002,7 +978,7 @@ func TestBuildHuskPodForkChildClonesFromSourceRootfs(t *testing.T) {
 }
 
 func TestBuildForkChildPodOwnedByFork(t *testing.T) {
-	fork := &v1alpha1.SandboxFork{ObjectMeta: metav1.ObjectMeta{Name: "f1", Namespace: "default", UID: "uid-f1"}}
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "f1", Namespace: "default", UID: "uid-f1"}}
 	pod := controller.BuildForkChildPodForTest(fork, "child-0", controller.HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
@@ -1028,17 +1004,16 @@ func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 // calls the Kubernetes API, so mounting the namespace default SA token would only
 // hand a guest that escaped into the stub a free system:authenticated token.
 func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "sa-pool", Namespace: "default", UID: "pool-uid-sa"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "sa-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "sa-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{StubImage: "img"})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
 
 	if pod.Spec.AutomountServiceAccountToken == nil {
 		t.Fatal("warm husk pod must set AutomountServiceAccountToken (got nil)")
@@ -1048,7 +1023,7 @@ func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
 	}
 
 	// Fork-child pods share buildHuskPod, so they must inherit the opt-out too.
-	fork := &v1alpha1.SandboxFork{ObjectMeta: metav1.ObjectMeta{Name: "sa-fork", Namespace: "default", UID: "uid-sa-fork"}}
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sa-fork", Namespace: "default", UID: "uid-sa-fork"}}
 	child := controller.BuildForkChildPodForTest(fork, "sa-child-0", controller.HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
@@ -1066,16 +1041,15 @@ func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
 // 300s, so a node loss evicts the pod and fails an active claim over (or refills
 // the warm pool) in ~a minute, not ~5 (#177).
 func TestBuildHuskPodFastNodeLossEviction(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "tol-pool", Namespace: "default", UID: "tol-uid"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "tol-tmpl"}, Replicas: 1},
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tol-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
 	}
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{StubImage: "mitos-husk-stub:test", KVMResourceName: "mitos.run/kvm"})
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "mitos-husk-stub:test", KVMResourceName: "mitos.run/kvm"})
 
 	want := map[string]int64{"node.kubernetes.io/not-ready": 60, "node.kubernetes.io/unreachable": 60}
 	got := map[string]int64{}
@@ -1095,19 +1069,19 @@ func TestBuildHuskPodFastNodeLossEviction(t *testing.T) {
 // is threaded onto the husk pod: the nodeSelector is merged with the KVM label
 // and the tolerations are appended to the node-loss tolerations.
 func TestBuildHuskPodPlacement(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ded-pool", Namespace: "default", UID: "ded-uid"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "ded-tmpl"}, Replicas: 1,
-			Placement: &v1alpha1.PoolPlacement{
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+			Placement: &v1.PoolPlacement{
 				NodeSelector: map[string]string{"mitos.run/tenant": "acme"},
 				Tolerations:  []corev1.Toleration{{Key: "mitos.run/tenant", Operator: corev1.TolerationOpEqual, Value: "acme", Effect: corev1.TaintEffectNoSchedule}},
 			},
 		},
 	}
-	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "ded-tmpl", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"}}
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
-	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{
 		StubImage: "mitos-husk-stub:test", KVMResourceName: "mitos.run/kvm",
 		PlacementNodeSelector: pool.Spec.Placement.NodeSelector,
 		PlacementTolerations:  pool.Spec.Placement.Tolerations,

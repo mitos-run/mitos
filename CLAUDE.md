@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Snapshot-fork sandboxes for AI agents on Kubernetes. The system boots Firecracker microVMs, forks them via copy-on-write snapshots, and exposes the whole lifecycle through declarative CRDs (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in API group `mitos.run/v1alpha1`.
+Snapshot-fork sandboxes for AI agents on Kubernetes. The system boots Firecracker microVMs, forks them via copy-on-write snapshots, and exposes the whole lifecycle through declarative CRDs (SandboxPool, Sandbox, Workspace) in API group `mitos.run/v1`.
 
 Components:
 
@@ -42,7 +42,7 @@ make generate manifests   # regenerate deepcopy + CRD YAML after api/ changes
 
 ## Architecture
 
-- **controller** (`cmd/controller`, `internal/controller`): reconciles SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork; tracks forkd nodes via the NodeRegistry fed by capacity heartbeats.
+- **controller** (`cmd/controller`, `internal/controller`): reconciles SandboxPool, Sandbox, Workspace, WorkspaceRevision; tracks forkd nodes via the NodeRegistry fed by capacity heartbeats.
 - **forkd** (`cmd/forkd`, `internal/daemon`): node daemon that owns VMs; gRPC service on :9090 (fork, prepare-pool, heartbeat), HTTP sandbox API on :9091 (exec, files, status).
 - **fork engines** (`internal/fork`): the real engine (internal/fork/engine.go) drives Firecracker snapshot/restore and needs KVM; the mock engine (internal/fork/mock.go, KVMAvailable=false) is used by kind e2e and envtest.
 - **firecracker client** (`internal/firecracker`): VM lifecycle over the Firecracker API socket.
@@ -76,6 +76,7 @@ Secret VALUES are never logged, never in error messages, never in condition mess
 
 - Conventional commits: feat, fix, docs, ci, chore, refactor, test.
 - Branch naming: feat/, fix/, chore/, docs/, ci/, refactor/.
+- DCO: every commit MUST carry a `Signed-off-by: Name <email>` trailer (use `git commit -s`). The `dco-check` CI job fails the PR if any non-merge commit lacks one, so add it as you commit rather than rewriting history later.
 
 ### TDD
 

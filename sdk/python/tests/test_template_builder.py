@@ -67,7 +67,7 @@ def test_empty_build_omits_buildsteps_key():
 
 def test_to_template_wraps_spec_with_name():
     obj = Template().from_image("busybox").to_template("my-tmpl")
-    assert obj["apiVersion"] == "mitos.run/v1alpha1"
-    assert obj["kind"] == "SandboxTemplate"
+    assert obj["apiVersion"] == "mitos.run/v1"
+    assert obj["kind"] == "SandboxPool"
     assert obj["metadata"]["name"] == "my-tmpl"
-    assert obj["spec"]["image"] == "busybox"
+    assert obj["spec"]["template"]["image"] == "busybox"

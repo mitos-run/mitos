@@ -2,13 +2,13 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -20,7 +20,7 @@ func selectTestScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 to scheme: %v", err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1alpha1 to scheme: %v", err)
 	}
 	return scheme
@@ -28,8 +28,8 @@ func selectTestScheme(t *testing.T) *runtime.Scheme {
 
 // huskPoolForSelect returns a pool with a UID so SetControllerReference can
 // stamp a controller owner reference the way reconcileHuskPods does in prod.
-func huskPoolForSelect(name string) *v1alpha1.SandboxPool {
-	return &v1alpha1.SandboxPool{
+func huskPoolForSelect(name string) *v1.SandboxPool {
+	return &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-" + name)},
 	}
 }
@@ -37,7 +37,7 @@ func huskPoolForSelect(name string) *v1alpha1.SandboxPool {
 // readyHuskPod builds a husk pod that is Running+Ready with a PodIP and the
 // pool's husk labels. ownedBy, when non-nil, attaches the controller owner
 // reference reconcileHuskPods stamps (Controller=true, BlockOwnerDeletion=true).
-func readyHuskPod(t *testing.T, name, poolName, podIP string, ownedBy *v1alpha1.SandboxPool) *corev1.Pod {
+func readyHuskPod(t *testing.T, name, poolName, podIP string, ownedBy *v1.SandboxPool) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -76,7 +76,7 @@ func TestSelectDormantHuskPodRequiresControllerOwnerRef(t *testing.T) {
 	genuine := readyHuskPod(t, "zzz-genuine", "p", "10.0.0.5", pool)
 
 	t.Run("decoy alone is not selected", func(t *testing.T) {
-		r := &SandboxClaimReconciler{Client: newAutoscaleFakeClient(t, pool, decoy)}
+		r := &SandboxReconciler{Client: newAutoscaleFakeClient(t, pool, decoy)}
 		got, err := r.selectDormantHuskPod(context.Background(), pool)
 		if err != nil {
 			t.Fatalf("selectDormantHuskPod: %v", err)
@@ -87,7 +87,7 @@ func TestSelectDormantHuskPodRequiresControllerOwnerRef(t *testing.T) {
 	})
 
 	t.Run("genuine is selected over a lower-named decoy", func(t *testing.T) {
-		r := &SandboxClaimReconciler{Client: newAutoscaleFakeClient(t, pool, decoy, genuine)}
+		r := &SandboxReconciler{Client: newAutoscaleFakeClient(t, pool, decoy, genuine)}
 		got, err := r.selectDormantHuskPod(context.Background(), pool)
 		if err != nil {
 			t.Fatalf("selectDormantHuskPod: %v", err)

@@ -10,7 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	forkdpb "mitos.run/mitos/proto/forkd"
 )
 
@@ -76,7 +76,7 @@ func sandboxInfo(ctx context.Context, registry *NodeRegistry, nodeName, sandboxI
 // attaches to the fork so the node can LABEL the sandbox's Layer 3 guest
 // telemetry (issue #164). The fields are Kubernetes object names, never secrets;
 // a nil value (no claim context) leaves the sandbox's vitals unlabeled.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, wrappedDEK []byte, kekID string, labels *forkdpb.VitalsLabels) (*forkResult, error) {
+func (r *SandboxReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, wrappedDEK []byte, kekID string, labels *forkdpb.VitalsLabels) (*forkResult, error) {
 	// controller.forkOnNode is the child span whose context the otelgrpc client
 	// handler injects over the wire so the forkd.Fork span joins this trace.
 	// Only node and snapshot (config, no secrets) are recorded.
@@ -140,7 +140,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 // validated here but not sent on the wire until the live-fork drive-rebind
 // path lands (Task 3). Names, mount paths, and policies are config, safe to
 // log.
-func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool, volumes []*forkdpb.VolumeMount, apiToken string) (*forkRunningResult, error) {
+func (r *SandboxReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool, volumes []*forkdpb.VolumeMount, apiToken string) (*forkRunningResult, error) {
 	_ = volumes
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
@@ -210,7 +210,7 @@ func toEnvVars(m map[string]string) []*forkdpb.EnvVar {
 // verbatim; forkd splits it into enforceable IP:port entries and name-based
 // entries (the latter logged as not-yet-enforced), so the controller does not
 // validate or filter it here.
-func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
+func toNetworkConfig(n *v1.NetworkPolicy) *forkdpb.NetworkConfig {
 	if n == nil {
 		return nil
 	}
@@ -230,11 +230,11 @@ func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
 // controller only passes the spec through. Names, mount paths, policies, and
 // sizes are config (no secrets), safe to log. A nil result means the template
 // declared no volumes.
-func volumeMounts(templateVols []v1alpha1.SandboxVolume, overrides []v1alpha1.VolumeOverride) []*forkdpb.VolumeMount {
+func volumeMounts(templateVols []v1.SandboxVolume, overrides []v1.VolumeOverride) []*forkdpb.VolumeMount {
 	if len(templateVols) == 0 {
 		return nil
 	}
-	overrideMap := make(map[string]v1alpha1.ForkPolicy, len(overrides))
+	overrideMap := make(map[string]v1.ForkPolicy, len(overrides))
 	for _, o := range overrides {
 		overrideMap[o.Name] = o.ForkPolicy
 	}
@@ -261,14 +261,18 @@ func volumeMounts(templateVols []v1alpha1.SandboxVolume, overrides []v1alpha1.Vo
 // when the claim has no workspaceRef), and the namespace. Every field is a
 // Kubernetes object name, never a secret value. Always non-nil so a poolless or
 // workspaceless claim still labels what it can.
-func claimVitalsLabels(claim *v1alpha1.SandboxClaim) *forkdpb.VitalsLabels {
+func claimVitalsLabels(claim *v1.Sandbox) *forkdpb.VitalsLabels {
 	workspace := ""
 	if claim.Spec.WorkspaceRef != nil {
 		workspace = claim.Spec.WorkspaceRef.Name
 	}
+	pool := ""
+	if claim.Spec.Source.PoolRef != nil {
+		pool = claim.Spec.Source.PoolRef.Name
+	}
 	return &forkdpb.VitalsLabels{
 		Claim:     claim.Name,
-		Pool:      claim.Spec.PoolRef.Name,
+		Pool:      pool,
 		Workspace: workspace,
 		Namespace: claim.Namespace,
 	}

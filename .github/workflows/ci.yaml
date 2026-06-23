@@ -702,36 +702,27 @@ jobs:
           docker exec "$worker" mkdir -p /var/lib/mitos
           docker cp /tmp/vmlinux "$worker:/var/lib/mitos/vmlinux"
           docker exec "$worker" ls -lh /var/lib/mitos/vmlinux
-      - name: Create a SandboxTemplate and a small SandboxPool
-        # The template references an OCI image (busybox); the pool asks for a
-        # small warm pool of husk pods. The controller in husk mode builds the
-        # snapshot on the KVM node AND maintains the husk pod warm pool pinned to
-        # the snapshot-holding node.
+      - name: Create a SandboxPool with inline template
+        # The pool inlines the v1 template (image, resources). The controller in
+        # husk mode builds the snapshot on the KVM node and maintains the warm
+        # husk pod pool pinned to the snapshot-holding node.
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
-          kind: SandboxTemplate
-          metadata:
-            name: husk-e2e
-            namespace: default
-          spec:
-            image: busybox:stable
-            resources:
-              cpu: "1"
-              memory: 512Mi
-          ---
-          apiVersion: mitos.run/v1alpha1
+          apiVersion: mitos.run/v1
           kind: SandboxPool
           metadata:
             name: husk-e2e
             namespace: default
           spec:
-            templateRef:
-              name: husk-e2e
-            replicas: 2
+            template:
+              image: busybox:stable
+              resources:
+                cpu: "1"
+                memory: 512Mi
+            snapshots:
+              replicasPerNode: 2
           YAML
-          kubectl -n default get sandboxtemplate.mitos.run husk-e2e
           kubectl -n default get sandboxpool husk-e2e
       - name: The pool creates husk pods that schedule onto the KVM node
         # GATE (cluster lifecycle): the controller's pool reconcile CREATES husk
@@ -769,7 +760,7 @@ jobs:
             # controller + forkd logs here so the reconcile error is captured.
             dump
             kubectl -n default describe sandboxpool husk-e2e || true
-            kubectl -n default get sandboxpool,sandboxtemplate -o yaml || true
+            kubectl -n default get sandboxpool -o yaml || true
             exit 1
           fi
 
@@ -1329,7 +1320,7 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== re-pend diagnostics ==="
-            kubectl -n default get sandboxclaim.mitos.run repend-probe -o yaml 2>/dev/null || true
+            kubectl -n default get sandbox.mitos.run repend-probe -o yaml 2>/dev/null || true
             kubectl -n default get sandboxpool repend-probe-pool -o yaml 2>/dev/null || true
             kubectl get pods -n default -l mitos.run/husk=true -o wide || true
             kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
@@ -1343,7 +1334,7 @@ jobs:
           # object-level stamp below the single source of truth, with no controller
           # re-pick to race.
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
+          apiVersion: mitos.run/v1
           kind: SandboxPool
           metadata:
             name: repend-probe-pool
@@ -1351,7 +1342,8 @@ jobs:
           spec:
             templateRef:
               name: husk-e2e
-            replicas: 0
+            snapshots:
+              replicasPerNode: 0
           YAML
 
           # Borrow a husk-e2e dormant pod (unclaimed, non-Failed) to back the probe
@@ -1372,19 +1364,20 @@ jobs:
           # reconcile of this claim pends with NoHuskPod (no dormant pod in the
           # empty pool) and never touches a husk pod.
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
-          kind: SandboxClaim
+          apiVersion: mitos.run/v1
+          kind: Sandbox
           metadata:
             name: repend-probe
             namespace: default
           spec:
-            poolRef:
-              name: repend-probe-pool
+            source:
+              poolRef:
+                name: repend-probe-pool
           YAML
           kubectl -n default label pod "$backing" mitos.run/claim=repend-probe --overwrite
           # Patch the claim status to "active on the backing pod" via the status
           # subresource so checkHuskPodLost sees it as Ready on that pod.
-          kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
+          kubectl -n default patch sandbox repend-probe --subresource=status --type=merge \
             -p "{\"status\":{\"phase\":\"Ready\",\"node\":\"${podnode}\",\"endpoint\":\"${podip}:9091\",\"sandboxID\":\"${backing}\"}}"
 
           # Confirm the controller has SETTLED on our stamp before deleting: it must
@@ -1405,8 +1398,8 @@ jobs:
           # in-flight pend does not count as settled.
           settled=0
           for i in $(seq 1 36); do
-            phase=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            sid=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.sandboxID}' 2>/dev/null || true)
+            phase=$(kubectl -n default get sandbox.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            sid=$(kubectl -n default get sandbox.mitos.run repend-probe -o jsonpath='{.status.sandboxID}' 2>/dev/null || true)
             echo "  [${i}/36] repend-probe phase: '${phase}' sandboxID: '${sid}' (stable=${settled})"
             if [ "$phase" = "Ready" ] && [ "$sid" = "$backing" ]; then
               settled=$((settled + 1))
@@ -1414,7 +1407,7 @@ jobs:
             else
               settled=0
               kubectl -n default label pod "$backing" mitos.run/claim=repend-probe --overwrite >/dev/null 2>&1 || true
-              kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
+              kubectl -n default patch sandbox repend-probe --subresource=status --type=merge \
                 -p "{\"status\":{\"phase\":\"Ready\",\"node\":\"${podnode}\",\"endpoint\":\"${podip}:9091\",\"sandboxID\":\"${backing}\"}}" >/dev/null 2>&1 || true
             fi
             sleep 5
@@ -1429,8 +1422,8 @@ jobs:
             # step that already passed above, and the full activation+re-pend is
             # gated in kvm-test.yaml. Best effort: skip the delete-assert below.
             echo "EVICTION-KIND-RACE: could not hold a stable stamped-Ready state for the object-level re-pend probe (stamp vs active controller). Covered by unit tests + the self-heal/re-pend step above + kvm-test.yaml. Not failing the job."
-            kubectl -n default get sandboxclaim.mitos.run repend-probe -o yaml 2>/dev/null || true
-            kubectl -n default delete sandboxclaim.mitos.run repend-probe --ignore-not-found=true >/dev/null 2>&1 || true
+            kubectl -n default get sandbox.mitos.run repend-probe -o yaml 2>/dev/null || true
+            kubectl -n default delete sandbox.mitos.run repend-probe --ignore-not-found=true >/dev/null 2>&1 || true
             kubectl -n default delete sandboxpool repend-probe-pool --ignore-not-found=true >/dev/null 2>&1 || true
             exit 0
           fi
@@ -1441,7 +1434,7 @@ jobs:
 
           repended=0
           for i in $(seq 1 36); do
-            phase=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            phase=$(kubectl -n default get sandbox.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
             echo "  [${i}/36] repend-probe phase: '${phase}'"
             if [ "$phase" = "Pending" ]; then repended=1; break; fi
             sleep 5
@@ -1451,7 +1444,7 @@ jobs:
             exit 1
           fi
           # Endpoint/Node cleared on re-pend.
-          ep=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
+          ep=$(kubectl -n default get sandbox.mitos.run repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
           [ -z "$ep" ] || { echo "EVICTION-FAILED: re-pended claim still advertises endpoint '${ep}'"; exit 1; }
           # The husk-e2e warm pool recreates a replacement dormant husk pod (it
           # counts only DORMANT pods toward Replicas, so the borrowed-then-deleted
@@ -1465,7 +1458,7 @@ jobs:
           done
           [ "$poolcount" -eq 1 ] || { echo "EVICTION-FAILED: the pool did not recreate a replacement husk pod after the re-pend"; exit 1; }
           echo "PASS: the claim re-pended (Pending, endpoint cleared) on husk pod loss and the pool recreated a replacement. The full re-activate onto a Ready dormant pod completes where the VMM runs (kvm-test.yaml / bare metal)."
-          kubectl -n default delete sandboxclaim.mitos.run repend-probe --ignore-not-found=true --wait=false || true
+          kubectl -n default delete sandbox.mitos.run repend-probe --ignore-not-found=true --wait=false || true
           kubectl -n default delete sandboxpool repend-probe-pool --ignore-not-found=true --wait=false || true
       - name: Eviction 4, an over-allocatable husk-shaped pod is Unschedulable (autoscaler signal)
         # The native cluster-autoscaler pending signal: a husk-shaped pod whose
@@ -1539,7 +1532,7 @@ jobs:
           dump() {
             echo "=== husk activation diagnostics ==="
             kubectl get pods -A -l mitos.run/husk=true -o wide || true
-            kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim -o yaml || true
+            kubectl -n default get sandbox.mitos.run husk-e2e-claim -o yaml || true
             kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
             for p in $(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
               ns=${p%%/*}; name=${p##*/}
@@ -1569,19 +1562,20 @@ jobs:
 
           echo "A husk pod reached Ready, tightening to the FULL claim -> Ready -> exec gate."
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
-          kind: SandboxClaim
+          apiVersion: mitos.run/v1
+          kind: Sandbox
           metadata:
             name: husk-e2e-claim
             namespace: default
           spec:
-            poolRef:
-              name: husk-e2e
+            source:
+              poolRef:
+                name: husk-e2e
           YAML
 
           # The claim activates a dormant husk pod in place and goes Ready.
           if ! kubectl -n default wait --for=jsonpath='{.status.phase}'=Ready \
-              sandboxclaim/husk-e2e-claim --timeout=180s; then
+              sandbox/husk-e2e-claim --timeout=180s; then
             # On kind the dormant stub can report Ready while the heavier in-place
             # activation (snapshot restore + exec in the NESTED Firecracker VMM)
             # is too slow or marginal to finish in the window: that is the same
@@ -1590,7 +1584,7 @@ jobs:
             # activation error (claim reaches Failed phase) from the nested-VMM
             # timeout (claim still Pending/activating): the former DOES fail, the
             # latter is the kind boundary and is best effort.
-            phase=$(kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim \
+            phase=$(kubectl -n default get sandbox.mitos.run husk-e2e-claim \
               -o jsonpath='{.status.phase}' 2>/dev/null || true)
             if [ "$phase" = "Failed" ]; then
               echo "HUSK-FAILED: claim reached Failed phase during activation (a real activation error, not the nested-VMM timeout)"
@@ -1598,7 +1592,7 @@ jobs:
               exit 1
             fi
             echo "HUSK-KIND-VMM: claim did not reach Ready within 180s (phase '${phase:-<none>}'); the nested-VMM in-place activation is the documented kind boundary, gated in kvm-test.yaml (Firecracker on the host). Not failing the job for the nested-VMM limitation."
-            kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim -o yaml || true
+            kubectl -n default get sandbox.mitos.run husk-e2e-claim -o yaml || true
             exit 0
           fi
           echo "PASS: claim activated a husk pod and reached Ready"
@@ -1607,7 +1601,7 @@ jobs:
           # claim minted, port-forward to the husk pod's sandbox port, and run a
           # command. The token Secret is <claim>-sandbox-token; its value is a
           # secret and is not echoed.
-          endpoint=$(kubectl -n default get sandboxclaim.mitos.run husk-e2e-claim -o jsonpath='{.status.endpoint}')
+          endpoint=$(kubectl -n default get sandbox.mitos.run husk-e2e-claim -o jsonpath='{.status.endpoint}')
           echo "claim endpoint (podIP:port): $endpoint"
           podip=${endpoint%%:*}
           sbport=${endpoint##*:}
@@ -1641,9 +1635,8 @@ jobs:
       - name: Husk e2e diagnostics and cleanup
         if: always()
         run: |
-          kubectl -n default delete sandboxclaim.mitos.run husk-e2e-claim --ignore-not-found=true || true
+          kubectl -n default delete sandbox.mitos.run husk-e2e-claim --ignore-not-found=true || true
           kubectl -n default delete sandboxpool husk-e2e --ignore-not-found=true || true
-          kubectl -n default delete sandboxtemplate.mitos.run husk-e2e --ignore-not-found=true || true
           kubectl get pods -A -l mitos.run/husk=true -o wide || true
 
   kind-e2e-placement:
@@ -1880,35 +1873,27 @@ jobs:
           done
       - name: Create the default SandboxPool the facade binds to
         # The facade binds an annotation-less Sandbox to its --default-pool
-        # ("default"). Create the SandboxTemplate + SandboxPool so the bridged
-        # claim references a real pool object. The pool need not reach Ready for
-        # the object-level assertions (a running pool needs the VMM tail); the
-        # SandboxClaim CRD admitting the claim is what matters here.
+        # ("default"). Create the SandboxPool with an inline template so the
+        # bridged Sandbox references a real pool object. The pool need not reach
+        # Ready for the object-level assertions (a running pool needs the VMM
+        # tail); the Sandbox CRD admitting the object is what matters here.
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: mitos.run/v1alpha1
-          kind: SandboxTemplate
-          metadata:
-            name: default
-            namespace: default
-          spec:
-            image: busybox:stable
-            resources:
-              cpu: "1"
-              memory: 512Mi
-          ---
-          apiVersion: mitos.run/v1alpha1
+          apiVersion: mitos.run/v1
           kind: SandboxPool
           metadata:
             name: default
             namespace: default
           spec:
-            templateRef:
-              name: default
-            replicas: 0
+            template:
+              image: busybox:stable
+              resources:
+                cpu: "1"
+                memory: 512Mi
+            snapshots:
+              replicasPerNode: 0
           YAML
-          kubectl -n default get sandboxtemplate.mitos.run default
           kubectl -n default get sandboxpool default
       - name: Apply the upstream example Sandbox manifest UNCHANGED
         # The conformance acceptance: their example manifest applies verbatim.
@@ -1934,8 +1919,8 @@ jobs:
             echo "=== facade-conformance diagnostics ==="
             kubectl -n default get sandbox.agents.x-k8s.io -o wide || true
             kubectl -n default describe sandbox.agents.x-k8s.io hello-world || true
-            kubectl -n default get sandboxclaim.mitos.run -o wide || true
-            kubectl -n default describe sandboxclaim.mitos.run hello-world || true
+            kubectl -n default get sandbox.mitos.run -o wide || true
+            kubectl -n default describe sandbox.mitos.run hello-world || true
             kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
@@ -1944,25 +1929,25 @@ jobs:
           kubectl -n default get sandbox.agents.x-k8s.io hello-world >/dev/null
           echo "PASS (a): upstream Sandbox admitted verbatim"
 
-          # (b) our facade creates the bridged husk-backed SandboxClaim, with the
+          # (b) our facade creates the bridged husk-backed Sandbox, with the
           # owner reference back to the Sandbox AND the mitos.run/pool bridge
           # annotation.
           claimed=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               claimed=1
               break
             fi
-            echo "  [${i}/30] waiting for the bridged SandboxClaim"
+            echo "  [${i}/30] waiting for the bridged Sandbox"
             sleep 2
           done
           if [ "$claimed" -ne 1 ]; then
-            echo "FACADE-CONFORMANCE: facade did not create the bridged SandboxClaim"
+            echo "FACADE-CONFORMANCE: facade did not create the bridged Sandbox"
             exit 1
           fi
-          owner=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
+          owner=$(kubectl -n default get sandbox.mitos.run hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
-          pool=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
+          pool=$(kubectl -n default get sandbox.mitos.run hello-world \
             -o jsonpath='{.metadata.annotations.mitos\.run/pool}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: claim owner = '$owner', want Sandbox/hello-world"
@@ -1972,7 +1957,7 @@ jobs:
             echo "FACADE-CONFORMANCE: claim mitos.run/pool = '$pool', want default"
             exit 1
           fi
-          echo "PASS (b): facade bridged a husk-backed SandboxClaim (owner=$owner pool=$pool)"
+          echo "PASS (b): facade bridged a husk-backed Sandbox (owner=$owner pool=$pool)"
 
           # (c) our facade UPDATES the Sandbox status with a Ready condition. On
           # kind no VMM boots, so the run-path state is Ready=False while the
@@ -2001,7 +1986,7 @@ jobs:
           kubectl -n default delete sandbox.agents.x-k8s.io hello-world
           gone=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
+            if ! kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               gone=1
               break
             fi
@@ -2019,7 +2004,7 @@ jobs:
           # facade deletes the claim.
           sed 's#^spec:#spec:\n  replicas: 1#' /tmp/hello-world.yaml | kubectl -n default apply -f -
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               break
             fi
             sleep 2
@@ -2028,7 +2013,7 @@ jobs:
             -p '{"spec":{"replicas":0}}'
           term=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
+            if ! kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               term=1
               break
             fi
@@ -2051,7 +2036,7 @@ jobs:
             -p '{"spec":{"replicas":1}}'
           resumed=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim.mitos.run hello-world >/dev/null 2>&1; then
+            if kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               resumed=1
               break
             fi
@@ -2062,7 +2047,7 @@ jobs:
             echo "FACADE-CONFORMANCE: replicas 1->0->1 did not re-activate the bridged claim"
             exit 1
           fi
-          owner=$(kubectl -n default get sandboxclaim.mitos.run hello-world \
+          owner=$(kubectl -n default get sandbox.mitos.run hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: re-activated claim owner = '$owner', want Sandbox/hello-world"
@@ -2094,35 +2079,34 @@ jobs:
             kubectl -n default get sandboxtemplate.extensions.agents.x-k8s.io -o wide || true
             kubectl -n default get sandboxwarmpool.extensions.agents.x-k8s.io -o wide || true
             kubectl -n default get sandboxclaim.extensions.agents.x-k8s.io -o wide || true
-            kubectl -n default get sandboxtemplate.mitos.run -o wide || true
             kubectl -n default get sandboxpool.mitos.run -o wide || true
-            kubectl -n default get sandboxclaim.mitos.run -o wide || true
+            kubectl -n default get sandbox.mitos.run -o wide || true
             kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
 
-          # (g) their SandboxTemplate creates our template (same name).
+          # (g) their SandboxTemplate creates our SandboxPool with inline template (same name).
           got_tmpl=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxtemplate.mitos.run secure-datascience-template >/dev/null 2>&1; then
+            if kubectl -n default get sandboxpool.mitos.run secure-datascience-template >/dev/null 2>&1; then
               got_tmpl=1
               break
             fi
-            echo "  [${i}/30] waiting for our mirrored SandboxTemplate"
+            echo "  [${i}/30] waiting for our mirrored SandboxPool"
             sleep 2
           done
           if [ "$got_tmpl" -ne 1 ]; then
             echo "FACADE-CONFORMANCE: their SandboxTemplate did not create our template"
             exit 1
           fi
-          echo "PASS (g): their SandboxTemplate maps to our template"
+          echo "PASS (g): their SandboxTemplate maps to our SandboxPool with inline template"
 
           # (h) their SandboxWarmPool creates our pool at the requested replicas
           # (1), pointing at the resolved template.
           got_pool=0
           for i in $(seq 1 30); do
             replicas=$(kubectl -n default get sandboxpool.mitos.run sandboxwarmpool-example \
-              -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+              -o jsonpath='{.spec.warm.min}' 2>/dev/null || true)
             if [ "$replicas" = "1" ]; then
               got_pool=1
               break
@@ -2142,25 +2126,25 @@ jobs:
           fi
           echo "PASS (h): their SandboxWarmPool maps to our pool at replicas 1 (template $tref)"
 
-          # (i) their SandboxClaim binds our claim from the template-matching pool
+          # (i) their SandboxClaim binds our Sandbox from the template-matching pool
           # (default warmpool policy), with the owner reference + the bridge
           # annotations.
           got_claim=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox >/dev/null 2>&1; then
+            if kubectl -n default get sandbox.mitos.run my-secure-sandbox >/dev/null 2>&1; then
               got_claim=1
               break
             fi
-            echo "  [${i}/30] waiting for our bridged SandboxClaim"
+            echo "  [${i}/30] waiting for our bridged Sandbox"
             sleep 2
           done
           if [ "$got_claim" -ne 1 ]; then
             echo "FACADE-CONFORMANCE: their SandboxClaim did not create our claim"
             exit 1
           fi
-          bound_pool=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
-            -o jsonpath='{.spec.poolRef.name}')
-          policy=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
+          bound_pool=$(kubectl -n default get sandbox.mitos.run my-secure-sandbox \
+            -o jsonpath='{.spec.source.poolRef.name}')
+          policy=$(kubectl -n default get sandbox.mitos.run my-secure-sandbox \
             -o jsonpath='{.metadata.annotations.mitos\.run/warmpool-policy}')
           if [ "$bound_pool" != "sandboxwarmpool-example" ]; then
             echo "FACADE-CONFORMANCE: our claim poolRef = '$bound_pool', want sandboxwarmpool-example"
@@ -2170,13 +2154,13 @@ jobs:
             echo "FACADE-CONFORMANCE: our claim warmpool-policy = '$policy', want default"
             exit 1
           fi
-          echo "PASS (i): their SandboxClaim binds our claim from the template-matching pool (policy=$policy pool=$bound_pool)"
+          echo "PASS (i): their SandboxClaim binds our Sandbox from the template-matching pool (policy=$policy pool=$bound_pool)"
 
-          # (j) deleting their SandboxClaim GCs our claim (owner-reference cascade).
+          # (j) deleting their SandboxClaim GCs our Sandbox (owner-reference cascade).
           kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox
           gone=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox >/dev/null 2>&1; then
+            if ! kubectl -n default get sandbox.mitos.run my-secure-sandbox >/dev/null 2>&1; then
               gone=1
               break
             fi
@@ -2187,8 +2171,8 @@ jobs:
             echo "FACADE-CONFORMANCE: deleting their SandboxClaim did not GC our claim"
             exit 1
           fi
-          echo "PASS (j): deleting their SandboxClaim GCs our claim"
-          echo "FACADE-EXTENSION-CONFORMANCE OK: their SandboxTemplate + SandboxWarmPool + SandboxClaim map to our template/pool/claim object-level on kind; the running-sandbox tail is the #18 bare-metal boundary"
+          echo "PASS (j): deleting their SandboxClaim GCs our Sandbox"
+          echo "FACADE-EXTENSION-CONFORMANCE OK: their SandboxTemplate + SandboxWarmPool + SandboxClaim map to our pool (inline template)/pool (warm)/sandbox object-level on kind; the running-sandbox tail is the #18 bare-metal boundary"
       - name: Facade conformance diagnostics and cleanup
         if: always()
         run: |
@@ -2197,5 +2181,4 @@ jobs:
           kubectl -n default delete sandboxwarmpool.extensions.agents.x-k8s.io sandboxwarmpool-example --ignore-not-found=true || true
           kubectl -n default delete sandboxtemplate.extensions.agents.x-k8s.io secure-datascience-template --ignore-not-found=true || true
           kubectl -n default delete sandboxpool.mitos.run default --ignore-not-found=true || true
-          kubectl -n default delete sandboxtemplate.mitos.run default --ignore-not-found=true || true
           kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=60 || true

@@ -4,9 +4,9 @@
 // logic talks to, so it is unit testable with a fake (no cluster, no Paperclip
 // SDK). The real implementation wraps @mitos/sdk AgentRun cluster mode
 // (sdk/typescript/src/client.ts), whose makeTerminator already patches outputs
-// before deleting the claim.
+// before deleting the sandbox.
 
-import type { OutputSpec, SandboxClaim } from "./claim-mapping.js";
+import type { MitosSandbox, OutputSpec } from "./claim-mapping.js";
 import { assertAdapterInstalls, terminateToOutputs } from "./claim-mapping.js";
 import type { InstalledProbe } from "./claim-mapping.js";
 
@@ -15,19 +15,20 @@ import type { InstalledProbe } from "./claim-mapping.js";
  * @mitos/sdk AgentRun / K8sApi verbs.
  */
 export interface MitosClaimClient {
-  /** Create a SandboxClaim and wait until it is Ready; returns its endpoint. */
-  createClaim(claim: SandboxClaim): Promise<{ endpoint: string }>;
+  /** Create a Sandbox and wait until it is Ready; returns its endpoint. */
+  createClaim(claim: MitosSandbox): Promise<{ endpoint: string }>;
   /**
    * Probe the running sandbox for the adapter binaries on PATH. Used by the
-   * claim-time install assertion. Implemented over the sandbox exec API.
+   * sandbox-time install assertion. Implemented over the sandbox exec API.
    */
   probeInstalls(claimName: string, required: string[]): Promise<InstalledProbe>;
   /**
-   * Patch a claim's spec.outputs (the terminate-with-outputs directives) so the
-   * controller dehydrates the workspace into a committed revision on teardown.
+   * Patch a sandbox's spec.outputs (the terminate-with-outputs directives) so
+   * the controller dehydrates the workspace into a committed revision on
+   * teardown.
    */
   patchOutputs(claimName: string, outputs: OutputSpec[]): Promise<void>;
-  /** Delete the claim (teardown). */
+  /** Delete the sandbox (teardown). */
   deleteClaim(claimName: string): Promise<void>;
 }
 
@@ -46,14 +47,14 @@ export class AdapterInstallError extends Error {
 }
 
 /**
- * Acquire a lease: create the claim, then assert the required adapter binaries
- * are present (never install them). On a missing adapter the claim is torn down
- * and an actionable error is thrown, so a non-conforming pool fails fast rather
- * than running a half-provisioned sandbox.
+ * Acquire a lease: create the sandbox, then assert the required adapter
+ * binaries are present (never install them). On a missing adapter the sandbox
+ * is torn down and an actionable error is thrown, so a non-conforming pool
+ * fails fast rather than running a half-provisioned sandbox.
  */
 export async function acquireWithAssertion(
   client: MitosClaimClient,
-  claim: SandboxClaim,
+  claim: MitosSandbox,
   requiredAdapters: string[],
 ): Promise<{ endpoint: string }> {
   const ready = await client.createClaim(claim);

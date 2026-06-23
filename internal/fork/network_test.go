@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/netconf"
@@ -79,7 +79,7 @@ func TestPrepareForkNetworkSetupAndOverride(t *testing.T) {
 		t.Fatalf("expected 1 Setup call, got %d", len(fm.SetupLog))
 	}
 	call := fm.SetupLog[0]
-	if call.Policy.Egress != v1alpha1.EgressDeny {
+	if call.Policy.Egress != v1.EgressDeny {
 		t.Errorf("policy = %q, want deny", call.Policy.Egress)
 	}
 	if len(call.Policy.Allow) != 1 || !call.Policy.Allow[0].IP.Equal(net.ParseIP("10.0.0.5")) || call.Policy.Allow[0].Port != 443 {

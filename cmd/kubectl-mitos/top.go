@@ -7,19 +7,19 @@ import (
 	"net/http"
 	"time"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cli/sandboxtable"
 	"mitos.run/mitos/internal/metering"
 )
 
 // meteringFetcher returns the CoW-aware metering report a forkd serves at
-// GET <endpoint>/v1/metering. endpoint is a claim's Status.Endpoint (the forkd
-// HTTP API host:port). The bool is false when the report could not be fetched
-// (endpoint unset, unreachable, or a non-2xx); the caller then renders dashes
-// for every sandbox on that node rather than inventing a number.
+// GET <endpoint>/v1/metering. endpoint is a sandbox's Status.Endpoint (the
+// forkd HTTP API host:port). The bool is false when the report could not be
+// fetched (endpoint unset, unreachable, or a non-2xx); the caller then renders
+// dashes for every sandbox on that node rather than inventing a number.
 type meteringFetcher func(ctx context.Context, endpoint string) (metering.Report, bool)
 
-// runTop lists the claims in scope, fetches the per-node CoW-aware metering
+// runTop lists the sandboxes in scope, fetches the per-node CoW-aware metering
 // report from each node's forkd endpoint, and renders a per-sandbox table. A
 // sandbox whose datum cannot be fetched (no endpoint, unreachable forkd, or no
 // matching row) shows a dash, never a fabricated value.
@@ -31,40 +31,40 @@ func runTop(namespace string, allNamespaces bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var claims v1alpha1.SandboxClaimList
-	if err := c.List(ctx, &claims, listOpts(namespace, allNamespaces)...); err != nil {
-		return fmt.Errorf("list claims: %w", err)
+	var sandboxes v1.SandboxList
+	if err := c.List(ctx, &sandboxes, listOpts(namespace, allNamespaces)...); err != nil {
+		return fmt.Errorf("list sandboxes: %w", err)
 	}
 
-	rows := buildTopRows(ctx, claims.Items, httpMeteringFetcher)
+	rows := buildTopRows(ctx, sandboxes.Items, httpMeteringFetcher)
 	fmt.Print(sandboxtable.FormatTop(rows))
 	return nil
 }
 
-// buildTopRows resolves one TopRow per claim. It fetches each distinct node
-// endpoint's metering report once (memoized), then matches each claim's
-// Status.SandboxID against the report's per-sandbox rows. A claim with no
+// buildTopRows resolves one TopRow per sandbox. It fetches each distinct node
+// endpoint's metering report once (memoized), then matches each sandbox's
+// Status.SandboxID against the report's per-sandbox rows. A sandbox with no
 // endpoint, an unreachable forkd, or no matching sandbox row yields Found=false
 // so every metered cell renders as a dash.
-func buildTopRows(ctx context.Context, claims []v1alpha1.SandboxClaim, fetch meteringFetcher) []sandboxtable.TopRow {
+func buildTopRows(ctx context.Context, sandboxes []v1.Sandbox, fetch meteringFetcher) []sandboxtable.TopRow {
 	reports := make(map[string]map[string]metering.SandboxMetering)
 	fetched := make(map[string]bool)
 
-	rows := make([]sandboxtable.TopRow, 0, len(claims))
-	for i := range claims {
-		cl := &claims[i]
-		row := sandboxtable.TopRow{Name: cl.Name, Node: cl.Status.Node}
+	rows := make([]sandboxtable.TopRow, 0, len(sandboxes))
+	for i := range sandboxes {
+		s := &sandboxes[i]
+		row := sandboxtable.TopRow{Name: s.Name, Node: s.Status.Node}
 
-		ep := cl.Status.Endpoint
-		id := cl.Status.SandboxID
+		ep := s.Status.Endpoint
+		id := s.Status.SandboxID
 		if ep != "" && id != "" {
 			byID, ok := reports[ep]
 			if !fetched[ep] {
 				fetched[ep] = true
 				if report, gotIt := fetch(ctx, ep); gotIt {
 					byID = make(map[string]metering.SandboxMetering, len(report.Sandboxes))
-					for _, s := range report.Sandboxes {
-						byID[s.ID] = s
+					for _, sb := range report.Sandboxes {
+						byID[sb.ID] = sb
 					}
 					reports[ep] = byID
 				}

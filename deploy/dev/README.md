@@ -17,10 +17,10 @@ without KVM:
   controller discovers it by the `app.kubernetes.io/component: forkd` pod label,
   builds the pool snapshot over insecure gRPC, and claims fork via the mock engine
   and reach Ready.
-- a default `SandboxTemplate` + `SandboxPool` (`dev-default`) in the `default`
+- a default `SandboxPool` (`dev-default`, with an inline template) in the `default`
   namespace so `mitos sandbox create --pool dev-default` has a pool to claim
-  from. Pools, templates, and claims are namespaced and looked up in the claim's
-  namespace; the CLI creates claims in `default`, so the dev pool lives there too.
+  from. Pools and sandboxes are namespaced and looked up in the sandbox's
+  namespace; the CLI creates sandboxes in `default`, so the dev pool lives there too.
   The control plane itself runs in the `mitos` namespace (the forkd discovery
   default).
 

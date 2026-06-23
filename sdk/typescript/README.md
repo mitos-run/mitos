@@ -100,8 +100,8 @@ An interactive PTY is available via `createPty` / the `Pty` class over
 
 ## Cluster mode: AgentRun
 
-Cluster mode drives the Kubernetes CRDs (`SandboxTemplate`, `SandboxPool`,
-`SandboxClaim`, `SandboxFork`) and execs through the forkd sandbox API. Each
+Cluster mode drives the Kubernetes CRDs (`SandboxPool`, `Sandbox`, `Workspace`)
+in API group `mitos.run/v1` and execs through the forkd sandbox API. Each
 sandbox gets a per-sandbox bearer token read from a Secret; the value is never
 logged and is redacted from any error message.
 
@@ -112,8 +112,8 @@ import { AgentRun, KubeConfigApi } from "@mitos/sdk";
 // inside a pod that has a service account.
 const c = new AgentRun({ k8s: new KubeConfigApi(), namespace: "default" });
 
-// Lazy default pool: ensures mitos-default-python (a SandboxTemplate plus a
-// SandboxPool referencing it) if you have none, then claims from it.
+// Lazy default pool: ensures mitos-default-python (a SandboxPool carrying the
+// image in its inline spec.template) if you have none, then starts from it.
 const sb = await c.sandbox("python");
 const { stdout } = await sb.exec("python -c 'print(2 + 2)'");
 console.log(stdout.trim()); // 4
@@ -134,7 +134,7 @@ object. Set `{ allowDefaultPool: false }` to require an explicit pool.
 | --- | --- |
 | `c.sandbox("python", opts?)` | one-liner; lazy default pool, claims, waits Ready |
 | `c.sandbox(undefined, { pool })` | explicit pool; never creates |
-| `c.create(pool, opts?)` | creates a `SandboxClaim` |
+| `c.create(pool, opts?)` | creates a `Sandbox` |
 | `c.fromName(name)` | reconnect by id |
 | `c.list(pool?)` | lists sandboxes |
 

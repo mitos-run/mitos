@@ -2,8 +2,11 @@
 //
 // It presents sandboxes via the upstream SIG agent-sandbox API
 // (agents.x-k8s.io/v1alpha1 Sandbox) and fulfils them on our fork engine by
-// mapping each upstream Sandbox onto our husk-backed run path: a SandboxClaim
-// in our mitos.run group, bound to one of our pools.
+// mapping each upstream Sandbox onto our husk-backed run path: a mitos.run/v1
+// Sandbox with source.poolRef, bound to one of our pools. After the API v1
+// consolidation (ADR 0007) the run-path object is the consolidated v1 Sandbox
+// (source.poolRef, replicas 1), which folded the former SandboxClaim and
+// SandboxFork into one kind.
 //
 // Toolchain note (ADR 0001): we vendor the upstream Go types
 // (sigs.k8s.io/agent-sandbox) directly. That module declares go 1.26, so the
@@ -35,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 )
 
 const (
@@ -51,10 +54,13 @@ const (
 )
 
 // SandboxReconciler reconciles an upstream agents.x-k8s.io/v1alpha1 Sandbox
-// onto our husk-backed run path. It owns exactly one of our SandboxClaim
-// objects per Sandbox (same name + namespace, owner-referenced for GC), mirrors
-// the claim's readiness into the Sandbox status, and terminates the claim when
-// the Sandbox is deleted or scaled to replicas 0.
+// onto our husk-backed run path. It owns exactly one of our consolidated
+// mitos.run/v1 Sandbox objects per upstream Sandbox (same name + namespace,
+// owner-referenced for GC), mirrors the run-path object's readiness into the
+// upstream Sandbox status, and terminates the run-path object when the upstream
+// Sandbox is deleted or scaled to replicas 0. The run-path object is a v1
+// Sandbox with source.poolRef (the consolidated successor to the old
+// SandboxClaim, ADR 0007).
 type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -156,8 +162,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	if claim.Status.Phase == runv1alpha1.SandboxReady {
-		logger.V(1).Info("sandbox ready", "sandbox", req.NamespacedName, "claim", claim.Name, "endpoint", claim.Status.Endpoint)
+	if claim.Status.Phase == runv1.SandboxReady {
+		logger.V(1).Info("sandbox ready", "sandbox", req.NamespacedName, "runPath", claim.Name, "endpoint", claim.Status.Endpoint)
 		return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
 			status:   metav1.ConditionTrue,
 			reason:   "ClaimReady",
@@ -174,18 +180,20 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	})
 }
 
-// ensureClaim creates or returns our SandboxClaim for a Sandbox. The claim is
-// named after the Sandbox, lives in the same namespace, is owner-referenced to
-// the Sandbox (for GC + the watch back-link), and binds to the resolved pool.
+// ensureClaim creates or returns our run-path Sandbox for an upstream Sandbox.
+// The run-path object is a consolidated v1 Sandbox with source.poolRef (the old
+// SandboxClaim, ADR 0007): named after the upstream Sandbox, in the same
+// namespace, owner-referenced to it (for GC + the watch back-link), and bound to
+// the resolved pool via source.poolRef.
 //
 // podTemplate mapping: the Sandbox spec.podTemplate.spec.containers[*].env is
-// reconciled onto the claim's env (the husk run path applies env into the
-// guest). Other podTemplate fields (images, resources, volumes, security
+// reconciled onto the run-path object's env (the husk run path applies env into
+// the guest). Other podTemplate fields (images, resources, volumes, security
 // context) are a documented conformance exception for a later slice; see
 // docs/facade-conformance.md. The husk pool already pins the image + resources
 // at pool build time, so the per-Sandbox podTemplate image is not yet honored.
-func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1alpha1.Sandbox, pool string) (*runv1alpha1.SandboxClaim, error) {
-	claim := &runv1alpha1.SandboxClaim{
+func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1alpha1.Sandbox, pool string) (*runv1.Sandbox, error) {
+	claim := &runv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sb.Name,
 			Namespace: sb.Namespace,
@@ -197,14 +205,15 @@ func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1alpha1.
 			claim.Annotations = map[string]string{}
 		}
 		claim.Annotations[PoolAnnotation] = pool
-		claim.Spec.PoolRef = runv1alpha1.LocalObjectReference{Name: pool}
+		claim.Spec.Source = runv1.SandboxSource{PoolRef: &runv1.LocalObjectReference{Name: pool}}
 		claim.Spec.Env = podTemplateEnv(sb)
-		// Owner reference: GC our claim when the Sandbox is deleted, and set the
-		// controller back-link so a claim status change re-queues the Sandbox.
+		// Owner reference: GC our run-path object when the upstream Sandbox is
+		// deleted, and set the controller back-link so a status change re-queues
+		// the upstream Sandbox.
 		return controllerutil.SetControllerReference(sb, claim, r.Scheme)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ensure SandboxClaim for sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
+		return nil, fmt.Errorf("ensure run-path Sandbox for sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
 	return claim, nil
 }
@@ -221,14 +230,14 @@ func podTemplateEnv(sb *agentsv1alpha1.Sandbox) []corev1.EnvVar {
 	return containers[0].Env
 }
 
-// deleteClaim terminates our SandboxClaim for a Sandbox (replicas 0 path). It
-// is a no-op when the claim is already gone.
+// deleteClaim terminates our run-path Sandbox for an upstream Sandbox (replicas
+// 0 path). It is a no-op when the run-path object is already gone.
 func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1alpha1.Sandbox) error {
-	claim := &runv1alpha1.SandboxClaim{
+	claim := &runv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: sb.Namespace},
 	}
 	if err := r.Delete(ctx, claim); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("terminate SandboxClaim for sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
+		return fmt.Errorf("terminate run-path Sandbox for sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
 	return nil
 }
@@ -326,10 +335,11 @@ func (r *SandboxReconciler) serviceFQDN(sb *agentsv1alpha1.Sandbox) string {
 }
 
 // SetupWithManager wires the reconciler to watch upstream Sandboxes and own our
-// SandboxClaim objects so a claim status change re-queues the owning Sandbox.
+// run-path Sandbox objects so a status change re-queues the owning upstream
+// Sandbox.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.Sandbox{}).
-		Owns(&runv1alpha1.SandboxClaim{}).
+		Owns(&runv1.Sandbox{}).
 		Complete(r)
 }

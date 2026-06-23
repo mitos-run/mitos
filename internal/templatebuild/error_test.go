@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
 )
 
@@ -13,7 +13,7 @@ import (
 // produces an apierr.Error with the build_failed code whose context names the
 // failing step index and kind and whose remediation is actionable.
 func TestBuildErrorCarriesTypedCodeAndNamesFailingStep(t *testing.T) {
-	step := v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: "pip install nonexistent-pkg"}
+	step := v1.BuildStep{Type: v1.BuildStepRun, Run: "pip install nonexistent-pkg"}
 	be := NewStepError(2, step, errors.New("exit status 1"))
 
 	if be.Code() != apierr.CodeBuildFailed {
@@ -26,7 +26,7 @@ func TestBuildErrorCarriesTypedCodeAndNamesFailingStep(t *testing.T) {
 	if env.Context["step"] != 2 {
 		t.Errorf("context step = %v, want 2", env.Context["step"])
 	}
-	if env.Context["step_kind"] != string(v1alpha1.BuildStepRun) {
+	if env.Context["step_kind"] != string(v1.BuildStepRun) {
 		t.Errorf("context step_kind = %v, want run", env.Context["step_kind"])
 	}
 	if env.Remediation == "" {
@@ -44,7 +44,7 @@ func TestBuildErrorCarriesTypedCodeAndNamesFailingStep(t *testing.T) {
 // the raw command text (which may contain a secret arg). Only the step kind and
 // index identify the step.
 func TestBuildErrorRedactsCommandText(t *testing.T) {
-	step := v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: "echo TOPSECRET | login --token=abc123"}
+	step := v1.BuildStep{Type: v1.BuildStepRun, Run: "echo TOPSECRET | login --token=abc123"}
 	be := NewStepError(0, step, errors.New("boom"))
 	if strings.Contains(be.Error(), "TOPSECRET") || strings.Contains(be.Error(), "abc123") {
 		t.Errorf("build error leaked the command text: %q", be.Error())
@@ -61,7 +61,7 @@ func TestBuildErrorRedactsCommandText(t *testing.T) {
 // callers can branch on the underlying error.
 func TestBuildErrorUnwrapsCause(t *testing.T) {
 	sentinel := errors.New("sentinel")
-	be := NewStepError(1, v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: "x"}, sentinel)
+	be := NewStepError(1, v1.BuildStep{Type: v1.BuildStepRun, Run: "x"}, sentinel)
 	if !errors.Is(be, sentinel) {
 		t.Error("build error should unwrap to its cause")
 	}

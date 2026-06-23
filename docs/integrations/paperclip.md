@@ -3,7 +3,7 @@
 This document describes how mitos serves as the execution substrate for the
 Paperclip ecosystem (issue #20, workstream W3). The integration implements the
 upstream pluggable sandbox-provider contract (Environments plus a lease
-lifecycle) and maps it onto mitos SandboxClaims instead of `batch/v1` Jobs.
+lifecycle) and maps it onto mitos Sandboxes instead of `batch/v1` Jobs.
 
 The in-repo plugin lives at `plugins/paperclip`. It is a TypeScript Paperclip
 plugin (`@paperclipai/sandbox-provider-sandbox`) that registers an environment
@@ -14,7 +14,7 @@ backends, selected by `config.backend`:
   sandbox-server REST API (`/v1/fork`, `/v1/exec`, `/v1/sandboxes`). No
   Kubernetes.
 - `claim`: the workstream-A target. The provider contract is realized as a
-  mitos `SandboxClaim` (`mitos.run/v1alpha1`) on Kubernetes.
+  mitos `Sandbox` (`mitos.run/v1`) on Kubernetes.
 
 ## Production gate (read first)
 
@@ -40,33 +40,33 @@ The contract maps onto mitos as follows. The pure mapping is in
 
 | Provider contract | mitos mapping | Code |
 | --- | --- | --- |
-| create environment / acquire lease | create a `SandboxClaim` from a pool, wait Ready | `leaseToClaim`, `acquireWithAssertion` |
-| lease max lifetime | `claim.spec.timeout` (wall-clock cap; zero is no limit) | `minutesToDuration` |
-| lease idle reaping | `claim.spec.idleTimeout` | `minutesToDuration` |
-| teardown | extract workspace artifacts FIRST, then delete the claim | `teardownWithExtract`, `terminateToOutputs` |
-| callback-bridge egress | a single claim-time egress allow entry over default-deny | `bridgeToEgressAllow` |
-| secrets (git creds, API keys, bridge token) | `claim.spec.secrets` SecretMounts, injected at claim time by reference | `secretsToClaimMounts` |
-| per-adapter installs | asserted at claim time by a PATH probe, never installed per run | `assertAdapterInstalls` |
+| create environment / acquire lease | create a `Sandbox` from a pool, wait Ready | `leaseToClaim`, `acquireWithAssertion` |
+| lease max lifetime | `sandbox.spec.lifetime.ttl` (wall-clock cap; zero is no limit) | `minutesToDuration` |
+| lease idle reaping | `sandbox.spec.lifetime.idleTimeout` | `minutesToDuration` |
+| teardown | extract workspace artifacts FIRST, then delete the sandbox | `teardownWithExtract`, `terminateToOutputs` |
+| callback-bridge egress | a single sandbox-time egress allow entry over default-deny | `bridgeToEgressAllow` |
+| secrets (git creds, API keys, bridge token) | `sandbox.spec.secrets` SecretMounts, injected at sandbox time by reference | `secretsToClaimMounts` |
+| per-adapter installs | asserted at sandbox time by a PATH probe, never installed per run | `assertAdapterInstalls` |
 
-### Lease lifetime to claim TTL
+### Lease lifetime to sandbox TTL
 
-`maxLifetimeMin` maps to `SandboxClaimSpec.Timeout` and `idleTimeoutMin` maps to
-`SandboxClaimSpec.IdleTimeout` (`api/v1alpha1/types.go`). Minutes are rendered as
+`maxLifetimeMin` maps to `SandboxSpec.Lifetime.TTL` and `idleTimeoutMin` maps to
+`SandboxSpec.Lifetime.IdleTimeout` (`api/v1/types.go`). Minutes are rendered as
 Go duration strings (`metav1.Duration`), whole minutes as `<n>m` and fractional
 minutes in seconds to avoid lossy rounding. A zero, negative, or absent value
 leaves the field unset, which the controller reads as "no limit".
 
 ### Teardown: extract before delete
 
-Teardown maps to claim deletion, but the workspace artifacts must be extracted
+Teardown maps to sandbox deletion, but the workspace artifacts must be extracted
 first. `teardownWithExtract` patches the terminate-with-outputs directives
-(`SandboxClaimSpec.Outputs`) onto the claim, which makes the controller
+(`SandboxSpec.Lifetime.OnTerminate.Outputs`) onto the sandbox, which makes the controller
 dehydrate the `/workspace` into a committed `WorkspaceRevision` on the way out,
-and only THEN deletes the claim. The ordering is the contract: the function
+and only THEN deletes the sandbox. The ordering is the contract: the function
 never reorders the two calls and never deletes if the output patch fails, so an
 artifact is never lost to a premature delete. This mirrors the `@mitos/sdk`
 `AgentRun` terminator (`sdk/typescript/src/client.ts` `makeTerminator`), which
-patches outputs before `deleteClaim`.
+patches outputs before `deleteSandbox`.
 
 With no extract paths the whole workspace is captured with a diff; with explicit
 paths each `/workspace` subtree becomes a narrowing, diff-bearing output.
@@ -76,7 +76,7 @@ paths each `/workspace` subtree becomes a narrowing, diff-bearing output.
 A conforming run reaches exactly one external endpoint: the instance
 callback-bridge. `bridgeToEgressAllow` derives a `NetworkPolicy` with
 `egress: "deny"` and the bridge `host:port` as the sole `allow` entry, reusing
-the #219 egress model (`api/v1alpha1/types.go` `NetworkPolicy`,
+the #219 egress model (`api/v1/types.go` `NetworkPolicy`,
 `docs/networking.md`, `docs/threat-model.md`). Everything else is denied by
 default. A bare `host:port`, or an `http`/`https`/`ws`/`wss` URL, is accepted;
 the scheme is stripped and a default port inferred. An unparseable or portless
@@ -88,11 +88,11 @@ bridge entry first.
 ### Secrets at claim time (never in snapshots)
 
 Secret VALUES never travel through the plugin. `secretsToClaimMounts` maps each
-ref to a `SandboxClaimSpec.Secrets` entry that carries only a Secret name and
-key; the mitos controller resolves the plaintext server-side at claim time
+ref to a `SandboxSpec.Secrets` entry that carries only a Secret name and
+key; the mitos controller resolves the plaintext server-side at sandbox time
 (`internal/controller/sandboxclaim_controller.go` `resolveSecrets`). This
 enforces the secret-inheritance policy (`docs/fork-correctness.md` section 3):
-claim-time secrets are injected at claim time and are never baked into a pool
+sandbox-time secrets are injected at sandbox time and are never baked into a pool
 snapshot, so a fork never inherits another run's credentials. Secret values are
 never logged.
 
@@ -102,9 +102,9 @@ Adapter installs (the runtimes and CLIs an adapter needs) are baked into the
 pool's snapshot at build time, NOT installed per run. `assertAdapterInstalls`
 takes the required binaries plus a PATH probe of the running sandbox and returns
 the missing set; `acquireWithAssertion` runs the probe right after the fork and,
-on any missing binary, tears the claim down and raises an actionable error
+on any missing binary, tears the sandbox down and raises an actionable error
 ("baked at pool build, not per run; rebuild the pool's template with these
-adapters"). The assertion is claim-time and read-only; it never mutates the
+adapters"). The assertion is sandbox-time and read-only; it never mutates the
 sandbox.
 
 ## What is in this repo vs external follow-up

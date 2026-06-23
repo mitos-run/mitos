@@ -16,7 +16,8 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/runtime"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/husk"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/observability"
@@ -68,16 +69,44 @@ type huskActivator func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // husk control-channel dial in this reconciler (activate, dehydrate, hydrate)
 // must go through it so the dial pins the namespace whose leaf the husk pod
 // serves.
-func (r *SandboxClaimReconciler) huskDialTLS(ctx context.Context, ns string) (*tls.Config, error) {
+func (r *SandboxReconciler) huskDialTLS(ctx context.Context, ns string) (*tls.Config, error) {
 	if r.HuskTLSFor != nil {
 		return r.HuskTLSFor(ctx, ns)
 	}
 	return r.HuskTLS, nil
 }
 
-type SandboxClaimReconciler struct {
+// SandboxReconciler reconciles a v1 Sandbox (the consolidated run-axis kind, ADR
+// 0007, issue #23). It OWNS the engine directly: a source.poolRef Sandbox drives
+// the claim engine (node selection, forkd Fork, secret delivery, bearer token
+// issue, endpoint/status, idle/lifetime, workspace binding, terminate-with-
+// outputs); a source.fromSandbox Sandbox drives the fork engine (live fork,
+// replicas:N, per-child status, secret-inheritance policy); a source.fromRevision
+// Sandbox reports a clear not-served condition. No intermediate SandboxClaim or
+// SandboxFork object is created (those kinds were removed in the v1 consolidation).
+type SandboxReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
+
+	// Scheme is the runtime scheme used to set controller owner references on the
+	// per-sandbox token Secret and the fork child pods.
+	Scheme *runtime.Scheme
+
+	// HuskStubImage / HuskDNSUpstream / DataDir / KVMResourceName / HuskTLSSecretName
+	// / HuskCASecretName configure the fork child husk pods on the fromSandbox path
+	// (the husk fork engine). Only used when EnableHuskPods is true.
+	HuskStubImage     string
+	HuskDNSUpstream   string
+	DataDir           string
+	KVMResourceName   string
+	HuskTLSSecretName string
+	HuskCASecretName  string
+
+	// forkSnapshot / removeForkSnapshot are the husk fork-snapshot control seams on
+	// the fromSandbox path. Nil defaults to ForkSnapshotOnHusk / RemoveForkSnapshotOnHusk.
+	// Tests inject fakes.
+	forkSnapshot       huskForkSnapshotter
+	removeForkSnapshot huskForkSnapshotRemover
 
 	// KMS is the envelope-encryption Wrapper used to wrap a template's at-rest DEK
 	// on the fork path (an idempotent read of the controller-owned Secret created
@@ -231,7 +260,7 @@ type SandboxClaimReconciler struct {
 }
 
 // now returns the reconciler's current time, honoring the injectable clock.
-func (r *SandboxClaimReconciler) now() time.Time {
+func (r *SandboxReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
 	}
@@ -242,16 +271,16 @@ func (r *SandboxClaimReconciler) now() time.Time {
 // demand tracker, the autoscaler's signal that warm capacity is being consumed.
 // It is best-effort: a nil tracker is a no-op. It records only the pool key and a
 // timestamp, never any claim payload.
-func (r *SandboxClaimReconciler) recordHuskDemand(claim *v1alpha1.SandboxClaim) {
+func (r *SandboxReconciler) recordHuskDemand(claim *v1.Sandbox) {
 	if r.Demand == nil {
 		return
 	}
-	key := claim.Namespace + "/" + claim.Spec.PoolRef.Name
+	key := claim.Namespace + "/" + claim.Spec.Source.PoolRef.Name
 	r.Demand.RecordArrival(key, r.now())
 }
 
 // maxPendingDuration returns the configured bound or the default.
-func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
+func (r *SandboxReconciler) maxPendingDuration() time.Duration {
 	if r.MaxPendingDuration > 0 {
 		return r.MaxPendingDuration
 	}
@@ -276,57 +305,24 @@ func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
 // The change feed mirrors each event as a Kubernetes Event on the source object
 // (the always-on channel); the EventRecorder needs create;patch on events.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// reconcilePoolRef owns the claim engine for a source.poolRef Sandbox: node
+// selection, forkd Fork, secret delivery, per-sandbox bearer token issue,
+// endpoint/status, idle/lifetime, workspace binding, and terminate-with-outputs.
+// The Sandbox IS the running sandbox (no intermediate SandboxClaim object). The
+// shared dispatcher (Reconcile) has already fetched the Sandbox and owns deletion
+// and the phase.changed feed emit.
+func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sandbox) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// controller.reconcileClaim spans the whole reconcile. Only claim
+	// controller.reconcileClaim spans the poolRef engine. Only the sandbox
 	// name/namespace and the pool name (config, no secrets) are attributes; the
 	// fork RPC below is a child span carrying the trace to forkd over gRPC.
 	ctx, span := tracer.Start(ctx, "controller.reconcileClaim", trace.WithAttributes(
-		attribute.String("claim.name", req.Name),
-		attribute.String("claim.namespace", req.Namespace),
+		attribute.String("claim.name", claim.Name),
+		attribute.String("claim.namespace", claim.Namespace),
+		attribute.String("pool", claim.Spec.Source.PoolRef.Name),
 	))
 	defer span.End()
-
-	var claim v1alpha1.SandboxClaim
-	if err := r.Get(ctx, req.NamespacedName, &claim); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	span.SetAttributes(attribute.String("pool", claim.Spec.PoolRef.Name))
-
-	// Emit a sandbox.phase.changed feed event for the NET phase transition this
-	// reconcile persisted. The phase observed at entry is compared against the
-	// phase persisted in the API after the reconcile, so the event fires only when
-	// the change actually landed (not on a mutation that failed to write). This is
-	// honest: a redelivered reconcile re-reads the same persisted phase and emits
-	// nothing. The time is stamped from the feed clock at the emit site.
-	entryPhase := claim.Status.Phase
-	defer func() {
-		// Read the post-reconcile phase through the uncached APIReader: the
-		// controller-runtime cache lags the apiserver write this reconcile just
-		// made, so a cached re-Get can observe the OLD phase, see no change, and
-		// drop the event (the next reconcile then reads the new phase at entry and
-		// never emits either). The uncached reader always sees the just-persisted
-		// phase. A nil APIReader (a bare unit-test struct) falls back to the cached
-		// client so those tests do not nil-panic.
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
-		var fresh v1alpha1.SandboxClaim
-		if err := reader.Get(ctx, req.NamespacedName, &fresh); err != nil {
-			return
-		}
-		if fresh.Status.Phase != "" && fresh.Status.Phase != entryPhase {
-			r.Feed.emitPhaseChanged(ctx, &fresh, entryPhase, fresh.Status.Phase)
-		}
-	}()
-
-	// A claim under deletion: reap its backing VM via the finalizer before the
-	// API object is allowed to disappear.
-	if !claim.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, &claim)
-	}
 
 	// Already assigned. In husk mode, FIRST check whether the backing husk pod
 	// was lost (a node drain, an eviction, a deletion): a Ready claim must not
@@ -335,30 +331,30 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// where reachable, then re-pends). This runs before the lifetime path so an
 	// enqueued pod-delete event promptly re-pends. When the pod is still healthy,
 	// fall through to the normal lifetime reaping.
-	if claim.Status.Phase == v1alpha1.SandboxReady {
+	if claim.Status.Phase == v1.SandboxReady {
 		if r.EnableHuskPods {
-			lost, lostPod, err := r.checkHuskPodLost(ctx, &claim)
+			lost, lostPod, err := r.checkHuskPodLost(ctx, claim)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			if lost {
-				var pool v1alpha1.SandboxPool
-				if perr := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.PoolRef.Name}, &pool); perr != nil {
+				var pool v1.SandboxPool
+				if perr := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.Source.PoolRef.Name}, &pool); perr != nil {
 					// The pool is gone too: re-pend with Kill semantics (an empty
 					// DrainPolicy defaults to Kill in rependOnHuskPodLost).
 					if client.IgnoreNotFound(perr) != nil {
 						return ctrl.Result{}, perr
 					}
 				}
-				return r.rependOnHuskPodLost(ctx, &claim, &pool, lostPod)
+				return r.rependOnHuskPodLost(ctx, claim, &pool, lostPod)
 			}
 			// The pod is not lost, but it may be NotReady (its node is rebooting or
 			// unreachable): the sandbox endpoint is then unreachable, so the claim
 			// must not keep reporting Ready. Reflect the backing pod's readiness in
 			// the Ready condition (flips back to True when the pod recovers). Actual
 			// loss/eviction is still handled by checkHuskPodLost above (#177).
-			if reflectHuskBackingReadiness(&claim, lostPod, r.now()) {
-				if err := r.Status().Update(ctx, &claim); err != nil {
+			if reflectHuskBackingReadiness(claim, lostPod, r.now()) {
+				if err := r.Status().Update(ctx, claim); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
@@ -367,11 +363,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// exactly once (idempotent via the hydrated annotation). A transient
 		// transfer error requeues without failing the Ready claim; the sandbox
 		// stays usable (an unpopulated workspace) until the next attempt succeeds.
-		if err := r.hydrateOnActivate(ctx, &claim); err != nil {
+		if err := r.hydrateOnActivate(ctx, claim); err != nil {
 			logger.Error(err, "hydrate workspace into sandbox; will retry", "claim", claim.Name)
 			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
-		res, err := r.reconcileLifetime(ctx, &claim)
+		res, err := r.reconcileLifetime(ctx, claim)
 		// Re-check backing-pod health periodically even when the claim has no
 		// lifetime/idle timeout (reconcileLifetime returns no requeue then), so a
 		// node/pod outage is reflected within huskHealthRequeue (#177).
@@ -382,26 +378,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Terminal phases: don't retry.
-	if claim.Status.Phase == v1alpha1.SandboxFailed || claim.Status.Phase == v1alpha1.SandboxTerminated {
+	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
 		return ctrl.Result{}, nil
 	}
 
 	// Find the pool
-	var pool v1alpha1.SandboxPool
+	var pool v1.SandboxPool
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: claim.Namespace,
-		Name:      claim.Spec.PoolRef.Name,
+		Name:      claim.Spec.Source.PoolRef.Name,
 	}, &pool); err != nil {
-		logger.Error(err, "pool not found", "pool", claim.Spec.PoolRef.Name)
+		logger.Error(err, "pool not found", "pool", claim.Spec.Source.PoolRef.Name)
 		return ctrl.Result{}, err
 	}
 
-	// Find the template
-	var template v1alpha1.SandboxTemplate
-	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: pool.Namespace,
-		Name:      pool.Spec.TemplateRef.Name,
-	}, &template); err != nil {
+	// Resolve the inline template (ADR 0007). The pool's spec.template is the
+	// common path; spec.templateRef resolves a shared template-shaped pool.
+	template, err := r.resolvePoolTemplate(ctx, &pool)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -410,12 +404,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// WorkspaceBusy reason and retries, so the second writer waits for the first
 	// to release rather than two sandboxes racing to dehydrate the same workspace.
 	if claim.Spec.WorkspaceRef != nil {
-		busy, err := r.workspaceBusyClaim(ctx, &claim)
+		busy, err := r.workspaceBusyClaim(ctx, claim)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if busy != "" {
-			claim.Status.Phase = v1alpha1.SandboxPending
+			claim.Status.Phase = v1.SandboxPending
 			setCondition(&claim.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
@@ -427,7 +421,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				),
 			})
 			// Best-effort status write; the return requeues regardless.
-			_ = r.Status().Update(ctx, &claim)
+			_ = r.Status().Update(ctx, claim)
 			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
 	}
@@ -435,8 +429,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Add the terminate finalizer before the claim acquires a backing VM, so
 	// no Ready claim can ever be deleted without forkd reaping its sandbox.
 	// This is a metadata Update, distinct from the status writes below.
-	if controllerutil.AddFinalizer(&claim, FinalizerTerminate) {
-		if err := r.Update(ctx, &claim); err != nil {
+	if controllerutil.AddFinalizer(claim, FinalizerTerminate) {
+		if err := r.Update(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -452,44 +446,44 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// writes from a stale read clobber an externally applied status (the husk e2e's
 	// merge-patch Ready stamp), so the claim never settles.
 	if r.EnableHuskPods {
-		return r.reconcileHuskClaim(ctx, &claim, &pool, &template)
+		return r.reconcileHuskClaim(ctx, claim, &pool, template)
 	}
 
 	// Raw-forkd path: mark as restoring before attempting placement.
-	claim.Status.Phase = v1alpha1.SandboxRestoring
-	if err := r.Status().Update(ctx, &claim); err != nil {
+	claim.Status.Phase = v1.SandboxRestoring
+	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Pick a node with a ready snapshot
-	node, snapshotID, err := r.selectNode(ctx, &pool, &template, claim.Spec.NodeName)
+	node, snapshotID, err := r.selectNode(ctx, &pool, template, claim.Spec.NodeName)
 	if err != nil {
 		// No node admits the fork under the overcommit policy: this is a real
 		// capacity shortage, not a missing snapshot. Pend with backpressure and
 		// fail cleanly after a bounded wait rather than hammering a full cluster
 		// forever (or, worse, forcing a placement that OOMs a node).
 		if errors.Is(err, ErrNoCapacity) {
-			return r.reconcileNoCapacity(ctx, &claim, err)
+			return r.reconcileNoCapacity(ctx, claim, err)
 		}
 		// No registered/healthy node, or no node holds the snapshot yet: a
 		// transient placement precondition the pool reconciler is expected to
 		// resolve. Pend and retry indefinitely (no bounded fail).
 		logger.Info("no node available for placement, pending", "error", err.Error())
 		beforeStatus := claim.Status.DeepCopy()
-		r.clearPendingSince(&claim)
-		claim.Status.Phase = v1alpha1.SandboxPending
+		r.clearPendingSince(claim)
+		claim.Status.Phase = v1.SandboxPending
 		recordClaimPending()
 		// Best-effort status write, elided on a no-op re-pend; the return below
 		// already requeues or surfaces the error.
-		_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
+		_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
 	// Placement succeeded: clear any capacity-pending stamp so a later shortage
 	// starts a fresh bounded-wait clock.
 	if claim.Annotations[pendingSinceAnnotation] != "" {
-		r.clearPendingSince(&claim)
-		if err := r.Update(ctx, &claim); err != nil {
+		r.clearPendingSince(claim)
+		if err := r.Update(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -497,20 +491,20 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Translate the template's volumes (with this claim's VolumeOverrides
 	// applied) into the Fork RPC's VolumeMounts. The node prepares and attaches
 	// the backing drives per policy; the controller only forwards the spec.
-	volumes := volumeMounts(template.Spec.Volumes, claim.Spec.VolumeOverrides)
+	volumes := volumeMounts(template.Volumes, claim.Spec.VolumeOverrides)
 
 	// Resolve secrets
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
-		recordClaimError(claim.Spec.PoolRef.Name, "secret")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "secret")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
 		// without it ttlFinished skips the claim forever (etcd leak).
 		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
 	}
 
@@ -522,12 +516,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "token minting failed")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
 		// without it ttlFinished skips the claim forever (etcd leak).
 		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
 	}
 
@@ -539,14 +533,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// equals the template id, so it names the key Secret.
 	var wrappedDEK []byte
 	var kekID string
-	if template.Spec.Encrypted {
-		wrappedDEK, kekID, err = EnsureEncKey(ctx, r.Client, r.KMS, claim.Namespace, snapshotID, &template)
+	if template.Encrypted {
+		wrappedDEK, kekID, err = EnsureEncKey(ctx, r.Client, r.KMS, claim.Namespace, snapshotID, &pool)
 		if err != nil {
 			logger.Error(err, "read encryption key for template", "template", snapshotID)
 			now := metav1.Now()
-			claim.Status.Phase = v1alpha1.SandboxFailed
+			claim.Status.Phase = v1.SandboxFailed
 			claim.Status.FinishedAt = &now
-			_ = r.Status().Update(ctx, &claim)
+			_ = r.Status().Update(ctx, claim)
 			return ctrl.Result{}, err
 		}
 	}
@@ -555,17 +549,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// labels (claim/pool/workspace/namespace, all object names, never secrets)
 	// ride along so the node can label the sandbox's Layer 3 guest telemetry
 	// (issue #164).
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, wrappedDEK, kekID, claimVitalsLabels(&claim))
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Network, volumes, apiToken, wrappedDEK, kekID, claimVitalsLabels(claim))
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.
 		if isNotFound(err) {
 			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
 			beforeStatus := claim.Status.DeepCopy()
-			claim.Status.Phase = v1alpha1.SandboxPending
+			claim.Status.Phase = v1.SandboxPending
 			// Best-effort status write, elided on a no-op re-pend; the return below
 			// already requeues or surfaces the error.
-			_ = r.writeClaimStatusIfChanged(ctx, &claim, beforeStatus)
+			_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		// The node rejected the fork on its sandbox-count cap (ResourceExhausted,
@@ -577,17 +571,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// headroom and only fails after the bounded wait.
 		if isRetryableCapacity(err) {
 			logger.Info("node rejected fork (capacity/unavailable), re-pending", "node", node.Name, "error", err.Error())
-			return r.reconcileNoCapacity(ctx, &claim, err)
+			return r.reconcileNoCapacity(ctx, claim, err)
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
-		recordClaimError(claim.Spec.PoolRef.Name, "fork")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "fork")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
 		// without it ttlFinished skips the claim forever (etcd leak).
 		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
 	}
 
@@ -595,26 +589,26 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// the Ready status write: a Ready claim whose token Secret does not
 	// exist would be unusable, and the Ready early-return above would never
 	// retry the Secret. The token exists only in this Secret.
-	if err := ensureSandboxTokenSecret(ctx, r.Client, &claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
+	if err := ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
 		logger.Error(err, "token secret write failed")
-		recordClaimError(claim.Spec.PoolRef.Name, "token")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "token")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
 		// without it ttlFinished skips the claim forever (etcd leak).
 		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
+		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
 	}
 
 	// Update status
 	now := metav1.Now()
-	claim.Status.Phase = v1alpha1.SandboxReady
+	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Endpoint = result.Endpoint
 	claim.Status.Node = node.Name
 	claim.Status.SandboxID = result.SandboxID
-	claim.Status.ForkTimeMicros = int64(result.ForkTimeMs * 1000)
+	claim.Status.StartupLatencyMs = int64(result.ForkTimeMs)
 	claim.Status.StartedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -624,7 +618,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            fmt.Sprintf("forked in %.2fms on node %s", result.ForkTimeMs, node.Name),
 	})
 
-	if err := r.Status().Update(ctx, &claim); err != nil {
+	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -650,7 +644,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // it pends with backpressure and an actionable message so a transient husk
 // (snapshot not yet materialized, stub still starting) can recover. Secret
 // VALUES are never logged or put in status/conditions.
-func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (ctrl.Result, error) {
+func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sandbox, pool *v1.SandboxPool, template *v1.PoolTemplateSpec) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Every arrival at the husk-claim path is demand on the pool's warm buffer,
@@ -679,9 +673,9 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		// pass regardless.
 		logger.Info("no dormant husk pod available, pending", "pool", pool.Name)
 		recordClaimPending()
-		changed := claim.Status.Phase != v1alpha1.SandboxPending ||
+		changed := claim.Status.Phase != v1.SandboxPending ||
 			claim.Status.Endpoint != "" || claim.Status.Node != "" || claim.Status.SandboxID != ""
-		claim.Status.Phase = v1alpha1.SandboxPending
+		claim.Status.Phase = v1.SandboxPending
 		claim.Status.Endpoint = ""
 		claim.Status.Node = ""
 		claim.Status.SandboxID = ""
@@ -703,8 +697,8 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	// A dormant pod is available: mark the claim Restoring before activating it.
 	// This is stamped here (not before pod selection) so a claim that cannot place
 	// stays Pending and settles, never cycling Pending -> Restoring -> Pending.
-	if claim.Status.Phase != v1alpha1.SandboxRestoring {
-		claim.Status.Phase = v1alpha1.SandboxRestoring
+	if claim.Status.Phase != v1.SandboxRestoring {
+		claim.Status.Phase = v1.SandboxRestoring
 		if err := r.Status().Update(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -715,9 +709,9 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
-		recordClaimError(claim.Spec.PoolRef.Name, "secret")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "secret")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		claim.Status.FinishedAt = &now
 		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
@@ -729,7 +723,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	if err != nil {
 		logger.Error(err, "token minting failed")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		claim.Status.FinishedAt = &now
 		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
@@ -761,7 +755,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		if apierrors.IsConflict(err) {
 			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
 			beforeStatus := claim.Status.DeepCopy()
-			claim.Status.Phase = v1alpha1.SandboxPending
+			claim.Status.Phase = v1.SandboxPending
 			setCondition(&claim.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
@@ -789,7 +783,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		// differ per node (#175). Using another node's digest fails the stub's
 		// prepare-time verification, which is what blocked cross-node failover
 		// (the claim could only ever re-activate on its origin node) (#177).
-		if d, ok := r.NodeRegistry.TemplateDigestOnNode(pod.Spec.NodeName, pool.Spec.TemplateRef.Name); ok {
+		if d, ok := r.NodeRegistry.TemplateDigestOnNode(pod.Spec.NodeName, poolTemplateID(pool)); ok {
 			expectedDigest = d
 		}
 	}
@@ -824,7 +818,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 			msg = "husk activation failed: " + res.Error
 		}
 		logger.Info("husk activation failed, pending", "pod", pod.Name, "node", pod.Spec.NodeName, "detail", msg)
-		recordClaimError(claim.Spec.PoolRef.Name, "activate")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "activate")
 		// Release the claim label stamped before activation so this pod returns to
 		// the dormant pool and can be retried (by this claim or another). Without
 		// this a stamped-but-not-activated pod is orphaned forever, leaking warm
@@ -833,7 +827,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
 		}
 		beforeStatus := claim.Status.DeepCopy()
-		claim.Status.Phase = v1alpha1.SandboxPending
+		claim.Status.Phase = v1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
@@ -853,9 +847,9 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	// write (same ordering as the forkd path).
 	if err := ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, endpoint); err != nil {
 		logger.Error(err, "token secret write failed")
-		recordClaimError(claim.Spec.PoolRef.Name, "token")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "token")
 		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		claim.Status.FinishedAt = &now
 		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
@@ -869,7 +863,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	}
 
 	now := metav1.Now()
-	claim.Status.Phase = v1alpha1.SandboxReady
+	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Endpoint = endpoint
 	claim.Status.Node = pod.Spec.NodeName
 	claim.Status.SandboxID = pod.Name
@@ -912,7 +906,7 @@ const (
 // pointed at the in-pod DNS proxy resolver, so the in-pod egress filter and DNS
 // proxy enforce the template allowlist. A template with no NetworkPolicy still
 // gets the fail-closed default-deny config (the stub defaults Egress to deny).
-func huskNotifyNetwork(_ *v1alpha1.SandboxTemplate) *vsock.NotifyForkedNetwork {
+func huskNotifyNetwork(_ *v1.PoolTemplateSpec) *vsock.NotifyForkedNetwork {
 	return &vsock.NotifyForkedNetwork{
 		GuestIP:    huskGuestIP,
 		GatewayIP:  huskGatewayIP,
@@ -939,14 +933,14 @@ type huskNetworkConfig struct {
 // NetworkPolicy: egress deny with no allows, and inbound deny-by-default. The
 // inbound default is left empty (the stub and renderer treat empty as deny), so
 // an untrusted sandbox with no policy gets deny-by-default in both directions.
-func huskEgressConfig(template *v1alpha1.SandboxTemplate) huskNetworkConfig {
-	if template == nil || template.Spec.Network == nil {
-		return huskNetworkConfig{Egress: string(v1alpha1.EgressDeny)}
+func huskEgressConfig(template *v1.PoolTemplateSpec) huskNetworkConfig {
+	if template == nil || template.Network == nil {
+		return huskNetworkConfig{Egress: string(v1.EgressDeny)}
 	}
-	n := template.Spec.Network
+	n := template.Network
 	e := n.Egress
 	if e == "" {
-		e = v1alpha1.EgressDeny
+		e = v1.EgressDeny
 	}
 	return huskNetworkConfig{
 		Egress:       string(e),
@@ -977,7 +971,7 @@ func huskEgressConfig(template *v1alpha1.SandboxTemplate) huskNetworkConfig {
 // the best-effort pend re-assert paths; a genuine transition (Ready, a terminal
 // Failed/Terminated) flips Phase and so always compares unequal and always
 // writes.
-func (r *SandboxClaimReconciler) writeClaimStatusIfChanged(ctx context.Context, claim *v1alpha1.SandboxClaim, before *v1alpha1.SandboxClaimStatus) error {
+func (r *SandboxReconciler) writeClaimStatusIfChanged(ctx context.Context, claim *v1.Sandbox, before *v1.SandboxStatus) error {
 	if apiequality.Semantic.DeepEqual(before, &claim.Status) {
 		return nil
 	}
@@ -991,7 +985,7 @@ func (r *SandboxClaimReconciler) writeClaimStatusIfChanged(ctx context.Context, 
 // it gives up and fails the claim with an actionable capacity-exhaustion
 // message (and a claim_errors metric, reason "capacity"). A claim that becomes
 // admittable before the deadline proceeds to Restoring on a later reconcile.
-func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim *v1alpha1.SandboxClaim, cause error) (ctrl.Result, error) {
+func (r *SandboxReconciler) reconcileNoCapacity(ctx context.Context, claim *v1.Sandbox, cause error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	now := r.now()
 
@@ -1023,9 +1017,9 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 	// Bounded fail: capacity never freed within the allowed wait. Surface an
 	// actionable terminal error and stamp FinishedAt so the GC TTL pass reaps it.
 	if waited >= maxWait {
-		recordClaimError(claim.Spec.PoolRef.Name, "capacity")
+		recordClaimError(claim.Spec.Source.PoolRef.Name, "capacity")
 		finished := metav1.NewTime(now)
-		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.Phase = v1.SandboxFailed
 		claim.Status.FinishedAt = &finished
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
@@ -1044,7 +1038,7 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 
 	// Within the bounded wait: pend with backpressure and retry.
 	beforeStatus := claim.Status.DeepCopy()
-	claim.Status.Phase = v1alpha1.SandboxPending
+	claim.Status.Phase = v1.SandboxPending
 	recordClaimPending()
 	setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -1091,7 +1085,7 @@ func noCapacityCauseText(cause error) (clause, remediation string) {
 
 // clearPendingSince removes the capacity-pending stamp from the claim's
 // annotations (in memory; the caller persists if needed). Idempotent.
-func (r *SandboxClaimReconciler) clearPendingSince(claim *v1alpha1.SandboxClaim) {
+func (r *SandboxReconciler) clearPendingSince(claim *v1.Sandbox) {
 	delete(claim.Annotations, pendingSinceAnnotation)
 }
 
@@ -1101,7 +1095,7 @@ func (r *SandboxClaimReconciler) clearPendingSince(claim *v1alpha1.SandboxClaim)
 // finalizer removal. terminateOnNode treats a NotFound sandbox and a
 // vanished node as already-terminated, so a node that left the registry never
 // hangs deletion.
-func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandbox) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(claim, FinalizerTerminate) {
@@ -1157,18 +1151,18 @@ func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1a
 // terminates the backing VM directly via terminateOnNode and leaves the
 // finalizer in place; the bounded, tolerant terminateOnNode keeps eventual
 // delete safe. A claim already Terminated returns immediately (idempotent).
-func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+func (r *SandboxReconciler) reconcileLifetime(ctx context.Context, claim *v1.Sandbox) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if claim.Status.Phase == v1alpha1.SandboxTerminated {
+	if claim.Status.Phase == v1.SandboxTerminated {
 		return ctrl.Result{}, nil
 	}
 	if claim.Status.StartedAt == nil {
 		return ctrl.Result{}, nil
 	}
 
-	hasMaxLifetime := claim.Spec.Timeout != nil
-	hasIdle := claim.Spec.IdleTimeout != nil
+	hasMaxLifetime := sandboxTTL(claim) != nil
+	hasIdle := sandboxIdleTimeout(claim) != nil
 	if !hasMaxLifetime && !hasIdle {
 		return ctrl.Result{}, nil
 	}
@@ -1178,10 +1172,10 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 
 	// maxLifetime takes precedence: it does not depend on a reachable forkd.
 	if hasMaxLifetime {
-		deadline := startedAt.Add(claim.Spec.Timeout.Duration)
+		deadline := startedAt.Add(sandboxTTL(claim).Duration)
 		if !now.Before(deadline) {
 			return r.terminateLifetime(ctx, claim, "MaxLifetimeExceeded",
-				fmt.Sprintf("max lifetime %s exceeded", claim.Spec.Timeout.Duration))
+				fmt.Sprintf("max lifetime %s exceeded", sandboxTTL(claim).Duration))
 		}
 	}
 
@@ -1211,21 +1205,21 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 			// Work-aware idle (issue #218): a paused sandbox or one with a live
 			// background job (an open stream) is NOT idle, so an unattended job is
 			// never reaped mid-run.
-			if idleExpired(sig, startedAt, claim.Spec.IdleTimeout.Duration, now) {
+			if idleExpired(sig, startedAt, sandboxIdleTimeout(claim).Duration, now) {
 				return r.terminateLifetime(ctx, claim, "IdleTimeout",
-					fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
+					fmt.Sprintf("idle for more than %s", sandboxIdleTimeout(claim).Duration))
 			}
 			last := startedAt
 			if sig.LastActivity.After(last) {
 				last = sig.LastActivity
 			}
-			requeue = time.Until(last.Add(claim.Spec.IdleTimeout.Duration))
+			requeue = time.Until(last.Add(sandboxIdleTimeout(claim).Duration))
 		}
 	}
 
 	// Requeue at the nearest deadline.
 	if hasMaxLifetime {
-		untilMax := time.Until(startedAt.Add(claim.Spec.Timeout.Duration))
+		untilMax := time.Until(startedAt.Add(sandboxTTL(claim).Duration))
 		if requeue == 0 || untilMax < requeue {
 			requeue = untilMax
 		}
@@ -1240,7 +1234,7 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 // Terminated phase with a FinishedAt time and a Terminated condition. The
 // finalizer stays in place; the bounded terminateOnNode keeps later delete
 // safe.
-func (r *SandboxClaimReconciler) terminateLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim, reason, message string) (ctrl.Result, error) {
+func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.Sandbox, reason, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Dehydrate the sandbox /workspace into a new committed revision BEFORE
@@ -1260,7 +1254,7 @@ func (r *SandboxClaimReconciler) terminateLifetime(ctx context.Context, claim *v
 	}
 
 	now := metav1.Now()
-	claim.Status.Phase = v1alpha1.SandboxTerminated
+	claim.Status.Phase = v1.SandboxTerminated
 	claim.Status.FinishedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Terminated",
@@ -1282,20 +1276,20 @@ type forkResult struct {
 	ForkTimeMs float64
 }
 
-func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, preferredNode string) (*NodeInfo, string, error) {
-	templateName := pool.Spec.TemplateRef.Name
+func (r *SandboxReconciler) selectNode(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, preferredNode string) (*NodeInfo, string, error) {
+	templateName := poolTemplateID(pool)
 	req := ForkRequest{TemplateID: templateName, PreferredNode: preferredNode}
 	// Thread the template's explicit size and GPU demand into placement (issue
 	// #221): a large memory size is admitted only on a node with the RAM, and a
 	// GPU pool is pinned to GPU-capable nodes. A zero memory size falls back to
 	// the per-template CoW estimate (the legacy behavior).
 	if template != nil {
-		if mem := template.Spec.Resources.Memory; !mem.IsZero() {
+		if mem := template.Resources.Memory; !mem.IsZero() {
 			if v, ok := mem.AsInt64(); ok {
 				req.MemoryBytes = v
 			}
 		}
-		if gpu := template.Spec.Resources.GPU; gpu != nil {
+		if gpu := template.Resources.GPU; gpu != nil {
 			req.GPUCount = gpu.Count
 			req.GPUType = gpu.Type
 		}
@@ -1303,7 +1297,7 @@ func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.
 		// security-sensitive template never lands on a lower-assurance node (for
 		// example a hardware-kvm floor keeps the sandbox off a PVM node). The
 		// requireHardwareKvm flag is folded in as the strongest possible floor.
-		req.MinIsolationTier = MinIsolationTierFromSpec(template.Spec.MinIsolationTier, template.Spec.RequireHardwareKvm)
+		req.MinIsolationTier = MinIsolationTierFromSpec(template.MinIsolationTier, template.RequireHardwareKvm)
 	}
 	node, err := r.NodeRegistry.SelectNodeForFork(req)
 	if err != nil {
@@ -1312,7 +1306,7 @@ func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.
 	return node, templateName, nil
 }
 
-func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (envOut, secretsOut map[string]string, err error) {
+func (r *SandboxReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1.SecretMount) (envOut, secretsOut map[string]string, err error) {
 	envOut = make(map[string]string)
 	secretsOut = make(map[string]string)
 
@@ -1343,7 +1337,7 @@ func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace s
 	return envOut, secretsOut, nil
 }
 
-func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr)
 	// The claim event filter is scoped to the PRIMARY claim source only (not the
 	// pod Watches below), so the test harness can run a raw and a husk reconciler
@@ -1351,9 +1345,9 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// stays unfiltered (a pod carries no claim label, so a global filter would
 	// drop every mapped pod event and break the re-pend trigger).
 	if r.eventFilter != nil {
-		b = b.For(&v1alpha1.SandboxClaim{}, builder.WithPredicates(r.eventFilter))
+		b = b.For(&v1.Sandbox{}, builder.WithPredicates(r.eventFilter))
 	} else {
-		b = b.For(&v1alpha1.SandboxClaim{})
+		b = b.For(&v1.Sandbox{})
 	}
 	// In husk mode, watch husk pods and map a pod event to the claim named in its
 	// mitos.run/claim label. A husk pod delete (drain, eviction, kubectl
@@ -1369,9 +1363,12 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(huskPodToClaim),
 		)
 	}
-	// A name lets the test harness run a raw and a husk claim reconciler on one
-	// manager (controller-runtime auto-names by kind and would collide). The
-	// production default (controllerName empty) keeps the kind-derived name.
+	// The fromSandbox fork engine owns child husk pods (created + GC'd with the
+	// Sandbox), so a child pod event re-queues the owning fan-out Sandbox.
+	b = b.Owns(&corev1.Pod{})
+	// A name lets the test harness run a raw and a husk reconciler on one manager
+	// (controller-runtime auto-names by kind and would collide). The production
+	// default (controllerName empty) keeps the kind-derived name.
 	if r.controllerName != "" {
 		b = b.Named(r.controllerName)
 	}

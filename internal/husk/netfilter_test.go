@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -28,7 +28,7 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
 		HostIP:     net.ParseIP("10.200.0.1"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		Allow:      []string{"10.0.0.5:5432"},
 		ResolverIP: net.ParseIP("169.254.1.1"),
 	}
@@ -79,7 +79,7 @@ func TestApplyEgressFilterInstallsInputGuard(t *testing.T) {
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
 		HostIP:     net.ParseIP("10.200.0.1"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		ResolverIP: net.ParseIP("169.254.1.1"),
 	}
 	if err := applyEgressFilter(context.Background(), rr.run, func() error { return nil }, cfg); err != nil {
@@ -132,7 +132,7 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 		Tap:     "sbtap0",
 		GuestIP: net.ParseIP("10.200.0.2"),
 		HostIP:  net.ParseIP("10.200.0.1"),
-		Egress:  v1alpha1.EgressDeny,
+		Egress:  v1.EgressDeny,
 		Allow:   []string{"not-a-valid-entry"},
 	}
 	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err == nil {

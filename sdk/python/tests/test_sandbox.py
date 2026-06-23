@@ -99,9 +99,9 @@ def test_sandbox_terminate(ready_sandbox, mock_api):
 
     mock_api.delete_namespaced_custom_object.assert_called_once_with(
         group="mitos.run",
-        version="v1alpha1",
+        version="v1",
         namespace="default",
-        plural="sandboxclaims",
+        plural="sandboxes",
         name="test-sandbox",
     )
     assert ready_sandbox.phase == SandboxPhase.TERMINATING
@@ -110,8 +110,8 @@ def test_sandbox_terminate(ready_sandbox, mock_api):
 def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     mock_api.get_namespaced_custom_object.return_value = {
         "status": {
-            "readyForks": 2,
-            "forks": [
+            "readyReplicas": 2,
+            "children": [
                 {"name": "fork-1", "endpoint": "127.0.0.1:9001", "phase": "Ready", "sandboxID": "f1", "node": "n1"},
                 {"name": "fork-2", "endpoint": "127.0.0.1:9002", "phase": "Ready", "sandboxID": "f2", "node": "n1"},
             ],
@@ -123,9 +123,10 @@ def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     mock_api.create_namespaced_custom_object.assert_called_once()
     call_kwargs = mock_api.create_namespaced_custom_object.call_args
     body = call_kwargs.kwargs.get("body") or call_kwargs[1].get("body")
-    assert body["kind"] == "SandboxFork"
+    assert body["kind"] == "Sandbox"
+    assert body["apiVersion"] == "mitos.run/v1"
     assert body["spec"]["replicas"] == 2
-    assert body["spec"]["sourceRef"]["name"] == "test-sandbox"
+    assert body["spec"]["source"]["fromSandbox"]["name"] == "test-sandbox"
 
     assert len(forks) == 2
     assert forks[0].phase == SandboxPhase.READY
@@ -339,8 +340,8 @@ def test_wait_forks_loads_each_fork_token(mock_api):
     )
     mock_api.get_namespaced_custom_object.return_value = {
         "status": {
-            "readyForks": 1,
-            "forks": [
+            "readyReplicas": 1,
+            "children": [
                 {"name": "fork-1", "endpoint": "127.0.0.1:9001", "phase": "Ready", "sandboxID": "f1", "node": "n1"},
             ],
         }

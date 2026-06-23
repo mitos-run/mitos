@@ -7,13 +7,13 @@ package controller_test
 // node), never hanging on the finalizer.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -24,7 +24,7 @@ func waitClaimGone(t *testing.T, name string) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)
 		if apierrors.IsNotFound(err) {
 			return
@@ -49,37 +49,32 @@ func waitTerminated(t *testing.T, engine interface{ TerminatedIDs() []string }, 
 }
 
 func TestClaimDeleteReapsBackingVM(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-1", "fin-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-1", "fin-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "fin-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "fin-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "fin-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "fin-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	got := waitClaimReady(t, "fin-claim")
@@ -108,7 +103,7 @@ func TestClaimDeleteReapsBackingVM(t *testing.T) {
 }
 
 func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-2", "fin2-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-2", "fin2-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,31 +114,26 @@ func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
 		}
 	}()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "fin2-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin2-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "fin2-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin2-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "fin2-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "fin2-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	got := waitClaimReady(t, "fin2-claim")
@@ -165,7 +155,7 @@ func TestClaimDeleteWithGoneNodeCompletes(t *testing.T) {
 // so Terminate errors Unavailable. Deletion must still complete within the
 // bounded window: a confirm-terminate we cannot make must not wedge the object.
 func TestClaimDeleteWithUnreachableForkdCompletes(t *testing.T) {
-	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-3", "fin3-tmpl")
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "fin-node-3", "fin3-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,31 +166,26 @@ func TestClaimDeleteWithUnreachableForkdCompletes(t *testing.T) {
 		}
 	}()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "fin3-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin3-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "fin3-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "fin3-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "fin3-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "fin3-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	got := waitClaimReady(t, "fin3-claim")

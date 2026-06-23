@@ -18,6 +18,7 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
@@ -26,7 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,30 +36,23 @@ import (
 func TestEnsureHuskPDB(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "pdb-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pdb-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "pdb-tmpl"},
-			Replicas:    3,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 3},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = c.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-pool-husk", Namespace: "default"}})
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	// Re-fetch so SetControllerReference has the server UID.
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +88,7 @@ func TestEnsureHuskPDB(t *testing.T) {
 	}
 
 	// Idempotent update: scale to 1 and re-ensure; minAvailable floors at 1.
-	live.Spec.Replicas = 1
+	live.Spec.Warm.Min = 1
 	if err := r.EnsureHuskPDBForTest(ctx, &live); err != nil {
 		t.Fatalf("ensureHuskPDB (update): %v", err)
 	}
@@ -110,31 +103,24 @@ func TestEnsureHuskPDB(t *testing.T) {
 func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "heal-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "heal-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "heal-tmpl"},
-			Replicas:    2,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 2},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		for _, p := range listHuskPods(t, c, "heal-pool") {
 			_ = c.Delete(ctx, &p)
 		}
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +134,7 @@ func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 	}
 
 	// Bring the warm pool up to Replicas=2.
-	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, template); err != nil {
+	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, live.Spec.Template); err != nil {
 		t.Fatalf("reconcileHuskPods (initial): %v", err)
 	}
 	pods := waitHuskPodCount(t, c, "heal-pool", 2)
@@ -170,7 +156,7 @@ func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 	}
 
 	// Self-heal: a reconcile recreates the replacement, count back to Replicas.
-	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, template); err != nil {
+	if _, err := r.ReconcileHuskPodsForTest(ctx, &live, live.Spec.Template); err != nil {
 		t.Fatalf("reconcileHuskPods (self-heal): %v", err)
 	}
 	healed := waitHuskPodCount(t, c, "heal-pool", 2)
@@ -204,21 +190,15 @@ func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
 	c := k8sClient
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "nobuild-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "nobuild-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "nobuild-tmpl"},
-			Replicas:    2,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 2},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		for _, p := range listHuskPods(t, c, "nobuild-pool") {
@@ -226,7 +206,6 @@ func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
 		}
 		_ = c.Delete(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "nobuild-pool-husk", Namespace: "default"}})
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	// An empty registry: no forkd node holds or can build the template, so
@@ -264,7 +243,7 @@ func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
 
 	// Sanity: the snapshot really is not built (no holder), so this asserts the
 	// warm pool was maintained INDEPENDENT of the build.
-	if holders := reg.NodesWithTemplate("nobuild-tmpl"); len(holders) != 0 {
+	if holders := reg.NodesWithTemplate("nobuild-pool"); len(holders) != 0 {
 		t.Fatalf("expected no snapshot holders (decoupling test), got %v", holders)
 	}
 
@@ -299,29 +278,21 @@ func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
 // activeHuskClaim creates a template, pool (with the given drain policy), a
 // dormant husk pod, drives the husk-test claim to Ready (active on the pod), and
 // returns the claim and the activated pod.
-func activeHuskClaim(t *testing.T, prefix string, drain v1alpha1.HuskDrainPolicy) (*v1alpha1.SandboxClaim, *corev1.Pod) {
+func activeHuskClaim(t *testing.T, prefix string, drain v1.HuskDrainPolicy) (*v1.Sandbox, *corev1.Pod) {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: prefix + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template:    &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:        &v1.PoolWarm{Min: 1},
 			DrainPolicy: drain,
 		},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	pod := makeDormantHuskPod(t, prefix+"-pool", "10.7.7.7")
@@ -330,21 +301,21 @@ func activeHuskClaim(t *testing.T, prefix string, drain v1alpha1.HuskDrainPolicy
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      prefix + "-claim",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: prefix + "-pool"}},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: prefix + "-pool"}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, claim) })
 
-	got := waitClaimPhase(t, claim.Name, func(cl *v1alpha1.SandboxClaim) bool {
-		return cl.Status.Phase == v1alpha1.SandboxReady
+	got := waitClaimPhase(t, claim.Name, func(cl *v1.Sandbox) bool {
+		return cl.Status.Phase == v1.SandboxReady
 	})
 	return got, pod
 }
@@ -364,8 +335,8 @@ func TestHuskClaimRePendsOnPodLossKill(t *testing.T) {
 	}
 
 	// The claim re-pends: Phase Pending, Endpoint/Node cleared.
-	got := waitClaimPhase(t, claim.Name, func(cl *v1alpha1.SandboxClaim) bool {
-		return cl.Status.Phase == v1alpha1.SandboxPending
+	got := waitClaimPhase(t, claim.Name, func(cl *v1.Sandbox) bool {
+		return cl.Status.Phase == v1.SandboxPending
 	})
 	if got.Status.Endpoint != "" {
 		t.Errorf("re-pended claim still has endpoint %q", got.Status.Endpoint)
@@ -376,8 +347,8 @@ func TestHuskClaimRePendsOnPodLossKill(t *testing.T) {
 
 	// Provide a replacement dormant pod: the next reconcile re-activates on it.
 	replacement := makeDormantHuskPod(t, "repend-kill-pool", "10.8.8.8")
-	reactivated := waitClaimPhase(t, claim.Name, func(cl *v1alpha1.SandboxClaim) bool {
-		return cl.Status.Phase == v1alpha1.SandboxReady
+	reactivated := waitClaimPhase(t, claim.Name, func(cl *v1.Sandbox) bool {
+		return cl.Status.Phase == v1.SandboxReady
 	})
 	if reactivated.Status.Endpoint != "10.8.8.8:9091" {
 		t.Errorf("re-activated endpoint = %q, want 10.8.8.8:9091 (the replacement pod)", reactivated.Status.Endpoint)
@@ -386,15 +357,15 @@ func TestHuskClaimRePendsOnPodLossKill(t *testing.T) {
 }
 
 func TestHuskClaimDrainCheckpointRoutesThroughSeam(t *testing.T) {
-	claim, pod := activeHuskClaim(t, "repend-ckpt", v1alpha1.DrainCheckpoint)
-	if claim.Status.Phase != v1alpha1.SandboxReady {
+	claim, pod := activeHuskClaim(t, "repend-ckpt", v1.DrainCheckpoint)
+	if claim.Status.Phase != v1.SandboxReady {
 		t.Fatalf("claim not Ready: %+v", claim.Status)
 	}
 
 	// Record the checkpointer call. Return ok=false (nothing captured) so the
 	// claim still re-pends after routing through the seam.
 	called := make(chan struct{}, 4)
-	setHuskTestCheckpointer(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ *corev1.Pod) (bool, error) {
+	setHuskTestCheckpointer(func(_ context.Context, _ *v1.Sandbox, _ *corev1.Pod) (bool, error) {
 		select {
 		case called <- struct{}{}:
 		default:
@@ -408,8 +379,8 @@ func TestHuskClaimDrainCheckpointRoutesThroughSeam(t *testing.T) {
 	}
 
 	// The claim re-pends (Checkpoint degrades to re-pend when nothing is captured).
-	waitClaimPhase(t, claim.Name, func(cl *v1alpha1.SandboxClaim) bool {
-		return cl.Status.Phase == v1alpha1.SandboxPending
+	waitClaimPhase(t, claim.Name, func(cl *v1.Sandbox) bool {
+		return cl.Status.Phase == v1.SandboxPending
 	})
 
 	select {

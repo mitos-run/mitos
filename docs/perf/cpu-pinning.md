@@ -62,7 +62,7 @@ leaking into steady state.
 
 ## The pool spec
 
-`SandboxPool.spec.cpuPinning` (api group `mitos.run/v1alpha1`):
+`SandboxPool.spec.cpuPinning` (api group `mitos.run/v1`):
 
 ```yaml
 spec:

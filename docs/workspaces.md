@@ -10,22 +10,23 @@ over the content-addressed store.
 
 ## Binding a sandbox to a workspace
 
-A `SandboxClaim` opts into workspace state with `spec.workspaceRef`:
+A `Sandbox` opts into workspace state with `spec.workspaceRef`:
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: agent-session-7
 spec:
-  poolRef:
-    name: python-pool
+  source:
+    poolRef:
+      name: python-pool
   workspaceRef:
     name: project-acme
 ```
 
-A claim without `workspaceRef` is unchanged: its `/workspace` is ephemeral, and
-no hydrate or dehydrate runs. A claim with `workspaceRef` participates in the
+A sandbox without `workspaceRef` is unchanged: its `/workspace` is ephemeral, and
+no hydrate or dehydrate runs. A sandbox with `workspaceRef` participates in the
 lifecycle below.
 
 ## The data path
@@ -148,21 +149,24 @@ workspace into divergent heads.
 ## Outputs: capturing only what matters, with a diff
 
 By default the dehydrate-on-terminate captures the whole `/workspace` tree into
-the new revision. A claim narrows and enriches that capture with
-`spec.outputs`, matching the v2-spec `onTerminate.outputs` shape:
+the new revision. A sandbox narrows and enriches that capture with
+`spec.lifetime.onTerminate.outputs`:
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: agent-session-7
 spec:
-  poolRef: { name: python-pool }
+  source:
+    poolRef: { name: python-pool }
   workspaceRef: { name: project-acme }
-  outputs:
-    - { path: /workspace/dist }                       # capture only this subtree
-    - { diff: true }                                  # record the diff vs the parent head
-    - { git: { remote: rendezvous, branch: "attempt/{{.name}}" } }
+  lifetime:
+    onTerminate:
+      outputs:
+        - { path: /workspace/dist }                       # capture only this subtree
+        - { diff: true }                                  # record the diff vs the parent head
+        - { git: { remote: rendezvous, branch: "attempt/{{.name}}" } }
 ```
 
 - A `{path}` output narrows the captured revision to that `/workspace` subtree.

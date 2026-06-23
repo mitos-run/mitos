@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // ParseDockerfile parses a minimal Dockerfile into a SandboxTemplateSpec so the
@@ -16,8 +16,8 @@ import (
 // instructions are ignored with no error so a real Dockerfile that uses extra
 // directives still produces a usable spec; the parser is deliberately small,
 // not a full Dockerfile frontend.
-func ParseDockerfile(content string) (v1alpha1.SandboxTemplateSpec, error) {
-	var spec v1alpha1.SandboxTemplateSpec
+func ParseDockerfile(content string) (v1.PoolTemplateSpec, error) {
+	var spec v1.PoolTemplateSpec
 	haveFrom := false
 
 	lines := strings.Split(content, "\n")
@@ -33,22 +33,22 @@ func ParseDockerfile(content string) (v1alpha1.SandboxTemplateSpec, error) {
 			spec.Image = firstField(rest)
 			haveFrom = true
 		case "RUN":
-			spec.BuildSteps = append(spec.BuildSteps, v1alpha1.BuildStep{
-				Type: v1alpha1.BuildStepRun, Run: rest,
+			spec.BuildSteps = append(spec.BuildSteps, v1.BuildStep{
+				Type: v1.BuildStepRun, Run: rest,
 			})
 		case "WORKDIR":
-			spec.BuildSteps = append(spec.BuildSteps, v1alpha1.BuildStep{
-				Type: v1alpha1.BuildStepWorkdir, Workdir: firstField(rest),
+			spec.BuildSteps = append(spec.BuildSteps, v1.BuildStep{
+				Type: v1.BuildStepWorkdir, Workdir: firstField(rest),
 			})
 		case "ENV":
 			name, value := parseEnv(rest)
-			spec.BuildSteps = append(spec.BuildSteps, v1alpha1.BuildStep{
-				Type: v1alpha1.BuildStepEnv, EnvName: name, EnvValue: value,
+			spec.BuildSteps = append(spec.BuildSteps, v1.BuildStep{
+				Type: v1.BuildStepEnv, EnvName: name, EnvValue: value,
 			})
 		case "COPY", "ADD":
 			src, dst := parseCopy(rest)
-			spec.BuildSteps = append(spec.BuildSteps, v1alpha1.BuildStep{
-				Type: v1alpha1.BuildStepCopy, Source: src, Dest: dst,
+			spec.BuildSteps = append(spec.BuildSteps, v1.BuildStep{
+				Type: v1.BuildStepCopy, Source: src, Dest: dst,
 			})
 		case "CMD", "ENTRYPOINT":
 			spec.Command = parseExecForm(rest)

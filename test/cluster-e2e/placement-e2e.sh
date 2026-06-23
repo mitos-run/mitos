@@ -47,7 +47,6 @@ TENANT_KEY="${TENANT_LABEL%%=*}"
 TENANT_VAL="${TENANT_LABEL#*=}"
 
 RUN_ID="$(date +%s)-$$"
-TEMPLATE="place-tmpl-${RUN_ID}"
 POOL="place-pool-${RUN_ID}"
 
 PASS_COUNT=0
@@ -73,7 +72,6 @@ cleanup() {
   rc=$?
   echo "=== teardown ==="
   k delete sandboxpool "$POOL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "$TEMPLATE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   echo "teardown done"
   exit "$rc"
 }
@@ -105,23 +103,17 @@ is_dedicated() { echo "$dedicated_nodes" | grep -qxF "$1"; }
 # ---------------------------------------------------------------------------
 echo "--- stage 1: a placed SandboxPool schedules husk pods ---"
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: ${TEMPLATE}
-  labels: { mitos.run/e2e-run: "${RUN_ID}" }
-spec:
-  image: ${E2E_IMAGE}
-  resources: { cpu: "250m", memory: "512Mi" }
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: ${POOL}
   labels: { mitos.run/e2e-run: "${RUN_ID}" }
 spec:
-  templateRef: { name: ${TEMPLATE} }
-  replicas: 2
+  template:
+    image: ${E2E_IMAGE}
+    resources: { cpu: "250m", memory: "512Mi" }
+  snapshots:
+    replicasPerNode: 2
   placement:
     nodeSelector:
       ${TENANT_KEY}: "${TENANT_VAL}"

@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
@@ -8,17 +9,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 )
 
 func TestLiveForkOfSecretHolderIsRejectedByDefault(t *testing.T) {
-	// Source claim that *declares* secrets. Readiness is irrelevant: the
+	// Source sandbox that *declares* secrets. Readiness is irrelevant: the
 	// policy gate is spec-level and must fire before any forkd call.
-	source := &v1alpha1.SandboxClaim{
+	source := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "secret-holder", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "nonexistent-pool"},
-			Secrets: []v1alpha1.SecretMount{{
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "nonexistent-pool"}},
+			Secrets: []v1.SecretMount{{
 				Name:      "k",
 				SecretRef: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "K"},
 			}},
@@ -27,11 +27,13 @@ func TestLiveForkOfSecretHolderIsRejectedByDefault(t *testing.T) {
 	if err := k8sClient.Create(ctx, source); err != nil {
 		t.Fatal(err)
 	}
-	forkObj := &v1alpha1.SandboxFork{
+	// A fork of the secret holder under the DEFAULT (secretInheritance=reissue,
+	// omitted): the gate must reject because the SOURCE holds secrets.
+	forkObj := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "denied-fork", Namespace: "default"},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef: v1alpha1.LocalObjectReference{Name: "secret-holder"},
-			Replicas:  1,
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "secret-holder"}},
+			Replicas: 1,
 		},
 	}
 	if err := k8sClient.Create(ctx, forkObj); err != nil {
@@ -44,13 +46,13 @@ func TestLiveForkOfSecretHolderIsRejectedByDefault(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "denied-fork", Namespace: "default"}, &got); err == nil {
 			if c := meta.FindStatusCondition(got.Status.Conditions, "Rejected"); c != nil {
 				if c.Reason != "SecretInheritanceDenied" {
 					t.Fatalf("reason = %q", c.Reason)
 				}
-				if got.Status.ReadyForks != 0 {
+				if got.Status.ReadyReplicas != 0 {
 					t.Fatalf("forks were created despite rejection")
 				}
 				return
@@ -62,11 +64,11 @@ func TestLiveForkOfSecretHolderIsRejectedByDefault(t *testing.T) {
 }
 
 func TestLiveForkOptInProceedsPastTheGate(t *testing.T) {
-	source := &v1alpha1.SandboxClaim{
+	source := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "secret-holder-2", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "nonexistent-pool"},
-			Secrets: []v1alpha1.SecretMount{{
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "nonexistent-pool"}},
+			Secrets: []v1.SecretMount{{
 				Name:      "k",
 				SecretRef: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "K"},
 			}},
@@ -75,12 +77,14 @@ func TestLiveForkOptInProceedsPastTheGate(t *testing.T) {
 	if err := k8sClient.Create(ctx, source); err != nil {
 		t.Fatal(err)
 	}
-	forkObj := &v1alpha1.SandboxFork{
+	// Explicit opt-in: secretInheritance=inherit permits inheriting the source's
+	// in-memory secrets.
+	forkObj := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "optin-fork", Namespace: "default"},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef:              v1alpha1.LocalObjectReference{Name: "secret-holder-2"},
-			Replicas:               1,
-			AllowSecretInheritance: true,
+		Spec: v1.SandboxSpec{
+			Source:            v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "secret-holder-2"}},
+			Replicas:          1,
+			SecretInheritance: v1.SecretInherit,
 		},
 	}
 	if err := k8sClient.Create(ctx, forkObj); err != nil {
@@ -96,7 +100,7 @@ func TestLiveForkOptInProceedsPastTheGate(t *testing.T) {
 	// we are testing the gate, not the fork path.)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "optin-fork", Namespace: "default"}, &got); err == nil {
 			if meta.FindStatusCondition(got.Status.Conditions, "Rejected") != nil {
 				t.Fatal("opt-in fork must not be rejected")

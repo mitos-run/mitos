@@ -37,11 +37,11 @@ runtime-wiring follow-up so the two stay in step).
 
 ### Go types
 
-The declarative shape is two Go types in `api/v1alpha1`:
+The declarative shape is two Go types in `api/v1`:
 
 - `Budget` (`maxForks`, `maxCheckpoints`, `maxCpuSeconds`, `maxLifetimeExtension`,
   `maxEgressBytes`); counts and CPU/egress are scalars, the two duration/quantity
-  fields use `metav1.Duration` and `resource.Quantity` to match the v2 spec's
+  fields use `metav1.Duration` and `resource.Quantity` to match the spec's
   `1h` and `1Gi` notation.
 - `BudgetSpend` (`forks`, `checkpoints`, `cpuSeconds`, `lifetimeExtension`,
   `egressBytes`): the consumed counterpart, surfaced on status.
@@ -49,23 +49,19 @@ The declarative shape is two Go types in `api/v1alpha1`:
 The token-bearing copy of `Budget`/`BudgetSpend` lives in `internal/captoken`
 (without the Kubernetes `metav1`/`resource` dependency) so the attenuation core
 is a pure, fuzz-testable package. The two copies are intentional: the
-`api/v1alpha1` types are the declarative wire shape; the `internal/captoken`
+`api/v1` types are the declarative wire shape; the `internal/captoken`
 types are the signed, intersected runtime shape.
 
 ### Where the types land (ADR 0007)
 
-Per ADR 0007 the budget is a field on the v2 `Sandbox` noun
-(`spec.budget`/`status.budgetSpend`), and the v2 `Sandbox` is NOT yet the served
-API: the four v1alpha1 kinds (`SandboxTemplate`, `SandboxPool`, `SandboxClaim`,
-`SandboxFork`) remain in force unchanged. Embedding `Budget` into a live
-v1alpha1 kind now would either drift a served CRD or graft a v2 concept onto a
-kind ADR 0007 is folding away (`SandboxFork` is folded into the v2 `Sandbox` via
-`source.fromSandbox` + `replicas`). To avoid that drift, `Budget` and
-`BudgetSpend` are defined as design types WITHOUT object-root markers and are not
-embedded in any served spec or status; `make manifests` produces zero CRD YAML
-change (verified: only the additive `Budget`/`BudgetSpend` `DeepCopy` functions
-appear in `zz_generated.deepcopy.go`). When the v2 `Sandbox` kind is served, the
-budget fields attach to it with no migration to the v1 kinds.
+Per ADR 0007 the budget is a field on the v1 `Sandbox` noun
+(`spec.budget`/`status.budgetSpend`). The `Sandbox` kind is the served
+API in `mitos.run/v1`; the former v1alpha1 kinds (`SandboxTemplate`, `SandboxPool`,
+`SandboxClaim`, `SandboxFork`) have been consolidated: `SandboxFork` is now
+`Sandbox` with `source.fromSandbox` + `replicas`, and `SandboxTemplate` is inlined
+into `SandboxPool.spec.template`. The `Budget` and `BudgetSpend` types are embedded
+on the `Sandbox` spec and status; the runtime enforcement wiring is the follow-up
+described in section 6.
 
 ## 2. Attenuated tokens (macaroon-style)
 
@@ -134,9 +130,9 @@ property and fuzz tests).
 credentials, never a copy of the parent's. The attenuated token is itself a fresh
 credential minted for the child (a new chain link, a distinct serialized value),
 never the parent's token value. This is consistent with `docs/fork-correctness.md`
-§3 and the existing `SandboxFork.spec.allowSecretInheritance` gate (default deny).
+§3 and the existing `Sandbox.spec.secretInheritance` field (default `reissue`).
 A fork carries a strictly-narrower token; it does not carry the parent's secrets
-unless the source explicitly opts in to `inherit`.
+unless the source explicitly opts in to `secretInheritance: inherit`.
 
 ## 4. A self-initiated fork is a controller-materialized object
 

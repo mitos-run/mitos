@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
@@ -8,7 +9,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	controller "mitos.run/mitos/internal/controller"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,24 +21,13 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 	// Without this, leaked husk pods from a prior run (envtest runs no GC to
 	// cascade-delete owner-ref'd pods on pool delete) accumulate under the same
 	// fixed labels and corrupt the dormant counts (the pre-existing flake).
-	templateName := uniqueName("t-autoscale")
 	poolName := uniqueName("p-autoscale")
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatalf("create template: %v", err)
-	}
-	defer func() { _ = k8sClient.Delete(ctx, template) }()
-
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: templateName},
-			Replicas:    1,
-			Autoscale: &v1alpha1.PoolAutoscaleSpec{
-				MinWarm: 1, MaxWarm: 8, TargetSpare: 2, ScaleDownCooldownSeconds: 60,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm: &v1.PoolWarm{
+				Min: 1, Max: 8, TargetPending: 2, CooldownSeconds: 60,
 			},
 		},
 	}
@@ -173,7 +162,7 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 	}
 
 	// Status reflects the desired count.
-	var fresh v1alpha1.SandboxPool
+	var fresh v1.SandboxPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &fresh); err != nil {
 		t.Fatalf("get pool status: %v", err)
 	}
@@ -229,8 +218,8 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, pool); err != nil {
 		t.Fatalf("get pool to shrink window: %v", err)
 	}
-	pool.Spec.Autoscale.MaxWarm = 1
-	pool.Spec.Autoscale.MinWarm = 1
+	pool.Spec.Warm.Max = 1
+	pool.Spec.Warm.Min = 1
 	if err := k8sClient.Update(ctx, pool); err != nil {
 		t.Fatalf("shrink autoscale window: %v", err)
 	}

@@ -120,11 +120,13 @@ class Template:
         return spec
 
     def to_template(self, name: str) -> Dict[str, object]:
-        """Wrap the spec in a full SandboxTemplate object with ``metadata.name``
-        set, ready to apply to a cluster or write to a YAML file."""
+        """Wrap the spec in a full SandboxPool object with inline spec.template
+        and ``metadata.name`` set, ready to apply to a cluster or write to a
+        YAML file. In v1 the standalone SandboxTemplate kind is removed; its
+        spec is inlined as SandboxPool.spec.template."""
         return {
-            "apiVersion": "mitos.run/v1alpha1",
-            "kind": "SandboxTemplate",
+            "apiVersion": "mitos.run/v1",
+            "kind": "SandboxPool",
             "metadata": {"name": name},
-            "spec": self.to_spec(),
+            "spec": {"template": self.to_spec()},
         }

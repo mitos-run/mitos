@@ -2,11 +2,11 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -20,22 +20,22 @@ const validDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(s); err != nil {
+	if err := v1.AddToScheme(s); err != nil {
 		t.Fatalf("add scheme: %v", err)
 	}
 	return s
 }
 
 func TestForkRevisionCreatesLineageEdge(t *testing.T) {
-	parent := &v1alpha1.WorkspaceRevision{
+	parent := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "src-1", Namespace: "ns"},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "src"},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:    v1.LocalObjectReference{Name: "src"},
 			ContentManifest: validDigest,
 		},
-		Status: v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionCommitted},
+		Status: v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionCommitted},
 	}
-	dst := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
+	dst := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, dst).Build()
 
 	v := &WorkspaceVerbs{Client: c}
@@ -56,12 +56,12 @@ func TestForkRevisionCreatesLineageEdge(t *testing.T) {
 }
 
 func TestForkRejectsUncommittedParentWithLLMError(t *testing.T) {
-	parent := &v1alpha1.WorkspaceRevision{
+	parent := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "src-1", Namespace: "ns"},
-		Spec:       v1alpha1.WorkspaceRevisionSpec{WorkspaceRef: v1alpha1.LocalObjectReference{Name: "src"}},
-		Status:     v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionPending},
+		Spec:       v1.WorkspaceRevisionSpec{WorkspaceRef: v1.LocalObjectReference{Name: "src"}},
+		Status:     v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionPending},
 	}
-	dst := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
+	dst := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, dst).Build()
 
 	v := &WorkspaceVerbs{Client: c}
@@ -76,15 +76,15 @@ func TestForkRejectsUncommittedParentWithLLMError(t *testing.T) {
 }
 
 func TestRevertCreatesNewTipInSameWorkspace(t *testing.T) {
-	parent := &v1alpha1.WorkspaceRevision{
+	parent := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "proj-1", Namespace: "ns"},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "proj"},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:    v1.LocalObjectReference{Name: "proj"},
 			ContentManifest: validDigest,
 		},
-		Status: v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionCommitted},
+		Status: v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionCommitted},
 	}
-	ws := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "proj", Namespace: "ns"}}
+	ws := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "proj", Namespace: "ns"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, ws).Build()
 
 	v := &WorkspaceVerbs{Client: c}

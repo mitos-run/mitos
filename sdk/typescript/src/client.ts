@@ -1,6 +1,6 @@
-// Cluster client for the mitos runtime on Kubernetes. Creates SandboxClaims
-// (mitos.run/v1alpha1), polls them to Ready, reads the per-sandbox bearer
-// token Secret, and hands back a Sandbox bound to the claim's HTTP endpoint.
+// Cluster client for the mitos runtime on Kubernetes. Creates Sandbox objects
+// (mitos.run/v1), polls them to Ready, reads the per-sandbox bearer token
+// Secret, and hands back a Sandbox bound to the sandbox's HTTP endpoint.
 // Mirrors the Python AgentRun (sdk/python/mitos/client.py). The token is
 // read into memory only and is never logged.
 
@@ -12,8 +12,8 @@ import type { SandboxInfo, SandboxPhase } from "./types.js";
 import { Workspace } from "./workspace.js";
 
 const API_GROUP = "mitos.run";
-const API_VERSION = "v1alpha1";
-// Suffix of the Secret holding a claim's sandbox API bearer token. Mirrors the
+const API_VERSION = "v1";
+// Suffix of the Secret holding a sandbox's API bearer token. Mirrors the
 // controller constant and internal/agentcli tokenSecretSuffix.
 const TOKEN_SECRET_SUFFIX = "-sandbox-token";
 
@@ -121,9 +121,10 @@ export class AgentRun {
 
   /**
    * The one-liner entry point (docs/api/v2-spec.md section 1.2). Pass an image
-   * for the lazy path (ensures mitos-default-<image-slug>, creating it and its
-   * SandboxTemplate if absent and allowed) or { pool } for the explicit path,
-   * which never creates a pool. Exactly one of image or { pool } is required.
+   * for the lazy path (ensures mitos-default-<image-slug> SandboxPool with
+   * inline spec.template, creating it if absent and allowed) or { pool } for
+   * the explicit path, which never creates a pool. Exactly one of image or
+   * { pool } is required.
    */
   async sandbox(
     image?: string,
@@ -187,26 +188,13 @@ export class AgentRun {
         throw e;
       }
     }
-    // The CRD splits image from pool: SandboxTemplate.spec.image, SandboxPool.
-    // spec.templateRef. Create both under the same deterministic name.
-    const template: CustomObject = {
-      apiVersion: `${API_GROUP}/${API_VERSION}`,
-      kind: "SandboxTemplate",
-      metadata: { name, namespace: this.namespace },
-      spec: { image },
-    };
-    try {
-      await this.k8s.createTemplate(this.namespace, template);
-    } catch (e) {
-      if (!isConflict(e)) {
-        throw e; // 409: another caller raced us; reuse it
-      }
-    }
+    // v1: SandboxTemplate is removed. The pool carries the image inline under
+    // spec.template. Create one SandboxPool with inline spec.template.image.
     const pool: CustomObject = {
       apiVersion: `${API_GROUP}/${API_VERSION}`,
       kind: "SandboxPool",
       metadata: { name, namespace: this.namespace },
-      spec: { templateRef: { name }, replicas: 1 },
+      spec: { template: { image }, replicas: 1 },
     };
     try {
       await this.k8s.createPool(this.namespace, pool);
@@ -222,34 +210,30 @@ export class AgentRun {
    * Guards the default-pool reuse path against a slug collision serving the
    * wrong image. The slug normalizes ":"/"/" and other characters to "-", so
    * two distinct images can map to one default pool (for example "python:3.11"
-   * and "python-3.11"). Reads the referenced SandboxTemplate's spec.image and
-   * compares it to the requested image; a mismatch throws rather than silently
-   * running the first caller's image.
+   * and "python-3.11"). In v1 the image lives inline in spec.template.image;
+   * reads it from the pool directly and compares to the requested image. A
+   * mismatch throws rather than silently running the first caller's image.
    */
   private async verifyPoolImage(
     pool: CustomObject,
     name: string,
     image: string,
   ): Promise<void> {
-    const templateRef = (pool.spec?.["templateRef"] ?? {}) as { name?: string };
-    const templateName = templateRef.name ?? name;
     const remediation = `Pass { pool: "${name}" } explicitly to reuse this pool, or use a distinct image that maps to a different default pool.`;
-    let template: CustomObject;
-    try {
-      template = await this.k8s.getTemplate(this.namespace, templateName);
-    } catch (e) {
-      // Pool with no resolvable template: cannot prove the image, so fail
-      // closed rather than risk the wrong image.
+    const tmpl = (pool.spec?.["template"] ?? {}) as Record<string, unknown>;
+    const existingImage = tmpl["image"] as string | undefined;
+    if (!existingImage) {
+      // Pool with no resolvable inline image: cannot prove the image matches,
+      // so fail closed rather than risk the wrong image.
       throw new AgentRunError(
-        `default pool ${name} references template ${templateName} that could not be read`,
+        `default pool ${name} has no readable inline template image`,
         {
           code: "pool_image_mismatch",
-          cause: `reading SandboxTemplate ${templateName} failed with status ${statusOf(e) ?? "unknown"}`,
+          cause: `pool ${name} spec.template.image is absent or unreadable`,
           remediation,
         },
       );
     }
-    const existingImage = (template.spec?.["image"] as string | undefined);
     if (existingImage !== image) {
       throw new AgentRunError(
         `default pool ${name} already exists for a different image`,
@@ -263,19 +247,20 @@ export class AgentRun {
   }
 
   /**
-   * Creates a sandbox from a pool: builds a SandboxClaim, polls until Ready,
-   * reads the token Secret and status endpoint, and returns a bound Sandbox.
+   * Creates a sandbox from a pool: builds a mitos.run/v1 Sandbox with
+   * spec.source.poolRef, polls until Ready, reads the token Secret and status
+   * endpoint, and returns a bound Sandbox.
    */
   async create(pool: string, opts?: CreateOptions): Promise<Sandbox> {
     const name = opts?.name ?? randomName();
     const spec: Record<string, unknown> = {
-      poolRef: { name: pool },
+      source: { poolRef: { name: pool } },
     };
     if (opts?.env) {
       spec["env"] = Object.entries(opts.env).map(([k, v]) => ({ name: k, value: v }));
     }
     if (opts?.timeout) {
-      spec["timeout"] = opts.timeout;
+      spec["lifetime"] = { ttl: opts.timeout };
     }
     if (opts?.workspace) {
       spec["workspaceRef"] = { name: opts.workspace };
@@ -283,7 +268,7 @@ export class AgentRun {
 
     const claim: CustomObject = {
       apiVersion: `${API_GROUP}/${API_VERSION}`,
-      kind: "SandboxClaim",
+      kind: "Sandbox",
       metadata: { name, namespace: this.namespace },
       spec,
     };
@@ -314,11 +299,11 @@ export class AgentRun {
   }
 
   /**
-   * Builds the workspace-aware terminator for a claim: when terminate is called
-   * with outputs or checkpoint, it merge-patches the claim spec first (the
-   * controller dehydrates with those outputs on the way out), then reads the
-   * claim's workspaceRef, deletes the claim, and returns the bound workspace
-   * name (or undefined when the sandbox is unbound).
+   * Builds the workspace-aware terminator for a sandbox: when terminate is
+   * called with outputs or checkpoint, it merge-patches the sandbox spec first
+   * (the controller dehydrates with those outputs on the way out under
+   * spec.lifetime.onTerminate), then reads the sandbox's workspaceRef, deletes
+   * the sandbox, and returns the bound workspace name (or undefined when unbound).
    */
   private makeTerminator(name: string): (opts?: TerminateOptions) => Promise<string | undefined> {
     return async (opts?: TerminateOptions) => {
@@ -330,23 +315,25 @@ export class AgentRun {
           specOutputs.push(o);
         }
       }
-      const patchSpec: Record<string, unknown> = {};
+      const onTerminate: Record<string, unknown> = {};
       if (specOutputs.length > 0) {
-        patchSpec["outputs"] = specOutputs;
+        onTerminate["outputs"] = specOutputs;
       }
       if (opts?.checkpoint) {
-        patchSpec["checkpointOnTerminate"] = true;
+        onTerminate["snapshot"] = "retain-1";
       }
-      if (Object.keys(patchSpec).length > 0) {
-        await this.k8s.patchClaim(this.namespace, name, { spec: patchSpec });
+      if (Object.keys(onTerminate).length > 0) {
+        await this.k8s.patchClaim(this.namespace, name, {
+          spec: { lifetime: { onTerminate } },
+        });
       }
       let workspaceRef: string | undefined;
       try {
-        const claim = await this.k8s.getClaim(this.namespace, name);
-        const ref = ((claim.spec ?? {})["workspaceRef"] ?? {}) as { name?: string };
+        const sandbox = await this.k8s.getClaim(this.namespace, name);
+        const ref = ((sandbox.spec ?? {})["workspaceRef"] ?? {}) as { name?: string };
         workspaceRef = ref.name;
       } catch {
-        // Claim already gone; report unbound.
+        // Sandbox already gone; report unbound.
       }
       await this.k8s.deleteClaim(this.namespace, name);
       return workspaceRef;
@@ -393,14 +380,14 @@ export class AgentRun {
   }
 
   /**
-   * Lists sandboxes (SandboxClaims) mapped to SandboxInfo, optionally filtered
-   * by pool.
+   * Lists sandboxes (mitos.run/v1 Sandbox) mapped to SandboxInfo, optionally
+   * filtered by pool.
    */
   async list(pool?: string): Promise<SandboxInfo[]> {
     const list = await this.k8s.listClaims(this.namespace);
     const out: SandboxInfo[] = [];
     for (const obj of list.items ?? []) {
-      const objPool = readString(obj.spec, ["poolRef", "name"]);
+      const objPool = readString(obj.spec, ["source", "poolRef", "name"]);
       if (pool && objPool !== pool) {
         continue;
       }
@@ -432,9 +419,9 @@ export class AgentRun {
       if (phase === "Failed") {
         throw new AgentRunError(`sandbox ${name} failed`, {
           code: "sandbox_failed",
-          cause: `claim ${name} reached the Failed phase`,
+          cause: `sandbox ${name} reached the Failed phase`,
           remediation:
-            "Inspect the SandboxClaim status conditions and the pool capacity.",
+            "Inspect the Sandbox status conditions and the pool capacity.",
         });
       }
       if (Date.now() >= deadline) {
@@ -442,7 +429,7 @@ export class AgentRun {
           `sandbox ${name} not ready after ${this.pollTimeoutMs}ms`,
           {
             code: "ready_timeout",
-            cause: `claim ${name} did not reach Ready within ${this.pollTimeoutMs}ms`,
+            cause: `sandbox ${name} did not reach Ready within ${this.pollTimeoutMs}ms`,
             remediation:
               "Raise pollTimeoutMs, or check the controller is reconciling and the pool has capacity.",
           },
@@ -466,6 +453,13 @@ function readString(obj: Record<string, unknown> | undefined, path: string[]): s
 }
 
 function forkTimeMs(status: Record<string, unknown>): number {
+  // v1: status.startupLatencyMs (already in ms).
+  const latencyMs = status["startupLatencyMs"];
+  if (typeof latencyMs === "number") {
+    return latencyMs;
+  }
+  // v1alpha1 legacy fields kept for objects observed before the storage
+  // migration completes.
   const micros = status["forkTimeMicros"];
   if (typeof micros === "number") {
     return micros / 1000;
