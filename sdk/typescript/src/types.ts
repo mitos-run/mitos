@@ -1,4 +1,4 @@
-// Public types for the mitos TypeScript SDK. These mirror the Python SDK
+// Public types for the Mitos TypeScript SDK. These mirror the Python SDK
 // (sdk/python/mitos/types.py) with camelCased field names.
 
 /**

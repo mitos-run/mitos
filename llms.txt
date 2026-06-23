@@ -1,4 +1,4 @@
-# mitos
+# Mitos
 
 > Snapshot-fork sandboxes for AI agents on Kubernetes. Boots Firecracker
 > microVMs, forks them via copy-on-write snapshots, and exposes the lifecycle

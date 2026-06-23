@@ -13,7 +13,7 @@ conformant'. Residuals ship as ADRs in `docs/adr/`."
 
 ## The rule
 
-> mitos NEVER claims to be "fully Kubernetes conformant". Permitted compliance
+> Mitos NEVER claims to be "fully Kubernetes conformant". Permitted compliance
 > claim language is bounded to exactly what a CI job proves. Anything beyond that
 > ships as a residual ADR in `docs/adr/`, not as a claim.
 

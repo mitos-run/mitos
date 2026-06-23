@@ -1,9 +1,9 @@
 # Recipe: host an HTTP daemon (coding-agent harness) in a sandbox
 
-Issue #230 asks whether a mitos sandbox can host a coding-agent harness (a
+Issue #230 asks whether a Mitos sandbox can host a coding-agent harness (a
 Rivet `sandbox-agent` style daemon, `opencode` web, or any in-box HTTP server)
 and be driven from outside over HTTP. The integration surface such a harness
-needs is exactly two things: shell access (mitos has `exec` over vsock) and a
+needs is exactly two things: shell access (Mitos has `exec` over vsock) and a
 reachable network port. The port half shipped as the foundation slice of issue
 #228 (`docs/ports.md`): a TCP-over-vsock tunnel through the standalone
 `sandbox-server`. This recipe shows the end-to-end flow using what ships today,
@@ -48,7 +48,7 @@ The forward is per sandbox, loopback-only on the host, bounded by a per-sandbox
 concurrency cap, and torn down automatically when the sandbox terminates (see
 `docs/ports.md`).
 
-## The mitos fork angle
+## The Mitos fork angle
 
 The distinguishing property: you can warm one sandbox with the daemon installed
 and the harness's dependencies in place, then `fork(n)` it into a swarm. Each

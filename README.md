@@ -2,11 +2,11 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mitos-mark-white.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/mitos-mark-black.svg">
-    <img alt="mitos" src="docs/assets/mitos-mark-black.svg" width="120" height="120">
+    <img alt="Mitos" src="docs/assets/mitos-mark-black.svg" width="120" height="120">
   </picture>
 </p>
 
-<h1 align="center">mitos</h1>
+<h1 align="center">Mitos</h1>
 
 <p align="center">
   <b>Millisecond microVM sandbox forking for AI agents on Kubernetes.</b><br/>
@@ -32,11 +32,11 @@
 
 ---
 
-## What is mitos
+## What is Mitos
 
 Agent harnesses need fast, isolated environments where agents can read and write files, install packages, and run untrusted code. Every existing option forces a trade you should not have to make: speed without ownership, isolation without forking, Kubernetes-nativeness without warm starts, or durability as someone else's proprietary cloud.
 
-`mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, and it does so with a **warm-claim activate in the tens-of-ms class**: P50 ~27 ms on the bare-metal reference node, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh). You drive the whole lifecycle through declarative CRDs (`mitos.run`) on your own cluster, or fully hosted by us.
+`Mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, and it does so with a **warm-claim activate in the tens-of-ms class**: P50 ~27 ms on the bare-metal reference node, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh). You drive the whole lifecycle through declarative CRDs (`mitos.run`) on your own cluster, or fully hosted by us.
 
 Two ways to run it:
 
@@ -104,7 +104,7 @@ hosted signup, the free-tier credit, and the first API key come from the
 ### Python on Kubernetes (operators)
 
 On a cluster, the two-tier `AgentRun` path drives the CRDs (SandboxPool,
-Sandbox, Workspace) directly. Use this when you run the mitos operator yourself.
+Sandbox, Workspace) directly. Use this when you run the Mitos operator yourself.
 
 ```python
 from mitos import AgentRun
@@ -206,7 +206,7 @@ Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) require t
 
 ### Integrations
 
-Drop a mitos sandbox into the agent framework you already use; each adapter is a thin shim over the same native SDK ops (`exec`, `run_code`, `files`), with no hard dependency on the framework package.
+Drop a Mitos sandbox into the agent framework you already use; each adapter is a thin shim over the same native SDK ops (`exec`, `run_code`, `files`), with no hard dependency on the framework package.
 
 | Framework | Import | Docs |
 |---|---|---|
@@ -394,22 +394,22 @@ The local dev cluster uses the mock fork engine (no KVM): claims reconcile to `R
 
 ## Comparison
 
-A numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/mitos-run/mitos/issues/15). The differentiator is not a single fastest-number claim: `mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, with a warm-claim activate in the tens-of-ms class (P50 ~27 ms, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh)).
+A numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/mitos-run/mitos/issues/15). The differentiator is not a single fastest-number claim: `Mitos` is, as far as we know, the only open-source, self-hostable, Kubernetes-native runtime whose engine does N-way live copy-on-write fork of a running microVM, with a warm-claim activate in the tens-of-ms class (P50 ~27 ms, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh)).
 
 The figures below are **other vendors' published numbers, for different operations, on different hardware, measured with different methodology**; they are NOT measured by us and this is NOT a head-to-head claim. The matched-hardware comparison is [#15](https://github.com/mitos-run/mitos/issues/15).
 
 | Runtime | Published figure (theirs, not ours) | Operation they describe |
 |---|---|---|
-| mitos (ours, measured) | ~27 ms P50 | warm-claim activate (snapshot load + fork-correctness handshake + guest-ready) on the bare-metal reference node |
+| Mitos (ours, measured) | ~27 ms P50 | warm-claim activate (snapshot load + fork-correctness handshake + guest-ready) on the bare-metal reference node |
 | E2B | ~150 ms | sandbox create |
 | Daytona | sub-90 ms | create from snapshot |
 | Modal | sub-second | sandbox create |
 | CodeSandbox SDK | ~863 ms / ~495 ms | live fork / memory-resume |
 | Fly Machines | < 1 s | machine start |
 
-What is comparable and real today is the qualitative pareto map: the combination of open source, self-hostable, k8s-native, and live snapshot fork is the axis where `mitos` is alone.
+What is comparable and real today is the qualitative pareto map: the combination of open source, self-hostable, k8s-native, and live snapshot fork is the axis where `Mitos` is alone.
 
-| | mitos | E2B | Modal | Daytona | Morph | Cloudflare | Box | Agent Sandbox | Kata/KubeVirt | raw Firecracker |
+| | Mitos | E2B | Modal | Daytona | Morph | Cloudflare | Box | Agent Sandbox | Kata/KubeVirt | raw Firecracker |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Hardware isolation per session | KVM microVM | microVM | gVisor | container/VM | microVM | V8 isolate | VM | Kata option | KVM | KVM |
 | Snapshot fork of running state | yes, core primitive | snapshot/resume | memory snapshots | no | yes (Infinibranch) | no | disk fork | no | no | build it yourself |
@@ -421,7 +421,7 @@ What is comparable and real today is the qualitative pareto map: the combination
 | Your data stays on your infra | yes (self-hosted) | no | no | partial | no | no | no | yes | yes | yes |
 | Open source | Apache 2.0 | partial | no | partial | no | no | no | Apache 2.0 | Apache 2.0 | Apache 2.0 |
 
-SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability. Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds. Box is a hosted-only disk-fork sandbox SaaS with an agent-native CLI, which validates the agent-native direction we take with `mitos` and MCP (Box publishes no latency benchmark, so we make no comparison claim there). Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we ship a conformance facade (`cmd/facade`) to be its fastest backend rather than fighting it ([docs/facade-conformance.md](docs/facade-conformance.md)). Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
+SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability. Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds. Box is a hosted-only disk-fork sandbox SaaS with an agent-native CLI, which validates the agent-native direction we take with `Mitos` and MCP (Box publishes no latency benchmark, so we make no comparison claim there). Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we ship a conformance facade (`cmd/facade`) to be its fastest backend rather than fighting it ([docs/facade-conformance.md](docs/facade-conformance.md)). Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
 
 If an alternative beats us on an axis you care about and we have no roadmap line that closes it, that is a bug in our strategy: open an issue.
 

@@ -2,7 +2,7 @@ package mitos
 
 import "strings"
 
-// Error is the LLM-legible error returned by the mitos SDK. It mirrors the
+// Error is the LLM-legible error returned by the Mitos SDK. It mirrors the
 // server envelope {error:{code, message, cause, remediation}} and the Python
 // AgentRunError, the TypeScript AgentRunError, the Ruby MitosError, and the Java
 // MitosException.

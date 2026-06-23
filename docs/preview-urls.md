@@ -2,7 +2,7 @@
 
 A preview URL exposes a port inside a running sandbox to the caller through a
 single per-sandbox hostname, `<sandbox-id>.preview.<domain>`, served by a
-controller-managed reverse proxy with automatic TLS. It is the mitos equivalent
+controller-managed reverse proxy with automatic TLS. It is the Mitos equivalent
 of E2B `sandbox.getHost(port)` and Daytona signed, expiring preview URLs: one
 internet-facing entrypoint fronting many ephemeral per-sandbox backends,
 Kubernetes-native, with the same per-sandbox token gate as the sandbox API.
@@ -68,7 +68,7 @@ that matter, each unit-tested in `internal/preview/sign_test.go`:
 
 ### Why not a captoken
 
-mitos already has macaroon-style attenuated capability tokens
+Mitos already has macaroon-style attenuated capability tokens
 (`internal/captoken`, issue #25). A preview token needs no attenuation chain,
 only a single expiring binding of `(sandbox, port)`, so a focused signer keeps
 the scheme small and auditable. It reuses the SAME standard-library HMAC-SHA256

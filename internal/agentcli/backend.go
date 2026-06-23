@@ -1,4 +1,4 @@
-// Package agentcli implements the mitos command-line interface: a thin,
+// Package agentcli implements the Mitos command-line interface: a thin,
 // dependency-free command tree over a Backend that drives the sandbox lifecycle
 // (create, exec, file IO, fork, terminate, list).
 //

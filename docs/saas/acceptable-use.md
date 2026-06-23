@@ -1,6 +1,6 @@
 # Acceptable Use Policy (hosted offering)
 
-This Acceptable Use Policy (AUP) governs the hosted mitos sandbox cloud. It is
+This Acceptable Use Policy (AUP) governs the hosted Mitos sandbox cloud. It is
 the human-readable counterpart to the technical abuse controls (issue #213): the
 per-organization quotas, the per-org and per-IP rate limits, the per-tier egress
 policy, and the kill-switch. By using the hosted offering you agree to these
@@ -96,14 +96,14 @@ in the same change.
 
 ## Self-hoster template
 
-If you run your own mitos cluster you are the operator, and you set your own
+If you run your own Mitos cluster you are the operator, and you set your own
 acceptable-use policy. The hosted controls (quotas, rate limits, per-tier egress,
 kill-switch) ship as a reusable layer (`internal/saas/quota`), but the DEFAULTS
 above are the hosted service's, not yours. If you expose your cluster to
 untrusted or multi-tenant users you SHOULD adopt an equivalent policy. A minimal
 starting template:
 
-> ## Acceptable Use (self-hosted mitos at <your-org>)
+> ## Acceptable Use (self-hosted Mitos at <your-org>)
 >
 > Sandboxes on this cluster may not be used for cryptocurrency mining,
 > spam, denial-of-service, attacks against any host, malware distribution, or any
