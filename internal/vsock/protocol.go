@@ -130,7 +130,7 @@ type VitalsResponse struct {
 // ProcessEntry is one row of the in-guest process table: the pid, program name,
 // single-letter state, accrued CPU jiffies (user + system), and resident set in
 // kilobytes. These map directly onto the guestvitals.PidStat the guest parsed
-// from /proc; the host carries them verbatim to kubectl sandbox ps.
+// from /proc; the host carries them verbatim to kubectl mitos ps.
 type ProcessEntry struct {
 	PID        int    `json:"pid"`
 	Comm       string `json:"comm"`

@@ -225,7 +225,7 @@ func meteringHandler(engine ForkEngine) http.Handler {
 // log.
 // labels carries the control-plane identity (claim/pool/workspace/namespace)
 // the controller attached to this fork; forkd records it per-sandbox so the
-// sandbox's Layer 3 guest telemetry (/v1/vitals, kubectl sandbox ps
+// sandbox's Layer 3 guest telemetry (/v1/vitals, kubectl mitos ps
 // --processes) is LABELED (issue #164). The fields are object names, never
 // secrets; an empty VitalsLabels leaves the sandbox unlabeled.
 func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, volumes []*forkdpb.VolumeMount, apiToken string, labels VitalsLabels) (*fork.ForkResult, error) {

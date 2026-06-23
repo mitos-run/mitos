@@ -1,13 +1,13 @@
 apiVersion: krew.googlecontainertools.github.com/v1alpha2
 kind: Plugin
 metadata:
-  name: sandbox
+  name: mitos
 spec:
   version: "{{ .TagName }}"
   homepage: https://mitos.run
   shortDescription: Inspect and operate mitos.run snapshot-fork sandboxes.
   description: |
-    kubectl sandbox inspects and operates mitos.run sandbox objects
+    kubectl mitos inspects and operates mitos.run sandbox objects
     (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in the
     mitos.run/v1alpha1 API group.
 
@@ -32,29 +32,29 @@ spec:
         matchLabels:
           os: linux
           arch: amd64
-      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_linux_amd64.tar.gz" .TagName }}
-      bin: kubectl-sandbox
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-mitos_{{ .TagName }}_linux_amd64.tar.gz" .TagName }}
+      bin: kubectl-mitos
     - selector:
         matchLabels:
           os: linux
           arch: arm64
-      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_linux_arm64.tar.gz" .TagName }}
-      bin: kubectl-sandbox
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-mitos_{{ .TagName }}_linux_arm64.tar.gz" .TagName }}
+      bin: kubectl-mitos
     - selector:
         matchLabels:
           os: darwin
           arch: amd64
-      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_darwin_amd64.tar.gz" .TagName }}
-      bin: kubectl-sandbox
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-mitos_{{ .TagName }}_darwin_amd64.tar.gz" .TagName }}
+      bin: kubectl-mitos
     - selector:
         matchLabels:
           os: darwin
           arch: arm64
-      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_darwin_arm64.tar.gz" .TagName }}
-      bin: kubectl-sandbox
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-mitos_{{ .TagName }}_darwin_arm64.tar.gz" .TagName }}
+      bin: kubectl-mitos
     - selector:
         matchLabels:
           os: windows
           arch: amd64
-      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_windows_amd64.zip" .TagName }}
-      bin: kubectl-sandbox.exe
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-mitos_{{ .TagName }}_windows_amd64.zip" .TagName }}
+      bin: kubectl-mitos.exe

@@ -359,7 +359,7 @@ construction with a clear message and prints no number.
   `claim-exec` mode of the `bench/claim` Go harness. For each sequential claim it
   creates a `SandboxClaim`, waits for the controller to drive it Ready, and runs
   the FIRST exec over the sandbox HTTP API (the same endpoint + per-sandbox
-  bearer token kubectl-sandbox and the SDK use), measuring claim-create ->
+  bearer token kubectl-mitos and the SDK use), measuring claim-create ->
   first-exec P50/P90/P99. This is the full controller + scheduler + pool path, NOT
   the engine data path `cmd/bench` measures. **Status: harness runnable on a
   cluster; numbers OPEN, pending the #16 reference node.**

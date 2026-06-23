@@ -338,7 +338,7 @@ framework is `docs/adr/README.md` (ADR 0000 adopts it); the residual ADRs are
 firewall). The reusable claim-language guardrail is `docs/compliance-claims.md`.
 Observability
 acceptance: Hubble-visible per-sandbox flows, OpenCost attribution, a guest
-telemetry bridge + `kubectl sandbox` plugin (`top`/`ps`/`logs`/`exec`), and
+telemetry bridge + `kubectl mitos` plugin (`top`/`ps`/`logs`/`exec`), and
 one trace ID from orchestrator request through exec to workspace revision.
 Family maturity bar before 1.0: Grafana dashboards, PrometheusRule alerts
 with runbooks, `docs/conditions.md` reason-code catalogue, shipped with the
@@ -847,7 +847,7 @@ verified. In rough order of leverage:
 - ⬜ File transfer ergonomics and operator port-forwarding beyond the runtime
   protocol above; the code-interpreter kernel baked into the husk cluster base
   image so `run_code` is live (not `KernelUnavailable`) by default.
-- ✅ `kubectl sandbox` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
+- ✅ `kubectl mitos` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
   fork/lineage DAG), top (per-sandbox CoW-aware metering from forkd
   `/v1/metering`, honestly labeled, a dash on a missing datum), logs (the husk
   stub pod console plus the guest-console #18 note), and exec (token-scoped

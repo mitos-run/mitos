@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// This file is the kubectl sandbox ps consumer of the Layer 3 guest telemetry
+// This file is the kubectl mitos ps consumer of the Layer 3 guest telemetry
 // bridge (issue #164): with --processes, ps fetches the REAL in-guest process
 // table from forkd's /v1/vitals endpoint (which asks the guest agent over vsock)
 // instead of listing SandboxFork objects. When the guest is unreachable the
