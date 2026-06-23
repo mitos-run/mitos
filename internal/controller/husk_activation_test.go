@@ -268,15 +268,21 @@ func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 	// (kvm-node-1, per makeDormantHuskPod), NOT a cluster-wide pick. Register a
 	// DECOY node with a different digest FIRST so a cluster-wide lookup would
 	// resolve the wrong one; the pod's node carries wantDigest (#177).
+	//
+	// The template id the digest is keyed by is poolTemplateID(pool). In v1 the
+	// pool carries an INLINE template (no separate SandboxTemplate object), so
+	// poolTemplateID returns the POOL NAME (husk-d-pool), not a referenced
+	// template name. Register the per-node digests under the pool name so the
+	// lookup in the activation path resolves.
 	testRegistry.Register(&controller.NodeInfo{
 		Name:            "other-node",
-		TemplateIDs:     []string{"husk-d-tmpl"},
-		TemplateDigests: map[string]string{"husk-d-tmpl": otherDigest},
+		TemplateIDs:     []string{"husk-d-pool"},
+		TemplateDigests: map[string]string{"husk-d-pool": otherDigest},
 	})
 	testRegistry.Register(&controller.NodeInfo{
 		Name:            "kvm-node-1",
-		TemplateIDs:     []string{"husk-d-tmpl"},
-		TemplateDigests: map[string]string{"husk-d-tmpl": wantDigest},
+		TemplateIDs:     []string{"husk-d-pool"},
+		TemplateDigests: map[string]string{"husk-d-pool": wantDigest},
 	})
 	t.Cleanup(func() { testRegistry.Unregister("other-node"); testRegistry.Unregister("kvm-node-1") })
 
