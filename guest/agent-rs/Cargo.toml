@@ -1,7 +1,7 @@
 [package]
 name = "sandbox-agent"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [lib]
@@ -13,9 +13,33 @@ name = "sandbox-agent"
 path = "src/main.rs"
 
 [dependencies]
+# gRPC stack: tonic for the service layer, prost for generated types.
+tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost", "router"] }
+prost = "0.13"
+
+# Async runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+# vsock transport (Linux only; stub on non-Linux via feature flag).
+tokio-vsock = { version = "0.6", optional = true }
+
+# libc for PID-1 init (mount, sethostname) and fork-correctness syscalls.
+libc = "0.2"
+
+# Legacy JSON serde kept alive during the wire migration; removed once Task 0.x
+# stubs are the last callers (deferred per task-0.1 brief).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libc = "0.2"
+
+[build-dependencies]
+# tonic-build compiles proto/sandbox/v1/sandbox.proto at build time.
+tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
+# Vendored protoc so the build needs no system protoc (box1 has none).
+protoc-bin-vendored = "3"
+
+[features]
+# vsock feature gate mirrors the Linux-only tokio-vsock dependency.
+vsock = ["dep:tokio-vsock"]
 
 [profile.release]
 opt-level = "z"
