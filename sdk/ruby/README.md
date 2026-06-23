@@ -114,12 +114,15 @@ sending any request.
 
 ## Tests
 
-The tests use only the standard library (`minitest`, `webrick`). They spin up a
-WEBrick stub reproducing the sandbox-server wire shapes and assert the SDK round
-trips them.
+The tests spin up a WEBrick stub reproducing the sandbox-server wire shapes and
+assert the SDK round trips them. They need `minitest` and `webrick`; both shipped
+in the stdlib through Ruby 2.7, but `webrick` became a separate gem in Ruby 3.0,
+so on Ruby 3+ install it first (`gem install webrick`). The SDK itself still has
+no runtime dependencies; this is a test-only dependency.
 
 ```bash
 cd sdk/ruby
+gem install webrick   # only needed on Ruby 3.0+
 ruby -Ilib -Itest test/sandbox_server_test.rb
 # or, with Rake:
 rake test
