@@ -145,7 +145,7 @@ template-go:    <base>
 template-rust:  <base>-rustagent
 kernel:         <data-dir>/vmlinux   (byte-identical for both)
 rootfs-base:    byte-identical ext4, same kernel, same shell, only /init differs
-agent-go:       guest/agent/ (Go, dynamic build inside rootfs)
+agent-go:       guest/agent/ (Go binary at /init in the baseline rootfs)
 agent-rust:     guest/agent-rs/target/x86_64-unknown-linux-musl/release/sandbox-agent
 firecracker:    v1.15.0
 host:           <CPU, kernel version, Hetzner node label>
