@@ -37,10 +37,10 @@ from typing import Callable, Optional
 import httpx
 
 from mitos._connect import ConnectClient
-from mitos._envelope import raise_for_status, raise_for_status_stream
-from mitos.errors import AgentRunError
-from mitos.types import Execution, ExecResult, FileInfo, Network, Result
-from mitos.sandbox import _parse_run_code_stream, _validate_timeout
+from mitos._envelope import raise_for_status
+from mitos.errors import AgentRunError, ExecutionDeadlineError
+from mitos.types import Execution, ExecResult, ExecutionError, FileInfo, Network, Result
+from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _validate_timeout
 
 
 # Environment variables for the flat onboarding path. Explicit constructor or
@@ -213,16 +213,96 @@ class DirectSandboxFiles:
         self._sb._connect().unary("Mkdir", {"path": path})
 
 
+def _decode_result_data(data: dict) -> dict[str, str]:
+    """Decode a Connect RunResult.data map (proto-JSON map<string,bytes>: every
+    value is base64) back to the MIME->payload form the Result type expects.
+
+    The guest stores each display value as raw bytes of the kernel's string
+    output (text/plain is "42", image/png is the already-base64 string), and
+    proto-JSON base64-encodes the byte map for the wire. Decoding the base64 back
+    to a utf-8 string recovers exactly the kernel value, so text stays text and
+    an image stays its base64 payload, matching Result.text / Result.png."""
+    out: dict[str, str] = {}
+    for mime, value in (data or {}).items():
+        try:
+            out[mime] = base64.b64decode(value).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001  not base64: keep the value as-is
+            out[mime] = value if isinstance(value, str) else str(value)
+    return out
+
+
+def _parse_run_code_connect(
+    frames,
+    on_stdout: Optional[Callable[[str], None]],
+    on_stderr: Optional[Callable[[str], None]],
+    on_result: Optional[Callable[[Result], None]],
+) -> Execution:
+    """Fold a Connect RunCodeStream response-frame stream into an Execution,
+    firing the callbacks live as frames arrive. The proto-JSON frames are the
+    RunCodeResponse oneof: stdout/stderr (base64 bytes), result
+    (RunResult{text,data}), error (RunError{name,value,traceback}), and the
+    terminal exitCode. Result and error payloads are tenant code output and are
+    never logged here."""
+    ex = Execution()
+    saw_exit = False
+    for frame in frames:
+        if "stdout" in frame:
+            text = _b64_decode(frame.get("stdout")).decode("utf-8", "replace")
+            ex.logs["stdout"].append(text)
+            if on_stdout:
+                on_stdout(text)
+        elif "stderr" in frame:
+            text = _b64_decode(frame.get("stderr")).decode("utf-8", "replace")
+            ex.logs["stderr"].append(text)
+            if on_stderr:
+                on_stderr(text)
+        elif "result" in frame:
+            payload = frame.get("result") or {}
+            data = _decode_result_data(payload.get("data") or {})
+            text = payload.get("text") or ""
+            is_main = bool(text)
+            # The REPL last-value is delivered in RunResult.text; mirror it into
+            # the text/plain MIME slot so Result.text resolves the same way the
+            # NDJSON path did.
+            if is_main and "text/plain" not in data:
+                data["text/plain"] = text
+            result = Result(data=data, is_main_result=is_main)
+            ex.results.append(result)
+            if is_main and text:
+                ex.text = text
+            if on_result:
+                on_result(result)
+        elif "error" in frame:
+            payload = frame.get("error") or {}
+            ex.error = ExecutionError(
+                name=payload.get("name", ""),
+                value=payload.get("value", ""),
+                traceback=payload.get("traceback", []) or [],
+            )
+        elif "exitCode" in frame:
+            saw_exit = True
+            break
+    if not saw_exit:
+        # The stream ended before the terminal exit frame: it was truncated or
+        # dropped. Surface it rather than a misleading clean Execution.
+        raise RuntimeError(
+            "run_code stream ended before the terminal exit frame: "
+            "the connection was truncated or dropped; the result is unknown"
+        )
+    return ex
+
+
 class DirectSandbox:
     """A sandbox connected directly to the sandbox-server / hosted control plane.
 
     The flat handle returned by mitos.create(). Exposes exec, run_code, files,
     pty, fork, and terminate against the sandbox-server / hosted control plane.
-    The file calls ride the Connect sandbox.v1.Sandbox service (issue #24); exec,
-    run_code, pty, and the lifecycle calls ride their existing JSON / WebSocket
-    transports (the Connect Exec/RunCode RPCs are bidi, which the Connect protocol
-    serves only over HTTP/2, and this dependency-light client cannot speak
-    cleartext HTTP/2; that migration is a #24 follow-up).
+    The exec, run_code, and file calls ride the Connect sandbox.v1.Sandbox
+    service (issue #24): exec via the ExecStream server-streaming RPC, run_code
+    via RunCodeStream, and files via ReadFile/WriteFile/List/Mkdir/Remove. pty and
+    the lifecycle calls (create/fork/terminate/set_timeout/pause/resume/preview)
+    ride their existing WebSocket / JSON transports (interactive pty needs bidi /
+    HTTP-2, a documented #24 follow-up).
     """
 
     def __init__(
@@ -291,29 +371,53 @@ class DirectSandbox:
     def exec(self, command: str, timeout: int = 30) -> ExecResult:
         """Run a command and return its aggregate result.
 
-        Exec stays on the JSON ``/v1/exec`` route. The Connect ``Exec`` RPC is a
-        BIDI stream (``stream ExecRequest returns stream ExecResponse``), and the
-        Connect protocol only supports bidi over HTTP/2; httpx cannot speak
-        cleartext HTTP/2 (h2c), which is what the standalone sandbox-server
-        serves, so a Connect Exec from this dependency-light client would 505. The
-        file RPCs (server/client/unary streaming) ride Connect over HTTP/1.1; exec
-        and run_code keep the JSON transport until the SDK gains an h2c-capable
-        client (a documented #24 follow-up). The legacy JSON routes remain in
-        force during the migration. The public return shape is unchanged."""
+        Drives the Connect ``ExecStream`` server-streaming RPC (a non-interactive
+        exec: the unary request fully describes the command, the reply is a
+        stream of stdout/stderr chunks then a terminal ExecExit). Connect serves
+        server-streaming over HTTP/1.1, so the dependency-light httpx client
+        reaches it. A command killed at its execution deadline reports exit 124,
+        surfaced as the typed ExecutionDeadlineError (matching the cluster path).
+        The public return shape is unchanged."""
         _validate_timeout(timeout)
-        resp = self._http.post(
-            f"{self._server_url}/v1/exec",
-            json={"sandbox": self.id, "command": command, "timeout": timeout},
-            timeout=timeout + 5,
-            headers=self._auth_headers(),
-        )
-        raise_for_status(resp, token=self._api_key)
-        data = resp.json()
+        out = bytearray()
+        err = bytearray()
+        exit_code = 0
+        exec_time_ms = 0.0
+        req = {"command": command, "timeoutSeconds": timeout}
+        for frame in self._connect().server_stream("ExecStream", req, timeout=timeout + 5):
+            if "stdout" in frame:
+                out.extend(_b64_decode(frame.get("stdout")))
+            elif "stderr" in frame:
+                err.extend(_b64_decode(frame.get("stderr")))
+            elif "exit" in frame:
+                ex = frame.get("exit") or {}
+                exit_code = int(ex.get("exitCode", 0))
+                exec_time_ms = float(ex.get("execTimeMs", 0.0))
+                # A spawn/transport failure rides ExecExit.error (an LLM-legible
+                # remediation string, never a secret); surface it rather than a
+                # misleading clean exit.
+                if ex.get("error"):
+                    raise AgentRunError(
+                        "exec failed",
+                        code="exec_failed",
+                        cause=str(ex["error"]),
+                        remediation="Check the command is accessible in the sandbox filesystem.",
+                    )
+        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+            raise ExecutionDeadlineError(
+                f"command exceeded its {timeout}s execution deadline and was terminated",
+                code="exec_timeout",
+                cause=f"command ran past its {timeout}s deadline (exit 124)",
+                remediation=(
+                    "Raise the timeout on the exec call or split the work into shorter steps."
+                ),
+                context={"timeout_s": timeout},
+            )
         return ExecResult(
-            exit_code=data["exit_code"],
-            stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""),
-            exec_time_ms=data.get("exec_time_ms", 0),
+            exit_code=exit_code,
+            stdout=out.decode("utf-8", "replace"),
+            stderr=err.decode("utf-8", "replace"),
+            exec_time_ms=exec_time_ms,
         )
 
     def run_code(
@@ -331,28 +435,21 @@ class DirectSandbox:
         code-interpreter kernel, else the Execution carries a KernelUnavailable
         error.
 
-        run_code stays on the JSON ``/v1/run_code/stream`` route for the same
-        reason as exec: the Connect ``RunCode`` RPC is a BIDI stream, which the
-        Connect protocol only carries over HTTP/2, and httpx cannot speak cleartext
-        HTTP/2 (h2c) to the standalone server. The file RPCs migrated to Connect;
-        exec and run_code follow once the SDK has an h2c-capable client (a #24
-        follow-up). The public return shape is unchanged."""
+        Drives the Connect ``RunCodeStream`` server-streaming RPC (a
+        non-interactive run: the unary request fully describes the snippet, the
+        reply is a stream of stdout/stderr chunks, rich RunResult frames, the
+        structured RunError, and the terminal exit code). Connect serves
+        server-streaming over HTTP/1.1, so the httpx client reaches it. The
+        callbacks fire live as frames arrive; the public return shape is
+        unchanged."""
         _validate_timeout(timeout)
-        payload = {
-            "sandbox": self.id,
-            "code": code,
-            "language": language,
-            "timeout": timeout,
-        }
-        with self._http.stream(
-            "POST",
-            f"{self._server_url}/v1/run_code/stream",
-            json=payload,
-            timeout=timeout + 10,
-            headers=self._auth_headers(),
-        ) as resp:
-            raise_for_status_stream(resp, token=self._api_key)
-            return _parse_run_code_stream(resp.iter_lines(), on_stdout, on_stderr, on_result)
+        req = {"code": code, "language": language, "timeoutSeconds": timeout}
+        return _parse_run_code_connect(
+            self._connect().server_stream("RunCodeStream", req, timeout=timeout + 10),
+            on_stdout,
+            on_stderr,
+            on_result,
+        )
 
     def pty_url(self, cols: int = 80, rows: int = 24) -> str:
         """The WebSocket URL for an interactive PTY in this sandbox. The bearer

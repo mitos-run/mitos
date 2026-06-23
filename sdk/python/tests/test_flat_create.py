@@ -114,13 +114,30 @@ def _make_fake_server():
             self.wfile.write(_connect_frame(json.dumps(end).encode(), end=True))
 
         def _connect_dispatch(self, method):
-            """Serve the Connect file RPCs the SDK migrated (ReadFile, WriteFile,
-            List, Mkdir, Remove). Exec and run_code stay on the JSON routes
-            (Connect Exec/RunCode are bidi, which needs HTTP/2; httpx cannot speak
-            cleartext h2c), so they are NOT served here."""
+            """Serve the Connect RPCs the SDK uses for the runtime calls:
+            ExecStream and RunCodeStream (server-streaming, HTTP/1.1) plus the
+            file RPCs ReadFile, WriteFile, List, Mkdir, Remove. pty stays on the
+            WebSocket transport, so it is not served here."""
             sid = self.headers.get("X-Sandbox-Id", "")
             body = self._read_raw()
-            if method == "ReadFile":
+            if method == "ExecStream":
+                # ExecStream/RunCodeStream are server-streaming: the unary request
+                # rides the Connect streaming envelope (one frame), so decode it.
+                msgs = _decode_connect_request(body)
+                req = msgs[0] if msgs else {}
+                cmd = req.get("command", "")
+                out = cmd.split("echo ", 1)[1] + "\n" if "echo " in cmd else ""
+                self._connect_stream([
+                    {"stdout": base64.b64encode(out.encode()).decode()},
+                    {"exit": {"exitCode": 0, "execTimeMs": 1.0}},
+                ])
+            elif method == "RunCodeStream":
+                self._connect_stream([
+                    {"stdout": base64.b64encode(b"ran\n").decode()},
+                    {"result": {"text": "2", "data": {"text/plain": base64.b64encode(b"2").decode()}}},
+                    {"exitCode": 0},
+                ])
+            elif method == "ReadFile":
                 msgs = _decode_connect_request(body)
                 req = msgs[0] if msgs else {}
                 files = state["files"].get(sid, {})
@@ -199,23 +216,6 @@ def _make_fake_server():
                 state["sandboxes"][sid] = info
                 state["files"].setdefault(sid, {})
                 self._json(200, info)
-            elif self.path == "/v1/exec":
-                # exec stays on JSON (Connect Exec is bidi -> HTTP/2 only).
-                cmd = req.get("command", "")
-                out = cmd.split("echo ", 1)[1] + "\n" if "echo " in cmd else ""
-                self._json(200, {"exit_code": 0, "stdout": out, "stderr": "", "exec_time_ms": 1})
-            elif self.path == "/v1/run_code/stream":
-                # run_code stays on JSON NDJSON (Connect RunCode is bidi).
-                self.send_response(200)
-                self.send_header("Content-Type", "application/x-ndjson")
-                self.end_headers()
-                frames = [
-                    {"kind": "stdout", "stdout": base64.b64encode(b"ran\n").decode()},
-                    {"kind": "result", "result": {"text": "2", "data": {"text/plain": "2"}}},
-                    {"kind": "exit", "exit_code": 0},
-                ]
-                for f in frames:
-                    self.wfile.write((json.dumps(f) + "\n").encode())
             else:
                 self._err(404, "not found")
 

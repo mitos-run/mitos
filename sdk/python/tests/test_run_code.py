@@ -66,40 +66,38 @@ def test_parse_run_code_stream_truncated_raises():
 
 
 def test_direct_sandbox_run_code_routes(monkeypatch):
-    """DirectSandbox.run_code posts to /v1/run_code/stream and folds the NDJSON
-    reply through the shared parser into an Execution.
-
-    run_code stays on the JSON route: the Connect RunCode RPC is bidi, which the
-    Connect protocol only carries over HTTP/2, and httpx cannot speak cleartext
-    HTTP/2 (h2c) to the standalone server. The file RPCs moved to Connect; exec
-    and run_code follow once the SDK has an h2c-capable client (a #24 follow-up)."""
+    """DirectSandbox.run_code drives the Connect RunCodeStream server-streaming
+    RPC (/sandbox.v1.Sandbox/RunCodeStream) and folds the proto-JSON frames into
+    an Execution. The sandbox id rides the X-Sandbox-Id header, and
+    RunResult.data values are base64 (proto map<string,bytes>), decoded back to
+    the kernel string."""
     import contextlib
+    import struct
 
     from mitos.direct import DirectSandbox
 
     captured = {}
 
+    def _envelope(obj, end=False):
+        payload = json.dumps(obj).encode()
+        flag = 0b00000010 if end else 0
+        return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
     class _FakeResp:
         is_success = True
 
-        def raise_for_status(self):
-            return None
-
-        def iter_lines(self):
-            for line in _line_iter(
-                _frames(
-                    {"kind": "stdout", "stdout": b64("ok\n")},
-                    {"kind": "result", "result": {"text": "7", "data": {"text/plain": "7"}}},
-                    {"kind": "exit", "exit_code": 0},
-                )
-            ):
-                yield line
+        def iter_bytes(self):
+            yield _envelope({"stdout": b64("ok\n")})
+            yield _envelope({"result": {"text": "7", "data": {"text/plain": b64("7")}}})
+            yield _envelope({"exitCode": 0})
+            yield _envelope({}, end=True)
 
     @contextlib.contextmanager
     def _fake_stream(method, url, **kwargs):
         captured["method"] = method
         captured["url"] = url
-        captured["json"] = kwargs.get("json")
+        captured["headers"] = kwargs.get("headers")
+        captured["content"] = kwargs.get("content")
         yield _FakeResp()
 
     sb = DirectSandbox.__new__(DirectSandbox)
@@ -114,8 +112,9 @@ def test_direct_sandbox_run_code_routes(monkeypatch):
 
     ex = sb.run_code("print('ok')\n7")
     assert captured["method"] == "POST"
-    assert captured["url"].endswith("/v1/run_code/stream")
-    assert captured["json"]["sandbox"] == "sb1"
+    assert captured["url"].endswith("/sandbox.v1.Sandbox/RunCodeStream")
+    assert captured["headers"]["X-Sandbox-Id"] == "sb1"
+    assert b"print('ok')" in captured["content"]
     assert ex.text == "7"
     assert ex.logs["stdout"] == ["ok\n"]
 

@@ -1,17 +1,21 @@
-"""Direct-mode file transport over the Connect sandbox.v1.Sandbox service.
+"""Direct-mode runtime transport over the Connect sandbox.v1.Sandbox service.
 
-Task 6.1 of issue #24: the native ``DirectSandbox`` FILE calls (read, read_bytes,
-write, list, mkdir, remove) speak the Connect ``sandbox.v1.Sandbox`` service at
-``/sandbox.v1.Sandbox/<Method>`` instead of the legacy JSON ``/v1/files/*``
-routes. These tests assert the WIRE the SDK now sends (the Connect envelope, the
-X-Sandbox-Id routing header, proto-JSON camelCase field names), that the
-server-streaming ReadFile delivers chunks INCREMENTALLY, and that the public
-return types are unchanged.
+Task 6.1 of issue #24: the native ``DirectSandbox`` runtime calls speak the
+Connect ``sandbox.v1.Sandbox`` service at ``/sandbox.v1.Sandbox/<Method>``
+instead of the legacy JSON ``/v1/*`` routes:
 
-exec and run_code stay on the JSON routes: their Connect RPCs (Exec, RunCode) are
-BIDI streams, which the Connect protocol only carries over HTTP/2, and httpx
-cannot speak cleartext HTTP/2 (h2c) to the standalone server; they migrate once
-the SDK has an h2c-capable client (a documented #24 follow-up).
+  - exec     -> ExecStream     (server-streaming over HTTP/1.1)
+  - run_code -> RunCodeStream  (server-streaming over HTTP/1.1)
+  - files.*  -> ReadFile / WriteFile / List / Mkdir / Remove
+
+These tests assert the WIRE the SDK sends (the Connect envelope, the X-Sandbox-Id
+routing header, proto-JSON camelCase field names), that the server-streaming
+calls deliver output INCREMENTALLY and fold the rich result/error shapes, and
+that the public return types are unchanged.
+
+pty stays on the WebSocket transport: an interactive PTY needs the bidi Exec RPC,
+which Connect serves only over HTTP/2; httpx cannot speak cleartext HTTP/2 (h2c).
+That migration is a documented #24 follow-up.
 
 The fixtures stand up a small in-process server that speaks the Connect wire (the
 same approach test_stream.py uses for the cluster NDJSON path), so no Go binary,
@@ -29,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from mitos.direct import DirectSandbox
-from mitos.errors import AgentRunError
+from mitos.errors import AgentRunError, ExecutionDeadlineError
 
 _END = 0b00000010
 
@@ -119,13 +123,145 @@ def _make_server(script):
     return srv, url, captured
 
 
+def test_exec_streams_incrementally_and_sends_sandbox_header():
+    """ExecStream is a Connect server-stream: the SDK forwards each stdout/stderr
+    chunk the instant its frame arrives, then aggregates the terminal ExecExit.
+    Gating after the first frame proves incremental delivery, and the request
+    carries the X-Sandbox-Id routing header plus the bearer."""
+    gate = threading.Event()
+
+    def script(h, method, msgs):
+        assert method == "ExecStream"
+        h.stream_start()
+        h.stream_msg({"stdout": base64.b64encode(b"first ").decode()})
+        # Pause so the test can observe the first chunk before the rest are sent.
+        gate.wait(timeout=5)
+        h.stream_msg({"stdout": base64.b64encode(b"second\n").decode()})
+        h.stream_msg({"stderr": base64.b64encode(b"warn\n").decode()})
+        h.stream_msg({"exit": {"exitCode": 3, "execTimeMs": 4.0}})
+        h.stream_end()
+
+    srv, url, cap = _make_server(script)
+    try:
+        sb = _direct(url, token="sk-x")
+        result_box = {}
+
+        def run():
+            result_box["r"] = sb.exec("echo first second")
+
+        th = threading.Thread(target=run)
+        th.start()
+        time.sleep(0.2)
+        gate.set()
+        th.join(timeout=5)
+        r = result_box["r"]
+        assert r.exit_code == 3
+        assert r.stdout == "first second\n"
+        assert r.stderr == "warn\n"
+        assert r.exec_time_ms == 4.0
+        assert cap["headers"].get("X-Sandbox-Id") == "sb-conn"
+        assert cap["headers"].get("Authorization") == "Bearer sk-x"
+        # ExecStream takes a UNARY request (not an enveloped open frame): the
+        # request body is the proto-JSON message with command + timeoutSeconds.
+        _, msgs = cap["requests"][0]
+        assert msgs[0]["command"] == "echo first second"
+        assert "timeoutSeconds" in msgs[0]
+    finally:
+        srv.shutdown()
+
+
+def test_exec_deadline_maps_to_typed_error():
+    def script(h, method, msgs):
+        h.stream_start()
+        h.stream_msg({"exit": {"exitCode": 124}})  # the timeout exit code
+        h.stream_end()
+
+    srv, url, _ = _make_server(script)
+    try:
+        sb = _direct(url)
+        with pytest.raises(ExecutionDeadlineError):
+            sb.exec("sleep 999", timeout=1)
+    finally:
+        srv.shutdown()
+
+
+def test_exec_spawn_error_on_exit_frame_raises():
+    def script(h, method, msgs):
+        h.stream_start()
+        h.stream_msg({"exit": {"exitCode": 1, "error": "no such command: bogus"}})
+        h.stream_end()
+
+    srv, url, _ = _make_server(script)
+    try:
+        sb = _direct(url)
+        with pytest.raises(AgentRunError) as ei:
+            sb.exec("bogus")
+        assert ei.value.code == "exec_failed"
+    finally:
+        srv.shutdown()
+
+
+def test_run_code_folds_rich_result_and_streams_callbacks():
+    def script(h, method, msgs):
+        assert method == "RunCodeStream"
+        # RunCodeStream takes a UNARY request: code + language + timeoutSeconds.
+        assert msgs[0]["code"] == "print(1+1)\n2"
+        h.stream_start()
+        h.stream_msg({"stdout": base64.b64encode(b"out\n").decode()})
+        # RunResult.data is map<string,bytes>: each value base64. text/plain "42"
+        # and an image/png whose stored bytes are the base64 string "aGVsbG8=".
+        h.stream_msg({"result": {"text": "42", "data": {
+            "text/plain": base64.b64encode(b"42").decode(),
+            "image/png": base64.b64encode(b"aGVsbG8=").decode(),
+        }}})
+        h.stream_msg({"exitCode": 0})
+        h.stream_end()
+
+    srv, url, _ = _make_server(script)
+    try:
+        sb = _direct(url)
+        seen_out, seen_res = [], []
+        ex = sb.run_code(
+            "print(1+1)\n2",
+            on_stdout=seen_out.append,
+            on_result=seen_res.append,
+        )
+        assert ex.text == "42"
+        assert ex.logs["stdout"] == ["out\n"]
+        assert ex.results[0].png == "aGVsbG8="
+        assert ex.results[0].text == "42"
+        assert ex.error is None
+        assert seen_out == ["out\n"]
+        assert len(seen_res) == 1
+    finally:
+        srv.shutdown()
+
+
+def test_run_code_structured_error():
+    def script(h, method, msgs):
+        h.stream_start()
+        h.stream_msg({"error": {"name": "ValueError", "value": "bad", "traceback": ["ValueError: bad"]}})
+        h.stream_msg({"exitCode": 1})
+        h.stream_end()
+
+    srv, url, _ = _make_server(script)
+    try:
+        sb = _direct(url)
+        ex = sb.run_code("raise ValueError('bad')")
+        assert ex.error is not None
+        assert ex.error.name == "ValueError"
+        assert ex.error.value == "bad"
+        assert ex.error.traceback == ["ValueError: bad"]
+    finally:
+        srv.shutdown()
+
+
 def test_readfile_streams_incrementally_and_sends_sandbox_header():
     """ReadFile is a Connect server-stream: the SDK delivers each Chunk the
     instant its frame arrives. Gating after the first frame proves incremental
     delivery, and the request carries the X-Sandbox-Id routing header plus the
     bearer."""
     gate = threading.Event()
-    first_seen = threading.Event()
 
     def script(h, method, msgs):
         assert method == "ReadFile"
