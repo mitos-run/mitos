@@ -617,7 +617,7 @@ fn step_clock(host_wall_clock_nanos: i64) -> i64 {
 
     let drift = host_wall_clock_nanos - guest_nanos;
     // Check abs(drift) > threshold without overflow risk.
-    if drift >= -CLOCK_STEP_THRESHOLD_NANOS && drift <= CLOCK_STEP_THRESHOLD_NANOS {
+    if (-CLOCK_STEP_THRESHOLD_NANOS..=CLOCK_STEP_THRESHOLD_NANOS).contains(&drift) {
         return 0;
     }
 
@@ -635,7 +635,7 @@ fn get_realtime_nanos() -> Option<i64> {
     unsafe {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         if libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) == 0 {
-            Some(ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64)
+            Some(ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
         } else {
             None
         }
