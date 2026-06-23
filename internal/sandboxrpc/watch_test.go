@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,7 +235,7 @@ func TestSignalGuestNilReturnsFollowup(t *testing.T) {
 
 // TestConnectErrSurfacesRemediationText is the Task 2.7 test: connectErr
 // wraps a cause error and appends a remediation string; the resulting
-// connect.Error carries both in its message.
+// connect.Error carries both in its message and preserves the error chain.
 func TestConnectErrSurfacesRemediationText(t *testing.T) {
 	cause := errors.New("sandbox not found")
 	err := connectErr(connect.CodeNotFound, cause, "check that the sandbox id is correct and the sandbox is running")
@@ -246,22 +247,14 @@ func TestConnectErrSurfacesRemediationText(t *testing.T) {
 		t.Fatal("empty error message")
 	}
 	// The remediation text must appear somewhere in the error message.
-	if !contains(msg, "check that the sandbox id is correct") {
+	if !strings.Contains(msg, "check that the sandbox id is correct") {
 		t.Fatalf("remediation text not in error message: %q", msg)
 	}
-}
-
-// contains is a simple substring check used in tests.
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
-		findSubstring(s, sub))
-}
-
-func findSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	// The cause must also appear and the chain must be preserved via %w.
+	if !strings.Contains(msg, "sandbox not found") {
+		t.Fatalf("cause text not in error message: %q", msg)
 	}
-	return false
+	if !errors.Is(err, cause) {
+		t.Fatalf("error chain not preserved: errors.Is(err, cause) = false")
+	}
 }

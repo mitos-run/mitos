@@ -114,9 +114,9 @@ func WithSandboxResolver(r func(ctx context.Context) (string, error)) Option {
 func followup(rpc string) error {
 	return connect.NewError(connect.CodeUnimplemented, fmt.Errorf(
 		"sandbox.v1.Sandbox/%s is not implemented yet: it is a tracked follow-up of issue #24 (Connect runtime protocol). "+
-			"The streaming Exec, the unary Budget, and the file RPCs (ReadFile, WriteFile, List, Stat, Mkdir, Remove) are "+
-			"live on this transport when a GuestConn is wired; the remaining runtime surface "+
-			"(watch, archive, processes, signal, port-forward, fork/checkpoint/extend, vitals) still rides the "+
+			"The streaming Exec and RunCode, the unary Budget, the file RPCs (ReadFile, WriteFile, List, Stat, Mkdir, Remove), "+
+			"and the runtime RPCs (Watch, Processes, Signal, PortForward, Vitals) are live on this transport when a GuestConn "+
+			"is wired; the remaining surface (archive, fork/checkpoint/extend) still rides the "+
 			"current JSON-over-HTTP sandbox API and the JSON-lines vsock protocol. See docs/api/runtime-protocol.md", rpc))
 }
 
@@ -125,11 +125,12 @@ func followup(rpc string) error {
 // human/LLM-legible string suggesting how to resolve the problem. Secret
 // values MUST NOT appear in remediation.
 func connectErr(code connect.Code, cause error, remediation string) *connect.Error {
-	msg := cause.Error()
-	if remediation != "" {
-		msg = msg + "; " + remediation
+	if remediation == "" {
+		return connect.NewError(code, cause)
 	}
-	return connect.NewError(code, fmt.Errorf("%s", msg))
+	// Preserve the error chain via %w so callers can errors.Is/As the cause,
+	// and append the LLM-legible remediation text.
+	return connect.NewError(code, fmt.Errorf("%w; %s", cause, remediation))
 }
 
 // Exec runs a command and streams its IO over the Connect bidi stream. The first

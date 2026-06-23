@@ -48,7 +48,12 @@ func (s *Service) Watch(ctx context.Context, req *connect.Request[sandboxv1.Watc
 
 	conn, err := s.Guest(sandboxID)
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+		// Route through the shared LLM-legible helper (issue #28): the cause
+		// carries the underlying failure (chain preserved via %w), the
+		// remediation string tells the caller how to recover.
+		return connectErr(connect.CodeUnavailable,
+			fmt.Errorf("open guest connection for sandbox %q: %w", sandboxID, err),
+			"ensure the sandbox is running and the guest agent is healthy")
 	}
 
 	ws, err := conn.Watch(ctx, req.Msg.GetPath())

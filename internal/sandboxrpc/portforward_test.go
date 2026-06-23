@@ -219,3 +219,87 @@ func TestPortForwardFirstFrameMustBeOpen(t *testing.T) {
 		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
 	}
 }
+
+// blockingPortForwardGuest backs a PortForward whose Recv blocks until Close
+// is called. This models a real guest stream: the guest-to-client pump sits
+// in Recv waiting for guest bytes, and only the host calling Close (on handler
+// return) unblocks it. It is the regression fixture for the defer-order
+// deadlock: with wg.Wait() running before pf.Close(), the handler would hang
+// on return because the pump goroutine is stuck in Recv and nothing closes it.
+type blockingPortForwardGuest struct {
+	fakeGuest
+}
+
+// blockingPortForwardStream blocks Recv until Close is called.
+type blockingPortForwardStream struct {
+	closed chan struct{}
+}
+
+func (s *blockingPortForwardStream) Recv() (*PortForwardFrame, error) {
+	// Block until Close is called, then report the stream as ended.
+	<-s.closed
+	return nil, errors.New("port-forward stream closed")
+}
+
+func (s *blockingPortForwardStream) Send(_ []byte) error { return nil }
+
+func (s *blockingPortForwardStream) Close() error {
+	select {
+	case <-s.closed:
+		// already closed
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+func (g *blockingPortForwardGuest) PortForward(_ context.Context, _ uint32) (PortForwardStream, error) {
+	return &blockingPortForwardStream{closed: make(chan struct{})}, nil
+}
+
+// TestPortForwardReturnsOnClientCloseWithBlockingGuest is the regression test
+// for the defer-order deadlock. The guest Recv blocks until Close; the client
+// closes its request side while the handler is pumping. The handler MUST
+// return promptly: pf.Close() (deferred to run before wg.Wait) unblocks the
+// pump goroutine's Recv, and wg.Wait then joins it. With the reverse defer
+// order this test hangs and trips the timeout.
+func TestPortForwardReturnsOnClientCloseWithBlockingGuest(t *testing.T) {
+	g := &blockingPortForwardGuest{}
+	svc := &Service{Guest: func(string) (GuestConn, error) { return g, nil }}
+	client, _ := newTestServer(t, svc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := client.PortForward(ctx)
+	if err := stream.Send(&sandboxv1.Frame{
+		Msg: &sandboxv1.Frame_Open{Open: &sandboxv1.PortForwardOpen{Port: 8080}},
+	}); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	// Close the client request side; the server's main loop then waits for the
+	// guest pump, which is blocked in Recv until pf.Close runs on return.
+	if err := stream.CloseRequest(); err != nil {
+		t.Fatalf("close request: %v", err)
+	}
+
+	// Drain the response stream in a goroutine; signal when it ends (which only
+	// happens once the handler returns and closes the stream).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			_, err := stream.Receive()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// Handler returned promptly: no deadlock.
+	case <-time.After(5 * time.Second):
+		t.Fatal("PortForward handler did not return within 5s: defer-order deadlock (wg.Wait before pf.Close)")
+	}
+}

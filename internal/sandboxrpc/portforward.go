@@ -85,8 +85,6 @@ func (s *Service) PortForward(ctx context.Context, stream *connect.BidiStream[sa
 	if err != nil {
 		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest PortForward open failed for port %d: %w; ensure the process is listening on the target port inside the sandbox", open.GetPort(), err))
 	}
-	defer pf.Close()
-
 	// guestErrCh carries the result of the guest-to-client goroutine.
 	// Buffered so the goroutine never blocks writing its result.
 	guestErrCh := make(chan error, 1)
@@ -95,7 +93,15 @@ func (s *Service) PortForward(ctx context.Context, stream *connect.BidiStream[sa
 	// before the handler returns, so stream.Send is never called post-return.
 	var wg sync.WaitGroup
 	wg.Add(1)
+
+	// Defer order matters (LIFO): wg.Wait() is registered FIRST so it runs
+	// LAST, and pf.Close() is registered SECOND so it runs FIRST. On any
+	// return (client close, context cancel, error), pf.Close() unblocks the
+	// goroutine's pf.Recv() before wg.Wait() joins it; the reverse order would
+	// deadlock (wg.Wait() blocking on a goroutine stuck in a Recv that only
+	// Close can unblock).
 	defer wg.Wait()
+	defer pf.Close()
 
 	// Guest-to-client goroutine: reads from pf and writes to stream.Send.
 	// It does NOT check any cancellation signal; it runs to completion and
