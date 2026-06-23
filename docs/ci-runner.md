@@ -257,7 +257,7 @@ waits and a cleanup trap, each printing a `PASS:` / `FAIL:` line:
 
 0. a node labeled `mitos.run/kvm=true` is present.
 1. a `SandboxPool` warms at least one dormant husk pod.
-2. a `SandboxClaim` activates to Ready and `exec("echo ...")` returns the
+2. a `Sandbox` activates to Ready and `exec("echo ...")` returns the
    expected stdout with exit 0.
 3. `fork(2)` produces two independent sandboxes (a marker written in one is not
    visible in the other).
