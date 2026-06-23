@@ -29,6 +29,13 @@ import (
 
 var startTime = time.Now()
 
+// uptimeSeconds is the single source of the agent uptime reported by both the
+// JSON TypePing handler and the gRPC Control.Ping RPC, so the two transports
+// return the same value.
+func uptimeSeconds() float64 {
+	return time.Since(startTime).Seconds()
+}
+
 // configuredEnv holds claim-time env+secrets delivered via the configure
 // message. Values are never logged. Guarded by configuredMu.
 // guestKernel is the single per-sandbox code-interpreter kernel. It is started
@@ -62,6 +69,14 @@ func main() {
 	// failure is logged inside the helper and exec/files over vsock are
 	// unaffected.
 	startSelfServiceSocket()
+
+	// Start the gRPC runtime protocol server (issue #24) on a SEPARATE vsock
+	// port, alongside the JSON-lines loop which stays in force during the wire
+	// migration. It serves the public sandbox.v1.Sandbox service and the
+	// host-trusted sandbox.internal.v1.Control service. Best-effort and
+	// non-fatal: a listen/serve failure is logged inside the helper and the
+	// JSON path is unaffected.
+	go startGRPCServer()
 
 	fmt.Println("sandbox-agent: ready")
 
@@ -185,7 +200,7 @@ func handleRequest(req *vsock.Request) vsock.Response {
 	case vsock.TypePing:
 		return vsock.Response{
 			OK:   true,
-			Ping: &vsock.PingResponse{Uptime: time.Since(startTime).Seconds()},
+			Ping: &vsock.PingResponse{Uptime: uptimeSeconds()},
 		}
 
 	case vsock.TypeExec:

@@ -10,12 +10,12 @@
 //     The fake handler emits three Chunk messages (simulating a file split into
 //     three segments) and then closes, which exercises the streaming path.
 //
-// Note: sandbox.internal.v1 cannot be imported here because the Go toolchain
-// enforces that packages under an "internal" path segment may only be imported
-// by code rooted at the parent of that "internal" directory
-// (proto/sandbox/internal/v1 is only importable from proto/sandbox/...).
-// sandbox.v1 has no such restriction and covers both the unary and streaming
-// cases needed to de-risk the Stage 5 guest flip.
+// Note: this spike test only needs sandbox.v1, which covers both the unary and
+// streaming cases needed to de-risk the Stage 5 guest flip. The control service
+// now lives at proto/sandbox/controlv1 (Go import path without an "internal"
+// path segment) so the guest agent and host daemon can both import it; the
+// proto package name stays sandbox.internal.v1 and its host-only semantics are
+// enforced by the no-public-exposure contract test, not by the directory name.
 
 package vsock
 

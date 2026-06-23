@@ -20,7 +20,16 @@ syntax = "proto3";
 // guest to accept connections on its dedicated control port.
 package sandbox.internal.v1;
 
-option go_package = "mitos.run/mitos/proto/sandbox/internal/v1;sandboxinternalv1";
+// The proto package name is sandbox.internal.v1 (the wire and service-name
+// discriminator). The Go import path deliberately does NOT use an "internal"
+// path segment: Go's internal-package visibility rule restricts importers of
+// .../internal/... to code rooted at the internal directory's parent, which
+// would lock out the guest agent (mitos.run/mitos/guest/agent) and the host
+// daemon (mitos.run/mitos/internal/daemon) that must both serve and call this
+// control service. The "internal, host-only" semantics are enforced by the
+// no-public-exposure contract test on sandbox.v1.Sandbox, not by the Go
+// directory name. The Go package identifier stays sandboxinternalv1.
+option go_package = "mitos.run/mitos/proto/sandbox/controlv1;sandboxinternalv1";
 
 // Control is served by the guest agent on the dedicated internal vsock control
 // port. Only the host (forkd) connects; no tenant or public surface exposes it.

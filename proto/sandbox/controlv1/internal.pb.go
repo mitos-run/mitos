@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.0
-// source: proto/sandbox/internal/v1/internal.proto
+// source: proto/sandbox/controlv1/internal.proto
 
 // Internal host-to-guest control service (sandbox.internal.v1).
 //
@@ -75,7 +75,7 @@ type NotifyForkedRequest struct {
 
 func (x *NotifyForkedRequest) Reset() {
 	*x = NotifyForkedRequest{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[0]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -87,7 +87,7 @@ func (x *NotifyForkedRequest) String() string {
 func (*NotifyForkedRequest) ProtoMessage() {}
 
 func (x *NotifyForkedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[0]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -100,7 +100,7 @@ func (x *NotifyForkedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedRequest.ProtoReflect.Descriptor instead.
 func (*NotifyForkedRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{0}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *NotifyForkedRequest) GetGeneration() uint64 {
@@ -165,7 +165,7 @@ type NotifyForkedNetwork struct {
 
 func (x *NotifyForkedNetwork) Reset() {
 	*x = NotifyForkedNetwork{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[1]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -177,7 +177,7 @@ func (x *NotifyForkedNetwork) String() string {
 func (*NotifyForkedNetwork) ProtoMessage() {}
 
 func (x *NotifyForkedNetwork) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[1]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -190,7 +190,7 @@ func (x *NotifyForkedNetwork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedNetwork.ProtoReflect.Descriptor instead.
 func (*NotifyForkedNetwork) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{1}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *NotifyForkedNetwork) GetGuestIp() string {
@@ -246,7 +246,7 @@ type VolumeMountEntry struct {
 
 func (x *VolumeMountEntry) Reset() {
 	*x = VolumeMountEntry{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[2]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -258,7 +258,7 @@ func (x *VolumeMountEntry) String() string {
 func (*VolumeMountEntry) ProtoMessage() {}
 
 func (x *VolumeMountEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[2]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -271,7 +271,7 @@ func (x *VolumeMountEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeMountEntry.ProtoReflect.Descriptor instead.
 func (*VolumeMountEntry) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{2}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *VolumeMountEntry) GetDevice() string {
@@ -314,7 +314,7 @@ type NotifyForkedResponse struct {
 
 func (x *NotifyForkedResponse) Reset() {
 	*x = NotifyForkedResponse{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[3]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -326,7 +326,7 @@ func (x *NotifyForkedResponse) String() string {
 func (*NotifyForkedResponse) ProtoMessage() {}
 
 func (x *NotifyForkedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[3]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -339,7 +339,7 @@ func (x *NotifyForkedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedResponse.ProtoReflect.Descriptor instead.
 func (*NotifyForkedResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{3}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *NotifyForkedResponse) GetAppliedClockStepNanos() int64 {
@@ -383,7 +383,7 @@ type ConfigureRequest struct {
 
 func (x *ConfigureRequest) Reset() {
 	*x = ConfigureRequest{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[4]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -395,7 +395,7 @@ func (x *ConfigureRequest) String() string {
 func (*ConfigureRequest) ProtoMessage() {}
 
 func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[4]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -408,7 +408,7 @@ func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{4}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ConfigureRequest) GetEnv() map[string]string {
@@ -435,7 +435,7 @@ type ConfigureResponse struct {
 
 func (x *ConfigureResponse) Reset() {
 	*x = ConfigureResponse{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[5]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +447,7 @@ func (x *ConfigureResponse) String() string {
 func (*ConfigureResponse) ProtoMessage() {}
 
 func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[5]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +460,7 @@ func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{5}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{5}
 }
 
 // PingRequest carries no fields; it is a struct so future knobs can be added
@@ -473,7 +473,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[6]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +485,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[6]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +498,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{6}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{6}
 }
 
 // PingResponse mirrors internal/vsock.PingResponse field-for-field.
@@ -514,7 +514,7 @@ type PingResponse struct {
 
 func (x *PingResponse) Reset() {
 	*x = PingResponse{}
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[7]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -526,7 +526,7 @@ func (x *PingResponse) String() string {
 func (*PingResponse) ProtoMessage() {}
 
 func (x *PingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_internal_v1_internal_proto_msgTypes[7]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -539,7 +539,7 @@ func (x *PingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResponse.ProtoReflect.Descriptor instead.
 func (*PingResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP(), []int{7}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PingResponse) GetUptimeSeconds() float64 {
@@ -549,11 +549,11 @@ func (x *PingResponse) GetUptimeSeconds() float64 {
 	return 0
 }
 
-var File_proto_sandbox_internal_v1_internal_proto protoreflect.FileDescriptor
+var File_proto_sandbox_controlv1_internal_proto protoreflect.FileDescriptor
 
-const file_proto_sandbox_internal_v1_internal_proto_rawDesc = "" +
+const file_proto_sandbox_controlv1_internal_proto_rawDesc = "" +
 	"\n" +
-	"(proto/sandbox/internal/v1/internal.proto\x12\x13sandbox.internal.v1\"\x87\x02\n" +
+	"&proto/sandbox/controlv1/internal.proto\x12\x13sandbox.internal.v1\"\x87\x02\n" +
 	"\x13NotifyForkedRequest\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x01 \x01(\x04R\n" +
@@ -596,22 +596,22 @@ const file_proto_sandbox_internal_v1_internal_proto_rawDesc = "" +
 	"\aControl\x12c\n" +
 	"\fNotifyForked\x12(.sandbox.internal.v1.NotifyForkedRequest\x1a).sandbox.internal.v1.NotifyForkedResponse\x12Z\n" +
 	"\tConfigure\x12%.sandbox.internal.v1.ConfigureRequest\x1a&.sandbox.internal.v1.ConfigureResponse\x12K\n" +
-	"\x04Ping\x12 .sandbox.internal.v1.PingRequest\x1a!.sandbox.internal.v1.PingResponseB=Z;mitos.run/mitos/proto/sandbox/internal/v1;sandboxinternalv1b\x06proto3"
+	"\x04Ping\x12 .sandbox.internal.v1.PingRequest\x1a!.sandbox.internal.v1.PingResponseB;Z9mitos.run/mitos/proto/sandbox/controlv1;sandboxinternalv1b\x06proto3"
 
 var (
-	file_proto_sandbox_internal_v1_internal_proto_rawDescOnce sync.Once
-	file_proto_sandbox_internal_v1_internal_proto_rawDescData []byte
+	file_proto_sandbox_controlv1_internal_proto_rawDescOnce sync.Once
+	file_proto_sandbox_controlv1_internal_proto_rawDescData []byte
 )
 
-func file_proto_sandbox_internal_v1_internal_proto_rawDescGZIP() []byte {
-	file_proto_sandbox_internal_v1_internal_proto_rawDescOnce.Do(func() {
-		file_proto_sandbox_internal_v1_internal_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_sandbox_internal_v1_internal_proto_rawDesc), len(file_proto_sandbox_internal_v1_internal_proto_rawDesc)))
+func file_proto_sandbox_controlv1_internal_proto_rawDescGZIP() []byte {
+	file_proto_sandbox_controlv1_internal_proto_rawDescOnce.Do(func() {
+		file_proto_sandbox_controlv1_internal_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_sandbox_controlv1_internal_proto_rawDesc), len(file_proto_sandbox_controlv1_internal_proto_rawDesc)))
 	})
-	return file_proto_sandbox_internal_v1_internal_proto_rawDescData
+	return file_proto_sandbox_controlv1_internal_proto_rawDescData
 }
 
-var file_proto_sandbox_internal_v1_internal_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_proto_sandbox_internal_v1_internal_proto_goTypes = []any{
+var file_proto_sandbox_controlv1_internal_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_proto_sandbox_controlv1_internal_proto_goTypes = []any{
 	(*NotifyForkedRequest)(nil),  // 0: sandbox.internal.v1.NotifyForkedRequest
 	(*NotifyForkedNetwork)(nil),  // 1: sandbox.internal.v1.NotifyForkedNetwork
 	(*VolumeMountEntry)(nil),     // 2: sandbox.internal.v1.VolumeMountEntry
@@ -623,7 +623,7 @@ var file_proto_sandbox_internal_v1_internal_proto_goTypes = []any{
 	nil,                          // 8: sandbox.internal.v1.ConfigureRequest.EnvEntry
 	nil,                          // 9: sandbox.internal.v1.ConfigureRequest.SecretsEntry
 }
-var file_proto_sandbox_internal_v1_internal_proto_depIdxs = []int32{
+var file_proto_sandbox_controlv1_internal_proto_depIdxs = []int32{
 	1, // 0: sandbox.internal.v1.NotifyForkedRequest.network:type_name -> sandbox.internal.v1.NotifyForkedNetwork
 	2, // 1: sandbox.internal.v1.NotifyForkedRequest.volumes:type_name -> sandbox.internal.v1.VolumeMountEntry
 	8, // 2: sandbox.internal.v1.ConfigureRequest.env:type_name -> sandbox.internal.v1.ConfigureRequest.EnvEntry
@@ -641,26 +641,26 @@ var file_proto_sandbox_internal_v1_internal_proto_depIdxs = []int32{
 	0, // [0:4] is the sub-list for field type_name
 }
 
-func init() { file_proto_sandbox_internal_v1_internal_proto_init() }
-func file_proto_sandbox_internal_v1_internal_proto_init() {
-	if File_proto_sandbox_internal_v1_internal_proto != nil {
+func init() { file_proto_sandbox_controlv1_internal_proto_init() }
+func file_proto_sandbox_controlv1_internal_proto_init() {
+	if File_proto_sandbox_controlv1_internal_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_sandbox_internal_v1_internal_proto_rawDesc), len(file_proto_sandbox_internal_v1_internal_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_sandbox_controlv1_internal_proto_rawDesc), len(file_proto_sandbox_controlv1_internal_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_sandbox_internal_v1_internal_proto_goTypes,
-		DependencyIndexes: file_proto_sandbox_internal_v1_internal_proto_depIdxs,
-		MessageInfos:      file_proto_sandbox_internal_v1_internal_proto_msgTypes,
+		GoTypes:           file_proto_sandbox_controlv1_internal_proto_goTypes,
+		DependencyIndexes: file_proto_sandbox_controlv1_internal_proto_depIdxs,
+		MessageInfos:      file_proto_sandbox_controlv1_internal_proto_msgTypes,
 	}.Build()
-	File_proto_sandbox_internal_v1_internal_proto = out.File
-	file_proto_sandbox_internal_v1_internal_proto_goTypes = nil
-	file_proto_sandbox_internal_v1_internal_proto_depIdxs = nil
+	File_proto_sandbox_controlv1_internal_proto = out.File
+	file_proto_sandbox_controlv1_internal_proto_goTypes = nil
+	file_proto_sandbox_controlv1_internal_proto_depIdxs = nil
 }

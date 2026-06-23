@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v7.35.0
-// source: proto/sandbox/internal/v1/internal.proto
+// source: proto/sandbox/controlv1/internal.proto
 
 // Internal host-to-guest control service (sandbox.internal.v1).
 //
@@ -246,5 +246,5 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/sandbox/internal/v1/internal.proto",
+	Metadata: "proto/sandbox/controlv1/internal.proto",
 }

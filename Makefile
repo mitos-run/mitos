@@ -63,7 +63,7 @@ proto:
 		--go_out=. --go_opt=module=mitos.run/mitos \
 		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
 		--connect-go_out=. --connect-go_opt=module=mitos.run/mitos \
-		proto/sandbox/internal/v1/internal.proto
+		proto/sandbox/controlv1/internal.proto
 
 docker-build:
 	docker build -f Dockerfile.controller -t $(IMG_CONTROLLER) .
