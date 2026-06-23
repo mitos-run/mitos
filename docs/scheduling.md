@@ -152,7 +152,7 @@ GC, and `mitos_claim_errors_total{reason="capacity"}` bumped. Failing after a
 bounded wait is the boring, honest behavior: the claim does not hang forever and
 the controller never forces a placement that would OOM a node.
 
-Live and standard forks (`SandboxFork`) are NOT placed by this scheduler. A
+Live and standard forks (a `Sandbox` with `spec.source.fromSandbox`) are NOT placed by this scheduler. A
 `ForkRunning` copies the source VM's already-resident guest memory in place, so
 a fork is pinned to the source sandbox's node by construction; the node's own
 admission still guards it at the forkd layer.

@@ -104,7 +104,7 @@ sandbox-server process, plain HTTP, one token.
 - `sandbox_fork` issues one `POST /v1/fork` per replica. The sandbox-server
   fork endpoint has no replicas parameter and its `template` field is a
   template lookup, so the source id must resolve there. True
-  fork-of-a-running-sandbox is the k8s `SandboxFork` path and is a follow-up.
+  fork-of-a-running-sandbox is the k8s `Sandbox` with `spec.source.fromSandbox` path and is a follow-up.
 - `sandbox_exec` and the file tools require the bearer token on the
   sandbox-server (its exec/files routes are token-guarded); `fork` does not.
 
@@ -150,7 +150,7 @@ Open:
 
 - Workspace tools (log/diff/revert/attach) pending Workspace (issue #21);
   advertised but not dispatched.
-- The Kubernetes claim backend (create a `SandboxClaim`, read its token
+- The Kubernetes claim backend (create a `Sandbox`, read its token
   Secret, exec via forkd); the HTTP backend is the v1 path.
 - Capability-budget advertisement pending issue #24.
 - Streaming exec and PTY over MCP pending the Connect runtime protocol
