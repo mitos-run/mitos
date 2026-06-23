@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+// Internal host-to-guest control service (sandbox.internal.v1).
+//
+// This service carries secrets and the fork-correctness handshake. It is served
+// by the guest agent on a DISTINCT vsock service port from the public Sandbox
+// service. It is NEVER part of sandbox.v1.Sandbox, NEVER exposed on forkd :9091,
+// and NEVER reachable from tenant code. The host (forkd) is the only caller.
+//
+// All three RPCs may carry sensitive material:
+//   - NotifyForked: Entropy is raw CRNG seed material; HostWallClockNanos can
+//     leak host timing. Neither is ever logged by host or guest.
+//   - Configure: Env and Secrets are claim-time secret values injected into the
+//     guest process environment. Values are NEVER logged or echoed by either side.
+//   - Ping: carries no secrets; used for health checks.
+//
+// Package is versioned independently of sandbox.v1 with a one-major-version
+// compatibility window (docs/api/runtime-protocol.md). The service name
+// "sandbox.internal.v1.Control" is the vsock service discriminator used by the
+// guest to accept connections on its dedicated control port.
+package sandbox.internal.v1;
+
+option go_package = "mitos.run/mitos/proto/sandbox/internal/v1;sandboxinternalv1";
+
+// Control is served by the guest agent on the dedicated internal vsock control
+// port. Only the host (forkd) connects; no tenant or public surface exposes it.
+// This service is INTENTIONALLY ABSENT from sandbox.v1.Sandbox; a test asserts
+// the public service carries none of these methods.
+service Control {
+  // NotifyForked tells the guest that a snapshot restore just occurred. The
+  // guest must: (1) reseed the kernel CRNG with Entropy, (2) step CLOCK_REALTIME
+  // to HostWallClockNanos, (3) reconfigure eth0 when Network is present, and
+  // (4) mount per-fork volumes when Volumes is non-empty. The response reports
+  // what the guest actually applied so the host can record fork-correctness
+  // observability without logging the raw sensitive fields.
+  rpc NotifyForked(NotifyForkedRequest) returns (NotifyForkedResponse);
+
+  // Configure delivers claim-time environment variables and secrets to the guest
+  // after restore. THIS RPC CARRIES SECRET VALUES. Neither side ever logs Env or
+  // Secrets values; only key names and counts are safe to log. This RPC is
+  // host-trusted and must never be exposed on any public surface.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+
+  // Ping checks that the guest agent is alive and returns its uptime. Carries no
+  // secrets; safe to log.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+// NotifyForkedRequest mirrors internal/vsock.NotifyForkedRequest field-for-field.
+//
+// Entropy and host_wall_clock_nanos are SENSITIVE: Entropy is raw CRNG seed
+// material and the clock can leak host timing. Neither field is ever logged by
+// host or guest; only applied-step magnitudes and reseed success are logged.
+message NotifyForkedRequest {
+  // generation is the fork sequence number; the guest uses it to detect
+  // replayed or out-of-order notifications.
+  uint64 generation = 1;
+
+  // host_wall_clock_nanos is the host wall time at fork time, in nanoseconds
+  // since the Unix epoch. The guest steps CLOCK_REALTIME to this value to
+  // correct the clock drift introduced by snapshot/restore.
+  // SENSITIVE: do not log.
+  int64 host_wall_clock_nanos = 2;
+
+  // entropy is fresh host CRNG output delivered to the guest so it can reseed
+  // its kernel entropy pool after restore. Forks share the snapshot's entropy
+  // state; without this injection every fork starts from the same seed.
+  // SENSITIVE: do not log.
+  bytes entropy = 3;
+
+  // network, when set, carries this fork's per-fork network identity (distinct
+  // guest IP, gateway, prefix, and optional MAC). The guest reconfigures eth0
+  // on receipt. Fields are plain addresses and safe to log.
+  NotifyForkedNetwork network = 4;
+
+  // volumes is the per-fork volume mount table. The host rebinds each backing
+  // drive before sending this notification; the guest mounts each entry at its
+  // designated path. Empty means no volumes. Device nodes and paths are safe
+  // to log.
+  repeated VolumeMountEntry volumes = 5;
+}
+
+// NotifyForkedNetwork mirrors internal/vsock.NotifyForkedNetwork field-for-field.
+// All fields are plain network addresses and safe to log.
+message NotifyForkedNetwork {
+  // guest_ip is the IPv4 address assigned to eth0 in the guest (e.g.
+  // "10.0.1.2").
+  string guest_ip = 1;
+
+  // gateway_ip is the default route target, the host side of the per-fork /30
+  // (e.g. "10.0.1.1").
+  string gateway_ip = 2;
+
+  // prefix_len is the network prefix length (e.g. 30 for a /30).
+  int32 prefix_len = 3;
+
+  // guest_mac, when non-empty, is this fork's distinct eth0 hardware address
+  // (e.g. "02:ab:cd:ef:01:02"). The guest sets it before bringing the link up
+  // so each fork has a distinct MAC. Empty leaves the snapshot-baked MAC in
+  // place.
+  string guest_mac = 4;
+
+  // resolver_ip, when non-empty, is the DNS resolver the guest must use. The
+  // guest writes it as the sole nameserver in /etc/resolv.conf. Empty leaves
+  // resolv.conf untouched.
+  string resolver_ip = 5;
+}
+
+// VolumeMountEntry mirrors internal/vsock.VolumeMountEntry field-for-field.
+// All fields are config values, not secrets, and safe to log.
+message VolumeMountEntry {
+  // device is the guest block device node (e.g. "/dev/vdb") assigned by the
+  // drive attach order (rootfs is /dev/vda; the i-th volume is /dev/vd{b+i}).
+  string device = 1;
+
+  // mount_path is where the guest mounts the device.
+  string mount_path = 2;
+
+  // read_only attaches the device MS_RDONLY so a shared or read-only volume
+  // cannot be modified by the guest.
+  bool read_only = 3;
+}
+
+// NotifyForkedResponse mirrors internal/vsock.NotifyForkedResponse field-for-field.
+// All fields are observability counters and magnitudes, never raw secret values.
+message NotifyForkedResponse {
+  // applied_clock_step_nanos is the signed adjustment applied to CLOCK_REALTIME
+  // in nanoseconds (0 when drift was within the guest's tolerance threshold).
+  int64 applied_clock_step_nanos = 1;
+
+  // reseeded_rng is true when at least one entropy-injection path into the
+  // kernel pool succeeded.
+  bool reseeded_rng = 2;
+
+  // signaled_processes is the count of userspace processes that received the
+  // CRNG-reseed signal so they can reinitialize their own PRNGs.
+  int32 signaled_processes = 3;
+}
+
+// ConfigureRequest mirrors internal/vsock.ConfigureRequest field-for-field.
+//
+// THIS MESSAGE CARRIES SECRET VALUES. env and secrets values are claim-time
+// credentials injected into the guest process environment. Neither side ever
+// logs values; only key names and entry counts are safe to log. This message
+// must never appear on any public service or surface.
+message ConfigureRequest {
+  // env is the set of environment variables to merge into the guest environment.
+  // Values may be secret; log only keys and the entry count.
+  map<string, string> env = 1;
+
+  // secrets is the set of secret values (e.g. API tokens, credentials) to
+  // inject. Values are NEVER logged or echoed by either side.
+  map<string, string> secrets = 2;
+}
+
+// ConfigureResponse acknowledges successful delivery of Configure. It carries
+// no payload; success is indicated by the absence of an RPC error.
+message ConfigureResponse {}
+
+// PingRequest carries no fields; it is a struct so future knobs can be added
+// without changing the wire tag.
+message PingRequest {}
+
+// PingResponse mirrors internal/vsock.PingResponse field-for-field.
+// Carries no secrets; safe to log.
+message PingResponse {
+  // uptime_seconds is the guest agent process uptime in fractional seconds,
+  // matching the vsock protocol's float64 "uptime_seconds" JSON field.
+  double uptime_seconds = 1;
+}
