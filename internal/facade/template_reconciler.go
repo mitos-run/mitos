@@ -14,16 +14,18 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 )
 
 const (
 	// TemplateAnnotation is the bridge annotation stamped on our mitos.run
-	// SandboxTemplate that links it back to the upstream
+	// SandboxPool that links it back to the upstream
 	// extensions.agents.x-k8s.io SandboxTemplate it was created from. It records
 	// the bridge in the same single-annotation style as PoolAnnotation
 	// (docs/adr/0001-facade-and-naming.md): the value is the upstream
-	// SandboxTemplate name.
+	// SandboxTemplate name. After the API v1 consolidation (ADR 0007) the upstream
+	// SandboxTemplate maps onto a v1 SandboxPool with an inline spec.template, so
+	// the bridge annotation lives on that pool.
 	TemplateAnnotation = "mitos.run/template"
 
 	// WarmPoolAnnotation is the bridge annotation stamped on our mitos.run
@@ -34,15 +36,23 @@ const (
 )
 
 // SandboxTemplateReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate onto our mitos.run
-// SandboxTemplate. It owns exactly one of our SandboxTemplate objects per
-// upstream template (same name + namespace, owner-referenced for GC), mapping
-// the upstream podTemplate's first container (image, command, env) onto our
-// template's fields. Unmapped upstream fields (volumeClaimTemplates,
-// networkPolicy, securityContext, ports, multiple containers,
-// envVarsInjectionPolicy, service) are documented justified exceptions in
-// docs/facade-conformance.md (no silent divergence): the husk pool pins
-// resources at build time and our engine is fork-from-snapshot, not pod-native.
+// extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate onto our consolidated
+// mitos.run/v1 SandboxPool with an inline spec.template (ADR 0007 folded the
+// standalone mitos.run SandboxTemplate kind into the pool's inline template). It
+// owns exactly one of our SandboxPool objects per upstream template (same name +
+// namespace, owner-referenced for GC), mapping the upstream podTemplate's first
+// container (image, command, env) onto the pool's spec.template fields. Unmapped
+// upstream fields (volumeClaimTemplates, networkPolicy, securityContext, ports,
+// multiple containers, envVarsInjectionPolicy, service) are documented justified
+// exceptions in docs/facade-conformance.md (no silent divergence): the husk pool
+// pins resources at build time and our engine is fork-from-snapshot, not
+// pod-native.
+//
+// The bridged pool carries only the inline template (no warm autoscaler); a
+// SandboxWarmPool referencing this template is mapped by the warm pool
+// reconciler onto its own pool (named after the warm pool) carrying the
+// warm-slot count. The template's pool and the warm pool's pool are distinct
+// mitos.run objects bridged from distinct upstream objects.
 type SandboxTemplateReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -50,12 +60,11 @@ type SandboxTemplateReconciler struct {
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=mitos.run,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile ensures our mitos.run SandboxTemplate mirrors the upstream one.
-// Deletion is handled by the owner-reference garbage collector: our template
-// carries an owner reference to the upstream template, so deleting theirs GCs
-// ours.
+// Reconcile ensures our mitos.run SandboxPool mirrors the upstream template.
+// Deletion is handled by the owner-reference garbage collector: our pool carries
+// an owner reference to the upstream template, so deleting theirs GCs ours.
 func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -64,7 +73,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !src.DeletionTimestamp.IsZero() {
-		// Owner-reference GC removes our template; nothing to do.
+		// Owner-reference GC removes our pool; nothing to do.
 		return ctrl.Result{}, nil
 	}
 
@@ -75,30 +84,34 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
-// ensureTemplate creates or updates our SandboxTemplate for an upstream one.
-// Our template is named after the upstream template, lives in the same
-// namespace, and is owner-referenced to it (for GC + the watch back-link).
+// ensureTemplate creates or updates our SandboxPool (inline template) for an
+// upstream SandboxTemplate. Our pool is named after the upstream template, lives
+// in the same namespace, and is owner-referenced to it (for GC + the watch
+// back-link).
 func (r *SandboxTemplateReconciler) ensureTemplate(ctx context.Context, src *extv1alpha1.SandboxTemplate) error {
-	tmpl := &runv1alpha1.SandboxTemplate{
+	pool := &runv1.SandboxPool{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, tmpl, func() error {
-		if tmpl.Annotations == nil {
-			tmpl.Annotations = map[string]string{}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pool, func() error {
+		if pool.Annotations == nil {
+			pool.Annotations = map[string]string{}
 		}
-		tmpl.Annotations[TemplateAnnotation] = src.Name
+		pool.Annotations[TemplateAnnotation] = src.Name
 
+		if pool.Spec.Template == nil {
+			pool.Spec.Template = &runv1.PoolTemplateSpec{}
+		}
 		container := firstTemplateContainer(src)
 		if container != nil {
-			tmpl.Spec.Image = container.Image
-			tmpl.Spec.Command = container.Command
-			tmpl.Spec.Env = container.Env
+			pool.Spec.Template.Image = container.Image
+			pool.Spec.Template.Command = container.Command
+			pool.Spec.Template.Env = container.Env
 		}
-		return controllerutil.SetControllerReference(src, tmpl, r.Scheme)
+		return controllerutil.SetControllerReference(src, pool, r.Scheme)
 	})
 	if err != nil {
-		return fmt.Errorf("ensure SandboxTemplate for upstream %s/%s: %w", src.Namespace, src.Name, err)
+		return fmt.Errorf("ensure SandboxPool for upstream template %s/%s: %w", src.Namespace, src.Name, err)
 	}
 	return nil
 }
@@ -122,10 +135,10 @@ func firstTemplateContainer(src *extv1alpha1.SandboxTemplate) *corev1.Container 
 }
 
 // SetupWithManager wires the reconciler to watch upstream SandboxTemplates and
-// own our SandboxTemplate objects.
+// own our SandboxPool objects.
 func (r *SandboxTemplateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extv1alpha1.SandboxTemplate{}).
-		Owns(&runv1alpha1.SandboxTemplate{}).
+		Owns(&runv1.SandboxPool{}).
 		Complete(r)
 }

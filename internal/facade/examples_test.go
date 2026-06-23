@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
 )
 
@@ -116,7 +116,8 @@ func convertUnstructured(u *unstructured.Unstructured, into *agentsv1alpha1.Sand
 // at the envtest level: for every core agents.x-k8s.io/v1alpha1 Sandbox manifest
 // vendored verbatim under third_party/agent-sandbox/examples (and
 // extensions/examples), the facade reconciles it WITHOUT error and creates the
-// bridged husk-backed SandboxClaim. The examples exercise podTemplate fields the
+// bridged husk-backed run-path Sandbox (the consolidated v1 Sandbox with
+// source.poolRef, ADR 0007). The examples exercise podTemplate fields the
 // facade does not yet map (volumeClaimTemplates, serviceAccountName, ports,
 // command, multiple/named containers, env.valueFrom); the facade ignores the
 // unmapped fields gracefully and still bridges the claim. Those unmapped fields
@@ -153,8 +154,8 @@ func TestFacadeReconcilesVendoredExamples(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
-			var claim *runv1alpha1.SandboxClaim
-			eventually(t, "facade bridges a husk-backed SandboxClaim for "+ex.sourcePath, func() bool {
+			var claim *runv1.Sandbox
+			eventually(t, "facade bridges a husk-backed run-path Sandbox for "+ex.sourcePath, func() bool {
 				c, ok := getClaimNS(t, sb.Name, sb.Namespace)
 				claim = c
 				return ok
@@ -162,9 +163,9 @@ func TestFacadeReconcilesVendoredExamples(t *testing.T) {
 
 			// The facade binds the example to the configured default pool (the
 			// examples carry no mitos.run/pool annotation) and stamps the
-			// bridge annotation onto the claim.
-			if claim.Spec.PoolRef.Name != "default-pool" {
-				t.Fatalf("%s: claim poolRef = %q, want default-pool", ex.sourcePath, claim.Spec.PoolRef.Name)
+			// bridge annotation onto the run-path object.
+			if claim.Spec.Source.PoolRef == nil || claim.Spec.Source.PoolRef.Name != "default-pool" {
+				t.Fatalf("%s: claim poolRef = %+v, want default-pool", ex.sourcePath, claim.Spec.Source.PoolRef)
 			}
 			if claim.Annotations[facade.PoolAnnotation] != "default-pool" {
 				t.Fatalf("%s: claim bridge annotation = %q, want default-pool", ex.sourcePath, claim.Annotations[facade.PoolAnnotation])
@@ -224,10 +225,10 @@ func envEqual(a, b []corev1.EnvVar) bool {
 	return true
 }
 
-// getClaimNS fetches our SandboxClaim by name in a given namespace.
-func getClaimNS(t *testing.T, name, ns string) (*runv1alpha1.SandboxClaim, bool) {
+// getClaimNS fetches our run-path Sandbox by name in a given namespace.
+func getClaimNS(t *testing.T, name, ns string) (*runv1.Sandbox, bool) {
 	t.Helper()
-	var claim runv1alpha1.SandboxClaim
+	var claim runv1.Sandbox
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &claim)
 	if apierrors.IsNotFound(err) {
 		return nil, false

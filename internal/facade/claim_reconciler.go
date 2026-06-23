@@ -18,7 +18,7 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 )
 
 const (
@@ -41,10 +41,11 @@ const (
 )
 
 // SandboxClaimReconciler maps an upstream extensions.agents.x-k8s.io/v1alpha1
-// SandboxClaim onto our mitos.run SandboxClaim (the fork-from-snapshot run
-// path, #18). It owns exactly one of our SandboxClaim objects per upstream claim
-// (same name + namespace, owner-referenced for GC), resolving the pool to fork
-// from per the upstream warmpool policy:
+// SandboxClaim onto our consolidated mitos.run/v1 Sandbox with source.poolRef
+// (the fork-from-snapshot run path, #18; ADR 0007 folded the old mitos.run
+// SandboxClaim into the v1 Sandbox). It owns exactly one of our Sandbox objects
+// per upstream claim (same name + namespace, owner-referenced for GC), resolving
+// the pool to fork from per the upstream warmpool policy:
 //
 //   - none: the upstream contract is "always create fresh sandboxes, no warm
 //     pool". Our engine has NO pool-less run path (every sandbox forks from a
@@ -73,7 +74,7 @@ type SandboxClaimReconciler struct {
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch
 
 // Reconcile drives the upstream SandboxClaim -> our fork-from-snapshot claim
@@ -115,7 +116,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	logger.V(1).Info("mirrored upstream SandboxClaim", "claim", req.NamespacedName, "pool", pool, "policy", policy)
 
-	if claim.Status.Phase == runv1alpha1.SandboxReady {
+	if claim.Status.Phase == runv1.SandboxReady {
 		return ctrl.Result{}, r.mirror(ctx, &src, claimStatusUpdate{
 			status:      metav1.ConditionTrue,
 			reason:      "Bound",
@@ -153,7 +154,7 @@ func warmPoolPolicy(src *extv1alpha1.SandboxClaim) extv1alpha1.WarmPoolPolicy {
 func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alpha1.SandboxClaim, policy extv1alpha1.WarmPoolPolicy) (string, error) {
 	if policy.IsSpecificPool() {
 		// Named pool: our pool of that name (created by the warm pool reconciler).
-		var pool runv1alpha1.SandboxPool
+		var pool runv1.SandboxPool
 		err := r.Get(ctx, client.ObjectKey{Namespace: src.Namespace, Name: string(policy)}, &pool)
 		if apierrors.IsNotFound(err) {
 			return "", nil
@@ -164,14 +165,18 @@ func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alph
 		return pool.Name, nil
 	}
 
-	// default / none: any of our pools matching the resolved template.
-	var pools runv1alpha1.SandboxPoolList
+	// default / none: any of our pools matching the resolved template. A pool
+	// matches when its spec.templateRef points at the resolved template name (the
+	// warm pool reconciler stamps it, ADR 0007); a pool with an inline template
+	// only (no templateRef) is the template-pool itself and does not match.
+	var pools runv1.SandboxPoolList
 	if err := r.List(ctx, &pools, client.InNamespace(src.Namespace)); err != nil {
 		return "", fmt.Errorf("list pools for claim %s/%s: %w", src.Namespace, src.Name, err)
 	}
 	var matches []string
 	for i := range pools.Items {
-		if pools.Items[i].Spec.TemplateRef.Name == src.Spec.TemplateRef.Name {
+		ref := pools.Items[i].Spec.TemplateRef
+		if ref != nil && ref.Name == src.Spec.TemplateRef.Name {
 			matches = append(matches, pools.Items[i].Name)
 		}
 	}
@@ -182,15 +187,17 @@ func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alph
 	return matches[0], nil
 }
 
-// ensureClaim creates or updates our SandboxClaim for an upstream claim. Our
-// claim is named after the upstream claim, lives in the same namespace, is
-// owner-referenced to it, and binds to the resolved pool. From the upstream
-// lifecycle, ttlSecondsAfterFinished maps onto our claim's TTL; shutdownTime is
-// recorded via the mitos.run/shutdown-time annotation (not mapped to a claim
-// Timeout). additionalPodMetadata annotations are propagated where our claim
-// supports them.
-func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alpha1.SandboxClaim, pool string, policy extv1alpha1.WarmPoolPolicy) (*runv1alpha1.SandboxClaim, error) {
-	claim := &runv1alpha1.SandboxClaim{
+// ensureClaim creates or updates our run-path Sandbox for an upstream claim. Our
+// run-path object is a consolidated v1 Sandbox with source.poolRef (the old
+// SandboxClaim, ADR 0007): named after the upstream claim, in the same
+// namespace, owner-referenced to it, and bound to the resolved pool via
+// source.poolRef. From the upstream lifecycle, ttlSecondsAfterFinished maps onto
+// our sandbox's lifetime.ttlSecondsAfterFinished; shutdownTime is recorded via
+// the mitos.run/shutdown-time annotation (not mapped to a Timeout).
+// additionalPodMetadata annotations are propagated where our object supports
+// them.
+func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alpha1.SandboxClaim, pool string, policy extv1alpha1.WarmPoolPolicy) (*runv1.Sandbox, error) {
+	claim := &runv1.Sandbox{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
 
@@ -201,20 +208,20 @@ func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alph
 		claim.Annotations[PoolAnnotation] = pool
 		claim.Annotations[TemplateAnnotation] = src.Spec.TemplateRef.Name
 		claim.Annotations[WarmPoolPolicyAnnotation] = string(policy)
-		// Propagate the upstream additionalPodMetadata annotations onto our claim
-		// (a documented best-effort: our claim has no per-pod metadata field, so
+		// Propagate the upstream additionalPodMetadata annotations onto our object
+		// (a documented best-effort: our Sandbox has no per-pod metadata field, so
 		// the upstream metadata is recorded as annotations for traceability).
 		for k, v := range src.Spec.AdditionalPodMetadata.Annotations {
 			claim.Annotations[k] = v
 		}
 
-		claim.Spec.PoolRef = runv1alpha1.LocalObjectReference{Name: pool}
+		claim.Spec.Source = runv1.SandboxSource{PoolRef: &runv1.LocalObjectReference{Name: pool}}
 		claim.Spec.Env = claimEnv(src)
 		applyLifecycle(claim, src.Spec.Lifecycle)
 		return controllerutil.SetControllerReference(src, claim, r.Scheme)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ensure SandboxClaim for upstream claim %s/%s: %w", src.Namespace, src.Name, err)
+		return nil, fmt.Errorf("ensure run-path Sandbox for upstream claim %s/%s: %w", src.Namespace, src.Name, err)
 	}
 	return claim, nil
 }
@@ -234,25 +241,28 @@ func claimEnv(src *extv1alpha1.SandboxClaim) []corev1.EnvVar {
 }
 
 // applyLifecycle maps the upstream claim lifecycle (shutdownTime,
-// ttlSecondsAfterFinished) onto our claim. The upstream shutdownPolicy
-// (Delete/DeleteForeground/Retain) governs the UPSTREAM claim object only and is
-// enforced by the owner-reference cascade (deleting their claim GCs ours); it is
-// a documented exception that our engine does not separately honor the Retain
-// vs Delete distinction at the our-claim level.
-func applyLifecycle(claim *runv1alpha1.SandboxClaim, lc *extv1alpha1.Lifecycle) {
+// ttlSecondsAfterFinished) onto our run-path Sandbox. ttlSecondsAfterFinished
+// re-homes under spec.lifetime.ttlSecondsAfterFinished (ADR 0007). The upstream
+// shutdownPolicy (Delete/DeleteForeground/Retain) governs the UPSTREAM claim
+// object only and is enforced by the owner-reference cascade (deleting their
+// claim GCs ours); it is a documented exception that our engine does not
+// separately honor the Retain vs Delete distinction at the our-object level.
+func applyLifecycle(claim *runv1.Sandbox, lc *extv1alpha1.Lifecycle) {
 	if lc == nil {
 		return
 	}
 	if lc.TTLSecondsAfterFinished != nil {
 		ttl := *lc.TTLSecondsAfterFinished
-		claim.Spec.TTLSecondsAfterFinished = &ttl
+		if claim.Spec.Lifetime == nil {
+			claim.Spec.Lifetime = &runv1.SandboxLifetime{}
+		}
+		claim.Spec.Lifetime.TTLSecondsAfterFinished = &ttl
 	}
 	if lc.ShutdownTime != nil {
-		// shutdownTime is an absolute expiry; our claim's Timeout is a wall-clock
-		// budget from start. We map the absolute expiry onto a Timeout computed
-		// from creation when both are known; absent a creation stamp we record the
-		// absolute time via the lifecycle annotation. Keeping the mapping simple
-		// and honest: stamp the requested expiry so it is not silently dropped.
+		// shutdownTime is an absolute expiry; our sandbox's lifetime.ttl is a
+		// wall-clock budget from start. We record the absolute time via the
+		// lifecycle annotation so it is not silently dropped. Keeping the mapping
+		// simple and honest: stamp the requested expiry.
 		if claim.Annotations == nil {
 			claim.Annotations = map[string]string{}
 		}
@@ -307,10 +317,10 @@ func (r *SandboxClaimReconciler) mirror(ctx context.Context, src *extv1alpha1.Sa
 }
 
 // SetupWithManager wires the reconciler to watch upstream SandboxClaims and own
-// our SandboxClaim objects so a claim status change re-queues the upstream claim.
+// our run-path Sandbox objects so a status change re-queues the upstream claim.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extv1alpha1.SandboxClaim{}).
-		Owns(&runv1alpha1.SandboxClaim{}).
+		Owns(&runv1.Sandbox{}).
 		Complete(r)
 }

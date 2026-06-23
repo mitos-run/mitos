@@ -5,9 +5,9 @@
 // engine.
 //
 // The facade watches upstream Sandbox objects and maps each onto our
-// husk-backed run path (a SandboxClaim in our mitos.run group bound to one
-// of our pools via the mitos.run/pool bridge annotation), mirroring the
-// claim's readiness back into the Sandbox status. See
+// husk-backed run path (a consolidated mitos.run/v1 Sandbox with source.poolRef
+// bound to one of our pools via the mitos.run/pool bridge annotation), mirroring
+// the run-path object's readiness back into the upstream Sandbox status. See
 // docs/adr/0001-facade-and-naming.md and docs/facade-conformance.md.
 package main
 
@@ -26,7 +26,7 @@ import (
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
 )
 
@@ -35,12 +35,13 @@ var scheme = runtime.NewScheme()
 func init() {
 	// Register the upstream agents.x-k8s.io scheme (the core Sandbox we watch),
 	// the upstream extensions.agents.x-k8s.io scheme (the SandboxTemplate /
-	// SandboxWarmPool / SandboxClaim extension kinds we map), and our mitos.run
-	// scheme (the template/pool/claim objects we create), plus core/v1.
+	// SandboxWarmPool / SandboxClaim extension kinds we map), and our mitos.run/v1
+	// scheme (the consolidated Sandbox and SandboxPool objects we create), plus
+	// core/v1.
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(extv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(runv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(runv1.AddToScheme(scheme))
 }
 
 func main() {
@@ -83,9 +84,11 @@ func main() {
 	}
 
 	// The extension reconcilers map the upstream extensions.agents.x-k8s.io kinds
-	// onto our mitos.run objects: their SandboxTemplate to our template and
-	// their SandboxWarmPool to our pool. They run in the same opt-in facade
-	// manager as the core Sandbox reconciler.
+	// onto our consolidated mitos.run/v1 objects: their SandboxTemplate to a
+	// SandboxPool with an inline template, their SandboxWarmPool to a SandboxPool
+	// with a warm-slot count, and their SandboxClaim to a Sandbox with
+	// source.poolRef (ADR 0007). They run in the same opt-in facade manager as the
+	// core Sandbox reconciler.
 	if err := (&facade.SandboxTemplateReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

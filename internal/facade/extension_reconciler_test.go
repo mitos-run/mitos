@@ -11,7 +11,7 @@ import (
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
 )
 
@@ -38,22 +38,25 @@ func newExtTemplate(name string) *extv1alpha1.SandboxTemplate {
 	}
 }
 
-func getOurTemplate(t *testing.T, name string) (*runv1alpha1.SandboxTemplate, bool) {
+// getOurTemplate fetches the SandboxPool the template reconciler bridges from an
+// upstream SandboxTemplate (ADR 0007: the template inlines into a pool's
+// spec.template under the same name).
+func getOurTemplate(t *testing.T, name string) (*runv1.SandboxPool, bool) {
 	t.Helper()
-	var tmpl runv1alpha1.SandboxTemplate
+	var tmpl runv1.SandboxPool
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, &tmpl)
 	if apierrors.IsNotFound(err) {
 		return nil, false
 	}
 	if err != nil {
-		t.Fatalf("get our template %s: %v", name, err)
+		t.Fatalf("get our template pool %s: %v", name, err)
 	}
 	return &tmpl, true
 }
 
-func getOurPool(t *testing.T, name string) (*runv1alpha1.SandboxPool, bool) {
+func getOurPool(t *testing.T, name string) (*runv1.SandboxPool, bool) {
 	t.Helper()
-	var pool runv1alpha1.SandboxPool
+	var pool runv1.SandboxPool
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, &pool)
 	if apierrors.IsNotFound(err) {
 		return nil, false
@@ -65,8 +68,9 @@ func getOurPool(t *testing.T, name string) (*runv1alpha1.SandboxPool, bool) {
 }
 
 // TestFacadeMapsExtSandboxTemplate: an upstream extension SandboxTemplate
-// reconciles to our mitos.run SandboxTemplate, mapping the first container's
-// image/command/env, stamping the bridge annotation, and owner-referenced for GC.
+// reconciles to our consolidated mitos.run/v1 SandboxPool with an inline
+// spec.template (ADR 0007), mapping the first container's image/command/env,
+// stamping the bridge annotation, and owner-referenced for GC.
 func TestFacadeMapsExtSandboxTemplate(t *testing.T) {
 	src := newExtTemplate("ext-template")
 	if err := k8sClient.Create(testCtx, src); err != nil {
@@ -74,21 +78,24 @@ func TestFacadeMapsExtSandboxTemplate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var tmpl *runv1alpha1.SandboxTemplate
-	eventually(t, "facade maps the ext SandboxTemplate to our template", func() bool {
+	var tmpl *runv1.SandboxPool
+	eventually(t, "facade maps the ext SandboxTemplate to our pool inline template", func() bool {
 		tt, ok := getOurTemplate(t, "ext-template")
 		tmpl = tt
-		return ok
+		return ok && tt.Spec.Template != nil
 	})
 
-	if tmpl.Spec.Image != "python:3.11-slim" {
-		t.Fatalf("our template image = %q, want python:3.11-slim", tmpl.Spec.Image)
+	if tmpl.Spec.Template == nil {
+		t.Fatalf("our pool has no inline template, want one bridged from the upstream SandboxTemplate")
 	}
-	if len(tmpl.Spec.Command) != 3 || tmpl.Spec.Command[0] != "/bin/sh" {
-		t.Fatalf("our template command = %+v, want the upstream container command", tmpl.Spec.Command)
+	if tmpl.Spec.Template.Image != "python:3.11-slim" {
+		t.Fatalf("our template image = %q, want python:3.11-slim", tmpl.Spec.Template.Image)
 	}
-	if len(tmpl.Spec.Env) != 1 || tmpl.Spec.Env[0].Name != "K" || tmpl.Spec.Env[0].Value != "v" {
-		t.Fatalf("our template env = %+v, want K=v", tmpl.Spec.Env)
+	if len(tmpl.Spec.Template.Command) != 3 || tmpl.Spec.Template.Command[0] != "/bin/sh" {
+		t.Fatalf("our template command = %+v, want the upstream container command", tmpl.Spec.Template.Command)
+	}
+	if len(tmpl.Spec.Template.Env) != 1 || tmpl.Spec.Template.Env[0].Name != "K" || tmpl.Spec.Template.Env[0].Value != "v" {
+		t.Fatalf("our template env = %+v, want K=v", tmpl.Spec.Template.Env)
 	}
 	if tmpl.Annotations[facade.TemplateAnnotation] != "ext-template" {
 		t.Fatalf("our template bridge annotation = %q, want ext-template", tmpl.Annotations[facade.TemplateAnnotation])
@@ -120,18 +127,20 @@ func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var pool *runv1alpha1.SandboxPool
+	var pool *runv1.SandboxPool
 	eventually(t, "facade maps the ext SandboxWarmPool to our pool", func() bool {
 		p, ok := getOurPool(t, "ext-warmpool")
 		pool = p
 		return ok
 	})
 
-	if pool.Spec.Replicas != 3 {
-		t.Fatalf("our pool replicas = %d, want 3", pool.Spec.Replicas)
+	// The warm-slot count re-homes onto spec.warm.min (ADR 0007 folded the
+	// v1alpha1 spec.replicas onto warm.min).
+	if pool.Spec.Warm == nil || pool.Spec.Warm.Min != 3 {
+		t.Fatalf("our pool warm.min = %+v, want 3", pool.Spec.Warm)
 	}
-	if pool.Spec.TemplateRef.Name != "ext-wp-template" {
-		t.Fatalf("our pool templateRef = %q, want ext-wp-template", pool.Spec.TemplateRef.Name)
+	if pool.Spec.TemplateRef == nil || pool.Spec.TemplateRef.Name != "ext-wp-template" {
+		t.Fatalf("our pool templateRef = %+v, want ext-wp-template", pool.Spec.TemplateRef)
 	}
 	if pool.Annotations[facade.WarmPoolAnnotation] != "ext-warmpool" {
 		t.Fatalf("our pool warmpool bridge annotation = %q, want ext-warmpool", pool.Annotations[facade.WarmPoolAnnotation])
@@ -164,9 +173,9 @@ func TestFacadeWarmPoolReplicasFollowUpstream(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	eventually(t, "our pool starts at 1 replica", func() bool {
+	eventually(t, "our pool starts at 1 warm slot", func() bool {
 		p, ok := getOurPool(t, "ext-warmpool-hpa")
-		return ok && p.Spec.Replicas == 1
+		return ok && p.Spec.Warm != nil && p.Spec.Warm.Min == 1
 	})
 
 	// Simulate an HPA scaling their warm pool to 5.
@@ -177,19 +186,19 @@ func TestFacadeWarmPoolReplicasFollowUpstream(t *testing.T) {
 
 	eventually(t, "our pool follows the upstream replica change to 5", func() bool {
 		p, ok := getOurPool(t, "ext-warmpool-hpa")
-		return ok && p.Spec.Replicas == 5
+		return ok && p.Spec.Warm != nil && p.Spec.Warm.Min == 5
 	})
 }
 
 // mkOurPool creates one of our SandboxPools bound to a template name, so the
 // claim reconciler's default/named resolution has a pool to bind to.
-func mkOurPool(t *testing.T, name, templateName string) *runv1alpha1.SandboxPool {
+func mkOurPool(t *testing.T, name, templateName string) *runv1.SandboxPool {
 	t.Helper()
-	pool := &runv1alpha1.SandboxPool{
+	pool := &runv1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: runv1alpha1.SandboxPoolSpec{
-			TemplateRef: runv1alpha1.LocalObjectReference{Name: templateName},
-			Replicas:    1,
+		Spec: runv1.SandboxPoolSpec{
+			TemplateRef: &runv1.LocalObjectReference{Name: templateName},
+			Warm:        &runv1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(testCtx, pool); err != nil {
@@ -211,7 +220,7 @@ func newExtClaim(name, templateName string, policy *extv1alpha1.WarmPoolPolicy) 
 	}
 }
 
-func getOurClaimT(t *testing.T, name string) (*runv1alpha1.SandboxClaim, bool) {
+func getOurClaimT(t *testing.T, name string) (*runv1.Sandbox, bool) {
 	t.Helper()
 	return getClaim(t, name)
 }
@@ -228,11 +237,11 @@ func TestFacadeClaimDefaultBindsMatchingPool(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "default policy binds our claim from a matching pool", func() bool {
 		c, ok := getOurClaimT(t, "ext-claim-default")
 		claim = c
-		return ok && c.Spec.PoolRef.Name == "claim-default-pool"
+		return ok && c.Spec.Source.PoolRef.Name == "claim-default-pool"
 	})
 	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "default" {
 		t.Fatalf("claim warmpool-policy annotation = %q, want default", claim.Annotations[facade.WarmPoolPolicyAnnotation])
@@ -256,11 +265,11 @@ func TestFacadeClaimNamedBindsNamedPool(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "named policy binds the named pool", func() bool {
 		c, ok := getOurClaimT(t, "ext-claim-named")
 		claim = c
-		return ok && c.Spec.PoolRef.Name == "claim-fast-pool"
+		return ok && c.Spec.Source.PoolRef.Name == "claim-fast-pool"
 	})
 	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "claim-fast-pool" {
 		t.Fatalf("claim warmpool-policy annotation = %q, want claim-fast-pool", claim.Annotations[facade.WarmPoolPolicyAnnotation])
@@ -279,11 +288,11 @@ func TestFacadeClaimNonePolicy(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "none policy forks from the template pool (documented exception)", func() bool {
 		c, ok := getOurClaimT(t, "ext-claim-none")
 		claim = c
-		return ok && c.Spec.PoolRef.Name == "claim-none-pool"
+		return ok && c.Spec.Source.PoolRef.Name == "claim-none-pool"
 	})
 	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "none" {
 		t.Fatalf("claim warmpool-policy annotation = %q, want none", claim.Annotations[facade.WarmPoolPolicyAnnotation])
@@ -302,7 +311,7 @@ func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
 		t.Fatalf("create ext claim: %v", err)
 	}
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "facade creates our claim", func() bool {
 		c, ok := getOurClaimT(t, "ext-claim-status")
 		claim = c
@@ -311,7 +320,7 @@ func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
 
 	// Drive our claim Ready (the test seam the real husk activation path sets).
 	statusUpdateWithRetry(t, types.NamespacedName{Name: "ext-claim-status", Namespace: "default"}, claim, func() {
-		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Phase = runv1.SandboxReady
 		claim.Status.Endpoint = "10.0.0.9:9091"
 	})
 
@@ -340,7 +349,7 @@ func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
 
 // hasControllerOwner2 reports whether our claim carries a controller owner
 // reference to the upstream SandboxClaim of the given name.
-func hasControllerOwner2(claim *runv1alpha1.SandboxClaim, name string) bool {
+func hasControllerOwner2(claim *runv1.Sandbox, name string) bool {
 	for _, o := range claim.OwnerReferences {
 		if o.Kind == "SandboxClaim" && o.Name == name && o.Controller != nil && *o.Controller {
 			return true

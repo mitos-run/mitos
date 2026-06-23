@@ -6,7 +6,7 @@
 //
 //   - On any cluster reachable by --kubeconfig, it applies an upstream
 //     agents.x-k8s.io/v1alpha1 Sandbox, waits for our facade to bridge the
-//     husk-backed SandboxClaim (claim latency), then toggles spec.replicas
+//     husk-backed run-path Sandbox (claim latency), then toggles spec.replicas
 //     1 -> 0 -> 1 for --iterations rounds, timing the OBJECT-LEVEL resume:
 //     wall-clock from the replicas-1 patch to the facade re-creating the
 //     bridged claim. That is the reconcile/re-activation latency the facade
@@ -46,7 +46,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/benchstat"
 )
 
@@ -84,7 +84,7 @@ func newClient(kubeconfig string) (client.Client, error) {
 	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register agents.x-k8s.io scheme: %w", err)
 	}
-	if err := runv1alpha1.AddToScheme(scheme); err != nil {
+	if err := runv1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("register mitos.run scheme: %w", err)
 	}
 
@@ -226,8 +226,8 @@ func (h *harness) timeClaimAppears(ctx context.Context) (time.Duration, error) {
 	return time.Since(start), nil
 }
 
-// waitClaimPresent polls until the bridged SandboxClaim exists or the timeout
-// elapses.
+// waitClaimPresent polls until the bridged run-path Sandbox exists or the
+// timeout elapses.
 func (h *harness) waitClaimPresent(ctx context.Context) error {
 	return h.poll(ctx, "bridged claim present", func() (bool, error) {
 		_, ok, err := h.getClaim(ctx)
@@ -235,7 +235,7 @@ func (h *harness) waitClaimPresent(ctx context.Context) error {
 	})
 }
 
-// waitClaimGone polls until the bridged SandboxClaim is gone or the timeout
+// waitClaimGone polls until the bridged run-path Sandbox is gone or the timeout
 // elapses.
 func (h *harness) waitClaimGone(ctx context.Context) error {
 	return h.poll(ctx, "bridged claim released", func() (bool, error) {
@@ -244,10 +244,11 @@ func (h *harness) waitClaimGone(ctx context.Context) error {
 	})
 }
 
-// getClaim fetches the bridged SandboxClaim (same name/namespace as the
-// Sandbox). The bool reports presence; a non-NotFound error is returned.
-func (h *harness) getClaim(ctx context.Context) (*runv1alpha1.SandboxClaim, bool, error) {
-	claim := &runv1alpha1.SandboxClaim{}
+// getClaim fetches the bridged run-path Sandbox (same name/namespace as the
+// upstream Sandbox). The bool reports presence; a non-NotFound error is
+// returned.
+func (h *harness) getClaim(ctx context.Context) (*runv1.Sandbox, bool, error) {
+	claim := &runv1.Sandbox{}
 	err := h.client.Get(ctx, h.key(), claim)
 	if apierrors.IsNotFound(err) {
 		return nil, false, nil
