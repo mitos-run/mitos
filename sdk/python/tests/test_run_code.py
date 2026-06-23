@@ -67,7 +67,12 @@ def test_parse_run_code_stream_truncated_raises():
 
 def test_direct_sandbox_run_code_routes(monkeypatch):
     """DirectSandbox.run_code posts to /v1/run_code/stream and folds the NDJSON
-    reply through the shared parser into an Execution."""
+    reply through the shared parser into an Execution.
+
+    run_code stays on the JSON route: the Connect RunCode RPC is bidi, which the
+    Connect protocol only carries over HTTP/2, and httpx cannot speak cleartext
+    HTTP/2 (h2c) to the standalone server. The file RPCs moved to Connect; exec
+    and run_code follow once the SDK has an h2c-capable client (a #24 follow-up)."""
     import contextlib
 
     from mitos.direct import DirectSandbox

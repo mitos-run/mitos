@@ -28,6 +28,7 @@ Usage:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -35,6 +36,7 @@ from typing import Callable, Optional
 
 import httpx
 
+from mitos._connect import ConnectClient
 from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.errors import AgentRunError
 from mitos.types import Execution, ExecResult, FileInfo, Network, Result
@@ -128,66 +130,71 @@ def _resolve_auth(
     return key, url.rstrip("/")
 
 
+def _b64_decode(value) -> bytes:
+    """Decode a proto-JSON bytes field (base64 string) to raw bytes. None and
+    the empty string both decode to empty bytes."""
+    if not value:
+        return b""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return base64.b64decode(value)
+
+
 class DirectSandboxFiles:
     """File operations on a DirectSandbox.
 
-    Reuses the exact sandbox-server REST file endpoints the k8s Sandbox uses
-    (/v1/files/read|write|list|remove|mkdir), so the standalone path is wire
-    identical to the cluster path. This is the shared prerequisite the E2B shim
-    (#206) sits on top of.
+    Speaks the Connect ``sandbox.v1.Sandbox`` file RPCs (ReadFile, WriteFile,
+    List, Stat, Mkdir, Remove) the sandbox-server and forkd serve at
+    ``/sandbox.v1.Sandbox/<Method>`` (issue #24), instead of the legacy JSON
+    ``/v1/files/*`` routes. ReadFile is a server-stream of byte chunks, WriteFile
+    a client-stream of chunks; List/Mkdir/Remove are unary. The public method
+    signatures and return types are UNCHANGED, so the E2B shim (#206) and the
+    framework adapters that sit on this surface are carried onto Connect for
+    free.
     """
 
     def __init__(self, sandbox: "DirectSandbox"):
         self._sb = sandbox
 
     def read(self, path: str) -> str:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/read",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return resp.json()["content"]
+        return self.read_bytes(path).decode("utf-8", "replace")
 
     def read_bytes(self, path: str) -> bytes:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/read",
-            json={"sandbox": self._sb.id, "path": path, "binary": True},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return bytes.fromhex(resp.json()["content"])
+        """Read a file's bytes via the ReadFile server-stream: concatenate each
+        Chunk's bytes until the eof frame. The same bytes back both read (utf-8
+        decoded) and read_bytes (raw)."""
+        client = self._sb._connect()
+        parts: list[bytes] = []
+        for frame in client.server_stream("ReadFile", {"path": path}):
+            parts.append(_b64_decode(frame.get("data")))
+        return b"".join(parts)
 
     def write(self, path: str, content: str | bytes, mode: int = 0o644) -> None:
-        data: dict = {"sandbox": self._sb.id, "path": path, "mode": mode}
-        if isinstance(content, bytes):
-            data["content"] = content.hex()
-            data["binary"] = True
-        else:
-            data["content"] = content
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/write",
-            json=data,
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        """Write a file via the WriteFile client-stream: an open frame carrying
+        the path and mode, then one data frame with the (base64-encoded) bytes.
+        str content is utf-8 encoded; bytes are written verbatim."""
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        messages = [
+            {"open": {"path": path, "mode": mode}},
+            {"data": base64.b64encode(raw).decode("ascii")},
+        ]
+        # WriteFile is a client-stream returning a unary WriteFileResult; the
+        # bidi helper drives the half-duplex send-then-read, and the single
+        # result frame is consumed (bytes_written is not part of the public API).
+        for _ in self._sb._connect().bidi("WriteFile", messages):
+            pass
 
     def list(self, path: str = "/") -> list[FileInfo]:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/list",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        resp = self._sb._connect().unary("List", {"parent": path})
         return [
             FileInfo(
-                name=f["name"],
-                is_dir=f["is_dir"],
-                size=f["size"],
-                mode=f.get("mode", 0),
-                modified_at=f.get("modified_at"),
+                name=f.get("name", ""),
+                is_dir=f.get("isDir", False),
+                size=int(f.get("size", 0)),
+                mode=int(f.get("mode", 0)),
+                modified_at=f.get("modifiedAtUnix"),
             )
-            for f in resp.json()["entries"]
+            for f in (resp.get("entries") or [])
         ]
 
     def exists(self, path: str) -> bool:
@@ -200,27 +207,22 @@ class DirectSandboxFiles:
             raise
 
     def remove(self, path: str) -> None:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/remove",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        self._sb._connect().unary("Remove", {"path": path})
 
     def mkdir(self, path: str) -> None:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/mkdir",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        self._sb._connect().unary("Mkdir", {"path": path})
 
 
 class DirectSandbox:
     """A sandbox connected directly to the sandbox-server / hosted control plane.
 
     The flat handle returned by mitos.create(). Exposes exec, run_code, files,
-    pty, fork, and terminate against the sandbox-server REST API.
+    pty, fork, and terminate against the sandbox-server / hosted control plane.
+    The file calls ride the Connect sandbox.v1.Sandbox service (issue #24); exec,
+    run_code, pty, and the lifecycle calls ride their existing JSON / WebSocket
+    transports (the Connect Exec/RunCode RPCs are bidi, which the Connect protocol
+    serves only over HTTP/2, and this dependency-light client cannot speak
+    cleartext HTTP/2; that migration is a #24 follow-up).
     """
 
     def __init__(
@@ -279,7 +281,25 @@ class DirectSandbox:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
+    def _connect(self) -> ConnectClient:
+        """A Connect client for this sandbox's runtime RPCs. It addresses the
+        sandbox by id via the X-Sandbox-Id header (the server routes on it in
+        both the tokenless standalone case and the hosted/forkd bearer case) and
+        sends the optional bearer key. The key VALUE is never logged."""
+        return ConnectClient(self._http, self._server_url, self.id, self._api_key)
+
     def exec(self, command: str, timeout: int = 30) -> ExecResult:
+        """Run a command and return its aggregate result.
+
+        Exec stays on the JSON ``/v1/exec`` route. The Connect ``Exec`` RPC is a
+        BIDI stream (``stream ExecRequest returns stream ExecResponse``), and the
+        Connect protocol only supports bidi over HTTP/2; httpx cannot speak
+        cleartext HTTP/2 (h2c), which is what the standalone sandbox-server
+        serves, so a Connect Exec from this dependency-light client would 505. The
+        file RPCs (server/client/unary streaming) ride Connect over HTTP/1.1; exec
+        and run_code keep the JSON transport until the SDK gains an h2c-capable
+        client (a documented #24 follow-up). The legacy JSON routes remain in
+        force during the migration. The public return shape is unchanged."""
         _validate_timeout(timeout)
         resp = self._http.post(
             f"{self._server_url}/v1/exec",
@@ -309,7 +329,14 @@ class DirectSandbox:
         mode). State persists across calls for the sandbox lifetime. Returns an
         Execution and streams via the callbacks; requires a base image with the
         code-interpreter kernel, else the Execution carries a KernelUnavailable
-        error."""
+        error.
+
+        run_code stays on the JSON ``/v1/run_code/stream`` route for the same
+        reason as exec: the Connect ``RunCode`` RPC is a BIDI stream, which the
+        Connect protocol only carries over HTTP/2, and httpx cannot speak cleartext
+        HTTP/2 (h2c) to the standalone server. The file RPCs migrated to Connect;
+        exec and run_code follow once the SDK has an h2c-capable client (a #24
+        follow-up). The public return shape is unchanged."""
         _validate_timeout(timeout)
         payload = {
             "sandbox": self.id,

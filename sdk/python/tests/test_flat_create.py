@@ -21,6 +21,7 @@ Two harnesses:
 import base64
 import json
 import os
+import struct
 import subprocess
 import threading
 import time
@@ -34,8 +35,30 @@ from mitos.direct import DirectSandbox, SandboxServer
 
 
 # ---------------------------------------------------------------------------
-# In-process fake sandbox-server: implements the REST routes the SDK calls.
+# Connect wire helpers for the in-process fake server (the SDK's direct-mode
+# runtime calls speak the Connect sandbox.v1.Sandbox service, issue #24).
 # ---------------------------------------------------------------------------
+
+_CONNECT_END = 0b00000010
+
+
+def _connect_frame(payload: bytes, end: bool = False) -> bytes:
+    """Wrap a payload in the Connect 5-byte envelope (flag + 4-byte BE length)."""
+    flag = _CONNECT_END if end else 0
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
+def _decode_connect_request(body: bytes) -> list[dict]:
+    """Decode the client's enveloped request frames into a list of JSON dicts."""
+    out = []
+    i = 0
+    while i + 5 <= len(body):
+        length = struct.unpack(">I", body[i + 1 : i + 5])[0]
+        payload = body[i + 5 : i + 5 + length]
+        i += 5 + length
+        if payload:
+            out.append(json.loads(payload))
+    return out
 
 
 def _make_fake_server():
@@ -60,6 +83,80 @@ def _make_fake_server():
             n = int(self.headers.get("Content-Length", 0))
             return json.loads(self.rfile.read(n)) if n else {}
 
+        def _read_raw(self) -> bytes:
+            n = int(self.headers.get("Content-Length", 0))
+            return self.rfile.read(n) if n else b""
+
+        # --- Connect wire ---
+
+        def _connect_unary(self, code, obj):
+            """Send a unary Connect reply (application/json)."""
+            self._json(code, obj)
+
+        def _connect_unary_err(self, connect_code, msg, http_status):
+            body = json.dumps({"code": connect_code, "message": msg}).encode()
+            self.send_response(http_status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _connect_stream(self, msgs, error=None):
+            """Send a Connect streaming reply (application/connect+json): each msg
+            as an enveloped frame, then a terminal end-stream frame carrying an
+            optional error object."""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/connect+json")
+            self.end_headers()
+            for m in msgs:
+                self.wfile.write(_connect_frame(json.dumps(m).encode()))
+            end = {"error": error} if error else {}
+            self.wfile.write(_connect_frame(json.dumps(end).encode(), end=True))
+
+        def _connect_dispatch(self, method):
+            """Serve the Connect file RPCs the SDK migrated (ReadFile, WriteFile,
+            List, Mkdir, Remove). Exec and run_code stay on the JSON routes
+            (Connect Exec/RunCode are bidi, which needs HTTP/2; httpx cannot speak
+            cleartext h2c), so they are NOT served here."""
+            sid = self.headers.get("X-Sandbox-Id", "")
+            body = self._read_raw()
+            if method == "ReadFile":
+                msgs = _decode_connect_request(body)
+                req = msgs[0] if msgs else {}
+                files = state["files"].get(sid, {})
+                path = req["path"]
+                if path not in files:
+                    self._connect_stream([], error={"code": "not_found", "message": "no such file"})
+                    return
+                raw = files[path]
+                self._connect_stream([
+                    {"data": base64.b64encode(raw.encode() if isinstance(raw, str) else raw).decode(), "eof": True},
+                ])
+            elif method == "WriteFile":
+                msgs = _decode_connect_request(body)
+                open_msg = next((m["open"] for m in msgs if "open" in m), {})
+                data = b"".join(base64.b64decode(m["data"]) for m in msgs if "data" in m)
+                state["files"].setdefault(sid, {})[open_msg["path"]] = data.decode("utf-8", "replace")
+                self._connect_stream([{"bytesWritten": len(data)}])
+            elif method == "List":
+                req = json.loads(body)
+                files = state["files"].get(sid, {})
+                base = req["parent"].rstrip("/")
+                entries = [
+                    {"name": p[len(base) + 1:], "isDir": False, "size": len(c), "mode": 0o644}
+                    for p, c in files.items()
+                    if p.startswith(base + "/") and "/" not in p[len(base) + 1:]
+                ]
+                self._connect_unary(200, {"entries": entries})
+            elif method == "Mkdir":
+                self._connect_unary(200, {})
+            elif method == "Remove":
+                req = json.loads(body)
+                state["files"].get(sid, {}).pop(req["path"], None)
+                self._connect_unary(200, {})
+            else:
+                self._connect_unary_err("unimplemented", f"no such method {method}", 501)
+
         def do_GET(self):
             if self.path == "/v1/health":
                 self._json(200, {"status": "ok", "mock": True})
@@ -71,6 +168,12 @@ def _make_fake_server():
                 self._err(404, "not found")
 
         def do_POST(self):
+            # The runtime calls (exec, files, run_code) ride the Connect
+            # sandbox.v1.Sandbox service; dispatch them before reading the body as
+            # JSON because Connect streaming requests carry binary enveloped frames.
+            if self.path.startswith("/sandbox.v1.Sandbox/"):
+                self._connect_dispatch(self.path.rsplit("/", 1)[-1])
+                return
             req = self._read()
             if self.path == "/v1/templates":
                 tid = req.get("id")
@@ -97,31 +200,12 @@ def _make_fake_server():
                 state["files"].setdefault(sid, {})
                 self._json(200, info)
             elif self.path == "/v1/exec":
+                # exec stays on JSON (Connect Exec is bidi -> HTTP/2 only).
                 cmd = req.get("command", "")
                 out = cmd.split("echo ", 1)[1] + "\n" if "echo " in cmd else ""
                 self._json(200, {"exit_code": 0, "stdout": out, "stderr": "", "exec_time_ms": 1})
-            elif self.path == "/v1/files/write":
-                state["files"].setdefault(req["sandbox"], {})[req["path"]] = req.get("content", "")
-                self._json(200, {"status": "ok"})
-            elif self.path == "/v1/files/read":
-                files = state["files"].get(req["sandbox"], {})
-                if req["path"] not in files:
-                    self._err(404, "no such file")
-                    return
-                self._json(200, {"content": files[req["path"]]})
-            elif self.path == "/v1/files/list":
-                files = state["files"].get(req["sandbox"], {})
-                base = req["path"].rstrip("/")
-                entries = [
-                    {"name": p[len(base) + 1:], "is_dir": False, "size": len(c), "mode": 0o644}
-                    for p, c in files.items()
-                    if p.startswith(base + "/") and "/" not in p[len(base) + 1:]
-                ]
-                self._json(200, {"entries": entries})
-            elif self.path == "/v1/files/remove":
-                state["files"].get(req["sandbox"], {}).pop(req["path"], None)
-                self._json(200, {"status": "ok"})
             elif self.path == "/v1/run_code/stream":
+                # run_code stays on JSON NDJSON (Connect RunCode is bidi).
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.end_headers()
