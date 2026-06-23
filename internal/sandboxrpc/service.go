@@ -120,6 +120,18 @@ func followup(rpc string) error {
 			"current JSON-over-HTTP sandbox API and the JSON-lines vsock protocol. See docs/api/runtime-protocol.md", rpc))
 }
 
+// connectErr builds an LLM-legible connect.Error (issue #28). code is the
+// Connect error code; cause is the underlying error; remediation is a
+// human/LLM-legible string suggesting how to resolve the problem. Secret
+// values MUST NOT appear in remediation.
+func connectErr(code connect.Code, cause error, remediation string) *connect.Error {
+	msg := cause.Error()
+	if remediation != "" {
+		msg = msg + "; " + remediation
+	}
+	return connect.NewError(code, fmt.Errorf("%s", msg))
+}
+
 // Exec runs a command and streams its IO over the Connect bidi stream. The first
 // client message MUST carry the open oneof; the handler bridges to either the
 // GuestConn port (when s.Guest is set, Task 2.1 path) or the ExecBackend
@@ -296,22 +308,6 @@ func (s *Service) Archive(_ context.Context, _ *connect.Request[sandboxv1.Archiv
 	return followup("Archive")
 }
 
-func (s *Service) Watch(_ context.Context, _ *connect.Request[sandboxv1.WatchRequest], _ *connect.ServerStream[sandboxv1.FsEvent]) error {
-	return followup("Watch")
-}
-
-func (s *Service) Processes(_ context.Context, _ *connect.Request[sandboxv1.ProcessesRequest]) (*connect.Response[sandboxv1.ProcessList], error) {
-	return nil, followup("Processes")
-}
-
-func (s *Service) Signal(_ context.Context, _ *connect.Request[sandboxv1.SignalRequest]) (*connect.Response[sandboxv1.SignalResponse], error) {
-	return nil, followup("Signal")
-}
-
-func (s *Service) PortForward(_ context.Context, _ *connect.BidiStream[sandboxv1.Frame, sandboxv1.Frame]) error {
-	return followup("PortForward")
-}
-
 func (s *Service) Fork(_ context.Context, _ *connect.Request[sandboxv1.ForkRequest]) (*connect.Response[sandboxv1.Operation], error) {
 	return nil, followup("Fork")
 }
@@ -322,8 +318,4 @@ func (s *Service) Checkpoint(_ context.Context, _ *connect.Request[sandboxv1.Che
 
 func (s *Service) ExtendLifetime(_ context.Context, _ *connect.Request[sandboxv1.ExtendRequest]) (*connect.Response[sandboxv1.Lease], error) {
 	return nil, followup("ExtendLifetime")
-}
-
-func (s *Service) Vitals(_ context.Context, _ *connect.Request[sandboxv1.VitalsRequest], _ *connect.ServerStream[sandboxv1.GuestVitals]) error {
-	return followup("Vitals")
 }

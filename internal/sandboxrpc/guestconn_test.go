@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
@@ -69,6 +70,26 @@ func (f *fakeGuest) Remove(_ context.Context, _ string, _ bool) error {
 
 func (f *fakeGuest) RunCode(_ context.Context, _ *sandboxv1.RunCodeOpen) (RunCodeStream, error) {
 	return nil, errors.New("RunCode: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) PortForward(_ context.Context, _ uint32) (PortForwardStream, error) {
+	return nil, errors.New("PortForward: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Vitals(_ context.Context, _ time.Duration) (VitalsStream, error) {
+	return nil, errors.New("Vitals: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Watch(_ context.Context, _ string) (WatchStream, error) {
+	return nil, errors.New("Watch: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Processes(_ context.Context) (*sandboxv1.ProcessList, error) {
+	return nil, errors.New("Processes: unimplemented in fakeGuest")
+}
+
+func (f *fakeGuest) Signal(_ context.Context, _ int32, _ int32) error {
+	return errors.New("Signal: unimplemented in fakeGuest")
 }
 
 // execResult collects the output of drainExec.

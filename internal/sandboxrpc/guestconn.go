@@ -8,6 +8,7 @@ package sandboxrpc
 
 import (
 	"context"
+	"time"
 
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
@@ -197,4 +198,27 @@ type GuestConn interface {
 	// output frames (stdout/stderr chunks, result, error, then a terminal
 	// exit frame). The caller owns the stream and must call Close when done.
 	RunCode(ctx context.Context, open *sandboxv1.RunCodeOpen) (RunCodeStream, error)
+
+	// PortForward opens a bidirectional byte stream to a TCP port inside the
+	// sandbox. The caller sends bytes toward the guest via Send and receives
+	// bytes from the guest via Recv. The stream ends with a Close frame.
+	// The caller owns the stream and must call Close when done.
+	PortForward(ctx context.Context, port uint32) (PortForwardStream, error)
+
+	// Vitals returns a server stream of GuestVitals samples emitted at the
+	// given interval. The stream runs until the context is cancelled or the
+	// guest closes it. The caller owns the stream and must call Close when done.
+	Vitals(ctx context.Context, interval time.Duration) (VitalsStream, error)
+
+	// Watch returns a server stream of FsEvents for the subtree at path.
+	// The stream runs until the context is cancelled or the guest closes it.
+	// The caller owns the stream and must call Close when done.
+	Watch(ctx context.Context, path string) (WatchStream, error)
+
+	// Processes returns the current guest process table.
+	Processes(ctx context.Context) (*sandboxv1.ProcessList, error)
+
+	// Signal delivers POSIX signal number signal to the process with the given
+	// pid inside the sandbox.
+	Signal(ctx context.Context, pid int32, signal int32) error
 }
