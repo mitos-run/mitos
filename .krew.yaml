@@ -1,0 +1,60 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: sandbox
+spec:
+  version: "{{ .TagName }}"
+  homepage: https://mitos.run
+  shortDescription: Inspect and operate mitos.run snapshot-fork sandboxes.
+  description: |
+    kubectl sandbox inspects and operates mitos.run sandbox objects
+    (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in the
+    mitos.run/v1alpha1 API group.
+
+    Subcommands:
+      ls    list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
+      ps    list SandboxForks, or one claim's forks if a name is given
+      tree  render the fork/lineage DAG (claims -> forks -> forks)
+      top   per-sandbox copy-on-write-aware metering (unique + shared memory)
+      logs  husk stub pod console for a claim, plus the guest console note
+      exec  run a command in a sandbox over the token-scoped sandbox API
+
+    Flags: -n <namespace>, -A (all namespaces). The plugin reads the cluster
+    connection from the standard kubeconfig resolution (KUBECONFIG,
+    --kubeconfig, or in-cluster).
+  caveats: |
+    This plugin talks to the mitos.run CRDs and forkd sandbox API. It requires:
+      * a Kubernetes cluster with mitos.run installed (controller + forkd), and
+      * a kubeconfig that can read SandboxClaim and SandboxFork objects.
+    See https://mitos.run for installation.
+  platforms:
+    - selector:
+        matchLabels:
+          os: linux
+          arch: amd64
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_linux_amd64.tar.gz" .TagName }}
+      bin: kubectl-sandbox
+    - selector:
+        matchLabels:
+          os: linux
+          arch: arm64
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_linux_arm64.tar.gz" .TagName }}
+      bin: kubectl-sandbox
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: amd64
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_darwin_amd64.tar.gz" .TagName }}
+      bin: kubectl-sandbox
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: arm64
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_darwin_arm64.tar.gz" .TagName }}
+      bin: kubectl-sandbox
+    - selector:
+        matchLabels:
+          os: windows
+          arch: amd64
+      {{ addURIAndSha "https://github.com/mitos-run/mitos/releases/download/{{ .TagName }}/kubectl-sandbox_{{ .TagName }}_windows_amd64.zip" .TagName }}
+      bin: kubectl-sandbox.exe
