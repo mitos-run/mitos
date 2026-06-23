@@ -3,7 +3,7 @@ package templatebuild
 import (
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // TestParseDockerfileMapsInstructionsToSpec asserts a minimal Dockerfile maps to
@@ -29,16 +29,16 @@ CMD ["python", "app.py"]
 	if len(spec.BuildSteps) != 4 {
 		t.Fatalf("got %d build steps, want 4: %+v", len(spec.BuildSteps), spec.BuildSteps)
 	}
-	if spec.BuildSteps[0].Type != v1alpha1.BuildStepWorkdir || spec.BuildSteps[0].Workdir != "/app" {
+	if spec.BuildSteps[0].Type != v1.BuildStepWorkdir || spec.BuildSteps[0].Workdir != "/app" {
 		t.Errorf("step 0 = %+v, want workdir /app", spec.BuildSteps[0])
 	}
-	if spec.BuildSteps[1].Type != v1alpha1.BuildStepCopy || spec.BuildSteps[1].Source != "app/" || spec.BuildSteps[1].Dest != "/app" {
+	if spec.BuildSteps[1].Type != v1.BuildStepCopy || spec.BuildSteps[1].Source != "app/" || spec.BuildSteps[1].Dest != "/app" {
 		t.Errorf("step 1 = %+v, want copy app/ -> /app", spec.BuildSteps[1])
 	}
-	if spec.BuildSteps[2].Type != v1alpha1.BuildStepEnv || spec.BuildSteps[2].EnvName != "PORT" || spec.BuildSteps[2].EnvValue != "8080" {
+	if spec.BuildSteps[2].Type != v1.BuildStepEnv || spec.BuildSteps[2].EnvName != "PORT" || spec.BuildSteps[2].EnvValue != "8080" {
 		t.Errorf("step 2 = %+v, want env PORT=8080", spec.BuildSteps[2])
 	}
-	if spec.BuildSteps[3].Type != v1alpha1.BuildStepRun || spec.BuildSteps[3].Run != "pip install -r requirements.txt" {
+	if spec.BuildSteps[3].Type != v1.BuildStepRun || spec.BuildSteps[3].Run != "pip install -r requirements.txt" {
 		t.Errorf("step 3 = %+v, want run", spec.BuildSteps[3])
 	}
 	if len(spec.Command) != 2 || spec.Command[0] != "python" || spec.Command[1] != "app.py" {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // TestRenderSandboxChainSpecBackwardCompat asserts the new spec-based renderer
@@ -16,11 +16,11 @@ import (
 func TestRenderSandboxChainSpecBackwardCompat(t *testing.T) {
 	allow := []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}
 	legacy := RenderSandboxChain("sbtap0", net.ParseIP("10.200.0.2"),
-		v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+		v1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
 	spec := RenderSandboxChainSpec(ChainSpec{
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		Allow:      allow,
 		ResolverIP: net.ParseIP("10.200.0.1"),
 	})
@@ -37,7 +37,7 @@ func TestRenderSandboxChainBlockNetwork(t *testing.T) {
 	out := RenderSandboxChainSpec(ChainSpec{
 		Tap:          "sbtap0",
 		GuestIP:      net.ParseIP("10.200.0.2"),
-		Egress:       v1alpha1.EgressAllow, // even allow is overridden by block
+		Egress:       v1.EgressAllow, // even allow is overridden by block
 		Allow:        []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}},
 		AllowCIDRs:   []string{"10.0.0.0/8"},
 		ResolverIP:   net.ParseIP("10.200.0.1"),
@@ -70,7 +70,7 @@ func TestRenderSandboxChainCIDRAllowlist(t *testing.T) {
 	out := RenderSandboxChainSpec(ChainSpec{
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		AllowCIDRs: []string{"203.0.113.0/24", "198.51.100.0/24"},
 		ResolverIP: net.ParseIP("10.200.0.1"),
 	})
@@ -97,7 +97,7 @@ func TestRenderSandboxChainCIDRAllowlistV6(t *testing.T) {
 	out := RenderSandboxChainSpec(ChainSpec{
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		AllowCIDRs: []string{"2001:db8::/32"},
 	})
 	if !strings.Contains(out, "ip6 daddr 2001:db8::/32 accept") {
@@ -117,7 +117,7 @@ func TestRenderSandboxChainEgressCounter(t *testing.T) {
 	out := RenderSandboxChainSpec(ChainSpec{
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		ResolverIP: net.ParseIP("10.200.0.1"),
 		Counter:    true,
 	})
@@ -143,7 +143,7 @@ func TestRenderSandboxChainNoCounterByDefault(t *testing.T) {
 	out := RenderSandboxChainSpec(ChainSpec{
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
-		Egress:     v1alpha1.EgressDeny,
+		Egress:     v1.EgressDeny,
 		ResolverIP: net.ParseIP("10.200.0.1"),
 	})
 	if strings.Contains(out, "add counter") || strings.Contains(out, "counter name") {
@@ -159,7 +159,7 @@ func TestRenderSandboxInputChainDenyByDefault(t *testing.T) {
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
 		ResolverIP: net.ParseIP("10.200.0.1"),
-		Inbound:    v1alpha1.InboundDeny,
+		Inbound:    v1.InboundDeny,
 	})
 	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "drop }\nadd element inet "+SharedTableName()+" "+InputDispatchMapName()+" { \"sbtap0\" : jump "+SandboxInputChainName("sbtap0")+" }") &&
 		!strings.Contains(out, "ip saddr 10.200.0.2 drop") {
@@ -176,7 +176,7 @@ func TestRenderSandboxInputChainAllowCIDR(t *testing.T) {
 		Tap:          "sbtap0",
 		GuestIP:      net.ParseIP("10.200.0.2"),
 		ResolverIP:   net.ParseIP("10.200.0.1"),
-		Inbound:      v1alpha1.InboundAllow,
+		Inbound:      v1.InboundAllow,
 		InboundCIDRs: []string{"203.0.113.0/24"},
 	})
 	if !strings.Contains(out, "ip daddr 10.200.0.2 ip saddr 203.0.113.0/24 accept") {
@@ -195,7 +195,7 @@ func TestRenderSandboxInputChainAllowAny(t *testing.T) {
 		Tap:        "sbtap0",
 		GuestIP:    net.ParseIP("10.200.0.2"),
 		ResolverIP: net.ParseIP("10.200.0.1"),
-		Inbound:    v1alpha1.InboundAllow,
+		Inbound:    v1.InboundAllow,
 	})
 	if !strings.Contains(out, "ip daddr 10.200.0.2 accept") {
 		t.Errorf("inbound-allow-any chain missing accept to guest\n%s", out)

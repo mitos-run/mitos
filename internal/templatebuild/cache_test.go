@@ -3,18 +3,18 @@ package templatebuild
 import (
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
-func runStep(cmd string) v1alpha1.BuildStep {
-	return v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: cmd}
+func runStep(cmd string) v1.BuildStep {
+	return v1.BuildStep{Type: v1.BuildStepRun, Run: cmd}
 }
 
 // TestCacheKeysChainOverBaseImageAndSteps asserts each step's cache key folds in
 // the base image, the step itself, and the previous step's key, so the key at
 // position N depends on everything from the base image through step N.
 func TestCacheKeysChainOverBaseImageAndSteps(t *testing.T) {
-	steps := []v1alpha1.BuildStep{
+	steps := []v1.BuildStep{
 		runStep("apt-get update"),
 		runStep("pip install -r requirements.txt"),
 		runStep("python -m compileall ."),
@@ -38,7 +38,7 @@ func TestCacheKeysChainOverBaseImageAndSteps(t *testing.T) {
 // TestChangingBaseImageInvalidatesAllKeys asserts a different base image yields a
 // completely different chain from the first step on.
 func TestChangingBaseImageInvalidatesAllKeys(t *testing.T) {
-	steps := []v1alpha1.BuildStep{runStep("echo a"), runStep("echo b")}
+	steps := []v1.BuildStep{runStep("echo a"), runStep("echo b")}
 	a := CacheKeys("python:3.12", steps)
 	b := CacheKeys("python:3.13", steps)
 	for i := range a {
@@ -53,12 +53,12 @@ func TestChangingBaseImageInvalidatesAllKeys(t *testing.T) {
 // keys of the steps before it untouched, so an unchanged prefix is reused.
 func TestChangingStepNInvalidatesNToEndOnly(t *testing.T) {
 	const base = "node:24"
-	before := []v1alpha1.BuildStep{
+	before := []v1.BuildStep{
 		runStep("npm ci"),
 		runStep("npm run build"),
 		runStep("npm prune --production"),
 	}
-	after := []v1alpha1.BuildStep{
+	after := []v1.BuildStep{
 		runStep("npm ci"),
 		runStep("npm run build --verbose"), // step 1 changed
 		runStep("npm prune --production"),
@@ -82,7 +82,7 @@ func TestChangingStepNInvalidatesNToEndOnly(t *testing.T) {
 // first changed step plus everything after as rebuild.
 func TestPlanSkipsCachedPrefix(t *testing.T) {
 	const base = "python:3.12"
-	steps := []v1alpha1.BuildStep{
+	steps := []v1.BuildStep{
 		runStep("pip install flask"),
 		runStep("pip install gunicorn"),
 		runStep("pytest"),
@@ -110,7 +110,7 @@ func TestPlanSkipsCachedPrefix(t *testing.T) {
 // inputs (the rebuilt earlier step) changed.
 func TestPlanRebuildsTailAfterFirstMiss(t *testing.T) {
 	const base = "alpine"
-	steps := []v1alpha1.BuildStep{runStep("a"), runStep("b"), runStep("c")}
+	steps := []v1.BuildStep{runStep("a"), runStep("b"), runStep("c")}
 	keys := CacheKeys(base, steps)
 
 	// Cache holds step 0 and step 2 but NOT step 1. Step 1 misses, so step 2 must
