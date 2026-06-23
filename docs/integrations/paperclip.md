@@ -90,7 +90,7 @@ bridge entry first.
 Secret VALUES never travel through the plugin. `secretsToClaimMounts` maps each
 ref to a `SandboxSpec.Secrets` entry that carries only a Secret name and
 key; the mitos controller resolves the plaintext server-side at sandbox time
-(`internal/controller/sandbox_controller.go` `resolveSecrets`). This
+(`internal/controller/sandboxclaim_controller.go` `resolveSecrets`). This
 enforces the secret-inheritance policy (`docs/fork-correctness.md` section 3):
 sandbox-time secrets are injected at sandbox time and are never baked into a pool
 snapshot, so a fork never inherits another run's credentials. Secret values are
