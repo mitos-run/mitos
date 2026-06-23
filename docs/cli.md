@@ -204,25 +204,25 @@ PROVEN in CI:
 The mock-engine exec limitation above is the one gap: real in-VM `exec` is proven
 by the KVM CI of the API, not by the kind dev smoke.
 
-## kubectl-sandbox operator plugin
+## kubectl-mitos operator plugin
 
-`kubectl-sandbox` is a separate kubectl plugin for the OPERATOR persona: a
+`kubectl-mitos` is a separate kubectl plugin for the OPERATOR persona: a
 cluster admin who inspects and operates the sandbox objects already in the
-cluster. Installed as `kubectl-sandbox` on `PATH`, it is invoked as
-`kubectl sandbox <verb>` and reads the cluster connection from the standard
+cluster. Installed as `kubectl-mitos` on `PATH`, it is invoked as
+`kubectl mitos <verb>` and reads the cluster connection from the standard
 kubeconfig resolution.
 
 ```bash
-go build -o /usr/local/bin/kubectl-sandbox ./cmd/kubectl-sandbox/
+go build -o /usr/local/bin/kubectl-mitos ./cmd/kubectl-mitos/
 ```
 
 ```
-kubectl sandbox ls   [-n ns] [-A]            list SandboxClaims
-kubectl sandbox ps   [name] [-n ns] [-A]     list SandboxForks (or one claim's forks)
-kubectl sandbox tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
-kubectl sandbox top  [-n ns] [-A]            per-sandbox CoW-aware metering
-kubectl sandbox logs <sandbox> [-n ns]       husk stub pod console for a claim
-kubectl sandbox exec <sandbox> [-n ns] -- cmd run a command in a sandbox
+kubectl mitos ls   [-n ns] [-A]            list SandboxClaims
+kubectl mitos ps   [name] [-n ns] [-A]     list SandboxForks (or one claim's forks)
+kubectl mitos tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
+kubectl mitos top  [-n ns] [-A]            per-sandbox CoW-aware metering
+kubectl mitos logs <sandbox> [-n ns]       husk stub pod console for a claim
+kubectl mitos exec <sandbox> [-n ns] -- cmd run a command in a sandbox
 ```
 
 ### tree

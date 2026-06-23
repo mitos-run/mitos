@@ -11,7 +11,7 @@ import (
 // (issue #164): the /v1/vitals endpoint asks a sandbox's guest agent over vsock
 // for a one-shot vitals snapshot (CPU steal, memory vs balloon, in-guest process
 // table) and returns it LABELED with the claim/pool/workspace identity the host
-// knows. It is what `kubectl sandbox ps`/top consume to show REAL guest
+// knows. It is what `kubectl mitos ps`/top consume to show REAL guest
 // processes and vitals; without a reachable guest they fall back to the object
 // listing. The endpoint is per-sandbox traffic (it returns one sandbox's process
 // table), so it is mounted under the per-sandbox bearer middleware, unlike the
@@ -30,7 +30,7 @@ type VitalsLabels struct {
 }
 
 // LabeledVitals is the /v1/vitals response: the guest snapshot plus the host's
-// claim/pool/workspace labels. The labels let an operator (or `kubectl sandbox
+// claim/pool/workspace labels. The labels let an operator (or `kubectl mitos
 // ps`) attribute the in-guest processes and steal to a specific claim.
 type LabeledVitals struct {
 	VitalsLabels
@@ -58,7 +58,7 @@ func (api *SandboxAPI) vitalsLabelsFor(sandboxID string) VitalsLabels {
 
 // handleVitals asks the sandbox's guest agent for a telemetry snapshot and
 // returns it labeled. A guest that is unreachable or errors yields a 502 so the
-// caller (kubectl sandbox ps/top) can fall back to the object listing rather
+// caller (kubectl mitos ps/top) can fall back to the object listing rather
 // than render a fabricated value. The snapshot carries no secrets: process
 // entries are program names and resource counters only.
 func (api *SandboxAPI) handleVitals(w http.ResponseWriter, r *http.Request) {

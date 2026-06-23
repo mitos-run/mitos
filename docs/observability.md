@@ -2,7 +2,7 @@
 
 This document describes the three observability signals the control plane
 exports today (distributed traces, a structured audit log, and Prometheus
-metrics) and the `kubectl sandbox` plugin for operators. Each section marks what
+metrics) and the `kubectl mitos` plugin for operators. Each section marks what
 is PROVEN in CI versus what remains OPEN.
 
 The governing rule is the secret-safety rule from CLAUDE.md: no signal ever
@@ -244,17 +244,17 @@ The Grafana dashboard, PrometheusRule alerts with runbook URLs, and the
 conditions/reason-code catalogue that ride on these metrics are shipped; see
 "Dashboards, alerts, runbooks" below.
 
-## `kubectl sandbox` plugin
+## `kubectl mitos` plugin
 
-The `kubectl-sandbox` binary is a kubectl plugin that lists mitos.run sandbox
+The `kubectl-mitos` binary is a kubectl plugin that lists mitos.run sandbox
 objects. It resolves the cluster connection from the standard kubeconfig
 resolution (`KUBECONFIG`, `--kubeconfig`, or in-cluster).
 
 ### Subcommands
 
 ```
-kubectl sandbox ls [-n namespace] [-A]          list SandboxClaims
-kubectl sandbox ps [name] [-n namespace] [-A]   list SandboxForks, or one claim's forks
+kubectl mitos ls [-n namespace] [-A]          list SandboxClaims
+kubectl mitos ps [name] [-n namespace] [-A]   list SandboxForks, or one claim's forks
 ```
 
 - `ls` prints SandboxClaims with columns NAME, POOL, PHASE, NODE, ENDPOINT, AGE.
@@ -268,12 +268,12 @@ source cells render as `-`.
 ### Installing it
 
 kubectl discovers plugins named `kubectl-<name>` on PATH. Build the binary and
-put it on PATH as `kubectl-sandbox`:
+put it on PATH as `kubectl-mitos`:
 
 ```
-go build -o kubectl-sandbox ./cmd/kubectl-sandbox/
-mv kubectl-sandbox /usr/local/bin/        # any directory on PATH
-kubectl sandbox ls
+go build -o kubectl-mitos ./cmd/kubectl-mitos/
+mv kubectl-mitos /usr/local/bin/        # any directory on PATH
+kubectl mitos ls
 ```
 
 ### PROVEN
@@ -284,7 +284,7 @@ strings, empty-list messages, and missing-cell dashes
 
 ### OPEN
 
-`kubectl sandbox top/tree/exec/logs` are documented follow-ups (#29); invoking
+`kubectl mitos top/tree/exec/logs` are documented follow-ups (#29); invoking
 them prints a "not yet implemented" notice.
 
 ## Dashboards, alerts, runbooks
@@ -309,7 +309,7 @@ kubectl apply -k deploy/monitoring/
   disk, claims pending, claim error rate by pool/reason, pool ready snapshots,
   orphan sweeps), wrapped in a ConfigMap.
 - `docs/runbooks/*.md`: one runbook per alert (signal, likely causes, diagnosis
-  with `kubectl sandbox ls/ps/top` and the metrics to check, remediation,
+  with `kubectl mitos ls/ps/top` and the metrics to check, remediation,
   escalation).
 - `docs/conditions.md`: the normative reason-code catalogue the runbooks cite.
 
@@ -401,7 +401,7 @@ The guest agent samples CPU steal (`/proc/stat` steal field), memory vs balloon
 reports them over the existing vsock protocol on a `vitals` request. forkd
 consumes the snapshot, labels it with the sandbox's claim/pool/workspace/namespace,
 and serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
-exec). `kubectl sandbox ps <name> --processes` consumes the REAL in-guest process
+exec). `kubectl mitos ps <name> --processes` consumes the REAL in-guest process
 table; when the guest is unreachable (claim not running, no KVM behind it) it
 falls back to the SandboxFork object listing, so it never renders a fabricated
 table.
@@ -424,7 +424,7 @@ claim-to-Fork-to-vitals label plumbing, and the `ps` consumer are unit-tested on
 darwin against fixtures (`internal/guestvitals`, `internal/vsock`,
 `internal/daemon/vitals_api_test.go`,
 `internal/controller/forkd_client_test.go`,
-`cmd/kubectl-sandbox/ps_guest_test.go`).
+`cmd/kubectl-mitos/ps_guest_test.go`).
 
 GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest
 collector reads real `/proc` and is exercised by a linux-tagged fixture test

@@ -9,7 +9,7 @@ Four channels:
 | Channel | What ships | Source of truth | Per-channel runbook |
 | --- | --- | --- | --- |
 | Artifact Hub | the Helm chart | `deploy/charts/mitos` | this file |
-| krew (kubectl plugins) | the `kubectl sandbox` plugin | `.krew.yaml`, `cmd/kubectl-sandbox` | [krew.md](krew.md) |
+| krew (kubectl plugins) | the `kubectl mitos` plugin | `.krew.yaml`, `cmd/kubectl-mitos` | [krew.md](krew.md) |
 | OperatorHub.io | the OLM operator bundle | `deploy/olm/bundle` | [operatorhub.md](operatorhub.md) |
 | Red Hat Certified Operators | the same OLM bundle, certified | `deploy/olm/bundle` | [redhat-certification.md](redhat-certification.md) |
 

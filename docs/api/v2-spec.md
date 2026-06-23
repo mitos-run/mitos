@@ -293,7 +293,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 - **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `mitos.run/pool` only.
 - **Paperclip provider** (`@mitos-run/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
-- **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
+- **kubectl plugin** (operator persona): `kubectl mitos ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
 - **Eventing**: CloudEvents (`dev.mitos.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
 
 ---

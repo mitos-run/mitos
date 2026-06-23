@@ -7,7 +7,7 @@
 # engine data path that cmd/bench measures: it creates a real SandboxClaim, waits
 # for the controller to drive it Ready, and runs the first exec over the sandbox
 # HTTP API (the same endpoint + per-sandbox bearer token the SDK and
-# kubectl-sandbox use).
+# kubectl-mitos use).
 #
 # What it measures: for each of N sequential claims, the wall clock from claim
 # create to the first successful exec result. Summarized as nearest-rank

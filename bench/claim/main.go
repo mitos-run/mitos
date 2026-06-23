@@ -11,7 +11,7 @@
 //   - claim-exec: for each of --iterations sequential claims it creates a
 //     SandboxClaim against --pool, waits for the claim's status.phase to reach
 //     Ready, then runs the FIRST exec over the sandbox HTTP API (the same
-//     endpoint + per-sandbox bearer token kubectl-sandbox and the SDK use). The
+//     endpoint + per-sandbox bearer token kubectl-mitos and the SDK use). The
 //     measured value is wall-clock from claim create to the first successful
 //     exec result: claim -> first-exec, the end-to-end controller + pool path
 //     the in-process cmd/bench harness does NOT cover (it measures the engine
@@ -224,7 +224,7 @@ func (h *harness) sandboxToken(ctx context.Context, name string) (string, error)
 }
 
 // firstExec runs a single trivial command over the sandbox HTTP API, the same
-// /v1/exec endpoint + bearer-token gate kubectl-sandbox uses. A non-zero exit
+// /v1/exec endpoint + bearer-token gate kubectl-mitos uses. A non-zero exit
 // or a transport error is returned; the token value never appears in an error.
 func (h *harness) firstExec(ctx context.Context, endpoint, token, ref string) error {
 	body, err := json.Marshal(map[string]any{"sandbox": ref, "command": "/bin/true"})

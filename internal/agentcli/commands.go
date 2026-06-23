@@ -227,7 +227,7 @@ func splitFirstPositional(args []string) (id string, rest []string) {
 // formatSandboxInfos renders SandboxInfo rows as an aligned table with columns
 // NAME POOL PHASE NODE ENDPOINT AGE. An empty list returns a friendly message.
 // The age formatting matches the kubectl-style rendering used by the
-// kubectl-sandbox plugin (single largest unit).
+// kubectl-mitos plugin (single largest unit).
 func formatSandboxInfos(infos []SandboxInfo) string {
 	if len(infos) == 0 {
 		return "No sandboxes found.\n"

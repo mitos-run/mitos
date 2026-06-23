@@ -60,7 +60,7 @@ func TestFetchGuestVitals_Unreachable(t *testing.T) {
 }
 
 // TestRenderGuestProcesses formats the real process table; this is the text a
-// user sees from `kubectl sandbox ps <name> --processes`.
+// user sees from `kubectl mitos ps <name> --processes`.
 func TestRenderGuestProcesses(t *testing.T) {
 	v := labeledVitals{
 		Claim:     "claim-a",

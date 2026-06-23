@@ -1,9 +1,9 @@
-# Distributing kubectl sandbox via krew
+# Distributing kubectl mitos via krew
 
-The `kubectl-sandbox` plugin (source: `cmd/kubectl-sandbox/main.go`) is
+The `kubectl-mitos` plugin (source: `cmd/kubectl-mitos/main.go`) is
 distributed through [krew](https://krew.sigs.k8s.io), the kubectl plugin
-manager. The krew plugin name is `sandbox`; once installed it is invoked as
-`kubectl sandbox <subcommand>` (ls, ps, tree, top, logs, exec).
+manager. The krew plugin name is `mitos`; once installed it is invoked as
+`kubectl mitos <subcommand>` (ls, ps, tree, top, logs, exec).
 
 Two files drive distribution:
 
@@ -18,15 +18,15 @@ Two files drive distribution:
 
 1. A release is published (release-please cuts the tag and GitHub Release).
 2. `.github/workflows/krew.yaml` runs on the `release: published` event:
-   - builds `kubectl-sandbox` with `CGO_ENABLED=0` for
+   - builds `kubectl-mitos` with `CGO_ENABLED=0` for
      linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64;
-   - packages each as `kubectl-sandbox_<tag>_<os>_<arch>.tar.gz`
+   - packages each as `kubectl-mitos_<tag>_<os>_<arch>.tar.gz`
      (`.zip` for windows), with the binary at the archive root plus `LICENSE`;
    - uploads the archives as assets onto the release;
    - runs `rajatjindal/krew-release-bot@v0.0.46`, which reads `.krew.yaml`,
      computes the sha256 of each uploaded archive, and opens (or updates) a PR
      against `kubernetes-sigs/krew-index`.
-3. After that PR merges, `kubectl krew upgrade sandbox` reaches users.
+3. After that PR merges, `kubectl krew upgrade mitos` reaches users.
 
 You can re-run the asset build and bot manually with the `workflow_dispatch`
 input set to an existing release tag (for example `v0.4.0`).
@@ -39,14 +39,14 @@ For example on darwin/arm64 (adjust the os/arch and extension to match):
 ```bash
 TAG=v0.4.0
 GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
-  go build -ldflags "-s -w" -o kubectl-sandbox ./cmd/kubectl-sandbox/
+  go build -ldflags "-s -w" -o kubectl-mitos ./cmd/kubectl-mitos/
 cp LICENSE LICENSE
-tar -czf "kubectl-sandbox_${TAG}_darwin_arm64.tar.gz" kubectl-sandbox LICENSE
+tar -czf "kubectl-mitos_${TAG}_darwin_arm64.tar.gz" kubectl-mitos LICENSE
 
 kubectl krew install \
   --manifest=.krew.yaml \
-  --archive="kubectl-sandbox_${TAG}_darwin_arm64.tar.gz"
-kubectl sandbox ls
+  --archive="kubectl-mitos_${TAG}_darwin_arm64.tar.gz"
+kubectl mitos ls
 ```
 
 When installing from a local `--archive`, krew skips the URI download and sha256
@@ -72,7 +72,7 @@ One-time prerequisites krew-index requires:
   resolve to real, downloadable assets with stable sha256.
 - The manifest must validate with `kubectl krew install --manifest=...`
   (the local-archive form above) on at least one platform.
-- The manifest lives at `plugins/sandbox.yaml` in krew-index, with the
+- The manifest lives at `plugins/mitos.yaml` in krew-index, with the
   template fields resolved to concrete values for the released tag. The
   simplest way to produce that resolved file is to let the workflow run once on
   a real release and copy the manifest the bot generates, or render it by hand
@@ -82,11 +82,11 @@ One-time prerequisites krew-index requires:
 
 krew-index maintainers check that:
 
-- the plugin name is unique and matches the `kubectl-sandbox` binary name
+- the plugin name is unique and matches the `kubectl-mitos` binary name
   convention (`kubectl <name>` invocation);
 - every platform entry has a working `uri`, a correct `sha256`, and a `bin`
-  that exists at the archive root (`kubectl-sandbox`, or
-  `kubectl-sandbox.exe` on windows);
+  that exists at the archive root (`kubectl-mitos`, or
+  `kubectl-mitos.exe` on windows);
 - `shortDescription`, `description`, and `homepage` are present and accurate;
 - the manifest passes `kubectl krew install --manifest`.
 

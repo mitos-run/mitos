@@ -1,6 +1,6 @@
-// Command kubectl-sandbox is a kubectl plugin that lists mitos.run sandbox
-// objects. Installed as "kubectl-sandbox" on PATH, it is invoked as
-// "kubectl sandbox <subcommand>".
+// Command kubectl-mitos is a kubectl plugin that lists mitos.run sandbox
+// objects. Installed as "kubectl-mitos" on PATH, it is invoked as
+// "kubectl mitos <subcommand>".
 //
 // Subcommands:
 //
@@ -38,16 +38,16 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
-const usage = `kubectl sandbox: inspect and operate mitos.run sandbox objects
+const usage = `kubectl mitos: inspect and operate mitos.run sandbox objects
 
 Usage:
-  kubectl sandbox ls [-n namespace] [-A]         list SandboxClaims
-  kubectl sandbox ps [name] [-n namespace] [-A]  list SandboxForks (or one claim's forks)
-  kubectl sandbox ps <name> --processes [-n ns]  show the REAL in-guest process table for one sandbox
-  kubectl sandbox tree [--pool name] [-n ns] [-A] render the fork/lineage DAG
-  kubectl sandbox top [-n namespace] [-A]        per-sandbox CoW-aware metering
-  kubectl sandbox logs <sandbox> [-n namespace]  husk stub pod console for a claim
-  kubectl sandbox exec <sandbox> [-n ns] -- cmd  run a command in a sandbox
+  kubectl mitos ls [-n namespace] [-A]         list SandboxClaims
+  kubectl mitos ps [name] [-n namespace] [-A]  list SandboxForks (or one claim's forks)
+  kubectl mitos ps <name> --processes [-n ns]  show the REAL in-guest process table for one sandbox
+  kubectl mitos tree [--pool name] [-n ns] [-A] render the fork/lineage DAG
+  kubectl mitos top [-n namespace] [-A]        per-sandbox CoW-aware metering
+  kubectl mitos logs <sandbox> [-n namespace]  husk stub pod console for a claim
+  kubectl mitos exec <sandbox> [-n ns] -- cmd  run a command in a sandbox
 
 Flags:
   -n string      namespace (default "default")

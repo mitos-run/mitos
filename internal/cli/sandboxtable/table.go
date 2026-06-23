@@ -1,7 +1,7 @@
 // Package sandboxtable renders SandboxClaim and SandboxFork lists as aligned
 // kubectl-style tables. The formatting functions are pure (no cluster access),
-// so they carry the kubectl-sandbox plugin's test coverage; the live listing in
-// cmd/kubectl-sandbox is a thin wrapper around them.
+// so they carry the kubectl-mitos plugin's test coverage; the live listing in
+// cmd/kubectl-mitos is a thin wrapper around them.
 package sandboxtable
 
 import (

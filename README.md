@@ -333,7 +333,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 |---|---|---|
 | Metrics and tracing | Node and controller Prometheus metrics, a per-claim OpenTelemetry trace (`--otlp-endpoint`), and a toggleable structured audit log (`--audit-log`) recording command/path and byte counts, never content or secrets | [docs/observability.md](docs/observability.md) |
 | CoW-aware metering | The shared template page set is counted once, not once per fork, so billing and scheduling reflect the honest physical footprint | [docs/metering.md](docs/metering.md) |
-| Operator tooling | `kubectl sandbox` plugin (`ls` / `ps`) and the operational `GET /v1/metering` report | [docs/observability.md](docs/observability.md) |
+| Operator tooling | `kubectl mitos` plugin (`ls` / `ps`) and the operational `GET /v1/metering` report | [docs/observability.md](docs/observability.md) |
 | Bare metal first-class | Talos + Hetzner is the reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 
 ## Architecture
