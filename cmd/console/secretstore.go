@@ -10,7 +10,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	sandboxv2 "mitos.run/mitos/api/v1alpha2"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/console/baosecrets"
 	"mitos.run/mitos/internal/saas/console/kubesecrets"
@@ -19,7 +19,7 @@ import (
 
 // kubeClient builds a controller-runtime client over the ambient kube config
 // (in-cluster service account, or KUBECONFIG in dev) with the scheme the console
-// needs: core types (for org Secrets) plus the mitos.run/v1alpha2 Sandbox types
+// needs: core types (for org Secrets) plus the mitos.run/v1 Sandbox types
 // (for the org-scoped live-sandbox query). Shared by the kube secret store and
 // the cluster sandbox control.
 func kubeClient() (ctrlclient.Client, error) {
@@ -31,7 +31,7 @@ func kubeClient() (ctrlclient.Client, error) {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		return nil, err
 	}
-	if err := sandboxv2.AddToScheme(s); err != nil {
+	if err := v1.AddToScheme(s); err != nil {
 		return nil, err
 	}
 	return ctrlclient.New(cfg, ctrlclient.Options{Scheme: s})

@@ -3,7 +3,7 @@ package quota
 import (
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // TestFreeTierIsDenyByDefaultEgress asserts the anti-abuse floor: a free-tier
@@ -16,11 +16,11 @@ func TestFreeTierIsDenyByDefaultEgress(t *testing.T) {
 	if pol.BlockNetwork {
 		t.Fatal("free tier must not fully block (deny-by-default allows an explicit allowlist), got BlockNetwork")
 	}
-	if pol.Egress != v1alpha1.EgressDeny {
-		t.Fatalf("free tier egress = %q, want %q (deny-by-default)", pol.Egress, v1alpha1.EgressDeny)
+	if pol.Egress != v1.EgressDeny {
+		t.Fatalf("free tier egress = %q, want %q (deny-by-default)", pol.Egress, v1.EgressDeny)
 	}
-	if pol.Inbound != v1alpha1.InboundDeny {
-		t.Fatalf("free tier inbound = %q, want %q (never dialable)", pol.Inbound, v1alpha1.InboundDeny)
+	if pol.Inbound != v1.InboundDeny {
+		t.Fatalf("free tier inbound = %q, want %q (never dialable)", pol.Inbound, v1.InboundDeny)
 	}
 }
 
@@ -41,8 +41,8 @@ func TestBlockedEgressTierDropsAllTraffic(t *testing.T) {
 func TestOpenTierAllowsEgressButStillBlocksAbusePorts(t *testing.T) {
 	tier := DefaultTiers()[TierPro]
 	resolved := tier.ResolveEgress()
-	if resolved.Policy.Egress != v1alpha1.EgressAllow {
-		t.Fatalf("pro tier egress = %q, want %q", resolved.Policy.Egress, v1alpha1.EgressAllow)
+	if resolved.Policy.Egress != v1.EgressAllow {
+		t.Fatalf("pro tier egress = %q, want %q", resolved.Policy.Egress, v1.EgressAllow)
 	}
 	if !containsPort(resolved.BlockPorts, 25) {
 		t.Fatal("open tier must still block outbound SMTP port 25 (issue #36)")

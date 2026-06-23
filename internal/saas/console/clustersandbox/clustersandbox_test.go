@@ -9,8 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	sandboxv2 "mitos.run/mitos/api/v1alpha2"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/tenant"
 )
@@ -18,23 +17,23 @@ import (
 func scheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := sandboxv2.AddToScheme(s); err != nil {
-		t.Fatalf("add v2 scheme: %v", err)
+	if err := v1.AddToScheme(s); err != nil {
+		t.Fatalf("add v1 scheme: %v", err)
 	}
 	return s
 }
 
-// sb builds a v1alpha2.Sandbox owned by org, in that org's hard-isolation
+// sb builds a v1.Sandbox owned by org, in that org's hard-isolation
 // namespace and carrying the org label.
-func sb(org, name, phase string) *sandboxv2.Sandbox {
-	return &sandboxv2.Sandbox{
+func sb(org, name, phase string) *v1.Sandbox {
+	return &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: tenant.NamespaceForOrg(org),
 			Labels:    tenant.OrgLabels(org),
 		},
-		Spec:   sandboxv2.SandboxSpec{Source: sandboxv2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "python"}}},
-		Status: sandboxv2.SandboxStatus{Phase: v1alpha1.SandboxPhase(phase), SandboxID: "engine-" + name},
+		Spec:   v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python"}}},
+		Status: v1.SandboxStatus{Phase: v1.SandboxPhase(phase), SandboxID: "engine-" + name},
 	}
 }
 
