@@ -27,7 +27,7 @@ const manifest: PaperclipPluginManifestV1 = {
             type: "string",
             enum: ["server", "claim"],
             description:
-              "Execution backend. server: standalone sandbox-server REST API. claim: a mitos SandboxClaim on Kubernetes (mitos.run/v1alpha1), with lease lifetime mapped to claim timeout/idleTimeout, callback-bridge mapped to a claim-time egress allow, and secrets injected at claim time. Production enablement of claim mode is gated on mitos #3 (fork-correctness) and #163 (failure/GC) being green in CI.",
+              "Execution backend. server: standalone sandbox-server REST API. claim: a mitos Sandbox on Kubernetes (mitos.run/v1), with lease lifetime mapped to sandbox lifetime.ttl/lifetime.idleTimeout, callback-bridge mapped to a sandbox-time egress allow, and secrets injected at sandbox create time. Production enablement of claim mode is gated on mitos #3 (fork-correctness) and #163 (failure/GC) being green in CI.",
             default: "server",
           },
           serverUrl: {
@@ -48,7 +48,7 @@ const manifest: PaperclipPluginManifestV1 = {
           },
           namespace: {
             type: "string",
-            description: "claim backend only: Kubernetes namespace for the SandboxClaim.",
+            description: "claim backend only: Kubernetes namespace for the Sandbox.",
             default: "default",
           },
           maxLifetimeMin: {

@@ -21,14 +21,14 @@ import {
 } from "./claim-client.js";
 import type { MitosClaimClient } from "./claim-client.js";
 import { leaseToClaim } from "./claim-mapping.js";
-import type { SecretKeyRef } from "./claim-mapping.js";
+import type { MitosSandbox, SecretKeyRef } from "./claim-mapping.js";
 
 /**
  * The driver backend. "server" maps the lease onto the standalone
  * sandbox-server REST API (the original skeleton path). "claim" maps it onto a
- * mitos SandboxClaim on Kubernetes (mitos.run/v1alpha1), the workstream-A
- * target: lease lifetime -> claim timeout/idleTimeout, teardown -> extract then
- * delete, callback-bridge -> claim-time egress allow, secrets at claim time.
+ * mitos Sandbox on Kubernetes (mitos.run/v1), the workstream-A target:
+ * lease lifetime -> sandbox lifetime.ttl/idleTimeout, teardown -> extract then
+ * delete, callback-bridge -> sandbox-time egress allow, secrets at create time.
  *
  * The k8s client wiring (a MitosClaimClient over @mitos/sdk AgentRun) is the
  * external follow-up: this repo carries the pure mapping (claim-mapping.ts) and
@@ -223,10 +223,10 @@ const plugin = definePlugin({
     const sandboxId = `paperclip-${params.environmentId}-${params.runId ?? "default"}`;
 
     if (config.backend === "claim") {
-      // Workstream A: realize the provider contract as a SandboxClaim. Lease
-      // lifetime -> timeout/idleTimeout; callback-bridge -> claim-time egress
-      // allow over default-deny; secrets injected at claim time by reference;
-      // required adapter binaries asserted (never installed) after the fork.
+      // Workstream A: realize the provider contract as a Sandbox. Lease
+      // lifetime -> sandbox lifetime.ttl/idleTimeout; callback-bridge ->
+      // sandbox-time egress allow over default-deny; secrets injected at create
+      // time by reference; required adapter binaries asserted (never installed).
       const client = requireClaimClient(config);
       const claim = leaseToClaim({
         name: sandboxId,
