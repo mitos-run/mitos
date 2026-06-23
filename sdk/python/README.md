@@ -3,6 +3,15 @@
 Python client for [mitos-run/mitos](https://github.com/mitos-run/mitos):
 snapshot-fork sandboxes for AI agents on Kubernetes.
 
+```bash
+pip install mitos-run
+```
+
+The PyPI distribution is named `mitos-run` (the bare `mitos` name is taken by an
+unrelated project), but the import package stays `mitos`: you `pip install
+mitos-run` and `import mitos`. Optional extras keep the same import name, for
+example `pip install "mitos-run[k8s]"` for cluster mode.
+
 Two modes:
 
 - `mitos.create` (flat one-liner): API key plus base URL, returns a Ready
@@ -258,7 +267,7 @@ sb.close()                           # alias: sb.stop(); lifecycle close
 ```
 
 Install the optional extra only if you use the integration:
-`pip install "mitos[langchain]"`. `MitosSandbox` does not subclass any langchain
+`pip install "mitos-run[langchain]"`. `MitosSandbox` does not subclass any langchain
 type and is fully usable without langchain installed.
 
 Fork is a mitos superpower the LangChain sandbox-backend interface does not
@@ -302,7 +311,7 @@ tools.close()
 ```
 
 Install the optional extra only if you use the integration:
-`pip install "mitos[openai-agents]"`. The adapter is fully usable and testable
+`pip install "mitos-run[openai-agents]"`. The adapter is fully usable and testable
 without `openai-agents`; only `as_function_tools()` needs it and it raises a
 clear error naming the extra when absent.
 
@@ -331,7 +340,7 @@ tools.close()
 ```
 
 Install the optional extra only if you use the integration:
-`pip install "mitos[claude-agent]"`. The adapter is fully usable and testable
+`pip install "mitos-run[claude-agent]"`. The adapter is fully usable and testable
 without `claude-agent-sdk`; only `as_mcp_server()` needs it and it raises a clear
 error naming the extra when absent.
 
@@ -356,7 +365,7 @@ sandbox.kill()                            # alias: sandbox.close()
 ```
 
 Install the optional extra only if you use the integration:
-`pip install "mitos[vibekit]"`. The provider does not subclass any VibeKit type
+`pip install "mitos-run[vibekit]"`. The provider does not subclass any VibeKit type
 and is fully usable and testable without VibeKit installed. Fork stays reachable
 as a mitos-native op via `sandbox.fork(n)`, which VibeKit's provider interface
 does not expose.
@@ -382,7 +391,7 @@ comp.deprovision()
 ```
 
 Install the optional extra only if you use the integration:
-`pip install "mitos[zenml]"`. The component backend is fully usable and testable
+`pip install "mitos-run[zenml]"`. The component backend is fully usable and testable
 without ZenML; only `MitosSandboxComponent.flavor()` needs it and raises a clear
 error naming the extra when absent.
 

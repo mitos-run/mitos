@@ -60,7 +60,7 @@ def k8s() -> "_K8s":
             code="kubernetes_not_installed",
             cause=f"importing the kubernetes package failed: {exc}",
             remediation=(
-                "Install it with 'pip install kubernetes' or 'pip install mitos[k8s]'. "
+                "Install it with 'pip install kubernetes' or 'pip install mitos-run[k8s]'. "
                 "Direct mode (mitos.create / mitos.direct) and the in-guest SDK "
                 "(mitos.guest) do not need it."
             ),

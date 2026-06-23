@@ -1,5 +1,11 @@
+# PyPI distribution name. The bare `mitos` name on PyPI is taken by an
+# unrelated bioinformatics tool, so the distribution publishes as `mitos-run`.
+# The import package stays `mitos` (see the `mitos/` directory and the
+# [tool.hatch.build.targets.wheel] packages list below): you `pip install
+# mitos-run` but `import mitos`, the same dist-name != import-name pattern as
+# scikit-learn -> sklearn.
 [project]
-name = "mitos"
+name = "mitos-run"
 version = "0.1.0"
 description = "Python SDK for mitos: sub-millisecond sandbox forking on Kubernetes"
 keywords = ["sandbox", "firecracker", "microvm", "ai-agents", "kubernetes", "code-interpreter", "mitos"]
@@ -21,8 +27,8 @@ Issues = "https://github.com/mitos-run/mitos/issues"
 # Cluster mode (mitos.client.AgentRun, mitos.aio, mitos.sandbox, mitos.workspace)
 # needs the Kubernetes client. Direct mode (mitos.create / mitos.direct over the
 # sandbox-server REST API) and the in-guest SDK (mitos.guest) speak only httpx
-# and never import it, so it is an optional extra: 'pip install mitos' stays
-# light and 'pip install mitos[k8s]' adds cluster support (issue #22).
+# and never import it, so it is an optional extra: 'pip install mitos-run' stays
+# light and 'pip install mitos-run[k8s]' adds cluster support (issue #22).
 k8s = [
     "kubernetes>=31.0.0",
 ]
