@@ -72,9 +72,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
-          # The gemspec requires Ruby >= 2.6.0; 3.3 is a maintained line and
-          # still ships webrick (a bundled gem) that the test stub server needs.
+          # The gemspec requires Ruby >= 2.6.0; 3.3 is a maintained line.
           ruby-version: "3.3"
+      - name: Install test-only deps (webrick left the stdlib in Ruby 3.0)
+        run: gem install webrick --no-document
       - name: minitest suite
         run: ruby -Ilib -Itest test/sandbox_server_test.rb
 
