@@ -70,10 +70,11 @@ func startGRPCServer() {
 // Archive (download), Upload (untar), RunCode, Vitals, and PortForward. Each
 // calls the same logic the JSON-lines path uses, so the path sanitization, the
 // workspace allowlist, the env merge, the kernel state, and the no-secret-log
-// invariants are byte-for-byte identical. Watch, Processes, and Signal remain
-// Unimplemented (Task 5.1c); Fork, Checkpoint, ExtendLifetime, and Budget remain
-// Unimplemented (Stage 8). Embedding by value is required by the generated
-// forward-compat contract.
+// invariants are byte-for-byte identical. Watch, Processes, and Signal (the
+// three genuinely-new RPCs with no JSON predecessor) are implemented in
+// grpc_runtime.go (Task 5.1c). Fork, Checkpoint, ExtendLifetime, and Budget
+// remain Unimplemented (Stage 8). Embedding by value is required by the
+// generated forward-compat contract.
 type sandboxServer struct {
 	sandboxv1.UnimplementedSandboxServer
 }
