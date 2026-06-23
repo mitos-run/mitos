@@ -14,20 +14,19 @@ package controller_test
 // condition.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	v1alpha2 "mitos.run/mitos/api/v1alpha2"
 )
 
 // getSandbox fetches a Sandbox by name in the default namespace, or fails.
-func getSandbox(t *testing.T, name string) *v1alpha2.Sandbox {
+func getSandbox(t *testing.T, name string) *v1.Sandbox {
 	t.Helper()
-	var sb v1alpha2.Sandbox
+	var sb v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &sb); err != nil {
 		t.Fatalf("get sandbox %q: %v", name, err)
 	}
@@ -40,7 +39,7 @@ func waitForEffectiveMaxForks(t *testing.T, name string) int32 {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		var sb v1alpha2.Sandbox
+		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &sb); err == nil {
 			if eb := sb.Status.EffectiveBudget; eb != nil && eb.MaxForks != nil {
 				return *eb.MaxForks
@@ -79,12 +78,12 @@ func TestSandboxForkBudgetIsDepthAggregate(t *testing.T) {
 	maxForks := int32(2)
 
 	// Root R: a poolRef sandbox carrying the budget.
-	root := &v1alpha2.Sandbox{
+	root := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "agg-root", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "agg-pool"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "agg-pool"}},
 			Replicas: 1,
-			Budget:   &v1alpha2.SandboxBudget{MaxForks: &maxForks},
+			Budget:   &v1.SandboxBudget{MaxForks: &maxForks},
 		},
 	}
 	if err := k8sClient.Create(ctx, root); err != nil {
@@ -93,10 +92,10 @@ func TestSandboxForkBudgetIsDepthAggregate(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, root) })
 
 	// C: a fork of R. Admitted (R has room for 2).
-	child := &v1alpha2.Sandbox{
+	child := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "agg-child", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{FromSandbox: &v1alpha2.FromSandboxSource{Name: "agg-root"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "agg-root"}},
 			Replicas: 1,
 		},
 	}
@@ -120,10 +119,10 @@ func TestSandboxForkBudgetIsDepthAggregate(t *testing.T) {
 	// creationTimestamps order GC0 < GC1.
 	gcNames := []string{"agg-grandchild-0", "agg-grandchild-1"}
 	for _, n := range gcNames {
-		gc := &v1alpha2.Sandbox{
+		gc := &v1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: "default"},
-			Spec: v1alpha2.SandboxSpec{
-				Source:   v1alpha2.SandboxSource{FromSandbox: &v1alpha2.FromSandboxSource{Name: "agg-child"}},
+			Spec: v1.SandboxSpec{
+				Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "agg-child"}},
 				Replicas: 1,
 			},
 		}
@@ -143,7 +142,7 @@ func TestSandboxForkBudgetIsDepthAggregate(t *testing.T) {
 		t.Fatalf("agg-grandchild-1 Ready reason = %q, want BudgetExhausted (a fork-of-a-fork must not bypass the root budget)", r)
 	}
 	gc1 := getSandbox(t, "agg-grandchild-1")
-	if gc1.Status.Phase != v1alpha1.SandboxFailed {
+	if gc1.Status.Phase != v1.SandboxFailed {
 		t.Fatalf("agg-grandchild-1 phase = %q, want Failed", gc1.Status.Phase)
 	}
 	if c := apimeta.FindStatusCondition(gc1.Status.Conditions, "Ready"); c == nil || c.Status != metav1.ConditionFalse {
@@ -165,12 +164,12 @@ func TestSandboxEffectiveBudgetNeverWidens(t *testing.T) {
 	rootMax := int32(2)
 	childRequest := int32(100)
 
-	root := &v1alpha2.Sandbox{
+	root := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "widen-root", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "widen-pool"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "widen-pool"}},
 			Replicas: 1,
-			Budget:   &v1alpha2.SandboxBudget{MaxForks: &rootMax},
+			Budget:   &v1.SandboxBudget{MaxForks: &rootMax},
 		},
 	}
 	if err := k8sClient.Create(ctx, root); err != nil {
@@ -178,13 +177,13 @@ func TestSandboxEffectiveBudgetNeverWidens(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, root) })
 
-	child := &v1alpha2.Sandbox{
+	child := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "widen-child", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{FromSandbox: &v1alpha2.FromSandboxSource{Name: "widen-root"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "widen-root"}},
 			Replicas: 1,
 			// The child asks for a far wider budget than the root will have left.
-			Budget: &v1alpha2.SandboxBudget{MaxForks: &childRequest},
+			Budget: &v1.SandboxBudget{MaxForks: &childRequest},
 		},
 	}
 	if err := k8sClient.Create(ctx, child); err != nil {

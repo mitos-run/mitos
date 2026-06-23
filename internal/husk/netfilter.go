@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/netconf"
 )
@@ -26,7 +26,7 @@ type NetfilterConfig struct {
 	// tap (the VM's gateway).
 	HostIP net.IP
 	// Egress is the template's policy; deny is the fail-closed default verdict.
-	Egress v1alpha1.EgressPolicy
+	Egress v1.EgressPolicy
 	// Allow is the raw allowlist; IP:port entries become static chain accepts,
 	// name entries are enforced by the DNS proxy (handled by the caller).
 	Allow []string
@@ -37,7 +37,7 @@ type NetfilterConfig struct {
 	AllowCIDRs []string
 	// Inbound governs unsolicited inbound to the guest; empty means deny-by-default
 	// (the secure default), the existing input-chain behavior.
-	Inbound v1alpha1.InboundPolicy
+	Inbound v1.InboundPolicy
 	// InboundCIDRs narrows an InboundAllow to source CIDRs (Modal
 	// inbound_cidr_allowlist).
 	InboundCIDRs []string

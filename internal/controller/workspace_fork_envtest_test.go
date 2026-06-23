@@ -12,36 +12,36 @@ package controller_test
 // sandbox saw an empty workspace.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 )
 
 func TestForkCommitsCrossWorkspaceRevisionAndAdvancesHead(t *testing.T) {
-	makeWorkspace(t, "wsfk-src", v1alpha1.WorkspaceRetention{})
-	makeWorkspace(t, "wsfk-branch", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "wsfk-src", v1.WorkspaceRetention{})
+	makeWorkspace(t, "wsfk-branch", v1.WorkspaceRetention{})
 
 	// A committed revision in the source workspace: the reconciler commits a
 	// revision whose ContentManifest is a valid content-addressed digest.
 	manifest := testManifest(0xab)
-	srcRev := &v1alpha1.WorkspaceRevision{
+	srcRev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "wsfk-src-",
 			Namespace:    "default",
 			Labels:       map[string]string{controller.WorkspaceLabel: "wsfk-src"},
 		},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "wsfk-src"},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:    v1.LocalObjectReference{Name: "wsfk-src"},
 			ContentManifest: manifest,
 		},
 	}
 	if err := k8sClient.Create(ctx, srcRev); err != nil {
 		t.Fatalf("create source revision: %v", err)
 	}
-	src := waitWorkspace(t, "wsfk-src", func(ws *v1alpha1.Workspace) bool {
+	src := waitWorkspace(t, "wsfk-src", func(ws *v1.Workspace) bool {
 		return ws.Status.Head != ""
 	}, "source head committed")
 
@@ -54,15 +54,15 @@ func TestForkCommitsCrossWorkspaceRevisionAndAdvancesHead(t *testing.T) {
 	// The branch head must advance to the forked, COMMITTED revision sharing the
 	// source content manifest. Before the fix the cross-workspace lineage was
 	// rejected, so the fork stayed Pending and Status.Head never advanced.
-	branch := waitWorkspace(t, "wsfk-branch", func(ws *v1alpha1.Workspace) bool {
+	branch := waitWorkspace(t, "wsfk-branch", func(ws *v1.Workspace) bool {
 		return ws.Status.Head != ""
 	}, "branch head advanced to the fork")
 
-	var head v1alpha1.WorkspaceRevision
+	var head v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: branch.Status.Head}, &head); err != nil {
 		t.Fatalf("get branch head: %v", err)
 	}
-	if head.Status.Phase != v1alpha1.WorkspaceRevisionCommitted {
+	if head.Status.Phase != v1.WorkspaceRevisionCommitted {
 		t.Fatalf("branch head phase = %q, want Committed", head.Status.Phase)
 	}
 	if head.Spec.ContentManifest != manifest {

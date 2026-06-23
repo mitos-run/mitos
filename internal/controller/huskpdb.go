@@ -8,7 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -56,8 +56,8 @@ func huskPDBMinAvailable(replicas int32) int32 {
 // =true) and is owner-referenced to the pool so Kubernetes garbage collection
 // deletes it when the pool is deleted. Idempotent: a second call updates the
 // minAvailable in place if Replicas changed.
-func (r *SandboxPoolReconciler) ensureHuskPDB(ctx context.Context, pool *v1alpha1.SandboxPool) error {
-	minAvailable := intstr.FromInt32(huskPDBMinAvailable(pool.Spec.Replicas))
+func (r *SandboxPoolReconciler) ensureHuskPDB(ctx context.Context, pool *v1.SandboxPool) error {
+	minAvailable := intstr.FromInt32(huskPDBMinAvailable(poolWarmMin(pool)))
 
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{

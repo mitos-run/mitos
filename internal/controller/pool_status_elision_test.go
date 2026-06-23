@@ -2,13 +2,13 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -19,7 +19,7 @@ import (
 // detected.
 func TestPoolStatusUnchanged(t *testing.T) {
 	t1 := metav1.Now()
-	base := v1alpha1.SandboxPoolStatus{
+	base := v1.SandboxPoolStatus{
 		ReadySnapshots:   2,
 		TotalSnapshots:   2,
 		DesiredWarm:      2,
@@ -41,14 +41,14 @@ func TestPoolStatusUnchanged(t *testing.T) {
 	}
 
 	// Each meaningful field change must be detected.
-	mutations := map[string]func(*v1alpha1.SandboxPoolStatus){
-		"ReadySnapshots":   func(s *v1alpha1.SandboxPoolStatus) { s.ReadySnapshots = 1 },
-		"TemplateDigest":   func(s *v1alpha1.SandboxPoolStatus) { s.TemplateDigest = "sha256:def" },
-		"NodeDistribution": func(s *v1alpha1.SandboxPoolStatus) { s.NodeDistribution = map[string]int32{"n1": 2} },
-		"ConditionMessage": func(s *v1alpha1.SandboxPoolStatus) { s.Conditions[0].Message = "1/2 warm husk pods" },
-		"ConditionStatus":  func(s *v1alpha1.SandboxPoolStatus) { s.Conditions[0].Status = metav1.ConditionFalse },
-		"DesiredWarm":      func(s *v1alpha1.SandboxPoolStatus) { s.DesiredWarm = 3 },
-		"ScaleDownTime":    func(s *v1alpha1.SandboxPoolStatus) { s.LastScaleDownTime = &t2 },
+	mutations := map[string]func(*v1.SandboxPoolStatus){
+		"ReadySnapshots":   func(s *v1.SandboxPoolStatus) { s.ReadySnapshots = 1 },
+		"TemplateDigest":   func(s *v1.SandboxPoolStatus) { s.TemplateDigest = "sha256:def" },
+		"NodeDistribution": func(s *v1.SandboxPoolStatus) { s.NodeDistribution = map[string]int32{"n1": 2} },
+		"ConditionMessage": func(s *v1.SandboxPoolStatus) { s.Conditions[0].Message = "1/2 warm husk pods" },
+		"ConditionStatus":  func(s *v1.SandboxPoolStatus) { s.Conditions[0].Status = metav1.ConditionFalse },
+		"DesiredWarm":      func(s *v1.SandboxPoolStatus) { s.DesiredWarm = 3 },
+		"ScaleDownTime":    func(s *v1.SandboxPoolStatus) { s.LastScaleDownTime = &t2 },
 	}
 	for name, mut := range mutations {
 		changed := base.DeepCopy()
@@ -68,22 +68,22 @@ func TestWritePoolStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
-		Status:     v1alpha1.SandboxPoolStatus{ReadySnapshots: 1, TotalSnapshots: 1},
+		Status:     v1.SandboxPoolStatus{ReadySnapshots: 1, TotalSnapshots: 1},
 	}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.SandboxPool{}).
+		WithStatusSubresource(&v1.SandboxPool{}).
 		WithObjects(pool).
 		Build()
 	r := &SandboxPoolReconciler{Client: c}
 	ctx := context.Background()
 
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestWritePoolStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := r.writePoolStatusIfChanged(ctx, &live, before, metav1.Now()); err != nil {
 		t.Fatalf("writePoolStatusIfChanged (no-op): %v", err)
 	}
-	var afterNoop v1alpha1.SandboxPool
+	var afterNoop v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &afterNoop); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestWritePoolStatusIfChangedElidesNoOp(t *testing.T) {
 	if err := r.writePoolStatusIfChanged(ctx, &live, before2, metav1.Now()); err != nil {
 		t.Fatalf("writePoolStatusIfChanged (change): %v", err)
 	}
-	var afterChange v1alpha1.SandboxPool
+	var afterChange v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &afterChange); err != nil {
 		t.Fatal(err)
 	}

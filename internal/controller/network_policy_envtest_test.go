@@ -9,44 +9,40 @@ package controller_test
 // not-yet-enforced.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestClaimPlumbsNetworkPolicyToForkd(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "netpol-node", "netpol-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "netpol-node", "netpol-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "netpol-tmpl", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Image: "python:3.12-slim",
-			Network: &v1alpha1.NetworkPolicy{
-				Egress: v1alpha1.EgressDeny,
-				Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
-			},
-		},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "netpol-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "netpol-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image: "python:3.12-slim",
+				Network: &v1.NetworkPolicy{
+					Egress: v1.EgressDeny,
+					Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
+				},
+			},
+			Warm: &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "netpol-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "netpol-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "netpol-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +50,6 @@ func TestClaimPlumbsNetworkPolicyToForkd(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// The claim must reach Ready: a name-based allow entry does not fail it.
@@ -81,7 +76,7 @@ func TestClaimPlumbsNetworkPolicyToForkd(t *testing.T) {
 	if got == nil {
 		t.Fatal("forkd recorded no NetworkConfig; template NetworkPolicy was not plumbed through the claim path")
 	}
-	if got.EgressPolicy != string(v1alpha1.EgressDeny) {
+	if got.EgressPolicy != string(v1.EgressDeny) {
 		t.Fatalf("recorded egress policy = %q, want deny", got.EgressPolicy)
 	}
 	want := []string{"10.0.0.5:443", "api.example.com:443"}

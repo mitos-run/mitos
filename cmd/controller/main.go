@@ -11,8 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	v1alpha2 "mitos.run/mitos/api/v1alpha2"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/admission"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
@@ -31,10 +30,9 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
-	// v1alpha2: the consolidated three-noun API (issue #23, ADR 0007), served
-	// additively alongside v1alpha1 during the migration.
-	utilruntime.Must(v1alpha2.AddToScheme(scheme))
+	// v1: the consolidated three-noun API (issue #23, ADR 0007). One served
+	// version equals stored version; v1alpha1 and v1alpha2 are removed.
+	utilruntime.Must(v1.AddToScheme(scheme))
 }
 
 // resolveRunMode picks the single active controller run path from the flags.
@@ -68,8 +66,6 @@ func main() {
 	var kekFile string
 	var workspaceMemorySnapshots bool
 	var enablePrincipalWebhook bool
-	var enableV2Sandbox bool
-	var enablePoolConversionWebhook bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -87,8 +83,6 @@ func main() {
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
 	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to WRAP each Encrypted template's per-template DEK (envelope encryption). REQUIRED when any reconciled template sets Encrypted: true; without it EnsureEncKey fails closed. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
-	flag.BoolVar(&enableV2Sandbox, "enable-v2-sandbox", false, "Register the consolidated v1alpha2 Sandbox reconciler (issue #23, ADR 0007): a Sandbox with source.poolRef drives the same fork-from-pool path a SandboxClaim does, and a Sandbox with source.fromSandbox plus replicas drives the live-fork path a SandboxFork does, by owning the corresponding child kind. Additive: the v1alpha1 SandboxClaim/SandboxFork reconcilers are unchanged and both surfaces serve. Off by default during the staged migration.")
-	flag.BoolVar(&enablePoolConversionWebhook, "enable-pool-conversion-webhook", false, "Register the SandboxPool conversion webhook (issue #23, ADR 0007) so the API server can translate the SandboxPool between v1alpha1 and v1alpha2. Requires the webhook server certs and the CRD conversion stanza pointing at the webhook (see the Helm chart). Off by default; v1alpha1 stays the storage version.")
 	flag.BoolVar(&enablePrincipalWebhook, "enable-principal-webhook", false, "Register the validating admission webhook that requires a SandboxClaim's creator to be authorized to impersonate the ServiceAccount named in spec.serviceAccount (RBAC verb 'impersonate' on 'serviceaccounts'). spec.serviceAccount is the principal a memory-snapshot resume is bound to, so without this gate it is self-asserted. STRONGLY RECOMMENDED whenever --workspace-memory-snapshots is enabled in a multi-tenant cluster. Requires the webhook server certs and a ValidatingWebhookConfiguration (see the Helm chart admissionWebhook values). Off by default so single-tenant and webhook-less deployments are unaffected.")
 	flag.BoolVar(&workspaceMemorySnapshots, "workspace-memory-snapshots", false, "Bind the workspace memory-snapshot seams (checkpoint-on-terminate, resume-on-activate, principal-bound existence) to the husk live-VM snapshot path so a checkpointed workspace head becomes RESUMABLE: a later claim with the SAME principal resumes the VM memory image paired with the workspace content. A memory image carries secrets-in-RAM and is bound to the capturing claim's ServiceAccount; it is NEVER served across principals (fail-closed refusal). Off by default: a checkpoint-on-terminate then fails loud rather than producing a falsely-resumable revision. The real bare-metal VM-memory image requires a KVM-capable kubelet and is cluster-gated; see docs/workspaces.md.")
 	flag.Parse()
@@ -213,17 +207,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The claim reconciler holds the husk fields. Its HuskTLS (the controller
-	// client mTLS config used to dial a husk stub's network control) is the SAME
-	// config EnsurePKI returns for forkd dialing; it is assigned below after
-	// bootstrap, exactly like nodeRegistry.TLS.
-	claimReconciler := &controller.SandboxClaimReconciler{
+	// The consolidated v1 Sandbox reconciler OWNS the engine directly (ADR 0007):
+	// source.poolRef drives the claim engine, source.fromSandbox the fork engine,
+	// source.fromRevision a not-served condition. It holds both the claim and fork
+	// husk fields. Its HuskTLS (the controller client mTLS config used to dial a
+	// husk stub's network control) is the SAME config EnsurePKI returns for forkd
+	// dialing; it is assigned below after bootstrap, exactly like nodeRegistry.TLS.
+	sandboxReconciler := &controller.SandboxReconciler{
 		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
 		APIReader:          mgr.GetAPIReader(),
 		NodeRegistry:       nodeRegistry,
 		MaxPendingDuration: maxPendingDuration,
 		EnableHuskPods:     enableHuskPods,
 		HuskControlPort:    huskControlPort,
+		HuskStubImage:      huskStubImage,
+		HuskDNSUpstream:    huskDNSUpstream,
+		DataDir:            huskDataDir,
+		KVMResourceName:    "mitos.run/kvm",
+		HuskTLSSecretName:  controller.HuskTLSSecretName,
+		HuskCASecretName:   controller.CASecretName,
 		KMS:                encKMS,
 		Demand:             poolDemand,
 		Feed: controller.NewEmitFeed(
@@ -237,16 +240,13 @@ func main() {
 		),
 	}
 	// Workspace memory snapshots (W4 Phase 2): when --workspace-memory-snapshots
-	// is set, bind the claim reconciler's checkpoint/resume/exists seams AND the
+	// is set, bind the sandbox reconciler's checkpoint/resume/exists seams AND the
 	// Workspace reconciler's resumable existence check to a single adapter over the
 	// husk live-VM snapshot path. The adapter binds each snapshot to the capturing
-	// claim's principal and refuses any cross-principal resume: a memory image
+	// sandbox's principal and refuses any cross-principal resume: a memory image
 	// carries secrets-in-RAM and is never served across principals. Off by default,
 	// the reconcilers keep their fail-closed defaults, so a checkpoint-on-terminate
-	// fails loud instead of producing a revision falsely marked resumable. The real
-	// bare-metal VM-memory image (a KVM-capable kubelet) is the cluster-gated tail;
-	// until its hooks are present the adapter itself fails loud (no fabricated
-	// snapshot), preserving the no-unverified-claims rule.
+	// fails loud instead of producing a revision falsely marked resumable.
 	var wsMemAdapter *controller.WorkspaceMemorySnapshotAdapter
 	if workspaceMemorySnapshots {
 		wsMemAdapter = &controller.WorkspaceMemorySnapshotAdapter{
@@ -254,49 +254,20 @@ func main() {
 			// live-VM hooks; left nil here, the adapter fails loud (it does not
 			// fabricate a snapshot) until the cluster-gated live-VM path is wired.
 		}
-		claimReconciler.CheckpointMemory = wsMemAdapter.Checkpoint
-		claimReconciler.ResumeMemory = wsMemAdapter.Resume
-		claimReconciler.MemorySnapshotExists = wsMemAdapter.Exists
+		sandboxReconciler.CheckpointMemory = wsMemAdapter.Checkpoint
+		sandboxReconciler.ResumeMemory = wsMemAdapter.Resume
+		sandboxReconciler.MemorySnapshotExists = wsMemAdapter.Exists
 		logger.Info("workspace memory snapshots: ENABLED; checkpoint-on-terminate pairs a principal-bound VM memory image with the revision (resumable head). The bare-metal live-VM image is cluster-gated; without it the adapter fails loud")
 	} else {
 		logger.Info("workspace memory snapshots: disabled (default); a checkpoint-on-terminate fails loud. Pass --workspace-memory-snapshots to enable resumable heads")
 	}
 
-	// Workspace transport (W4): in husk mode the hydrate/dehydrate of a claim's
-	// /workspace is DELEGATED to the husk-stub control op that owns the VM's vsock
-	// and the node CAS (the controller is not on the node). The claim reconciler's
-	// default hydrate/dehydrate path self-wires to dial the claim's husk pod
-	// (defaultHuskHydrate / defaultHuskDehydrate) over the SAME mTLS control
-	// channel that carries Activate + the fork-snapshot ops, using the HuskTLS
-	// assigned after bootstrap below. So the not-wired transport seam no longer
-	// fires in husk mode; the raw-forkd path keeps the documented seam.
 	if enableHuskPods {
-		logger.Info("workspace transport: husk delegation ENABLED; a claim's /workspace hydrate/dehydrate is delegated to the husk-stub control op (the node owns the VM vsock + node CAS); the controller commits the revision and advances the head")
+		logger.Info("workspace transport: husk delegation ENABLED; a sandbox's /workspace hydrate/dehydrate is delegated to the husk-stub control op (the node owns the VM vsock + node CAS); the controller commits the revision and advances the head")
 	}
 
-	if err := claimReconciler.SetupWithManager(mgr); err != nil {
-		logger.Error(err, "unable to create controller", "controller", "SandboxClaim")
-		os.Exit(1)
-	}
-
-	// The fork reconciler holds the husk fork fields. Its HuskTLS (the controller
-	// client mTLS config used to dial a source husk pod's network control to
-	// snapshot it) is the SAME config EnsurePKI returns; it is assigned below
-	// after bootstrap, exactly like the claim reconciler.
-	forkReconciler := &controller.SandboxForkReconciler{
-		Client:            mgr.GetClient(),
-		NodeRegistry:      nodeRegistry,
-		EnableHuskPods:    enableHuskPods,
-		HuskControlPort:   huskControlPort,
-		HuskStubImage:     huskStubImage,
-		HuskDNSUpstream:   huskDNSUpstream,
-		DataDir:           huskDataDir,
-		KVMResourceName:   "mitos.run/kvm",
-		HuskTLSSecretName: controller.HuskTLSSecretName,
-		HuskCASecretName:  controller.CASecretName,
-	}
-	if err := forkReconciler.SetupWithManager(mgr); err != nil {
-		logger.Error(err, "unable to create controller", "controller", "SandboxFork")
+	if err := sandboxReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
 	}
 
@@ -318,32 +289,6 @@ func main() {
 	if err := wsReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "Workspace")
 		os.Exit(1)
-	}
-
-	// The consolidated v1alpha2 Sandbox reconciler (issue #23, ADR 0007). Opt-in:
-	// it maps a Sandbox onto an owned SandboxClaim (source.poolRef) or SandboxFork
-	// (source.fromSandbox) and mirrors the child status back, additive to the
-	// unchanged v1alpha1 reconcilers. Off by default during the staged migration.
-	if enableV2Sandbox {
-		if err := (&controller.SandboxReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-		}).SetupWithManager(mgr); err != nil {
-			logger.Error(err, "unable to create controller", "controller", "Sandbox")
-			os.Exit(1)
-		}
-		logger.Info("v1alpha2 Sandbox reconciler: ENABLED (consolidated three-noun surface; maps onto the unchanged SandboxClaim/SandboxFork engine)")
-	}
-
-	// The SandboxPool conversion webhook (issue #23, ADR 0007). Opt-in: it needs
-	// the webhook server certs and the CRD conversion stanza. v1alpha1 stays the
-	// storage version; the webhook only translates between the two served versions.
-	if enablePoolConversionWebhook {
-		if err := v1alpha2.SetupSandboxPoolWebhookWithManager(mgr); err != nil {
-			logger.Error(err, "unable to set up SandboxPool conversion webhook")
-			os.Exit(1)
-		}
-		logger.Info("SandboxPool conversion webhook: ENABLED (translates SandboxPool between v1alpha1 and v1alpha2)")
 	}
 
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
@@ -386,13 +331,11 @@ func main() {
 		// (husk.<ns>.mitos) so the shared forkd server key is never needed in a
 		// tenant namespace. The controller leaf + CA are read from the controller
 		// namespace at dial time (so a cert rotation is picked up).
-		claimReconciler.HuskTLS = tlsConf
-		forkReconciler.HuskTLS = tlsConf
+		sandboxReconciler.HuskTLS = tlsConf
 		huskDial := func(dialCtx context.Context, poolNamespace string) (*tls.Config, error) {
 			return controller.HuskDialTLSConfig(dialCtx, mgr.GetClient(), discoveryNamespace, poolNamespace)
 		}
-		claimReconciler.HuskTLSFor = huskDial
-		forkReconciler.HuskTLSFor = huskDial
+		sandboxReconciler.HuskTLSFor = huskDial
 		logger.Info("PKI bootstrap complete; dialing forkd with mTLS and husk pods with per-namespace identity", "namespace", discoveryNamespace)
 	}
 

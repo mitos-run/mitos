@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/fork"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,32 +19,26 @@ import (
 
 const gib = int64(1024 * 1024 * 1024)
 
-// makeCapacityFixture creates a template, pool, and claim wired together for a
-// capacity-admission test and returns a cleanup. The caller has already started
-// a fake forkd node holding the template.
+// makeCapacityFixture creates an inline-template pool and a Sandbox wired
+// together for a capacity-admission test and registers a cleanup. The caller has
+// already started a fake forkd node holding the pool's snapshot (keyed by the
+// pool name, the inline-template snapshot id).
 func makeCapacityFixture(t *testing.T, name string) {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: name + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: name + "-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: name + "-pool"}},
 		},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
@@ -53,13 +47,12 @@ func makeCapacityFixture(t *testing.T, name string) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 }
 
-func getClaim(t *testing.T, name string) v1alpha1.SandboxClaim {
+func getClaim(t *testing.T, name string) v1.Sandbox {
 	t.Helper()
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-claim", Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +61,10 @@ func getClaim(t *testing.T, name string) v1alpha1.SandboxClaim {
 
 // waitForPhase polls the claim until it reaches want or the deadline; it fails
 // the test if the claim reaches a different terminal phase or times out.
-func waitForPhase(t *testing.T, name string, want v1alpha1.SandboxPhase, timeout time.Duration) v1alpha1.SandboxClaim {
+func waitForPhase(t *testing.T, name string, want v1.SandboxPhase, timeout time.Duration) v1.Sandbox {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	var last v1alpha1.SandboxClaim
+	var last v1.Sandbox
 	for time.Now().Before(deadline) {
 		last = getClaim(t, name)
 		if last.Status.Phase == want {
@@ -88,7 +81,7 @@ func waitForPhase(t *testing.T, name string, want v1alpha1.SandboxPhase, timeout
 // NoCapacity condition (not Ready, not Failed); freeing the node lets the claim
 // place and reach Ready.
 func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "cap-node-1", "cap1-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "cap-node-1", "cap1-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +96,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 	makeCapacityFixture(t, "cap1")
 
 	// The claim must pend (not Ready, not Failed) while capacity is exhausted.
-	pending := waitForPhase(t, "cap1", v1alpha1.SandboxPending, 15*time.Second)
+	pending := waitForPhase(t, "cap1", v1.SandboxPending, 15*time.Second)
 	if got := counterValue(t, "mitos_claim_pending_total", nil); got <= pendingBefore {
 		t.Fatalf("claim_pending_total = %v, want > %v", got, pendingBefore)
 	}
@@ -121,7 +114,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 	// Free the node: usage drops to 0, so the projected fork now fits.
 	testRegistry.SetNodeMemory("cap-node-1", 2*gib, 0)
 
-	ready := waitForPhase(t, "cap1", v1alpha1.SandboxReady, 15*time.Second)
+	ready := waitForPhase(t, "cap1", v1.SandboxReady, 15*time.Second)
 	if ready.Status.Node != "cap-node-1" {
 		t.Fatalf("ready node = %q, want cap-node-1", ready.Status.Node)
 	}
@@ -137,7 +130,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 // backdating the pending-since annotation past the default bound so the test
 // does not sleep for minutes.
 func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "cap-node-2", "cap2-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "cap-node-2", "cap2-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +142,7 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 	makeCapacityFixture(t, "cap2")
 
 	// First, confirm it pends and the stamp lands.
-	pending := waitForPhase(t, "cap2", v1alpha1.SandboxPending, 15*time.Second)
+	pending := waitForPhase(t, "cap2", v1.SandboxPending, 15*time.Second)
 	if pending.Annotations[capacityPendingSinceKey] == "" {
 		t.Fatal("expected capacity-pending-since annotation to be stamped")
 	}
@@ -163,12 +156,12 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 		capacityPendingSinceKey,
 		time.Now().Add(-10*time.Minute).Format(time.RFC3339),
 	)))
-	target := &v1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "cap2-claim", Namespace: "default"}}
+	target := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "cap2-claim", Namespace: "default"}}
 	if err := k8sClient.Patch(ctx, target, patch); err != nil {
 		t.Fatalf("backdate pending annotation: %v", err)
 	}
 
-	failed := waitForPhase(t, "cap2", v1alpha1.SandboxFailed, 15*time.Second)
+	failed := waitForPhase(t, "cap2", v1.SandboxFailed, 15*time.Second)
 	if failed.Status.FinishedAt == nil {
 		t.Fatal("failed claim must stamp FinishedAt for GC TTL reaping")
 	}
@@ -188,7 +181,7 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 // with a NoCapacity condition (bounded retry), NOT fail terminally: another
 // node, or this one once it drains, can still take the fork.
 func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-3", "cap3-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-3", "cap3-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +194,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 
 	makeCapacityFixture(t, "cap3")
 
-	pending := waitForPhase(t, "cap3", v1alpha1.SandboxPending, 15*time.Second)
+	pending := waitForPhase(t, "cap3", v1.SandboxPending, 15*time.Second)
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
@@ -209,7 +202,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	if cond.Status != metav1.ConditionFalse {
 		t.Fatalf("NoCapacity Ready condition status = %q, want False", cond.Status)
 	}
-	if pending.Status.Phase == v1alpha1.SandboxFailed {
+	if pending.Status.Phase == v1.SandboxFailed {
 		t.Fatal("claim must NOT be Failed on a forkd ResourceExhausted reject")
 	}
 	// The message must reflect the count-ceiling cause, NOT the memory-overcommit
@@ -224,7 +217,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	// Clearing the reject lets a later reconcile place the claim and go Ready,
 	// proving the re-pend was recoverable (not a dead end).
 	engine.ForkErr = nil
-	ready := waitForPhase(t, "cap3", v1alpha1.SandboxReady, 15*time.Second)
+	ready := waitForPhase(t, "cap3", v1.SandboxReady, 15*time.Second)
 	if ready.Status.Node != "cap-node-3" {
 		t.Fatalf("ready node = %q, want cap-node-3", ready.Status.Node)
 	}
@@ -235,7 +228,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 // and the RPC). Like ResourceExhausted, the claim must RE-PEND (NoCapacity), not
 // fail terminally, so it retries on a healthy node.
 func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-4", "cap4-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-4", "cap4-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,12 +239,12 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 
 	makeCapacityFixture(t, "cap4")
 
-	pending := waitForPhase(t, "cap4", v1alpha1.SandboxPending, 15*time.Second)
+	pending := waitForPhase(t, "cap4", v1.SandboxPending, 15*time.Second)
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
 	}
-	if pending.Status.Phase == v1alpha1.SandboxFailed {
+	if pending.Status.Phase == v1.SandboxFailed {
 		t.Fatal("claim must NOT be Failed on a forkd Unavailable reject")
 	}
 	// The message must reflect the node-unreachable cause, NOT the

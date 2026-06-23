@@ -7,12 +7,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
-func rdyClaim() *v1alpha1.SandboxClaim {
-	return &v1alpha1.SandboxClaim{Status: v1alpha1.SandboxClaimStatus{
-		Phase: v1alpha1.SandboxReady, Node: "n1", Endpoint: "10.0.0.1:9091", SandboxID: "pod-1",
+func rdyClaim() *v1.Sandbox {
+	return &v1.Sandbox{Status: v1.SandboxStatus{
+		Phase: v1.SandboxReady, Node: "n1", Endpoint: "10.0.0.1:9091", SandboxID: "pod-1",
 		Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "HuskActivated", LastTransitionTime: metav1.Now()}},
 	}}
 }
@@ -23,7 +23,7 @@ func rdyPod(ready bool) *corev1.Pod {
 	}
 	return &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: st}}}}
 }
-func rdyCond(c *v1alpha1.SandboxClaim) (metav1.ConditionStatus, string) {
+func rdyCond(c *v1.Sandbox) (metav1.ConditionStatus, string) {
 	for _, x := range c.Status.Conditions {
 		if x.Type == "Ready" {
 			return x.Status, x.Reason

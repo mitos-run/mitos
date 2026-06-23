@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	forkdpb "mitos.run/mitos/proto/forkd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -80,35 +80,30 @@ func (g *GarbageCollector) applyDefaults() {
 func (g *GarbageCollector) runOnce(ctx context.Context) {
 	logger := log.FromContext(ctx).WithName("gc")
 
-	var claims v1alpha1.SandboxClaimList
-	if err := g.Client.List(ctx, &claims); err != nil {
-		logger.Error(err, "list claims")
-		return
-	}
-	var forks v1alpha1.SandboxForkList
-	if err := g.Client.List(ctx, &forks); err != nil {
-		logger.Error(err, "list forks")
+	var sandboxes v1.SandboxList
+	if err := g.Client.List(ctx, &sandboxes); err != nil {
+		logger.Error(err, "list sandboxes")
 		return
 	}
 
-	desired := g.desiredAlive(claims.Items, forks.Items)
-	liveIDs := g.liveIDs(claims.Items, forks.Items)
+	desired := g.desiredAlive(sandboxes.Items)
+	liveIDs := g.liveIDs(sandboxes.Items)
 
-	// Order matters only loosely: markNodeLost only touches claims whose node is
-	// unhealthy/absent, and sweepOrphans only visits healthy nodes, so the two
-	// never act on the same node. A claim just marked NodeLost stamps
+	// Order matters only loosely: markNodeLost only touches sandboxes whose node
+	// is unhealthy/absent, and sweepOrphans only visits healthy nodes, so the two
+	// never act on the same node. A sandbox just marked NodeLost stamps
 	// FinishedAt=now, so it is too fresh for any later TTL pass to delete.
-	g.markNodeLost(ctx, logger, claims.Items)
-	g.sweepOrphans(ctx, logger, desired, liveIDs, claims.Items)
+	g.markNodeLost(ctx, logger, sandboxes.Items)
+	g.sweepOrphans(ctx, logger, desired, liveIDs, sandboxes.Items)
 	g.sweepOrphanVolumes(ctx, logger, desired, liveIDs)
-	g.ttlFinished(ctx, logger, claims.Items)
+	g.ttlFinished(ctx, logger, sandboxes.Items)
 }
 
 // desiredAlive builds the set of VMs the control plane expects alive, keyed by
-// node then sandbox id: Ready claims (status.Node + status.SandboxID) and
-// Ready fork children (fork.Status.Forks entries with a Node, SandboxID, and
+// node then sandbox id: Ready poolRef sandboxes (status.Node + status.SandboxID)
+// and Ready fork children (status.Children entries with a Node, SandboxID, and
 // Ready phase).
-func (g *GarbageCollector) desiredAlive(claims []v1alpha1.SandboxClaim, forks []v1alpha1.SandboxFork) map[string]map[string]bool {
+func (g *GarbageCollector) desiredAlive(sandboxes []v1.Sandbox) map[string]map[string]bool {
 	desired := make(map[string]map[string]bool)
 	add := func(node, id string) {
 		if node == "" || id == "" {
@@ -119,16 +114,13 @@ func (g *GarbageCollector) desiredAlive(claims []v1alpha1.SandboxClaim, forks []
 		}
 		desired[node][id] = true
 	}
-	for i := range claims {
-		c := &claims[i]
-		if c.Status.Phase == v1alpha1.SandboxReady {
+	for i := range sandboxes {
+		c := &sandboxes[i]
+		if c.Status.Phase == v1.SandboxReady {
 			add(c.Status.Node, c.Status.SandboxID)
 		}
-	}
-	for i := range forks {
-		f := &forks[i]
-		for _, fi := range f.Status.Forks {
-			if fi.Phase == v1alpha1.SandboxReady {
+		for _, fi := range c.Status.Children {
+			if fi.Phase == v1.SandboxReady {
 				add(fi.Node, fi.SandboxID)
 			}
 		}
@@ -139,27 +131,24 @@ func (g *GarbageCollector) desiredAlive(claims []v1alpha1.SandboxClaim, forks []
 // liveIDs builds a node-independent set of sandbox ids the control plane still
 // has a live CRD object for, so the orphan sweep never kills a VM whose backing
 // object exists even when that object never wrote status.Node/status.SandboxID
-// (e.g. a claim wedged in Restoring or Pending past the grace).
+// (e.g. a sandbox wedged in Restoring or Pending past the grace).
 //
-// The controller uses claim.Name AS the sandbox id (the claim reconciler calls
-// forkOnNode(ctx, node, snapshotID, claim.Name, ...) and forkd echoes it back,
-// so status.SandboxID == claim.Name once Ready). So every non-terminal claim
-// contributes claim.Name regardless of its status, and every non-terminal fork
-// child contributes its explicit SandboxID from fork.Status.Forks. A VM is only
-// a sweep candidate once its claim object is gone (or its node is lost).
-func (g *GarbageCollector) liveIDs(claims []v1alpha1.SandboxClaim, forks []v1alpha1.SandboxFork) map[string]bool {
+// The controller uses sandbox.Name AS the sandbox id (the engine calls
+// forkOnNode(ctx, node, snapshotID, sb.Name, ...) and forkd echoes it back, so
+// status.SandboxID == sb.Name once Ready). So every non-terminal sandbox
+// contributes sb.Name regardless of its status, and every non-terminal fork
+// child contributes its explicit SandboxID from status.Children. A VM is only a
+// sweep candidate once its sandbox object is gone (or its node is lost).
+func (g *GarbageCollector) liveIDs(sandboxes []v1.Sandbox) map[string]bool {
 	live := make(map[string]bool)
-	for i := range claims {
-		c := &claims[i]
-		if c.Status.Phase == v1alpha1.SandboxTerminated || c.Status.Phase == v1alpha1.SandboxFailed {
+	for i := range sandboxes {
+		c := &sandboxes[i]
+		if c.Status.Phase == v1.SandboxTerminated || c.Status.Phase == v1.SandboxFailed {
 			continue
 		}
 		live[c.Name] = true
-	}
-	for i := range forks {
-		f := &forks[i]
-		for _, fi := range f.Status.Forks {
-			if fi.Phase == v1alpha1.SandboxTerminated || fi.Phase == v1alpha1.SandboxFailed {
+		for _, fi := range c.Status.Children {
+			if fi.Phase == v1.SandboxTerminated || fi.Phase == v1.SandboxFailed {
 				continue
 			}
 			if fi.SandboxID != "" {
@@ -176,16 +165,16 @@ func (g *GarbageCollector) liveIDs(claims []v1alpha1.SandboxClaim, forks []v1alp
 // is owned by the NodeLost path. The liveIDs guard closes the stuck-Restoring
 // window: a VM keeps living as long as its claim object exists, while a
 // genuinely-abandoned VM (claim object gone) is still reaped.
-func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool, claims []v1alpha1.SandboxClaim) {
+func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger, desired map[string]map[string]bool, liveIDs map[string]bool, sandboxes []v1.Sandbox) {
 	// Index terminal claims by sandbox id (the claim name) so the sweep can
 	// surface a typed condition when it reaps a VM a still-present claim once
 	// backed. Only terminal claims appear here: a non-terminal claim by name is
 	// in liveIDs and never swept. The claim having reached a terminal phase while
 	// its VM lingered is the re-adopted-orphan case the condition names.
-	terminalClaims := make(map[string]*v1alpha1.SandboxClaim, len(claims))
-	for i := range claims {
-		c := &claims[i]
-		if c.Status.Phase == v1alpha1.SandboxTerminated || c.Status.Phase == v1alpha1.SandboxFailed {
+	terminalClaims := make(map[string]*v1.Sandbox, len(sandboxes))
+	for i := range sandboxes {
+		c := &sandboxes[i]
+		if c.Status.Phase == v1.SandboxTerminated || c.Status.Phase == v1.SandboxFailed {
 			terminalClaims[c.Name] = c
 		}
 	}
@@ -229,7 +218,7 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 // (setCondition no-ops an identical re-assert) so repeated passes on a claim
 // that survives its TTL do not churn the object. The message is operator-legible
 // and carries no secret value.
-func (g *GarbageCollector) stampOrphanReaped(ctx context.Context, logger logr.Logger, claim *v1alpha1.SandboxClaim) {
+func (g *GarbageCollector) stampOrphanReaped(ctx context.Context, logger logr.Logger, claim *v1.Sandbox) {
 	changed := setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
@@ -298,20 +287,20 @@ func (g *GarbageCollector) sweepOrphanVolumes(ctx context.Context, logger logr.L
 // loss by re-pending onto a replacement dormant slot (checkHuskPodLost + the
 // husk pod watch own that path). Failing it here would race that re-pend into a
 // terminal state and defeat the husk self-heal.
-func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger, claims []v1alpha1.SandboxClaim) {
+func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger, sandboxes []v1.Sandbox) {
 	if g.EnableHuskPods {
 		return
 	}
-	for i := range claims {
-		c := &claims[i]
-		if c.Status.Phase != v1alpha1.SandboxReady {
+	for i := range sandboxes {
+		c := &sandboxes[i]
+		if c.Status.Phase != v1.SandboxReady {
 			continue
 		}
 		if c.Status.Node == "" || g.Registry.NodeHealthy(c.Status.Node) {
 			continue
 		}
 		now := metav1.Now()
-		c.Status.Phase = v1alpha1.SandboxFailed
+		c.Status.Phase = v1.SandboxFailed
 		c.Status.FinishedAt = &now
 		setCondition(&c.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
@@ -337,22 +326,22 @@ func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger,
 // its finalizer. A claim freshly stamped terminal earlier in this same pass has
 // FinishedAt=now, so it is too young to delete here; SandboxForks have no
 // FinishedAt today, so TTL of forks is a follow-up.
-func (g *GarbageCollector) ttlFinished(ctx context.Context, logger logr.Logger, claims []v1alpha1.SandboxClaim) {
+func (g *GarbageCollector) ttlFinished(ctx context.Context, logger logr.Logger, sandboxes []v1.Sandbox) {
 	now := time.Now()
-	for i := range claims {
-		c := &claims[i]
+	for i := range sandboxes {
+		c := &sandboxes[i]
 		if !c.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if c.Status.Phase != v1alpha1.SandboxTerminated && c.Status.Phase != v1alpha1.SandboxFailed {
+		if c.Status.Phase != v1.SandboxTerminated && c.Status.Phase != v1.SandboxFailed {
 			continue
 		}
 		if c.Status.FinishedAt == nil {
 			continue
 		}
 		ttl := g.DefaultTTLSeconds
-		if c.Spec.TTLSecondsAfterFinished != nil {
-			ttl = *c.Spec.TTLSecondsAfterFinished
+		if sandboxTTLSecondsAfterFinished(c) != nil {
+			ttl = *sandboxTTLSecondsAfterFinished(c)
 		}
 		if now.Sub(c.Status.FinishedAt.Time) < time.Duration(ttl)*time.Second {
 			continue

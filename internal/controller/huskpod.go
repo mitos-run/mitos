@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -288,7 +288,7 @@ func huskMemoryLimit(memReq, floor resource.Quantity, percent int) resource.Quan
 // GenerateName <pool>-husk- in the pool namespace, owner-referenced to the pool
 // for garbage collection, labeled for the warm-pool selector, and runs the
 // dormant stub with a non-privileged securityContext.
-func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
+func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.PoolTemplateSpec, opts HuskPodOptions) *corev1.Pod {
 	kvmResource := opts.KVMResourceName
 	if kvmResource == "" {
 		kvmResource = defaultKVMResourceName
@@ -299,12 +299,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// sandbox like any other workload (scheduler truth: a husk pod shows up in
 	// kubectl describe node and counts against ResourceQuota/LimitRange).
 	cpuReq := defaultHuskCPU
-	if !template.Spec.Resources.CPU.IsZero() {
-		cpuReq = template.Spec.Resources.CPU
+	if !template.Resources.CPU.IsZero() {
+		cpuReq = template.Resources.CPU
 	}
 	memReq := defaultHuskMemory
-	if !template.Spec.Resources.Memory.IsZero() {
-		memReq = template.Spec.Resources.Memory
+	if !template.Resources.Memory.IsZero() {
+		memReq = template.Resources.Memory
 	}
 	// Memory LIMIT = request + headroom (production-blocker #2, cap 1). The
 	// headroom (floor + proportional) is operator-tunable on the reconciler; the
@@ -894,14 +894,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 // then rewrites the ownership, labels, and name for the fork. The pod is pinned
 // to the source node (opts.ForkSourceNode) and activates from
 // <DataDir>/forks/<ForkSnapshotID> (opts.ForkSnapshotID), both set by the caller.
-func buildForkChildPod(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
 	// buildHuskPod only reads r.Scheme() (for the owner ref we overwrite) and the
 	// opts, so a zero reconciler is sufficient to build the spec. A synthetic pool
 	// carrier supplies GenerateName/namespace; ownership and labels are overwritten
 	// below.
 	r := &SandboxPoolReconciler{}
-	carrier := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
-	pod := r.buildHuskPod(carrier, &v1alpha1.SandboxTemplate{}, opts)
+	carrier := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
+	pod := r.buildHuskPod(carrier, &v1.PoolTemplateSpec{}, opts)
 
 	// Rewrite identity: owned by the SandboxFork (GC with it), labeled as a fork
 	// child (never a warm-pool slot), deterministic name so re-reconcile is
@@ -945,7 +945,7 @@ type huskReconcileResult struct {
 // in-use counts WITHOUT creating or deleting anything, so the autoscaler can
 // compute a desired count before reconcileHuskPods drives toward it. Same
 // filtering as reconcileHuskPods (non-terminating, owned, dormant vs claimed).
-func (r *SandboxPoolReconciler) countHuskPods(ctx context.Context, pool *v1alpha1.SandboxPool) (dormant, inUse int32, err error) {
+func (r *SandboxPoolReconciler) countHuskPods(ctx context.Context, pool *v1.SandboxPool) (dormant, inUse int32, err error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(pool.Namespace),
@@ -974,7 +974,7 @@ func (r *SandboxPoolReconciler) countHuskPods(ctx context.Context, pool *v1alpha
 	return dorm, use, nil
 }
 
-func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, desired int32) (huskReconcileResult, error) {
+func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, desired int32) (huskReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
 	var pods corev1.PodList
@@ -1068,7 +1068,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			StubImage:       r.HuskStubImage,
 			DNSUpstream:     r.HuskDNSUpstream,
 			KVMResourceName: r.KVMResourceName,
-			SnapshotID:      pool.Spec.TemplateRef.Name,
+			SnapshotID:      poolTemplateID(pool),
 			DataDir:         r.DataDir,
 			TLSSecretName:   r.HuskTLSSecretName,
 			CASecretName:    r.HuskCASecretName,
@@ -1089,7 +1089,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		// survivors, where the digest is correct for that node).
 		var holders []SnapshotHolder
 		if r.NodeRegistry != nil {
-			holders = r.NodeRegistry.SnapshotHolders(pool.Spec.TemplateRef.Name)
+			holders = r.NodeRegistry.SnapshotHolders(poolTemplateID(pool))
 		}
 		// dedicatedNodes (#172): a placed pool may only run on its dedicated nodes,
 		// so restrict the snapshot-holders we pin pods to (the #175 per-node-digest
@@ -1134,8 +1134,8 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 				// No registry, or no node has reported holding the snapshot yet: fall
 				// back to the kvm nodeSelector alone and the stub's unverified escape
 				// hatch so a pre-digest pool still warms.
-				podOpts.SnapshotNodes = r.snapshotNodeNames(pool.Spec.TemplateRef.Name)
-				podOpts.ExpectedDigest = r.huskTemplateDigest(pool.Spec.TemplateRef.Name)
+				podOpts.SnapshotNodes = r.snapshotNodeNames(poolTemplateID(pool))
+				podOpts.ExpectedDigest = r.huskTemplateDigest(poolTemplateID(pool))
 			}
 			pod := r.buildHuskPod(pool, template, podOpts)
 			if err := r.Create(ctx, pod); err != nil {
@@ -1198,14 +1198,14 @@ func huskTolerations(opts HuskPodOptions) []corev1.Toleration {
 
 // huskPlacementNodeSelector / huskPlacementTolerations read the pool's
 // spec.placement (dedicatedNodes, #172), nil-safe.
-func huskPlacementNodeSelector(pool *v1alpha1.SandboxPool) map[string]string {
+func huskPlacementNodeSelector(pool *v1.SandboxPool) map[string]string {
 	if pool.Spec.Placement == nil {
 		return nil
 	}
 	return pool.Spec.Placement.NodeSelector
 }
 
-func huskPlacementTolerations(pool *v1alpha1.SandboxPool) []corev1.Toleration {
+func huskPlacementTolerations(pool *v1.SandboxPool) []corev1.Toleration {
 	if pool.Spec.Placement == nil {
 		return nil
 	}
@@ -1283,7 +1283,7 @@ func (r *SandboxPoolReconciler) observeRefillForReadyPods(ctx context.Context, o
 // deliberately NOT compared: it adds no forgery resistance (anyone who could
 // forge BlockOwnerDeletion could also read and copy the pool UID), and in
 // production GC already deletes husk pods whose owner UID drifts from the pool.
-func huskPodOwnedByPool(pod *corev1.Pod, pool *v1alpha1.SandboxPool) bool {
+func huskPodOwnedByPool(pod *corev1.Pod, pool *v1.SandboxPool) bool {
 	ref := metav1.GetControllerOf(pod)
 	if ref == nil {
 		return false
@@ -1318,7 +1318,7 @@ func huskPodReady(p *corev1.Pod) bool {
 // carries the pod's resourceVersion so exactly one wins and the loser gets a 409
 // Conflict and requeues to pick a different dormant pod. A pod is therefore
 // claimed (and activated) by exactly one claim.
-func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool) (*corev1.Pod, error) {
+func (r *SandboxReconciler) selectDormantHuskPod(ctx context.Context, pool *v1.SandboxPool) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(pool.Namespace),
@@ -1372,7 +1372,7 @@ func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool 
 // patch still merges cleanly with concurrent kubelet status writes (status is a
 // separate subresource), so the optimistic lock fires only on a genuine
 // metadata race, which is exactly the double-assignment it must prevent.
-func (r *SandboxClaimReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claimName string) error {
+func (r *SandboxReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claimName string) error {
 	patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
@@ -1393,7 +1393,7 @@ func (r *SandboxClaimReconciler) markHuskPodClaimed(ctx context.Context, pod *co
 // permanently, leaking warm capacity and blocking cross-node failover (#177). It
 // is the claim that stamped the label releasing it, so no optimistic lock is
 // needed; a no-op when the label is already absent.
-func (r *SandboxClaimReconciler) unmarkHuskPodClaimed(ctx context.Context, pod *corev1.Pod) error {
+func (r *SandboxReconciler) unmarkHuskPodClaimed(ctx context.Context, pod *corev1.Pod) error {
 	if pod.Labels[huskClaimLabel] == "" {
 		return nil
 	}

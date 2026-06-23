@@ -1,43 +1,45 @@
 package controller_test
 
-// Conformance envtest for the v1alpha2 consolidated Sandbox kind (issue #23,
-// ADR 0007): the three-noun API expresses everything the four-noun API did.
+// Conformance + guard envtests for the v1 consolidated Sandbox kind (issue #23,
+// ADR 0007): the three-noun API expresses everything the four-noun API did, and
+// the reconciler OWNS the engine directly (no intermediate SandboxClaim or
+// SandboxFork object).
 //
-//   - A Sandbox{source.poolRef} reaches Ready, driving the same fork-from-pool
-//     path a SandboxClaim drives (the CLAIM equivalent). Ported from the
-//     claim-ready assertions.
+//   - A Sandbox{source.poolRef} reaches Ready, driving the fork-from-pool path
+//     the old SandboxClaim drove (the CLAIM equivalent), with NO child object.
 //   - A Sandbox{source.fromSandbox, replicas:N} produces N children, driving the
-//     live-fork path a SandboxFork drives (the FORK equivalent). Ported from the
-//     fork-ready assertions.
+//     live-fork path the old SandboxFork drove (the FORK equivalent).
+//   - A pool with an inline spec.template builds with NO SandboxTemplate object.
+//   - A fork of a secret-holding source is denied by default (reissue), with the
+//     SecretInheritanceDenied condition.
+//   - A Sandbox{source.fromRevision} reports Ready=False / RevisionResumeNotImplemented.
 //
-// Both run against the MOCK engine (the fake forkd node), additively: the v2
-// Sandbox reconciler owns a SandboxClaim / SandboxFork that the existing raw
-// reconcilers drive, and mirrors the child status back onto the Sandbox.
+// All run against the MOCK engine (the fake forkd node).
 
 import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	v1alpha2 "mitos.run/mitos/api/v1alpha2"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// waitSandboxReady polls until the named v1alpha2 Sandbox reaches Ready and
-// returns it, failing the test otherwise.
-func waitSandboxReady(t *testing.T, name string) *v1alpha2.Sandbox {
+// waitSandboxReady polls until the named v1 Sandbox reaches Ready and returns it.
+func waitSandboxReady(t *testing.T, name string) *v1.Sandbox {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
-	var last v1alpha2.Sandbox
+	var last v1.Sandbox
 	for time.Now().Before(deadline) {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &last); err == nil {
-			if last.Status.Phase == v1alpha1.SandboxReady {
+			if last.Status.Phase == v1.SandboxReady {
 				return &last
 			}
-			if last.Status.Phase == v1alpha1.SandboxFailed {
+			if last.Status.Phase == v1.SandboxFailed {
 				t.Fatalf("sandbox %s failed: %+v", name, last.Status)
 			}
 		}
@@ -47,35 +49,38 @@ func waitSandboxReady(t *testing.T, name string) *v1alpha2.Sandbox {
 	return nil
 }
 
-// TestSandboxV2PoolRefReachesReady is the CLAIM-equivalent conformance: a
-// Sandbox with source.poolRef and the default replicas 1 reaches Ready, with an
-// endpoint and pod mirrored back from the owned claim.
+// inlinePool builds a v1 SandboxPool with an inline template (no SandboxTemplate
+// object). The pool name doubles as the template/snapshot id (poolTemplateID).
+func inlinePool(name string) *v1.SandboxPool {
+	return &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+}
+
+// TestSandboxV2PoolRefReachesReady is the CLAIM-equivalent conformance: a Sandbox
+// with source.poolRef and the default replicas 1 reaches Ready, with an endpoint
+// and sandboxID set by the engine, and NO child SandboxClaim object (the kind no
+// longer exists).
 func TestSandboxV2PoolRefReachesReady(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "v2pool-node-1", "v2pool-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "v2pool-node-1", "v2pool-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "v2pool-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "v2pool-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "v2pool-tmpl"},
-			Replicas:    1,
-		},
-	}
-	sb := &v1alpha2.Sandbox{
+	pool := inlinePool("v2pool-pool")
+	sb := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "v2pool-sandbox", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "v2pool-pool"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "v2pool-pool"}},
 			Replicas: 1,
 		},
 	}
-	for _, obj := range []client.Object{template, pool, sb} {
+	for _, obj := range []client.Object{pool, sb} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -83,61 +88,98 @@ func TestSandboxV2PoolRefReachesReady(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, sb)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	ready := waitSandboxReady(t, "v2pool-sandbox")
 	if ready.Status.Endpoint == "" {
-		t.Fatal("Ready sandbox has no endpoint mirrored from the claim")
+		t.Fatal("Ready sandbox has no endpoint set by the engine")
 	}
-	if ready.Status.Pod == "" {
-		t.Fatal("Ready sandbox has no pod mirrored from the claim")
-	}
-
-	// The owned SandboxClaim exists, is named after the sandbox, and is
-	// owner-referenced to it (so it GCs with the sandbox). This proves the v2
-	// surface drives the SAME engine path the four-noun claim drives.
-	var claim v1alpha1.SandboxClaim
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "v2pool-sandbox", Namespace: "default"}, &claim); err != nil {
-		t.Fatalf("owned claim not found: %v", err)
-	}
-	owner := metav1.GetControllerOf(&claim)
-	if owner == nil || owner.Kind != "Sandbox" || owner.Name != "v2pool-sandbox" {
-		t.Fatalf("claim controller owner = %+v, want Sandbox v2pool-sandbox", owner)
+	if ready.Status.SandboxID == "" {
+		t.Fatal("Ready sandbox has no sandboxID set by the engine")
 	}
 }
 
-// TestSandboxV2FromSandboxProducesNChildren is the FORK-equivalent conformance:
-// a Sandbox with source.fromSandbox and replicas N produces N ready children,
-// each mirrored into status.children, and reports readyReplicas == N.
-func TestSandboxV2FromSandboxProducesNChildren(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "v2fork-node-1", "v2fork-tmpl")
+// TestSandboxPoolRefCreatesNoChildClaim is the guard: a Sandbox{source.poolRef}
+// drives the engine DIRECTLY and populates status.SandboxID + Endpoint, proving
+// the engine path runs with no intermediate child object.
+func TestSandboxPoolRefCreatesNoChildClaim(t *testing.T) {
+	stop, err := controller.StartFakeForkdNode(testRegistry, "v2nochild-node-1", "v2nochild-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "v2fork-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "v2fork-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "v2fork-tmpl"},
-			Replicas:    1,
+	pool := inlinePool("v2nochild-pool")
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2nochild-sandbox", Namespace: "default"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "v2nochild-pool"}},
 		},
 	}
-	// The source is itself a v2 Sandbox{poolRef}: it reaches Ready first, then a
-	// second Sandbox forks it.
-	source := &v1alpha2.Sandbox{
+	for _, obj := range []client.Object{pool, sb} {
+		if err := k8sClient.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, sb)
+		_ = k8sClient.Delete(ctx, pool)
+	})
+
+	ready := waitSandboxReady(t, "v2nochild-sandbox")
+	if ready.Status.SandboxID == "" || ready.Status.Endpoint == "" {
+		t.Fatalf("engine did not populate status directly: %+v", ready.Status)
+	}
+}
+
+// TestPoolInlineTemplateBuildsWithoutTemplateObject is the guard for the pool
+// inline template: a pool with spec.template (and no SandboxTemplate object)
+// drives a poolRef Sandbox to Ready, proving the engine reads the inline template.
+func TestPoolInlineTemplateBuildsWithoutTemplateObject(t *testing.T) {
+	stop, err := controller.StartFakeForkdNode(testRegistry, "v2inline-node-1", "v2inline-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	pool := inlinePool("v2inline-pool")
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2inline-sandbox", Namespace: "default"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "v2inline-pool"}},
+		},
+	}
+	for _, obj := range []client.Object{pool, sb} {
+		if err := k8sClient.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, sb)
+		_ = k8sClient.Delete(ctx, pool)
+	})
+
+	waitSandboxReady(t, "v2inline-sandbox")
+}
+
+// TestSandboxV2FromSandboxProducesNChildren is the FORK-equivalent conformance: a
+// Sandbox with source.fromSandbox and replicas N produces N ready children, each
+// mirrored into status.children, and reports readyReplicas == N.
+func TestSandboxV2FromSandboxProducesNChildren(t *testing.T) {
+	stop, err := controller.StartFakeForkdNode(testRegistry, "v2fork-node-1", "v2fork-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	pool := inlinePool("v2fork-pool")
+	source := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "v2fork-source", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "v2fork-pool"}},
-			Replicas: 1,
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "v2fork-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, source} {
+	for _, obj := range []client.Object{pool, source} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -145,21 +187,15 @@ func TestSandboxV2FromSandboxProducesNChildren(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, source)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
-	// The owned source claim must be Ready before the fork can fan out (the fork
-	// reconciler waits on the source's Ready phase).
 	waitSandboxReady(t, "v2fork-source")
-	// The fork reconciler forks the SOURCE CLAIM (the owned child, named after the
-	// source sandbox). The v2 fan-out Sandbox names its fromSandbox by that claim.
-	waitClaimReady(t, "v2fork-source")
 
 	const replicas = 3
-	fanout := &v1alpha2.Sandbox{
+	fanout := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "v2fork-fanout", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{FromSandbox: &v1alpha2.FromSandboxSource{Name: "v2fork-source"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "v2fork-source"}},
 			Replicas: replicas,
 		},
 	}
@@ -179,20 +215,108 @@ func TestSandboxV2FromSandboxProducesNChildren(t *testing.T) {
 		if c.Name == "" || c.Endpoint == "" || c.SandboxID == "" {
 			t.Fatalf("child %d incomplete: %+v", i, c)
 		}
-		if c.Phase != v1alpha1.SandboxReady {
+		if c.Phase != v1.SandboxReady {
 			t.Fatalf("child %d phase = %q, want Ready", i, c.Phase)
 		}
 	}
+}
 
-	// The owned SandboxFork exists and is owner-referenced to the fan-out Sandbox.
-	var fork v1alpha1.SandboxFork
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "v2fork-fanout", Namespace: "default"}, &fork); err != nil {
-		t.Fatalf("owned fork not found: %v", err)
+// TestForkDeniesSecretInheritanceByDefault is the security guard: a fork
+// (source.fromSandbox) of a source that holds secrets is DENIED by default
+// (secretInheritance defaults to reissue), reported with the SecretInheritanceDenied
+// condition. This preserves docs/fork-correctness.md section 3. The fresh per-fork
+// bearer-token reissue is asserted directly in fork_secrets_test.go and
+// token_secret_envtest_test.go.
+func TestForkDeniesSecretInheritanceByDefault(t *testing.T) {
+	stop, err := controller.StartFakeForkdNode(testRegistry, "v2deny-node-1", "v2deny-pool")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if owner := metav1.GetControllerOf(&fork); owner == nil || owner.Kind != "Sandbox" {
-		t.Fatalf("fork controller owner = %+v, want Sandbox", owner)
+	defer stop()
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2deny-secret", Namespace: "default"},
+		Data:       map[string][]byte{"k": []byte("v")},
 	}
-	if fork.Spec.Replicas != replicas {
-		t.Fatalf("owned fork replicas = %d, want %d", fork.Spec.Replicas, replicas)
+	pool := inlinePool("v2deny-pool")
+	source := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2deny-source", Namespace: "default"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "v2deny-pool"}},
+			Secrets: []v1.SecretMount{{
+				Name:      "k",
+				SecretRef: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "v2deny-secret"}, Key: "k"},
+			}},
+		},
 	}
+	for _, obj := range []client.Object{secret, pool, source} {
+		if err := k8sClient.Create(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, source)
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, secret)
+	})
+
+	waitSandboxReady(t, "v2deny-source")
+
+	// A fork with NO secretInheritance set (defaults to reissue) must be denied.
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2deny-fork", Namespace: "default"},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "v2deny-source"}},
+			Replicas: 1,
+		},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "v2deny-fork", Namespace: "default"}, &got); err == nil {
+			if c := apimeta.FindStatusCondition(got.Status.Conditions, "Rejected"); c != nil &&
+				c.Status == metav1.ConditionTrue && c.Reason == "SecretInheritanceDenied" {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("fork was not denied with SecretInheritanceDenied by default (reissue)")
+}
+
+// TestFromRevisionReportsNotServedCondition is the guard for the not-served
+// source: a Sandbox{source.fromRevision} reports phase Pending and a Ready=False
+// condition with reason RevisionResumeNotImplemented, never silently dropped.
+func TestFromRevisionReportsNotServedCondition(t *testing.T) {
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "v2rev-sandbox", Namespace: "default"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{FromRevision: &v1.FromRevisionSource{Workspace: "w", Revision: "rev-1"}},
+		},
+	}
+	if err := k8sClient.Create(ctx, sb); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, sb) })
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "v2rev-sandbox", Namespace: "default"}, &got); err == nil {
+			c := apimeta.FindStatusCondition(got.Status.Conditions, "Ready")
+			if c != nil && c.Status == metav1.ConditionFalse && c.Reason == "RevisionResumeNotImplemented" {
+				if got.Status.Phase != v1.SandboxPending {
+					t.Fatalf("phase = %q, want Pending", got.Status.Phase)
+				}
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("fromRevision sandbox did not report Ready=False reason RevisionResumeNotImplemented")
 }

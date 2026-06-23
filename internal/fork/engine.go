@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
@@ -447,7 +447,7 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 	if len(skipped) > 0 && !dnsOn {
 		fmt.Fprintf(os.Stderr, "forkd: WARNING egress allowlist for %s has %d name-based entries that are NOT enforced (DNS egress disabled): %v\n", sandboxID, len(skipped), skipped)
 	}
-	policy := v1alpha1.EgressPolicy(opts.Network.EgressPolicy)
+	policy := v1.EgressPolicy(opts.Network.EgressPolicy)
 
 	id, err := e.netAlloc.Acquire(sandboxID)
 	if err != nil {
@@ -469,7 +469,7 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		Allow:        allow,
 		AllowCIDRs:   opts.Network.AllowCIDRs,
 		BlockNetwork: opts.Network.BlockNetwork,
-		Inbound:      v1alpha1.InboundPolicy(opts.Network.Inbound),
+		Inbound:      v1.InboundPolicy(opts.Network.Inbound),
 		InboundCIDRs: opts.Network.InboundCIDRs,
 		// Always wire the per-sandbox egress counter so the metering pipeline
 		// (#211) can read this sandbox's egress bytes by name. It is a passive
@@ -1966,9 +1966,9 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 	if len(initCommands) == 0 {
 		return
 	}
-	steps := make([]v1alpha1.BuildStep, len(initCommands))
+	steps := make([]v1.BuildStep, len(initCommands))
 	for i, c := range initCommands {
-		steps[i] = v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: c}
+		steps[i] = v1.BuildStep{Type: v1.BuildStepRun, Run: c}
 	}
 	plan := templatebuild.Plan(image, steps, cache)
 	cached := 0
@@ -2051,7 +2051,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 			HostIP:   placeholderHostIP,
 			GuestIP:  placeholderGuestIP,
 		}
-		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil); err != nil {
+		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
 		defer func() {

@@ -2,13 +2,13 @@ package controller
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -23,21 +23,20 @@ func newAutoscaleFakeClient(t *testing.T, objs ...client.Object) client.Client {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 to scheme: %v", err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1alpha1 to scheme: %v", err)
 	}
 	return fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
-func autoPool(min, max, spare, cooldownSec int32) *v1alpha1.SandboxPool {
-	return &v1alpha1.SandboxPool{
-		Spec: v1alpha1.SandboxPoolSpec{
-			Replicas: 3,
-			Autoscale: &v1alpha1.PoolAutoscaleSpec{
-				MinWarm:                  min,
-				MaxWarm:                  max,
-				TargetSpare:              spare,
-				ScaleDownCooldownSeconds: cooldownSec,
+func autoPool(min, max, spare, cooldownSec int32) *v1.SandboxPool {
+	return &v1.SandboxPool{
+		Spec: v1.SandboxPoolSpec{
+			Warm: &v1.PoolWarm{
+				Min:             min,
+				Max:             max,
+				TargetPending:   spare,
+				CooldownSeconds: cooldownSec,
 			},
 		},
 	}
@@ -47,7 +46,7 @@ func TestComputeDesiredWarm(t *testing.T) {
 	t0 := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name           string
-		pool           *v1alpha1.SandboxPool
+		pool           *v1.SandboxPool
 		dormant        int32
 		inUse          int32
 		lastClaim      time.Time
@@ -56,8 +55,10 @@ func TestComputeDesiredWarm(t *testing.T) {
 		wantScaledDown bool
 	}{
 		{
-			name:    "autoscale nil uses Replicas",
-			pool:    &v1alpha1.SandboxPool{Spec: v1alpha1.SandboxPoolSpec{Replicas: 4}},
+			// Warm.Max==0 is the fixed back-compat shape: desired == warm.min
+			// (which carries the v1alpha1 spec.replicas).
+			name:    "fixed warm pool uses warm.min",
+			pool:    &v1.SandboxPool{Spec: v1.SandboxPoolSpec{Warm: &v1.PoolWarm{Min: 4}}},
 			dormant: 1, inUse: 0, now: t0, want: 4,
 		},
 		{
@@ -284,19 +285,18 @@ func TestWarmPoolMetricsSetters(t *testing.T) {
 }
 
 func TestReconcileHuskPodsDesiredArg(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "pool-uid"},
-		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "t"}, Replicas: 2},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "img"},
+			Warm:     &v1.PoolWarm{Min: 2},
+		},
 	}
-	tmpl := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "img"},
-	}
-	cl := newAutoscaleFakeClient(t, pool, tmpl)
+	cl := newAutoscaleFakeClient(t, pool)
 	r := &SandboxPoolReconciler{Client: cl, EnableHuskPods: true, HuskStubImage: "stub:latest"}
 
 	// desired=3 creates 3 dormant pods (existence-counting under no kubelet).
-	res, err := r.reconcileHuskPods(context.Background(), pool, tmpl, 3)
+	res, err := r.reconcileHuskPods(context.Background(), pool, pool.Spec.Template, 3)
 	if err != nil {
 		t.Fatalf("reconcileHuskPods: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestReconcileHuskPodsDesiredArg(t *testing.T) {
 	}
 
 	// desired=1 deletes the surplus down to 1.
-	res, err = r.reconcileHuskPods(context.Background(), pool, tmpl, 1)
+	res, err = r.reconcileHuskPods(context.Background(), pool, pool.Spec.Template, 1)
 	if err != nil {
 		t.Fatalf("reconcileHuskPods scale down: %v", err)
 	}
@@ -324,19 +324,14 @@ func TestReconcileHuskPodsDesiredArg(t *testing.T) {
 }
 
 func TestPoolReconcileAutoscaleDesired(t *testing.T) {
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "pool-uid"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "t"},
-			Replicas:    1,
-			Autoscale:   &v1alpha1.PoolAutoscaleSpec{MinWarm: 1, MaxWarm: 10, TargetSpare: 2, ScaleDownCooldownSeconds: 300},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "img"},
+			Warm:     &v1.PoolWarm{Min: 1, Max: 10, TargetPending: 2, CooldownSeconds: 300},
 		},
 	}
-	tmpl := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "img"},
-	}
-	cl := newAutoscaleFakeClient(t, pool, tmpl)
+	cl := newAutoscaleFakeClient(t, pool)
 	r := &SandboxPoolReconciler{
 		Client: cl, EnableHuskPods: true, HuskStubImage: "stub:latest",
 		Demand: NewPoolDemand(),
@@ -356,12 +351,12 @@ func TestPoolReconcileAutoscaleDesired(t *testing.T) {
 
 func TestClaimRecordsDemandArrival(t *testing.T) {
 	d := NewPoolDemand()
-	r := &SandboxClaimReconciler{Demand: d, Now: func() time.Time {
+	r := &SandboxReconciler{Demand: d, Now: func() time.Time {
 		return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	}}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "p"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "p"}}},
 	}
 	r.recordHuskDemand(claim)
 	got, ok := d.LastArrival("ns/p")

@@ -18,13 +18,13 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"sync"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 )
@@ -39,7 +39,7 @@ type resumeRecorder struct {
 	calls int
 }
 
-func (r *resumeRecorder) record(claim *v1alpha1.SandboxClaim, ref string) {
+func (r *resumeRecorder) record(claim *v1.Sandbox, ref string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -89,13 +89,13 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	var hydMu sync.Mutex
 	hydratedFor := map[string]bool{}
 	setWSTransfer(
-		func(_ context.Context, claim *v1alpha1.SandboxClaim, _ cas.Digest) error {
+		func(_ context.Context, claim *v1.Sandbox, _ cas.Digest) error {
 			hydMu.Lock()
 			defer hydMu.Unlock()
 			hydratedFor[claim.Spec.ServiceAccount] = true
 			return nil
 		},
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, _, _ []string) (cas.Digest, error) {
+		func(_ context.Context, _ *v1.Sandbox, _, _ []string) (cas.Digest, error) {
 			return headDigest, nil
 		},
 	)
@@ -106,10 +106,10 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	// true); resume records the restore request.
 	rr := &resumeRecorder{}
 	setMemSnapshot(
-		func(_ context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error) {
+		func(_ context.Context, claim *v1.Sandbox) (controller.MemSnapshotResultForTest, error) {
 			return controller.NewMemSnapshotResult(snapRef, claim.Spec.ServiceAccount), nil
 		},
-		func(_ context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+		func(_ context.Context, claim *v1.Sandbox, ref string) error {
 			rr.record(claim, ref)
 			return nil
 		},
@@ -121,31 +121,33 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	)
 	t.Cleanup(func() { setMemSnapshot(nil, nil, nil) })
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-resumable-node", "wsr-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-resumable-node", "wsr-cp-pool", "wsr-resume-pool", "wsr-intruder-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, wsName, v1.WorkspaceRetention{})
 
 	// 1) A claim with principal sa-a does work and checkpoints on terminate.
-	checkpointClaim := makeBoundClaim(t, "wsr-cp", wsName, v1alpha1.SandboxClaimSpec{
-		NodeName:              "ws-resumable-node",
-		ServiceAccount:        principal,
-		CheckpointOnTerminate: true,
-		Timeout:               &metav1.Duration{Duration: 2 * time.Second},
+	checkpointClaim := makeBoundClaim(t, "wsr-cp", wsName, v1.SandboxSpec{
+		NodeName:       "ws-resumable-node",
+		ServiceAccount: principal,
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Snapshot: "retain-last-1"},
+		},
 	})
-	waitBoundPhase(t, "wsr-cp-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wsr-cp-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wsr-cp-claim", v1.SandboxReady)
+	waitBoundPhase(t, "wsr-cp-claim", v1.SandboxTerminated)
 
 	// 2) The new revision pairs the disk manifest with the memory snapshot, bound
 	// to the capturing principal. This is the disk+memory pairing.
-	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after checkpoint")
 
-	var head v1alpha1.WorkspaceRevision
+	var head v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err != nil {
 		t.Fatalf("get head revision: %v", err)
 	}
@@ -163,7 +165,7 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	}
 
 	// 3) The workspace head is resumable (its snapshot exists, principal-bound).
-	waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head == head.Name && ws.Status.Resumable
 	}, "head resumable")
 
@@ -174,13 +176,15 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	// cross-principal claim below arrives (otherwise a plain terminate would
 	// advance the head to a non-resumable revision and the refusal would never be
 	// exercised).
-	makeBoundClaim(t, "wsr-resume", wsName, v1alpha1.SandboxClaimSpec{
-		NodeName:              "ws-resumable-node",
-		ServiceAccount:        principal,
-		CheckpointOnTerminate: true,
-		Timeout:               &metav1.Duration{Duration: 2 * time.Second},
+	makeBoundClaim(t, "wsr-resume", wsName, v1.SandboxSpec{
+		NodeName:       "ws-resumable-node",
+		ServiceAccount: principal,
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Snapshot: "retain-last-1"},
+		},
 	})
-	waitBoundPhase(t, "wsr-resume-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsr-resume-claim", v1.SandboxReady)
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -202,14 +206,14 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	// Let the resume claim terminate (re-checkpointing, bound to sa-a) so it
 	// releases the single-writer lock and leaves a resumable, sa-a-bound head for
 	// the cross-principal claim below.
-	waitBoundPhase(t, "wsr-resume-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wsr-resume-claim", v1.SandboxTerminated)
 
 	// Confirm the new head is still resumable and bound to sa-a, so the intruder
 	// genuinely faces a cross-principal resumable head (not a non-resumable one).
-	resumedHead := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	resumedHead := waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Head != head.Name && ws.Status.Resumable
 	}, "resumable head after same-principal re-checkpoint")
-	var head2 v1alpha1.WorkspaceRevision
+	var head2 v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: resumedHead.Status.Head}, &head2); err != nil {
 		t.Fatalf("get re-checkpointed head: %v", err)
 	}
@@ -221,12 +225,12 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 	// cross-principal resume never happens (the resume seam is never called for
 	// sa-b), and the intruder's claim is never hydrated (fail-closed): a memory
 	// image carries secrets-in-RAM and is never served across principals.
-	makeBoundClaim(t, "wsr-intruder", wsName, v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "wsr-intruder", wsName, v1.SandboxSpec{
 		NodeName:       "ws-resumable-node",
 		ServiceAccount: intruder,
-		Timeout:        &metav1.Duration{Duration: 4 * time.Second},
+		Lifetime:       &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 4 * time.Second}},
 	})
-	waitBoundPhase(t, "wsr-intruder-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsr-intruder-claim", v1.SandboxReady)
 
 	// Give the reconciler ample time to (not) resume. The refusal is an error that
 	// requeues; the resume seam must stay untouched for the intruder principal and
@@ -247,7 +251,7 @@ func TestResumableHeadFromMemorySnapshot(t *testing.T) {
 
 	// The intruder claim must NOT have stamped the hydrated annotation: the
 	// activation never completed past the cross-principal refusal.
-	var intruder2 v1alpha1.SandboxClaim
+	var intruder2 v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "wsr-intruder-claim"}, &intruder2); err == nil {
 		if _, done := intruder2.Annotations["mitos.run/workspace-hydrated-head"]; done {
 			t.Fatal("cross-principal claim stamped the hydrated annotation; the refusal did not fail closed")

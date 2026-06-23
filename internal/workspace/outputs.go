@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 )
 
@@ -19,7 +19,7 @@ import (
 // returns nil, which FilterFiles treats as the whole-workspace default (the
 // slice-2 behavior). Returning nil rather than an empty slice keeps the
 // "capture everything" and "capture nothing listed" cases unambiguous.
-func CapturePaths(outputs []v1alpha1.OutputSpec) []string {
+func CapturePaths(outputs []v1.OutputSpec) []string {
 	seen := map[string]struct{}{}
 	var paths []string
 	for _, o := range outputs {

@@ -12,12 +12,12 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -26,14 +26,14 @@ func TestEnsureHuskNetworkPolicyCreatesObject(t *testing.T) {
 	c := k8sClient
 	ctx := context.Background()
 
-	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "np-pool", Namespace: "default"}}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "np-pool", Namespace: "default"}}
 	if err := c.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Delete(ctx, pool) })
 
 	// Re-fetch so SetControllerReference has the server UID.
-	var live v1alpha1.SandboxPool
+	var live v1.SandboxPool
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &live); err != nil {
 		t.Fatal(err)
 	}

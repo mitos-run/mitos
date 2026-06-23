@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,7 +55,7 @@ import (
 // records the call. It returns ok=true when a live snapshot was captured (the
 // VMM was still reachable), ok=false when there was nothing to checkpoint (the
 // pod/VMM is already gone), in which case the caller falls back to re-pend.
-type huskCheckpointer func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (ok bool, err error)
+type huskCheckpointer func(ctx context.Context, claim *v1.Sandbox, pod *corev1.Pod) (ok bool, err error)
 
 // defaultHuskCheckpointer is the production checkpointer. The live VM runs
 // INSIDE the husk pod, so a checkpoint is only possible while that pod (and its
@@ -66,7 +66,7 @@ type huskCheckpointer func(ctx context.Context, claim *v1alpha1.SandboxClaim, po
 // it likewise has nothing reachable to checkpoint and degrades to re-pend. The
 // end-to-end live snapshot surviving a drain is gated on bare metal (documented
 // in docs/husk-pods.md); this default is the reachable-seam plumbing.
-func defaultHuskCheckpointer(_ context.Context, _ *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error) {
+func defaultHuskCheckpointer(_ context.Context, _ *v1.Sandbox, pod *corev1.Pod) (bool, error) {
 	if pod == nil {
 		// The pod is already gone: nothing to checkpoint, fall back to re-pend.
 		return false, nil
@@ -83,7 +83,7 @@ func defaultHuskCheckpointer(_ context.Context, _ *v1alpha1.SandboxClaim, pod *c
 // Checkpoint policy can attempt a live snapshot while the pod is still present
 // but terminating. A claim with no Node/Endpoint (not actually active on a pod)
 // is never "lost" here. Only meaningful in husk mode.
-func (r *SandboxClaimReconciler) checkHuskPodLost(ctx context.Context, claim *v1alpha1.SandboxClaim) (lost bool, pod *corev1.Pod, err error) {
+func (r *SandboxReconciler) checkHuskPodLost(ctx context.Context, claim *v1.Sandbox) (lost bool, pod *corev1.Pod, err error) {
 	// Not active on a husk pod: nothing to lose.
 	if claim.Status.Node == "" || claim.Status.Endpoint == "" {
 		return false, nil, nil
@@ -138,16 +138,16 @@ func (r *SandboxClaimReconciler) checkHuskPodLost(ctx context.Context, claim *v1
 // re-pends regardless. Re-pend = Phase Pending, Endpoint/Node/SandboxID
 // cleared, recordClaimPending, a HuskPodLost condition, and a requeue so the
 // next reconcile re-activates on a replacement dormant slot.
-func (r *SandboxClaimReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, pod *corev1.Pod) (ctrl.Result, error) {
+func (r *SandboxReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1.Sandbox, pool *v1.SandboxPool, pod *corev1.Pod) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	policy := pool.Spec.DrainPolicy
 	if policy == "" {
-		policy = v1alpha1.DrainKill
+		policy = v1.DrainKill
 	}
 
 	checkpointed := false
-	if policy == v1alpha1.DrainCheckpoint {
+	if policy == v1.DrainCheckpoint {
 		checkpointer := r.Checkpoint
 		if checkpointer == nil {
 			checkpointer = defaultHuskCheckpointer
@@ -168,7 +168,7 @@ func (r *SandboxClaimReconciler) rependOnHuskPodLost(ctx context.Context, claim 
 
 	reason := "HuskPodLost"
 	msg := "the backing husk pod was lost (drain, eviction, or deletion); the claim is re-pending and will re-activate on a replacement dormant slot"
-	if policy == v1alpha1.DrainCheckpoint {
+	if policy == v1.DrainCheckpoint {
 		if checkpointed {
 			msg = "the backing husk pod was lost; a live-VM checkpoint was captured and the claim is re-pending to re-activate on a replacement slot"
 		} else {
@@ -176,7 +176,7 @@ func (r *SandboxClaimReconciler) rependOnHuskPodLost(ctx context.Context, claim 
 		}
 	}
 
-	claim.Status.Phase = v1alpha1.SandboxPending
+	claim.Status.Phase = v1.SandboxPending
 	claim.Status.Endpoint = ""
 	claim.Status.Node = ""
 	claim.Status.SandboxID = ""
@@ -219,7 +219,7 @@ func huskPodToClaim(_ context.Context, obj client.Object) []ctrl.Request {
 // recovers. Actual loss/eviction (re-pend) is owned by checkHuskPodLost; this
 // only reflects transient unreachability in the condition. Returns whether it
 // changed the condition (so the caller writes status only when needed).
-func reflectHuskBackingReadiness(claim *v1alpha1.SandboxClaim, pod *corev1.Pod, now time.Time) bool {
+func reflectHuskBackingReadiness(claim *v1.Sandbox, pod *corev1.Pod, now time.Time) bool {
 	ready := pod != nil && huskPodReady(pod)
 	var cur *metav1.Condition
 	for i := range claim.Status.Conditions {

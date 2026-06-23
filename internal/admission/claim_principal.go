@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	authzv1 "k8s.io/api/authorization/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -36,7 +36,7 @@ type ClaimServiceAccountValidator struct {
 // never a silent allow, so an authorization-service outage cannot be used to
 // smuggle an unauthorized principal past the gate.
 func (v *ClaimServiceAccountValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	claim := &v1alpha1.SandboxClaim{}
+	claim := &v1.Sandbox{}
 	if err := v.Decoder.Decode(req, claim); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
