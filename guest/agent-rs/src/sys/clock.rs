@@ -87,8 +87,17 @@ pub fn step_clock(host_wall_nanos: i64) -> i64 {
         }
     };
 
-    let drift = host_wall_nanos - guest_nanos;
-    if drift.abs() <= CLOCK_STEP_THRESHOLD_NS {
+    // Use saturating_sub so that extreme i64 inputs (e.g. i64::MIN as
+    // host_wall_nanos) do not overflow in debug mode. Saturating at i64::MIN or
+    // i64::MAX is far outside the threshold, so the subsequent comparison still
+    // produces the correct outcome (step is applied). The doc comment states
+    // "Never panics"; saturating arithmetic guarantees that.
+    let drift = host_wall_nanos.saturating_sub(guest_nanos);
+    // Use a two-branch comparison rather than drift.abs() to avoid a panic on
+    // i64::MIN in debug mode (abs of i64::MIN overflows). The doc comment states
+    // "Never panics"; this formulation holds for every i64 input.
+    // Mirrors the Go stepClock two-branch check in notifyforked.go.
+    if drift > -CLOCK_STEP_THRESHOLD_NS && drift < CLOCK_STEP_THRESHOLD_NS {
         return 0;
     }
 
@@ -135,21 +144,33 @@ fn clock_now_nanos_linux() -> io::Result<i64> {
 
 #[cfg(target_os = "linux")]
 fn clock_set_realtime_linux(target_nanos: i64) -> io::Result<()> {
-    let tv_sec = target_nanos / 1_000_000_000;
-    let tv_nsec = target_nanos % 1_000_000_000;
+    // Use rem_euclid and div_euclid so that tv_nsec is always in [0, 999_999_999]
+    // even when target_nanos is negative. Truncating % on negative values produces
+    // a negative remainder, which the kernel rejects with EINVAL. rem_euclid
+    // always yields a non-negative result in [0, 1_000_000_000), satisfying the
+    // POSIX/Linux requirement that tv_nsec in [0, 999_999_999].
+    let tv_sec = target_nanos.div_euclid(1_000_000_000);
+    let tv_nsec = target_nanos.rem_euclid(1_000_000_000);
+    // libc::time_t is deprecated on musl (it will change to i64 in a future
+    // libc release; see libc #1848). The cast is currently required because
+    // libc::timespec.tv_sec is typed as libc::time_t; allow the deprecation
+    // warning here rather than silencing it project-wide. The numeric value is
+    // the same (both i64 on musl 1.2+ and on gnu).
+    #[allow(deprecated)]
     let ts = libc::timespec {
         tv_sec: tv_sec as libc::time_t,
         tv_nsec: tv_nsec as libc::c_long,
     };
     // SAFETY:
     // - &ts is a valid, aligned pointer to a fully initialized libc::timespec.
-    //   tv_sec and tv_nsec are computed from target_nanos; tv_nsec is in
-    //   [0, 999_999_999] (a valid nanosecond count) because we used %, and
-    //   target_nanos is a caller-supplied value (not a secret).
+    //   tv_nsec is computed via rem_euclid and is guaranteed to be in
+    //   [0, 999_999_999], satisfying the kernel's invariant for tv_nsec.
+    //   tv_sec is the Euclidean quotient of target_nanos, consistent with tv_nsec.
     // - CLOCK_REALTIME (0) is a valid clock ID.
     // - clock_settime does not retain the pointer after the call returns.
     let ret = unsafe {
-        // SAFETY: ts is a fully initialized libc::timespec (see above).
+        // SAFETY: ts is a fully initialized libc::timespec with tv_nsec in
+        // [0, 999_999_999] (guaranteed by rem_euclid; see above).
         libc::clock_settime(libc::CLOCK_REALTIME, &ts)
     };
     if ret != 0 {
@@ -172,6 +193,45 @@ mod tests {
     #[test]
     fn clock_step_threshold_is_500ms() {
         assert_eq!(CLOCK_STEP_THRESHOLD_NS, 500_000_000);
+    }
+
+    // Confirm the two-branch drift check never panics for extreme i64 inputs.
+    // i64::MIN.abs() overflows in debug mode; the two-branch form avoids abs().
+    #[test]
+    fn step_clock_i64_min_does_not_panic() {
+        // We cannot step the clock to i64::MIN (it would fail or be rejected),
+        // but the threshold check itself must not panic. Because host_wall_nanos
+        // is i64::MIN and clock_now_nanos() will succeed (returning a real time),
+        // the drift computation may overflow; we only need the function to return
+        // without panicking.
+        // We call with i64::MIN directly; the two-branch check on drift is the
+        // important thing: it must not call .abs() on i64::MIN.
+        // The result (0 or non-zero) is not asserted; only no-panic matters.
+        let _ = step_clock(i64::MIN);
+    }
+
+    // Confirm rem_euclid always yields tv_nsec in [0, 999_999_999].
+    #[test]
+    fn rem_euclid_tv_nsec_always_non_negative() {
+        // Negative nanosecond value: -1ns = just before the epoch.
+        // truncating % would give -1, which the kernel rejects; rem_euclid gives
+        // 999_999_999.
+        let target_nanos: i64 = -1;
+        let tv_nsec = target_nanos.rem_euclid(1_000_000_000);
+        assert_eq!(tv_nsec, 999_999_999, "rem_euclid of -1 must be 999_999_999");
+
+        // -500ms: another negative input.
+        let target_nanos: i64 = -500_000_000;
+        let tv_nsec = target_nanos.rem_euclid(1_000_000_000);
+        assert!(
+            (0..1_000_000_000).contains(&tv_nsec),
+            "rem_euclid must always be in [0, 999_999_999], got {tv_nsec}"
+        );
+
+        // Positive: must match truncating % (both agree on positive inputs).
+        let target_nanos: i64 = 1_500_000_000;
+        let tv_nsec = target_nanos.rem_euclid(1_000_000_000);
+        assert_eq!(tv_nsec, 500_000_000, "rem_euclid of 1.5s must be 500ms");
     }
 
     // On Linux we can test clock_now_nanos returns a plausible value.

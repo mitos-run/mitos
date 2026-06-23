@@ -3,7 +3,7 @@
 // This module wraps three Linux-specific unsafe surfaces behind safe,
 // typed APIs:
 //
-// 1. crng: RNDADDENTROPY ioctl for fork-correctness CRNG reseed.
+// 1. entropy: RNDADDENTROPY ioctl for fork-correctness CRNG reseed.
 // 2. clock: clock_gettime / clock_settime for CLOCK_REALTIME step.
 // 3. vsock: AF_VSOCK listener via tokio-vsock (vsock feature).
 //
@@ -19,12 +19,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod clock;
-pub mod crng;
+pub mod entropy;
 pub mod vsock;
 
 // Re-export the most-used surface so callers write sys::reseed_crng etc.
 pub use clock::{clock_now_nanos, clock_set_realtime, step_clock, CLOCK_STEP_THRESHOLD_NS};
-pub use crng::{reseed_crng, reseed_crng_at};
+pub use entropy::{reseed_crng, reseed_crng_at};
 pub use vsock::{AGENT_GRPC_PORT, AGENT_LEGACY_PORT};
 #[cfg(feature = "vsock")]
 pub use vsock::bind_vsock;
