@@ -93,7 +93,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
-| `controller.image.tag` | `v0.12.0` | Controller image tag. |
+| `controller.image.tag` | `v0.13.0` | Controller image tag. |
 | `controller.image.pullPolicy` | `IfNotPresent` | Controller image pull policy. |
 | `controller.replicas` | `2` | Controller replica count. |
 | `controller.resources` | requests 128Mi/100m, limits 512Mi/500m | Controller resources. |
@@ -103,10 +103,10 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `controller.kvmResourceName` | `mitos.run/kvm` | KVM extended-resource name husk pods request. |
 | `controller.extraArgs` | `[]` | Extra args appended to the controller container. |
 | `huskStub.image.repository` | `mitos-husk-stub` | Husk stub image repository (passed via `--husk-stub-image`). |
-| `huskStub.image.tag` | `v0.12.0` | Husk stub image tag. |
+| `huskStub.image.tag` | `v0.13.0` | Husk stub image tag. |
 | `huskStub.image.pullPolicy` | `IfNotPresent` | Husk stub image pull policy. |
 | `forkd.image.repository` | `mitos-forkd` | forkd image repository. |
-| `forkd.image.tag` | `v0.12.0` | forkd image tag. |
+| `forkd.image.tag` | `v0.13.0` | forkd image tag. |
 | `forkd.image.pullPolicy` | `IfNotPresent` | forkd image pull policy. |
 | `forkd.resources` | requests 1Gi/500m, limits 16Gi/8 | forkd resources. |
 | `forkd.dataDir` | `/var/lib/mitos` | forkd `--data-dir` and the data hostPath. |
@@ -116,7 +116,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `forkd.tolerations` | `mitos.run/dedicated` NoSchedule | forkd and kernel-stage tolerations. |
 | `devicePlugin.enabled` | `true` | Render the KVM device plugin DaemonSet. |
 | `devicePlugin.image.repository` | `mitos-kvm-device-plugin` | Device plugin image repository. |
-| `devicePlugin.image.tag` | `v0.12.0` | Device plugin image tag. |
+| `devicePlugin.image.tag` | `v0.13.0` | Device plugin image tag. |
 | `devicePlugin.image.pullPolicy` | `IfNotPresent` | Device plugin image pull policy. |
 | `kernelProvisioner.enabled` | `true` | Render the kernel-stage DaemonSet. |
 | `kernelProvisioner.kernelUrl` | Firecracker CI x86_64 5.10 vmlinux | Guest kernel download URL. |
@@ -125,7 +125,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `admissionWebhook.failurePolicy` | `Fail` | Webhook failure policy. `Fail` rejects claims if the webhook is unreachable (fail closed); set `Ignore` only if availability outranks the principal guarantee. |
 | `facade.enabled` | `false` | Render the agents.x-k8s.io facade. |
 | `facade.image.repository` | `mitos-facade` | Facade image repository. |
-| `facade.image.tag` | `v0.12.0` | Facade image tag. |
+| `facade.image.tag` | `v0.13.0` | Facade image tag. |
 | `facade.image.pullPolicy` | `IfNotPresent` | Facade image pull policy. |
 | `facade.defaultPool` | `default` | Facade `--default-pool`. |
 | `facade.clusterDomain` | `cluster.local` | Facade `--cluster-domain`. |
