@@ -141,22 +141,37 @@ func (b *bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFu
 	}
 }
 
-// allowTokenlessInterceptor is a pass-through interceptor used by the
-// standalone sandbox-server (and by tests of other layers) when no bearer
-// token is configured. It never performs any auth check.
+// allowTokenlessInterceptor performs no auth check but still resolves the
+// target sandbox: it reads the X-Sandbox-Id request header and injects it into
+// the context so the Service resolver routes a tokenless multi-sandbox call to
+// the right sandbox. It is used ONLY by the standalone sandbox-server, which has
+// no token-minting control plane.
 type allowTokenlessInterceptor struct{}
 
 // AllowTokenlessInterceptor returns a Connect interceptor that allows all
-// requests through without any authentication check. It is used ONLY by the
-// standalone sandbox-server, which has no token-minting control plane. forkd
-// never uses it: a forkd sandbox without a token fails closed via
-// BearerInterceptor. This mirrors the AllowTokenless option on SandboxAPI.
+// requests through without any authentication check, while still injecting the
+// X-Sandbox-Id header into the context so the Service resolver can route the
+// call. It is used ONLY by the standalone sandbox-server. forkd never uses it: a
+// forkd sandbox without a token fails closed via BearerInterceptor. This mirrors
+// the AllowTokenless option on SandboxAPI.
 func AllowTokenlessInterceptor() connect.Interceptor {
 	return &allowTokenlessInterceptor{}
 }
 
+// injectTokenlessSandboxID injects the X-Sandbox-Id header value into ctx so the
+// resolver can route the call. When the header is absent it leaves ctx
+// unchanged, so a single-sandbox server falls back to its single target.
+func injectTokenlessSandboxID(ctx context.Context, h interface{ Get(string) string }) context.Context {
+	if id := h.Get(sandboxIDHeader); id != "" {
+		return sandboxIDIntoContext(ctx, id)
+	}
+	return ctx
+}
+
 func (a *allowTokenlessInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return next
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		return next(injectTokenlessSandboxID(ctx, req.Header()), req)
+	}
 }
 
 func (a *allowTokenlessInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
@@ -164,5 +179,7 @@ func (a *allowTokenlessInterceptor) WrapStreamingClient(next connect.StreamingCl
 }
 
 func (a *allowTokenlessInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		return next(injectTokenlessSandboxID(ctx, conn.RequestHeader()), conn)
+	}
 }
