@@ -13,10 +13,11 @@ forkd :9091 and the JSON-lines vsock protocol the guest agent speaks, with ONE
 (in-guest), cluster-internal (forkd :9091), and browser (Connect-Web, no proxy
 tier). The proto and generated stubs already exist
 (`proto/sandbox/v1/sandbox.proto`, `proto/sandbox/v1/sandboxv1connect/`); this
-work implements the server, migrates the guest agent, cuts the Python and
-TypeScript SDKs over, and wires the budget-gated self-service RPCs. The old
-JSON-HTTP API stays as a deprecated compatibility shim so the e2b drop-in and the
-Go/Ruby/Rust/Java direct-mode SDKs keep working.
+work implements the server, migrates the guest agent, cuts ALL SIX SDKs over,
+wires the budget-gated self-service RPCs, and REMOVES the old JSON-HTTP runtime
+API. The e2b drop-in rides the Python SDK's cutover. (The sandbox-server
+lifecycle REST, create/fork/list/terminate, is a separate management API and is
+unchanged.)
 
 Acceptance (from #24): an SDK exec streams stdout incrementally over all three
 transports; PTY mode drives an interactive program; the old HTTP shape is shimmed
@@ -24,15 +25,20 @@ with a deprecation note.
 
 ## Decisions taken (constraints for this work)
 
-1. The old JSON-HTTP sandbox API is KEPT as a deprecated compatibility shim, not
-   removed. Its only remaining consumers are the four direct-only SDKs (Go, Ruby,
-   Rust, Java), which call HTTP directly and are not migrating in this work.
-   Connect becomes the primary transport; Python and TypeScript migrate to it.
-   The e2b drop-in does NOT depend on the shim: it is layered on the Python SDK's
-   DirectSandbox (sdk/python/mitos/e2b.py imports mitos.direct), so it rides the
-   Connect cutover automatically and its run_code maps onto the new RunCode RPC.
-   Shim removal is a tracked follow-up once Go/Ruby/Rust/Java migrate, not part of
-   this work.
+1. The old JSON-HTTP RUNTIME sandbox API (/v1/exec, /v1/files/*, /v1/pty,
+   /v1/run_code, /v1/vitals, /v1/sandboxes/{id}/forward) is REMOVED, not shimmed.
+   ALL SIX SDKs migrate their runtime calls to the Connect Sandbox service in this
+   work, and the JSON-HTTP runtime handlers are deleted once they are gone.
+   (Scope note: the sandbox-server LIFECYCLE REST, create template / fork / list /
+   terminate, is a separate management API, out of #24 scope and unchanged.) The
+   four stdlib-light SDKs (Go, Ruby, Rust, Java) today make only ONE runtime call,
+   exec; it becomes the Connect Exec RPC. To preserve their minimal-dependency
+   posture, they speak the Connect protocol over their existing HTTP stack where
+   feasible (a one-shot exec is server-streaming-after-open, expressible over
+   HTTP/1.1 chunked). The one watch-item is Rust (ureq is HTTP/1.1 unary-only),
+   which may need a small streaming-capable HTTP dependency. The e2b drop-in rides
+   the Python SDK's Connect cutover (sdk/python/mitos/e2b.py is layered on
+   mitos.direct), and its run_code maps onto the new RunCode RPC.
 2. `run_code` gets its OWN streaming RPC (`RunCode`), not an `Exec` overload: its
    Jupyter-style structured result/error frames do not fit `Exec`'s
    stdout/stderr/exit shape.
@@ -45,9 +51,10 @@ with a deprecation note.
 
 ## Non-goals
 
-- Removing the JSON-HTTP API (follow-up, decision 1).
-- Migrating Go/Ruby/Rust/Java SDKs to Connect (they keep using the shim; cluster
-  mode for them is #303-#306).
+- The sandbox-server LIFECYCLE REST (create template / fork / list / terminate)
+  is unchanged; #24 is the runtime exec/files protocol only.
+- Cluster mode for Go/Ruby/Rust/Java (that is #303-#306); this work migrates only
+  their direct-mode runtime exec call.
 - gRPC mTLS between controller and forkd (that channel is :9090, unchanged).
 
 ## Architecture: one service, three transports
@@ -131,9 +138,11 @@ forkd.proto).
 - forkd serves the Connect/gRPC `Sandbox` service on :9091 alongside the
   deprecated JSON-HTTP shim, with the bearer-token Connect interceptor.
 - sandbox-server (standalone, tokenless by default) mounts the same Service.
-- The JSON-HTTP handlers (internal/daemon/sandbox_api.go) are retained but each
-  response carries a `Deprecation` header and the handlers delegate to the same
-  Service methods (no duplicate engine logic).
+- During the SDK cutover the JSON-HTTP runtime handlers
+  (internal/daemon/sandbox_api.go) delegate to the same Service methods (no
+  duplicate engine logic) and carry a `Deprecation` header; once all six SDKs are
+  on Connect (stage 9) the runtime routes are REMOVED. The lifecycle REST routes
+  stay.
 
 ### Budget-gated self-service RPCs
 
@@ -146,12 +155,20 @@ forkd.proto).
   over the internal channel. Budget exhaustion returns an LLM-legible error
   (#28) naming the orchestrator escalation path.
 
-### SDKs (Python + TypeScript)
+### SDKs (all six)
 
-- Swap the direct-mode transport layer (sdk/python/mitos/direct.py +
-  sandbox.py streaming; sdk/typescript/src/http.ts + sandbox.ts) to the Connect
-  client (connectrpc for both). The public SDK API (exec/files/pty/run_code/
-  vitals/port_forward) is unchanged. Cluster mode is untouched.
+- Python + TypeScript: swap the direct-mode runtime transport (sdk/python/mitos/
+  direct.py + sandbox.py streaming; sdk/typescript/src/http.ts + sandbox.ts) to
+  the Connect client (connectrpc for both), covering the full runtime surface
+  (exec/files/pty/run_code/vitals/port_forward). Public SDK API unchanged; cluster
+  mode untouched.
+- Go, Ruby, Rust, Java: migrate the ONE runtime call they make, exec, to the
+  Connect Exec RPC. Keep the minimal-dependency posture by speaking Connect over
+  the SDK's existing HTTP stack (a one-shot exec is server-streaming-after-open
+  over HTTP/1.1 chunked: Go net/http, Ruby net/http, Java HttpClient all stream;
+  Rust ureq is HTTP/1.1 unary-only and may take a small streaming HTTP dep). Their
+  lifecycle calls (create/fork/list/terminate) are unchanged. Each SDK's test
+  stub is updated to the Connect wire shape.
 - The shared conformance suite (sdk/conformance) gains the streaming exec + PTY
   scenarios so Python and TS stay at parity.
 - The e2b drop-in (sdk/python/mitos/e2b.py) is NOT modified: it is built on
@@ -195,14 +212,17 @@ returning the same envelope shape it does today.
 5. guest/agent gRPC-over-vsock migration (with the internal control channel for
    NotifyForked/Configure/ping). Stages 4+5 land together (the guest transport
    flips); KVM CI streaming exec + PTY phase added.
-6. Python + TS SDK transport cutover to Connect; conformance streaming/PTY
-   scenarios.
+6. SDK runtime cutover to Connect for all six: Python + TS full runtime surface;
+   Go/Ruby/Rust/Java exec via Connect over their HTTP stack (Rust may take a small
+   streaming HTTP dep). Python+TS conformance streaming/PTY scenarios.
 7. Browser transport: Connect-Web reachability on :9091 proven (a small browser
    or connect-web client test streaming exec).
 8. Budget-gated self-service RPCs (Fork/Checkpoint/ExtendLifetime/Budget) wired
    to the controller + in-guest socket with attenuated tokens.
-9. Deprecation: JSON-HTTP handlers carry the Deprecation header + a docs note;
-   the new RPCs (Watch/Processes/Signal/Upload/Mkdir/Remove) are documented.
+9. REMOVE the JSON-HTTP runtime handlers (the runtime routes in
+   internal/daemon/sandbox_api.go and the matching sandbox-server routes) now that
+   all six SDKs are on Connect; document the removed routes and the new RPCs
+   (Watch/Processes/Signal/Upload/Mkdir/Remove). The lifecycle REST stays.
 
 Stages 4+5 are the security-sensitive core (guest protocol flip) and the only
 ones that cannot land incrementally green per-package; they land as one unit
