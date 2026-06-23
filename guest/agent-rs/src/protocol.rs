@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 // We do not add the base64 crate; this covers the three []byte fields in scope:
 //   ReadFileResponse.content, ExecStreamFrame.data, WriteFileRequest.content.
 // ---------------------------------------------------------------------------
+
+/// Decode a standard-alphabet base64 string (with padding). Exposed for tests.
+pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    base64_bytes::decode(s)
+}
+
 mod base64_bytes {
     use serde::{Deserializer, Serializer};
 

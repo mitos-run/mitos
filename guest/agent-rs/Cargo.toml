@@ -4,6 +4,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[lib]
+name = "sandbox_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sandbox-agent"
 path = "src/main.rs"
