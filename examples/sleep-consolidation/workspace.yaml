@@ -6,7 +6,7 @@
 # snapshot, so a later claim with the SAME principal can RESUME mid-execution
 # (the "wake") instead of a cold start. A `mitos ws revert` to a pre-sleep
 # revision makes the demo REVERSIBLE.
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: Workspace
 metadata:
   name: sleep-demo
