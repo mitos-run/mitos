@@ -43,6 +43,17 @@ service Sandbox {
   // (open.pty set) is the interactive terminal, both over the one bidi stream.
   rpc Exec(stream ExecRequest) returns (stream ExecResponse);
 
+  // ExecStream runs a non-interactive command and streams its output over a
+  // server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+  // Exec: Connect serves bidi only over HTTP/2, which HTTP/1.1-only clients
+  // (httpx, the light SDKs) cannot reach against the cleartext standalone
+  // server, whereas server-streaming works over HTTP/1.1 chunked transfer. The
+  // request carries the same shape as ExecOpen but WITHOUT pty and WITHOUT
+  // stdin, so this is non-interactive only; the bidi Exec stays for the
+  // interactive and PTY cases. The reply reuses ExecResponse (stdout/stderr
+  // chunks then a terminal exit).
+  rpc ExecStream(ExecStreamRequest) returns (stream ExecResponse);
+
   // --- Filesystem ---
 
   // ReadFile streams the bytes of one file. Replaces POST /v1/files/read.
@@ -124,6 +135,14 @@ service Sandbox {
   // first RunCodeRequest MUST carry `open`; subsequent messages may carry
   // `stdin` to feed interactive prompts.
   rpc RunCode(stream RunCodeRequest) returns (stream RunCodeResponse);
+
+  // RunCodeStream runs a code snippet and streams its output over a
+  // server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+  // RunCode (same rationale as ExecStream: bidi needs HTTP/2). The request
+  // carries the RunCodeOpen shape WITHOUT stdin, so this is non-interactive
+  // only; the bidi RunCode stays for the interactive case. The reply reuses
+  // RunCodeResponse (stdout/stderr, rich result, kernel error, then exit_code).
+  rpc RunCodeStream(RunCodeStreamRequest) returns (stream RunCodeResponse);
 
   // --- Filesystem helpers ---
 
@@ -212,6 +231,25 @@ message ExecExit {
 message EnvVar {
   string key = 1;
   string value = 2;
+}
+
+// ExecStreamRequest is the unary request of the server-streaming ExecStream
+// RPC. It mirrors ExecOpen for a non-interactive run: there is no pty and no
+// stdin, so a single request fully describes the command. HTTP/1.1-only clients
+// use this RPC because Connect serves the bidi Exec only over HTTP/2.
+message ExecStreamRequest {
+  // command and args follow ExecOpen: when args is empty, command is run
+  // through the shell as a single string; when args is set, command is argv[0]
+  // and args the rest, executed without a shell.
+  string command = 1;
+  repeated string args = 2;
+  // env entries are merged onto the sandbox environment. Values may be secret
+  // and are never logged.
+  repeated EnvVar env = 3;
+  // cwd is the working directory; empty defaults to /workspace.
+  string cwd = 4;
+  // timeout_seconds bounds one execution; <= 0 applies the guest default.
+  int32 timeout_seconds = 5;
 }
 
 // --- Filesystem messages ---
@@ -467,6 +505,17 @@ message RunCodeRequest {
     RunCodeOpen open = 1;
     bytes stdin = 2;
   }
+}
+
+// RunCodeStreamRequest is the unary request of the server-streaming
+// RunCodeStream RPC. It mirrors RunCodeOpen for a non-interactive run: there is
+// no stdin, so a single request fully describes the snippet. HTTP/1.1-only
+// clients use this RPC because Connect serves the bidi RunCode only over
+// HTTP/2.
+message RunCodeStreamRequest {
+  string code = 1;
+  string language = 2;
+  int64 timeout_seconds = 3;
 }
 
 // RunResult carries rich display output from a kernel execution (Jupyter-style

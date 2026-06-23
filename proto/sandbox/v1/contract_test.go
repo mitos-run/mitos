@@ -19,6 +19,8 @@ func TestSandboxServiceContractExists(t *testing.T) {
 
 	want := map[string]bool{
 		"Exec":           false,
+		"ExecStream":     false,
+		"RunCodeStream":  false,
 		"ReadFile":       false,
 		"WriteFile":      false,
 		"List":           false,

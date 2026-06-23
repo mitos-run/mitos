@@ -54,6 +54,8 @@ const (
 const (
 	// SandboxExecProcedure is the fully-qualified name of the Sandbox's Exec RPC.
 	SandboxExecProcedure = "/sandbox.v1.Sandbox/Exec"
+	// SandboxExecStreamProcedure is the fully-qualified name of the Sandbox's ExecStream RPC.
+	SandboxExecStreamProcedure = "/sandbox.v1.Sandbox/ExecStream"
 	// SandboxReadFileProcedure is the fully-qualified name of the Sandbox's ReadFile RPC.
 	SandboxReadFileProcedure = "/sandbox.v1.Sandbox/ReadFile"
 	// SandboxWriteFileProcedure is the fully-qualified name of the Sandbox's WriteFile RPC.
@@ -84,6 +86,8 @@ const (
 	SandboxVitalsProcedure = "/sandbox.v1.Sandbox/Vitals"
 	// SandboxRunCodeProcedure is the fully-qualified name of the Sandbox's RunCode RPC.
 	SandboxRunCodeProcedure = "/sandbox.v1.Sandbox/RunCode"
+	// SandboxRunCodeStreamProcedure is the fully-qualified name of the Sandbox's RunCodeStream RPC.
+	SandboxRunCodeStreamProcedure = "/sandbox.v1.Sandbox/RunCodeStream"
 	// SandboxMkdirProcedure is the fully-qualified name of the Sandbox's Mkdir RPC.
 	SandboxMkdirProcedure = "/sandbox.v1.Sandbox/Mkdir"
 	// SandboxRemoveProcedure is the fully-qualified name of the Sandbox's Remove RPC.
@@ -102,6 +106,16 @@ type SandboxClient interface {
 	// WebSocket GET /v1/pty: a non-PTY Exec is a streaming exec, a PTY Exec
 	// (open.pty set) is the interactive terminal, both over the one bidi stream.
 	Exec(context.Context) *connect.BidiStreamForClient[v1.ExecRequest, v1.ExecResponse]
+	// ExecStream runs a non-interactive command and streams its output over a
+	// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+	// Exec: Connect serves bidi only over HTTP/2, which HTTP/1.1-only clients
+	// (httpx, the light SDKs) cannot reach against the cleartext standalone
+	// server, whereas server-streaming works over HTTP/1.1 chunked transfer. The
+	// request carries the same shape as ExecOpen but WITHOUT pty and WITHOUT
+	// stdin, so this is non-interactive only; the bidi Exec stays for the
+	// interactive and PTY cases. The reply reuses ExecResponse (stdout/stderr
+	// chunks then a terminal exit).
+	ExecStream(context.Context, *connect.Request[v1.ExecStreamRequest]) (*connect.ServerStreamForClient[v1.ExecResponse], error)
 	// ReadFile streams the bytes of one file. Replaces POST /v1/files/read.
 	ReadFile(context.Context, *connect.Request[v1.ReadFileRequest]) (*connect.ServerStreamForClient[v1.Chunk], error)
 	// WriteFile streams bytes into one file. The first WriteFileRequest carries
@@ -152,6 +166,13 @@ type SandboxClient interface {
 	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
 	// `stdin` to feed interactive prompts.
 	RunCode(context.Context) *connect.BidiStreamForClient[v1.RunCodeRequest, v1.RunCodeResponse]
+	// RunCodeStream runs a code snippet and streams its output over a
+	// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+	// RunCode (same rationale as ExecStream: bidi needs HTTP/2). The request
+	// carries the RunCodeOpen shape WITHOUT stdin, so this is non-interactive
+	// only; the bidi RunCode stays for the interactive case. The reply reuses
+	// RunCodeResponse (stdout/stderr, rich result, kernel error, then exit_code).
+	RunCodeStream(context.Context, *connect.Request[v1.RunCodeStreamRequest]) (*connect.ServerStreamForClient[v1.RunCodeResponse], error)
 	// Mkdir creates a directory (and parents) at the given path.
 	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
 	// Remove deletes a file or directory. Set recursive to remove a non-empty
@@ -178,6 +199,12 @@ func NewSandboxClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+SandboxExecProcedure,
 			connect.WithSchema(sandboxMethods.ByName("Exec")),
+			connect.WithClientOptions(opts...),
+		),
+		execStream: connect.NewClient[v1.ExecStreamRequest, v1.ExecResponse](
+			httpClient,
+			baseURL+SandboxExecStreamProcedure,
+			connect.WithSchema(sandboxMethods.ByName("ExecStream")),
 			connect.WithClientOptions(opts...),
 		),
 		readFile: connect.NewClient[v1.ReadFileRequest, v1.Chunk](
@@ -270,6 +297,12 @@ func NewSandboxClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(sandboxMethods.ByName("RunCode")),
 			connect.WithClientOptions(opts...),
 		),
+		runCodeStream: connect.NewClient[v1.RunCodeStreamRequest, v1.RunCodeResponse](
+			httpClient,
+			baseURL+SandboxRunCodeStreamProcedure,
+			connect.WithSchema(sandboxMethods.ByName("RunCodeStream")),
+			connect.WithClientOptions(opts...),
+		),
 		mkdir: connect.NewClient[v1.MkdirRequest, v1.MkdirResponse](
 			httpClient,
 			baseURL+SandboxMkdirProcedure,
@@ -294,6 +327,7 @@ func NewSandboxClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 // sandboxClient implements SandboxClient.
 type sandboxClient struct {
 	exec           *connect.Client[v1.ExecRequest, v1.ExecResponse]
+	execStream     *connect.Client[v1.ExecStreamRequest, v1.ExecResponse]
 	readFile       *connect.Client[v1.ReadFileRequest, v1.Chunk]
 	writeFile      *connect.Client[v1.WriteFileRequest, v1.WriteFileResult]
 	list           *connect.Client[v1.ListRequest, v1.ListResponse]
@@ -309,6 +343,7 @@ type sandboxClient struct {
 	budget         *connect.Client[v1.BudgetRequest, v1.BudgetStatus]
 	vitals         *connect.Client[v1.VitalsRequest, v1.GuestVitals]
 	runCode        *connect.Client[v1.RunCodeRequest, v1.RunCodeResponse]
+	runCodeStream  *connect.Client[v1.RunCodeStreamRequest, v1.RunCodeResponse]
 	mkdir          *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
 	remove         *connect.Client[v1.RemoveRequest, v1.RemoveResponse]
 	upload         *connect.Client[v1.UploadRequest, v1.UploadResult]
@@ -317,6 +352,11 @@ type sandboxClient struct {
 // Exec calls sandbox.v1.Sandbox.Exec.
 func (c *sandboxClient) Exec(ctx context.Context) *connect.BidiStreamForClient[v1.ExecRequest, v1.ExecResponse] {
 	return c.exec.CallBidiStream(ctx)
+}
+
+// ExecStream calls sandbox.v1.Sandbox.ExecStream.
+func (c *sandboxClient) ExecStream(ctx context.Context, req *connect.Request[v1.ExecStreamRequest]) (*connect.ServerStreamForClient[v1.ExecResponse], error) {
+	return c.execStream.CallServerStream(ctx, req)
 }
 
 // ReadFile calls sandbox.v1.Sandbox.ReadFile.
@@ -394,6 +434,11 @@ func (c *sandboxClient) RunCode(ctx context.Context) *connect.BidiStreamForClien
 	return c.runCode.CallBidiStream(ctx)
 }
 
+// RunCodeStream calls sandbox.v1.Sandbox.RunCodeStream.
+func (c *sandboxClient) RunCodeStream(ctx context.Context, req *connect.Request[v1.RunCodeStreamRequest]) (*connect.ServerStreamForClient[v1.RunCodeResponse], error) {
+	return c.runCodeStream.CallServerStream(ctx, req)
+}
+
 // Mkdir calls sandbox.v1.Sandbox.Mkdir.
 func (c *sandboxClient) Mkdir(ctx context.Context, req *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {
 	return c.mkdir.CallUnary(ctx, req)
@@ -419,6 +464,16 @@ type SandboxHandler interface {
 	// WebSocket GET /v1/pty: a non-PTY Exec is a streaming exec, a PTY Exec
 	// (open.pty set) is the interactive terminal, both over the one bidi stream.
 	Exec(context.Context, *connect.BidiStream[v1.ExecRequest, v1.ExecResponse]) error
+	// ExecStream runs a non-interactive command and streams its output over a
+	// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+	// Exec: Connect serves bidi only over HTTP/2, which HTTP/1.1-only clients
+	// (httpx, the light SDKs) cannot reach against the cleartext standalone
+	// server, whereas server-streaming works over HTTP/1.1 chunked transfer. The
+	// request carries the same shape as ExecOpen but WITHOUT pty and WITHOUT
+	// stdin, so this is non-interactive only; the bidi Exec stays for the
+	// interactive and PTY cases. The reply reuses ExecResponse (stdout/stderr
+	// chunks then a terminal exit).
+	ExecStream(context.Context, *connect.Request[v1.ExecStreamRequest], *connect.ServerStream[v1.ExecResponse]) error
 	// ReadFile streams the bytes of one file. Replaces POST /v1/files/read.
 	ReadFile(context.Context, *connect.Request[v1.ReadFileRequest], *connect.ServerStream[v1.Chunk]) error
 	// WriteFile streams bytes into one file. The first WriteFileRequest carries
@@ -469,6 +524,13 @@ type SandboxHandler interface {
 	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
 	// `stdin` to feed interactive prompts.
 	RunCode(context.Context, *connect.BidiStream[v1.RunCodeRequest, v1.RunCodeResponse]) error
+	// RunCodeStream runs a code snippet and streams its output over a
+	// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+	// RunCode (same rationale as ExecStream: bidi needs HTTP/2). The request
+	// carries the RunCodeOpen shape WITHOUT stdin, so this is non-interactive
+	// only; the bidi RunCode stays for the interactive case. The reply reuses
+	// RunCodeResponse (stdout/stderr, rich result, kernel error, then exit_code).
+	RunCodeStream(context.Context, *connect.Request[v1.RunCodeStreamRequest], *connect.ServerStream[v1.RunCodeResponse]) error
 	// Mkdir creates a directory (and parents) at the given path.
 	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
 	// Remove deletes a file or directory. Set recursive to remove a non-empty
@@ -491,6 +553,12 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 		SandboxExecProcedure,
 		svc.Exec,
 		connect.WithSchema(sandboxMethods.ByName("Exec")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxExecStreamHandler := connect.NewServerStreamHandler(
+		SandboxExecStreamProcedure,
+		svc.ExecStream,
+		connect.WithSchema(sandboxMethods.ByName("ExecStream")),
 		connect.WithHandlerOptions(opts...),
 	)
 	sandboxReadFileHandler := connect.NewServerStreamHandler(
@@ -583,6 +651,12 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(sandboxMethods.ByName("RunCode")),
 		connect.WithHandlerOptions(opts...),
 	)
+	sandboxRunCodeStreamHandler := connect.NewServerStreamHandler(
+		SandboxRunCodeStreamProcedure,
+		svc.RunCodeStream,
+		connect.WithSchema(sandboxMethods.ByName("RunCodeStream")),
+		connect.WithHandlerOptions(opts...),
+	)
 	sandboxMkdirHandler := connect.NewUnaryHandler(
 		SandboxMkdirProcedure,
 		svc.Mkdir,
@@ -605,6 +679,8 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 		switch r.URL.Path {
 		case SandboxExecProcedure:
 			sandboxExecHandler.ServeHTTP(w, r)
+		case SandboxExecStreamProcedure:
+			sandboxExecStreamHandler.ServeHTTP(w, r)
 		case SandboxReadFileProcedure:
 			sandboxReadFileHandler.ServeHTTP(w, r)
 		case SandboxWriteFileProcedure:
@@ -635,6 +711,8 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 			sandboxVitalsHandler.ServeHTTP(w, r)
 		case SandboxRunCodeProcedure:
 			sandboxRunCodeHandler.ServeHTTP(w, r)
+		case SandboxRunCodeStreamProcedure:
+			sandboxRunCodeStreamHandler.ServeHTTP(w, r)
 		case SandboxMkdirProcedure:
 			sandboxMkdirHandler.ServeHTTP(w, r)
 		case SandboxRemoveProcedure:
@@ -652,6 +730,10 @@ type UnimplementedSandboxHandler struct{}
 
 func (UnimplementedSandboxHandler) Exec(context.Context, *connect.BidiStream[v1.ExecRequest, v1.ExecResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.Exec is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) ExecStream(context.Context, *connect.Request[v1.ExecStreamRequest], *connect.ServerStream[v1.ExecResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.ExecStream is not implemented"))
 }
 
 func (UnimplementedSandboxHandler) ReadFile(context.Context, *connect.Request[v1.ReadFileRequest], *connect.ServerStream[v1.Chunk]) error {
@@ -712,6 +794,10 @@ func (UnimplementedSandboxHandler) Vitals(context.Context, *connect.Request[v1.V
 
 func (UnimplementedSandboxHandler) RunCode(context.Context, *connect.BidiStream[v1.RunCodeRequest, v1.RunCodeResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.RunCode is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) RunCodeStream(context.Context, *connect.Request[v1.RunCodeStreamRequest], *connect.ServerStream[v1.RunCodeResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.RunCodeStream is not implemented"))
 }
 
 func (UnimplementedSandboxHandler) Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {

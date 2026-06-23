@@ -235,6 +235,17 @@ func (s *Service) execViaGuest(ctx context.Context, stream *connect.BidiStream[s
 	}
 	defer es.Close()
 
+	return copyExecFrames(ctx, es, stream.Send)
+}
+
+// copyExecFrames drains a guest ExecStream and forwards each frame to send as
+// an ExecResponse: stdout/stderr chunks then a terminal ExecExit. It is shared
+// by the bidi Exec (Service.execViaGuest) and the server-streaming ExecStream
+// so both transports have identical copy semantics. A guest Recv error is
+// surfaced as an LLM-legible terminal exit frame (never a secret value) so the
+// client always reads a clean terminal frame rather than a bare transport
+// error.
+func copyExecFrames(ctx context.Context, es ExecStream, send func(*sandboxv1.ExecResponse) error) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -243,28 +254,71 @@ func (s *Service) execViaGuest(ctx context.Context, stream *connect.BidiStream[s
 		if recvErr != nil {
 			// io.EOF is handled by the Done frame below, not here; any other
 			// error is a transport failure surfaced as an LLM-legible exit.
-			_ = stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+			_ = send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
 				ExitCode: 1,
 				Error:    fmt.Sprintf("exec stream read error: %v; the guest agent may have crashed or the vsock connection was lost", recvErr),
 			}}})
 			return nil
 		}
 		if frame.Done {
-			return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+			return send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
 				ExitCode: frame.ExitCode,
 			}}})
 		}
 		if len(frame.Stdout) > 0 {
-			if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: frame.Stdout}}); err != nil {
+			if err := send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: frame.Stdout}}); err != nil {
 				return err
 			}
 		}
 		if len(frame.Stderr) > 0 {
-			if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: frame.Stderr}}); err != nil {
+			if err := send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: frame.Stderr}}); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// ExecStream runs a non-interactive command and streams its output over a
+// server-streaming RPC, the HTTP/1.1-reachable counterpart to the bidi Exec
+// (Connect serves bidi only over HTTP/2). It builds the equivalent ExecOpen
+// from the unary request (no pty, no stdin), opens the guest exec via the SAME
+// GuestConn.Exec path the bidi Exec uses, and copies frames with the shared
+// copyExecFrames helper. The per-sandbox concurrent-stream cap is enforced
+// inside GuestConn.Exec (the daemon vsockGuestConn acquires the slot), so this
+// RPC inherits the same ceiling as the bidi Exec.
+//
+// When s.Guest is nil the handler returns the honest #24 follow-up message.
+func (s *Service) ExecStream(ctx context.Context, req *connect.Request[sandboxv1.ExecStreamRequest], stream *connect.ServerStream[sandboxv1.ExecResponse]) error {
+	if s.Guest == nil {
+		return followup("ExecStream")
+	}
+
+	r := req.Msg
+	open := &sandboxv1.ExecOpen{
+		Command:        r.GetCommand(),
+		Args:           r.GetArgs(),
+		Env:            r.GetEnv(),
+		Cwd:            r.GetCwd(),
+		TimeoutSeconds: r.GetTimeoutSeconds(),
+	}
+
+	sandboxID, err := s.resolveID(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
+	}
+
+	conn, err := s.Guest(sandboxID)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+	}
+
+	es, err := conn.Exec(ctx, open)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest exec open failed: %w; check that the command is accessible in the sandbox filesystem", err))
+	}
+	defer es.Close()
+
+	return copyExecFrames(ctx, es, stream.Send)
 }
 
 // resolveID returns the sandbox id from the resolver, or the empty string when

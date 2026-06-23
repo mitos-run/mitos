@@ -53,6 +53,56 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 	}
 	defer rs.Close()
 
+	return copyRunCodeFrames(ctx, rs, stream.Send)
+}
+
+// RunCodeStream runs a code snippet and streams its output over a
+// server-streaming RPC, the HTTP/1.1-reachable counterpart to the bidi RunCode
+// (Connect serves bidi only over HTTP/2). It builds the equivalent RunCodeOpen
+// from the unary request (no stdin), opens the guest run via the SAME
+// GuestConn.RunCode path the bidi RunCode uses, and copies frames with the
+// shared copyRunCodeFrames helper. Like the bidi RunCode, this path does not
+// acquire a concurrent-stream slot (only Exec does in the daemon
+// vsockGuestConn), so its cap behavior matches the bidi RunCode exactly.
+//
+// When s.Guest is nil the handler returns the honest #24 follow-up message.
+func (s *Service) RunCodeStream(ctx context.Context, req *connect.Request[sandboxv1.RunCodeStreamRequest], stream *connect.ServerStream[sandboxv1.RunCodeResponse]) error {
+	if s.Guest == nil {
+		return followup("RunCodeStream")
+	}
+
+	r := req.Msg
+	open := &sandboxv1.RunCodeOpen{
+		Code:           r.GetCode(),
+		Language:       r.GetLanguage(),
+		TimeoutSeconds: r.GetTimeoutSeconds(),
+	}
+
+	sandboxID, err := s.resolveID(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
+	}
+
+	conn, err := s.Guest(sandboxID)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+	}
+
+	rs, err := conn.RunCode(ctx, open)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest RunCode open failed: %w; check that the language kernel is available in the sandbox", err))
+	}
+	defer rs.Close()
+
+	return copyRunCodeFrames(ctx, rs, stream.Send)
+}
+
+// copyRunCodeFrames drains a guest RunCodeStream and forwards each frame to
+// send as a RunCodeResponse: stdout/stderr chunks, rich result, kernel error,
+// then a terminal exit_code. It is shared by the bidi RunCode and the
+// server-streaming RunCodeStream so both transports have identical copy
+// semantics.
+func copyRunCodeFrames(ctx context.Context, rs RunCodeStream, send func(*sandboxv1.RunCodeResponse) error) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -66,7 +116,7 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 			// field, so unlike Exec this terminal frame cannot carry remediation
 			// text; the non-zero exit is the only signal. Adding an error string
 			// to RunCodeResponse is a tracked proto follow-up of issue #24.
-			_ = stream.Send(&sandboxv1.RunCodeResponse{
+			_ = send(&sandboxv1.RunCodeResponse{
 				Msg: &sandboxv1.RunCodeResponse_ExitCode{ExitCode: 1},
 			})
 			return nil
@@ -75,7 +125,7 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 		switch frame.Kind {
 		case RunCodeFrameStdout:
 			if len(frame.Stdout) > 0 {
-				if err := stream.Send(&sandboxv1.RunCodeResponse{
+				if err := send(&sandboxv1.RunCodeResponse{
 					Msg: &sandboxv1.RunCodeResponse_Stdout{Stdout: frame.Stdout},
 				}); err != nil {
 					return err
@@ -84,7 +134,7 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 
 		case RunCodeFrameStderr:
 			if len(frame.Stderr) > 0 {
-				if err := stream.Send(&sandboxv1.RunCodeResponse{
+				if err := send(&sandboxv1.RunCodeResponse{
 					Msg: &sandboxv1.RunCodeResponse_Stderr{Stderr: frame.Stderr},
 				}); err != nil {
 					return err
@@ -102,7 +152,7 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 					}
 				}
 			}
-			if err := stream.Send(&sandboxv1.RunCodeResponse{
+			if err := send(&sandboxv1.RunCodeResponse{
 				Msg: &sandboxv1.RunCodeResponse_Result{Result: protoResult},
 			}); err != nil {
 				return err
@@ -115,14 +165,14 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 				protoErr.Value = frame.Error.Value
 				protoErr.Traceback = frame.Error.Traceback
 			}
-			if err := stream.Send(&sandboxv1.RunCodeResponse{
+			if err := send(&sandboxv1.RunCodeResponse{
 				Msg: &sandboxv1.RunCodeResponse_Error{Error: protoErr},
 			}); err != nil {
 				return err
 			}
 
 		case RunCodeFrameExit:
-			return stream.Send(&sandboxv1.RunCodeResponse{
+			return send(&sandboxv1.RunCodeResponse{
 				Msg: &sandboxv1.RunCodeResponse_ExitCode{ExitCode: frame.ExitCode},
 			})
 		}
