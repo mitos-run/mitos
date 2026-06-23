@@ -1,0 +1,21 @@
+[package]
+name = "sandbox-agent"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sandbox-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
