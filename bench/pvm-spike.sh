@@ -15,9 +15,13 @@
 #   - host /dev/kvm appears under kvm_pvm:           PASS
 #   - microVM boot + guest exec under PVM:           PASS
 #   - Firecracker snapshot CREATE:                   PASS
-#   - Firecracker snapshot RESTORE:                  FAIL (unhandled WRMSR
-#     0xc0010007 = AMD MSR_K7_PERFCTR3; PVM module partial-writes the MSR set and
-#     Firecracker aborts the restore). kvm enable_pmu=0 does NOT work around it.
+#   - Firecracker snapshot RESTORE (stock fork):     FAIL (host rejects an MSR:
+#     0x3a IA32_FEATURE_CONTROL on the restore path; PVM partial-writes the MSR
+#     set and Firecracker aborts). kvm enable_pmu=0 does NOT work around it.
+#   - Firecracker snapshot RESTORE (patched fork):   PASS, guest resumes state.
+#     Apply bench/pvm/firecracker-msr-tolerance.patch and rebuild (STEP=build-fc).
+#     That patch is a spike proof, not production-ready: see the honesty caveat in
+#     docs/platforms/pvm-evaluation.md (skip an allowlist, not every MSR).
 # See docs/platforms/pvm-evaluation.md for the full writeup and decision impact.
 
 set -euo pipefail
@@ -153,12 +157,43 @@ run_test() {
   kill "$fc2" 2>/dev/null || true
 }
 
+build_patched_fc() {
+  log "build the MSR-tolerant Firecracker fork (skips host-rejected MSRs on restore)"
+  # The patch lives next to this script. PATCH defaults to that path; override if
+  # you run the script from elsewhere on the host.
+  local PATCH=${PATCH:-"$(dirname "$0")/pvm/firecracker-msr-tolerance.patch"}
+  export DEBIAN_FRONTEND=noninteractive
+  # Ubuntu 26.04 ships gcc 15 and clang 21, both too new for aws-lc-sys 0.30
+  # (an aws-lc-rs dependency of the vmm crate): the C build fails under -Werror.
+  # Use gcc-13 and strip -Werror from aws-lc's own CMake so warnings are not fatal.
+  apt-get update -qq
+  apt-get install -y -qq gcc-13 g++-13 libseccomp-dev cmake pkg-config libssl-dev
+  command -v cargo >/dev/null || { curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null; }
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+  cd "$WORK"
+  [ -d firecracker-src ] || git clone --depth 1 --branch main-live-migration-pvm \
+    https://github.com/loopholelabs/firecracker.git firecracker-src
+  cd firecracker-src
+  git apply --check "$PATCH" 2>/dev/null && git apply "$PATCH" || echo "(patch already applied or adjust manually)"
+  # rust-toolchain.toml pins 1.87.0; aws-lc-sys bindgen needs rustfmt on it.
+  rustup component add rustfmt --toolchain 1.87.0 || true
+  local AWS
+  AWS=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'aws-lc-sys-*' | head -1)
+  [ -n "$AWS" ] && sed -i 's/-Werror //g' "$AWS/aws-lc/CMakeLists.txt" || true
+  CC=gcc-13 CXX=g++-13 cargo build --release --bin firecracker
+  cp -f build/cargo_target/release/firecracker "$WORK/fc/firecracker"
+  echo "patched firecracker installed: $($WORK/fc/firecracker --version | head -1)"
+  echo "now run STEP=test with --no-seccomp to verify restore PASSES"
+}
+
 STEP=${STEP:-all}
 case "$STEP" in
   baseline)      baseline ;;
   install)       baseline; install_host_kernel ;;
   after-reboot)  after_reboot; build_guest_kernel; build_rootfs; run_test ;;
+  build-fc)      build_patched_fc ;;
   test)          run_test ;;
   all)           baseline; install_host_kernel ;;  # then reboot and run STEP=after-reboot
-  *) echo "unknown STEP=$STEP (baseline|install|after-reboot|test)"; exit 2 ;;
+  *) echo "unknown STEP=$STEP (baseline|install|after-reboot|build-fc|test)"; exit 2 ;;
 esac

@@ -943,10 +943,15 @@ as equivalent to hardware virt:
   (`docs/platforms/pvm-evaluation.md`, reproducer `bench/pvm-spike.sh`) confirmed
   this substrate is real: a PVM host kernel makes `/dev/kvm` appear on a Hetzner
   CPX with no `vmx`/`svm`, and a guest boots and runs ring-3 code there with zero
-  hardware-virt flags. PVM remains EVALUATED, NOT ADOPTED: the spike also found
-  the core fork primitive (Firecracker snapshot restore) is currently BLOCKED
-  under PVM, so no PVM tier can be enabled today. This row exists so that if a PVM
-  tier is ever enabled it is a documented lower-assurance tier from day one.
+  hardware-virt flags. PVM remains EVALUATED, NOT ADOPTED: the spike found the
+  core fork primitive (Firecracker snapshot restore) BLOCKED under PVM, then
+  validated a small VMM fork patch that unblocks it (the host rejects an MSR,
+  `IA32_FEATURE_CONTROL`, on restore; the patch skips it). That patch is a spike
+  proof, not production-ready: skipping a snapshotted MSR is a fork-correctness
+  hazard, so a PVM tier still gates on an allowlisted version plus a green
+  fork-correctness run. No PVM tier can be enabled today. This row exists so that
+  if a PVM tier is ever enabled it is a documented lower-assurance tier from day
+  one.
 - **gVisor** (userspace-kernel syscall interposition): not a VM at all. The
   software-isolation tier, relevant to the gVisor fallback and to ADR 0005 (raw
   forkd is not multi-tenant). Weaker still than a VM boundary.

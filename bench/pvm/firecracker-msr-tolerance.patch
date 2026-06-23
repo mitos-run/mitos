@@ -1,0 +1,64 @@
+From: mitos PVM spike (issue #40)
+Subject: [SPIKE] tolerate host-rejected MSRs on snapshot restore under PVM
+
+Spike-quality patch against the Loophole Labs Firecracker fork branch
+main-live-migration-pvm (HEAD 7f6c070). It makes `KVM_SET_MSRS` partial writes
+non-fatal on snapshot restore: the PVM kernel module rejects MSRs that Firecracker
+captured at snapshot time (observed on a Hetzner CPX22 / AMD EPYC: index 0x3a
+IA32_FEATURE_CONTROL on the restore path, and 0xc0010007 MSR_K7_PERFCTR3 written
+by the guest at boot). With this patch a microVM restores and resumes under PVM.
+
+HONESTY CAVEAT, do NOT ship as-is: this skips ANY MSR the host rejects, which can
+silently drop meaningful vCPU state and is a fork-correctness hazard. The
+production form must skip only a known allowlist (IA32_FEATURE_CONTROL, the AMD
+perfctr MSRs) and keep every other rejection fatal, and must run the
+fork-correctness suite (issue #3) under PVM before it is trusted.
+
+Validated 2026-06-23: restore succeeds, guest heartbeat resumes past the snapshot
+point, restore-load ~25 ms. See docs/platforms/pvm-evaluation.md.
+
+diff --git a/src/vmm/src/arch/x86_64/vcpu.rs b/src/vmm/src/arch/x86_64/vcpu.rs
+index 81e8a4e..1c5f63f 100644
+--- a/src/vmm/src/arch/x86_64/vcpu.rs
++++ b/src/vmm/src/arch/x86_64/vcpu.rs
+@@ -92,8 +92,6 @@ pub enum KvmVcpuError {
+     VcpuSetMpState(kvm_ioctls::Error),
+     /// Failed to set KVM vcpu msrs: {0}
+     VcpuSetMsrs(kvm_ioctls::Error),
+-    /// Failed to set all KVM MSRs for this vCPU. Only a partial write was done.
+-    VcpuSetMsrsIncomplete,
+     /// Failed to set KVM vcpu regs: {0}
+     VcpuSetRegs(kvm_ioctls::Error),
+     /// Failed to set KVM vcpu sregs: {0}
+@@ -693,9 +691,26 @@ impl KvmVcpu {
+             .set_lapic(&state.lapic)
+             .map_err(KvmVcpuError::VcpuSetLapic)?;
+         for msrs in &state.saved_msrs {
+-            let nmsrs = self.fd.set_msrs(msrs).map_err(KvmVcpuError::VcpuSetMsrs)?;
+-            if nmsrs < msrs.as_fam_struct_ref().nmsrs as usize {
+-                return Err(KvmVcpuError::VcpuSetMsrsIncomplete);
++            // KVM_SET_MSRS applies entries in array order and returns the count it
++            // set, stopping at the first MSR the host rejects. Under the PVM kernel
++            // module some MSRs Firecracker captured at snapshot time (for example
++            // IA32_FEATURE_CONTROL 0x3a, or the AMD perfctr MSR 0xc0010007) are not
++            // settable, which previously failed the entire restore. Tolerate a
++            // partial write by skipping the rejected MSR and retrying the remainder,
++            // so a microVM still restores on a host that does not accept every
++            // snapshotted MSR.
++            let mut entries: Vec<kvm_bindings::kvm_msr_entry> = msrs.as_slice().to_vec();
++            while !entries.is_empty() {
++                let chunk = Msrs::from_entries(&entries).map_err(KvmVcpuError::Fam)?;
++                let nmsrs = self.fd.set_msrs(&chunk).map_err(KvmVcpuError::VcpuSetMsrs)?;
++                if nmsrs == entries.len() {
++                    break;
++                }
++                let skipped = entries[nmsrs];
++                warn!(
++                    "Skipping MSR rejected by host during snapshot restore: \
++                     index {:#x} value {:#x}",
++                    skipped.index, skipped.data
++                );
++                entries.drain(..=nmsrs);
+             }
+         }
+         self.fd

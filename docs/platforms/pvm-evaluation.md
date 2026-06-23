@@ -8,8 +8,11 @@ measured, and the one latency figure is explicitly marked indicative, not a
 benchmark, because it was taken with a debug-laden guest kernel and a non-minimal
 config (the no-unverified-claims rule). The reproducer is `bench/pvm-spike.sh`.
 
-Status: **evaluated, NOT adopted (spike confirms the core fork primitive is
-blocked under PVM today, see below).** What ships alongside this doc is the
+Status: **evaluated, NOT adopted.** The spike found the core fork primitive
+(Firecracker snapshot restore) blocked under PVM, then validated a small VMM fork
+patch that unblocks it; adoption still gates on a production-quality version of
+that patch plus a green fork-correctness run under PVM (see "Spike results" and
+"Follow-up"). What ships alongside this doc is the
 isolation-tier control the threat model needs regardless of PVM (the
 `mitos.run/isolation-tier` node label, the `minIsolationTier` /
 `requireHardwareKvm` template floor, and the scheduler filter that keeps a
@@ -144,11 +147,11 @@ therefore unmeasurable under PVM until this is fixed.
 The AMD perfctr MSR stays in Firecracker's restore MSR set regardless, and the
 module still rejects it. So there is no config knob; restore needs a code change.
 
-**Candidate fixes for a follow-up spike (none validated):**
-- Patch the PVM KVM module to accept (or no-op) the AMD perfctr MSRs.
+**Candidate fixes (the Firecracker-fork one is now VALIDATED, see below):**
+- Patch the PVM KVM module to accept (or no-op) the rejected MSRs.
 - Patch the Firecracker fork to tolerate a partial MSR write or drop unsupported
-  MSRs from the restore set.
-- Re-run on an Intel CPX, since `0xc0010007` is an AMD-specific MSR; the failing
+  MSRs from the restore set. VALIDATED on 2026-06-23 (see "Follow-up").
+- Re-run on an Intel CPX, since the rejected MSRs are CPU-specific; the failing
   MSR set may differ (or not appear) on Intel.
 
 **Indicative timing, NOT a benchmark:** cold-boot `InstanceStart` to first guest
@@ -156,10 +159,42 @@ exec marker was about 0.81 s, measured with a 277 MB debug `vmlinux` and a
 non-minimal guest config. It is recorded only to show boot is in a sane range; it
 is not a published number and is not in `bench/` results, per principle 1.
 
-This moves the decision framework below: the "kvm-test snapshot/restore passes
-under PVM" gate is currently a hard FAIL, so PVM is not adoptable as a fork tier
-today regardless of the other costs. Re-evaluate after the restore blocker is
-fixed or PVM mainlines.
+## Follow-up: the restore blocker is fixable in the VMM (validated 2026-06-23)
+
+The restore failure was chased down and fixed in the Firecracker fork, then
+re-tested on the same box. `KVM_SET_MSRS` applies entries in order and returns
+the count it set, stopping at the first MSR the host rejects, so the rejected
+entry is identifiable. The fork was patched to skip the rejected MSR and retry
+the remainder instead of aborting the restore. Patch:
+`bench/pvm/firecracker-msr-tolerance.patch` (against fork HEAD `7f6c070`).
+
+Result with the patched binary:
+
+| Primitive | Before patch | After patch |
+|---|---|---|
+| Firecracker snapshot RESTORE | FAIL | **PASS** |
+| guest resumes state across restore | n/a | **PASS** (heartbeat 5 at snapshot, resumes 6, 7, 8, 9) |
+
+The MSR the restore path actually rejected was `0x3a` = `IA32_FEATURE_CONTROL`
+(the VMX-enable MSR, which a PVM guest has no use for); the patch skipped it and
+the restore completed. Restore-load was about 25 ms (indicative, not a benchmark).
+
+**Honesty caveat, this patch is a spike proof and is NOT production-ready.** It
+skips ANY MSR the host rejects, which can silently drop meaningful vCPU state and
+is a fork-correctness hazard. The production form must skip only a known allowlist
+(`IA32_FEATURE_CONTROL`, the AMD perfctr MSRs) and keep every other rejection
+fatal, AND the fork-correctness suite (issue #3) must pass under PVM before this
+is trusted. Skipping an MSR is exactly the kind of silent state divergence that
+suite exists to catch.
+
+This shifts, but does not clear, the decision framework below. The
+"kvm-test snapshot/restore passes under PVM" gate is no longer a hard FAIL: a
+small VMM patch makes restore work and the guest resumes correctly. PVM is still
+NOT adoptable today, because the gating conditions now are a production-quality
+allowlisted MSR patch (upstreamed to whichever Firecracker mitos ships) plus a
+green fork-correctness run under PVM, on top of the unchanged kernel-maintenance
+and lower-assurance-tier costs. The run-anywhere story is materially more
+plausible than before this spike; it is not free.
 
 ## Upstream mainlining: revisit when merged
 
