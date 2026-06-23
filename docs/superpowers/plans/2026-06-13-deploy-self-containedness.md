@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `kubectl apply -k deploy/` bring up a fully working mitos stack on a real KVM node with no manual `kubectl` patches; bake in the eight runtime fixes that were applied by hand to go live tonight.
+**Goal:** Make `kubectl apply -k deploy/` bring up a fully working Mitos stack on a real KVM node with no manual `kubectl` patches; bake in the eight runtime fixes that were applied by hand to go live tonight.
 
 **Architecture:** Most fixes are declarative deploy/ changes: PodSecurity Admission labels on the namespace, an image pull secret + serviceaccount wiring, forkd DaemonSet adjustments (agent-bin arg, privileged securityContext, DOCKER_CONFIG + docker-config secret mount, jailer args removed for the husk path), and a kernel-staging DaemonSet that places `vmlinux` on each KVM node. One fix needs Go: the controller must replicate the CA and forkd-TLS Secrets from its namespace into any pool namespace where it creates husk pods, with the matching RBAC already present (secrets create/get/list/update exists). The namespace default (`mitos`) is already correct in code and deploy/; we verify it and only add a task if a gap remains.
 

@@ -1,4 +1,4 @@
-// Public API for the mitos TypeScript SDK.
+// Public API for the Mitos TypeScript SDK.
 
 export type {
   ForkPolicy,

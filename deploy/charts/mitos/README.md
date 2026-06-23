@@ -1,4 +1,4 @@
-# mitos Helm chart
+# Mitos Helm chart
 
 Snapshot-fork sandboxes for AI agents on Kubernetes. This chart installs the
 mitos.run operator: the controller Deployment, the privileged forkd DaemonSet,
@@ -90,7 +90,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
+| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every Mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
 | `controller.image.tag` | `v0.13.0` | Controller image tag. |

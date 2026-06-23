@@ -2,9 +2,9 @@
 (issue #205).
 
 VibeKit is a provider aggregator over sandbox backends ("E2B today; Daytona,
-Modal, Fly.io coming soon"). Listing mitos there is near-free distribution. The
+Modal, Fly.io coming soon"). Listing Mitos there is near-free distribution. The
 external LISTING (a PR to VibeKit's repo) is a human step; what is implemented
-here is the mitos PROVIDER each aggregator expects, backed by the native
+here is the Mitos PROVIDER each aggregator expects, backed by the native
 ``DirectSandbox`` surface through the shared ``mitos.integrations._mapping`` op
 layer.
 

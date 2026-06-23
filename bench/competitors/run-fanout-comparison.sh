@@ -9,11 +9,11 @@
 # time-to-ready distribution. Every system is measured by the same method so the
 # comparison is apples-to-apples.
 #
-# This is the contested-claim harness. The defensible mitos claim is sub-second
+# This is the contested-claim harness. The defensible Mitos claim is sub-second
 # 1-to-N live copy-on-write fan-out: forking one warmed base into many children
 # cheaply. Modal markets a snapshot/branch capability and Daytona/E2B start cold
 # sandboxes; the only honest way to compare is to measure the SAME fan-out shape
-# on each and record whether mitos fork actually beats branching, or whether the
+# on each and record whether Mitos fork actually beats branching, or whether the
 # wedge is self-hosting plus per-fork network isolation rather than raw speed.
 # This driver does NOT decide that. It only runs the adapter the maintainer
 # points it at, on the maintainer's hardware, and never invents a number.

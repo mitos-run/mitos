@@ -1,6 +1,6 @@
 name: Release Helm chart
 
-# Package the mitos Helm chart and publish it to the gh-pages branch as a
+# Package the Mitos Helm chart and publish it to the gh-pages branch as a
 # classic HTTP Helm repository, plus attach the .tgz to a GitHub release. The
 # repository is served from https://mitos.run/charts via a Cloudflare rewrite to
 # this repo's GitHub Pages site (see docs/distribution.md). Artifact Hub then

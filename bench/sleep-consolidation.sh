@@ -26,7 +26,7 @@
 #
 # It writes a result row to bench/results/ so the number is reproducible.
 #
-# Requirements: a running mitos cluster, kubectl + a KUBECONFIG that can create
+# Requirements: a running Mitos cluster, kubectl + a KUBECONFIG that can create
 # the demo objects in the namespace, python3 with the mitos SDK, the mitos CLI.
 #
 # Usage:

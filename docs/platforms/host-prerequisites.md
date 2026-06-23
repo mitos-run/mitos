@@ -1,6 +1,6 @@
 # Host kernel prerequisites for KVM nodes
 
-This is the host/kernel checklist every mitos KVM node must satisfy, the two
+This is the host/kernel checklist every Mitos KVM node must satisfy, the two
 failure modes a rescue/minimal kernel causes, and the one-shot verify. It is the
 companion to `prerequisites.md` (the distro-neutral node/install checklist) and
 `talos-hetzner.md` (one concrete realization). These were learned the hard way

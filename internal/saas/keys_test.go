@@ -91,7 +91,7 @@ func TestVerifyRejectsForgedKey(t *testing.T) {
 	}
 }
 
-// TestVerifyRejectsMalformedKey asserts a credential without the mitos prefix is
+// TestVerifyRejectsMalformedKey asserts a credential without the Mitos prefix is
 // rejected before any store lookup.
 func TestVerifyRejectsMalformedKey(t *testing.T) {
 	store := NewMemStore()

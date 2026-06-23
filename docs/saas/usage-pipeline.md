@@ -1,6 +1,6 @@
 # Billing-grade usage metering pipeline
 
-This document describes how mitos turns per-node CoW-aware operational metering
+This document describes how Mitos turns per-node CoW-aware operational metering
 (`internal/metering`, the forkd `GET /v1/metering` endpoint, docs/metering.md)
 into per-organization, time-integrated, auditable usage records, and the
 org-scoped public usage API on top of them. The implementation is

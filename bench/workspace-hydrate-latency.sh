@@ -28,7 +28,7 @@
 # It reuses the warm-pool wait pattern from bench/husk-activate-latency.sh so
 # each hydrate sample is a real warm bind and not blocked on pool refill.
 #
-# Requirements: a running mitos cluster with a warm pool, a Workspace object,
+# Requirements: a running Mitos cluster with a warm pool, a Workspace object,
 # kubectl + a KUBECONFIG that can create the objects in the namespace, and
 # python3 with the mitos SDK installed.
 #

@@ -2,7 +2,7 @@
 #
 # husk-activate-latency.sh
 #
-# Reproducible source for the warm-claim activate latency number mitos
+# Reproducible source for the warm-claim activate latency number Mitos
 # publishes (the "~27 ms P50" bare-metal reference figure, issue #16 / #18).
 #
 # What it measures: the time the controller reports for a warm-sandbox activation
@@ -24,7 +24,7 @@
 # sample list, so the published number is reproducible per the repo's
 # no-unverified-claims rule.
 #
-# Requirements: a running mitos cluster with the husk-pods path enabled and a
+# Requirements: a running Mitos cluster with the husk-pods path enabled and a
 # warm pool with dormant pods available, plus kubectl and a KUBECONFIG that can
 # create Sandboxes in the target namespace.
 #

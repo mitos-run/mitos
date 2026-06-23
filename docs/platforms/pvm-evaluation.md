@@ -1,7 +1,7 @@
 # PVM as a no-nested-virt node tier: evaluation (issue #40)
 
 This document is the HONEST evaluation of PVM (pagetable-based virtual machine,
-Ant/Alibaba) as a mitos node tier that runs Firecracker on plain cloud VPS with
+Ant/Alibaba) as a Mitos node tier that runs Firecracker on plain cloud VPS with
 no nested virtualization. It is an EVALUATION, not an adoption. No PVM kernel was
 built and no measurement was taken; every number below is a target to be produced
 by the spike, never a claimed result (the no-unverified-claims rule).
@@ -20,7 +20,7 @@ ring 3 using pagetable switching instead of hardware virtualization. It needs no
 VMX (Intel VT-x) or SVM (AMD-V), exposes the standard `/dev/kvm` ABI, and runs
 Firecracker unmodified against that ABI. It is used in production at Alibaba/Ant.
 
-The consequence that matters to mitos: most cloud VPS (Hetzner Cloud and the
+The consequence that matters to Mitos: most cloud VPS (Hetzner Cloud and the
 majority of commodity providers) do NOT expose `/dev/kvm` because they do not
 offer nested virtualization. On such a host, Firecracker cannot start today. With
 a PVM host kernel, it can.
@@ -33,11 +33,11 @@ References:
 ## The benefit: run anywhere
 
 The single, real benefit is RUN-ANYWHERE. With a PVM tier, a self-hoster can run
-mitos's Firecracker snapshot-fork sandboxes on ANY cloud VPS that exposes no
+Mitos's Firecracker snapshot-fork sandboxes on ANY cloud VPS that exposes no
 nested virt: a plain Hetzner Cloud `cpx` instance, a generic DigitalOcean or
 Vultr droplet, a bare provider VM. That is a story no competitor offers
 self-hosters: the snapshot-fork primitive without requiring a metal host or a
-nested-virt-capable cloud tier. For mitos specifically, bare metal is already a
+nested-virt-capable cloud tier. For Mitos specifically, bare metal is already a
 first-class target; PVM extends the reach to the commodity-VPS long tail without
 asking the operator to find KVM-capable hosts.
 
@@ -52,7 +52,7 @@ it honest.
 PVM is not free. Each cost below is a real, recurring tax, not a one-time setup.
 
 1. **Out-of-tree HOST kernel patches.** PVM is a forked KVM module on an
-   out-of-tree, RFC kernel patch set. mitos targets Talos; every Talos release
+   out-of-tree, RFC kernel patch set. Mitos targets Talos; every Talos release
    would need a forked kernel build carrying the PVM patches. This DOUBLES the
    kernel-distributor tax already tracked in issue #35: a second kernel flavor to
    build, sign, distribute, and keep current with CVE fixes, forever, until (and
@@ -64,7 +64,7 @@ PVM is not free. Each cost below is a real, recurring tax, not a one-time setup.
    (issue #10): a second guest kernel to build and ship, and to keep aligned with
    the host module's ABI.
 
-3. **Core-primitive validation under PVM.** mitos's whole value is the
+3. **Core-primitive validation under PVM.** Mitos's whole value is the
    snapshot-fork primitive. Every core mechanism must be RE-VALIDATED under PVM,
    because PVM is a different execution substrate, not a drop-in:
    - snapshot/restore correctness,
@@ -150,7 +150,7 @@ are met; otherwise do not.
 
 **Strong signal to revisit:** PVM mainlines upstream (removes cost 1), OR a
 concrete customer requires Firecracker on a specific no-nested-virt VPS that
-mitos cannot otherwise serve.
+Mitos cannot otherwise serve.
 
 ## What ships now (the achievable, valuable slice)
 

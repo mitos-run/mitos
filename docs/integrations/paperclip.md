@@ -1,9 +1,9 @@
 # Paperclip / OpenClaw / Hermes integration
 
-This document describes how mitos serves as the execution substrate for the
+This document describes how Mitos serves as the execution substrate for the
 Paperclip ecosystem (issue #20, workstream W3). The integration implements the
 upstream pluggable sandbox-provider contract (Environments plus a lease
-lifecycle) and maps it onto mitos Sandboxes instead of `batch/v1` Jobs.
+lifecycle) and maps it onto Mitos Sandboxes instead of `batch/v1` Jobs.
 
 The in-repo plugin lives at `plugins/paperclip`. It is a TypeScript Paperclip
 plugin (`@paperclipai/sandbox-provider-sandbox`) that registers an environment
@@ -14,7 +14,7 @@ backends, selected by `config.backend`:
   sandbox-server REST API (`/v1/fork`, `/v1/exec`, `/v1/sandboxes`). No
   Kubernetes.
 - `claim`: the workstream-A target. The provider contract is realized as a
-  mitos `Sandbox` (`mitos.run/v1`) on Kubernetes.
+  Mitos `Sandbox` (`mitos.run/v1`) on Kubernetes.
 
 ## Production gate (read first)
 
@@ -33,12 +33,12 @@ description as well.
 
 ## Provider-contract mapping (workstream A)
 
-The contract maps onto mitos as follows. The pure mapping is in
+The contract maps onto Mitos as follows. The pure mapping is in
 `plugins/paperclip/src/claim-mapping.ts`; the lifecycle orchestration is in
 `plugins/paperclip/src/claim-client.ts`. Both are unit tested with no cluster
 (`plugins/paperclip/test/*.test.ts`).
 
-| Provider contract | mitos mapping | Code |
+| Provider contract | Mitos mapping | Code |
 | --- | --- | --- |
 | create environment / acquire lease | create a `Sandbox` from a pool, wait Ready | `leaseToClaim`, `acquireWithAssertion` |
 | lease max lifetime | `sandbox.spec.lifetime.ttl` (wall-clock cap; zero is no limit) | `minutesToDuration` |
@@ -89,7 +89,7 @@ bridge entry first.
 
 Secret VALUES never travel through the plugin. `secretsToClaimMounts` maps each
 ref to a `SandboxSpec.Secrets` entry that carries only a Secret name and
-key; the mitos controller resolves the plaintext server-side at sandbox time
+key; the Mitos controller resolves the plaintext server-side at sandbox time
 (`internal/controller/sandboxclaim_controller.go` `resolveSecrets`). This
 enforces the secret-inheritance policy (`docs/fork-correctness.md` section 3):
 sandbox-time secrets are injected at sandbox time and are never baked into a pool

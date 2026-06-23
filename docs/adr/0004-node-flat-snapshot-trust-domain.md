@@ -10,7 +10,7 @@ the node-CAS row in section 3; the code is `internal/cas`,
 ## Context
 
 Snapshots are executable memory images: loading one is equivalent to running code
-at sandbox privilege. mitos stores them content-addressed in a per-node store
+at sandbox privilege. Mitos stores them content-addressed in a per-node store
 (`internal/cas`, under `<dataDir>`), and the run path shares them across pods on
 the same node:
 
@@ -32,7 +32,7 @@ today (section 7): snapshots on a node are a flat directory shared by all tenant
 there is no enforcement that a claim only forks snapshots its namespace published,
 and VMs of different namespaces share nodes, host kernel, and forkd.
 
-This needs a recorded decision because it sets the multi-tenancy posture mitos
+This needs a recorded decision because it sets the multi-tenancy posture Mitos
 commits to honestly: what a Kubernetes namespace boundary actually buys around
 snapshots today, and what it does not.
 

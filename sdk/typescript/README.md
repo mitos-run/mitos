@@ -1,6 +1,6 @@
-# mitos TypeScript SDK
+# Mitos TypeScript SDK
 
-mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+Mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
 restore from snapshots and fork into parallel attempts, so an agent can branch a
 warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
@@ -181,9 +181,9 @@ Sandbox ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. `fork` and
 and throw `invalid_sandbox_id` before sending any request. `validSandboxId(id)`
 exposes the check.
 
-## The mitos SDK family
+## The Mitos SDK family
 
-mitos ships native clients in six languages. All of them share the same
+Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
 1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
 TypeScript only.
