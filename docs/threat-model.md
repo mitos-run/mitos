@@ -939,9 +939,14 @@ as equivalent to hardware virt:
   Firecracker runs on a plain cloud VPS that exposes no `/dev/kvm` nested virt.
   Ring-3 pagetable isolation is WEAKER than hardware virt: there is no VT-x/AMD-V
   root-mode boundary, the host kernel runs out-of-tree patches, and the guest
-  shares more of the host's privilege machinery. PVM is EVALUATED, NOT ADOPTED
-  (`docs/platforms/pvm-evaluation.md`); this row exists so that if a PVM tier is
-  ever enabled it is a documented lower-assurance tier from day one.
+  shares more of the host's privilege machinery. The 2026-06-23 spike
+  (`docs/platforms/pvm-evaluation.md`, reproducer `bench/pvm-spike.sh`) confirmed
+  this substrate is real: a PVM host kernel makes `/dev/kvm` appear on a Hetzner
+  CPX with no `vmx`/`svm`, and a guest boots and runs ring-3 code there with zero
+  hardware-virt flags. PVM remains EVALUATED, NOT ADOPTED: the spike also found
+  the core fork primitive (Firecracker snapshot restore) is currently BLOCKED
+  under PVM, so no PVM tier can be enabled today. This row exists so that if a PVM
+  tier is ever enabled it is a documented lower-assurance tier from day one.
 - **gVisor** (userspace-kernel syscall interposition): not a VM at all. The
   software-isolation tier, relevant to the gVisor fallback and to ADR 0005 (raw
   forkd is not multi-tenant). Weaker still than a VM boundary.

@@ -2,11 +2,14 @@
 
 This document is the HONEST evaluation of PVM (pagetable-based virtual machine,
 Ant/Alibaba) as a mitos node tier that runs Firecracker on plain cloud VPS with
-no nested virtualization. It is an EVALUATION, not an adoption. No PVM kernel was
-built and no measurement was taken; every number below is a target to be produced
-by the spike, never a claimed result (the no-unverified-claims rule).
+no nested virtualization. It is an EVALUATION, not an adoption. The spike below
+WAS run on 2026-06-23 (see "Spike results"); its findings are reported as
+measured, and the one latency figure is explicitly marked indicative, not a
+benchmark, because it was taken with a debug-laden guest kernel and a non-minimal
+config (the no-unverified-claims rule). The reproducer is `bench/pvm-spike.sh`.
 
-Status: **evaluated, NOT adopted.** What ships alongside this doc is the
+Status: **evaluated, NOT adopted (spike confirms the core fork primitive is
+blocked under PVM today, see below).** What ships alongside this doc is the
 isolation-tier control the threat model needs regardless of PVM (the
 `mitos.run/isolation-tier` node label, the `minIsolationTier` /
 `requireHardwareKvm` template floor, and the scheduler filter that keeps a
@@ -107,6 +110,56 @@ performed here. The exact steps, for whoever runs it:
    into any doc that `bench/` cannot reproduce.
 6. Assess Talos packaging: how much the PVM kernel build adds to the
    kernel-distributor pipeline (issue #35), concretely, not in the abstract.
+
+## Spike results (2026-06-23)
+
+The spike was run on a throwaway Hetzner CPX22 (2 vCPU AMD EPYC, 4 GiB, Ubuntu
+26.04) that exposed no `vmx`/`svm` and no `/dev/kvm`: the exact no-nested-virt
+substrate this tier targets. Reproducer: `bench/pvm-spike.sh`. Stack: the
+prebuilt PVM host kernel 6.12.33 (`actuated-kernel-pvm-host`), a PVM-enlightened
+guest `vmlinux` built from `virt-pvm/linux@pvm-612` with the published guest
+config, and the Loophole Labs PVM Firecracker fork (`v1.13.0-dev`).
+
+| Primitive | Result |
+|---|---|
+| `/dev/kvm` appears under `kvm_pvm` on a host with no hardware virt | PASS |
+| microVM boot + guest exec (guest sees `virtflag-count=0`, `kvm-clock`) | PASS |
+| Firecracker snapshot CREATE (full: vmstate + mem) | PASS |
+| Firecracker snapshot RESTORE | **FAIL** |
+
+The run-anywhere premise holds at the substrate level: a PVM host kernel does
+make `/dev/kvm` appear on a plain VPS, and the PVM Firecracker fork boots a guest
+and runs code there. But the CORE mitos primitive does not survive the move.
+
+**Blocker: snapshot restore fails.** Restore aborts with `Failed to set all KVM
+MSRs for this vCPU. Only a partial write was done`. Host `dmesg` pins the exact
+cause: `Unhandled WRMSR(0xc0010007)`, which is `MSR_K7_PERFCTR3`, an AMD
+performance-counter MSR (CPX is AMD EPYC). The PVM module does not handle this
+MSR, so `KVM_SET_MSRS` partial-writes the set and Firecracker treats the partial
+write as fatal. This is decisive for mitos because the fork primitive IS
+restore-from-snapshot: boot works, but fork does not, and fork latency is
+therefore unmeasurable under PVM until this is fixed.
+
+**Attempted mitigation that did NOT work:** reloading `kvm` with `enable_pmu=0`.
+The AMD perfctr MSR stays in Firecracker's restore MSR set regardless, and the
+module still rejects it. So there is no config knob; restore needs a code change.
+
+**Candidate fixes for a follow-up spike (none validated):**
+- Patch the PVM KVM module to accept (or no-op) the AMD perfctr MSRs.
+- Patch the Firecracker fork to tolerate a partial MSR write or drop unsupported
+  MSRs from the restore set.
+- Re-run on an Intel CPX, since `0xc0010007` is an AMD-specific MSR; the failing
+  MSR set may differ (or not appear) on Intel.
+
+**Indicative timing, NOT a benchmark:** cold-boot `InstanceStart` to first guest
+exec marker was about 0.81 s, measured with a 277 MB debug `vmlinux` and a
+non-minimal guest config. It is recorded only to show boot is in a sane range; it
+is not a published number and is not in `bench/` results, per principle 1.
+
+This moves the decision framework below: the "kvm-test snapshot/restore passes
+under PVM" gate is currently a hard FAIL, so PVM is not adoptable as a fork tier
+today regardless of the other costs. Re-evaluate after the restore blocker is
+fixed or PVM mainlines.
 
 ## Upstream mainlining: revisit when merged
 
