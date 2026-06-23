@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -409,6 +410,33 @@ func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
 	return nil, err
 }
 
+// dialGuestGRPC opens a RAW net.Conn to the sandbox's guest gRPC server on
+// vsock.AgentGRPCPort, performing the Firecracker UDS CONNECT preamble. It reuses
+// the SAME per-sandbox vsock UDS path resolution as dialStream (streamPaths,
+// registered by RegisterStreamPath) so the gRPC runtime path and the legacy JSON
+// path address the same guest, just on a different in-guest port. The returned
+// conn is handed to vsock.DialGRPCOverConn to build the gRPC client.
+//
+// When the standalone unix fallback is enabled and the Firecracker UDS is
+// absent, it dials the guest's plain gRPC unix socket (no preamble), mirroring
+// dialStream's fallback.
+func (api *SandboxAPI) dialGuestGRPC(sandboxID string) (net.Conn, error) {
+	api.mu.RLock()
+	path, ok := api.streamPaths[sandboxID]
+	api.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("sandbox %s has no stream path", sandboxID)
+	}
+	conn, err := vsock.DialGRPCConn(path, vsock.AgentGRPCPort)
+	if err == nil {
+		return conn, nil
+	}
+	if api.unixFallback && errors.Is(err, fs.ErrNotExist) {
+		return vsock.DialGRPCConnUnix(fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentGRPCPort))
+	}
+	return nil, err
+}
+
 // Configure delivers claim-time env and secrets to a sandbox's guest agent.
 // Values are never logged.
 func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]string) error {
@@ -507,10 +535,14 @@ func (api *SandboxAPI) Handler() http.Handler {
 			return api.resolveSandboxID(id), nil
 		}),
 	)
-	// Wire the GuestConn factory: returns a daemonGuestConn for the given
-	// sandbox id so Exec delegates through RunExecStream -> vsock -> guest.
+	// Wire the GuestConn factory (issue #24 stage 5): returns a vsockGuestConn
+	// for the given sandbox id so EVERY Connect RPC delegates through the guest
+	// agent's gRPC server over vsock (vsock.AgentGRPCPort). This replaces the
+	// JSON-bridge daemonGuestConn, which only bridged Exec. The legacy JSON
+	// /v1/* handlers keep using the JSON path (RunExecStream over
+	// vsock.AgentPort), so the guest serves both ports during the migration.
 	svc.Guest = func(sandboxID string) (sandboxrpc.GuestConn, error) {
-		return newDaemonGuestConn(api, sandboxID), nil
+		return newVsockGuestConn(api, sandboxID), nil
 	}
 	connectPath, connectHandler := sandboxv1connect.NewSandboxHandler(svc, connect.WithInterceptors(authIC))
 

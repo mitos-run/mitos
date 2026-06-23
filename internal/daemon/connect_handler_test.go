@@ -33,10 +33,13 @@ import (
 	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
-// newConnectTestServer builds a SandboxAPI wired to the given fake vsock stream,
-// registers the sandbox and (optionally) a token, and starts an HTTP/2 test
-// server over api.Handler(). It returns the Connect client, the raw HTTP URL,
-// and a cleanup func.
+// newConnectTestServer builds a SandboxAPI wired to a fake guest that serves
+// BOTH the legacy JSON-lines port (vsock.AgentPort = 52, for RegisterSandbox and
+// the JSON smoke route) AND the gRPC runtime port (vsock.AgentGRPCPort = 53, the
+// path the Connect Sandbox service now dials via vsockGuestConn, issue #24 stage
+// 5). It registers the sandbox and (optionally) a token, and starts an HTTP/2
+// test server over api.Handler(). It returns the Connect client, the raw HTTP
+// URL, and a cleanup func.
 //
 // The test server speaks both HTTP/1.1 (for the JSON smoke test) and
 // unencrypted HTTP/2 (for Connect bidi streaming).
@@ -49,11 +52,18 @@ func newConnectTestServer(t *testing.T, sandboxID, token string) (sandboxv1conne
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
+	// The single fake UDS dispatches on the CONNECT port: CONNECT 52 -> JSON
+	// (echoes a scripted exec_stream over port 52), CONNECT 53 -> gRPC Sandbox
+	// service. The Connect Exec call routes through gRPC; the fake's Exec returns
+	// "hello connect\n" + exit 42 so the assertions below are unchanged.
 	sock := filepath.Join(dir, "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{
-		{Kind: vsock.FrameChunk, Stream: vsock.StreamStdout, Data: []byte("hello connect\n")},
-		{Kind: vsock.FrameExit, ExitCode: 42, ExecTimeMs: 3.14},
-	})
+	startFakeGuestDualUDS(t, sock,
+		[]vsock.ExecStreamFrame{
+			{Kind: vsock.FrameChunk, Stream: vsock.StreamStdout, Data: []byte("hello connect\n")},
+			{Kind: vsock.FrameExit, ExitCode: 42, ExecTimeMs: 3.14},
+		},
+		&fakeGuestSandbox{execStdout: "hello connect\n", execExit: 42},
+	)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox(sandboxID, sock); err != nil {
