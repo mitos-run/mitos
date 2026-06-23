@@ -1,6 +1,3 @@
-// These types are defined ahead of the handler loop; remove this allow once Task 1.3+ wires them in.
-#![allow(dead_code)]
-
 //! Wire-compatible JSON protocol types mirroring internal/vsock/protocol.go.
 //!
 //! Encoding rules (must match Go's encoding/json behaviour exactly):

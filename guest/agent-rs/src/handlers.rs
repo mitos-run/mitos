@@ -1,7 +1,3 @@
-// Functions and statics are pub for Task 1.5 (transport). Allow dead_code until
-// main.rs wires them in (same pattern as protocol.rs transient allow).
-#![allow(dead_code)]
-
 use crate::protocol::{
     ConfigureRequest, ExecRequest, FileEntry, ListDirRequest, MkdirRequest, NotifyForkedRequest,
     NotifyForkedResponse, PingResponse, ReadFileRequest, RemoveRequest, Request, Response,
@@ -301,6 +297,9 @@ pub fn handle_exec(req: &ExecRequest, env: &Mutex<HashMap<String, String>>) -> R
             let _ = drain_stdout.join();
             let _ = drain_stderr.join();
             exit_code = status.code().unwrap_or(1);
+            // from_utf8_lossy replaces invalid UTF-8 sequences with U+FFFD, a minor
+            // divergence from Go which returns raw bytes; acceptable for the spike's
+            // text commands.
             stdout_str = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
             stderr_str = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
         }
@@ -527,7 +526,10 @@ const CLOCK_STEP_THRESHOLD_NANOS: i64 = 500 * 1_000_000;
 pub fn handle_notify_forked(req: &NotifyForkedRequest) -> Response {
     // Cross-reference: docs/fork-correctness.md sections 1 (RNG) and 2 (clock).
 
-    let reseeded_rng = reseed_rng();
+    // Log only the byte count, never the entropy value itself.
+    eprintln!("sandbox-agent: notify_forked entropy_bytes={}", req.entropy.len());
+
+    let reseeded_rng = reseed_rng(&req.entropy);
     let applied_clock_step_nanos = step_clock(req.host_wall_clock_nanos);
     // signaled_processes: signal userspace so language runtimes reseed their
     // own PRNGs. This spike reads /proc for the pid list on Linux (where /proc
@@ -546,12 +548,16 @@ pub fn handle_notify_forked(req: &NotifyForkedRequest) -> Response {
     }
 }
 
-// reseed_rng injects fresh entropy into the kernel RNG after a fork.
+// reseed_rng injects the host-supplied entropy into the kernel RNG after a fork.
 //
-// On Linux: writes 32 random bytes to /dev/urandom. Linux (mode 0666) allows
-// any process to write; the write mixes bytes into the input pool. This
-// matches the spike intent described in the task brief. The production Go
-// agent uses RNDADDENTROPY (credited injection, requires a fd open O_RDWR and
+// The entropy argument is the per-fork divergence material from the host; it is
+// what makes each fork diverge after restoring the same snapshot. Mirroring Go's
+// reseedCRNG: if entropy is empty, return false immediately (nothing to inject).
+//
+// On Linux: writes the host-supplied bytes to /dev/urandom. Linux (mode 0666)
+// allows any process to write; the write mixes bytes into the input pool. This
+// matches the spike intent described in the task brief. The production Go agent
+// uses RNDADDENTROPY (credited injection, requires a fd open O_RDWR and
 // CAP_SYS_ADMIN on some kernels) and fails closed; this spike uses the plain
 // write path which is sufficient for the fork-correctness demonstration.
 // See docs/fork-correctness.md section 1.
@@ -561,24 +567,12 @@ pub fn handle_notify_forked(req: &NotifyForkedRequest) -> Response {
 // real reseed occurred. reseeded_rng == true MUST mean a real reseed happened;
 // returning anything else would be a false claim. The guest agent only runs in
 // Linux VMs in production so a false return on the dev host is correct.
-fn reseed_rng() -> bool {
-    // Generate 32 entropy bytes from the OS CSPRNG via /dev/urandom (read).
-    // This read always succeeds; we then write the bytes back to mix them in.
-    let entropy = match read_os_entropy(32) {
-        Some(b) => b,
-        None => return false,
-    };
-
-    write_entropy_bytes(&entropy)
-}
-
-// read_os_entropy reads n bytes from the OS CSPRNG. Returns None on error.
-fn read_os_entropy(n: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut buf = vec![0u8; n];
-    let mut f = std::fs::File::open("/dev/urandom").ok()?;
-    f.read_exact(&mut buf).ok()?;
-    Some(buf)
+fn reseed_rng(entropy: &[u8]) -> bool {
+    // Mirror Go: return false immediately when entropy is empty (nothing to inject).
+    if entropy.is_empty() {
+        return false;
+    }
+    write_entropy_bytes(entropy)
 }
 
 // write_entropy_bytes mixes entropy bytes into the kernel RNG pool via
@@ -756,19 +750,39 @@ mod tests {
         // kernel rejects writes to /dev/urandom with EPERM so reseed_rng() honestly
         // returns false. The firecracker-test CI job runs on Linux and exercises
         // the true-reseed path.
+        //
+        // entropy field: base64-encoded bytes ("AAECBA==" == [0,1,2,4]).
+        // This matches the Go wire format where NotifyForkedRequest.Entropy is []byte
+        // serialized as a base64 string (json tag: "entropy").
         let env = std::sync::Mutex::new(std::collections::HashMap::new());
-        // Use the real wire key host_wall_clock_nanos (matches the Go
-        // NotifyForkedRequest json tag) so the test actually exercises step_clock
-        // by name rather than relying on serde defaulting an unknown key to 0.
-        let req = serde_json::from_str(r#"{"type":"notify_forked","notify_forked":{"host_wall_clock_nanos":0}}"#).unwrap();
+        let req = serde_json::from_str(
+            r#"{"type":"notify_forked","notify_forked":{"host_wall_clock_nanos":0,"entropy":"AAECBA=="}}"#,
+        ).unwrap();
         let resp = dispatch(&req, &env);
         assert!(resp.ok);
         let n = resp.notify_forked.unwrap();
         assert_eq!(n.applied_clock_step_nanos, 0); // 0 host time => no step
-        // reseeded_rng is a bool reflecting the real /dev/urandom write outcome.
-        let _ = n.reseeded_rng; // value is platform-dependent; just confirm the field exists
+        // On Linux the write to /dev/urandom succeeds (mode 0666, no caps needed).
+        // On macOS the kernel rejects it with EPERM; reseed_rng honestly returns false.
         #[cfg(target_os = "linux")]
         assert!(n.reseeded_rng, "Linux: write to /dev/urandom must succeed (mode 0666, no caps needed)");
+        #[cfg(not(target_os = "linux"))]
+        let _ = n.reseeded_rng; // EPERM on macOS; confirm field exists but do not assert true
+    }
+
+    #[test]
+    fn notify_forked_empty_entropy_returns_false() {
+        // Mirror Go's reseedCRNG: empty entropy => return false on all platforms.
+        // No host-supplied divergence material means no reseed should be claimed.
+        let env = std::sync::Mutex::new(std::collections::HashMap::new());
+        let req = serde_json::from_str(
+            r#"{"type":"notify_forked","notify_forked":{"host_wall_clock_nanos":0}}"#,
+        ).unwrap();
+        let resp = dispatch(&req, &env);
+        assert!(resp.ok);
+        let n = resp.notify_forked.unwrap();
+        assert_eq!(n.applied_clock_step_nanos, 0);
+        assert!(!n.reseeded_rng, "empty entropy must yield reseeded_rng=false on all platforms");
     }
 
     // Verify that a timed-out exec returns exit_code 124 and does not hang.
