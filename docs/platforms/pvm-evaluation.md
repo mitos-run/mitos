@@ -160,8 +160,8 @@ Mitos cannot otherwise serve.
   (`internal/controller/isolation_tier.go`, `node_registry.go`), reading the
   `mitos.run/isolation-tier` node label (`hardware-kvm` / `pvm` / `gvisor`), with
   an undeclared node treated as the lowest assurance (fail-closed).
-- The assurance FLOOR on the template: `spec.minIsolationTier` and the
-  convenience `spec.requireHardwareKvm` (`api/v1alpha1/types.go`), folded into the
+- The assurance FLOOR on the template: `spec.template.minIsolationTier` and the
+  convenience `spec.template.requireHardwareKvm` (`api/v1/types.go`), folded into the
   required tier by `MinIsolationTierFromSpec` (`requireHardwareKvm` can only
   tighten, never weaken).
 - The scheduler tier filter: node selection admits only nodes whose declared tier

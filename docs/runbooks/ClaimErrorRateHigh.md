@@ -28,7 +28,7 @@ environment-tunable; set it from the observed baseline.
   Ready in the named pool.
 - `kubectl mitos ps` for the per-node sandbox view to spot a node whose forks
   fail.
-- Check the SandboxClaim `Ready` condition reason against the catalogue in
+- Check the Sandbox `Ready` condition reason against the catalogue in
   `docs/conditions.md` (for example `ActivateFailed`, `CapacityExhausted`,
   `NoHuskPod`, `SecretInheritanceDenied`).
 - Metrics to corroborate: `mitos_claim_errors_total` (split by reason),

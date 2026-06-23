@@ -11,7 +11,7 @@ live findings tracker that drives each finding to closure is
 ## Trust model (what is and is not trusted)
 
 - **Untrusted:** code running inside a sandbox VM (the agent workload); a tenant
-  with `create` on SandboxClaim/SandboxFork in their namespace; anything reachable
+  with `create` on Sandbox in their namespace; anything reachable
   from inside the guest.
 - **Trusted:** the controller, forkd, the host kernel, the node, the control-plane
   PKI CA. The husk stub is trusted host-side but serves an untrusted guest.
@@ -42,7 +42,7 @@ live findings tracker that drives each finding to closure is
    husk pods (the tenant-decoy-pod gate in `selectDormantHuskPod`).
 6. **Secret handling**: secret VALUES must never be logged / in conditions / on
    host paths (the project rule). Forks duplicate guest memory incl. secrets and
-   are default-denied without `allowSecretInheritance` (#fork-correctness §3).
+   are default-denied without `spec.secretInheritance: inherit` (#fork-correctness §3).
 7. **Fork correctness** (`docs/fork-correctness.md`): RNG reseed (credited
    entropy), clock resync, secret inheritance across CoW forks.
 

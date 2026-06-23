@@ -23,7 +23,7 @@ controller.reconcileClaim         (controller)
       engine.fork                  (forkd, KVM snapshot restore)
 ```
 
-- `controller.reconcileClaim` opens when the SandboxClaim reconciler runs.
+- `controller.reconcileClaim` opens when the Sandbox reconciler runs.
   Attributes: `claim.name`, `claim.namespace`, and `pool` (the pool the claim
   resolves to).
 - `controller.forkOnNode` covers node selection plus the gRPC call to the chosen
@@ -253,13 +253,13 @@ resolution (`KUBECONFIG`, `--kubeconfig`, or in-cluster).
 ### Subcommands
 
 ```
-kubectl mitos ls [-n namespace] [-A]          list SandboxClaims
-kubectl mitos ps [name] [-n namespace] [-A]   list SandboxForks, or one claim's forks
+kubectl mitos ls [-n namespace] [-A]          list Sandboxes
+kubectl mitos ps [name] [-n namespace] [-A]   list fork Sandboxes, or one sandbox's forks
 ```
 
-- `ls` prints SandboxClaims with columns NAME, POOL, PHASE, NODE, ENDPOINT, AGE.
-- `ps` prints SandboxForks with columns NAME, SOURCE, READY, AGE. Given a claim
-  name, it filters to forks whose source is that claim.
+- `ls` prints Sandboxes with columns NAME, POOL, PHASE, NODE, ENDPOINT, AGE.
+- `ps` prints fork Sandboxes with columns NAME, SOURCE, READY, AGE. Given a sandbox
+  name, it filters to forks whose source is that sandbox.
 - `-n` scopes to a namespace (default `default`); `-A` lists all namespaces.
 
 Ages render kubectl-style (`30s`, `2m`, `3h`, `5d`); missing node, endpoint, or
@@ -403,7 +403,7 @@ consumes the snapshot, labels it with the sandbox's claim/pool/workspace/namespa
 and serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
 exec). `kubectl mitos ps <name> --processes` consumes the REAL in-guest process
 table; when the guest is unreachable (claim not running, no KVM behind it) it
-falls back to the SandboxFork object listing, so it never renders a fabricated
+falls back to the fork Sandbox listing, so it never renders a fabricated
 table.
 
 The labeling is end to end. The controller knows the claim, its pool, its bound

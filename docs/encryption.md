@@ -134,7 +134,7 @@ node data disk.
 
 ### Key lifecycle
 
-1. When `SandboxTemplate.Spec.Encrypted` is true, the pool reconciler calls
+1. When `SandboxPool.spec.template.encrypted` is true, the pool reconciler calls
    `EnsureEncKey` (`internal/controller/enc_key_secret.go`). This generates a
    32-byte data-encryption key (DEK) with `crypto/rand`, WRAPS it with the KMS
    key-encryption key (KEK) via `kms.Wrap`, zeroizes the plaintext DEK
@@ -146,9 +146,9 @@ node data disk.
    logs. The wrapped DEK and the plaintext DEK are never logged, never in event
    messages, and never in CRD status or conditions. See the KMS/HSM envelope
    encryption section below.
-2. The Secret is owner-referenced to the `SandboxTemplate` object with
+2. The Secret is owner-referenced to the `SandboxPool` object with
    `SetControllerReference`. Kubernetes garbage collection deletes the Secret
-   automatically when the template is deleted, performing the crypto-shred at
+   automatically when the pool is deleted, performing the crypto-shred at
    the Kubernetes level.
 3. The WRAPPED DEK plus the KEK id are delivered to forkd inside the
    mTLS-protected gRPC request: `CreateTemplateRequest.EncryptionKey` +
@@ -196,7 +196,7 @@ node data disk.
 
 ### Crypto-shred lifecycle
 
-Deleting a `SandboxTemplate`:
+Deleting a `SandboxPool`:
 1. Kubernetes GC deletes the `<templateID>-enc-key` Secret via the owner
    reference. The only stored copy of the WRAPPED DEK is now gone.
 2. The LUKS keyslots on the node are wiped by `luksErase` when forkd runs
@@ -240,11 +240,11 @@ time and zeroizes the plaintext immediately.
   cloud SDK is added yet; the interface is shaped for them.
 
 TEARDOWN BOUNDARY: the controller does NOT today send a `DeleteTemplate` RPC to
-forkd when a `SandboxTemplate` is deleted. There is no SandboxTemplate
-reconciler and the pool reconciler never calls `DeleteTemplate`. The key Secret
+forkd when a `SandboxPool` is deleted. The pool reconciler never calls
+`DeleteTemplate`. The key Secret
 is GC'd via the owner reference (step 1 above), but the node-side encrypted
 container is reclaimed only by node data dir lifecycle until the forkd
-container-shred-on-template-GC wiring is added. That wiring is deliberately
+container-shred-on-pool-GC wiring is added. That wiring is deliberately
 deferred and tracked as a follow-up; the honest status is documented in
 `enc_key_secret.go` as the `TEARDOWN BOUNDARY (PR2)` comment.
 
@@ -257,7 +257,7 @@ deferred and tracked as a follow-up; the honest status is documented in
   This was a deliberate placeholder.
 - **PR2 (this work):** key custody hardening. The controller generates a
   per-template key with `crypto/rand`, stores it in a `<template>-enc-key`
-  Secret owner-referenced to the `SandboxTemplate`, delivers it to forkd over
+  Secret owner-referenced to the `SandboxPool`, delivers it to forkd over
   the mTLS gRPC `CreateTemplate` and `Fork` requests, and forkd holds it in
   memory only via `RequestKeyProvider` and never writes it to the node data
   disk. Encryption enabled with no delivered key fails closed. The key is never
@@ -275,7 +275,7 @@ The envtest suite (`internal/controller/enc_key_envtest_test.go`) and unit tests
 - **Secret stores ONLY the wrapped DEK:** the envtest proves `EnsureEncKey`
   creates a `<template>-enc-key` Secret holding `wrapped-dek` and `kek-id` and NO
   raw `key` data key, that the wrapped DEK unwraps to a 32-byte DEK via the test
-  KMS, and that the Secret is owner-referenced to the `SandboxTemplate`.
+  KMS, and that the Secret is owner-referenced to the `SandboxPool`.
 - **Wrapped DEK over RPC:** the controller delivers the wrapped DEK in
   `CreateTemplateRequest.EncryptionKey`/`ForkRequest.EncryptionKey` and the KEK id
   in `kek_id`; the grpc_service stashes them via `SetWrappedKey` and forgets them

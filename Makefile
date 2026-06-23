@@ -81,3 +81,15 @@ lint:
 
 clean:
 	rm -rf bin/
+
+# Render the README terminal demo (docs/assets/demo.gif) from the VHS tape.
+# Needs vhs (brew install vhs). The tape records against a local SDK stub via
+# MITOS_DEMO_PYTHONPATH (no cluster or key needed); set MITOS_API_KEY +
+# MITOS_BASE_URL instead to record against a live endpoint. Re-run when the SDK
+# surface changes and commit the refreshed docs/assets/demo.gif.
+.PHONY: demo
+demo:
+	@command -v vhs >/dev/null 2>&1 || { echo "install vhs first: brew install vhs"; exit 1; }
+	@test -f "$$HOME/.mitos_api_key" || { echo "put your key in ~/.mitos_api_key"; exit 1; }
+	MITOS_API_KEY="$$(cat "$$HOME/.mitos_api_key")" vhs docs/assets/demo.tape
+	@echo ">> rendered docs/assets/demo.gif"

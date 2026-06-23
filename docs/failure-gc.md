@@ -7,8 +7,8 @@ tracking epic.
 
 Two control loops cooperate:
 
-- the SandboxClaim reconciler (`internal/controller/sandboxclaim_controller.go`),
-  event-driven per claim, owns the finalizer reap and the lifetime/idle reap;
+- the Sandbox reconciler (`internal/controller/sandboxclaim_controller.go`),
+  event-driven per sandbox, owns the finalizer reap and the lifetime/idle reap;
 - the GarbageCollector (`internal/controller/gc.go`), a periodic Runnable that
   runs every `Interval` (default 30s), owns NodeLost, the VM orphan sweep, the
   volume orphan sweep, and TTL.
@@ -303,14 +303,14 @@ against the code below so the gap is honest, not assumed:
   snapshot-holder, which the snapshot rebuild above guarantees exists).
 - status-update rate-limiting and batching: the SandboxPool reconcile elides a
   no-op status write (`writePoolStatusIfChanged`, `sandboxpool_controller.go:434`
-  / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the SandboxClaim
+  / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the Sandbox
   reconcile now does the same on its steady-state pend re-asserts
   (`writeClaimStatusIfChanged`, called from `sandboxclaim_controller.go:484`,
   `:568`, `:772` for the no-node, snapshot-not-yet, NoCapacity, husk-raced, and
   activate-failed paths), so a stuck claim re-reconciling every 1-5s no longer
   churns etcd or re-triggers its own watch (proven by
   `TestWriteClaimStatusIfChangedElidesNoOp`, `claim_status_elision_test.go`).
-  Still open: the SandboxFork reconciler, and true coalescing/rate-limiting of
+  Still open: the fork-path Sandbox reconcile (`source.fromSandbox`), and true coalescing/rate-limiting of
   genuine transitions (today only exact no-op writes are elided, not a bounded
   update interval).
 - chaos CI suite: `test/cluster-e2e/chaos-e2e.sh` runs on the multi-node

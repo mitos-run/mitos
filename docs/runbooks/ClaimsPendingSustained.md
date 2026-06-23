@@ -26,7 +26,7 @@ claims. The threshold is environment-tunable.
 - Metrics to check: `mitos_claim_pending_total` (the rate driving this
   alert), `mitos_pool_ready_snapshots{pool}` (which pools are starved),
   `mitos_active_sandboxes` per node (are nodes saturated?).
-- SandboxClaim `Ready` condition reason: `NoCapacity` / `CapacityExhausted`
+- Sandbox (source.poolRef) `Ready` condition reason: `NoCapacity` / `CapacityExhausted`
   confirms admission pressure; `NoHuskPod` confirms warm-pool starvation. See
   `docs/conditions.md`.
 
