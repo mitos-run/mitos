@@ -18,8 +18,8 @@ import (
 	"io"
 	"time"
 
-	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 	"mitos.run/mitos/internal/sandboxrpc"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // daemonGuestConn adapts a SandboxAPI's vsock exec path to the sandboxrpc.GuestConn
@@ -66,8 +66,19 @@ func (g *daemonGuestConn) Exec(ctx context.Context, open *sandboxv1.ExecOpen) (s
 		cmd = joinArgs(all)
 	}
 
+	// Per-sandbox concurrent-stream cap (production-blocker #2): the Connect exec
+	// path must count against the SAME ceiling the JSON /v1/exec/stream handler
+	// enforces (handleExecStream), or a tenant could open unbounded streams over
+	// Connect while JSON is capped. Acquire a slot at OPEN and hold it for the
+	// duration of the stream (released when RunExecStream returns).
+	release, ok := g.api.acquireStream(g.sandboxID)
+	if !ok {
+		return nil, fmt.Errorf("sandbox %q is at its concurrent exec-stream limit; close an existing stream before opening another", g.sandboxID)
+	}
+
 	pipe := newExecPipe()
 	go func() {
+		defer release()
 		exitCode, _, err := g.api.RunExecStream(
 			ctx,
 			g.sandboxID,
