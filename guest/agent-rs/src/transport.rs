@@ -5,16 +5,72 @@
 use crate::handlers;
 use crate::protocol::{ExecStreamFrame, Request, Response};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
 // MaxMessageBytes matches vsock.MaxMessageBytes = 96 << 20 (96 MiB). The line
-// reader must hold at least this many bytes for tar/untar messages.
+// reader enforces this cap so a client that never sends a newline cannot OOM
+// PID 1 (which would crash the VM). Mirrors Go's scanner.Buffer cap.
 const MAX_MESSAGE_BYTES: usize = 96 << 20;
 
 // streamChunkBytes matches streamChunkBytes in exec_stream.go: 32 KiB per read.
 const STREAM_CHUNK_BYTES: usize = 32 << 10;
+
+// ---------------------------------------------------------------------------
+// Bounded line reader: enforces MAX_MESSAGE_BYTES, mirrors Go scanner.Buffer.
+// ---------------------------------------------------------------------------
+
+/// Reads one newline-delimited line into buf. Returns Ok(0) at EOF. Returns
+/// Err(InvalidData) if the line exceeds limit bytes, matching Go's
+/// scanner.Buffer cap so a guest-facing socket cannot be OOM-killed by a
+/// client that never sends a newline.
+///
+/// The function appends to buf from its current length; the caller must clear
+/// buf between calls if a fresh line is wanted.
+pub fn read_line_bounded<R: std::io::BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<usize> {
+    let start = buf.len();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            // EOF.
+            return Ok(buf.len() - start);
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                buf.extend_from_slice(&available[..=i]);
+                let consumed = i + 1;
+                reader.consume(consumed);
+                if buf.len() - start > limit {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "line exceeds MaxMessageBytes",
+                    ));
+                }
+                return Ok(buf.len() - start);
+            }
+            None => {
+                buf.extend_from_slice(available);
+                let consumed = available.len();
+                reader.consume(consumed);
+                if buf.len() - start > limit {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "line exceeds MaxMessageBytes",
+                    ));
+                }
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Unix-socket listener: test / non-KVM entry point.
@@ -255,21 +311,13 @@ pub fn handle_conn<S: std::io::Read + std::io::Write + Send + 'static>(stream: S
 
     let read_half = ReadHalf(Arc::clone(&shared));
     let mut reader = BufReader::with_capacity(64 * 1024, read_half);
-    // Set a large line buffer matching MaxMessageBytes. BufReader's capacity
-    // controls the internal I/O buffer; read_line grows its String as needed, so
-    // there is no separate size limit to enforce here beyond what the OS provides.
-    // For the tar/untar path a full 96 MiB line is expected; read_line handles it
-    // as long as memory is available. We do not impose a hard per-line cap in this
-    // spike: the Go agent caps via scanner.Buffer, but the spike uses read_line
-    // which grows dynamically. A production implementation would enforce the cap.
-    let _ = MAX_MESSAGE_BYTES; // constant kept for documentation; see above.
 
     loop {
-        let mut line = String::new();
-        let n = match reader.read_line(&mut line) {
+        let mut raw = Vec::new();
+        let n = match read_line_bounded(&mut reader, &mut raw, MAX_MESSAGE_BYTES) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("sandbox-agent: read error: {}", e);
+                eprintln!("sandbox-agent: read error: {}; closing connection", e);
                 return;
             }
         };
@@ -278,7 +326,16 @@ pub fn handle_conn<S: std::io::Read + std::io::Write + Send + 'static>(stream: S
             return;
         }
 
-        let req: Request = match serde_json::from_str(line.trim_end_matches('\n')) {
+        // Trim trailing newline then parse as UTF-8 JSON.
+        let trimmed = match std::str::from_utf8(&raw) {
+            Ok(s) => s.trim_end_matches('\n'),
+            Err(e) => {
+                eprintln!("sandbox-agent: invalid UTF-8: {}; closing connection", e);
+                return;
+            }
+        };
+
+        let req: Request = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
                 let resp = Response {
@@ -336,7 +393,9 @@ fn write_response<S: std::io::Write>(shared: &Arc<Mutex<S>>, resp: &Response) {
         Err(_) => return,
     };
     buf.push(b'\n');
-    let mut guard = shared.lock().unwrap();
+    // Use unwrap_or_else so a poisoned lock (from a panicked pump thread) does
+    // not prevent the response from being written. Parity with finding 2.
+    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
     let _ = guard.write_all(&buf);
 }
 
@@ -367,6 +426,10 @@ fn write_frame_locked<S: std::io::Write>(guard: &mut S, frame: &ExecStreamFrame)
 ///   - We wait for both reader threads to finish (wg.Wait() equivalent) before
 ///     writing the exit frame, so the exit frame is always last.
 ///   - The child is reaped via child.wait() so no zombie is left.
+///   - The child is started in its own process group (process_group(0)) and
+///     the entire group is killed on timeout via killpg, matching Go's
+///     Setpgid + killpg in handleExecStream in exec_stream.go. This prevents
+///     orphaned grandchildren accumulating in PID 1 after a timeout.
 fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
     shared: &Arc<Mutex<S>>,
     req: &crate::protocol::ExecRequest,
@@ -398,14 +461,25 @@ fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
         req.working_dir.clone()
     };
 
-    let mut child = match std::process::Command::new("/bin/sh")
-        .arg("-c")
+    // Build the command. On Unix, put the child in its own process group so
+    // that a timeout kill via killpg reaches all grandchildren too. This
+    // mirrors Go's SysProcAttr{Setpgid: true} in exec_stream.go.
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c")
         .arg(&req.command)
         .current_dir(&working_dir)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(unix)]
     {
+        // process_group(0) means: use the child's own PID as its PGID, so the
+        // child is the leader of a new process group. Stable since Rust 1.64.
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
         Err(e) => {
             let frame = ExecStreamFrame {
                 kind: "exit".into(),
@@ -414,7 +488,9 @@ fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
                 exec_time_ms: start.elapsed().as_micros() as f64 / 1000.0,
                 ..Default::default()
             };
-            let mut guard = shared.lock().unwrap();
+            // Use unwrap_or_else so a poisoned lock does not strand the exit
+            // frame. Mirrors finding 2.
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             write_frame_locked(&mut *guard, &frame);
             return;
         }
@@ -436,7 +512,9 @@ fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
         pump_stream(stderr_pipe, "stderr", &shared_err);
     });
 
-    // Poll for child exit or timeout. On timeout, kill and reap.
+    // Poll for child exit or timeout. On timeout, kill the whole process group
+    // (mirrors Go's killpg in exec_stream.go) so grandchildren are not
+    // orphaned inside PID 1.
     let poll_interval = std::time::Duration::from_millis(10);
     let deadline = Instant::now() + timeout;
     let timed_out = loop {
@@ -444,13 +522,30 @@ fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
             Ok(Some(_)) => break false,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    // Kill the entire process group. The child's PID equals its
+                    // PGID because we used process_group(0) above. On non-Unix
+                    // builds fall back to killing just the child process.
+                    #[cfg(unix)]
+                    {
+                        let pgid = child.id() as libc::pid_t;
+                        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
                     let _ = child.wait();
                     break true;
                 }
                 std::thread::sleep(poll_interval);
             }
-            Err(_) => break false,
+            Err(e) => {
+                // Pathological OS error from try_wait (e.g. ECHILD from a
+                // rogue waitpid call). Treat as exited to avoid looping
+                // forever; the exit_code will be 1 via the wait() below.
+                eprintln!("sandbox-agent: try_wait error: {}; treating as exited", e);
+                break false;
+            }
         }
     };
 
@@ -480,7 +575,9 @@ fn handle_exec_stream<S: std::io::Read + std::io::Write + Send + 'static>(
         exec_time_ms,
         ..Default::default()
     };
-    let mut guard = shared.lock().unwrap();
+    // Use unwrap_or_else so a poisoned lock (from a panicked pump thread) does
+    // not prevent the exit frame from being written, avoiding a hung host client.
+    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
     write_frame_locked(&mut *guard, &frame);
 }
 
@@ -504,7 +601,64 @@ fn pump_stream<R: std::io::Read, S: std::io::Write>(
             data: buf[..n].to_vec(),
             ..Default::default()
         };
-        let mut guard = shared.lock().unwrap();
+        // Use unwrap_or_else so a poisoned lock does not stall the pump thread.
+        // Mirrors finding 2: the exit frame must still be writable after any
+        // pump thread panic.
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
         write_frame_locked(&mut *guard, &frame);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_line_bounded_rejects_oversized_line() {
+        // Simulate a line of 6 bytes with no newline and a limit of 5.
+        // The helper must return an InvalidData error rather than buffering
+        // the entire line, proving the OOM-DoS cap is enforced.
+        let data = b"AAAAAA"; // 6 bytes, no newline
+        let mut reader = std::io::BufReader::new(Cursor::new(data));
+        let mut buf = Vec::new();
+        let result = read_line_bounded(&mut reader, &mut buf, 5);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("MaxMessageBytes"));
+    }
+
+    #[test]
+    fn read_line_bounded_accepts_line_within_limit() {
+        let data = b"hello\nworld\n";
+        let mut reader = std::io::BufReader::new(Cursor::new(data));
+        let mut buf = Vec::new();
+        let n = read_line_bounded(&mut reader, &mut buf, 1024).unwrap();
+        assert_eq!(n, 6); // "hello\n"
+        assert_eq!(&buf, b"hello\n");
+    }
+
+    #[test]
+    fn read_line_bounded_eof_returns_zero() {
+        let data: &[u8] = b"";
+        let mut reader = std::io::BufReader::new(Cursor::new(data));
+        let mut buf = Vec::new();
+        let n = read_line_bounded(&mut reader, &mut buf, 1024).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn read_line_bounded_accepts_line_exactly_at_limit() {
+        // Line is exactly limit bytes including the newline.
+        let data = b"AAAA\n"; // 5 bytes
+        let mut reader = std::io::BufReader::new(Cursor::new(data));
+        let mut buf = Vec::new();
+        let n = read_line_bounded(&mut reader, &mut buf, 5).unwrap();
+        assert_eq!(n, 5);
     }
 }
