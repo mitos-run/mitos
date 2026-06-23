@@ -52,3 +52,13 @@ pub mod sandbox_v1 {
 /// PID-1 init: mounts filesystems, creates /workspace, sets hostname.
 #[allow(unsafe_code, missing_docs)]
 pub mod init;
+
+// ---------------------------------------------------------------------------
+// sys/ module: the ONLY place in the crate with unsafe code (task 1.2).
+// Wraps AF_VSOCK, RNDADDENTROPY, and clock_settime behind safe APIs.
+// ---------------------------------------------------------------------------
+
+/// Unsafe syscall wrappers: AF_VSOCK listener, RNDADDENTROPY ioctl,
+/// clock_gettime / clock_settime. Every unsafe block carries a SAFETY comment.
+#[allow(unsafe_code, missing_docs)]
+pub mod sys;

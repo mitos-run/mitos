@@ -34,6 +34,10 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[dev-dependencies]
+# For temp file creation in sys/crng tests (RNDADDENTROPY on plain file).
+tempfile = "3"
+
 [build-dependencies]
 # tonic-build compiles proto/sandbox/v1/sandbox.proto at build time.
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
