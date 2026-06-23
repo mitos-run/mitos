@@ -10,7 +10,7 @@ full epic still needs.
 > The controller runs `--enable-husk-pods` by default: each `SandboxPool` builds
 > its template snapshot on the KVM nodes AND maintains a warm pool of
 > pre-scheduled husk pods pinned to the snapshot-holding nodes, and a
-> `SandboxClaim` activates a dormant husk pod in place. Sandboxes ARE pods by
+> `Sandbox` with `spec.source.poolRef` activates a dormant husk pod in place. Sandboxes ARE pods by
 > default. The build-vs-run split is the key idea: forkd stays the PRIVILEGED
 > snapshot BUILDER (it needs `/dev/kvm` and the jailer to build a template
 > snapshot), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
@@ -429,7 +429,7 @@ The default is still raw-forkd (flag off). The pod-native default is slice 3.
 ## 6b. Claim activation (slice 2)
 
 Slice 1 (section 6) builds the warm pool of pre-scheduled DORMANT husk pod
-objects. Slice 2 is the claim side: when a `SandboxClaim` binds to a pool with
+objects. Slice 2 is the claim side: when a `Sandbox` with `spec.source.poolRef` binds to a pool with
 `--enable-husk-pods`, the controller picks a dormant warm husk pod and ACTIVATES
 it in place over the husk pod's mTLS control channel, instead of asking forkd to
 fork a node-local VM. The activated VM runs inside the Kubernetes pod; the
@@ -569,7 +569,7 @@ unprivileged husk pods. The husk pod never builds; it only activates.
    pinned, via a `kubernetes.io/hostname` nodeAffinity, to exactly the
    snapshot-holding nodes, so each husk pod's read-only snapshot hostPath
    resolves (`internal/controller/huskpod.go`).
-2. A `SandboxClaim` selects a dormant Running+Ready husk pod, claims it under an
+2. A `Sandbox` with `spec.source.poolRef` selects a dormant Running+Ready husk pod, claims it under an
    optimistic lock (no double-assign), and activates it over the mTLS control
    channel (slice 2, section 6b), delivering the claim-time env/secrets and the
    per-sandbox bearer token; `Status.Endpoint` becomes `podIP:sandboxPort`.

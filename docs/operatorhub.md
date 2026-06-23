@@ -12,10 +12,7 @@ deploy/olm/bundle/
   bundle.Dockerfile
   manifests/
     mitos.clusterserviceversion.yaml
-    mitos.run_sandboxtemplates.yaml
     mitos.run_sandboxpools.yaml
-    mitos.run_sandboxclaims.yaml
-    mitos.run_sandboxforks.yaml
     mitos.run_sandboxes.yaml
     mitos.run_workspaces.yaml
     mitos.run_workspacerevisions.yaml
@@ -83,10 +80,9 @@ Common things this catches and how to fix them:
   `metadata.name` suffix (`mitos.v0.4.0`).
 - Every owned CRD in the CSV must have a matching CRD manifest in `manifests/`,
   and the `version` in each `customresourcedefinitions.owned` entry must be the
-  CRD storage version. NOTE: `Sandbox` is served at `v1alpha2` (storage) and
-  `SandboxPool` storage is `v1alpha1`; the rest are `v1alpha1`. The CSV already
-  reflects this. If you bump a CRD version, update both the CRD YAML and the CSV
-  owned entry.
+  CRD storage version. NOTE: every CRD is served and stored at `mitos.run/v1`.
+  The CSV already reflects this. If you bump a CRD version, update both the CRD
+  YAML and the CSV owned entry.
 - Image references must be digest-pinnable; community-operators may require
   immutable references at submission time. Replace the `:v0.4.0` tags with
   `@sha256:...` digests if the reviewer asks.
@@ -120,7 +116,7 @@ Then apply an example CR and confirm the controller reconciles it:
 
 ```bash
 kubectl apply -n mitos -f examples/python-pool.yaml
-kubectl get sandboxpools,sandboxtemplates -n mitos
+kubectl get sandboxpools,sandboxes -n mitos
 ```
 
 Clean up:
@@ -143,10 +139,7 @@ operators/mitos/
   0.4.0/
     manifests/
       mitos.clusterserviceversion.yaml
-      mitos.run_sandboxtemplates.yaml
       mitos.run_sandboxpools.yaml
-      mitos.run_sandboxclaims.yaml
-      mitos.run_sandboxforks.yaml
       mitos.run_sandboxes.yaml
       mitos.run_workspaces.yaml
       mitos.run_workspacerevisions.yaml

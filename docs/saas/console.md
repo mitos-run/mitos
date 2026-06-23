@@ -117,7 +117,7 @@ enforces org-scoping NOW behind two seams:
 - The SPA frontend (React/Next) that renders the BFF.
 - The real control-plane `SandboxControl` (cluster query) and the `LogStreamer`
   proxy over the existing exec/log transport.
-- The `TemplateLister` over the #220 SandboxTemplate CRDs.
+- The `TemplateLister` over the #220 `SandboxPool` CRDs (inline `spec.template`).
 - Real Stripe invoice objects in the billing view (this slice shows the credit
   ledger entries).
 - A durable (Postgres) audit log behind the `AuditRecorder` seam.

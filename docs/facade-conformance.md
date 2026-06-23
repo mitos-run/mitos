@@ -45,7 +45,7 @@ the facade reconciles them object-level:
 - In envtest (`internal/facade/examples_test.go`): every core
   `agents.x-k8s.io/v1alpha1` Sandbox example vendored under
   `third_party/agent-sandbox/examples` (and `extensions/examples`) is applied and
-  the facade creates the bridged husk-backed `SandboxClaim` (default-pool
+  the facade creates the bridged husk-backed `Sandbox` (default-pool
   binding, owner reference, first-container env mirrored).
 - In CI (`facade-conformance` kind job): the upstream
   `examples/hello-world-sandbox/hello-world.yaml` is applied UNCHANGED against a
@@ -73,19 +73,19 @@ asserts, each gated with a SETUP-vs-CONFORMANCE distinction and a diagnostics
 trap:
 
 - (a) the Sandbox is ADMITTED by the upstream CRD (verbatim);
-- (b) the facade creates the bridged husk-backed `SandboxClaim` (owner reference
+- (b) the facade creates the bridged husk-backed `Sandbox` (owner reference
   back to the Sandbox + the `mitos.run/pool` bridge annotation set to the
   default pool);
 - (c) the facade UPDATES the Sandbox status with a Ready condition reflecting the
   run-path state achievable on kind (Ready=False while the husk claim is Pending,
   since no VMM boots here);
-- (d) deleting the Sandbox GCs the bridged claim (the live apiserver runs the
+- (d) deleting the Sandbox GCs the bridged sandbox (the live apiserver runs the
   owner-reference garbage collector);
 - (e) a replicas-0 Sandbox terminates the run-path object (pause = warm-pool
   release);
 - (f) a replicas 1->0->1 toggle is an OBJECT-LEVEL resume: after the
   pause releases the claim, scaling back to replicas 1 RE-ACTIVATES it (the
-  facade re-creates the bridged claim). This is the object-level half of the
+  facade re-creates the bridged sandbox). This is the object-level half of the
   pause/resume mapping; the in-VM resume tail (snapshot load + resume +
   guest-ready) is the #18 bare-metal boundary, not asserted here.
 
@@ -94,13 +94,13 @@ The job then applies their three extension example manifests UNCHANGED
 the extension mappings object-level:
 
 - (g) their `SandboxTemplate` (`secure-datascience-template`) creates our
-  template of the same name;
+  `SandboxPool` (carrying the template inline) of the same name;
 - (h) their `SandboxWarmPool` (`sandboxwarmpool-example`, replicas 1) creates our
   `SandboxPool` at replicas 1 pointing at the resolved template;
 - (i) their `SandboxClaim` (`my-secure-sandbox`, default warmpool policy) binds
-  our claim from the template-matching pool (`sandboxwarmpool-example`), with the
+  our `Sandbox` from the template-matching pool (`sandboxwarmpool-example`), with the
   `mitos.run/warmpool-policy=default` annotation;
-- (j) deleting their `SandboxClaim` GCs our claim (the live-apiserver
+- (j) deleting their `SandboxClaim` GCs our `Sandbox` (the live-apiserver
   owner-reference cascade).
 
 The job echoes that the in-VM Ready tail (PodReady / ChromeReady) needs a
@@ -122,7 +122,7 @@ verified by reading the vendored sources:
   `Message: "Pod is Ready; Service Exists"`, `Reason: DependenciesReady` (see
   `basic_test.go`). Those predicates require a RUNNING pod that becomes Ready.
 
-Our facade bridges a Sandbox to a husk-backed `SandboxClaim` on the fork engine;
+Our facade bridges a Sandbox to a husk-backed `Sandbox` on the fork engine;
 it does not create a Pod/Service, and Ready requires the in-VM boot. So their Go
 suite is bare-metal-gated (it needs both their controller and a running
 sandbox). Half-running it and claiming a pass it did not achieve would violate
@@ -135,8 +135,8 @@ NEEDS-BARE-METAL accordingly.
 
 | Upstream test | What it asserts upstream | Status | Notes |
 | --- | --- | --- | --- |
-| `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot (#18). Object-level Sandbox admission + the bridged claim ARE proven on kind (facade-conformance (a),(b)). |
-| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The pause/resume contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 RELEASES the bridged claim (warm-pool release) and (f) asserts a replicas 1->0->1 toggle RE-ACTIVATES it (object-level resume). The upstream Pod/Service deletion + the in-VM resume tail need their controller + a running sandbox (#18). |
+| `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot (#18). Object-level Sandbox admission + the bridged sandbox ARE proven on kind (facade-conformance (a),(b)). |
+| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The pause/resume contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 RELEASES the bridged sandbox (warm-pool release) and (f) asserts a replicas 1->0->1 toggle RE-ACTIVATES it (object-level resume). The upstream Pod/Service deletion + the in-VM resume tail need their controller + a running sandbox (#18). |
 | `test/e2e/shutdown_test.go` :: `TestSandboxShutdownTime`, `TestSandboxRetainedExpiryPreservesFinishedCondition` | shutdown tears down Pod/Service in bounded time; Finished condition retained | NEEDS-BARE-METAL | Requires a running Pod that succeeds and the upstream Finished-condition controller. The deletion/GC object contract is proven object-level (facade-conformance (d)). |
 | `test/e2e/parallelism_test.go` :: `TestParallelSandboxes`, `TestParallelSandboxClaimsWith{Sufficient,Insufficient}WarmPool` | many Sandboxes/Claims reach Ready in parallel via a warm pool | NEEDS-BARE-METAL | Waits `ReadyConditionIsTrue` on running sandboxes drawn from a warm pool; needs the in-VM boot and the warm-pool/claim extension mappings (a later slice). |
 | `test/e2e/volumeclaimtemplate_test.go` :: `TestSandboxVolumeClaimTemplates` | `volumeClaimTemplates` produce PVCs bound to the Pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The facade does not yet map `volumeClaimTemplates` (storage contract, exception 4 below); upstream also needs a running Pod. The manifest still applies unchanged and the claim bridges (proven object-level). |
@@ -211,7 +211,7 @@ maps.
    pause/resume contract is the `spec.replicas` 0<->1 toggle (upstream v0.4.6 has
    NO stateful hibernate field; their controller deletes the pod on 0 and
    cold-creates a fresh one on 1). The facade maps it onto the husk warm pool:
-   replicas 0 (pause) RELEASES the bridged claim so the bound husk pod returns
+   replicas 0 (pause) RELEASES the bridged sandbox so the bound husk pod returns
    dormant to the warm pool; replicas 1 after a 0 (resume) RE-ACTIVATES a dormant
    warm husk pod via the same fast path as create (the ~42ms husk activation,
    #66). The conformant observable is preserved: `Status.Replicas` reflects 0/1,
@@ -231,8 +231,9 @@ maps.
    no-unverified-claims rule).
 
 3. extension kinds + unmapped fields. The facade now maps all three extension
-   kinds object-level: `SandboxTemplate` -> our template, `SandboxWarmPool` ->
-   our pool, the upstream `SandboxClaim` -> our fork-from-snapshot claim. Within
+   kinds object-level: `SandboxTemplate` -> our `SandboxPool` (template inline),
+   `SandboxWarmPool` -> our `SandboxPool` (warm), the upstream `SandboxClaim` ->
+   our `Sandbox` (source.poolRef). Within
    each mapping the facade maps a faithful subset and lists the rest as
    unmapped (recorded, not silently dropped):
    - SandboxTemplate: the first podTemplate container's `image`, `command`, and
@@ -326,7 +327,7 @@ maps.
 - CI (`facade-conformance` kind job): their hello-world Sandbox applies UNCHANGED
   against a live apiserver and the object-level facts (a)-(f) above hold,
   including the replicas 1->0->1 OBJECT-LEVEL resume (the facade releases then
-  re-creates the bridged claim). Their three extension example manifests apply
+  re-creates the bridged sandbox). Their three extension example manifests apply
   UNCHANGED and the object-level facts (g)-(j) hold (their template/warmpool/claim
   map to our template/pool/claim; deletion GCs ours).
 - `bench/facade/`: the reproducible pause/resume latency harness + methodology

@@ -21,7 +21,7 @@ restart is expected, sustained reaping is not.
 ## Diagnosis
 
 - `kubectl mitos ps` to compare live VMs per node against known claims; orphans
-  are VMs with no matching SandboxClaim.
+  are VMs with no matching Sandbox.
 - `kubectl mitos ls` to confirm the claim inventory.
 - `kubectl mitos top` for node churn / pressure correlation.
 - Metrics: `mitos_orphan_sweeps_total` (the rate driving this alert),

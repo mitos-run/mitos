@@ -68,7 +68,7 @@ so children remain independent; only the clone SOURCE is the source rootfs.
 Verified by `internal/controller` `TestBuildHuskPodForkChildClonesFromSourceRootfs`.
 
 Single coherent fork point. The source VM is snapshotted EXACTLY ONCE per
-`SandboxFork` (guarded by `Status.ForkSnapshotTaken`, persisted so it survives a
+`Sandbox` with `source.fromSandbox` (guarded by `Status.ForkSnapshotTaken`, persisted so it survives a
 controller restart mid-fork). Children take several reconcile passes to reach
 Ready; re-snapshotting on each pass would re-pause the source and overwrite the
 fork `mem`/`vmstate`, so a child activated in a later pass would restore a NEWER
@@ -244,13 +244,13 @@ validation variant remains a follow-up.
 
 ## 3. Live-fork memory hygiene (secrets)
 
-`SandboxFork` of a running sandbox duplicates everything in guest memory,
+A `Sandbox` with `spec.source.fromSandbox` of a running sandbox duplicates everything in guest memory,
 including claim-time secrets, into every fork.
 
 **Chosen policy (default-safe):** live forks of a sandbox that holds claim-time
 secrets are **rejected** unless one of:
 
-- `spec.allowSecretInheritance: true` is set on the `SandboxFork` (explicit
+- `spec.secretInheritance: inherit` is set on the `Sandbox` (explicit
   opt-in, recorded in the fork's status), or
 - the platform implements revoke-and-reissue for the secret class in question
   (each fork receives fresh credentials over vsock post-restore; the parent's
@@ -260,7 +260,7 @@ secrets are **rejected** unless one of:
 The default-deny gate plus opt-in audit trail is implemented in the fork
 controller (`internal/controller/sandboxfork_controller.go`): forks of
 secret-holding sandboxes get a terminal typed `Rejected` condition without
-`spec.allowSecretInheritance: true`, and explicit opt-ins are recorded as an
+`spec.secretInheritance: inherit`, and explicit opt-ins are recorded as an
 audit condition. Secret *delivery* is implemented too: the controller resolves
 Secret refs (`internal/controller/sandboxclaim_controller.go:resolveSecrets`)
 and forkd delivers them over vsock post-restore
