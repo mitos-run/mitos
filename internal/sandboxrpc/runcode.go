@@ -59,9 +59,13 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 		}
 		frame, recvErr := rs.Recv()
 		if recvErr != nil {
-			// Any error from Recv (including unexpected io.EOF) is a transport
-			// failure. Surface it as an LLM-legible exit frame so the client
-			// always reads a clean terminal frame.
+			// Any error from Recv (including an unexpected io.EOF) is a transport
+			// failure (the guest agent may have crashed or the vsock connection
+			// was lost). Send a clean terminal exit frame so the client never
+			// hangs. RunCodeResponse.exit_code is a bare int32 with no message
+			// field, so unlike Exec this terminal frame cannot carry remediation
+			// text; the non-zero exit is the only signal. Adding an error string
+			// to RunCodeResponse is a tracked proto follow-up of issue #24.
 			_ = stream.Send(&sandboxv1.RunCodeResponse{
 				Msg: &sandboxv1.RunCodeResponse_ExitCode{ExitCode: 1},
 			})

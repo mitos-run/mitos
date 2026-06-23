@@ -240,3 +240,32 @@ func TestRunCodeGuestNilReturnsFollowup(t *testing.T) {
 		t.Fatalf("code = %v, want CodeUnimplemented", connErr.Code())
 	}
 }
+
+// TestRunCodeTransportErrorSendsTerminalExit verifies that when the guest stream
+// ends without an Exit frame (a crash or a lost vsock connection, surfaced as an
+// io.EOF from Recv), the Service still sends a clean terminal exit_code=1 so the
+// client never hangs. exit_code is a bare int32 and cannot carry a message.
+func TestRunCodeTransportErrorSendsTerminalExit(t *testing.T) {
+	g := &runCodeGuest{
+		// Scripted frames with NO terminal Exit frame: after the stdout frame
+		// the fake returns io.EOF, which the Service treats as a transport
+		// failure.
+		frames: []*RunCodeFrame{
+			{Kind: RunCodeFrameStdout, Stdout: []byte("partial output")},
+		},
+	}
+	client := newRunCodeTestServer(t, g)
+	got := drainRunCode(t, client, &sandboxv1.RunCodeOpen{Code: "crash()"})
+
+	if len(got) == 0 {
+		t.Fatal("expected at least the stdout and a terminal exit frame, got none")
+	}
+	last := got[len(got)-1]
+	exit, ok := last.Msg.(*sandboxv1.RunCodeResponse_ExitCode)
+	if !ok {
+		t.Fatalf("last frame = %T, want a terminal RunCodeResponse_ExitCode", last.Msg)
+	}
+	if exit.ExitCode != 1 {
+		t.Fatalf("terminal exit code = %d, want 1 (transport failure)", exit.ExitCode)
+	}
+}
