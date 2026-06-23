@@ -495,7 +495,7 @@ func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpup
 // deps installed when the maintainer builds it that way) into N children, and
 // for each N in cfg.fanOutN record (a) each child's time-to-ready (fork ->
 // first successful exec) and (b) the wall clock from the fan-out start to the
-// instant the LAST child is ready. The defensible mitos claim under test is
+// instant the LAST child is ready. The defensible Mitos claim under test is
 // sub-second 1-to-N COW fan-out, so the headline number is wall-clock-to-N-ready
 // at the larger N.
 //

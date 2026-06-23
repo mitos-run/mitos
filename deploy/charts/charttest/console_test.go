@@ -1,4 +1,4 @@
-// Package charttest renders the mitos Helm chart with `helm template` and
+// Package charttest renders the Mitos Helm chart with `helm template` and
 // asserts the console/gateway components behave per the spec: ONE chart, two
 // editions driven by values, the #208 gate enforced server-side (signup/billing
 // off by default), and the console gated by console.enabled. It skips when the

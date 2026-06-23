@@ -1,6 +1,6 @@
 # Secrets management (multi-tenant)
 
-This is the consolidated, operator-facing page for how mitos handles tenant
+This is the consolidated, operator-facing page for how Mitos handles tenant
 secrets, especially in a multi-tenant cluster. It pulls together what was
 scattered across `docs/threat-model.md`, `docs/encryption.md`, and
 `docs/fork-correctness.md`, and is explicit about what is implemented versus

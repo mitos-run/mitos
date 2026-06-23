@@ -6,10 +6,10 @@
 # rather than forking one warmed base, so its "fan-out" is N independent creates
 # from the same pre-pulled image. Measuring that SAME shape is exactly the honest
 # comparison issue #207 asks for: it shows the cold-start baseline against
-# mitos's live copy-on-write fan-out. To produce a Daytona number this repo can
+# Mitos's live copy-on-write fan-out. To produce a Daytona number this repo can
 # publish as OUR measurement, a reproducer must:
 #
-#   1. Stand up a self-hosted Daytona instance on the SAME hardware as the mitos
+#   1. Stand up a self-hosted Daytona instance on the SAME hardware as the Mitos
 #      run (issue #16 reference node).
 #   2. Pre-pull the workspace image and warm any pool Daytona supports (document
 #      what "warm" means; Daytona cold-creates a workspace per sandbox).

@@ -14,7 +14,7 @@ func TestServesIndexAtRoot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "mitos console") {
+	if !strings.Contains(w.Body.String(), "Mitos console") {
 		t.Fatalf("index missing marker: %s", w.Body.String())
 	}
 }

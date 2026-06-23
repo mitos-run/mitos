@@ -1,6 +1,6 @@
 # Matched-hardware competitor comparison (2026-06-22)
 
-Issue #15 item 3 (the competitor comparison table). This run produces the mitos
+Issue #15 item 3 (the competitor comparison table). This run produces the Mitos
 column as OUR measurement on bare-metal KVM via the comparison harness, and
 records the competitor attempt honestly: deployed and brought up, but the
 create -> first-exec measurement blocked at headless authentication, with NO
@@ -93,7 +93,7 @@ Raw samples sorted:
 164 166 168 170 173 174 177 177 179 180 181 184 185 185 185 187 198 202 202 204
 ```
 
-This is mitos's matched-method create -> first-exec on bare-metal KVM: roughly a
+This is Mitos's matched-method create -> first-exec on bare-metal KVM: roughly a
 180 ms P50 warm fork-to-exec, no Kubernetes, no cluster, no pool. The full
 harness output (warm log, per-iter lines, percentiles) is reproducible by
 re-running the adapter; see "How to reproduce" below.
@@ -173,7 +173,7 @@ flows (no password grant), so no headless token in the timebox.** No number.
   from the vendor's hosted hardware, not this reference node; recorded as
   vendor-published, not our measurement (see the fan-out section of the
   competitors README).
-- **mitos cluster claim path (`adapters/mitos.sh`)**: not run here; it needs a
+- **Mitos cluster claim path (`adapters/mitos.sh`)**: not run here; it needs a
   kubeconfig + warm SandboxPool we do not have on these boxes. `mitos-direct.sh`
   is the bare-metal, no-cluster companion measured above.
 
@@ -181,7 +181,7 @@ flows (no password grant), so no headless token in the timebox.** No number.
 
 | system | create -> first-exec | source |
 | --- | --- | --- |
-| mitos (mitos-direct, bare-metal KVM) | min 164 / P50 180 / P90 202 / P99 204 / max 204 ms (N=20) | OUR measurement, this run (`adapters/mitos-direct.sh`) |
+| Mitos (mitos-direct, bare-metal KVM) | min 164 / P50 180 / P90 202 / P99 204 / max 204 ms (N=20) | OUR measurement, this run (`adapters/mitos-direct.sh`) |
 | Daytona OSS (self-hosted) | blocked: headless auth (Dex OIDC, no password grant) | deployed on box2 this run; no number, see above |
 | E2B (self-hosted) | not measured (out of timebox; heavy multi-service stack) | vendor-published until `adapters/e2b.sh` is run here |
 

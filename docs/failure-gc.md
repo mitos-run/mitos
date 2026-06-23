@@ -204,14 +204,14 @@ controller run mode to make this decision (`gc.go:42`).
 - Bound: raw mode fails within one `Interval` of the node going unhealthy or
   leaving the registry; husk mode re-pends on the pod event (or the claim's own
   requeue).
-- Husk hard-node-loss latency is cluster-dependent, not a mitos GC interval. Husk
+- Husk hard-node-loss latency is cluster-dependent, not a Mitos GC interval. Husk
   node-loss recovery fires immediately on a pod delete or `DeletionTimestamp`
   event. But a HARD host loss where the pod object lingers `Running` with no
   `DeletionTimestamp` is bounded by the cluster's own unreachable-pod eviction
   setting (the `node.kubernetes.io/unreachable` taint toleration husk pods carry,
   `huskpod.go:1194`), since no pod event fires until the cluster evicts the pod.
   Operators wanting faster husk node-loss recovery should tune the unreachable
-  toleration or the pod-eviction timeout; mitos cannot shorten it.
+  toleration or the pod-eviction timeout; Mitos cannot shorten it.
 - Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
   `TestGCInHuskModeDoesNotFailNodeLostClaim`.
 

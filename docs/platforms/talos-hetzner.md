@@ -1,6 +1,6 @@
 # Talos + Hetzner AX: bare-metal provisioning runbook
 
-This document is the end-to-end guide for running the mitos operator on
+This document is the end-to-end guide for running the Mitos operator on
 Talos Linux atop Hetzner AX dedicated servers (Robot fleet). It covers hardware
 selection, OS install, machine configuration, operator deployment, KVM
 readiness checks, and capacity planning pointers.

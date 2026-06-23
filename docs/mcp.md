@@ -1,6 +1,6 @@
 # MCP server (`mitos-mcp`)
 
-`mitos-mcp` exposes the mitos sandbox lifecycle as [Model Context
+`mitos-mcp` exposes the Mitos sandbox lifecycle as [Model Context
 Protocol](https://modelcontextprotocol.io) tools. Any MCP-speaking agent
 (Claude Desktop, an MCP client library, an agent framework with MCP support)
 can create sandboxes, run commands, read and write files, fork, and terminate,

@@ -32,7 +32,7 @@ controller (namespace mitos)  ->  husk pods (namespace mitos-e2e, do the KVM)
 The runner itself does NOT need docker or KVM. The husk pods do the KVM (they
 request the `mitos.run/kvm` device-plugin resource, the production pod-native
 path). The runner only drives the cluster with `kubectl` and talks to each
-claim's sandbox HTTP API over the in-cluster pod network via the mitos Python
+claim's sandbox HTTP API over the in-cluster pod network via the Mitos Python
 SDK (`in_cluster=True`).
 
 Images are built and pushed to `ghcr.io/mitos-run/mitos-{controller,husk-stub,...}`
@@ -142,7 +142,7 @@ admin of the GitHub repo.
 ### 1. Build and push the runner image
 
 The runner image is the official `actions-runner` plus `kubectl`, `git`, `jq`,
-`python3`, and the mitos Python SDK. Build it on a trusted machine and push to
+`python3`, and the Mitos Python SDK. Build it on a trusted machine and push to
 GHCR:
 
 ```bash

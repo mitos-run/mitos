@@ -23,7 +23,7 @@
 # per-node density) point. The p99 degradation point is where achieved/sec stops
 # tracking the target rate as you push the arrival rate up.
 #
-# Requirements: a running mitos cluster with the controller and a warm
+# Requirements: a running Mitos cluster with the controller and a warm
 # SandboxPool sized for the target concurrency, Go, and a KUBECONFIG that can
 # create and read SandboxClaims in the namespace.
 #

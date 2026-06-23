@@ -1,4 +1,4 @@
-//! Thin, direct-mode Rust client for the mitos standalone and hosted
+//! Thin, direct-mode Rust client for the Mitos standalone and hosted
 //! sandbox-server REST API.
 //!
 //! This crate mirrors the direct-mode surface of the Python SDK

@@ -22,7 +22,7 @@ under a claim storm:
    readiness deadline and fail.
 
 Browser Use reported the shape of this on their stack (we cite it as motivation,
-not as a mitos measurement): pinning vCPUs FROM startup actually HURT, because it
+not as a Mitos measurement): pinning vCPUs FROM startup actually HURT, because it
 serialized the launch burst onto too few cores; the win came from leaving vCPUs
 unpinned during the launch burst so the kernel spreads them across cores, THEN
 pinning for predictable packing once the guest is ready, assigning BOTH
