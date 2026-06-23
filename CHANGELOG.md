@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.0](https://github.com/mitos-run/mitos/compare/v0.13.0...v0.14.0) (2026-06-23)
+
+
+### Features
+
+* distribution to Artifact Hub, krew, OperatorHub, and Red Hat ([1c65051](https://github.com/mitos-run/mitos/commit/1c6505195be64c99bd850e0d90b330943b05bd29))
+* **sdk:** official Go SDK library (direct mode, hosted mitos.run) ([#250](https://github.com/mitos-run/mitos/issues/250)) ([#291](https://github.com/mitos-run/mitos/issues/291)) ([6b02066](https://github.com/mitos-run/mitos/commit/6b0206643a4631273048a0bc41e183705b57b38a))
+
+
+### Bug Fixes
+
+* **krew:** rename plugin to mitos (kubectl mitos) ([aac976a](https://github.com/mitos-run/mitos/commit/aac976a5080b26ae5e90aea42a8355c2f14ee0e7))
+* **krew:** rename the plugin to mitos (kubectl mitos) ([d5b45c3](https://github.com/mitos-run/mitos/commit/d5b45c39843121f7040b85d5849483602c3d89dd))
+
 ## [0.13.0](https://github.com/mitos-run/mitos/compare/v0.12.0...v0.13.0) (2026-06-23)
 
 
