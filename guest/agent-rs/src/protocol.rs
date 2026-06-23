@@ -1,3 +1,6 @@
+// These types are defined ahead of the handler loop; remove this allow once Task 1.3+ wires them in.
+#![allow(dead_code)]
+
 //! Wire-compatible JSON protocol types mirroring internal/vsock/protocol.go.
 //!
 //! Encoding rules (must match Go's encoding/json behaviour exactly):
@@ -95,7 +98,7 @@ mod base64_bytes {
         Ok(out)
     }
 
-    pub fn serialize<S: Serializer>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(data: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&encode(data))
     }
 
@@ -103,51 +106,22 @@ mod base64_bytes {
         let s: &str = serde::de::Deserialize::deserialize(d)?;
         decode(s).map_err(serde::de::Error::custom)
     }
-
-    // Variant for Option<Vec<u8>> fields that may be absent in JSON.
-    pub mod opt {
-        use serde::{Deserializer, Serializer};
-
-        pub fn serialize<S: Serializer>(data: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
-            match data {
-                Some(v) => s.serialize_str(&super::encode(v)),
-                None => s.serialize_none(),
-            }
-        }
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
-            let opt: Option<&str> = serde::de::Deserialize::deserialize(d)?;
-            match opt {
-                None => Ok(None),
-                Some(s) => super::decode(s).map(Some).map_err(serde::de::Error::custom),
-            }
-        }
-    }
 }
 
 // Helper: skip_serializing_if for empty Vec
-fn is_empty_vec<T>(v: &Vec<T>) -> bool {
+fn is_empty_vec<T>(v: &[T]) -> bool {
     v.is_empty()
 }
 
-// Helper: skip_serializing_if for zero i64
-fn is_zero_i64(v: &i64) -> bool {
-    *v == 0
-}
-
-// Helper: skip_serializing_if for zero f64
+// Helper: skip_serializing_if for zero f64. Matches Go encoding/json omitempty,
+// which drops both +0.0 and -0.0; comparing the bit pattern avoids clippy::float_cmp.
 fn is_zero_f64(v: &f64) -> bool {
-    *v == 0.0
+    v.to_bits() == 0u64 || v.to_bits() == (-0.0f64).to_bits()
 }
 
 // Helper: skip_serializing_if for zero i32/int
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
-}
-
-// Helper: skip_serializing_if for false bool
-fn is_false(v: &bool) -> bool {
-    !v
 }
 
 // ---------------------------------------------------------------------------
@@ -374,11 +348,12 @@ pub struct PingResponse {
 
 #[derive(Debug, Default, Serialize)]
 pub struct NotifyForkedResponse {
-    #[serde(rename = "applied_clock_step_nanos", skip_serializing_if = "is_zero_i64")]
+    // Go's NotifyForkedResponse has no omitempty on any field, so all three always serialize.
+    #[serde(rename = "applied_clock_step_nanos")]
     pub applied_clock_step_nanos: i64,
-    #[serde(rename = "reseeded_rng", skip_serializing_if = "is_false")]
+    #[serde(rename = "reseeded_rng")]
     pub reseeded_rng: bool,
-    #[serde(rename = "signaled_processes", skip_serializing_if = "is_zero_i32")]
+    #[serde(rename = "signaled_processes")]
     pub signaled_processes: i32,
 }
 
