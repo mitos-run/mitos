@@ -265,7 +265,7 @@ jobs:
           echo "=== controller logs ==="
           kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-controller --tail=200 --all-containers
           echo "=== e2e namespace objects ==="
-          kubectl -n "${E2E_NAMESPACE}" get sandboxpools,sandboxclaims,sandboxforks,pods -o wide
+          kubectl -n "${E2E_NAMESPACE}" get sandboxpools,sandboxes,pods -o wide
           echo "=== e2e husk pod logs ==="
           for p in $(kubectl -n "${E2E_NAMESPACE}" get pods -l 'mitos.run/husk=true' -o name | head -5); do
             echo "--- ${p} ---"
@@ -280,10 +280,8 @@ jobs:
           echo "=== teardown: remove e2e objects ==="
           # The e2e script cleans its own objects on exit; this is the belt-and-
           # suspenders sweep in case the runner step was cancelled mid-run.
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxforks --all --wait=false
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxclaims --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxes --all --wait=false
           kubectl -n "${E2E_NAMESPACE}" delete sandboxpools --all --wait=false
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxtemplates --all --wait=false
 
           echo "=== teardown: restore the controller image ==="
           PREV="${{ steps.deploy.outputs.prev_controller_image }}"
@@ -410,7 +408,7 @@ jobs:
           echo "=== controller logs ==="
           kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-controller --tail=200 --all-containers
           echo "=== e2e namespace objects ==="
-          kubectl -n "${E2E_NAMESPACE}" get workspaces,workspacerevisions,sandboxpools,sandboxclaims,pods -o wide
+          kubectl -n "${E2E_NAMESPACE}" get workspaces,workspacerevisions,sandboxpools,sandboxes,pods -o wide
           exit 0
 
       - name: Teardown (always)
@@ -418,10 +416,9 @@ jobs:
         run: |
           set +e
           echo "=== teardown: remove e2e objects ==="
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxclaims --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxes --all --wait=false
           kubectl -n "${E2E_NAMESPACE}" delete workspaces --all --wait=false
           kubectl -n "${E2E_NAMESPACE}" delete sandboxpools --all --wait=false
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxtemplates --all --wait=false
 
           echo "=== teardown: restore the controller image ==="
           PREV="${{ steps.deploy.outputs.prev_controller_image }}"
@@ -555,7 +552,7 @@ jobs:
           echo "=== controller logs ==="
           kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-controller --tail=200 --all-containers
           echo "=== e2e namespace objects ==="
-          kubectl -n "${E2E_NAMESPACE}" get sandboxpools,sandboxclaims,sandboxtemplates,networkpolicies,pods -o wide
+          kubectl -n "${E2E_NAMESPACE}" get sandboxpools,sandboxes,networkpolicies,pods -o wide
           echo "=== e2e husk pod logs ==="
           for p in $(kubectl -n "${E2E_NAMESPACE}" get pods -l 'mitos.run/husk=true' -o name | head -5); do
             echo "--- ${p} ---"
@@ -568,9 +565,8 @@ jobs:
         run: |
           set +e
           echo "=== teardown: remove e2e objects ==="
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxclaims --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxes --all --wait=false
           kubectl -n "${E2E_NAMESPACE}" delete sandboxpools --all --wait=false
-          kubectl -n "${E2E_NAMESPACE}" delete sandboxtemplates --all --wait=false
 
           echo "=== teardown: restore the controller image ==="
           PREV="${{ steps.deploy.outputs.prev_controller_image }}"
