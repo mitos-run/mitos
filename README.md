@@ -32,7 +32,7 @@
 </p>
 
 <p align="center">
-  <img alt="Mitos SDK: create a microVM sandbox, then fork it into parallel attempts" src="docs/assets/demo.svg" width="760">
+  <img alt="Mitos SDK: create a microVM sandbox, run code, and fork it into isolated parallel attempts" src="docs/assets/demo.gif" width="760">
 </p>
 
 ---
