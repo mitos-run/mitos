@@ -82,6 +82,14 @@ const (
 	SandboxBudgetProcedure = "/sandbox.v1.Sandbox/Budget"
 	// SandboxVitalsProcedure is the fully-qualified name of the Sandbox's Vitals RPC.
 	SandboxVitalsProcedure = "/sandbox.v1.Sandbox/Vitals"
+	// SandboxRunCodeProcedure is the fully-qualified name of the Sandbox's RunCode RPC.
+	SandboxRunCodeProcedure = "/sandbox.v1.Sandbox/RunCode"
+	// SandboxMkdirProcedure is the fully-qualified name of the Sandbox's Mkdir RPC.
+	SandboxMkdirProcedure = "/sandbox.v1.Sandbox/Mkdir"
+	// SandboxRemoveProcedure is the fully-qualified name of the Sandbox's Remove RPC.
+	SandboxRemoveProcedure = "/sandbox.v1.Sandbox/Remove"
+	// SandboxUploadProcedure is the fully-qualified name of the Sandbox's Upload RPC.
+	SandboxUploadProcedure = "/sandbox.v1.Sandbox/Upload"
 )
 
 // SandboxClient is a client for the sandbox.v1.Sandbox service.
@@ -139,6 +147,20 @@ type SandboxClient interface {
 	// Vitals streams guest health samples (cpu steal, memory vs balloon, process
 	// count) until the client cancels. New surface in v2.
 	Vitals(context.Context, *connect.Request[v1.VitalsRequest]) (*connect.ServerStreamForClient[v1.GuestVitals], error)
+	// RunCode runs a snippet of code in the sandbox kernel (default Python) and
+	// streams back stdout, stderr, rich display results, and an exit code. The
+	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
+	// `stdin` to feed interactive prompts.
+	RunCode(context.Context) *connect.BidiStreamForClient[v1.RunCodeRequest, v1.RunCodeResponse]
+	// Mkdir creates a directory (and parents) at the given path.
+	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
+	// Remove deletes a file or directory. Set recursive to remove a non-empty
+	// directory tree.
+	Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error)
+	// Upload accepts a tar archive over a streaming request and extracts it at
+	// the destination directory. The first UploadRequest MUST carry `open`;
+	// subsequent messages carry raw tar bytes as `chunk`.
+	Upload(context.Context) *connect.ClientStreamForClient[v1.UploadRequest, v1.UploadResult]
 }
 
 // NewSandboxClient constructs a client for the sandbox.v1.Sandbox service. By default, it uses the
@@ -242,6 +264,30 @@ func NewSandboxClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(sandboxMethods.ByName("Vitals")),
 			connect.WithClientOptions(opts...),
 		),
+		runCode: connect.NewClient[v1.RunCodeRequest, v1.RunCodeResponse](
+			httpClient,
+			baseURL+SandboxRunCodeProcedure,
+			connect.WithSchema(sandboxMethods.ByName("RunCode")),
+			connect.WithClientOptions(opts...),
+		),
+		mkdir: connect.NewClient[v1.MkdirRequest, v1.MkdirResponse](
+			httpClient,
+			baseURL+SandboxMkdirProcedure,
+			connect.WithSchema(sandboxMethods.ByName("Mkdir")),
+			connect.WithClientOptions(opts...),
+		),
+		remove: connect.NewClient[v1.RemoveRequest, v1.RemoveResponse](
+			httpClient,
+			baseURL+SandboxRemoveProcedure,
+			connect.WithSchema(sandboxMethods.ByName("Remove")),
+			connect.WithClientOptions(opts...),
+		),
+		upload: connect.NewClient[v1.UploadRequest, v1.UploadResult](
+			httpClient,
+			baseURL+SandboxUploadProcedure,
+			connect.WithSchema(sandboxMethods.ByName("Upload")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -262,6 +308,10 @@ type sandboxClient struct {
 	extendLifetime *connect.Client[v1.ExtendRequest, v1.Lease]
 	budget         *connect.Client[v1.BudgetRequest, v1.BudgetStatus]
 	vitals         *connect.Client[v1.VitalsRequest, v1.GuestVitals]
+	runCode        *connect.Client[v1.RunCodeRequest, v1.RunCodeResponse]
+	mkdir          *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
+	remove         *connect.Client[v1.RemoveRequest, v1.RemoveResponse]
+	upload         *connect.Client[v1.UploadRequest, v1.UploadResult]
 }
 
 // Exec calls sandbox.v1.Sandbox.Exec.
@@ -339,6 +389,26 @@ func (c *sandboxClient) Vitals(ctx context.Context, req *connect.Request[v1.Vita
 	return c.vitals.CallServerStream(ctx, req)
 }
 
+// RunCode calls sandbox.v1.Sandbox.RunCode.
+func (c *sandboxClient) RunCode(ctx context.Context) *connect.BidiStreamForClient[v1.RunCodeRequest, v1.RunCodeResponse] {
+	return c.runCode.CallBidiStream(ctx)
+}
+
+// Mkdir calls sandbox.v1.Sandbox.Mkdir.
+func (c *sandboxClient) Mkdir(ctx context.Context, req *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {
+	return c.mkdir.CallUnary(ctx, req)
+}
+
+// Remove calls sandbox.v1.Sandbox.Remove.
+func (c *sandboxClient) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	return c.remove.CallUnary(ctx, req)
+}
+
+// Upload calls sandbox.v1.Sandbox.Upload.
+func (c *sandboxClient) Upload(ctx context.Context) *connect.ClientStreamForClient[v1.UploadRequest, v1.UploadResult] {
+	return c.upload.CallClientStream(ctx)
+}
+
 // SandboxHandler is an implementation of the sandbox.v1.Sandbox service.
 type SandboxHandler interface {
 	// Exec runs a command and streams its IO. The client sends one ExecRequest
@@ -394,6 +464,20 @@ type SandboxHandler interface {
 	// Vitals streams guest health samples (cpu steal, memory vs balloon, process
 	// count) until the client cancels. New surface in v2.
 	Vitals(context.Context, *connect.Request[v1.VitalsRequest], *connect.ServerStream[v1.GuestVitals]) error
+	// RunCode runs a snippet of code in the sandbox kernel (default Python) and
+	// streams back stdout, stderr, rich display results, and an exit code. The
+	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
+	// `stdin` to feed interactive prompts.
+	RunCode(context.Context, *connect.BidiStream[v1.RunCodeRequest, v1.RunCodeResponse]) error
+	// Mkdir creates a directory (and parents) at the given path.
+	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
+	// Remove deletes a file or directory. Set recursive to remove a non-empty
+	// directory tree.
+	Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error)
+	// Upload accepts a tar archive over a streaming request and extracts it at
+	// the destination directory. The first UploadRequest MUST carry `open`;
+	// subsequent messages carry raw tar bytes as `chunk`.
+	Upload(context.Context, *connect.ClientStream[v1.UploadRequest]) (*connect.Response[v1.UploadResult], error)
 }
 
 // NewSandboxHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -493,6 +577,30 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(sandboxMethods.ByName("Vitals")),
 		connect.WithHandlerOptions(opts...),
 	)
+	sandboxRunCodeHandler := connect.NewBidiStreamHandler(
+		SandboxRunCodeProcedure,
+		svc.RunCode,
+		connect.WithSchema(sandboxMethods.ByName("RunCode")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxMkdirHandler := connect.NewUnaryHandler(
+		SandboxMkdirProcedure,
+		svc.Mkdir,
+		connect.WithSchema(sandboxMethods.ByName("Mkdir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxRemoveHandler := connect.NewUnaryHandler(
+		SandboxRemoveProcedure,
+		svc.Remove,
+		connect.WithSchema(sandboxMethods.ByName("Remove")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxUploadHandler := connect.NewClientStreamHandler(
+		SandboxUploadProcedure,
+		svc.Upload,
+		connect.WithSchema(sandboxMethods.ByName("Upload")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/sandbox.v1.Sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SandboxExecProcedure:
@@ -525,6 +633,14 @@ func NewSandboxHandler(svc SandboxHandler, opts ...connect.HandlerOption) (strin
 			sandboxBudgetHandler.ServeHTTP(w, r)
 		case SandboxVitalsProcedure:
 			sandboxVitalsHandler.ServeHTTP(w, r)
+		case SandboxRunCodeProcedure:
+			sandboxRunCodeHandler.ServeHTTP(w, r)
+		case SandboxMkdirProcedure:
+			sandboxMkdirHandler.ServeHTTP(w, r)
+		case SandboxRemoveProcedure:
+			sandboxRemoveHandler.ServeHTTP(w, r)
+		case SandboxUploadProcedure:
+			sandboxUploadHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -592,4 +708,20 @@ func (UnimplementedSandboxHandler) Budget(context.Context, *connect.Request[v1.B
 
 func (UnimplementedSandboxHandler) Vitals(context.Context, *connect.Request[v1.VitalsRequest], *connect.ServerStream[v1.GuestVitals]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.Vitals is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) RunCode(context.Context, *connect.BidiStream[v1.RunCodeRequest, v1.RunCodeResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.RunCode is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.Mkdir is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.Remove is not implemented"))
+}
+
+func (UnimplementedSandboxHandler) Upload(context.Context, *connect.ClientStream[v1.UploadRequest]) (*connect.Response[v1.UploadResult], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.v1.Sandbox.Upload is not implemented"))
 }

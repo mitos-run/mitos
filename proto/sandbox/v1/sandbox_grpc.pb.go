@@ -54,6 +54,10 @@ const (
 	Sandbox_ExtendLifetime_FullMethodName = "/sandbox.v1.Sandbox/ExtendLifetime"
 	Sandbox_Budget_FullMethodName         = "/sandbox.v1.Sandbox/Budget"
 	Sandbox_Vitals_FullMethodName         = "/sandbox.v1.Sandbox/Vitals"
+	Sandbox_RunCode_FullMethodName        = "/sandbox.v1.Sandbox/RunCode"
+	Sandbox_Mkdir_FullMethodName          = "/sandbox.v1.Sandbox/Mkdir"
+	Sandbox_Remove_FullMethodName         = "/sandbox.v1.Sandbox/Remove"
+	Sandbox_Upload_FullMethodName         = "/sandbox.v1.Sandbox/Upload"
 )
 
 // SandboxClient is the client API for Sandbox service.
@@ -122,6 +126,20 @@ type SandboxClient interface {
 	// Vitals streams guest health samples (cpu steal, memory vs balloon, process
 	// count) until the client cancels. New surface in v2.
 	Vitals(ctx context.Context, in *VitalsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GuestVitals], error)
+	// RunCode runs a snippet of code in the sandbox kernel (default Python) and
+	// streams back stdout, stderr, rich display results, and an exit code. The
+	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
+	// `stdin` to feed interactive prompts.
+	RunCode(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunCodeRequest, RunCodeResponse], error)
+	// Mkdir creates a directory (and parents) at the given path.
+	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
+	// Remove deletes a file or directory. Set recursive to remove a non-empty
+	// directory tree.
+	Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
+	// Upload accepts a tar archive over a streaming request and extracts it at
+	// the destination directory. The first UploadRequest MUST carry `open`;
+	// subsequent messages carry raw tar bytes as `chunk`.
+	Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadRequest, UploadResult], error)
 }
 
 type sandboxClient struct {
@@ -327,6 +345,52 @@ func (c *sandboxClient) Vitals(ctx context.Context, in *VitalsRequest, opts ...g
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sandbox_VitalsClient = grpc.ServerStreamingClient[GuestVitals]
 
+func (c *sandboxClient) RunCode(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunCodeRequest, RunCodeResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Sandbox_ServiceDesc.Streams[7], Sandbox_RunCode_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RunCodeRequest, RunCodeResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Sandbox_RunCodeClient = grpc.BidiStreamingClient[RunCodeRequest, RunCodeResponse]
+
+func (c *sandboxClient) Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MkdirResponse)
+	err := c.cc.Invoke(ctx, Sandbox_Mkdir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxClient) Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveResponse)
+	err := c.cc.Invoke(ctx, Sandbox_Remove_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxClient) Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadRequest, UploadResult], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Sandbox_ServiceDesc.Streams[8], Sandbox_Upload_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[UploadRequest, UploadResult]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Sandbox_UploadClient = grpc.ClientStreamingClient[UploadRequest, UploadResult]
+
 // SandboxServer is the server API for Sandbox service.
 // All implementations must embed UnimplementedSandboxServer
 // for forward compatibility.
@@ -393,6 +457,20 @@ type SandboxServer interface {
 	// Vitals streams guest health samples (cpu steal, memory vs balloon, process
 	// count) until the client cancels. New surface in v2.
 	Vitals(*VitalsRequest, grpc.ServerStreamingServer[GuestVitals]) error
+	// RunCode runs a snippet of code in the sandbox kernel (default Python) and
+	// streams back stdout, stderr, rich display results, and an exit code. The
+	// first RunCodeRequest MUST carry `open`; subsequent messages may carry
+	// `stdin` to feed interactive prompts.
+	RunCode(grpc.BidiStreamingServer[RunCodeRequest, RunCodeResponse]) error
+	// Mkdir creates a directory (and parents) at the given path.
+	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
+	// Remove deletes a file or directory. Set recursive to remove a non-empty
+	// directory tree.
+	Remove(context.Context, *RemoveRequest) (*RemoveResponse, error)
+	// Upload accepts a tar archive over a streaming request and extracts it at
+	// the destination directory. The first UploadRequest MUST carry `open`;
+	// subsequent messages carry raw tar bytes as `chunk`.
+	Upload(grpc.ClientStreamingServer[UploadRequest, UploadResult]) error
 	mustEmbedUnimplementedSandboxServer()
 }
 
@@ -447,6 +525,18 @@ func (UnimplementedSandboxServer) Budget(context.Context, *BudgetRequest) (*Budg
 }
 func (UnimplementedSandboxServer) Vitals(*VitalsRequest, grpc.ServerStreamingServer[GuestVitals]) error {
 	return status.Error(codes.Unimplemented, "method Vitals not implemented")
+}
+func (UnimplementedSandboxServer) RunCode(grpc.BidiStreamingServer[RunCodeRequest, RunCodeResponse]) error {
+	return status.Error(codes.Unimplemented, "method RunCode not implemented")
+}
+func (UnimplementedSandboxServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mkdir not implemented")
+}
+func (UnimplementedSandboxServer) Remove(context.Context, *RemoveRequest) (*RemoveResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Remove not implemented")
+}
+func (UnimplementedSandboxServer) Upload(grpc.ClientStreamingServer[UploadRequest, UploadResult]) error {
+	return status.Error(codes.Unimplemented, "method Upload not implemented")
 }
 func (UnimplementedSandboxServer) mustEmbedUnimplementedSandboxServer() {}
 func (UnimplementedSandboxServer) testEmbeddedByValue()                 {}
@@ -678,6 +768,56 @@ func _Sandbox_Vitals_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sandbox_VitalsServer = grpc.ServerStreamingServer[GuestVitals]
 
+func _Sandbox_RunCode_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxServer).RunCode(&grpc.GenericServerStream[RunCodeRequest, RunCodeResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Sandbox_RunCodeServer = grpc.BidiStreamingServer[RunCodeRequest, RunCodeResponse]
+
+func _Sandbox_Mkdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MkdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServer).Mkdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Sandbox_Mkdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServer).Mkdir(ctx, req.(*MkdirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Sandbox_Remove_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServer).Remove(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Sandbox_Remove_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServer).Remove(ctx, req.(*RemoveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Sandbox_Upload_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxServer).Upload(&grpc.GenericServerStream[UploadRequest, UploadResult]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Sandbox_UploadServer = grpc.ClientStreamingServer[UploadRequest, UploadResult]
+
 // Sandbox_ServiceDesc is the grpc.ServiceDesc for Sandbox service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -717,6 +857,14 @@ var Sandbox_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Budget",
 			Handler:    _Sandbox_Budget_Handler,
 		},
+		{
+			MethodName: "Mkdir",
+			Handler:    _Sandbox_Mkdir_Handler,
+		},
+		{
+			MethodName: "Remove",
+			Handler:    _Sandbox_Remove_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -755,6 +903,17 @@ var Sandbox_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Vitals",
 			Handler:       _Sandbox_Vitals_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "RunCode",
+			Handler:       _Sandbox_RunCode_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "Upload",
+			Handler:       _Sandbox_Upload_Handler,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "proto/sandbox/v1/sandbox.proto",

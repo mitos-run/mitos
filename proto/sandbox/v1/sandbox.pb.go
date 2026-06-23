@@ -2402,6 +2402,745 @@ func (x *GuestVitals) GetProcessCount() int32 {
 	return 0
 }
 
+// RunCodeOpen starts a code execution. language defaults to "python" when
+// empty. timeout_seconds bounds the run; <= 0 applies the guest default.
+type RunCodeOpen struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Code           string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	Language       string                 `protobuf:"bytes,2,opt,name=language,proto3" json:"language,omitempty"`
+	TimeoutSeconds int64                  `protobuf:"varint,3,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RunCodeOpen) Reset() {
+	*x = RunCodeOpen{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCodeOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCodeOpen) ProtoMessage() {}
+
+func (x *RunCodeOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCodeOpen.ProtoReflect.Descriptor instead.
+func (*RunCodeOpen) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *RunCodeOpen) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *RunCodeOpen) GetLanguage() string {
+	if x != nil {
+		return x.Language
+	}
+	return ""
+}
+
+func (x *RunCodeOpen) GetTimeoutSeconds() int64 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+// RunCodeRequest is one message in the RunCode bidi stream. The first message
+// MUST carry `open`; subsequent messages may carry `stdin` for interactive
+// prompts.
+type RunCodeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*RunCodeRequest_Open
+	//	*RunCodeRequest_Stdin
+	Msg           isRunCodeRequest_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCodeRequest) Reset() {
+	*x = RunCodeRequest{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCodeRequest) ProtoMessage() {}
+
+func (x *RunCodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCodeRequest.ProtoReflect.Descriptor instead.
+func (*RunCodeRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *RunCodeRequest) GetMsg() isRunCodeRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *RunCodeRequest) GetOpen() *RunCodeOpen {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeRequest_Open); ok {
+			return x.Open
+		}
+	}
+	return nil
+}
+
+func (x *RunCodeRequest) GetStdin() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeRequest_Stdin); ok {
+			return x.Stdin
+		}
+	}
+	return nil
+}
+
+type isRunCodeRequest_Msg interface {
+	isRunCodeRequest_Msg()
+}
+
+type RunCodeRequest_Open struct {
+	Open *RunCodeOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"`
+}
+
+type RunCodeRequest_Stdin struct {
+	Stdin []byte `protobuf:"bytes,2,opt,name=stdin,proto3,oneof"`
+}
+
+func (*RunCodeRequest_Open) isRunCodeRequest_Msg() {}
+
+func (*RunCodeRequest_Stdin) isRunCodeRequest_Msg() {}
+
+// RunResult carries rich display output from a kernel execution (Jupyter-style
+// rich output). data maps MIME type to payload bytes (e.g. "image/png" to PNG
+// bytes).
+type RunResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	Data          map[string][]byte      `protobuf:"bytes,2,rep,name=data,proto3" json:"data,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunResult) Reset() {
+	*x = RunResult{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunResult) ProtoMessage() {}
+
+func (x *RunResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunResult.ProtoReflect.Descriptor instead.
+func (*RunResult) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *RunResult) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *RunResult) GetData() map[string][]byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// RunError carries a kernel exception: the exception name, its string value,
+// and the formatted traceback lines.
+type RunError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	Traceback     []string               `protobuf:"bytes,3,rep,name=traceback,proto3" json:"traceback,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunError) Reset() {
+	*x = RunError{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunError) ProtoMessage() {}
+
+func (x *RunError) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunError.ProtoReflect.Descriptor instead.
+func (*RunError) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *RunError) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RunError) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *RunError) GetTraceback() []string {
+	if x != nil {
+		return x.Traceback
+	}
+	return nil
+}
+
+// RunCodeResponse is one message in the RunCode reply stream. Exactly one
+// field is set. stdout/stderr carry output chunks; result carries rich display
+// output; error carries a kernel exception; exit_code is the terminal message.
+type RunCodeResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*RunCodeResponse_Stdout
+	//	*RunCodeResponse_Stderr
+	//	*RunCodeResponse_Result
+	//	*RunCodeResponse_Error
+	//	*RunCodeResponse_ExitCode
+	Msg           isRunCodeResponse_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunCodeResponse) Reset() {
+	*x = RunCodeResponse{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunCodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunCodeResponse) ProtoMessage() {}
+
+func (x *RunCodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunCodeResponse.ProtoReflect.Descriptor instead.
+func (*RunCodeResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *RunCodeResponse) GetMsg() isRunCodeResponse_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *RunCodeResponse) GetStdout() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeResponse_Stdout); ok {
+			return x.Stdout
+		}
+	}
+	return nil
+}
+
+func (x *RunCodeResponse) GetStderr() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeResponse_Stderr); ok {
+			return x.Stderr
+		}
+	}
+	return nil
+}
+
+func (x *RunCodeResponse) GetResult() *RunResult {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeResponse_Result); ok {
+			return x.Result
+		}
+	}
+	return nil
+}
+
+func (x *RunCodeResponse) GetError() *RunError {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeResponse_Error); ok {
+			return x.Error
+		}
+	}
+	return nil
+}
+
+func (x *RunCodeResponse) GetExitCode() int32 {
+	if x != nil {
+		if x, ok := x.Msg.(*RunCodeResponse_ExitCode); ok {
+			return x.ExitCode
+		}
+	}
+	return 0
+}
+
+type isRunCodeResponse_Msg interface {
+	isRunCodeResponse_Msg()
+}
+
+type RunCodeResponse_Stdout struct {
+	Stdout []byte `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
+}
+
+type RunCodeResponse_Stderr struct {
+	Stderr []byte `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
+}
+
+type RunCodeResponse_Result struct {
+	Result *RunResult `protobuf:"bytes,3,opt,name=result,proto3,oneof"`
+}
+
+type RunCodeResponse_Error struct {
+	Error *RunError `protobuf:"bytes,4,opt,name=error,proto3,oneof"`
+}
+
+type RunCodeResponse_ExitCode struct {
+	ExitCode int32 `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3,oneof"`
+}
+
+func (*RunCodeResponse_Stdout) isRunCodeResponse_Msg() {}
+
+func (*RunCodeResponse_Stderr) isRunCodeResponse_Msg() {}
+
+func (*RunCodeResponse_Result) isRunCodeResponse_Msg() {}
+
+func (*RunCodeResponse_Error) isRunCodeResponse_Msg() {}
+
+func (*RunCodeResponse_ExitCode) isRunCodeResponse_Msg() {}
+
+type MkdirRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MkdirRequest) Reset() {
+	*x = MkdirRequest{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MkdirRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MkdirRequest) ProtoMessage() {}
+
+func (x *MkdirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MkdirRequest.ProtoReflect.Descriptor instead.
+func (*MkdirRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *MkdirRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type MkdirResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MkdirResponse) Reset() {
+	*x = MkdirResponse{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MkdirResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MkdirResponse) ProtoMessage() {}
+
+func (x *MkdirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MkdirResponse.ProtoReflect.Descriptor instead.
+func (*MkdirResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{43}
+}
+
+type RemoveRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Recursive     bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveRequest) Reset() {
+	*x = RemoveRequest{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveRequest) ProtoMessage() {}
+
+func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveRequest.ProtoReflect.Descriptor instead.
+func (*RemoveRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *RemoveRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *RemoveRequest) GetRecursive() bool {
+	if x != nil {
+		return x.Recursive
+	}
+	return false
+}
+
+type RemoveResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveResponse) Reset() {
+	*x = RemoveResponse{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveResponse) ProtoMessage() {}
+
+func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveResponse.ProtoReflect.Descriptor instead.
+func (*RemoveResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{45}
+}
+
+// UploadOpen selects the destination directory for tar extraction.
+type UploadOpen struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Dest          string                 `protobuf:"bytes,1,opt,name=dest,proto3" json:"dest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadOpen) Reset() {
+	*x = UploadOpen{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadOpen) ProtoMessage() {}
+
+func (x *UploadOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadOpen.ProtoReflect.Descriptor instead.
+func (*UploadOpen) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *UploadOpen) GetDest() string {
+	if x != nil {
+		return x.Dest
+	}
+	return ""
+}
+
+// UploadRequest is one message in the Upload stream. The first message MUST
+// carry `open`; subsequent messages carry raw tar bytes as `chunk`.
+type UploadRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*UploadRequest_Open
+	//	*UploadRequest_Chunk
+	Msg           isUploadRequest_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadRequest) Reset() {
+	*x = UploadRequest{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadRequest) ProtoMessage() {}
+
+func (x *UploadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadRequest.ProtoReflect.Descriptor instead.
+func (*UploadRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *UploadRequest) GetMsg() isUploadRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *UploadRequest) GetOpen() *UploadOpen {
+	if x != nil {
+		if x, ok := x.Msg.(*UploadRequest_Open); ok {
+			return x.Open
+		}
+	}
+	return nil
+}
+
+func (x *UploadRequest) GetChunk() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*UploadRequest_Chunk); ok {
+			return x.Chunk
+		}
+	}
+	return nil
+}
+
+type isUploadRequest_Msg interface {
+	isUploadRequest_Msg()
+}
+
+type UploadRequest_Open struct {
+	Open *UploadOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"`
+}
+
+type UploadRequest_Chunk struct {
+	Chunk []byte `protobuf:"bytes,2,opt,name=chunk,proto3,oneof"`
+}
+
+func (*UploadRequest_Open) isUploadRequest_Msg() {}
+
+func (*UploadRequest_Chunk) isUploadRequest_Msg() {}
+
+// UploadResult reports the total bytes written from the extracted archive.
+type UploadResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BytesWritten  int64                  `protobuf:"varint,1,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadResult) Reset() {
+	*x = UploadResult{}
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadResult) ProtoMessage() {}
+
+func (x *UploadResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_v1_sandbox_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadResult.ProtoReflect.Descriptor instead.
+func (*UploadResult) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_v1_sandbox_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *UploadResult) GetBytesWritten() int64 {
+	if x != nil {
+		return x.BytesWritten
+	}
+	return 0
+}
+
 var File_proto_sandbox_v1_sandbox_proto protoreflect.FileDescriptor
 
 const file_proto_sandbox_v1_sandbox_proto_rawDesc = "" +
@@ -2557,7 +3296,48 @@ const file_proto_sandbox_v1_sandbox_proto_rawDesc = "" +
 	"\x0emem_used_bytes\x18\x04 \x01(\x03R\fmemUsedBytes\x12&\n" +
 	"\x0fmem_total_bytes\x18\x05 \x01(\x03R\rmemTotalBytes\x12*\n" +
 	"\x11mem_balloon_bytes\x18\x06 \x01(\x03R\x0fmemBalloonBytes\x12#\n" +
-	"\rprocess_count\x18\a \x01(\x05R\fprocessCount2\xb0\a\n" +
+	"\rprocess_count\x18\a \x01(\x05R\fprocessCount\"f\n" +
+	"\vRunCodeOpen\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12\x1a\n" +
+	"\blanguage\x18\x02 \x01(\tR\blanguage\x12'\n" +
+	"\x0ftimeout_seconds\x18\x03 \x01(\x03R\x0etimeoutSeconds\"^\n" +
+	"\x0eRunCodeRequest\x12-\n" +
+	"\x04open\x18\x01 \x01(\v2\x17.sandbox.v1.RunCodeOpenH\x00R\x04open\x12\x16\n" +
+	"\x05stdin\x18\x02 \x01(\fH\x00R\x05stdinB\x05\n" +
+	"\x03msg\"\x8d\x01\n" +
+	"\tRunResult\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x123\n" +
+	"\x04data\x18\x02 \x03(\v2\x1f.sandbox.v1.RunResult.DataEntryR\x04data\x1a7\n" +
+	"\tDataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"R\n" +
+	"\bRunError\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\x12\x1c\n" +
+	"\ttraceback\x18\x03 \x03(\tR\ttraceback\"\xca\x01\n" +
+	"\x0fRunCodeResponse\x12\x18\n" +
+	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12\x18\n" +
+	"\x06stderr\x18\x02 \x01(\fH\x00R\x06stderr\x12/\n" +
+	"\x06result\x18\x03 \x01(\v2\x15.sandbox.v1.RunResultH\x00R\x06result\x12,\n" +
+	"\x05error\x18\x04 \x01(\v2\x14.sandbox.v1.RunErrorH\x00R\x05error\x12\x1d\n" +
+	"\texit_code\x18\x05 \x01(\x05H\x00R\bexitCodeB\x05\n" +
+	"\x03msg\"\"\n" +
+	"\fMkdirRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x0f\n" +
+	"\rMkdirResponse\"A\n" +
+	"\rRemoveRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x10\n" +
+	"\x0eRemoveResponse\" \n" +
+	"\n" +
+	"UploadOpen\x12\x12\n" +
+	"\x04dest\x18\x01 \x01(\tR\x04dest\"\\\n" +
+	"\rUploadRequest\x12,\n" +
+	"\x04open\x18\x01 \x01(\v2\x16.sandbox.v1.UploadOpenH\x00R\x04open\x12\x16\n" +
+	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\x05\n" +
+	"\x03msg\"3\n" +
+	"\fUploadResult\x12#\n" +
+	"\rbytes_written\x18\x01 \x01(\x03R\fbytesWritten2\xb8\t\n" +
 	"\aSandbox\x12=\n" +
 	"\x04Exec\x12\x17.sandbox.v1.ExecRequest\x1a\x18.sandbox.v1.ExecResponse(\x010\x01\x12<\n" +
 	"\bReadFile\x12\x1b.sandbox.v1.ReadFileRequest\x1a\x11.sandbox.v1.Chunk0\x01\x12H\n" +
@@ -2574,7 +3354,11 @@ const file_proto_sandbox_v1_sandbox_proto_rawDesc = "" +
 	"Checkpoint\x12\x1d.sandbox.v1.CheckpointRequest\x1a\x14.sandbox.v1.Revision\x12>\n" +
 	"\x0eExtendLifetime\x12\x19.sandbox.v1.ExtendRequest\x1a\x11.sandbox.v1.Lease\x12=\n" +
 	"\x06Budget\x12\x19.sandbox.v1.BudgetRequest\x1a\x18.sandbox.v1.BudgetStatus\x12>\n" +
-	"\x06Vitals\x12\x19.sandbox.v1.VitalsRequest\x1a\x17.sandbox.v1.GuestVitals0\x01B,Z*mitos.run/mitos/proto/sandbox/v1;sandboxv1b\x06proto3"
+	"\x06Vitals\x12\x19.sandbox.v1.VitalsRequest\x1a\x17.sandbox.v1.GuestVitals0\x01\x12F\n" +
+	"\aRunCode\x12\x1a.sandbox.v1.RunCodeRequest\x1a\x1b.sandbox.v1.RunCodeResponse(\x010\x01\x12<\n" +
+	"\x05Mkdir\x12\x18.sandbox.v1.MkdirRequest\x1a\x19.sandbox.v1.MkdirResponse\x12?\n" +
+	"\x06Remove\x12\x19.sandbox.v1.RemoveRequest\x1a\x1a.sandbox.v1.RemoveResponse\x12?\n" +
+	"\x06Upload\x12\x19.sandbox.v1.UploadRequest\x1a\x18.sandbox.v1.UploadResult(\x01B,Z*mitos.run/mitos/proto/sandbox/v1;sandboxv1b\x06proto3"
 
 var (
 	file_proto_sandbox_v1_sandbox_proto_rawDescOnce sync.Once
@@ -2589,7 +3373,7 @@ func file_proto_sandbox_v1_sandbox_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_sandbox_v1_sandbox_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_sandbox_v1_sandbox_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_proto_sandbox_v1_sandbox_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
 var file_proto_sandbox_v1_sandbox_proto_goTypes = []any{
 	(ArchiveRequest_Direction)(0), // 0: sandbox.v1.ArchiveRequest.Direction
 	(FsEvent_Kind)(0),             // 1: sandbox.v1.FsEvent.Kind
@@ -2630,6 +3414,19 @@ var file_proto_sandbox_v1_sandbox_proto_goTypes = []any{
 	(*Allowance)(nil),             // 36: sandbox.v1.Allowance
 	(*VitalsRequest)(nil),         // 37: sandbox.v1.VitalsRequest
 	(*GuestVitals)(nil),           // 38: sandbox.v1.GuestVitals
+	(*RunCodeOpen)(nil),           // 39: sandbox.v1.RunCodeOpen
+	(*RunCodeRequest)(nil),        // 40: sandbox.v1.RunCodeRequest
+	(*RunResult)(nil),             // 41: sandbox.v1.RunResult
+	(*RunError)(nil),              // 42: sandbox.v1.RunError
+	(*RunCodeResponse)(nil),       // 43: sandbox.v1.RunCodeResponse
+	(*MkdirRequest)(nil),          // 44: sandbox.v1.MkdirRequest
+	(*MkdirResponse)(nil),         // 45: sandbox.v1.MkdirResponse
+	(*RemoveRequest)(nil),         // 46: sandbox.v1.RemoveRequest
+	(*RemoveResponse)(nil),        // 47: sandbox.v1.RemoveResponse
+	(*UploadOpen)(nil),            // 48: sandbox.v1.UploadOpen
+	(*UploadRequest)(nil),         // 49: sandbox.v1.UploadRequest
+	(*UploadResult)(nil),          // 50: sandbox.v1.UploadResult
+	nil,                           // 51: sandbox.v1.RunResult.DataEntry
 }
 var file_proto_sandbox_v1_sandbox_proto_depIdxs = []int32{
 	3,  // 0: sandbox.v1.ExecRequest.open:type_name -> sandbox.v1.ExecOpen
@@ -2648,41 +3445,54 @@ var file_proto_sandbox_v1_sandbox_proto_depIdxs = []int32{
 	36, // 13: sandbox.v1.BudgetStatus.fork:type_name -> sandbox.v1.Allowance
 	36, // 14: sandbox.v1.BudgetStatus.checkpoint:type_name -> sandbox.v1.Allowance
 	36, // 15: sandbox.v1.BudgetStatus.lifetime_extension:type_name -> sandbox.v1.Allowance
-	2,  // 16: sandbox.v1.Sandbox.Exec:input_type -> sandbox.v1.ExecRequest
-	9,  // 17: sandbox.v1.Sandbox.ReadFile:input_type -> sandbox.v1.ReadFileRequest
-	11, // 18: sandbox.v1.Sandbox.WriteFile:input_type -> sandbox.v1.WriteFileRequest
-	14, // 19: sandbox.v1.Sandbox.List:input_type -> sandbox.v1.ListRequest
-	16, // 20: sandbox.v1.Sandbox.Stat:input_type -> sandbox.v1.StatRequest
-	18, // 21: sandbox.v1.Sandbox.Archive:input_type -> sandbox.v1.ArchiveRequest
-	19, // 22: sandbox.v1.Sandbox.Watch:input_type -> sandbox.v1.WatchRequest
-	21, // 23: sandbox.v1.Sandbox.Processes:input_type -> sandbox.v1.ProcessesRequest
-	24, // 24: sandbox.v1.Sandbox.Signal:input_type -> sandbox.v1.SignalRequest
-	26, // 25: sandbox.v1.Sandbox.PortForward:input_type -> sandbox.v1.Frame
-	28, // 26: sandbox.v1.Sandbox.Fork:input_type -> sandbox.v1.ForkRequest
-	30, // 27: sandbox.v1.Sandbox.Checkpoint:input_type -> sandbox.v1.CheckpointRequest
-	32, // 28: sandbox.v1.Sandbox.ExtendLifetime:input_type -> sandbox.v1.ExtendRequest
-	34, // 29: sandbox.v1.Sandbox.Budget:input_type -> sandbox.v1.BudgetRequest
-	37, // 30: sandbox.v1.Sandbox.Vitals:input_type -> sandbox.v1.VitalsRequest
-	6,  // 31: sandbox.v1.Sandbox.Exec:output_type -> sandbox.v1.ExecResponse
-	10, // 32: sandbox.v1.Sandbox.ReadFile:output_type -> sandbox.v1.Chunk
-	13, // 33: sandbox.v1.Sandbox.WriteFile:output_type -> sandbox.v1.WriteFileResult
-	15, // 34: sandbox.v1.Sandbox.List:output_type -> sandbox.v1.ListResponse
-	17, // 35: sandbox.v1.Sandbox.Stat:output_type -> sandbox.v1.FileInfo
-	10, // 36: sandbox.v1.Sandbox.Archive:output_type -> sandbox.v1.Chunk
-	20, // 37: sandbox.v1.Sandbox.Watch:output_type -> sandbox.v1.FsEvent
-	22, // 38: sandbox.v1.Sandbox.Processes:output_type -> sandbox.v1.ProcessList
-	25, // 39: sandbox.v1.Sandbox.Signal:output_type -> sandbox.v1.SignalResponse
-	26, // 40: sandbox.v1.Sandbox.PortForward:output_type -> sandbox.v1.Frame
-	29, // 41: sandbox.v1.Sandbox.Fork:output_type -> sandbox.v1.Operation
-	31, // 42: sandbox.v1.Sandbox.Checkpoint:output_type -> sandbox.v1.Revision
-	33, // 43: sandbox.v1.Sandbox.ExtendLifetime:output_type -> sandbox.v1.Lease
-	35, // 44: sandbox.v1.Sandbox.Budget:output_type -> sandbox.v1.BudgetStatus
-	38, // 45: sandbox.v1.Sandbox.Vitals:output_type -> sandbox.v1.GuestVitals
-	31, // [31:46] is the sub-list for method output_type
-	16, // [16:31] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	39, // 16: sandbox.v1.RunCodeRequest.open:type_name -> sandbox.v1.RunCodeOpen
+	51, // 17: sandbox.v1.RunResult.data:type_name -> sandbox.v1.RunResult.DataEntry
+	41, // 18: sandbox.v1.RunCodeResponse.result:type_name -> sandbox.v1.RunResult
+	42, // 19: sandbox.v1.RunCodeResponse.error:type_name -> sandbox.v1.RunError
+	48, // 20: sandbox.v1.UploadRequest.open:type_name -> sandbox.v1.UploadOpen
+	2,  // 21: sandbox.v1.Sandbox.Exec:input_type -> sandbox.v1.ExecRequest
+	9,  // 22: sandbox.v1.Sandbox.ReadFile:input_type -> sandbox.v1.ReadFileRequest
+	11, // 23: sandbox.v1.Sandbox.WriteFile:input_type -> sandbox.v1.WriteFileRequest
+	14, // 24: sandbox.v1.Sandbox.List:input_type -> sandbox.v1.ListRequest
+	16, // 25: sandbox.v1.Sandbox.Stat:input_type -> sandbox.v1.StatRequest
+	18, // 26: sandbox.v1.Sandbox.Archive:input_type -> sandbox.v1.ArchiveRequest
+	19, // 27: sandbox.v1.Sandbox.Watch:input_type -> sandbox.v1.WatchRequest
+	21, // 28: sandbox.v1.Sandbox.Processes:input_type -> sandbox.v1.ProcessesRequest
+	24, // 29: sandbox.v1.Sandbox.Signal:input_type -> sandbox.v1.SignalRequest
+	26, // 30: sandbox.v1.Sandbox.PortForward:input_type -> sandbox.v1.Frame
+	28, // 31: sandbox.v1.Sandbox.Fork:input_type -> sandbox.v1.ForkRequest
+	30, // 32: sandbox.v1.Sandbox.Checkpoint:input_type -> sandbox.v1.CheckpointRequest
+	32, // 33: sandbox.v1.Sandbox.ExtendLifetime:input_type -> sandbox.v1.ExtendRequest
+	34, // 34: sandbox.v1.Sandbox.Budget:input_type -> sandbox.v1.BudgetRequest
+	37, // 35: sandbox.v1.Sandbox.Vitals:input_type -> sandbox.v1.VitalsRequest
+	40, // 36: sandbox.v1.Sandbox.RunCode:input_type -> sandbox.v1.RunCodeRequest
+	44, // 37: sandbox.v1.Sandbox.Mkdir:input_type -> sandbox.v1.MkdirRequest
+	46, // 38: sandbox.v1.Sandbox.Remove:input_type -> sandbox.v1.RemoveRequest
+	49, // 39: sandbox.v1.Sandbox.Upload:input_type -> sandbox.v1.UploadRequest
+	6,  // 40: sandbox.v1.Sandbox.Exec:output_type -> sandbox.v1.ExecResponse
+	10, // 41: sandbox.v1.Sandbox.ReadFile:output_type -> sandbox.v1.Chunk
+	13, // 42: sandbox.v1.Sandbox.WriteFile:output_type -> sandbox.v1.WriteFileResult
+	15, // 43: sandbox.v1.Sandbox.List:output_type -> sandbox.v1.ListResponse
+	17, // 44: sandbox.v1.Sandbox.Stat:output_type -> sandbox.v1.FileInfo
+	10, // 45: sandbox.v1.Sandbox.Archive:output_type -> sandbox.v1.Chunk
+	20, // 46: sandbox.v1.Sandbox.Watch:output_type -> sandbox.v1.FsEvent
+	22, // 47: sandbox.v1.Sandbox.Processes:output_type -> sandbox.v1.ProcessList
+	25, // 48: sandbox.v1.Sandbox.Signal:output_type -> sandbox.v1.SignalResponse
+	26, // 49: sandbox.v1.Sandbox.PortForward:output_type -> sandbox.v1.Frame
+	29, // 50: sandbox.v1.Sandbox.Fork:output_type -> sandbox.v1.Operation
+	31, // 51: sandbox.v1.Sandbox.Checkpoint:output_type -> sandbox.v1.Revision
+	33, // 52: sandbox.v1.Sandbox.ExtendLifetime:output_type -> sandbox.v1.Lease
+	35, // 53: sandbox.v1.Sandbox.Budget:output_type -> sandbox.v1.BudgetStatus
+	38, // 54: sandbox.v1.Sandbox.Vitals:output_type -> sandbox.v1.GuestVitals
+	43, // 55: sandbox.v1.Sandbox.RunCode:output_type -> sandbox.v1.RunCodeResponse
+	45, // 56: sandbox.v1.Sandbox.Mkdir:output_type -> sandbox.v1.MkdirResponse
+	47, // 57: sandbox.v1.Sandbox.Remove:output_type -> sandbox.v1.RemoveResponse
+	50, // 58: sandbox.v1.Sandbox.Upload:output_type -> sandbox.v1.UploadResult
+	40, // [40:59] is the sub-list for method output_type
+	21, // [21:40] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_proto_sandbox_v1_sandbox_proto_init() }
@@ -2710,13 +3520,28 @@ func file_proto_sandbox_v1_sandbox_proto_init() {
 		(*Frame_Data)(nil),
 		(*Frame_Close)(nil),
 	}
+	file_proto_sandbox_v1_sandbox_proto_msgTypes[38].OneofWrappers = []any{
+		(*RunCodeRequest_Open)(nil),
+		(*RunCodeRequest_Stdin)(nil),
+	}
+	file_proto_sandbox_v1_sandbox_proto_msgTypes[41].OneofWrappers = []any{
+		(*RunCodeResponse_Stdout)(nil),
+		(*RunCodeResponse_Stderr)(nil),
+		(*RunCodeResponse_Result)(nil),
+		(*RunCodeResponse_Error)(nil),
+		(*RunCodeResponse_ExitCode)(nil),
+	}
+	file_proto_sandbox_v1_sandbox_proto_msgTypes[47].OneofWrappers = []any{
+		(*UploadRequest_Open)(nil),
+		(*UploadRequest_Chunk)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_sandbox_v1_sandbox_proto_rawDesc), len(file_proto_sandbox_v1_sandbox_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   37,
+			NumMessages:   50,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

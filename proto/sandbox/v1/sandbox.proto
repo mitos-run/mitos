@@ -116,6 +116,28 @@ service Sandbox {
   // Vitals streams guest health samples (cpu steal, memory vs balloon, process
   // count) until the client cancels. New surface in v2.
   rpc Vitals(VitalsRequest) returns (stream GuestVitals);
+
+  // --- Code execution (Jupyter-style) ---
+
+  // RunCode runs a snippet of code in the sandbox kernel (default Python) and
+  // streams back stdout, stderr, rich display results, and an exit code. The
+  // first RunCodeRequest MUST carry `open`; subsequent messages may carry
+  // `stdin` to feed interactive prompts.
+  rpc RunCode(stream RunCodeRequest) returns (stream RunCodeResponse);
+
+  // --- Filesystem helpers ---
+
+  // Mkdir creates a directory (and parents) at the given path.
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+
+  // Remove deletes a file or directory. Set recursive to remove a non-empty
+  // directory tree.
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+
+  // Upload accepts a tar archive over a streaming request and extracts it at
+  // the destination directory. The first UploadRequest MUST carry `open`;
+  // subsequent messages carry raw tar bytes as `chunk`.
+  rpc Upload(stream UploadRequest) returns (UploadResult);
 }
 
 // --- Execution messages ---
@@ -425,4 +447,87 @@ message GuestVitals {
   // mem_balloon_bytes is memory reclaimed by the balloon device.
   int64 mem_balloon_bytes = 6;
   int32 process_count = 7;
+}
+
+// --- Code execution messages ---
+
+// RunCodeOpen starts a code execution. language defaults to "python" when
+// empty. timeout_seconds bounds the run; <= 0 applies the guest default.
+message RunCodeOpen {
+  string code = 1;
+  string language = 2;
+  int64 timeout_seconds = 3;
+}
+
+// RunCodeRequest is one message in the RunCode bidi stream. The first message
+// MUST carry `open`; subsequent messages may carry `stdin` for interactive
+// prompts.
+message RunCodeRequest {
+  oneof msg {
+    RunCodeOpen open = 1;
+    bytes stdin = 2;
+  }
+}
+
+// RunResult carries rich display output from a kernel execution (Jupyter-style
+// rich output). data maps MIME type to payload bytes (e.g. "image/png" to PNG
+// bytes).
+message RunResult {
+  string text = 1;
+  map<string, bytes> data = 2;
+}
+
+// RunError carries a kernel exception: the exception name, its string value,
+// and the formatted traceback lines.
+message RunError {
+  string name = 1;
+  string value = 2;
+  repeated string traceback = 3;
+}
+
+// RunCodeResponse is one message in the RunCode reply stream. Exactly one
+// field is set. stdout/stderr carry output chunks; result carries rich display
+// output; error carries a kernel exception; exit_code is the terminal message.
+message RunCodeResponse {
+  oneof msg {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    RunResult result = 3;
+    RunError error = 4;
+    int32 exit_code = 5;
+  }
+}
+
+// --- Filesystem helper messages ---
+
+message MkdirRequest {
+  string path = 1;
+}
+
+message MkdirResponse {}
+
+message RemoveRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message RemoveResponse {}
+
+// UploadOpen selects the destination directory for tar extraction.
+message UploadOpen {
+  string dest = 1;
+}
+
+// UploadRequest is one message in the Upload stream. The first message MUST
+// carry `open`; subsequent messages carry raw tar bytes as `chunk`.
+message UploadRequest {
+  oneof msg {
+    UploadOpen open = 1;
+    bytes chunk = 2;
+  }
+}
+
+// UploadResult reports the total bytes written from the extracted archive.
+message UploadResult {
+  int64 bytes_written = 1;
 }
