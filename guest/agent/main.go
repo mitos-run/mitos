@@ -462,8 +462,18 @@ func (c *vsockConn) Close() error {
 	return unix.Close(c.fd)
 }
 
-func (c *vsockConn) LocalAddr() net.Addr                { return nil }
-func (c *vsockConn) RemoteAddr() net.Addr               { return nil }
+// vsockAddr is a non-nil net.Addr for vsock connections and listeners. grpc's
+// server derefs Listener.Addr() and Conn.LocalAddr()/RemoteAddr() during
+// channelz socket registration; returning nil there panics inside grpc.Serve,
+// and because the agent is PID 1 that panic kernel-panics the whole microVM.
+// A constant non-nil addr is sufficient: vsock has no host:port string.
+type vsockAddr struct{}
+
+func (vsockAddr) Network() string { return "vsock" }
+func (vsockAddr) String() string  { return "vsock" }
+
+func (c *vsockConn) LocalAddr() net.Addr                { return vsockAddr{} }
+func (c *vsockConn) RemoteAddr() net.Addr               { return vsockAddr{} }
 func (c *vsockConn) SetDeadline(t time.Time) error      { return nil }
 func (c *vsockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *vsockConn) SetWriteDeadline(t time.Time) error { return nil }
@@ -473,7 +483,7 @@ func (l *vsockListener) Close() error {
 }
 
 func (l *vsockListener) Addr() net.Addr {
-	return nil
+	return vsockAddr{}
 }
 
 func listenVsock(port int) (net.Listener, error) {

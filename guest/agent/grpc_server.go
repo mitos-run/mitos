@@ -51,7 +51,17 @@ func newGuestGRPCServer() *grpc.Server {
 // runtime protocol. It is best-effort and non-fatal, like the self-service
 // socket: a listen failure is logged and the legacy JSON-lines loop is
 // unaffected. It blocks in Serve, so callers run it in a goroutine.
+//
+// The whole body runs under recover(): the agent is PID 1, so an unrecovered
+// panic anywhere in the gRPC serving path (for example a grpc-internal nil
+// deref) would crash init and kernel-panic the entire microVM. The legacy
+// JSON-lines loop on AgentPort is the fallback, so the gRPC path must fail soft.
 func startGRPCServer() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "sandbox-agent: gRPC server panic recovered (JSON-lines loop unaffected): %v\n", r)
+		}
+	}()
 	listener, err := listenVsock(vsock.AgentGRPCPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox-agent: gRPC listen error: %v\n", err)
