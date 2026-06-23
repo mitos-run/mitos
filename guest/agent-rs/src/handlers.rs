@@ -203,9 +203,8 @@ pub fn handle_exec(req: &ExecRequest, env: &Mutex<HashMap<String, String>>) -> R
     let req_env = req.env.as_ref().unwrap_or(&empty_req_env);
     let merged = merge_env(&base_env, &configured_snapshot, req_env);
 
-    // Spawn the child with piped stdout/stderr. We keep the Child handle here
-    // so we can call child.kill() on timeout, matching Go's exec.CommandContext
-    // which SIGKILLs the child when the deadline is hit (kill-on-deadline).
+    // Spawn the child with piped stdout/stderr. Capture the pid BEFORE moving
+    // the child into the waiter thread (needed for SIGKILL on timeout).
     let mut child = match std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(&req.command)
@@ -233,86 +232,81 @@ pub fn handle_exec(req: &ExecRequest, env: &Mutex<HashMap<String, String>>) -> R
         Ok(c) => c,
     };
 
-    // Take ownership of the pipes and drain them on a thread so the child never
-    // blocks on a full pipe buffer. We keep `child` in the parent so we can
-    // call child.kill() on timeout, matching Go's exec.CommandContext
-    // kill-on-deadline behavior.
-    use std::sync::{Arc, Mutex as StdMutex};
-    let stdout_buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
-    let stderr_buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+    // Capture pid before moving child into the waiter thread.
+    let pid = child.id();
 
+    // Take the pipes; spawn one drain thread per pipe so the child never blocks
+    // on a full pipe buffer. Each thread reads to EOF and returns the bytes.
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
 
-    let out_clone = Arc::clone(&stdout_buf);
-    let err_clone = Arc::clone(&stderr_buf);
-
-    // Drain both pipes concurrently on one thread each. Save handles so we can
-    // join them after the child exits or is killed, ensuring no output is lost.
     let drain_stdout = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = Vec::new();
         let mut pipe = stdout_pipe;
         let _ = pipe.read_to_end(&mut buf);
-        *out_clone.lock().unwrap() = buf;
+        buf
     });
     let drain_stderr = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = Vec::new();
         let mut pipe = stderr_pipe;
         let _ = pipe.read_to_end(&mut buf);
-        *err_clone.lock().unwrap() = buf;
+        buf
     });
 
-    // Poll child.try_wait() until it exits or the timeout elapses. On timeout,
-    // kill the child and reap it so nothing leaks. This mirrors Go's
-    // exec.CommandContext kill-on-deadline behavior.
-    let poll_interval = Duration::from_millis(10);
-    let deadline = std::time::Instant::now() + timeout;
-    let status_result = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    // Kill the child on timeout; ignore error if it already exited.
-                    let _ = child.kill();
-                    // Reap so no zombie is left.
-                    let _ = child.wait();
-                    break Err(())
-                }
-                std::thread::sleep(poll_interval);
-            }
-            Err(_) => break Err(()),
-        }
-    };
+    // Move the child into a waiter thread that blocks on child.wait() and
+    // sends the ExitStatus over a channel. This avoids any poll interval,
+    // eliminating the up-to-10ms latency that was added to every exec-rt
+    // measurement (the key metric of this spike).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
 
+    // Wait up to timeout for the child to exit, then SIGKILL via pid.
+    // One-shot exec deliberately does NOT use a process group (no Setpgid),
+    // matching Go's handleExec which also does not set Setpgid.
     let exit_code: i32;
-    let stdout_str: String;
-    let stderr_str: String;
+    let stdout_bytes: Vec<u8>;
+    let stderr_bytes: Vec<u8>;
 
-    match status_result {
-        Ok(status) => {
-            // Join the pipe-draining threads so all output is captured before
-            // we read the shared buffers.
-            let _ = drain_stdout.join();
-            let _ = drain_stderr.join();
+    use std::sync::mpsc::RecvTimeoutError;
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(status)) => {
+            // Child exited normally; join drain threads to collect all output.
+            stdout_bytes = drain_stdout.join().unwrap_or_default();
+            stderr_bytes = drain_stderr.join().unwrap_or_default();
             exit_code = status.code().unwrap_or(1);
-            // from_utf8_lossy replaces invalid UTF-8 sequences with U+FFFD, a minor
-            // divergence from Go which returns raw bytes; acceptable for the spike's
-            // text commands.
-            stdout_str = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
-            stderr_str = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
         }
-        Err(()) => {
-            // On timeout the child was already killed and reaped; drain threads
-            // will finish quickly as pipes are now closed.
-            let _ = drain_stdout.join();
-            let _ = drain_stderr.join();
+        Ok(Err(_)) => {
+            // wait() failed; drain threads may still hold partial output.
+            stdout_bytes = drain_stdout.join().unwrap_or_default();
+            stderr_bytes = drain_stderr.join().unwrap_or_default();
+            exit_code = 1;
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            // Timeout: kill via pid (single process, no process group, matching Go).
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            // Reap the child by waiting for the waiter thread to finish.
+            let _ = rx.recv();
+            // Drain threads finish quickly now that the pipes are closed by the killed child.
+            stdout_bytes = drain_stdout.join().unwrap_or_default();
+            stderr_bytes = drain_stderr.join().unwrap_or_default();
             exit_code = 124;
-            stdout_str = String::new();
-            stderr_str = String::new();
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            stdout_bytes = drain_stdout.join().unwrap_or_default();
+            stderr_bytes = drain_stderr.join().unwrap_or_default();
+            exit_code = 1;
         }
     }
+
+    // from_utf8_lossy replaces invalid UTF-8 sequences with U+FFFD, a minor
+    // divergence from Go which returns raw bytes; acceptable for the spike's
+    // text commands.
+    let stdout_str = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
     let elapsed_ms = start.elapsed().as_micros() as f64 / 1000.0;
 
