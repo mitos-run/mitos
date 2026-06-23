@@ -150,6 +150,8 @@ The Ruby SDK is a thin, dependency-free (standard-library only) client for the s
 
 The Rust SDK is a thin, blocking (no async runtime) client for the standalone and hosted sandbox-server REST API with the same direct-mode surface: create a template, fork a sandbox, run `exec`, and terminate. It covers direct mode only; cluster mode stays Python and TypeScript. See [sdk/rust/README.md](sdk/rust/README.md).
 
+The Java SDK is a thin, dependency-free (JDK standard library only) client for the standalone and hosted sandbox-server REST API: create a template, fork a sandbox, run `exec`, and terminate. It targets Java 17, covers direct mode only, and parses the server envelope into a structured `MitosException`. Cluster mode stays Python and TypeScript. See [sdk/java/README.md](sdk/java/README.md).
+
 ### CLI
 
 Install the `mitos` CLI. The full per-OS matrix, the env vars the installer
