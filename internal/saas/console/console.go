@@ -49,6 +49,7 @@ type Deps struct {
 	Logs        LogStreamer
 	Secrets     SecretStore
 	Instruments InstrumentsSource
+	Portal      PortalLinker
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -83,6 +84,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Instruments == nil {
 		deps.Instruments = NewMemInstruments()
+	}
+	if deps.Portal == nil {
+		deps.Portal = noPortal{}
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
@@ -122,6 +126,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/keys/{id}/revoke", c.handleRevokeKey)
 	mux.HandleFunc("GET /console/usage", c.handleUsage)
 	mux.HandleFunc("GET /console/billing", c.handleBilling)
+	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)

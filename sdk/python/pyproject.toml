@@ -2,6 +2,7 @@
 name = "mitos"
 version = "0.1.0"
 description = "Python SDK for mitos: sub-millisecond sandbox forking on Kubernetes"
+keywords = ["sandbox", "firecracker", "microvm", "ai-agents", "kubernetes", "code-interpreter", "mitos"]
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -9,6 +10,12 @@ dependencies = [
     "httpx>=0.27.0",
     "websocket-client>=1.7.0",
 ]
+
+[project.urls]
+Homepage = "https://mitos.run"
+Documentation = "https://mitos.run/docs"
+Repository = "https://github.com/mitos-run/mitos"
+Issues = "https://github.com/mitos-run/mitos/issues"
 
 [project.optional-dependencies]
 # Cluster mode (mitos.client.AgentRun, mitos.aio, mitos.sandbox, mitos.workspace)

@@ -52,18 +52,32 @@ func main() {
 	keys := saas.NewKeyService(store)
 	accounts := saas.NewAccountService(store, keys)
 
+	caps := capabilitiesFromEnv()
+	// One status store is shared by the BFF billing view and the billing webhook
+	// so a provider event (payment failed / canceled) is reflected in the console.
+	statusStore := billing.NewMemStatusStore()
+	bill := setupBilling(logger, statusStore)
 	con := console.New(console.Deps{
 		Accounts: accounts,
 		Usage:    usage.NewMemUsageStore(),
 		Billing: console.BillingReader{
 			Ledger: billing.NewMemCreditLedger(),
-			Status: billing.NewMemStatusStore(),
+			Status: statusStore,
 			Caps:   billing.NewMemSpendCapStore(),
 			Rates:  billing.DefaultRates(),
 		},
+		// The active secret backend selected from config (kube / openbao), falling
+		// back to in-memory in dev. Capabilities advertise the same providers.
+		Secrets: buildSecretStore(logger, caps),
+		// The live-sandbox control: the org-scoped cluster query when in a cluster,
+		// in-memory otherwise. Shares the org→namespace boundary with secrets.
+		Sandboxes: buildSandboxControl(logger),
+		// The manage-subscription portal link (provider-neutral); nil keeps the
+		// console's no-portal default (community edition).
+		Portal: bill.portal,
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
-		Capabilities: capabilitiesFromEnv(),
+		Capabilities: caps,
 		Log:          logger,
 	})
 
@@ -89,6 +103,13 @@ func main() {
 		} else {
 			logger.Warn("MITOS_CONSOLE_OIDC_ISSUER unset; /auth login flow not mounted (BFF requires a session)")
 		}
+	}
+	// The billing webhook is PUBLIC by design: it is authenticated by the
+	// provider's signature, not a session, so it is mounted OUTSIDE the session
+	// middleware. It verifies the signature before touching any billing state.
+	if bill.webhook != nil {
+		mux.Handle("/webhooks/billing", bill.webhook)
+		logger.Info("billing webhook mounted at /webhooks/billing")
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
