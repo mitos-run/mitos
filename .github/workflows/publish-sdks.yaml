@@ -11,16 +11,22 @@ name: Publish SDKs
 #   2. It asks the registry whether that exact version already exists; if so it
 #      logs "already published" and exits 0 (idempotent: a re-run never errors on
 #      a duplicate upload).
-#   3. If the registry token secret is empty it logs "token not configured" and
-#      exits 0, so the workflow never hard-fails before a maintainer wires the
-#      secrets. This mirrors the Homebrew-tap token skip in release.yaml.
+#   3. The token-based jobs additionally skip when their secret is empty, logging
+#      "token not configured" and exiting 0 so the workflow never hard-fails
+#      before a maintainer wires the secrets. This mirrors the Homebrew-tap token
+#      skip in release.yaml. The OIDC jobs do not need a secret.
 #
-# The four registries and the secrets they need:
+# The four registries and how they authenticate:
 #
-#   Python      -> PyPI       secret PYPI_API_TOKEN
+#   Python      -> PyPI       Trusted Publishing (OIDC), no secret. The PyPI
+#                             project is "mitos-run" (the bare "mitos" name is
+#                             taken on PyPI by an unrelated project); the import
+#                             package stays "mitos".
 #   TypeScript  -> npm        secret NPM_TOKEN
 #   Ruby        -> RubyGems   secret RUBYGEMS_API_KEY
-#   Rust        -> crates.io  secret CARGO_REGISTRY_TOKEN
+#   Rust        -> crates.io  Trusted Publishing (OIDC) via
+#                             rust-lang/crates-io-auth-action, after a one-time
+#                             token-based first publish to claim the crate name.
 #
 # Path filters scope each push so a Python-only change does not run the npm job,
 # and workflow_dispatch lets a maintainer force one SDK (or all) by hand.
@@ -122,11 +128,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # id-token: write is NOT required for the API-token publish below. Once the
-      # PyPI project "mitos" is configured for Trusted Publishing (OIDC), the
-      # recommended migration is to add `id-token: write` here, drop the
-      # PYPI_API_TOKEN secret, and remove the `password:` line from the publish
-      # step so gh-action-pypi-publish mints a short-lived OIDC token instead.
+      # id-token: write lets gh-action-pypi-publish mint a short-lived OIDC token
+      # for PyPI Trusted Publishing; no PYPI_API_TOKEN secret is involved. The
+      # PyPI project "mitos-run" has the matching trusted publisher configured
+      # (this repository, workflow publish-sdks.yaml).
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -146,7 +152,7 @@ jobs:
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "mitos (PyPI) declared version: ${version}"
+          echo "mitos-run (PyPI) declared version: ${version}"
 
       - name: Skip if already on PyPI
         id: exists
@@ -154,33 +160,20 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          # HTTP 200 from the per-version JSON endpoint means the release exists.
-          code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mitos/${VERSION}/json")"
+          # The PyPI distribution is named "mitos-run" (the import package stays
+          # "mitos"). HTTP 200 from the per-version JSON endpoint means the
+          # release exists.
+          code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mitos-run/${VERSION}/json")"
           if [ "${code}" = "200" ]; then
-            echo "mitos ${VERSION} already published to PyPI; skipping."
+            echo "mitos-run ${VERSION} already published to PyPI; skipping."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
-            echo "mitos ${VERSION} not on PyPI (HTTP ${code}); will build and publish."
+            echo "mitos-run ${VERSION} not on PyPI (HTTP ${code}); will build and publish."
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Skip if token not configured
-        id: token
-        if: steps.exists.outputs.publish == 'true'
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${PYPI_API_TOKEN:-}" ]; then
-            echo "have_token=true" >> "$GITHUB_OUTPUT"
-            echo "PYPI_API_TOKEN present; will publish."
-          else
-            echo "have_token=false" >> "$GITHUB_OUTPUT"
-            echo "No PYPI_API_TOKEN secret; skipping the PyPI publish."
-          fi
-
       - name: Build the distribution
-        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        if: steps.exists.outputs.publish == 'true'
         run: |
           set -euo pipefail
           python -m pip install --upgrade build
@@ -188,11 +181,12 @@ jobs:
           ls -l sdk/python/dist
 
       - name: Publish to PyPI
-        if: steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        if: steps.exists.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdk/python/dist
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          # No password: Trusted Publishing (OIDC) authenticates via the
+          # id-token: write permission above.
           # Belt and suspenders: even if two runs race, do not fail on a version
           # that already exists on the index.
           skip-existing: true
@@ -369,6 +363,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # id-token: write lets rust-lang/crates-io-auth-action mint a short-lived
+      # crates.io token for Trusted Publishing (OIDC); no CARGO_REGISTRY_TOKEN
+      # secret is involved.
+      #
+      # One-time bootstrap (maintainer, by hand): the FIRST publish of the
+      # "mitos" crate must use a token to claim the name, because crates.io
+      # cannot pre-register a Trusted Publisher for a crate that does not exist
+      # yet. From sdk/rust, run `cargo login <temporary-token>` then
+      # `cargo publish`. After that first publish, add a GitHub Trusted Publisher
+      # in the crate settings (owner mitos-run, repo mitos, workflow
+      # publish-sdks.yaml); every later release then uses the OIDC path below
+      # with no token.
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -426,25 +433,20 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Skip if token not configured
-        id: token
+      - name: Authenticate to crates.io (OIDC)
+        id: auth
         if: steps.guard.outputs.present == 'true' && steps.exists.outputs.publish == 'true'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "have_token=true" >> "$GITHUB_OUTPUT"
-            echo "CARGO_REGISTRY_TOKEN present; will publish."
-          else
-            echo "have_token=false" >> "$GITHUB_OUTPUT"
-            echo "No CARGO_REGISTRY_TOKEN secret; skipping the crates.io publish."
-          fi
+        uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish to crates.io
-        if: steps.guard.outputs.present == 'true' && steps.exists.outputs.publish == 'true' && steps.token.outputs.have_token == 'true'
+        if: steps.guard.outputs.present == 'true' && steps.exists.outputs.publish == 'true'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # rust-lang/crates-io-auth-action exposes the temporary token on its
+          # `token` output; cargo reads it from CARGO_REGISTRY_TOKEN. The action
+          # revokes the token in its post step. See
+          # https://github.com/rust-lang/crates-io-auth-action and
+          # https://crates.io/docs/trusted-publishing
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
           cargo publish --manifest-path sdk/rust/Cargo.toml

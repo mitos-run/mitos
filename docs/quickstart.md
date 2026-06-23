@@ -7,8 +7,12 @@ quickstart; the README headline points here.
 ## One package, one snippet
 
 ```bash
-pip install mitos
+pip install mitos-run
 ```
+
+The PyPI distribution is named `mitos-run` (the bare `mitos` name is taken by an
+unrelated project), but the import package stays `mitos`: you `pip install
+mitos-run` and `import mitos`.
 
 ```python
 import mitos
@@ -20,7 +24,7 @@ print(sb.run_code("print(1 + 1)").text)     # 2
 sb.terminate()
 ```
 
-That is the whole thing: one `pip install mitos`, one import, one `create`, code
+That is the whole thing: one `pip install mitos-run`, one import, one `create`, code
 execution, no second SDK to install. `mitos.create(image, api_key=..., base_url=...)`
 resolves the API key (argument, else `MITOS_API_KEY`) and the base URL (argument,
 else `MITOS_BASE_URL`, else the hosted endpoint `https://mitos.run`), then returns

@@ -29,7 +29,8 @@ In open self-serve mode the flow is:
    the org via #210; the raw key is shown exactly once.
 
 The user then drops straight into the [quickstart](../quickstart.md): one
-`pip install mitos`, one `mitos.create(...)`, code execution, no second SDK.
+`pip install mitos-run` (installs the `mitos-run` distribution; you still `import
+mitos`), one `mitos.create(...)`, code execution, no second SDK.
 
 ### Idempotency and rejection
 
