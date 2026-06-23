@@ -41,6 +41,6 @@ Verify the control plane:
   kubectl get pods -n {{ include "mitos.namespace" . }}
   kubectl get crds | grep mitos.run
 
-The CRDs (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork, Workspace,
-WorkspaceRevision) install from the chart crds/ directory. Helm does not upgrade
-or delete CRDs on chart upgrade or uninstall; manage CRD changes out of band.
+The CRDs (SandboxPool, Sandbox, Workspace, WorkspaceRevision) install from the
+chart crds/ directory. Helm does not upgrade or delete CRDs on chart upgrade or
+uninstall; manage CRD changes out of band.

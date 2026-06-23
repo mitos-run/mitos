@@ -6,9 +6,10 @@
   webhook config at it:
 
     - admissionWebhook.enabled            -> the principal ValidatingWebhookConfiguration
-                                             (binds SandboxClaim.spec.serviceAccount to RBAC).
-    - apiV2.poolConversionWebhook.enabled -> the SandboxPool conversion webhook
-                                             (CRD conversion: strategy: Webhook + v1alpha2 served).
+                                             (binds Sandbox.spec.serviceAccount to RBAC).
+    - apiV2.poolConversionWebhook.enabled -> retained as a no-op knob (the v1alpha1/v1alpha2
+                                             conversion webhook is no longer needed; mitos.run/v1
+                                             is the single served version).
 
   Certs: a self-signed serving cert via the sprig genSignedCert helper, with the
   CA injected into each webhook's caBundle. The cert covers BOTH webhook Service
@@ -103,20 +104,11 @@ spec:
       targetPort: webhook
 ---
 {{- /*
-  CRD conversion enablement. The default (kustomize) install and the chart's
-  static crds/ copy keep v1alpha2 unserved with no conversion stanza. When the
-  pool conversion webhook is enabled we re-render the SandboxPool CRD from the
-  vendored copy with two edits, gated entirely by this value:
-
-    1. inject a top-level conversion: strategy: Webhook stanza routing to the
-       controller's /convert endpoint via the conversion Service, with the
-       shared CA in caBundle;
-    2. flip the single v1alpha2 `served: false` line to `served: true`.
-
-  v1alpha1 stays the storage version (storage: true is untouched). NOTE: Helm
-  does not upgrade objects under crds/, and it does not template them. This
-  templated copy is what carries the conversion stanza into the cluster; apply it
-  with the chart (helm upgrade) so the API server starts routing conversions.
+  CRD conversion enablement. Retained as a no-op code path: the v1alpha1/v1alpha2
+  conversion webhook is no longer needed. mitos.run/v1 is the single served and
+  stored version. This block renders nothing useful when poolConversionWebhook is
+  enabled (which should not happen on a fresh install), but is kept to avoid Helm
+  render failures on values files that set the flag.
 */}}
 {{- $raw := .Files.Get "crds/mitos.run_sandboxpools.yaml" }}
 {{- $conversionStanza := printf "  conversion:\n    strategy: Webhook\n    webhook:\n      conversionReviewVersions: [\"v1\"]\n      clientConfig:\n        service:\n          name: %s\n          namespace: %s\n          path: /convert\n          port: 443\n        caBundle: %s\n" $conversionSvc $ns ($ca.Cert | b64enc) }}
