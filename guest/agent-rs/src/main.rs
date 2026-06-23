@@ -9,7 +9,7 @@ fn main() {
         sandbox_agent::init::init_system();
     }
 
-    println!("sandbox-agent: starting on vsock port 52");
+    eprintln!("sandbox-agent: starting on vsock port 52");
 
     let env = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 

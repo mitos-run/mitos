@@ -40,17 +40,25 @@ pub fn init_system() {
         }
 
         // Perform the mount. Flags = 0 matches the Go agent (no MS_* flags).
-        let source = std::ffi::CString::new(m.source).unwrap();
-        let target = std::ffi::CString::new(m.target).unwrap();
-        let fstype = std::ffi::CString::new(m.fstype).unwrap();
-        let data = std::ffi::CString::new("").unwrap();
+        let Ok(source) = std::ffi::CString::new(m.source) else {
+            eprintln!("mount {}: bad source string", m.target);
+            continue;
+        };
+        let Ok(target) = std::ffi::CString::new(m.target) else {
+            eprintln!("mount {}: bad target string", m.target);
+            continue;
+        };
+        let Ok(fstype) = std::ffi::CString::new(m.fstype) else {
+            eprintln!("mount {}: bad fstype string", m.target);
+            continue;
+        };
         let ret = unsafe {
             libc::mount(
                 source.as_ptr(),
                 target.as_ptr(),
                 fstype.as_ptr(),
                 0,
-                data.as_ptr() as *const libc::c_void,
+                std::ptr::null(),
             )
         };
         if ret != 0 {
@@ -86,6 +94,10 @@ mod tests {
     fn mount_table_matches_go_agent() {
         let t = mount_table();
         let targets: Vec<&str> = t.iter().map(|m| m.target).collect();
+        let sources: Vec<&str> = t.iter().map(|m| m.source).collect();
+        let fstypes: Vec<&str> = t.iter().map(|m| m.fstype).collect();
         assert_eq!(targets, vec!["/proc", "/sys", "/dev", "/tmp", "/run"]);
+        assert_eq!(sources, vec!["proc", "sysfs", "devtmpfs", "tmpfs", "tmpfs"]);
+        assert_eq!(fstypes, vec!["proc", "sysfs", "devtmpfs", "tmpfs", "tmpfs"]);
     }
 }
