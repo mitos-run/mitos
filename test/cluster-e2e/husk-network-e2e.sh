@@ -50,7 +50,6 @@ DENY_HOST="${DENY_HOST:-1.1.1.1}"
 ALLOW_NAME="${ALLOW_HOST%%:*}"
 
 RUN_ID="$(date +%s)-$$"
-TEMPLATE="e2e-net-tmpl-${RUN_ID}"
 POOL="e2e-net-pool-${RUN_ID}"
 CLAIM="e2e-net-claim-${RUN_ID}"
 
@@ -72,10 +71,10 @@ k() { kubectl -n "$NAMESPACE" "$@"; }
 
 diagnostics() {
   echo "=== diagnostics (namespace ${NAMESPACE}) ===" >&2
-  k get sandboxpools,sandboxclaims,sandboxtemplates,networkpolicies -o wide >&2 2>&1 || true
+  k get sandboxpools,sandboxes,networkpolicies -o wide >&2 2>&1 || true
   k get pods -o wide >&2 2>&1 || true
-  echo "--- claim describe ---" >&2
-  k describe sandboxclaim "$CLAIM" >&2 2>&1 || true
+  echo "--- sandbox describe ---" >&2
+  k describe sandbox "$CLAIM" >&2 2>&1 || true
   echo "--- recent husk pod logs ---" >&2
   for p in $(k get pods -l 'mitos.run/husk=true' -o name 2>/dev/null | head -3); do
     echo "--- logs $p ---" >&2
@@ -86,10 +85,9 @@ diagnostics() {
 cleanup() {
   rc=$?
   echo "=== teardown ==="
-  k delete sandboxclaim "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete sandbox "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "$POOL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "$TEMPLATE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxclaims -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete sandboxes -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   echo "teardown done"
   exit "$rc"
 }
@@ -115,32 +113,24 @@ fi
 # ---------------------------------------------------------------------------
 echo "--- stage 1: pool warms a dormant husk pod (egress deny, allow ${ALLOW_HOST}) ---"
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: ${TEMPLATE}
-  labels:
-    mitos.run/e2e-run: "${RUN_ID}"
-spec:
-  image: ${E2E_IMAGE}
-  resources:
-    cpu: "250m"
-    memory: "512Mi"
-  networkPolicy:
-    egress: deny
-    allow:
-      - "${ALLOW_HOST}"
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: ${POOL}
   labels:
     mitos.run/e2e-run: "${RUN_ID}"
 spec:
-  templateRef:
-    name: ${TEMPLATE}
-  replicas: 1
+  template:
+    image: ${E2E_IMAGE}
+    resources:
+      cpu: "250m"
+      memory: "512Mi"
+    network:
+      egress: deny
+      allow:
+        - "${ALLOW_HOST}"
+  snapshots:
+    replicasPerNode: 1
 EOF
 
 # Wait for at least one dormant warm pod: husk=true, Running, no claim label.

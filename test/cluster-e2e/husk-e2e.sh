@@ -9,7 +9,7 @@
 #
 # Stages (each prints a PASS/FAIL line):
 #   1. pool warms      a SandboxPool brings up dormant husk pods
-#   2. claim activates a SandboxClaim reaches Ready and exec returns expected stdout
+#   2. claim activates a Sandbox reaches Ready and exec returns expected stdout
 #   3. fork(2)         a fork produces independent sandboxes
 #   4. run_code        a code-interpreter run returns a result OR a clean
 #                      KernelUnavailable (the husk OCI base may lack the kernel;
@@ -73,10 +73,10 @@ k() { kubectl -n "$NAMESPACE" "$@"; }
 
 diagnostics() {
   echo "=== diagnostics (namespace ${NAMESPACE}) ===" >&2
-  k get sandboxpools,sandboxclaims,sandboxforks -o wide >&2 2>&1 || true
+  k get sandboxpools,sandboxes -o wide >&2 2>&1 || true
   k get pods -o wide >&2 2>&1 || true
-  echo "--- claim describe ---" >&2
-  k describe sandboxclaim "$CLAIM" >&2 2>&1 || true
+  echo "--- sandbox describe ---" >&2
+  k describe sandbox "$CLAIM" >&2 2>&1 || true
   echo "--- recent husk pod logs ---" >&2
   for p in $(k get pods -l 'mitos.run/husk=true' -o name 2>/dev/null | head -3); do
     echo "--- logs $p ---" >&2
@@ -87,14 +87,12 @@ diagnostics() {
 cleanup() {
   rc=$?
   echo "=== teardown ==="
-  # Delete the claim/fork first (releases pods), then the pool, then the
-  # template. Best effort; never let teardown mask the real exit code.
-  k delete sandboxforks --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxclaim "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Delete the sandbox first (releases pods), then the pool. Best effort;
+  # never let teardown mask the real exit code.
+  k delete sandbox "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "$POOL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "$TEMPLATE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  # Sweep any residual claims/forks this run created.
-  k delete sandboxclaims -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Sweep any residual sandboxes this run created.
+  k delete sandboxes -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   echo "teardown done"
   exit "$rc"
 }
@@ -118,28 +116,20 @@ fi
 # ---------------------------------------------------------------------------
 echo "--- stage 1: pool warms dormant husk pods ---"
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: ${TEMPLATE}
-  labels:
-    mitos.run/e2e-run: "${RUN_ID}"
-spec:
-  image: ${E2E_IMAGE}
-  resources:
-    cpu: "250m"
-    memory: "512Mi"
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: ${POOL}
   labels:
     mitos.run/e2e-run: "${RUN_ID}"
 spec:
-  templateRef:
-    name: ${TEMPLATE}
-  replicas: 2
+  template:
+    image: ${E2E_IMAGE}
+    resources:
+      cpu: "250m"
+      memory: "512Mi"
+  snapshots:
+    replicasPerNode: 2
 EOF
 
 # Wait for at least one dormant warm pod: husk=true, Running, no claim label.
@@ -371,7 +361,7 @@ self_heal_probe() {
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   saw_repend=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    ready="$(k get sandboxclaim "$CLAIM" \
+    ready="$(k get sandbox "$CLAIM" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
     if [ "$ready" != "True" ]; then saw_repend="yes"; break; fi
     sleep "$POLL_INTERVAL"
