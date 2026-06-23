@@ -150,7 +150,7 @@ converts to `source.fromSandbox` + `replicas: <its replicas>`.
 | --- | --- | --- |
 | `SandboxClaimStatus.phase` (`SandboxPhase`) | `phase` | v2 phases: Pending, Hydrating, Ready, Terminating, NodeLost, Failed; v1 `Restoring` maps to `Hydrating`, v1 `Terminated` is a terminal phase reaped by TTL |
 | `SandboxClaimStatus.endpoint` | `endpoint` | unchanged |
-| `SandboxClaimStatus.node` | (folded into `pod`) | the husk pod name (`status.pod`) is the operator-visible handle; node is derivable from the pod |
+| `SandboxClaimStatus.node` | `node` | carried unchanged; `status.pod` is the husk-path operator handle, but `status.node` remains the engine placement identity (GC orphan sweep, NodeLost, terminate/idle) and is not derivable from a pod on the raw-forkd path |
 | `SandboxClaimStatus.sandboxID` | `sandboxID` | unchanged |
 | `SandboxClaimStatus.forkTimeMicros` | `startupLatencyMs` | renamed and rescaled (micros -> ms) to the v2 spec field |
 | `SandboxClaimStatus.startedAt` | `startedAt` | unchanged |

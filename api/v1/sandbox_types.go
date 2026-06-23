@@ -280,9 +280,17 @@ type SandboxStatus struct {
 
 	// Pod is the husk pod name backing the sandbox (for example
 	// "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
-	// OpenCost. NEW explicit v2 field; the node is derivable from the pod.
+	// OpenCost. NEW explicit v2 field. On the husk path the node is derivable
+	// from the pod; on the raw-forkd path the node is carried in Node below.
 	// +optional
 	Pod string `json:"pod,omitempty"`
+
+	// Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
+	// engine placement identity distinct from SandboxID: the GC orphan sweep,
+	// NodeLost detection, and the terminate/idle engine calls key off it on the
+	// raw-forkd path, where it is not derivable from a husk pod.
+	// +optional
+	Node string `json:"node,omitempty"`
 
 	// SandboxID is the engine-side sandbox identifier. Unchanged from v1alpha1.
 	// +optional
