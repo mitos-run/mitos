@@ -1,108 +1,116 @@
-# @mitos/sdk
+# mitos TypeScript SDK
 
-TypeScript SDK for the mitos sandbox runtime. Snapshot-fork microVMs for
-AI agents: fork from a pool in milliseconds, exec commands, read and write
-files, then terminate. Targets Node 18+ with native fetch.
+mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+restore from snapshots and fork into parallel attempts, so an agent can branch a
+warm environment instead of rebuilding it. Run it fully hosted at
+[https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
+cluster.
 
-Two modes:
-
-- **Direct mode** (`SandboxServer`): talks to a standalone `sandbox-server`
-  (no Kubernetes required). No bearer token; the standalone server is tokenless
-  by design.
-- **Cluster mode** (`AgentRun`): drives the Kubernetes CRDs
-  (`SandboxClaim`, `SandboxFork`) in the `mitos.run/v1alpha1` API group.
-  Each sandbox gets a per-sandbox bearer token read from a Secret and sent
-  as `Authorization: Bearer <token>`. The token value is never logged and is
-  redacted from any error message surfaced to callers.
-
-See the [Python SDK README](../python/README.md) for the Python-language
-equivalent and the parity mapping below.
+This is the TypeScript client. It covers both modes: the direct sandbox API
+(hosted or standalone, no Kubernetes) and cluster mode driving the Kubernetes
+CRDs. It targets Node 18+ with native `fetch`.
 
 ## Install
 
-```
+```bash
 npm install @mitos/sdk
 ```
 
-## Direct mode: SandboxServer
+```bash
+pnpm add @mitos/sdk
+yarn add @mitos/sdk
+```
+
+## Quickstart (hosted)
+
+Get an API key from [https://mitos.run](https://mitos.run) and set it in the
+environment. The base URL defaults to the hosted endpoint.
 
 ```typescript
 import { SandboxServer } from "@mitos/sdk";
 
-const server = new SandboxServer("http://localhost:8080");
+// MITOS_API_KEY from the environment; base URL defaults to https://mitos.run.
+const server = new SandboxServer();
 
-// List VM snapshot templates the server has built.
-const templates = await server.listTemplates();
-console.log(templates.map((t) => t.id));
+// Fork a sandbox from a template (a fresh, independent VM from a warm snapshot).
+const sandbox = await server.fork("python");
 
-// Fork a sandbox from a template. id is optional; a random one is generated.
-const sandbox = await server.fork("python-3.12");
-
-// Execute a command.
 const result = await sandbox.exec("python3 -c 'print(1 + 1)'");
 console.log(result.exitCode, result.stdout.trim()); // 0  2
 
-// Write and read a file (content is a UTF-8 string).
-await sandbox.files.write("/tmp/hello.txt", "hello\n");
-const content = await sandbox.files.read("/tmp/hello.txt");
-console.log(content.trim()); // hello
+await sandbox.files.write("/workspace/hello.txt", "hello\n");
+console.log((await sandbox.files.read("/workspace/hello.txt")).trim()); // hello
 
-// List directory entries.
-const entries = await sandbox.files.list("/tmp");
-console.log(entries.map((e) => e.name));
-
-// Terminate issues DELETE /v1/sandboxes/{id}.
 await sandbox.terminate();
 ```
 
-Full runnable example: [`examples/direct.ts`](examples/direct.ts).
+Point at a local standalone server by setting `MITOS_BASE_URL` or passing the
+URL: `new SandboxServer("http://localhost:8080")`.
 
-`new SandboxServer(url?, token?)` resolves the base URL (argument, else
-`MITOS_BASE_URL`, else the hosted endpoint) and the bearer token (argument, else
-`MITOS_API_KEY`, else the CLI login credential file written by `mitos auth
-login`, so one login authenticates the SDK too). The credential-file fallback is
-read only on Node; in a browser bundle it is skipped silently. The token VALUE is
-never logged.
+## Direct mode: SandboxServer
+
+`SandboxServer.fork(template)` forks a named template into a fresh, independent
+sandbox: that is the snapshot-fork primitive that makes parallel attempts cheap.
+
+```typescript
+import { SandboxServer } from "@mitos/sdk";
+
+const server = new SandboxServer();
+
+const templates = await server.listTemplates();
+console.log(templates.map((t) => t.id));
+
+await server.createTemplate("python");
+const sandbox = await server.fork("python");
+
+// Streaming exec: callbacks fire per chunk; the result still carries the
+// aggregate stdout/stderr.
+await sandbox.exec("pytest -x", {
+  onStdout: (b) => process.stdout.write(b),
+});
+
+// Stateful code interpreter (needs a base image with the kernel).
+const ex = await sandbox.runCode("import math; math.sqrt(144)");
+console.log(ex.text); // 12.0
+
+await sandbox.terminate();
+```
+
+### Direct-mode surface
+
+| Method | HTTP | Returns |
+| --- | --- | --- |
+| `new SandboxServer(url?, token?)` | none | `SandboxServer` |
+| `server.createTemplate(id, opts?)` | `POST /v1/templates` | `Template` |
+| `server.listTemplates()` | `GET /v1/templates` | `Template[]` |
+| `server.fork(template, id?, opts?)` | `POST /v1/fork` | `Sandbox` |
+| `server.listSandboxes()` | `GET /v1/sandboxes` | `ServerSandbox[]` |
+| `sandbox.exec(cmd, opts?)` | `POST /v1/exec` | `ExecResult` |
+| `sandbox.execBackground(cmd, opts?)` | `POST /v1/exec` (stream) | `BackgroundProcess` |
+| `sandbox.runCode(code, opts?)` | `POST /v1/run_code/stream` | `Execution` |
+| `sandbox.files.read(path)` | `POST /v1/files/read` | `string` |
+| `sandbox.files.write(path, content, opts?)` | `POST /v1/files/write` | `void` |
+| `sandbox.files.list(path?)` | `POST /v1/files/list` | `FileInfo[]` |
+| `sandbox.setTimeout(seconds)` | `POST /v1/set_timeout` | `number` (deadline) |
+| `sandbox.pause()` / `sandbox.resume()` | `POST /v1/pause`, `/v1/resume` | `void` |
+| `sandbox.terminate()` | `DELETE /v1/sandboxes/{id}` | `void` |
+
+An interactive PTY is available via `createPty` / the `Pty` class over
+`WS /v1/pty`.
 
 ## Cluster mode: AgentRun
+
+Cluster mode drives the Kubernetes CRDs (`SandboxTemplate`, `SandboxPool`,
+`SandboxClaim`, `SandboxFork`) and execs through the forkd sandbox API. Each
+sandbox gets a per-sandbox bearer token read from a Secret; the value is never
+logged and is redacted from any error message.
 
 ```typescript
 import { AgentRun, KubeConfigApi } from "@mitos/sdk";
 
 // KubeConfigApi loads ~/.kube/config by default. Pass { inCluster: true }
 // inside a pod that has a service account.
-const k8s = new KubeConfigApi();
-
-const client = new AgentRun({ k8s, namespace: "default" });
-
-// Create a sandbox from a pool. Blocks until the SandboxClaim is Ready.
-const sandbox = await client.create("my-pool", {
-  env: { MY_VAR: "hello" },
-});
-
-// Execute with a per-sandbox bearer token (never logged).
-const result = await sandbox.exec("echo $MY_VAR", { timeoutSeconds: 10 });
-console.log(result.stdout.trim()); // hello
-
-// File operations are identical to direct mode.
-await sandbox.files.write("/tmp/data.txt", "cluster mode\n");
-
-// List sandboxes, optionally filtered by pool.
-const all = await client.list("my-pool");
-console.log(all.map((s) => s.name));
-
-// Terminate deletes the SandboxClaim; the controller tears the VM down.
-await sandbox.terminate();
-```
-
-Full runnable example: [`examples/cluster.ts`](examples/cluster.ts).
-
-### The one-liner: sandbox(image) and fromName
-
-```typescript
-import { AgentRun, KubeConfigApi } from "@mitos/sdk";
-
-const c = new AgentRun({ k8s: new KubeConfigApi() });
+const c = new AgentRun({ k8s: new KubeConfigApi(), namespace: "default" });
 
 // Lazy default pool: ensures mitos-default-python (a SandboxTemplate plus a
 // SandboxPool referencing it) if you have none, then claims from it.
@@ -113,91 +121,42 @@ await sb.files.write("/workspace/notes.md", "# findings");
 
 // Reconnect to a live sandbox by id (a durable handle across processes).
 const again = await c.fromName(sb.id);
+
 await sb.terminate();
 ```
 
 Pass `{ pool: "my-pool" }` for the explicit path, which never creates a pool.
 The default-pool name is computed by `defaultPoolName(image)` byte-for-byte
-identically to the Python `default_pool_name`, so both SDKs target the same
-pool object. Set `{ allowDefaultPool: false }` to require an explicit pool.
+identically to the Python `default_pool_name`, so both SDKs target the same pool
+object. Set `{ allowDefaultPool: false }` to require an explicit pool.
 
-## Bearer token model
+| Method | Effect |
+| --- | --- |
+| `c.sandbox("python", opts?)` | one-liner; lazy default pool, claims, waits Ready |
+| `c.sandbox(undefined, { pool })` | explicit pool; never creates |
+| `c.create(pool, opts?)` | creates a `SandboxClaim` |
+| `c.fromName(name)` | reconnect by id |
+| `c.list(pool?)` | lists sandboxes |
 
-In cluster mode the controller creates a per-sandbox `Secret` named
-`<claim-name>-sandbox-token` containing a `token` key. `AgentRun.create`
-reads this secret into memory immediately after the claim reaches Ready. The
-value:
+## Auth and base URL precedence
 
-- is sent as `Authorization: Bearer <token>` on every exec and file request
-- is never written to any log, span, metric label, or error message
-- is redacted from any server-error body that reflects it back (via `redact`)
-- is not stored on disk by the SDK
+Resolution order, highest precedence first:
 
-Direct mode (`SandboxServer`) has no token: the standalone server exposes its
-sandbox API with `AllowTokenless`.
+- Token: the `token` argument, then `MITOS_API_KEY`, then the credential file
+  written by `mitos auth login` (`~/.config/mitos/credentials.json`, honoring
+  `MITOS_CONFIG_DIR`), then tokenless. The credential-file fallback is read only
+  on Node; in a browser bundle it is skipped silently.
+- Base URL: the `url` argument, then `MITOS_BASE_URL`, then `https://mitos.run`.
 
-## PROVEN vs. OPEN
-
-**PROVEN in CI** (see the `typescript-sdk` and `firecracker-test` jobs in
-`.github/workflows/ci.yaml` and `kvm-test.yaml`):
-
-- The SDK speaks the correct wire protocol. Every public method is driven
-  against a mock HTTP server in the test suite (`test/`) that reproduces the
-  exact JSON shapes the real `forkd` and `sandbox-server` emit. The suite
-  covers exec (blocking and streaming), files read/write/list, fork, terminate,
-  auth, structured error parsing, the one-liner lazy default pool, fromName
-  reconnect, and cluster polling.
-- The package type-checks (`tsc --noEmit`) and builds (`tsc`) cleanly under
-  TypeScript 5.7 strict mode.
-- The examples type-check under `tsconfig.examples.json` (separate check so
-  dist is not polluted).
-- `npm pack --dry-run` confirms the package assembles and ships only `dist/`.
-
-**OPEN** (proven by the KVM CI of the underlying API, not the TS SDK itself):
-
-- Real in-VM exec over vsock: the KVM CI (`kvm-test.yaml`) exercises the
-  `forkd` exec and file paths end to end against a live Firecracker VM; the TS
-  SDK drives the same HTTP API that Python and the CLI use.
-- Pool snapshot readiness on a real cluster: requires the controller and forkd
-  running on KVM-capable hardware.
-
-**Not yet shipped:**
-
-- npm registry publication (`npm publish`): tracked as a release follow-up
-  once the API stabilizes past 0.1. No `latest` badge until then.
-
-## Parity with the Python SDK
-
-See [`sdk/python/README.md`](../python/README.md) for the Python SDK.
-
-| Python (`mitos`)            | TypeScript (`@mitos/sdk`)        | Notes                               |
-|---------------------------------|-------------------------------------|-------------------------------------|
-| `SandboxServer(url)`            | `new SandboxServer(url)`            | direct mode                         |
-| `server.create_template(id)`    | `server.createTemplate(id)`         | builds a VM snapshot                |
-| `server.fork(template)`         | `server.fork(template)`             | returns a `Sandbox`                 |
-| `server.list_sandboxes()`       | `server.listSandboxes()`            | active sandboxes on the server      |
-| `AgentRun(namespace=...)`       | `new AgentRun({ k8s, namespace })`  | cluster mode                        |
-| `client.sandbox("python")`      | `client.sandbox("python")`          | one-liner; lazy default pool        |
-| `client.sandbox(pool="p")`      | `client.sandbox(undefined, {pool})` | explicit pool; never creates        |
-| `client.from_name(name)`        | `client.fromName(name)`             | reconnect by id                     |
-| `client.create(pool)`           | `client.create(pool)`               | creates a `SandboxClaim`            |
-| `client.list(pool)`             | `client.list(pool)`                 | lists `SandboxClaim`s               |
-| `AgentRunError(code, ...)`      | `AgentRunError{code, errorCause}`   | parsed from the server envelope     |
-| `sandbox.exec(cmd)`             | `sandbox.exec(cmd)`                 | returns `ExecResult`                |
-| `sandbox.exec_result.stdout`    | `result.stdout`                     | camelCase in TS                     |
-| `sandbox.files.read(path)`      | `sandbox.files.read(path)`          | UTF-8 string                        |
-| `sandbox.files.write(path, c)`  | `sandbox.files.write(path, c)`      | UTF-8 string                        |
-| `sandbox.files.list(path)`      | `sandbox.files.list(path)`          | returns `FileInfo[]`                |
-| `sandbox.terminate()`           | `sandbox.terminate()`               | tears down the VM                   |
-
-Naming: Python uses `snake_case`; TypeScript uses `camelCase`. The wire
-protocol (HTTP JSON shapes) is identical; both SDKs talk to the same
-`forkd`/`sandbox-server` endpoints.
+The token rides on `Authorization: Bearer <token>`. The standalone server runs
+tokenless and ignores it; the hosted endpoint verifies it. The token value is
+never logged.
 
 ## Errors
 
-All errors are `AgentRunError` instances with a machine-readable `code`, a
-human-readable `errorCause`, and an actionable `remediation`:
+Failures are `AgentRunError` instances, parsed from the server envelope
+`{error:{code, message, cause, remediation}}`. Branch on `code`, never on the
+message text.
 
 ```typescript
 import { AgentRunError } from "@mitos/sdk";
@@ -206,11 +165,40 @@ try {
   await sandbox.exec("...");
 } catch (err) {
   if (err instanceof AgentRunError) {
-    console.error(err.code);        // e.g. "unauthorized"
+    console.error(err.code);        // e.g. "unauthorized", "not_found"
     console.error(err.remediation); // actionable hint
   }
 }
 ```
+
+A bearer token a misconfigured server reflects back is redacted (via `redact`)
+before it becomes the error cause.
+
+## Sandbox ids
+
+Sandbox ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. `fork` and
+`terminate` validate the id (the explicit one or the generated `sandbox-<hex>`)
+and throw `invalid_sandbox_id` before sending any request. `validSandboxId(id)`
+exposes the check.
+
+## The mitos SDK family
+
+mitos ships native clients in six languages. All of them share the same
+direct-mode surface (create a template, fork, exec, terminate), so the API maps
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
+TypeScript only.
+
+| Language | Install | Covers |
+| --- | --- | --- |
+| Python | `pip install mitos-run` | direct + cluster + async |
+| TypeScript | `npm install @mitos/sdk` | direct + cluster |
+| Ruby | `gem install mitos` | direct |
+| Rust | `cargo add mitos` | direct |
+| Go | `go get github.com/mitos-run/mitos/sdk/go` | direct |
+| Java | build from source | direct |
+
+Project home: [https://mitos.run](https://mitos.run). Source and all six SDKs:
+[github.com/mitos-run/mitos](https://github.com/mitos-run/mitos).
 
 ## Development
 
@@ -219,5 +207,9 @@ npm ci
 npm run build   # tsc -> dist/
 npm test        # vitest conformance suite
 npm run lint    # tsc --noEmit + tsc --project tsconfig.examples.json
-npm pack --dry-run
 ```
+
+## License
+
+Apache-2.0.
+</content>
