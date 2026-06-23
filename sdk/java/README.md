@@ -127,8 +127,9 @@ sending any request.
 
 ## Scope
 
-This SDK is direct-mode only. Cluster mode (driving the Kubernetes CRDs) is
-served by the Python and TypeScript SDKs. Beyond the create / fork / exec /
+This SDK is direct-mode only today. Cluster mode (driving the Kubernetes CRDs)
+ships in the Python and TypeScript SDKs and is planned for this SDK too, for full
+parity (tracked in #306). Beyond the create / fork / exec /
 terminate surface above, the following are not part of this SDK: file operations
 (`files.read` / `write` / `list` / `remove` / `mkdir`), interactive PTY over
 WebSocket, `run_code` against the code-interpreter kernel, `pause` / `resume`,
@@ -139,8 +140,8 @@ sandbox-to-sandbox `fork` from a running handle.
 
 mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
-1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
-TypeScript only.
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
+and TypeScript today and is planned for the rest, for full parity (#296).
 
 | Language | Install | Covers |
 | --- | --- | --- |

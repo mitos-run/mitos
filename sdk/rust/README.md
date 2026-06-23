@@ -146,8 +146,9 @@ cargo clippy --all-targets -- -D warnings
 
 ## Scope
 
-This crate is direct-mode only. Cluster mode (driving the Kubernetes CRDs) is
-served by the Python and TypeScript SDKs. Beyond the create / fork / exec /
+This crate is direct-mode only today. Cluster mode (driving the Kubernetes CRDs)
+ships in the Python and TypeScript SDKs and is planned for this crate too, for
+full parity (tracked in #305). Beyond the create / fork / exec /
 terminate surface above, the following direct-mode endpoints are not part of this
 crate: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`), `run_code`,
 per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
@@ -157,8 +158,8 @@ per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
 
 mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
-1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
-TypeScript only.
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
+and TypeScript today and is planned for the rest, for full parity (#296).
 
 | Language | Install | Covers |
 | --- | --- | --- |
