@@ -11,7 +11,9 @@ package sandboxrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 
 	"connectrpc.com/connect"
 
@@ -140,10 +142,21 @@ func (s *Service) Upload(ctx context.Context, stream *connect.ClientStream[sandb
 
 	// Collect all chunk bytes and forward them to the guest via a channel so
 	// the GuestConn.Upload signature stays clean (no proto types on the port).
+	// uploadCtx is cancelled as soon as conn.Upload returns, so the reader
+	// goroutine never leaks: if Upload returns early (a guest error) while the
+	// goroutine is blocked sending on the unbuffered chunks channel, cancelling
+	// uploadCtx unblocks it. wg joins the goroutine so errCh is fully populated
+	// before we read it (no lost-error race).
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+
 	chunks := make(chan []byte)
 	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		defer close(chunks)
 		for stream.Receive() {
 			data := stream.Msg().GetChunk()
@@ -152,8 +165,8 @@ func (s *Service) Upload(ctx context.Context, stream *connect.ClientStream[sandb
 				copy(buf, data)
 				select {
 				case chunks <- buf:
-				case <-ctx.Done():
-					errCh <- ctx.Err()
+				case <-uploadCtx.Done():
+					errCh <- uploadCtx.Err()
 					return
 				}
 			}
@@ -164,17 +177,23 @@ func (s *Service) Upload(ctx context.Context, stream *connect.ClientStream[sandb
 	}()
 
 	result, uploadErr := conn.Upload(ctx, dest, chunks)
-
-	// Drain any goroutine-reported stream error; it takes priority over the
-	// guest error when both arrive (the stream error is the root cause).
-	select {
-	case streamErr := <-errCh:
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("read Upload stream: %w", streamErr))
-	default:
-	}
+	cancelUpload() // unblock the reader goroutine if Upload returned early
+	wg.Wait()      // join it so errCh is final and nothing leaks
 
 	if uploadErr != nil {
+		// The guest error is the root cause; any errCh value here is the
+		// induced uploadCtx cancellation, not a real client-stream failure.
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("upload to %q: %w; check the destination path is writable inside the sandbox", dest, uploadErr))
+	}
+
+	// Upload reported success: surface a genuine client-stream read error (not
+	// the induced cancellation) so a truncated tar is not silently accepted.
+	select {
+	case streamErr := <-errCh:
+		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("read Upload stream: %w", streamErr))
+		}
+	default:
 	}
 	return connect.NewResponse(&sandboxv1.UploadResult{
 		BytesWritten: result.BytesWritten,

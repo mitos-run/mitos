@@ -7,13 +7,29 @@ package sandboxrpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
+
+// nonDrainingUploadGuest returns from Upload immediately WITHOUT reading the
+// chunks channel, simulating a guest that errors early (a full disk, a tar
+// extract failure). It exercises the reader-goroutine leak path: the handler
+// must cancel the upload context and join the goroutine so it does not block
+// forever on the unbuffered chunks send.
+type nonDrainingUploadGuest struct {
+	fakeGuest
+	err error
+}
+
+func (g *nonDrainingUploadGuest) Upload(_ context.Context, _ string, _ <-chan []byte) (*UploadResult, error) {
+	return nil, g.err
+}
 
 // archiveGuest extends fakeGuest for Archive and Upload operations. It holds
 // scripted responses and records the arguments it was called with.
@@ -286,5 +302,46 @@ func TestUploadMissingOpenFrameReturnsInvalidArgument(t *testing.T) {
 	}
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+}
+
+// TestUploadEarlyGuestErrorDoesNotHang sends an open frame and a chunk, then has
+// the guest's Upload return an error WITHOUT draining the chunks channel. The
+// handler must cancel the upload context and join the reader goroutine, so it
+// returns the guest error promptly instead of hanging on wg.Wait (which would
+// happen if the cancel were dropped while the goroutine is blocked on the send).
+func TestUploadEarlyGuestErrorDoesNotHang(t *testing.T) {
+	g := &nonDrainingUploadGuest{err: errors.New("tar extract failed: no space left on device")}
+	svc := &Service{Guest: func(string) (GuestConn, error) { return g, nil }}
+	client, _ := newTestServer(t, svc)
+
+	stream := client.Upload(context.Background())
+	if err := stream.Send(&sandboxv1.UploadRequest{
+		Msg: &sandboxv1.UploadRequest_Open{Open: &sandboxv1.UploadOpen{Dest: "/workspace/out"}},
+	}); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	if err := stream.Send(&sandboxv1.UploadRequest{
+		Msg: &sandboxv1.UploadRequest_Chunk{Chunk: []byte("some tar bytes the guest never reads")},
+	}); err != nil {
+		t.Fatalf("send chunk: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.CloseAndReceive()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from the early guest Upload failure, got nil")
+		}
+		if connect.CodeOf(err) != connect.CodeInternal {
+			t.Fatalf("code = %v, want Internal", connect.CodeOf(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Upload handler hung: the reader goroutine likely leaked (cancelUpload missing before wg.Wait)")
 	}
 }
