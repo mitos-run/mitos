@@ -5,23 +5,14 @@ metadata:
 spec:
   version: "{{ .TagName }}"
   homepage: https://mitos.run
-  shortDescription: Inspect and operate mitos.run snapshot-fork sandboxes.
+  shortDescription: Operate mitos.run sandboxes for AI agents
   description: |
-    kubectl mitos inspects and operates mitos.run sandbox objects
-    (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in the
-    mitos.run/v1alpha1 API group.
-
-    Subcommands:
-      ls    list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
-      ps    list SandboxForks, or one claim's forks if a name is given
-      tree  render the fork/lineage DAG (claims -> forks -> forks)
-      top   per-sandbox copy-on-write-aware metering (unique + shared memory)
-      logs  husk stub pod console for a claim, plus the guest console note
-      exec  run a command in a sandbox over the token-scoped sandbox API
-
-    Flags: -n <namespace>, -A (all namespaces). The plugin reads the cluster
-    connection from the standard kubeconfig resolution (KUBECONFIG,
-    --kubeconfig, or in-cluster).
+    kubectl mitos inspects and operates mitos.run sandbox objects from your
+    cluster: it lists sandbox claims and their copy-on-write forks, renders the
+    fork lineage, reports per-sandbox memory metering, reads sandbox logs, and
+    runs commands inside a sandbox. mitos boots Firecracker microVMs and forks
+    them via memory snapshots into parallel attempts. The plugin reads the
+    cluster connection from the standard kubeconfig resolution.
   caveats: |
     This plugin talks to the mitos.run CRDs and forkd sandbox API. It requires:
       * a Kubernetes cluster with mitos.run installed (controller + forkd), and
