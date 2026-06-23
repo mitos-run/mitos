@@ -24,6 +24,16 @@
 #![warn(missing_docs)]
 
 // ---------------------------------------------------------------------------
+// Shared primitives: error types and environment merge.
+// ---------------------------------------------------------------------------
+
+/// Typed agent errors with tonic Status mapping (task 1.1).
+pub mod error;
+
+/// Guest environment merge: base < configured < request precedence (task 1.1).
+pub mod env;
+
+// ---------------------------------------------------------------------------
 // Proto-generated types (sandbox.v1).
 // ---------------------------------------------------------------------------
 

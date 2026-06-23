@@ -17,6 +17,9 @@ path = "src/main.rs"
 tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost", "router"] }
 prost = "0.13"
 
+# Typed errors with Display derivation. Used by error.rs.
+thiserror = "2"
+
 # Async runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
