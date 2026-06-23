@@ -75,14 +75,14 @@ webhooks:
       service:
         name: {{ $principalSvc }}
         namespace: {{ $ns }}
-        path: /validate-mitos-run-v1alpha1-sandboxclaim
+        path: /validate-mitos-run-v1-sandbox
         port: 443
       caBundle: {{ $ca.Cert | b64enc | quote }}
     rules:
       - apiGroups: ["mitos.run"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["sandboxclaims"]
+        resources: ["sandboxes"]
         scope: Namespaced
 {{- end }}
 {{- if .Values.apiV2.poolConversionWebhook.enabled }}

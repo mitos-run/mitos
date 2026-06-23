@@ -361,7 +361,7 @@ func main() {
 	// ValidatingWebhookConfiguration. Warn if memory snapshots are on without it,
 	// because the principal gate is only an authorization boundary when this runs.
 	if enablePrincipalWebhook {
-		mgr.GetWebhookServer().Register("/validate-mitos-run-v1alpha1-sandboxclaim", &webhook.Admission{
+		mgr.GetWebhookServer().Register("/validate-mitos-run-v1-sandbox", &webhook.Admission{
 			Handler: &admission.ClaimServiceAccountValidator{
 				Client:  mgr.GetClient(),
 				Decoder: ctrladmission.NewDecoder(scheme),
