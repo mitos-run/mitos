@@ -12,6 +12,79 @@ import (
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
+// RunCodeFrameKind identifies which field of a RunCodeFrame is populated.
+type RunCodeFrameKind int
+
+const (
+	// RunCodeFrameStdout carries a stdout chunk.
+	RunCodeFrameStdout RunCodeFrameKind = iota
+	// RunCodeFrameStderr carries a stderr chunk.
+	RunCodeFrameStderr
+	// RunCodeFrameResult carries rich display output (Jupyter-style).
+	RunCodeFrameResult
+	// RunCodeFrameError carries a kernel exception.
+	RunCodeFrameError
+	// RunCodeFrameExit is the terminal frame; ExitCode is valid.
+	RunCodeFrameExit
+)
+
+// RunCodeFrame is one event from a guest RunCode execution. Kind determines
+// which field is populated. When Kind is RunCodeFrameExit, ExitCode is valid
+// and the stream is exhausted.
+type RunCodeFrame struct {
+	// Kind identifies the payload.
+	Kind RunCodeFrameKind
+	// Stdout carries bytes written to stdout (Kind == RunCodeFrameStdout).
+	Stdout []byte
+	// Stderr carries bytes written to stderr (Kind == RunCodeFrameStderr).
+	Stderr []byte
+	// Result carries rich display output (Kind == RunCodeFrameResult).
+	// Text is the plain-text representation; Data maps MIME type to payload.
+	// No proto or connect types appear here.
+	Result *RunCodeResult
+	// Error carries a kernel exception (Kind == RunCodeFrameError).
+	Error *RunCodeError
+	// ExitCode is valid only when Kind == RunCodeFrameExit.
+	ExitCode int32
+}
+
+// RunCodeResult is the transport-neutral representation of a RunResult frame:
+// rich display output from a kernel execution. Text is the plain-text form;
+// Data maps MIME type string to raw bytes (e.g. "image/png" to PNG bytes).
+// No connect or proto types appear in this struct.
+type RunCodeResult struct {
+	// Text is the plain-text representation of the output.
+	Text string
+	// Data maps MIME type to payload bytes (e.g. "text/html" to HTML bytes).
+	Data map[string][]byte
+}
+
+// RunCodeError is the transport-neutral representation of a RunError frame:
+// a kernel exception. No connect or proto types appear in this struct.
+type RunCodeError struct {
+	// Name is the exception class name (e.g. "ZeroDivisionError").
+	Name string
+	// Value is the string value of the exception.
+	Value string
+	// Traceback is the formatted traceback lines.
+	Traceback []string
+}
+
+// RunCodeStream is the handle returned by GuestConn.RunCode. Recv returns
+// successive frames with err == nil for each frame including the terminal
+// RunCodeFrameExit frame. After the exit frame, a subsequent call returns
+// io.EOF (the Service never makes that call). Other errors indicate a transport
+// or guest failure. Close releases resources.
+type RunCodeStream interface {
+	// Recv returns the next RunCodeFrame with err == nil, including the
+	// terminal RunCodeFrameExit frame. io.EOF is returned only on a
+	// subsequent call after the exit frame, which the Service never makes.
+	// Other errors are transport or guest failures.
+	Recv() (*RunCodeFrame, error)
+	// Close releases resources. Safe to call after the exit frame.
+	Close() error
+}
+
 // ExecFrame is one output event from a guest exec: either a stdout/stderr chunk
 // or the terminal exit. When Done is true the ExitCode field is valid and the
 // stream is exhausted.
@@ -119,4 +192,9 @@ type GuestConn interface {
 	// Remove deletes the file or directory at path. When recursive is true, a
 	// non-empty directory tree is deleted (equivalent to rm -rf).
 	Remove(ctx context.Context, path string, recursive bool) error
+
+	// RunCode executes code in the sandbox kernel and returns a stream of
+	// output frames (stdout/stderr chunks, result, error, then a terminal
+	// exit frame). The caller owns the stream and must call Close when done.
+	RunCode(ctx context.Context, open *sandboxv1.RunCodeOpen) (RunCodeStream, error)
 }

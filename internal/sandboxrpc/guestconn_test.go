@@ -67,6 +67,10 @@ func (f *fakeGuest) Remove(_ context.Context, _ string, _ bool) error {
 	return errors.New("Remove: unimplemented in fakeGuest")
 }
 
+func (f *fakeGuest) RunCode(_ context.Context, _ *sandboxv1.RunCodeOpen) (RunCodeStream, error) {
+	return nil, errors.New("RunCode: unimplemented in fakeGuest")
+}
+
 // execResult collects the output of drainExec.
 type execResult struct {
 	stdout string
