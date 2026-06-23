@@ -50,6 +50,107 @@ entries:
             timeout: 30m
       artifacthub.io/images: |
         - name: controller
+          image: ghcr.io/mitos-run/mitos-controller:v0.13.0
+        - name: forkd
+          image: ghcr.io/mitos-run/mitos-forkd:v0.13.0
+        - name: husk-stub
+          image: ghcr.io/mitos-run/mitos-husk-stub:v0.13.0
+        - name: kvm-device-plugin
+          image: ghcr.io/mitos-run/mitos-kvm-device-plugin:v0.13.0
+        - name: facade
+          image: ghcr.io/mitos-run/mitos-facade:v0.13.0
+        - name: console
+          image: ghcr.io/mitos-run/mitos-console:v0.13.0
+        - name: gateway
+          image: ghcr.io/mitos-run/mitos-gateway:v0.13.0
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Homepage
+          url: https://mitos.run
+        - name: Documentation
+          url: https://mitos.run
+        - name: Source
+          url: https://github.com/mitos-run/mitos
+        - name: support
+          url: https://github.com/mitos-run/mitos/issues
+      artifacthub.io/operator: "true"
+      artifacthub.io/operatorCapabilities: Basic Install
+      artifacthub.io/prerelease: "true"
+    apiVersion: v2
+    appVersion: v0.13.0
+    created: "2026-06-23T06:22:33.437510288Z"
+    description: Snapshot-fork sandboxes for AI agents on Kubernetes.
+    digest: ab489020998ef654aac8bbd84ef8da9750ec999ec804badf3b860c2329442e91
+    home: https://mitos.run
+    icon: https://raw.githubusercontent.com/mitos-run/mitos/main/docs/assets/mitos-mark-black.svg
+    keywords:
+    - sandbox
+    - firecracker
+    - microvm
+    - snapshot
+    - fork
+    - ai-agents
+    - operator
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: mitos-run
+      url: https://mitos.run
+    name: mitos
+    sources:
+    - https://github.com/mitos-run/mitos
+    type: application
+    urls:
+    - https://github.com/mitos-run/mitos/releases/download/mitos-0.4.0/mitos-0.4.0.tgz
+    version: 0.4.0
+  - annotations:
+      artifacthub.io/category: ai-machine-learning
+      artifacthub.io/crds: |
+        - kind: SandboxTemplate
+          version: v1alpha1
+          name: sandboxtemplates.mitos.run
+          displayName: Sandbox Template
+          description: Base image, resources, volumes, and network policy a sandbox boots from.
+        - kind: SandboxPool
+          version: v1alpha1
+          name: sandboxpools.mitos.run
+          displayName: Sandbox Pool
+          description: Warm pool of pre-snapshotted sandboxes a template fans out into.
+        - kind: SandboxClaim
+          version: v1alpha1
+          name: sandboxclaims.mitos.run
+          displayName: Sandbox Claim
+          description: A request for one running sandbox from a pool or template.
+        - kind: SandboxFork
+          version: v1alpha1
+          name: sandboxforks.mitos.run
+          displayName: Sandbox Fork
+          description: A copy-on-write fork of a running sandbox into a parallel attempt.
+        - kind: Sandbox
+          version: v1alpha2
+          name: sandboxes.mitos.run
+          displayName: Sandbox
+          description: A single running microVM sandbox instance.
+        - kind: Workspace
+          version: v1alpha1
+          name: workspaces.mitos.run
+          displayName: Workspace
+          description: A durable, versioned filesystem a sandbox persists into.
+        - kind: WorkspaceRevision
+          version: v1alpha1
+          name: workspacerevisions.mitos.run
+          displayName: Workspace Revision
+          description: One immutable snapshot in a workspace history.
+      artifacthub.io/crdsExamples: |
+        - apiVersion: mitos.run/v1alpha1
+          kind: SandboxClaim
+          metadata:
+            name: agent-session-1
+          spec:
+            poolRef:
+              name: python-agent-pool
+            timeout: 30m
+      artifacthub.io/images: |
+        - name: controller
           image: ghcr.io/mitos-run/mitos-controller:v0.12.0
         - name: forkd
           image: ghcr.io/mitos-run/mitos-forkd:v0.12.0
@@ -195,4 +296,4 @@ entries:
     urls:
     - https://github.com/mitos-run/mitos/releases/download/mitos-0.2.0/mitos-0.2.0.tgz
     version: 0.2.0
-generated: "2026-06-22T23:37:27.007206+02:00"
+generated: "2026-06-23T06:22:33.437528834Z"
