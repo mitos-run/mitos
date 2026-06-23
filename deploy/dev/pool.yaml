@@ -1,26 +1,19 @@
 # Default dev pool in the `default` namespace: `mitos sandbox create` creates
-# claims there and the claim reconciler looks up the pool in the claim's
+# sandboxes there and the sandbox reconciler looks up the pool in the sandbox's
 # namespace. The controller (in mitos) discovers the mock forkd, builds this
-# template's snapshot over insecure gRPC, and claims fork via the mock engine and
-# reach Ready. No CSI/snapshot volumes, so it reconciles on the no-KVM node.
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: dev-default
-  namespace: default
-spec:
-  image: python:3.12-slim
-  resources:
-    cpu: "1"
-    memory: "512Mi"
----
-apiVersion: mitos.run/v1alpha1
+# pool's snapshot over insecure gRPC, and sandboxes claiming from it reach
+# Ready. No CSI/snapshot volumes, so it reconciles on the no-KVM node.
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: dev-default
   namespace: default
 spec:
-  templateRef:
-    name: dev-default
-  replicas: 1
-  snapshotAfter: Ready
+  template:
+    image: python:3.12-slim
+    resources:
+      cpu: "1"
+      memory: "512Mi"
+  snapshots:
+    replicasPerNode: 1
+    snapshotAfter: Ready
