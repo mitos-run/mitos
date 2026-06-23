@@ -556,13 +556,11 @@ pub fn handle_notify_forked(req: &NotifyForkedRequest) -> Response {
 // write path which is sufficient for the fork-correctness demonstration.
 // See docs/fork-correctness.md section 1.
 //
-// On non-Linux (macOS dev host): macOS refuses writes to /dev/urandom with
-// EPERM even though the device is mode 0666 (the kernel rejects it in the
-// character device driver). To keep reseeded_rng truthful, the non-Linux path
-// writes the same entropy bytes to a temp file so the reseed code path is
-// exercised and the boolean reflects a real action, not a hardcoded true.
-// The spike has no correctness obligation on macOS (it runs in Linux VMs only);
-// the non-Linux branch exists solely so tests pass on the dev host.
+// On macOS: the kernel refuses writes to /dev/urandom with EPERM even though
+// the device is mode 0666. reseed_rng() returns false on macOS because no
+// real reseed occurred. reseeded_rng == true MUST mean a real reseed happened;
+// returning anything else would be a false claim. The guest agent only runs in
+// Linux VMs in production so a false return on the dev host is correct.
 fn reseed_rng() -> bool {
     // Generate 32 entropy bytes from the OS CSPRNG via /dev/urandom (read).
     // This read always succeeds; we then write the bytes back to mix them in.
@@ -583,33 +581,17 @@ fn read_os_entropy(n: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-// write_entropy_bytes mixes entropy bytes into the platform RNG pool.
-// Returns true when the write succeeds, false otherwise.
+// write_entropy_bytes mixes entropy bytes into the kernel RNG pool via
+// /dev/urandom. Returns true when the write succeeds, false otherwise.
+// On Linux /dev/urandom is world-writable (mode 0666); a write mixes the
+// bytes into the input pool without requiring any privilege.
+// On macOS the kernel rejects the write with EPERM; this function returns
+// false there, and reseed_rng() propagates that honest false.
 fn write_entropy_bytes(entropy: &[u8]) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // On Linux /dev/urandom is world-writable (mode 0666); a write mixes
-        // the bytes into the input pool without requiring any privilege.
-        use std::io::Write;
-        match std::fs::OpenOptions::new().write(true).open("/dev/urandom") {
-            Ok(mut f) => f.write_all(entropy).is_ok(),
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // macOS refuses writes to /dev/urandom at the kernel level (EPERM)
-        // despite the device being mode 0666. On this dev host the spike
-        // writes to a temp file so the reseed path executes a real I/O action
-        // and reseeded_rng truthfully reflects that the code path ran.
-        // The guest agent only runs in Linux VMs in production; this branch
-        // exists only for dev-host test coverage.
-        use std::io::Write;
-        let path = std::env::temp_dir().join("agent-rs-reseed-entropy");
-        match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
-            Ok(mut f) => f.write_all(entropy).is_ok(),
-            Err(_) => false,
-        }
+    use std::io::Write;
+    match std::fs::OpenOptions::new().write(true).open("/dev/urandom") {
+        Ok(mut f) => f.write_all(entropy).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -768,17 +750,22 @@ mod tests {
 
     #[test]
     fn notify_forked_reports_reseed() {
-        // On a host without CAP_SYS_TIME the clock step may be 0, but the RNG
-        // reseed path (writing to /dev/urandom, which any process may do) must be
-        // attempted and reported. The test asserts the response shape and that a
-        // zero-drift notify yields a zero clock step, not an error.
+        // Asserts the response is well-formed and that a zero host wall-clock
+        // yields applied_clock_step_nanos == 0 (no CAP_SYS_TIME needed).
+        // The strict reseeded_rng == true assertion is Linux-only: on macOS the
+        // kernel rejects writes to /dev/urandom with EPERM so reseed_rng() honestly
+        // returns false. The firecracker-test CI job runs on Linux and exercises
+        // the true-reseed path.
         let env = std::sync::Mutex::new(std::collections::HashMap::new());
         let req = serde_json::from_str(r#"{"type":"notify_forked","notify_forked":{"wall_clock_unix_nanos":0}}"#).unwrap();
         let resp = dispatch(&req, &env);
         assert!(resp.ok);
         let n = resp.notify_forked.unwrap();
         assert_eq!(n.applied_clock_step_nanos, 0); // 0 host time => no step
-        assert!(n.reseeded_rng); // writing entropy to /dev/urandom does not need caps
+        // reseeded_rng is a bool reflecting the real /dev/urandom write outcome.
+        let _ = n.reseeded_rng; // value is platform-dependent; just confirm the field exists
+        #[cfg(target_os = "linux")]
+        assert!(n.reseeded_rng, "Linux: write to /dev/urandom must succeed (mode 0666, no caps needed)");
     }
 
     // Verify that a timed-out exec returns exit_code 124 and does not hang.
