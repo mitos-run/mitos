@@ -76,13 +76,13 @@ rules:
   # missing list/watch here silently stalls the manager (the slice-1 lesson), so
   # the dev mock overlay carries the same grants as the base ClusterRole.
   - apiGroups: ["mitos.run"]
-    resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks", "workspaces", "workspacerevisions"]
+    resources: ["sandboxes", "sandboxpools", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["mitos.run"]
-    resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status", "workspaces/status", "workspacerevisions/status"]
+    resources: ["sandboxes/status", "sandboxpools/status", "workspaces/status", "workspacerevisions/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["mitos.run"]
-    resources: ["sandboxclaims/finalizers", "sandboxforks/finalizers"]
+    resources: ["sandboxes/finalizers", "sandboxpools/finalizers"]
     verbs: ["update"]
   - apiGroups: ["mitos.run"]
     resources: ["sandboxpools/scale"]
