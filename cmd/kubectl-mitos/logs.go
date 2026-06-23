@@ -17,10 +17,11 @@ import (
 )
 
 // huskSandboxLabel and huskLabel mirror the controller's husk pod labels: the
-// pod backing a sandbox carries mitos.run/sandbox=<sandbox> and
-// mitos.run/husk=true.
+// pod backing a sandbox carries mitos.run/claim=<sandbox-name> and
+// mitos.run/husk=true. The controller keeps the historical mitos.run/claim key
+// for husk activation matching, so this read path selects on it.
 const (
-	huskSandboxLabel = "mitos.run/sandbox"
+	huskSandboxLabel = "mitos.run/claim"
 	huskLabel        = "mitos.run/husk"
 )
 
@@ -78,7 +79,7 @@ func renderLogs(sandbox string, console podConsole) string {
 
 // huskPodConsole is the production huskConsoleFetcher: it builds a typed
 // clientset from the standard kubeconfig, finds the husk pod backing the
-// sandbox by its mitos.run/sandbox + mitos.run/husk labels, and streams that
+// sandbox by its mitos.run/claim + mitos.run/husk labels, and streams that
 // pod's logs. A sandbox with no husk pod yields Found=false (not an error) so
 // logs reads the same on a mock control plane.
 func huskPodConsole(ctx context.Context, namespace, sandbox string) (podConsole, error) {
