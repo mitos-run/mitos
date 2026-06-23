@@ -81,3 +81,14 @@ lint:
 
 clean:
 	rm -rf bin/
+
+# Render the README terminal demo to docs/assets/demo.gif from the VHS tape.
+# Needs vhs (brew install vhs), a key in ~/.mitos_api_key, and a live mitos.run.
+# The committed hero is the hand-built docs/assets/demo.svg; regenerate the GIF
+# when the SDK surface changes, then point the README <img> src at demo.gif.
+.PHONY: demo
+demo:
+	@command -v vhs >/dev/null 2>&1 || { echo "install vhs first: brew install vhs"; exit 1; }
+	@test -f "$$HOME/.mitos_api_key" || { echo "put your key in ~/.mitos_api_key"; exit 1; }
+	MITOS_API_KEY="$$(cat "$$HOME/.mitos_api_key")" vhs docs/assets/demo.tape
+	@echo ">> rendered docs/assets/demo.gif"
