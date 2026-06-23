@@ -16,7 +16,7 @@ spec:
   caveats: |
     This plugin talks to the mitos.run CRDs and forkd sandbox API. It requires:
       * a Kubernetes cluster with mitos.run installed (controller + forkd), and
-      * a kubeconfig that can read SandboxClaim and SandboxFork objects.
+      * a kubeconfig that can read Sandbox objects.
     See https://mitos.run for installation.
   platforms:
     - selector:

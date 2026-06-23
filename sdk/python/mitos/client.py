@@ -69,10 +69,10 @@ class AgentRun:
         """The one-liner entry point (docs/api/v2-spec.md section 1.2).
 
         Pass image= for the lazy path: the client ensures a default pool named
-        mitos-default-<image-slug> exists (creating it and its SandboxTemplate
-        if absent and allowed), then claims from it. Pass pool= for the explicit
-        path, which never creates anything. Exactly one of image or pool is
-        required.
+        mitos-default-<image-slug> exists (creating it with an inline template
+        if absent and allowed), then starts a Sandbox from it. Pass pool= for
+        the explicit path, which never creates anything. Exactly one of image or
+        pool is required.
 
         With ready=True the call blocks until the sandbox is Ready (or raises),
         so the caller stops sleeping-and-hoping; with ready=False (default) the

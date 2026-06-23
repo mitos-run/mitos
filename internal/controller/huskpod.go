@@ -877,7 +877,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
-	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is
+	// core/v1 and mitos.run/v1). An error here means the scheme is
 	// missing a type and is a programming error; the caller logs and skips.
 	// buildForkChildPod reuses this shape with a Client-less throwaway reconciler
 	// and sets its OWN owner ref (to the SandboxFork) afterward, so skip the
