@@ -53,8 +53,12 @@ func BearerInterceptor(lookup func(sandboxID string) (token string, ok bool)) co
 func (b *bearerInterceptor) checkBearer(h interface{ Get(string) string }) error {
 	sandboxID := h.Get(sandboxIDHeader)
 	token, ok := b.lookup(sandboxID)
-	if !ok {
-		// Fail-closed: no token registered for this sandbox.
+	if !ok || len(token) == 0 {
+		// Fail-closed: no token registered for this sandbox. The empty-token
+		// guard is defense-in-depth: an empty registered token must never match
+		// an empty presented token ("Bearer " with nothing after it), so this
+		// public interceptor is self-enforcing even if a caller's lookup
+		// returns ("", true).
 		return connect.NewError(connect.CodeUnauthenticated,
 			fmt.Errorf("unauthenticated: no token registered for sandbox; "+
 				"provide a valid bearer token in the Authorization header"))

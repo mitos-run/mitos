@@ -139,6 +139,19 @@ func TestBearerInterceptorUnknownSandboxFails(t *testing.T) {
 	}
 }
 
+// TestBearerInterceptorEmptyRegisteredTokenFails is the defense-in-depth guard:
+// a lookup that returns an empty token with ok=true must NOT be matched by an
+// empty presented token ("Bearer " with nothing after it); the request is
+// rejected before the constant-time compare.
+func TestBearerInterceptorEmptyRegisteredTokenFails(t *testing.T) {
+	ic := BearerInterceptor(func(_ string) (string, bool) { return "", true })
+	c := newInterceptedTestServer(t, ic)
+	err := budgetCall(t, c, "Bearer ", "sandbox-1")
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("want CodeUnauthenticated for an empty registered token, got %v", err)
+	}
+}
+
 // TestAllowTokenlessPassesWithoutToken verifies AllowTokenlessInterceptor
 // passes requests even when no Authorization header is set.
 func TestAllowTokenlessPassesWithoutToken(t *testing.T) {
