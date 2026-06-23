@@ -16,9 +16,9 @@ and later.
 
 This SDK covers DIRECT mode only: the standalone `cmd/sandbox-server` and the
 hosted control plane at `https://mitos.run`. The Kubernetes / cluster mode (the
-controller, forkd, and the SandboxTemplate / SandboxPool / SandboxClaim /
-SandboxFork CRDs) is served by the Python and TypeScript SDKs only and is NOT
-part of this SDK.
+controller, forkd, and the `mitos.run/v1` CRDs: `Sandbox`, `SandboxPool`,
+`Workspace`, `WorkspaceRevision`) is served by the Python and TypeScript SDKs
+only and is NOT part of this SDK.
 
 ## Build from source
 
@@ -126,7 +126,7 @@ rejected with code `invalid_sandbox_id` BEFORE any request is sent.
 Direct-mode parity with the richer Python and TypeScript clients is intentionally
 not yet implemented here. The following are deferred to follow-ups:
 
-- Kubernetes / cluster mode (controller, forkd, the CRDs): Python and
+- Kubernetes / cluster mode (controller, forkd, `mitos.run/v1` CRDs): Python and
   TypeScript only.
 - File operations (`files.read` / `write` / `list` / `remove` / `mkdir`).
 - Interactive PTY over WebSocket.

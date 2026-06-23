@@ -18,7 +18,7 @@ Two modes:
   sandbox handle against the hosted control plane or a standalone
   `sandbox-server`. No Kubernetes required. The canonical entry point.
 - `mitos.AgentRun` / `Sandbox`: drives the Kubernetes CRDs
-  (`SandboxClaim`, `SandboxFork`, `SandboxPool`, `SandboxTemplate`) and execs
+  (`Sandbox`, `SandboxPool`) in the `mitos.run/v1` API group and execs
   through the forkd sandbox API. For operators who run the mitos cluster.
 
 ## The flat one-liner
@@ -102,10 +102,9 @@ sb.terminate()
 ```
 
 `c.sandbox("python")` ensures a deterministic default pool
-`mitos-default-python` (a `SandboxTemplate` carrying the image plus a
-`SandboxPool` that references it), creating both if absent. It is
-admin-disableable with `AgentRun(allow_default_pool=False)`, which makes the
-image path raise instead of creating anything.
+`mitos-default-python` (a `SandboxPool` with an inline template), creating
+it if absent. It is admin-disableable with `AgentRun(allow_default_pool=False)`,
+which makes the image path raise instead of creating anything.
 
 ### Explicit pool (never creates anything)
 
@@ -207,8 +206,8 @@ sandbox.terminate()
 ## Templates as code
 
 Author a custom environment from code with the fluent `Template` builder, in the
-shape E2B and Daytona use. It emits a `SandboxTemplate` spec; no server or KVM is
-needed to build the spec.
+shape E2B and Daytona use. It emits a `SandboxPool` spec with an inline template;
+no server or KVM is needed to build the spec.
 
 ```python
 from mitos import Template

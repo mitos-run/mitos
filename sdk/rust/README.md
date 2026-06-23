@@ -15,9 +15,9 @@ idempotency key and the generated sandbox id. It targets Rust 1.74 and later.
 
 This crate covers DIRECT mode only: the standalone `cmd/sandbox-server` and the
 hosted control plane at `https://mitos.run`. The Kubernetes / cluster mode (the
-controller, forkd, and the SandboxTemplate / SandboxPool / SandboxClaim /
-SandboxFork CRDs) is served by the Python and TypeScript SDKs only and is NOT
-part of this crate.
+controller, forkd, and the `mitos.run/v1` CRDs: `Sandbox`, `SandboxPool`,
+`Workspace`, `WorkspaceRevision`) is served by the Python and TypeScript SDKs
+only and is NOT part of this crate.
 
 ## Install
 
@@ -159,7 +159,7 @@ cargo clippy --all-targets -- -D warnings
 Not yet implemented in the Rust SDK (covered by the Python / TypeScript SDKs
 where noted):
 
-- Kubernetes / cluster mode (controller, forkd, CRDs): Python and TypeScript only.
+- Kubernetes / cluster mode (controller, forkd, `mitos.run/v1` CRDs): Python and TypeScript only.
 - The files API (`/v1/files/*`).
 - Interactive PTY (`/v1/pty`).
 - `run_code`: the server exposes a streaming-only route

@@ -16,7 +16,7 @@ The harness, given a cluster (`--kubeconfig`):
 1. Applies an upstream `agents.x-k8s.io/v1alpha1` Sandbox bound to one of our
    pools via the `mitos.run/pool` bridge annotation.
 2. Times the **initial claim latency**: apply -> the facade bridges the
-   husk-backed `SandboxClaim`.
+   husk-backed `Sandbox`.
 3. Toggles `spec.replicas` `1 -> 0 -> 1` for `--iterations` rounds, timing the
    **object-level resume latency** each round: wall-clock from the replicas-1
    patch to the facade re-creating the bridged claim.
@@ -27,7 +27,7 @@ The harness, given a cluster (`--kubeconfig`):
 
 | system | how it handles resume (replicas 0 -> 1) |
 | --- | --- |
-| our facade | RE-ACTIVATES a dormant warm husk pod: the bridged `SandboxClaim` is re-created and the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready, the ~42ms husk activation datapoint, #66). No pod schedule, no image pull, no container start, no app boot on the hot path. |
+| our facade | RE-ACTIVATES a dormant warm husk pod: the bridged `Sandbox` is re-created and the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready, the ~42ms husk activation datapoint, #66). No pod schedule, no image pull, no container start, no app boot on the hot path. |
 | upstream reference controller (v0.4.6) | COLD-CREATES a pod: their controller deletes the pod on replicas 0 and creates a fresh one on replicas 1 (pod schedule + admission + image + container start + app boot). |
 
 The order-of-magnitude resume advantage is the **design** claim: re-activating a

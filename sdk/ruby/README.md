@@ -14,9 +14,9 @@ The SDK uses only the Ruby standard library (`net/http`, `json`, `uri`,
 
 This gem covers DIRECT mode only: the standalone `cmd/sandbox-server` and the
 hosted control plane at `https://mitos.run`. The Kubernetes / cluster mode (the
-controller, forkd, and the SandboxTemplate / SandboxPool / SandboxClaim /
-SandboxFork CRDs) is served by the Python and TypeScript SDKs only and is NOT
-part of this gem.
+controller, forkd, and the `mitos.run/v1` CRDs: `Sandbox`, `SandboxPool`,
+`Workspace`, `WorkspaceRevision`) is served by the Python and TypeScript SDKs
+only and is NOT part of this gem.
 
 ## Install
 
@@ -132,7 +132,7 @@ rake test
 
 Not yet implemented in the Ruby SDK (covered by the Python / TypeScript SDKs):
 
-- Kubernetes / cluster mode (controller, forkd, CRDs).
+- Kubernetes / cluster mode (controller, forkd, `mitos.run/v1` CRDs).
 - The files API (`/v1/files/*`).
 - Interactive PTY (`/v1/pty`).
 - `run_code`: the server exposes a streaming-only route

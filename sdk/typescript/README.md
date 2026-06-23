@@ -10,7 +10,7 @@ Two modes:
   (no Kubernetes required). No bearer token; the standalone server is tokenless
   by design.
 - **Cluster mode** (`AgentRun`): drives the Kubernetes CRDs
-  (`SandboxClaim`, `SandboxFork`) in the `mitos.run/v1alpha1` API group.
+  (`Sandbox`, `SandboxPool`) in the `mitos.run/v1` API group.
   Each sandbox gets a per-sandbox bearer token read from a Secret and sent
   as `Authorization: Bearer <token>`. The token value is never logged and is
   redacted from any error message surfaced to callers.
@@ -75,7 +75,7 @@ const k8s = new KubeConfigApi();
 
 const client = new AgentRun({ k8s, namespace: "default" });
 
-// Create a sandbox from a pool. Blocks until the SandboxClaim is Ready.
+// Create a sandbox from a pool. Blocks until the Sandbox is Ready.
 const sandbox = await client.create("my-pool", {
   env: { MY_VAR: "hello" },
 });
@@ -91,7 +91,7 @@ await sandbox.files.write("/tmp/data.txt", "cluster mode\n");
 const all = await client.list("my-pool");
 console.log(all.map((s) => s.name));
 
-// Terminate deletes the SandboxClaim; the controller tears the VM down.
+// Terminate deletes the Sandbox; the controller tears the VM down.
 await sandbox.terminate();
 ```
 
@@ -104,8 +104,8 @@ import { AgentRun, KubeConfigApi } from "@mitos/sdk";
 
 const c = new AgentRun({ k8s: new KubeConfigApi() });
 
-// Lazy default pool: ensures mitos-default-python (a SandboxTemplate plus a
-// SandboxPool referencing it) if you have none, then claims from it.
+// Lazy default pool: ensures mitos-default-python (a SandboxPool with an
+// inline template) if you have none, then claims from it.
 const sb = await c.sandbox("python");
 const { stdout } = await sb.exec("python -c 'print(2 + 2)'");
 console.log(stdout.trim()); // 4
@@ -180,8 +180,8 @@ See [`sdk/python/README.md`](../python/README.md) for the Python SDK.
 | `client.sandbox("python")`      | `client.sandbox("python")`          | one-liner; lazy default pool        |
 | `client.sandbox(pool="p")`      | `client.sandbox(undefined, {pool})` | explicit pool; never creates        |
 | `client.from_name(name)`        | `client.fromName(name)`             | reconnect by id                     |
-| `client.create(pool)`           | `client.create(pool)`               | creates a `SandboxClaim`            |
-| `client.list(pool)`             | `client.list(pool)`                 | lists `SandboxClaim`s               |
+| `client.create(pool)`           | `client.create(pool)`               | creates a `Sandbox`                 |
+| `client.list(pool)`             | `client.list(pool)`                 | lists `Sandbox`es                   |
 | `AgentRunError(code, ...)`      | `AgentRunError{code, errorCause}`   | parsed from the server envelope     |
 | `sandbox.exec(cmd)`             | `sandbox.exec(cmd)`                 | returns `ExecResult`                |
 | `sandbox.exec_result.stdout`    | `result.stdout`                     | camelCase in TS                     |
