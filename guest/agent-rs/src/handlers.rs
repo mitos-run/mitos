@@ -757,7 +757,10 @@ mod tests {
         // returns false. The firecracker-test CI job runs on Linux and exercises
         // the true-reseed path.
         let env = std::sync::Mutex::new(std::collections::HashMap::new());
-        let req = serde_json::from_str(r#"{"type":"notify_forked","notify_forked":{"wall_clock_unix_nanos":0}}"#).unwrap();
+        // Use the real wire key host_wall_clock_nanos (matches the Go
+        // NotifyForkedRequest json tag) so the test actually exercises step_clock
+        // by name rather than relying on serde defaulting an unknown key to 0.
+        let req = serde_json::from_str(r#"{"type":"notify_forked","notify_forked":{"host_wall_clock_nanos":0}}"#).unwrap();
         let resp = dispatch(&req, &env);
         assert!(resp.ok);
         let n = resp.notify_forked.unwrap();
