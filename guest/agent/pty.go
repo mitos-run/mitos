@@ -59,42 +59,74 @@ func setWinsize(master *os.File, cols, rows int) error {
 	})
 }
 
-// handlePtyStream allocates a PTY, starts the shell as a session leader on the
-// slave, and pumps PTY<->vsock bidirectionally on the DEDICATED conn: a reader
-// goroutine decodes input/resize frames from the host, the main loop frames PTY
-// output back, and on shell exit it writes the terminal exit frame. The shell
-// runs in its own session/process group so a connection drop or the host's
-// kill kills the whole tree.
-//
-// sc is the dispatcher's scanner, handed over (not freshly allocated): it may
-// already hold input/resize frames that arrived coalesced with the open-request
-// line in a single read (bufio.Scanner reads in chunks). Reusing it ensures
-// those early frames are consumed rather than dropped by a fresh scanner.
-func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
+// ptyParams is the transport-neutral input to runPTY: the shell command, the
+// working dir, the per-call env overlay, and the initial window size. Both the
+// JSON-lines handlePtyStream and the gRPC Exec+pty path translate their wire
+// shapes into this struct so the PTY spawn, the session-leader SysProcAttr, the
+// env merge, and the kill-group logic live in exactly one place.
+type ptyParams struct {
+	Command    string
+	WorkingDir string
+	Env        map[string]string
+	Cols       int
+	Rows       int
+}
+
+// ptyInputKind tags a host->guest PTY frame the reader pulled from a transport.
+type ptyInputKind int
+
+const (
+	ptyInputData   ptyInputKind = iota // stdin bytes to write to the master
+	ptyInputResize                     // a window resize (cols/rows)
+	ptyInputEOF                        // the host hung up; runPTY kills the shell
+)
+
+// ptyTransport is the transport-neutral sink+source runPTY drives. output is
+// called with each PTY output chunk (the bytes are owned by the callee), exit
+// with the terminal exit code (and a non-secret spawn-failure remediation, set
+// only when the shell never started). input blocks reading the next host->guest
+// frame and returns its kind: ptyInputData carries data, ptyInputResize carries
+// cols/rows, ptyInputEOF means the host hung up and runPTY kills the shell group.
+type ptyTransport interface {
+	output(data []byte)
+	exit(exitCode int, spawnErr string)
+	input() (kind ptyInputKind, data []byte, cols, rows int)
+}
+
+// runPTY allocates a PTY, starts the shell as a session leader on the slave,
+// and pumps PTY<->transport bidirectionally: a reader goroutine pulls
+// input/resize frames via t.input() and writes them to the master, the main
+// loop frames PTY output back via t.output(), and on shell exit it reports the
+// terminal exit via t.exit(). The shell runs in its own session/process group
+// so a host hang-up (t.input() returning ok==false) or the host's kill kills
+// the whole tree. The env merge is identical to the exec path and TERM is
+// exported; secret env values are never logged. This is the shared core behind
+// both the JSON-lines PTY stream and the gRPC Exec+pty path.
+func runPTY(p ptyParams, t ptyTransport) {
 	master, slavePath, err := openPTY()
 	if err != nil {
-		writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: err.Error()})
+		t.exit(1, err.Error())
 		return
 	}
 	defer master.Close()
 
-	if err := setWinsize(master, req.Cols, req.Rows); err != nil {
-		writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: fmt.Sprintf("set winsize: %v", err)})
+	if err := setWinsize(master, p.Cols, p.Rows); err != nil {
+		t.exit(1, fmt.Sprintf("set winsize: %v", err))
 		return
 	}
 
 	slave, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
-		writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: fmt.Sprintf("open slave: %v", err)})
+		t.exit(1, fmt.Sprintf("open slave: %v", err))
 		return
 	}
 
-	shell := req.Command
+	shell := p.Command
 	if shell == "" {
 		shell = "/bin/sh"
 	}
 	cmd := exec.Command(shell)
-	cmd.Dir = req.WorkingDir
+	cmd.Dir = p.WorkingDir
 	if cmd.Dir == "" {
 		cmd.Dir = "/workspace"
 	}
@@ -120,44 +152,43 @@ func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
 		configured[k] = v
 	}
 	configuredMu.Unlock()
-	cmd.Env = append(guestenv.Merge(os.Environ(), configured, req.Env), "TERM=xterm-256color")
+	cmd.Env = append(guestenv.Merge(os.Environ(), configured, p.Env), "TERM=xterm-256color")
 
 	if err := cmd.Start(); err != nil {
 		slave.Close()
-		writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: fmt.Sprintf("start shell: %v", err)})
+		t.exit(1, fmt.Sprintf("start shell: %v", err))
 		return
 	}
 	// The child holds the slave now; the parent closes its copy so the master
 	// sees EOF when the shell exits.
 	slave.Close()
 
-	var writeMu sync.Mutex
 	killGroup := func() {
 		if cmd.Process != nil {
 			_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 		}
 	}
 
-	// Reader goroutine: host->guest. Decodes input/resize frames. A scan error
-	// (host hung up or ctx-cancel closed the conn) kills the shell group.
+	// Reader goroutine: host->guest. Pulls input/resize frames from the
+	// transport. ok==false (host hung up or the stream ctx was cancelled) kills
+	// the shell group, which makes the master read below return so the main loop
+	// and cmd.Wait join: no goroutine leak on client cancel.
 	go func() {
-		for sc.Scan() {
-			var f vsock.PtyFrame
-			if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
-				continue
-			}
-			switch f.Kind {
-			case vsock.PtyInput:
-				if _, err := master.Write(f.Data); err != nil {
+		for {
+			kind, data, cols, rows := t.input()
+			switch kind {
+			case ptyInputEOF:
+				killGroup()
+				return
+			case ptyInputResize:
+				_ = setWinsize(master, cols, rows)
+			case ptyInputData:
+				if _, err := master.Write(data); err != nil {
 					killGroup()
 					return
 				}
-			case vsock.PtyResize:
-				_ = setWinsize(master, f.Cols, f.Rows)
 			}
 		}
-		// Host closed the connection: kill the shell.
-		killGroup()
 	}()
 
 	// Main loop: guest->host. Frame PTY output until the master reports EOF
@@ -166,9 +197,7 @@ func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
 	for {
 		n, rerr := master.Read(buf)
 		if n > 0 {
-			writeMu.Lock()
-			writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyOutput, Data: append([]byte(nil), buf[:n]...)})
-			writeMu.Unlock()
+			t.output(append([]byte(nil), buf[:n]...))
 		}
 		if rerr != nil {
 			break
@@ -185,9 +214,69 @@ func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
 			exitCode = 1
 		}
 	}
-	writeMu.Lock()
-	writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: exitCode})
-	writeMu.Unlock()
+	t.exit(exitCode, "")
+}
+
+// handlePtyStream allocates a PTY and pumps PTY<->vsock bidirectionally on the
+// DEDICATED conn by driving the shared runPTY engine through a JSON-lines
+// transport (jsonPtyTransport): a reader goroutine inside runPTY decodes
+// input/resize frames from the host, the main loop frames PTY output back, and
+// on shell exit it writes the terminal exit frame. The shell runs in its own
+// session/process group so a connection drop or the host's kill kills the whole
+// tree.
+//
+// sc is the dispatcher's scanner, handed over (not freshly allocated): it may
+// already hold input/resize frames that arrived coalesced with the open-request
+// line in a single read (bufio.Scanner reads in chunks). Reusing it ensures
+// those early frames are consumed rather than dropped by a fresh scanner.
+func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
+	t := &jsonPtyTransport{conn: conn, sc: sc}
+	runPTY(ptyParams{
+		Command:    req.Command,
+		WorkingDir: req.WorkingDir,
+		Env:        req.Env,
+		Cols:       req.Cols,
+		Rows:       req.Rows,
+	}, t)
+}
+
+// jsonPtyTransport adapts the shared runPTY engine to the legacy JSON-lines wire
+// shape on the dedicated vsock conn. output/exit marshal PtyFrame lines under a
+// write mutex (output and exit must not interleave); input scans and decodes the
+// next input/resize frame. A scan error (host hung up) returns ok==false so
+// runPTY kills the shell group, matching the prior behavior byte-for-byte.
+type jsonPtyTransport struct {
+	conn    net.Conn
+	sc      *bufio.Scanner
+	writeMu sync.Mutex
+}
+
+func (t *jsonPtyTransport) output(data []byte) {
+	t.writeMu.Lock()
+	writePtyFrame(t.conn, vsock.PtyFrame{Kind: vsock.PtyOutput, Data: data})
+	t.writeMu.Unlock()
+}
+
+func (t *jsonPtyTransport) exit(exitCode int, spawnErr string) {
+	t.writeMu.Lock()
+	writePtyFrame(t.conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: exitCode, Error: spawnErr})
+	t.writeMu.Unlock()
+}
+
+func (t *jsonPtyTransport) input() (kind ptyInputKind, data []byte, cols, rows int) {
+	for t.sc.Scan() {
+		var f vsock.PtyFrame
+		if err := json.Unmarshal(t.sc.Bytes(), &f); err != nil {
+			continue
+		}
+		switch f.Kind {
+		case vsock.PtyInput:
+			return ptyInputData, f.Data, 0, 0
+		case vsock.PtyResize:
+			return ptyInputResize, nil, f.Cols, f.Rows
+		}
+	}
+	return ptyInputEOF, nil, 0, 0
 }
 
 // writePtyFrame marshals one frame and writes it as a single newline-delimited

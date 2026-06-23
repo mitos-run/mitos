@@ -216,35 +216,24 @@ func TestGRPCControlConfigureThenExecSeesEnv(t *testing.T) {
 	}
 }
 
-// TestGRPCExecPtyAndArgsUnimplemented checks the two deferred Exec shapes return
-// a clear error in this slice.
-func TestGRPCExecPtyAndArgsUnimplemented(t *testing.T) {
+// TestGRPCExecArgsUnimplemented checks the deferred argv (shell-less) Exec shape
+// returns a clear error in this slice. The PTY shape is now implemented (Task
+// 5.1b) and is exercised by TestGRPCExecPtyEchoAndResize.
+func TestGRPCExecArgsUnimplemented(t *testing.T) {
 	client := sandboxv1.NewSandboxClient(dialGuestGRPC(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cases := []struct {
-		name string
-		open *sandboxv1.ExecOpen
-	}{
-		{"pty", &sandboxv1.ExecOpen{Command: "sh", Pty: &sandboxv1.PtyOptions{}}},
-		{"args", &sandboxv1.ExecOpen{Command: "echo", Args: []string{"hi"}}},
+	stream, err := client.Exec(ctx)
+	if err != nil {
+		t.Fatalf("Exec open: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			stream, err := client.Exec(ctx)
-			if err != nil {
-				t.Fatalf("Exec open: %v", err)
-			}
-			if err := stream.Send(&sandboxv1.ExecRequest{Msg: &sandboxv1.ExecRequest_Open{Open: tc.open}}); err != nil {
-				t.Fatalf("send: %v", err)
-			}
-			_ = stream.CloseSend()
-			_, err = stream.Recv()
-			if err == nil {
-				t.Fatalf("expected Unimplemented error, got nil")
-			}
-		})
+	if err := stream.Send(&sandboxv1.ExecRequest{Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{Command: "echo", Args: []string{"hi"}}}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	_ = stream.CloseSend()
+	if _, err = stream.Recv(); err == nil {
+		t.Fatalf("expected Unimplemented error, got nil")
 	}
 }
 
