@@ -133,12 +133,12 @@ real HTTP scrape of `GET /v1/metering` across nodes is a documented follow-up
 that implements `SampleSource`.
 
 The **org tag** comes from the sandbox -> owning-org mapping. A sandbox is
-created through a SandboxClaim; the claim is created by a gateway request that
+created through a Sandbox; the sandbox is created by a gateway request that
 carries the verified org (issue #210, the org is taken solely from the verified
-API key). So the owning org of a sandbox is the org of the claim that created
+API key). So the owning org of a sandbox is the org of the request that created
 it. The mapping is the `OrgResolver` seam: `OrgFor(sandboxID) -> orgID`. The
-tested default is a static map; the real resolver reads the claim -> org label
-the gateway stamps on the SandboxClaim (a documented follow-up, the controller
+tested default is a static map; the real resolver reads the sandbox -> org label
+the gateway stamps on the Sandbox (a documented follow-up, the controller
 wiring).
 
 ## Public usage API (org-scoped)

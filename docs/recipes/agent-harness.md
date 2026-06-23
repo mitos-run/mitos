@@ -67,8 +67,8 @@ Tracked under issues #228 and #230:
   multi-tenant path is a follow-up.
 - Kubernetes Service / Ingress routing to the owning node's forwarded port (the
   forkd / cluster path); today the forward is standalone-server only.
-- A first-class CRD field to declare exposed guest ports on a SandboxTemplate /
-  SandboxClaim.
+- A first-class CRD field to declare exposed guest ports on a SandboxPool.spec.template /
+  Sandbox.
 - SSE / long-lived streaming specifics for the agent-session use case, and a
   worked Rivet `sandbox-agent` integration.
 - For internet-facing, signed, expiring per-sandbox URLs (the E2B
