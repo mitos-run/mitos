@@ -182,7 +182,7 @@ The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-
 kubectl apply -k deploy/
 ```
 
-The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. A Helm chart is available under [deploy/charts/mitos](deploy/charts/mitos/README.md).
+The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. The Helm chart is published at `https://mitos.run/charts` and listed on Artifact Hub: `helm repo add mitos https://mitos.run/charts`. See [deploy/charts/mitos](deploy/charts/mitos/README.md) for the install command and values.
 
 ```yaml
 apiVersion: mitos.run/v1
