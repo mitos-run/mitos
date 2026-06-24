@@ -42,12 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // PID-1 guard: mirrors the getpid()==1 check in guest/agent/main.go:47-49.
     // Runs the filesystem mounts, /workspace mkdir, and sethostname steps.
-    //
-    // SAFETY: getpid() reads the process ID from the kernel and has no
-    // preconditions; calling it is always safe. The unsafe block is the
-    // minimum scope required to call a libc function.
-    #[allow(unsafe_code)]
-    if unsafe { libc::getpid() } == 1 {
+    if sandbox_agent::sys::signal::getpid() == 1 {
         sandbox_agent::init::init_system();
     }
 
