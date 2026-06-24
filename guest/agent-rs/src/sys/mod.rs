@@ -24,6 +24,7 @@ pub mod kill;
 pub mod netlink;
 pub mod pty;
 pub mod mount;
+pub mod signal;
 pub mod vsock;
 
 // Re-export the most-used surface so callers write sys::reseed_crng etc.
