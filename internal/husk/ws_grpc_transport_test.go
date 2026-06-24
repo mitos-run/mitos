@@ -18,16 +18,19 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
 
 	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/vsock"
 	"mitos.run/mitos/internal/workspace"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
@@ -354,5 +357,116 @@ func TestGRPCWorkspaceTransport_StubDehydrateHydrate(t *testing.T) {
 	}
 	if uploadLen == 0 {
 		t.Errorf("hydrate UntarDir received 0 bytes; expected non-empty tar")
+	}
+}
+
+// overflowArchiveServer is an Archive stub that streams exactly (cap+1) bytes so
+// the host-side cap in TarDir is exercised without allocating 64 MiB.
+type overflowArchiveServer struct {
+	sandboxv1.UnimplementedSandboxServer
+	// bytesToStream is the total number of bytes the Archive RPC will stream
+	// before the eof chunk. Tests set this just above the injectable cap.
+	bytesToStream int
+}
+
+func (s *overflowArchiveServer) Archive(_ *sandboxv1.ArchiveRequest, stream sandboxv1.Sandbox_ArchiveServer) error {
+	remaining := s.bytesToStream
+	const chunkSz = 512
+	for remaining > 0 {
+		n := chunkSz
+		if n > remaining {
+			n = remaining
+		}
+		data := bytes.Repeat([]byte("x"), n)
+		if err := stream.Send(&sandboxv1.Chunk{Data: data}); err != nil {
+			return err
+		}
+		remaining -= n
+	}
+	return stream.Send(&sandboxv1.Chunk{Eof: true})
+}
+
+// TestGRPCWorkspaceTransport_TarDir_CapExceeded verifies that TarDir returns an
+// error (not OOM/loop) when the Archive stream exceeds the injectable cap.
+func TestGRPCWorkspaceTransport_TarDir_CapExceeded(t *testing.T) {
+	const smallCap = 1024 // 1 KiB injectable cap; avoid allocating 64 MiB in tests.
+
+	srv := &overflowArchiveServer{bytesToStream: smallCap + 1}
+	dir, err := os.MkdirTemp("", "husk-cap-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "sandbox.sock")
+
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcSrv := grpc.NewServer()
+	sandboxv1.RegisterSandboxServer(grpcSrv, srv)
+	go grpcSrv.Serve(lis) //nolint:errcheck
+	defer grpcSrv.Stop()
+
+	tr := &grpcWorkspaceTransport{
+		vsockPath:   sockPath,
+		dial:        dialUnixSandbox,
+		maxTarBytes: smallCap,
+	}
+
+	_, err = tr.TarDir("/workspace")
+	if err == nil {
+		t.Fatal("TarDir: expected cap error, got nil")
+	}
+	wantFrag := fmt.Sprintf("exceeds %d bytes", smallCap)
+	if !strings.Contains(err.Error(), wantFrag) {
+		t.Errorf("TarDir error %q does not contain %q", err.Error(), wantFrag)
+	}
+}
+
+// TestGRPCWorkspaceTransport_UntarDir_CapExceeded verifies that UntarDir returns
+// an error before sending any Upload RPC when the input tar exceeds the injectable cap.
+func TestGRPCWorkspaceTransport_UntarDir_CapExceeded(t *testing.T) {
+	const smallCap = 1024 // 1 KiB injectable cap.
+
+	// Build a tar just over the cap.
+	oversized := bytes.Repeat([]byte("y"), smallCap+1)
+
+	srv := &recordingSandboxServer{}
+	sockPath, cleanup := startSandboxGRPC(t, srv)
+	defer cleanup()
+
+	tr := &grpcWorkspaceTransport{
+		vsockPath:   sockPath,
+		dial:        dialUnixSandbox,
+		maxTarBytes: smallCap,
+	}
+
+	err := tr.UntarDir("/workspace", oversized)
+	if err == nil {
+		t.Fatal("UntarDir: expected cap error, got nil")
+	}
+	wantFrag := fmt.Sprintf("exceeds %d bytes", smallCap)
+	if !strings.Contains(err.Error(), wantFrag) {
+		t.Errorf("UntarDir error %q does not contain %q", err.Error(), wantFrag)
+	}
+
+	// Confirm no Upload RPC was started (no connection to server was attempted
+	// for actual upload data).
+	srv.mu.Lock()
+	dest := srv.uploadDest
+	srv.mu.Unlock()
+	if dest != "" {
+		t.Errorf("UntarDir opened Upload RPC despite cap exceeded; dest = %q", dest)
+	}
+}
+
+// TestGRPCWorkspaceTransport_DefaultCap verifies that productionWorkspaceTransport
+// uses vsock.MaxTarBytes as the default cap (not zero).
+func TestGRPCWorkspaceTransport_DefaultCap(t *testing.T) {
+	tr := &grpcWorkspaceTransport{vsockPath: "/dev/null"}
+	if tr.effectiveMaxTarBytes() != vsock.MaxTarBytes {
+		t.Errorf("default maxTarBytes = %d, want vsock.MaxTarBytes (%d)",
+			tr.effectiveMaxTarBytes(), vsock.MaxTarBytes)
 	}
 }

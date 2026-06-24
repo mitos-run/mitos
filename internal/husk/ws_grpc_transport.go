@@ -14,17 +14,18 @@ package husk
 //     Archive(ArchiveRequest{Path: path, Direction: DOWNLOAD}) does the same:
 //     the guest tars the subtree at path and streams the bytes back as Chunk
 //     frames ending with eof=true. The host concatenates them into the same
-//     []byte the caller receives. The size cap from the JSON path does not apply
-//     here (streaming removes the buffer limit); the guest enforces its own cap.
+//     []byte the caller receives. The host-side cap (vsock.MaxTarBytes) is
+//     re-applied as a running byte counter over the incoming chunks as
+//     defense-in-depth, matching the old JSON path behavior.
 //
 //   - UntarDir(path, tar): JSON UntarDir sent the tar bytes to the guest and
 //     the guest extracted them into path, sanitizing every member against
 //     traversal. Upload does the same: the first UploadRequest carries the
 //     open frame (dest=path), subsequent requests carry the tar bytes as chunks.
 //     Traversal sanitization is enforced guest-side in the Upload handler,
-//     providing the same guarantee as the JSON path. The 64 MiB cap the JSON
-//     host-side check enforced (MaxTarBytes) is removed here because the gRPC
-//     stream is not line-buffered; the guest imposes its own limits.
+//     providing the same guarantee as the JSON path. The host-side guard from
+//     the old JSON path (MaxTarBytes check before sending) is re-applied so the
+//     host refuses to stream an oversized tar.
 //
 // Secret hygiene: workspace tar bytes may contain user files. The transport
 // never logs file contents or byte counts beyond sizes and durations. Error
@@ -37,6 +38,7 @@ import (
 	"io"
 
 	"mitos.run/mitos/internal/guestgrpc"
+	"mitos.run/mitos/internal/vsock"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
@@ -62,6 +64,19 @@ type grpcWorkspaceTransport struct {
 	// dial opens a gRPC client to the guest Sandbox service. Nil uses
 	// guestgrpc.Dial (production vsock); tests inject dialUnixSandbox.
 	dial wsDialFunc
+	// maxTarBytes is the host-side cap on workspace tar payloads. Zero means
+	// use vsock.MaxTarBytes (64 MiB). Tests may set a small value to avoid
+	// allocating large buffers.
+	maxTarBytes int
+}
+
+// effectiveMaxTarBytes returns the active cap: the injected value when non-zero,
+// or vsock.MaxTarBytes for production.
+func (t *grpcWorkspaceTransport) effectiveMaxTarBytes() int {
+	if t.maxTarBytes > 0 {
+		return t.maxTarBytes
+	}
+	return vsock.MaxTarBytes
 }
 
 // dialer returns the effective dial function: the injected one, or the
@@ -94,7 +109,9 @@ func (t *grpcWorkspaceTransport) TarDir(path string) ([]byte, error) {
 		return nil, fmt.Errorf("open guest Archive for workspace tar %q: %w", path, err)
 	}
 
+	cap := t.effectiveMaxTarBytes()
 	var buf bytes.Buffer
+	var received int
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
@@ -104,8 +121,12 @@ func (t *grpcWorkspaceTransport) TarDir(path string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("recv archive chunk for workspace tar %q: %w", path, err)
 		}
-		if len(chunk.GetData()) > 0 {
-			buf.Write(chunk.GetData())
+		if data := chunk.GetData(); len(data) > 0 {
+			received += len(data)
+			if received > cap {
+				return nil, fmt.Errorf("workspace tar from guest exceeds %d bytes", cap)
+			}
+			buf.Write(data)
 		}
 		if chunk.GetEof() {
 			break
@@ -121,6 +142,12 @@ func (t *grpcWorkspaceTransport) TarDir(path string) ([]byte, error) {
 // tar into path, sanitizing every member against traversal guest-side. Workspace
 // content bytes are never logged; errors carry only the path and transport error.
 func (t *grpcWorkspaceTransport) UntarDir(path string, tarBytes []byte) error {
+	// Host-side cap: refuse to stream a tar that exceeds the bound. This mirrors
+	// the old JSON client.go:297-299 check (vsock.Client.UntarDir) as defense-in-depth.
+	if len(tarBytes) > t.effectiveMaxTarBytes() {
+		return fmt.Errorf("workspace tar for guest exceeds %d bytes", t.effectiveMaxTarBytes())
+	}
+
 	client, err := t.dialer()(t.vsockPath)
 	if err != nil {
 		return fmt.Errorf("connect guest gRPC for workspace untar: %w", err)
@@ -140,21 +167,19 @@ func (t *grpcWorkspaceTransport) UntarDir(path string, tarBytes []byte) error {
 		return fmt.Errorf("send workspace untar open frame for %q: %w", path, err)
 	}
 
-	// Stream the tar bytes in wsUploadChunkSize blocks.
+	// Stream the tar bytes in wsUploadChunkSize blocks. Slice directly into
+	// tarBytes (owned, not mutated during send) to avoid a per-chunk allocation.
 	for len(tarBytes) > 0 {
 		n := wsUploadChunkSize
 		if n > len(tarBytes) {
 			n = len(tarBytes)
 		}
-		chunk := make([]byte, n)
-		copy(chunk, tarBytes[:n])
-		tarBytes = tarBytes[n:]
-
 		if err := stream.Send(&sandboxv1.UploadRequest{
-			Msg: &sandboxv1.UploadRequest_Chunk{Chunk: chunk},
+			Msg: &sandboxv1.UploadRequest_Chunk{Chunk: tarBytes[:n]},
 		}); err != nil {
 			return fmt.Errorf("send workspace untar chunk for %q: %w", path, err)
 		}
+		tarBytes = tarBytes[n:]
 	}
 
 	if _, err := stream.CloseAndRecv(); err != nil {
