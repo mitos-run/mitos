@@ -16,6 +16,7 @@ import (
 // display escaping.
 type PidStat struct {
 	PID      int
+	PPID     int
 	Comm     string
 	State    string
 	UTime    uint64
@@ -43,10 +44,15 @@ func ParsePidStat(line []byte) (PidStat, error) {
 	}
 	comm := s[open+1 : close]
 	rest := strings.Fields(s[close+1:])
-	// rest[0] is state (field 3). utime is field 14 => rest index 11; stime is
-	// field 15 => rest index 12; rss is field 24 => rest index 21.
+	// rest[0] is state (field 3); ppid is field 4 => rest index 1. utime is field
+	// 14 => rest index 11; stime is field 15 => rest index 12; rss is field 24 =>
+	// rest index 21.
 	if len(rest) < 22 {
 		return PidStat{}, fmt.Errorf("pid stat: only %d post-comm fields, need >= 22", len(rest))
+	}
+	ppid, err := strconv.Atoi(rest[1])
+	if err != nil {
+		return PidStat{}, fmt.Errorf("pid stat: ppid: %w", err)
 	}
 	utime, err := strconv.ParseUint(rest[11], 10, 64)
 	if err != nil {
@@ -62,6 +68,7 @@ func ParsePidStat(line []byte) (PidStat, error) {
 	}
 	return PidStat{
 		PID:      pid,
+		PPID:     ppid,
 		Comm:     comm,
 		State:    rest[0],
 		UTime:    utime,

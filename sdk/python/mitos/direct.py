@@ -28,6 +28,7 @@ Usage:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -35,10 +36,11 @@ from typing import Callable, Optional
 
 import httpx
 
-from mitos._envelope import raise_for_status, raise_for_status_stream
-from mitos.errors import AgentRunError
-from mitos.types import Execution, ExecResult, FileInfo, Network, Result
-from mitos.sandbox import _parse_run_code_stream, _validate_timeout
+from mitos._connect import ConnectClient
+from mitos._envelope import raise_for_status
+from mitos.errors import AgentRunError, ExecutionDeadlineError
+from mitos.types import Execution, ExecResult, ExecutionError, FileInfo, Network, Result
+from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _validate_timeout
 
 
 # Environment variables for the flat onboarding path. Explicit constructor or
@@ -128,66 +130,71 @@ def _resolve_auth(
     return key, url.rstrip("/")
 
 
+def _b64_decode(value) -> bytes:
+    """Decode a proto-JSON bytes field (base64 string) to raw bytes. None and
+    the empty string both decode to empty bytes."""
+    if not value:
+        return b""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return base64.b64decode(value)
+
+
 class DirectSandboxFiles:
     """File operations on a DirectSandbox.
 
-    Reuses the exact sandbox-server REST file endpoints the k8s Sandbox uses
-    (/v1/files/read|write|list|remove|mkdir), so the standalone path is wire
-    identical to the cluster path. This is the shared prerequisite the E2B shim
-    (#206) sits on top of.
+    Speaks the Connect ``sandbox.v1.Sandbox`` file RPCs (ReadFile, WriteFile,
+    List, Stat, Mkdir, Remove) the sandbox-server and forkd serve at
+    ``/sandbox.v1.Sandbox/<Method>`` (issue #24), instead of the legacy JSON
+    ``/v1/files/*`` routes. ReadFile is a server-stream of byte chunks, WriteFile
+    a client-stream of chunks; List/Mkdir/Remove are unary. The public method
+    signatures and return types are UNCHANGED, so the E2B shim (#206) and the
+    framework adapters that sit on this surface are carried onto Connect for
+    free.
     """
 
     def __init__(self, sandbox: "DirectSandbox"):
         self._sb = sandbox
 
     def read(self, path: str) -> str:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/read",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return resp.json()["content"]
+        return self.read_bytes(path).decode("utf-8", "replace")
 
     def read_bytes(self, path: str) -> bytes:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/read",
-            json={"sandbox": self._sb.id, "path": path, "binary": True},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return bytes.fromhex(resp.json()["content"])
+        """Read a file's bytes via the ReadFile server-stream: concatenate each
+        Chunk's bytes until the eof frame. The same bytes back both read (utf-8
+        decoded) and read_bytes (raw)."""
+        client = self._sb._connect()
+        parts: list[bytes] = []
+        for frame in client.server_stream("ReadFile", {"path": path}):
+            parts.append(_b64_decode(frame.get("data")))
+        return b"".join(parts)
 
     def write(self, path: str, content: str | bytes, mode: int = 0o644) -> None:
-        data: dict = {"sandbox": self._sb.id, "path": path, "mode": mode}
-        if isinstance(content, bytes):
-            data["content"] = content.hex()
-            data["binary"] = True
-        else:
-            data["content"] = content
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/write",
-            json=data,
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        """Write a file via the WriteFile client-stream: an open frame carrying
+        the path and mode, then one data frame with the (base64-encoded) bytes.
+        str content is utf-8 encoded; bytes are written verbatim."""
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        messages = [
+            {"open": {"path": path, "mode": mode}},
+            {"data": base64.b64encode(raw).decode("ascii")},
+        ]
+        # WriteFile is a client-stream returning a unary WriteFileResult; the
+        # bidi helper drives the half-duplex send-then-read, and the single
+        # result frame is consumed (bytes_written is not part of the public API).
+        for _ in self._sb._connect().bidi("WriteFile", messages):
+            pass
 
     def list(self, path: str = "/") -> list[FileInfo]:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/list",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        resp = self._sb._connect().unary("List", {"parent": path})
         return [
             FileInfo(
-                name=f["name"],
-                is_dir=f["is_dir"],
-                size=f["size"],
-                mode=f.get("mode", 0),
-                modified_at=f.get("modified_at"),
+                name=f.get("name", ""),
+                is_dir=f.get("isDir", False),
+                size=int(f.get("size", 0)),
+                mode=int(f.get("mode", 0)),
+                modified_at=f.get("modifiedAtUnix"),
             )
-            for f in resp.json()["entries"]
+            for f in (resp.get("entries") or [])
         ]
 
     def exists(self, path: str) -> bool:
@@ -200,27 +207,102 @@ class DirectSandboxFiles:
             raise
 
     def remove(self, path: str) -> None:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/remove",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        self._sb._connect().unary("Remove", {"path": path})
 
     def mkdir(self, path: str) -> None:
-        resp = self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/mkdir",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
+        self._sb._connect().unary("Mkdir", {"path": path})
+
+
+def _decode_result_data(data: dict) -> dict[str, str]:
+    """Decode a Connect RunResult.data map (proto-JSON map<string,bytes>: every
+    value is base64) back to the MIME->payload form the Result type expects.
+
+    The guest stores each display value as raw bytes of the kernel's string
+    output (text/plain is "42", image/png is the already-base64 string), and
+    proto-JSON base64-encodes the byte map for the wire. Decoding the base64 back
+    to a utf-8 string recovers exactly the kernel value, so text stays text and
+    an image stays its base64 payload, matching Result.text / Result.png."""
+    out: dict[str, str] = {}
+    for mime, value in (data or {}).items():
+        try:
+            out[mime] = base64.b64decode(value).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001  not base64: keep the value as-is
+            out[mime] = value if isinstance(value, str) else str(value)
+    return out
+
+
+def _parse_run_code_connect(
+    frames,
+    on_stdout: Optional[Callable[[str], None]],
+    on_stderr: Optional[Callable[[str], None]],
+    on_result: Optional[Callable[[Result], None]],
+) -> Execution:
+    """Fold a Connect RunCodeStream response-frame stream into an Execution,
+    firing the callbacks live as frames arrive. The proto-JSON frames are the
+    RunCodeResponse oneof: stdout/stderr (base64 bytes), result
+    (RunResult{text,data}), error (RunError{name,value,traceback}), and the
+    terminal exitCode. Result and error payloads are tenant code output and are
+    never logged here."""
+    ex = Execution()
+    saw_exit = False
+    for frame in frames:
+        if "stdout" in frame:
+            text = _b64_decode(frame.get("stdout")).decode("utf-8", "replace")
+            ex.logs["stdout"].append(text)
+            if on_stdout:
+                on_stdout(text)
+        elif "stderr" in frame:
+            text = _b64_decode(frame.get("stderr")).decode("utf-8", "replace")
+            ex.logs["stderr"].append(text)
+            if on_stderr:
+                on_stderr(text)
+        elif "result" in frame:
+            payload = frame.get("result") or {}
+            data = _decode_result_data(payload.get("data") or {})
+            text = payload.get("text") or ""
+            is_main = bool(text)
+            # The REPL last-value is delivered in RunResult.text; mirror it into
+            # the text/plain MIME slot so Result.text resolves the same way the
+            # NDJSON path did.
+            if is_main and "text/plain" not in data:
+                data["text/plain"] = text
+            result = Result(data=data, is_main_result=is_main)
+            ex.results.append(result)
+            if is_main and text:
+                ex.text = text
+            if on_result:
+                on_result(result)
+        elif "error" in frame:
+            payload = frame.get("error") or {}
+            ex.error = ExecutionError(
+                name=payload.get("name", ""),
+                value=payload.get("value", ""),
+                traceback=payload.get("traceback", []) or [],
+            )
+        elif "exitCode" in frame:
+            saw_exit = True
+            break
+    if not saw_exit:
+        # The stream ended before the terminal exit frame: it was truncated or
+        # dropped. Surface it rather than a misleading clean Execution.
+        raise RuntimeError(
+            "run_code stream ended before the terminal exit frame: "
+            "the connection was truncated or dropped; the result is unknown"
         )
-        raise_for_status(resp, token=self._sb._api_key)
+    return ex
 
 
 class DirectSandbox:
     """A sandbox connected directly to the sandbox-server / hosted control plane.
 
     The flat handle returned by mitos.create(). Exposes exec, run_code, files,
-    pty, fork, and terminate against the sandbox-server REST API.
+    pty, fork, and terminate against the sandbox-server / hosted control plane.
+    The exec, run_code, and file calls ride the Connect sandbox.v1.Sandbox
+    service (issue #24): exec via the ExecStream server-streaming RPC, run_code
+    via RunCodeStream, and files via ReadFile/WriteFile/List/Mkdir/Remove. pty and
+    the lifecycle calls (create/fork/terminate/set_timeout/pause/resume/preview)
+    ride their existing WebSocket / JSON transports (interactive pty needs bidi /
+    HTTP-2, a documented #24 follow-up).
     """
 
     def __init__(
@@ -279,21 +361,63 @@ class DirectSandbox:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
+    def _connect(self) -> ConnectClient:
+        """A Connect client for this sandbox's runtime RPCs. It addresses the
+        sandbox by id via the X-Sandbox-Id header (the server routes on it in
+        both the tokenless standalone case and the hosted/forkd bearer case) and
+        sends the optional bearer key. The key VALUE is never logged."""
+        return ConnectClient(self._http, self._server_url, self.id, self._api_key)
+
     def exec(self, command: str, timeout: int = 30) -> ExecResult:
+        """Run a command and return its aggregate result.
+
+        Drives the Connect ``ExecStream`` server-streaming RPC (a non-interactive
+        exec: the unary request fully describes the command, the reply is a
+        stream of stdout/stderr chunks then a terminal ExecExit). Connect serves
+        server-streaming over HTTP/1.1, so the dependency-light httpx client
+        reaches it. A command killed at its execution deadline reports exit 124,
+        surfaced as the typed ExecutionDeadlineError (matching the cluster path).
+        The public return shape is unchanged."""
         _validate_timeout(timeout)
-        resp = self._http.post(
-            f"{self._server_url}/v1/exec",
-            json={"sandbox": self.id, "command": command, "timeout": timeout},
-            timeout=timeout + 5,
-            headers=self._auth_headers(),
-        )
-        raise_for_status(resp, token=self._api_key)
-        data = resp.json()
+        out = bytearray()
+        err = bytearray()
+        exit_code = 0
+        exec_time_ms = 0.0
+        req = {"command": command, "timeoutSeconds": timeout}
+        for frame in self._connect().server_stream("ExecStream", req, timeout=timeout + 5):
+            if "stdout" in frame:
+                out.extend(_b64_decode(frame.get("stdout")))
+            elif "stderr" in frame:
+                err.extend(_b64_decode(frame.get("stderr")))
+            elif "exit" in frame:
+                ex = frame.get("exit") or {}
+                exit_code = int(ex.get("exitCode", 0))
+                exec_time_ms = float(ex.get("execTimeMs", 0.0))
+                # A spawn/transport failure rides ExecExit.error (an LLM-legible
+                # remediation string, never a secret); surface it rather than a
+                # misleading clean exit.
+                if ex.get("error"):
+                    raise AgentRunError(
+                        "exec failed",
+                        code="exec_failed",
+                        cause=str(ex["error"]),
+                        remediation="Check the command is accessible in the sandbox filesystem.",
+                    )
+        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+            raise ExecutionDeadlineError(
+                f"command exceeded its {timeout}s execution deadline and was terminated",
+                code="exec_timeout",
+                cause=f"command ran past its {timeout}s deadline (exit 124)",
+                remediation=(
+                    "Raise the timeout on the exec call or split the work into shorter steps."
+                ),
+                context={"timeout_s": timeout},
+            )
         return ExecResult(
-            exit_code=data["exit_code"],
-            stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""),
-            exec_time_ms=data.get("exec_time_ms", 0),
+            exit_code=exit_code,
+            stdout=out.decode("utf-8", "replace"),
+            stderr=err.decode("utf-8", "replace"),
+            exec_time_ms=exec_time_ms,
         )
 
     def run_code(
@@ -309,23 +433,23 @@ class DirectSandbox:
         mode). State persists across calls for the sandbox lifetime. Returns an
         Execution and streams via the callbacks; requires a base image with the
         code-interpreter kernel, else the Execution carries a KernelUnavailable
-        error."""
+        error.
+
+        Drives the Connect ``RunCodeStream`` server-streaming RPC (a
+        non-interactive run: the unary request fully describes the snippet, the
+        reply is a stream of stdout/stderr chunks, rich RunResult frames, the
+        structured RunError, and the terminal exit code). Connect serves
+        server-streaming over HTTP/1.1, so the httpx client reaches it. The
+        callbacks fire live as frames arrive; the public return shape is
+        unchanged."""
         _validate_timeout(timeout)
-        payload = {
-            "sandbox": self.id,
-            "code": code,
-            "language": language,
-            "timeout": timeout,
-        }
-        with self._http.stream(
-            "POST",
-            f"{self._server_url}/v1/run_code/stream",
-            json=payload,
-            timeout=timeout + 10,
-            headers=self._auth_headers(),
-        ) as resp:
-            raise_for_status_stream(resp, token=self._api_key)
-            return _parse_run_code_stream(resp.iter_lines(), on_stdout, on_stderr, on_result)
+        req = {"code": code, "language": language, "timeoutSeconds": timeout}
+        return _parse_run_code_connect(
+            self._connect().server_stream("RunCodeStream", req, timeout=timeout + 10),
+            on_stdout,
+            on_stderr,
+            on_result,
+        )
 
     def pty_url(self, cols: int = 80, rows: int = 24) -> str:
         """The WebSocket URL for an interactive PTY in this sandbox. The bearer

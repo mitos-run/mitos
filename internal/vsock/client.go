@@ -393,6 +393,79 @@ func DialStreamUnix(sockPath string) (*StreamConn, error) {
 	return &StreamConn{conn: conn, scanner: sc}, nil
 }
 
+// DialGRPCConn dials the guest agent over the Firecracker vsock UDS, performs
+// the "CONNECT <port>\n" / "OK <port>" preamble, and returns the RAW net.Conn
+// ready for gRPC framing (HTTP/2) to take over. It is the transport the host
+// side of the gRPC runtime protocol (issue #24 stage 5) uses to reach the guest
+// gRPC server on AgentGRPCPort.
+//
+// The preamble "OK" line is read ONE BYTE AT A TIME directly from the conn (not
+// through a bufio.Scanner) so the read stops exactly at the preamble newline and
+// never over-consumes into the gRPC HTTP/2 client preface or settings frames
+// that follow. The guest gRPC server sends nothing before it sees the client's
+// first bytes, so in practice there is nothing buffered after the newline; the
+// byte-at-a-time read guarantees correctness regardless. The preamble read is
+// bounded by maxAckLineBytes and a deadline so a wedged guest cannot hang the
+// caller; the deadline is cleared before the conn is returned so it never leaks
+// onto the long-lived gRPC traffic.
+func DialGRPCConn(udsPath string, guestPort int) (net.Conn, error) {
+	conn, err := net.DialTimeout("unix", udsPath, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial grpc vsock UDS: %w", err)
+	}
+	if _, err := conn.Write([]byte(fmt.Sprintf("CONNECT %d\n", guestPort))); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(DefaultRequestTimeout))
+	line, leftover, rerr := readAckLine(conn)
+	_ = conn.SetReadDeadline(time.Time{})
+	if rerr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT: %w", rerr)
+	}
+	if len(line) < 2 || string(line[:2]) != "OK" {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT rejected: %s", string(line))
+	}
+	if len(leftover) > 0 {
+		// The guest sent application bytes coalesced with the preamble newline.
+		// Replay them ahead of the conn so gRPC's HTTP/2 reader sees them first.
+		return &prefixConn{Conn: conn, leftover: leftover}, nil
+	}
+	return conn, nil
+}
+
+// DialGRPCConnUnix dials a PLAIN unix socket where the guest gRPC server listens
+// WITHOUT a CONNECT preamble (the standalone sandbox-server's local-testing
+// fallback: the guest binds /tmp/sandbox-agent-<port>.sock via net.Listen and
+// serves gRPC directly on it). It returns the raw net.Conn for gRPC framing.
+func DialGRPCConnUnix(sockPath string) (net.Conn, error) {
+	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial grpc unix: %w", err)
+	}
+	return conn, nil
+}
+
+// prefixConn replays leftover bytes (captured alongside the CONNECT preamble
+// newline) before reading from the underlying conn, so no application bytes are
+// lost when the preamble read coalesces with early payload. Writes and Close go
+// straight to the underlying conn.
+type prefixConn struct {
+	net.Conn
+	leftover []byte
+}
+
+func (p *prefixConn) Read(b []byte) (int, error) {
+	if len(p.leftover) > 0 {
+		n := copy(b, p.leftover)
+		p.leftover = p.leftover[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
+}
+
 // Close shuts the dedicated stream connection. Closing it while the guest is
 // still running cancels the guest exec (the guest sees the connection drop).
 func (s *StreamConn) Close() error {

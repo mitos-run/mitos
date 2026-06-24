@@ -21,7 +21,10 @@ import (
 // host workspace transfer can never reach the guest's secret/token state (which
 // lives in the in-memory configured env, never on disk under /workspace) or
 // elsewhere on the rootfs.
-const workspaceRoot = "/workspace"
+// workspaceRoot is a var (not a const) so a test on a linux runner can point it
+// at a temp dir to exercise the allowlist without writing to the real
+// /workspace; production leaves it at /workspace.
+var workspaceRoot = "/workspace"
 
 // pathAllowed reports whether p is workspaceRoot or a descendant of it, after
 // cleaning. This is the allowlist gate for both tar (read) and untar (write).

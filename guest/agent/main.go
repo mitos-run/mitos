@@ -29,6 +29,13 @@ import (
 
 var startTime = time.Now()
 
+// uptimeSeconds is the single source of the agent uptime reported by both the
+// JSON TypePing handler and the gRPC Control.Ping RPC, so the two transports
+// return the same value.
+func uptimeSeconds() float64 {
+	return time.Since(startTime).Seconds()
+}
+
 // configuredEnv holds claim-time env+secrets delivered via the configure
 // message. Values are never logged. Guarded by configuredMu.
 // guestKernel is the single per-sandbox code-interpreter kernel. It is started
@@ -62,6 +69,14 @@ func main() {
 	// failure is logged inside the helper and exec/files over vsock are
 	// unaffected.
 	startSelfServiceSocket()
+
+	// Start the gRPC runtime protocol server (issue #24) on a SEPARATE vsock
+	// port, alongside the JSON-lines loop which stays in force during the wire
+	// migration. It serves the public sandbox.v1.Sandbox service and the
+	// host-trusted sandbox.internal.v1.Control service. Best-effort and
+	// non-fatal: a listen/serve failure is logged inside the helper and the
+	// JSON path is unaffected.
+	go startGRPCServer()
 
 	fmt.Println("sandbox-agent: ready")
 
@@ -185,7 +200,7 @@ func handleRequest(req *vsock.Request) vsock.Response {
 	case vsock.TypePing:
 		return vsock.Response{
 			OK:   true,
-			Ping: &vsock.PingResponse{Uptime: time.Since(startTime).Seconds()},
+			Ping: &vsock.PingResponse{Uptime: uptimeSeconds()},
 		}
 
 	case vsock.TypeExec:
@@ -447,8 +462,18 @@ func (c *vsockConn) Close() error {
 	return unix.Close(c.fd)
 }
 
-func (c *vsockConn) LocalAddr() net.Addr                { return nil }
-func (c *vsockConn) RemoteAddr() net.Addr               { return nil }
+// vsockAddr is a non-nil net.Addr for vsock connections and listeners. grpc's
+// server derefs Listener.Addr() and Conn.LocalAddr()/RemoteAddr() during
+// channelz socket registration; returning nil there panics inside grpc.Serve,
+// and because the agent is PID 1 that panic kernel-panics the whole microVM.
+// A constant non-nil addr is sufficient: vsock has no host:port string.
+type vsockAddr struct{}
+
+func (vsockAddr) Network() string { return "vsock" }
+func (vsockAddr) String() string  { return "vsock" }
+
+func (c *vsockConn) LocalAddr() net.Addr                { return vsockAddr{} }
+func (c *vsockConn) RemoteAddr() net.Addr               { return vsockAddr{} }
 func (c *vsockConn) SetDeadline(t time.Time) error      { return nil }
 func (c *vsockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *vsockConn) SetWriteDeadline(t time.Time) error { return nil }
@@ -458,7 +483,7 @@ func (l *vsockListener) Close() error {
 }
 
 func (l *vsockListener) Addr() net.Addr {
-	return nil
+	return vsockAddr{}
 }
 
 func listenVsock(port int) (net.Listener, error) {
