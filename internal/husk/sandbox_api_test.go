@@ -7,37 +7,131 @@ package husk
 // port, exactly as forkd does. This test proves:
 //
 //   - after Activate, an HTTP exec carrying the per-sandbox bearer token reaches
-//     the (fake) guest agent over vsock and returns the guest's reply;
+//     the (fake) guest agent over gRPC and returns the guest's reply;
 //   - an exec WITHOUT the token (or with the wrong token) is rejected (401);
 //   - the bearer token VALUE is never written to the captured stub log.
 //
 // The activate path runs end to end through the Stub OnActivated hook (the same
 // hook cmd/husk-stub wires), with a fake VMM, a fake fork-correctness notifier,
-// and a REAL fake vsock guest agent on a unix socket, so the exec genuinely
-// traverses RegisterSandbox -> vsock -> agent.
+// and a REAL fake gRPC guest agent on a unix socket, so the exec genuinely
+// traverses RegisterSandbox -> vsock gRPC -> agent.
 
 import (
 	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// fakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS CONNECT
-// preamble, then answers every request with a canned OK exec reply.
-func fakeVsockAgent(t *testing.T, sockPath string) {
+// huskFakeGuest is a minimal sandbox.v1.SandboxServer that returns a fixed
+// stdout + exit 0 for every Exec call. All other methods fall through to the
+// unimplemented stubs.
+type huskFakeGuest struct {
+	sandboxv1.UnimplementedSandboxServer
+}
+
+func (g *huskFakeGuest) Exec(stream sandboxv1.Sandbox_ExecServer) error {
+	_, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&sandboxv1.ExecResponse{
+		Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte("husk-exec-ok\n")},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&sandboxv1.ExecResponse{
+		Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
+	})
+}
+
+func (g *huskFakeGuest) List(_ context.Context, _ *sandboxv1.ListRequest) (*sandboxv1.ListResponse, error) {
+	return &sandboxv1.ListResponse{}, nil
+}
+func (g *huskFakeGuest) Mkdir(_ context.Context, _ *sandboxv1.MkdirRequest) (*sandboxv1.MkdirResponse, error) {
+	return &sandboxv1.MkdirResponse{}, nil
+}
+func (g *huskFakeGuest) Remove(_ context.Context, _ *sandboxv1.RemoveRequest) (*sandboxv1.RemoveResponse, error) {
+	return &sandboxv1.RemoveResponse{}, nil
+}
+func (g *huskFakeGuest) ReadFile(_ *sandboxv1.ReadFileRequest, stream sandboxv1.Sandbox_ReadFileServer) error {
+	return stream.Send(&sandboxv1.Chunk{Eof: true})
+}
+func (g *huskFakeGuest) WriteFile(stream sandboxv1.Sandbox_WriteFileServer) error {
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return stream.SendAndClose(&sandboxv1.WriteFileResult{})
+}
+
+// huskChanConnListener is a net.Listener that yields conns from a channel.
+type huskChanConnListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+}
+
+func (l *huskChanConnListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *huskChanConnListener) Close() error {
+	select {
+	case <-l.done:
+	default:
+		close(l.done)
+	}
+	return nil
+}
+
+func (l *huskChanConnListener) Addr() net.Addr { return &net.UnixAddr{Name: "fake"} }
+
+// huskReplayConn prepends leftover bytes (buffered past the CONNECT preamble
+// newline) before the real conn Read, so the gRPC HTTP/2 preface is not lost.
+type huskReplayConn struct {
+	net.Conn
+	leftover []byte
+}
+
+func (c *huskReplayConn) Read(b []byte) (int, error) {
+	if len(c.leftover) > 0 {
+		n := copy(b, c.leftover)
+		c.leftover = c.leftover[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
+}
+
+// startHuskGRPCUDS listens on sockPath, reads the Firecracker vsock CONNECT
+// preamble, replies "OK <port>", then feeds AgentGRPCPort connections to an
+// in-process gRPC server serving huskFakeGuest.
+func startHuskGRPCUDS(t *testing.T, sockPath string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -46,8 +140,19 @@ func fakeVsockAgent(t *testing.T, sockPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = lis.Close() })
+	t.Cleanup(func() { lis.Close() })
 
+	grpcSrv := grpc.NewServer()
+	sandboxv1.RegisterSandboxServer(grpcSrv, &huskFakeGuest{})
+
+	cl := &huskChanConnListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	go grpcSrv.Serve(cl) //nolint:errcheck // test: errors surface via RPC failures
+	t.Cleanup(func() {
+		grpcSrv.Stop()
+		cl.Close()
+	})
+
+	grpcPortStr := strconv.Itoa(vsock.AgentGRPCPort)
 	go func() {
 		for {
 			conn, err := lis.Accept()
@@ -55,23 +160,32 @@ func fakeVsockAgent(t *testing.T, sockPath string) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				if !sc.Scan() { // "CONNECT <port>"
+				r := bufio.NewReader(c)
+				line, err := r.ReadString('\n')
+				if err != nil || !strings.HasPrefix(line, "CONNECT ") {
+					c.Close()
 					return
 				}
-				if _, err := c.Write([]byte("OK 52\n")); err != nil {
+				port := strings.TrimSpace(strings.TrimPrefix(line, "CONNECT "))
+				if _, err := c.Write([]byte("OK " + port + "\n")); err != nil {
+					c.Close()
 					return
 				}
-				for sc.Scan() {
-					resp, _ := json.Marshal(vsock.Response{
-						OK:   true,
-						Exec: &vsock.ExecResponse{ExitCode: 0, Stdout: "husk-exec-ok\n"},
-					})
-					if _, err := c.Write(append(resp, '\n')); err != nil {
-						return
-					}
+				// Only gRPC-port connections go to the gRPC server.
+				// Port 52 (legacy JSON for PTY/forward) is unused here.
+				if port != grpcPortStr {
+					c.Close()
+					return
+				}
+				var served net.Conn = c
+				if n := r.Buffered(); n > 0 {
+					buf, _ := r.Peek(n)
+					served = &huskReplayConn{Conn: c, leftover: append([]byte(nil), buf...)}
+				}
+				select {
+				case cl.conns <- served:
+				case <-cl.done:
+					c.Close()
 				}
 			}(conn)
 		}
@@ -97,8 +211,8 @@ func (m *pathVMM) Close() error                     { return nil }
 
 func postHuskExec(t *testing.T, url, sandbox, bearer string) (int, string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"sandbox": sandbox, "command": "echo hi"})
-	req, err := http.NewRequest(http.MethodPost, url+"/v1/exec", bytes.NewReader(body))
+	bodyBytes, _ := json.Marshal(map[string]any{"sandbox": sandbox, "command": "echo hi"})
+	req, err := http.NewRequest(http.MethodPost, url+"/v1/exec", bytes.NewReader(bodyBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +241,7 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "vsock.sock")
-	fakeVsockAgent(t, sockPath)
+	startHuskGRPCUDS(t, sockPath)
 
 	// A real daemon.SandboxAPI; the OnActivated hook registers the activated VM
 	// and the delivered token, then we serve its Handler over httptest. This
@@ -149,7 +263,7 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: sandboxID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(string, time.Duration) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) error { return nil },
 			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,
@@ -215,7 +329,7 @@ func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "vsock.sock")
-	fakeVsockAgent(t, sockPath)
+	startHuskGRPCUDS(t, sockPath)
 
 	api := daemon.NewSandboxAPI(dir)
 	// Single-sandbox mode: gate on the one registered token regardless of the
@@ -236,7 +350,7 @@ func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: localID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(string, time.Duration) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) error { return nil },
 			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,

@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 
 	"mitos.run/mitos/internal/vsock"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
@@ -41,10 +42,25 @@ type fakeGuestSandbox struct {
 
 	files map[string][]byte // path -> content, for ReadFile/WriteFile round-trip
 
-	// execStdout/execExit configure the scripted Exec reply. When execStdout is
-	// empty it defaults to "hello grpc\n" and execExit defaults to 7.
+	// execStdout/execExit/execTimeMs configure the scripted Exec reply. When
+	// execStdout is empty it defaults to "hello grpc\n" and execExit defaults to
+	// 7. execTimeMs is forwarded on the ExecExit frame.
 	execStdout string
 	execExit   int32
+	execTimeMs float64
+
+	// runCodeResponses, when set, is the sequence of RunCodeResponse messages
+	// the scripted RunCode handler sends before closing the stream. When nil,
+	// RunCode returns an exit-code 0 response immediately.
+	runCodeResponses []*sandboxv1.RunCodeResponse
+
+	// vitalsResponse, when non-nil, is the single GuestVitals sample the Vitals
+	// stream handler emits. When nil, the default sample is used.
+	vitalsResponse *sandboxv1.GuestVitals
+
+	// processesResponse, when non-nil, is the ProcessList the Processes RPC
+	// returns. When nil, an empty ProcessList is returned.
+	processesResponse *sandboxv1.ProcessList
 }
 
 // Exec streams one stdout chunk then an exit frame.
@@ -65,7 +81,7 @@ func (s *fakeGuestSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
 	if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(out)}}); err != nil {
 		return err
 	}
-	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: exit}}})
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: exit, ExecTimeMs: s.execTimeMs}}})
 }
 
 // ReadFile streams the stored content for the requested path as one Chunk then eof.
@@ -109,27 +125,75 @@ func (s *fakeGuestSandbox) WriteFile(stream sandboxv1.Sandbox_WriteFileServer) e
 
 // Vitals streams one sample then ends the stream cleanly (io.EOF on the client).
 func (s *fakeGuestSandbox) Vitals(_ *sandboxv1.VitalsRequest, stream sandboxv1.Sandbox_VitalsServer) error {
-	return stream.Send(&sandboxv1.GuestVitals{ProcessCount: 11, MemTotalBytes: 2048})
+	v := s.vitalsResponse
+	if v == nil {
+		v = &sandboxv1.GuestVitals{ProcessCount: 11, MemTotalBytes: 2048}
+	}
+	return stream.Send(v)
+}
+
+// Processes returns the configured ProcessList or an empty one.
+func (s *fakeGuestSandbox) Processes(_ context.Context, _ *sandboxv1.ProcessesRequest) (*sandboxv1.ProcessList, error) {
+	if s.processesResponse != nil {
+		return s.processesResponse, nil
+	}
+	return &sandboxv1.ProcessList{}, nil
+}
+
+// List returns an empty entries list (sufficient for audit/auth tests that
+// just need a 200 response from /v1/files/list).
+func (s *fakeGuestSandbox) List(_ context.Context, _ *sandboxv1.ListRequest) (*sandboxv1.ListResponse, error) {
+	return &sandboxv1.ListResponse{}, nil
+}
+
+// Mkdir acknowledges a directory creation without error.
+func (s *fakeGuestSandbox) Mkdir(_ context.Context, _ *sandboxv1.MkdirRequest) (*sandboxv1.MkdirResponse, error) {
+	return &sandboxv1.MkdirResponse{}, nil
+}
+
+// Remove acknowledges a removal without error.
+func (s *fakeGuestSandbox) Remove(_ context.Context, _ *sandboxv1.RemoveRequest) (*sandboxv1.RemoveResponse, error) {
+	return &sandboxv1.RemoveResponse{}, nil
+}
+
+// RunCode reads the open frame then sends each runCodeResponse message in order.
+// If runCodeResponses is nil, sends a single exit-code 0 message.
+func (s *fakeGuestSandbox) RunCode(stream sandboxv1.Sandbox_RunCodeServer) error {
+	_, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if s.runCodeResponses == nil {
+		return stream.Send(&sandboxv1.RunCodeResponse{
+			Msg: &sandboxv1.RunCodeResponse_ExitCode{ExitCode: 0},
+		})
+	}
+	for _, r := range s.runCodeResponses {
+		if err := stream.Send(r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // startFakeGuestGRPCUDS serves the Firecracker vsock CONNECT preamble for the
 // gRPC port on sockPath, then hands each accepted connection to an in-process
 // gRPC server serving fake. The preamble reply is "OK <port>" matching the real
 // vsock mux; the byte-at-a-time DialGRPCConn read on the host side stops at the
-// newline so the gRPC HTTP/2 preface is not consumed.
-func startFakeGuestGRPCUDS(t *testing.T, sockPath string, fake *fakeGuestSandbox) {
+// newline so the gRPC HTTP/2 preface is not consumed. fake may be any
+// sandboxv1.SandboxServer implementation.
+func startFakeGuestGRPCUDS(t *testing.T, sockPath string, fake sandboxv1.SandboxServer) {
 	t.Helper()
 	startFakeGuestDualUDS(t, sockPath, nil, fake)
 }
 
 // startFakeGuestDualUDS serves a single fake guest UDS that dispatches on the
 // CONNECT port: "CONNECT <AgentPort>" speaks the legacy JSON-lines exec_stream
-// protocol (echoing jsonFrames), and "CONNECT <AgentGRPCPort>" hands the conn to
-// an in-process gRPC server serving fake. This lets one socket back both the
-// legacy JSON path (RegisterSandbox + /v1/* routes) and the gRPC runtime path
-// (vsockGuestConn) during the issue #24 wire migration. jsonFrames may be nil to
-// serve only the gRPC port.
-func startFakeGuestDualUDS(t *testing.T, sockPath string, jsonFrames []vsock.ExecStreamFrame, fake *fakeGuestSandbox) {
+// protocol for PTY/forward tests (echoing jsonFrames), and "CONNECT
+// <AgentGRPCPort>" hands the conn to an in-process gRPC server serving fake.
+// jsonFrames may be nil to serve only the gRPC port. fake may be any
+// sandboxv1.SandboxServer implementation.
+func startFakeGuestDualUDS(t *testing.T, sockPath string, jsonFrames []vsock.ExecStreamFrame, fake sandboxv1.SandboxServer) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -189,6 +253,73 @@ func startFakeGuestDualUDS(t *testing.T, sockPath string, jsonFrames []vsock.Exe
 				// gRPC port: replay any bytes buffered past the preamble newline
 				// (the HTTP/2 preface coalesced with CONNECT) ahead of the raw conn.
 				served := c
+				if n := r.Buffered(); n > 0 {
+					buffered, _ := r.Peek(n)
+					served = &replayConn{Conn: c, leftover: append([]byte(nil), buffered...)}
+				}
+				select {
+				case cl.conns <- served:
+				case <-cl.done:
+					c.Close()
+				}
+			}(conn)
+		}
+	}()
+}
+
+// startFakeControlUDS serves a single fake guest UDS that accepts the
+// Firecracker CONNECT preamble on AgentGRPCPort (53), strips it, and hands
+// each connection to an in-process gRPC server that registers BOTH
+// sandbox.v1.Sandbox and sandbox.internal.v1.Control services. This lets the
+// delivery_test helpers exercise the gRPC Configure and NotifyForked paths
+// without a real guest.
+func startFakeControlUDS(t *testing.T, sockPath string, sandbox sandboxv1.SandboxServer, ctrl internalv1.ControlServer) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lis.Close() })
+
+	grpcSrv := grpc.NewServer()
+	if sandbox != nil {
+		sandboxv1.RegisterSandboxServer(grpcSrv, sandbox)
+	}
+	if ctrl != nil {
+		internalv1.RegisterControlServer(grpcSrv, ctrl)
+	}
+	cl := &chanConnListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	go grpcSrv.Serve(cl) //nolint:errcheck // test: errors surface via RPC failures
+	t.Cleanup(func() {
+		grpcSrv.Stop()
+		cl.Close()
+	})
+
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				r := bufio.NewReader(c)
+				line, err := r.ReadString('\n')
+				if err != nil || !strings.HasPrefix(line, "CONNECT ") {
+					c.Close()
+					return
+				}
+				portStr := strings.TrimSpace(strings.TrimPrefix(line, "CONNECT "))
+				if _, err := c.Write([]byte("OK " + portStr + "\n")); err != nil {
+					c.Close()
+					return
+				}
+				// Both AgentGRPCPort (53) and AgentPort (52) arrive on this socket;
+				// route everything to the gRPC server (Control handles configure and
+				// notify_forked; port 52 is unused by these tests).
+				served := net.Conn(c)
 				if n := r.Buffered(); n > 0 {
 					buffered, _ := r.Peek(n)
 					served = &replayConn{Conn: c, leftover: append([]byte(nil), buffered...)}

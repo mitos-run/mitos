@@ -13,18 +13,22 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
-	"mitos.run/mitos/internal/vsock"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 const placeholderMAC = "02:00:00:00:00:01"
@@ -91,12 +95,29 @@ func run(image, dataDir, fcBin, kernel, agentBin string) error {
 			_ = client.Close()
 			return setupErr(fmt.Errorf("entropy: %w", err))
 		}
-		resp, err := client.NotifyForkedWithNetwork(1, entropy, res.GuestNetwork)
+
+		var protoNetwork *internalv1.NotifyForkedNetwork
+		if res.GuestNetwork != nil {
+			protoNetwork = &internalv1.NotifyForkedNetwork{
+				GuestIp:    res.GuestNetwork.GuestIP,
+				GatewayIp:  res.GuestNetwork.GatewayIP,
+				PrefixLen:  int32(res.GuestNetwork.PrefixLen), //nolint:gosec // network prefix (0-32)
+				GuestMac:   res.GuestNetwork.GuestMAC,
+				ResolverIp: res.GuestNetwork.ResolverIP,
+			}
+		}
+		ctx := context.Background()
+		resp, err := client.Control.NotifyForked(ctx, &internalv1.NotifyForkedRequest{
+			Generation:         1,
+			HostWallClockNanos: time.Now().UnixNano(),
+			Entropy:            entropy,
+			Network:            protoNetwork,
+		})
 		if err != nil {
 			_ = client.Close()
 			return setupErr(fmt.Errorf("notify-forked %s: %w", id, err))
 		}
-		if resp == nil || !resp.ReseededRNG {
+		if resp == nil || !resp.GetReseededRng() {
 			_ = client.Close()
 			return fmt.Errorf("%s did not reseed after fork", id)
 		}
@@ -140,29 +161,45 @@ func setupErr(err error) error {
 	return err
 }
 
-func execOut(client *vsock.Client, command string) (string, error) {
-	res, err := client.Exec(command, "/", nil, 60)
+func execOut(client *guestgrpc.Client, command string) (string, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/",
+		TimeoutSeconds: 60,
+	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("exec stream: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return res.Stdout, fmt.Errorf("command %q exited %d: %s", command, res.ExitCode, res.Stderr)
+	var stdout, stderr strings.Builder
+	var exitCode int32
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("recv exec frame: %w", err)
+		}
+		switch m := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout.Write(m.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderr.Write(m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = m.Exit.GetExitCode()
+			if spawnErr := m.Exit.GetError(); spawnErr != "" {
+				return stdout.String(), fmt.Errorf("exec spawn error: %s", spawnErr)
+			}
+		}
 	}
-	return res.Stdout, nil
+	if exitCode != 0 {
+		return stdout.String(), fmt.Errorf("command %q exited %d: %s", command, exitCode, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
-func connect(udsPath string) (*vsock.Client, error) {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < 30; attempt++ {
-		client, err = vsock.Connect(udsPath, vsock.AgentPort)
-		if err == nil {
-			if _, perr := client.Ping(); perr == nil {
-				return client, nil
-			}
-			_ = client.Close()
-		}
-		time.Sleep(time.Second)
-	}
-	return nil, fmt.Errorf("connect after retries: %w", err)
+func connect(udsPath string) (*guestgrpc.Client, error) {
+	ctx := context.Background()
+	return guestgrpc.WaitReady(ctx, udsPath, 30*time.Second)
 }

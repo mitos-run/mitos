@@ -10,21 +10,26 @@ import (
 	"path/filepath"
 	"testing"
 
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// newRunCodeAPI wires a fake UDS stream agent that replies to the run_code
-// request with canned ExecStreamFrames (a stdout chunk, a result, an exit),
-// driven through the real dialStream + StreamConn.RunCode path.
+// newRunCodeAPI wires a fake in-process gRPC guest server that replies to
+// run_code requests with scripted RunCodeResponse frames.
 func newRunCodeAPI(t *testing.T) *SandboxAPI {
 	t.Helper()
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb1", "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{
-		{Kind: vsock.FrameChunk, Stream: vsock.StreamStdout, Data: []byte("hi")},
-		{Kind: vsock.FrameResult, Result: &vsock.ResultFrame{Text: "42", Data: map[string]string{"text/plain": "42"}}},
-		{Kind: vsock.FrameExit, ExitCode: 0},
-	})
+	fake := &fakeGuestSandbox{
+		runCodeResponses: []*sandboxv1.RunCodeResponse{
+			{Msg: &sandboxv1.RunCodeResponse_Stdout{Stdout: []byte("hi")}},
+			{Msg: &sandboxv1.RunCodeResponse_Result{Result: &sandboxv1.RunResult{
+				Text: "42",
+				Data: map[string][]byte{"text/plain": []byte("42")},
+			}}},
+			{Msg: &sandboxv1.RunCodeResponse_ExitCode{ExitCode: 0}},
+		},
+	}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
 	if err := api.RegisterSandbox("sb1", sock); err != nil {
@@ -96,7 +101,8 @@ func TestRunCodeStreamHTTP(t *testing.T) {
 func TestRunCodeStreamRequiresToken(t *testing.T) {
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb2", "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{{Kind: vsock.FrameExit}})
+	fake := &fakeGuestSandbox{}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir) // NOT tokenless
 	if err := api.RegisterSandbox("sb2", sock); err != nil {
 		t.Fatal(err)

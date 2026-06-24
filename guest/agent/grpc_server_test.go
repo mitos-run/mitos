@@ -237,6 +237,143 @@ func TestGRPCExecArgsUnimplemented(t *testing.T) {
 	}
 }
 
+// TestGRPCExecStreamEchoStreamsStdoutAndExit drives the server-streaming
+// ExecStream RPC with a simple echo command and asserts the merged stdout
+// arrives as ExecResponse chunks and a terminal ExecExit frame carries exit
+// code 0. This proves ExecStream reuses the shared runExecStream engine and
+// emits the same wire frames as the bidi Exec path.
+func TestGRPCExecStreamEchoStreamsStdoutAndExit(t *testing.T) {
+	client := sandboxv1.NewSandboxClient(dialGuestGRPC(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        "echo hello",
+		Cwd:            t.TempDir(),
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatalf("ExecStream open: %v", err)
+	}
+
+	var stdout []byte
+	var gotExit bool
+	var exitCode int32
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ExecStream recv: %v", err)
+		}
+		switch m := resp.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout = append(stdout, m.Stdout...)
+		case *sandboxv1.ExecResponse_Stderr:
+			t.Fatalf("unexpected stderr: %q", m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			gotExit = true
+			exitCode = m.Exit.ExitCode
+			if m.Exit.Error != "" {
+				t.Fatalf("spawn error: %q", m.Exit.Error)
+			}
+		}
+	}
+
+	if string(stdout) != "hello\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "hello\n")
+	}
+	if !gotExit {
+		t.Fatal("no exit frame received from ExecStream")
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0", exitCode)
+	}
+}
+
+// TestGRPCExecStreamNonZeroExitPropagates proves a non-zero exit code from
+// ExecStream is delivered in the ExecExit frame, matching the bidi Exec path.
+func TestGRPCExecStreamNonZeroExitPropagates(t *testing.T) {
+	client := sandboxv1.NewSandboxClient(dialGuestGRPC(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        "exit 3",
+		Cwd:            t.TempDir(),
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatalf("ExecStream open: %v", err)
+	}
+
+	var exitCode int32 = -1
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ExecStream recv: %v", err)
+		}
+		if e, ok := resp.Msg.(*sandboxv1.ExecResponse_Exit); ok {
+			exitCode = e.Exit.ExitCode
+		}
+	}
+	if exitCode != 3 {
+		t.Errorf("exit code = %d, want 3", exitCode)
+	}
+}
+
+// TestGRPCRunCodeStreamEmitsResult drives RunCodeStream against the fake kernel
+// driver and asserts a result frame and a terminal exit_code arrive, proving the
+// kernel reuse and the frame mapping match the bidi RunCode path.
+func TestGRPCRunCodeStreamEmitsResult(t *testing.T) {
+	dir := t.TempDir()
+	driver := writeFakeDriver(t, dir)
+	guestKernel = newKernelManager(kernelConfig{python: "/bin/sh", driverPath: driver})
+	t.Cleanup(func() { guestKernel.shutdown() })
+
+	client := sandboxv1.NewSandboxClient(dialGuestGRPC(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.RunCodeStream(ctx, &sandboxv1.RunCodeStreamRequest{
+		Code:     "print('hi')",
+		Language: "python",
+	})
+	if err != nil {
+		t.Fatalf("RunCodeStream open: %v", err)
+	}
+
+	var gotResult, gotExit bool
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("RunCodeStream recv: %v", err)
+		}
+		switch m := resp.Msg.(type) {
+		case *sandboxv1.RunCodeResponse_Result:
+			gotResult = true
+			if string(m.Result.Data["image/png"]) == "" {
+				t.Errorf("rich result data not mapped: %+v", m.Result.Data)
+			}
+		case *sandboxv1.RunCodeResponse_ExitCode:
+			gotExit = true
+		}
+	}
+	if !gotResult {
+		t.Error("no result frame received from RunCodeStream")
+	}
+	if !gotExit {
+		t.Error("no exit_code frame received from RunCodeStream")
+	}
+}
+
 // onePipeListener hands a single pre-dialed net.Conn to grpc.Server.Serve and
 // blocks (then returns io.EOF after Close) on subsequent Accept calls, so a
 // net.Pipe server side can back a gRPC server without a real socket.

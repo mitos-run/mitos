@@ -1,13 +1,15 @@
 package fork
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
 
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
-	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestgrpc"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // This file is the engine-side glue for the userfaultfd memory backend (issue
@@ -140,10 +142,13 @@ func (e *Engine) CaptureTemplateHotPages(template string, cap int) (cas.HotPageS
 	// Drive the working set to first-exec, the same shape the claim path measures,
 	// so the captured pages cover what a fresh fork touches. Best-effort: a connect
 	// or exec failure still yields the resume-time working set already faulted in.
-	if client, cerr := connectVsockRetry(res.VsockPath); cerr == nil {
-		_, _ = client.Exec("/bin/true", "/", nil, 10)
-		client.Close()
+	// The readiness check uses gRPC Control.Ping (port 53) so the Rust guest agent
+	// works here; the exec uses Sandbox.ExecStream (same gRPC client, port 53).
+	captureReady := e.captureGuestReady
+	if captureReady == nil {
+		captureReady = guestgrpc.WaitReady
 	}
+	captureExecBestEffort(captureReady, res.VsockPath)
 	// Let the post-resume working set settle so the trace reflects steady state.
 	time.Sleep(300 * time.Millisecond)
 
@@ -203,18 +208,42 @@ func (e *Engine) restampHotPages(template string, hot *cas.HotPageSet) error {
 	return nil
 }
 
-// connectVsockRetry dials the guest agent, retrying briefly while the freshly
-// resumed guest finishes coming up. It mirrors the bench connect helper so the
-// capture path waits the same way a real claim would.
-func connectVsockRetry(vsockPath string) (*vsock.Client, error) {
-	var lastErr error
-	for i := 0; i < 50; i++ {
-		c, err := vsock.Connect(vsockPath, vsock.AgentPort)
-		if err == nil {
-			return c, nil
-		}
-		lastErr = err
-		time.Sleep(20 * time.Millisecond)
+// captureReadyFunc is the type for the injectable guest-readiness seam used
+// by CaptureTemplateHotPages. It mirrors guestgrpc.WaitReady's signature so
+// tests can inject guestgrpc.WaitReadyUnix without touching a real vsock.
+type captureReadyFunc func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
+
+// captureExecBestEffort waits for the guest agent gRPC Control service to answer
+// Ping (using waitReady), then runs /bin/true in the guest via Sandbox.ExecStream.
+// Both the readiness wait and the exec are best-effort: any failure yields the
+// resume-time working set already faulted in, which is sufficient for the hot-page
+// capture. The timeout mirrors the old connectVsockRetry loop: 50 attempts at 20 ms
+// each = 1 second. ctx is context.Background() (the caller has no incoming ctx).
+//
+// Secret hygiene: no env, secrets, or argv are logged. Only durations/errors.
+func captureExecBestEffort(waitReady captureReadyFunc, vsockPath string) {
+	const captureReadyTimeout = 50 * 20 * time.Millisecond // 1 second, mirrors old loop
+	ctx := context.Background()
+	client, err := waitReady(ctx, vsockPath, captureReadyTimeout)
+	if err != nil {
+		// Guest not yet ready; the resume-time working set is already faulted in.
+		return
 	}
-	return nil, lastErr
+	defer client.Close() //nolint:errcheck // best-effort on close
+	execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	stream, eerr := client.Sandbox.ExecStream(execCtx, &sandboxv1.ExecStreamRequest{
+		Command:        "/bin/true",
+		Cwd:            "/",
+		TimeoutSeconds: 10,
+	})
+	if eerr != nil {
+		return
+	}
+	// Drain the stream to completion (best-effort; errors are ignored).
+	for {
+		if _, rerr := stream.Recv(); rerr != nil {
+			break
+		}
+	}
 }

@@ -9,11 +9,9 @@ package daemon
 // was built with AllowTokenless (standalone sandbox-server only).
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,53 +20,9 @@ import (
 	"testing"
 
 	"mitos.run/mitos/internal/fork"
-	"mitos.run/mitos/internal/vsock"
 )
 
-// startFakeExecAgent listens on sockPath, speaks the Firecracker vsock UDS
-// preamble, then answers every request OK with a canned exec payload.
-func startFakeExecAgent(t *testing.T, sockPath string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				if !sc.Scan() { // "CONNECT 52"
-					return
-				}
-				if _, err := c.Write([]byte("OK 52\n")); err != nil {
-					return
-				}
-				for sc.Scan() {
-					resp, _ := json.Marshal(vsock.Response{
-						OK:   true,
-						Exec: &vsock.ExecResponse{ExitCode: 0, Stdout: "hi\n"},
-					})
-					if _, err := c.Write(append(resp, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-}
-
-// newAuthTestAPI builds a SandboxAPI with a connected fake agent for
+// newAuthTestAPI builds a SandboxAPI with a connected gRPC fake agent for
 // sandbox "sb-auth" and returns the API plus an httptest server over its
 // Handler.
 func newAuthTestAPI(t *testing.T) (*SandboxAPI, *httptest.Server) {
@@ -80,12 +34,17 @@ func newAuthTestAPI(t *testing.T) (*SandboxAPI, *httptest.Server) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startFakeExecAgent(t, sockPath)
+	fake := &fakeGuestSandbox{
+		execStdout: "hi\n",
+		execExit:   0,
+	}
+	startFakeGuestGRPCUDS(t, sockPath, fake)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox("sb-auth", sockPath); err != nil {
 		t.Fatal(err)
 	}
+	api.RegisterStreamPath("sb-auth", sockPath)
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 	return api, ts
@@ -208,10 +167,10 @@ func TestUnregisterSandboxClearsToken(t *testing.T) {
 	api.UnregisterSandbox("sb-auth")
 
 	// Token gone: under AllowTokenless the request passes auth again and
-	// then 404s on the missing agent; the old token must not linger.
+	// then 404s on the missing sandbox; the old token must not linger.
 	resp, body := postExec(t, ts.URL, "sb-auth", "")
 	if resp.StatusCode != 404 {
-		t.Fatalf("status = %d, body = %s, want 404 (auth passed, agent gone)", resp.StatusCode, body)
+		t.Fatalf("status = %d, body = %s, want 404 (auth passed, sandbox gone)", resp.StatusCode, body)
 	}
 }
 
@@ -236,15 +195,15 @@ func TestForkRegistersTokenOnServer(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 
-	// With the bearer: auth passes; mock mode has no agent, so the request
-	// reaches the handler and 404s with the agent-missing error. That
+	// With the bearer: auth passes; mock mode has no vsock path, so the request
+	// reaches the handler and 404s with the sandbox-missing error. That
 	// distinction (404 not 401) is the proof the token was registered.
 	resp, body := postExec(t, ts.URL, "sb-tok", "tok-fork")
 	if resp.StatusCode != 404 {
 		t.Fatalf("status = %d, body = %s, want 404", resp.StatusCode, body)
 	}
-	if !strings.Contains(body, "not found or agent not connected") {
-		t.Fatalf("want agent-missing error, got: %s", body)
+	if !strings.Contains(body, "not found or not registered") {
+		t.Fatalf("want sandbox-missing error, got: %s", body)
 	}
 }
 
@@ -295,8 +254,8 @@ func TestForkRunningRegistersToken(t *testing.T) {
 		t.Fatalf("child without bearer: status = %d, want 401", resp.StatusCode)
 	}
 	resp, body := postExec(t, ts.URL, "child", "tok-child")
-	if resp.StatusCode != 404 || !strings.Contains(body, "not found or agent not connected") {
-		t.Fatalf("child with bearer: status = %d, body = %s, want 404 agent-missing", resp.StatusCode, body)
+	if resp.StatusCode != 404 || !strings.Contains(body, "not found or not registered") {
+		t.Fatalf("child with bearer: status = %d, body = %s, want 404 sandbox-missing", resp.StatusCode, body)
 	}
 	// The parent's token does not open the child.
 	resp, _ = postExec(t, ts.URL, "child", "tok-parent")

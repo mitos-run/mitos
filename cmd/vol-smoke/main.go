@@ -29,6 +29,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"flag"
 	"fmt"
@@ -41,8 +42,11 @@ import (
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/volume"
 	"mitos.run/mitos/internal/vsock"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 func main() {
@@ -158,17 +162,28 @@ func run(o opts) error {
 	if err != nil {
 		return fmt.Errorf("connect fork1: %w", err)
 	}
-	defer c1.Close()
+	defer c1.Close() //nolint:errcheck // best-effort
 	c2, err := connect(res2.VsockPath)
 	if err != nil {
 		return fmt.Errorf("connect fork2: %w", err)
 	}
-	defer c2.Close()
+	defer c2.Close() //nolint:errcheck // best-effort
 
-	if _, err := c1.NotifyForkedWithConfig(1, freshEntropy(), nil, res1.VolumeMounts); err != nil {
+	ctx := context.Background()
+	if _, err := c1.Control.NotifyForked(ctx, &internalv1.NotifyForkedRequest{
+		Generation:         1,
+		HostWallClockNanos: time.Now().UnixNano(),
+		Entropy:            freshEntropy(),
+		Volumes:            toProtoVolumes(res1.VolumeMounts),
+	}); err != nil {
 		return fmt.Errorf("notify fork1 (mount table): %w", err)
 	}
-	if _, err := c2.NotifyForkedWithConfig(2, freshEntropy(), nil, res2.VolumeMounts); err != nil {
+	if _, err := c2.Control.NotifyForked(ctx, &internalv1.NotifyForkedRequest{
+		Generation:         2,
+		HostWallClockNanos: time.Now().UnixNano(),
+		Entropy:            freshEntropy(),
+		Volumes:            toProtoVolumes(res2.VolumeMounts),
+	}); err != nil {
 		return fmt.Errorf("notify fork2 (mount table): %w", err)
 	}
 	fmt.Printf("vol-smoke: delivered mount tables (fork1=%d entries, fork2=%d entries)\n", len(res1.VolumeMounts), len(res2.VolumeMounts))
@@ -212,8 +227,9 @@ func run(o opts) error {
 	}
 	// A successful cat in fork2 would mean the backings are shared: a failure
 	// (nonzero exit) is the expected, passing case.
-	if res, err := c2.Exec("cat "+forkUnique, "/", nil, 30); err == nil && res.ExitCode == 0 {
-		return fmt.Errorf("snapshot CoW VIOLATED: fork2 sees fork1's write %q = %q (backings are shared, not copy-on-write)", forkUnique, strings.TrimSpace(res.Stdout))
+	res, execErr := execRaw(c2, "cat "+forkUnique)
+	if execErr == nil && res == 0 {
+		return fmt.Errorf("snapshot CoW VIOLATED: fork2 sees fork1's write %q (backings are shared, not copy-on-write)", forkUnique)
 	}
 	fmt.Println("vol-smoke: Snapshot CoW independence OK (fork2 does not see fork1's write)")
 
@@ -231,14 +247,30 @@ func run(o opts) error {
 	// --- Optional read-only Share: the guest must NOT be able to write to it. ---
 	if o.shareMount != "" {
 		sharePath := o.shareMount + "/should-fail.txt"
-		res, err := c1.Exec(fmt.Sprintf("echo nope > %s", sharePath), "/", nil, 30)
-		if err == nil && res.ExitCode == 0 {
+		exitCode, execErr := execRaw(c1, fmt.Sprintf("echo nope > %s", sharePath))
+		if execErr == nil && exitCode == 0 {
 			return fmt.Errorf("read-only Share VIOLATED: a write to the Share volume at %s succeeded; it must be read-only", sharePath)
 		}
 		fmt.Println("vol-smoke: read-only Share OK (guest write to the Share volume was refused)")
 	}
 
 	return nil
+}
+
+// toProtoVolumes converts vsock VolumeMountEntry slice to proto VolumeMountEntry slice.
+func toProtoVolumes(vols []vsock.VolumeMountEntry) []*internalv1.VolumeMountEntry {
+	if len(vols) == 0 {
+		return nil
+	}
+	out := make([]*internalv1.VolumeMountEntry, 0, len(vols))
+	for _, v := range vols {
+		out = append(out, &internalv1.VolumeMountEntry{
+			Device:    v.Device,
+			MountPath: v.MountPath,
+			ReadOnly:  v.ReadOnly,
+		})
+	}
+	return out
 }
 
 // seedVolumeImage rebuilds the ext4 image at imagePath with content written to
@@ -305,35 +337,77 @@ func isPullFailure(err error) bool {
 	return strings.Contains(s, "pull") || strings.Contains(s, "manifest") || strings.Contains(s, "registry") || strings.Contains(s, "timeout")
 }
 
-// execOK runs a command in the fork over the guest agent and returns its stdout,
+// execOK runs a command in the fork over the gRPC ExecStream RPC and returns its stdout,
 // failing if the transport errors or the command exits nonzero.
-func execOK(client *vsock.Client, command string) (string, error) {
-	res, err := client.Exec(command, "/", nil, 60)
+func execOK(client *guestgrpc.Client, command string) (string, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/",
+		TimeoutSeconds: 60,
+	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("exec stream: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return res.Stdout, fmt.Errorf("command %q exited %d: %s", command, res.ExitCode, res.Stderr)
+	var stdout, stderr strings.Builder
+	var exitCode int32
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("recv exec frame: %w", err)
+		}
+		switch m := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout.Write(m.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderr.Write(m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = m.Exit.GetExitCode()
+			if spawnErr := m.Exit.GetError(); spawnErr != "" {
+				return stdout.String(), fmt.Errorf("exec spawn error: %s", spawnErr)
+			}
+		}
 	}
-	return res.Stdout, nil
+	if exitCode != 0 {
+		return stdout.String(), fmt.Errorf("command %q exited %d: %s", command, exitCode, stderr.String())
+	}
+	return stdout.String(), nil
+}
+
+// execRaw runs a command and returns the exit code. An error is returned only on
+// transport failure; a nonzero exit code is returned as-is (not an error).
+func execRaw(client *guestgrpc.Client, command string) (int32, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/",
+		TimeoutSeconds: 30,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("exec stream: %w", err)
+	}
+	var exitCode int32
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("recv exec frame: %w", err)
+		}
+		if exit, ok := msg.Msg.(*sandboxv1.ExecResponse_Exit); ok {
+			exitCode = exit.Exit.GetExitCode()
+		}
+	}
+	return exitCode, nil
 }
 
 // connect dials the forked guest agent over vsock with a bounded retry while the
 // restored VM finishes coming up.
-func connect(udsPath string) (*vsock.Client, error) {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < 30; attempt++ {
-		client, err = vsock.Connect(udsPath, vsock.AgentPort)
-		if err == nil {
-			_, perr := client.Ping()
-			if perr == nil {
-				return client, nil
-			}
-			_ = client.Close()
-			err = perr
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return nil, fmt.Errorf("connect after retries: %w", err)
+func connect(udsPath string) (*guestgrpc.Client, error) {
+	ctx := context.Background()
+	return guestgrpc.WaitReady(ctx, udsPath, 30*time.Second)
 }

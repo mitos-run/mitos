@@ -17,11 +17,12 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/snapcompat"
 	"mitos.run/mitos/internal/volume"
-	"mitos.run/mitos/internal/vsock"
 	"mitos.run/mitos/internal/workspace"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 )
 
 // entropySize is the number of crypto/rand bytes generated per activation and
@@ -99,9 +100,10 @@ type vmm interface {
 type starter func(cfg firecracker.VMConfig) (vmm, error)
 
 // guestReady blocks until the guest agent answers a ping over the vsock UDS at
-// vsockPath, or the timeout elapses. The production seam connects via
-// internal/vsock and pings; tests inject a fake.
-type guestReady func(vsockPath string, timeout time.Duration) error
+// vsockPath, or the timeout elapses. The production seam dials the gRPC Control
+// service and calls Ping; tests inject a fake. ctx is forwarded so a cancelled
+// activate context also cancels the readiness wait.
+type guestReady func(ctx context.Context, vsockPath string, timeout time.Duration) error
 
 // notifier runs the post-restore fork-correctness handshake against the guest
 // agent at vsockPath: it delivers the fresh generation + entropy via
@@ -114,42 +116,139 @@ type guestReady func(vsockPath string, timeout time.Duration) error
 // logged by any implementation.
 type notifier func(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
 
-// productionNotifier connects the vsock client to the guest agent at vsockPath
-// (the same AgentPort productionGuestReady pings) and runs the handshake in the
-// same order the daemon's deliverConfig does: NotifyForkedWithConfig first
-// (generation + entropy + per-fork network + volume table), then Configure with
-// env+secrets. It fails closed: any connect/handshake error, or a guest that
-// reports ReseededRNG=false, returns an error so the stub leaves the VM unserved.
-//
-// Entropy and secret VALUES never appear in any log line or error here: errors
-// carry only the operation and the underlying transport error.
-func productionNotifier(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
-	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-	if err != nil {
-		return fmt.Errorf("connect guest agent for fork handshake: %w", err)
-	}
-	defer client.Close()
+// dialFunc is the injectable gRPC dial seam used by notifierGRPC and
+// guestReadyGRPC. The production seam uses guestgrpc.Dial (vsock); tests inject
+// guestgrpc.DialUnix so no real Firecracker process or vsock is needed.
+type dialFunc func(vsockPath string) (*guestgrpc.Client, error)
 
-	resp, err := client.NotifyForkedWithConfig(generation, entropy, req.Network, req.Volumes)
+// notifierGRPC runs the post-restore fork-correctness handshake against the
+// guest agent's gRPC Control service at vsockPath via the supplied dial function.
+// It delivers NotifyForked (generation + entropy + per-fork network + volume
+// table) then Configure (env + secrets), in the same order as the daemon's
+// deliverConfig. It fails closed: any transport error, or a guest that reports
+// ReseededRng=false, returns an error so the stub leaves the VM unserved.
+//
+// Entropy and secret VALUES are never logged or included in any error text:
+// errors carry only the operation name and the underlying transport error.
+func notifierGRPC(vsockPath string, generation uint64, entropy []byte, req ActivateRequest, dial dialFunc) error {
+	client, err := dial(vsockPath)
+	if err != nil {
+		return fmt.Errorf("connect guest agent gRPC for fork handshake: %w", err)
+	}
+	defer client.Close() //nolint:errcheck // best-effort on close
+
+	// Build the network sub-message from the vsock type. Nil network is valid
+	// (no per-fork re-addressing needed for this activation).
+	var pbNet *internalv1.NotifyForkedNetwork
+	if req.Network != nil {
+		pbNet = &internalv1.NotifyForkedNetwork{
+			GuestIp:    req.Network.GuestIP,
+			GatewayIp:  req.Network.GatewayIP,
+			PrefixLen:  int32(req.Network.PrefixLen),
+			GuestMac:   req.Network.GuestMAC,
+			ResolverIp: req.Network.ResolverIP,
+		}
+	}
+
+	// Build the volume table. Empty slice is valid (no volumes for this fork).
+	pbVols := make([]*internalv1.VolumeMountEntry, len(req.Volumes))
+	for i, v := range req.Volumes {
+		pbVols[i] = &internalv1.VolumeMountEntry{
+			Device:    v.Device,
+			MountPath: v.MountPath,
+			ReadOnly:  v.ReadOnly,
+		}
+	}
+
+	// NotifyForked: deliver generation, fresh entropy (SENSITIVE: do not log the
+	// value), host wall clock, per-fork network, and volume table. The guest
+	// reseeds its kernel CRNG, steps CLOCK_REALTIME, re-addresses eth0, and
+	// mounts volumes. host_wall_clock_nanos mirrors NotifyForkedWithConfig.
+	ctx := context.Background()
+	resp, err := client.Control.NotifyForked(ctx, &internalv1.NotifyForkedRequest{
+		Generation:         generation,
+		HostWallClockNanos: time.Now().UnixNano(),
+		Entropy:            entropy,
+		Network:            pbNet,
+		Volumes:            pbVols,
+	})
 	if err != nil {
 		return fmt.Errorf("notify guest of fork: %w", err)
 	}
 	// Fail closed: a guest that did not reseed shares CRNG state with its
-	// siblings, which is incorrect (not merely degraded). Do not serve it.
-	if resp == nil || !resp.ReseededRNG {
+	// siblings. Do not serve it.
+	if resp == nil || !resp.ReseededRng {
 		return fmt.Errorf("guest did not reseed its RNG after restore; refusing to serve a fork that shares CRNG state")
 	}
 
-	// Deliver claim-time env+secrets exactly as deliverConfig does: skip when
-	// there is nothing to deliver, otherwise hand them to the guest. Secret
-	// values are never logged.
+	// Configure: deliver claim-time env+secrets exactly as deliverConfig does.
+	// Skip when there is nothing to deliver. Secret values are never logged.
 	if len(req.Env) == 0 && len(req.Secrets) == 0 {
 		return nil
 	}
-	if err := client.Configure(req.Env, req.Secrets); err != nil {
+	if _, err := client.Control.Configure(ctx, &internalv1.ConfigureRequest{
+		Env:     req.Env,
+		Secrets: req.Secrets,
+	}); err != nil {
 		return fmt.Errorf("configure guest env/secrets: %w", err)
 	}
 	return nil
+}
+
+// productionNotifier is the production notifier seam: it calls notifierGRPC
+// with the real vsock dial function (guestgrpc.Dial, port 53) so the fork
+// handshake reaches the guest's gRPC Control service. The legacy JSON protocol
+// on AgentPort 52 is no longer used for this path.
+//
+// Entropy and secret VALUES are never logged or included in any error text.
+func productionNotifier(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
+	return notifierGRPC(vsockPath, generation, entropy, req, guestgrpc.Dial)
+}
+
+// guestReadyGRPC waits for the guest agent's gRPC Control service to answer a
+// Ping RPC, retrying at fixed intervals until the timeout elapses or ctx is
+// cancelled. It uses the supplied dial function so tests can inject DialUnix.
+// The retry semantics mirror the legacy productionGuestReady JSON poll loop.
+func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+
+		client, err := dial(vsockPath)
+		if err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+			case <-time.After(20 * time.Millisecond):
+			}
+			continue
+		}
+
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, pingErr := client.Control.Ping(pingCtx, &internalv1.PingRequest{})
+		cancel()
+		client.Close() //nolint:errcheck // best-effort; conn closed after check
+		if pingErr == nil {
+			return nil
+		}
+		lastErr = pingErr
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timeout")
+	}
+	return fmt.Errorf("guest agent gRPC not ready within %s: %w", timeout, lastErr)
 }
 
 // reflinker copies a source file to a destination with copy-on-write semantics
@@ -194,21 +293,19 @@ func waitForFile(ctx context.Context, path string, timeout time.Duration) error 
 // wsTransporter resolves a workspace.VsockTransport (the bulk tar TarDir/UntarDir
 // slice of the guest agent) for the active VM at vsockPath. The dehydrate and
 // hydrate workspace ops run the KVM-proven internal/workspace round trip through
-// it. The production seam connects a vsock client to the guest agent; tests
-// inject a fake in-memory transport so the ops can be exercised with no VM.
+// it. The production seam returns a gRPC-backed transport (Archive/Upload on
+// AgentGRPCPort 53); tests inject a fake in-memory transport so the ops can be
+// exercised with no VM.
 type wsTransporter func(vsockPath string) (workspace.VsockTransport, error)
 
-// productionWorkspaceTransport connects the vsock client to the guest agent at
-// vsockPath (the SAME AgentPort the activate handshake and sandbox API use) and
-// returns it as a workspace.VsockTransport (it satisfies TarDir/UntarDir). The
-// caller closes the client when done. Workspace content bytes never appear in
-// any log line: only the operation and the transport error are reported.
+// productionWorkspaceTransport returns a gRPC-backed workspace.VsockTransport
+// that uses the guest Sandbox Archive and Upload RPCs on AgentGRPCPort 53 to
+// perform bulk tar transfers. This replaces the legacy JSON path on AgentPort 52
+// so workspace dehydrate/hydrate works against the gRPC-only Rust agent.
+// Workspace content bytes never appear in any log line: only the operation and
+// the transport error are reported.
 func productionWorkspaceTransport(vsockPath string) (workspace.VsockTransport, error) {
-	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-	if err != nil {
-		return nil, fmt.Errorf("connect guest agent for workspace transfer: %w", err)
-	}
-	return client, nil
+	return &grpcWorkspaceTransport{vsockPath: vsockPath}, nil
 }
 
 // productionStarter wraps firecracker.StartVM. *firecracker.Client satisfies
@@ -232,30 +329,12 @@ func (c *clientVMM) Close() error {
 	return c.Client.Kill()
 }
 
-// productionGuestReady retries a vsock connect + ping until the guest answers or
-// the timeout elapses. It mirrors how cmd/bench waits for a restored guest: the
-// agent listens on vsock.AgentPort and answers Ping once the VM is resumed.
-func productionGuestReady(vsockPath string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-		if err == nil {
-			_, perr := client.Ping()
-			client.Close()
-			if perr == nil {
-				return nil
-			}
-			lastErr = perr
-		} else {
-			lastErr = err
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("timeout")
-	}
-	return fmt.Errorf("guest agent not ready within %s: %w", timeout, lastErr)
+// productionGuestReady waits for the guest agent's gRPC Control service to
+// answer a Ping RPC on vsock.AgentGRPCPort (53). It replaces the legacy JSON
+// poll on vsock.AgentPort (52) so the Rust guest agent (which serves only gRPC)
+// works in production. The retry semantics mirror the legacy JSON loop.
+func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) error {
+	return guestReadyGRPC(ctx, vsockPath, timeout, guestgrpc.Dial)
 }
 
 // Options configures a Stub. Zero values select the production seams, so the
@@ -340,8 +419,8 @@ type Options struct {
 	// not a secret; workspace CONTENT is never logged.
 	CASDir string
 	// WorkspaceTransport resolves the guest-agent bulk-tar transport for the
-	// workspace ops. Nil uses the production seam (connect a vsock client to the
-	// active VM's guest agent). Tests inject a fake in-memory transport.
+	// workspace ops. Nil uses the production seam (gRPC Archive/Upload on
+	// AgentGRPCPort 53). Tests inject a fake in-memory transport.
 	WorkspaceTransport wsTransporter
 }
 
@@ -738,7 +817,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	}
 
 	vsockPath := s.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(vsockPath, s.readyTimeout); err != nil {
+	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
 		// Fail closed: the snapshot loaded but the guest never answered, so we
 		// cannot vouch for the VM. Do NOT mark active or report a usable VM.
 		werr := fmt.Errorf("husk: guest not ready after activate: %w", err)

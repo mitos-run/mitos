@@ -262,7 +262,8 @@ func copyExecFrames(ctx context.Context, es ExecStream, send func(*sandboxv1.Exe
 		}
 		if frame.Done {
 			return send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
-				ExitCode: frame.ExitCode,
+				ExitCode:   frame.ExitCode,
+				ExecTimeMs: frame.ExecTimeMs,
 			}}})
 		}
 		if len(frame.Stdout) > 0 {
