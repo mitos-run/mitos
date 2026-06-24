@@ -24,9 +24,8 @@ deploy/olm/bundle/
 
 The CSV deploys `ghcr.io/mitos-run/mitos-controller:v0.4.0` and references
 `ghcr.io/mitos-run/mitos-husk-stub:v0.4.0`. The controller in turn deploys the
-node images (`mitos-forkd`, `mitos-kvm-device-plugin`, `mitos-facade`). The
-project is migrating its registry from `ghcr.io/paperclipinc` to
-`ghcr.io/mitos-run`. Before this bundle can install and run, every referenced
+node images (`mitos-forkd`, `mitos-kvm-device-plugin`, `mitos-facade`).
+Before this bundle can install and run, every referenced
 image MUST be published and pullable under `ghcr.io/mitos-run`. Confirm this
 first; OLM will report ImagePullBackOff otherwise.
 

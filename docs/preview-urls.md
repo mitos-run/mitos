@@ -1,4 +1,4 @@
-# Preview URLs: per-sandbox port exposure with auto-TLS (issue #126)
+# Preview URLs: per-sandbox port exposure with auto-TLS
 
 A preview URL exposes a port inside a running sandbox to the caller through a
 single per-sandbox hostname, `<sandbox-id>.preview.<domain>`, served by a
@@ -69,7 +69,7 @@ that matter, each unit-tested in `internal/preview/sign_test.go`:
 ### Why not a captoken
 
 Mitos already has macaroon-style attenuated capability tokens
-(`internal/captoken`, issue #25). A preview token needs no attenuation chain,
+(`internal/captoken`). A preview token needs no attenuation chain,
 only a single expiring binding of `(sandbox, port)`, so a focused signer keeps
 the scheme small and auditable. It reuses the SAME standard-library HMAC-SHA256
 and constant-time-compare core as captoken and the W4 S3 SigV4 signer
@@ -149,7 +149,7 @@ url = sb.get_host(8080)          # signed, expiring preview URL for port 8080
 `get_host(port)` asks the server to mint the URL (`POST /v1/preview`) and
 returns it; the signing secret never leaves the server. A server that does not
 expose the preview proxy returns a typed `501`. The E2B compatibility shim
-(`mitos.e2b.Sandbox.get_host`, issue #206) delegates to this same method, so an
+(`mitos.e2b.Sandbox.get_host`) delegates to this same method, so an
 E2B script's `sandbox.get_host(port)` works unchanged.
 
 ## Operating the proxy
@@ -167,6 +167,6 @@ claims by the controller wiring follow-up.
 ## Production gate
 
 This ingress adds a public attack surface. It is NOT cleared for production
-tenants until the external security review (issue #194) covers it. Edge rate
-limiting and an SNI/connection cap are documented follow-ups, sequenced with the
-#213 abuse-control envelope. See docs/threat-model.md section 7c.
+tenants until the external security review covers it. Edge rate
+limiting and an SNI/connection cap are documented follow-ups. See
+docs/threat-model.md section 7c.

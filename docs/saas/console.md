@@ -1,16 +1,16 @@
 # SaaS hosted web console: BFF and stack decision
 
-Status: foundational slice (issue #214). This slice ships the tested
+Status: foundational. This ships the tested
 backend-for-frontend (BFF) the console UI consumes; the SPA frontend, the real
 cluster live-sandbox query, and log streaming are documented follow-ups below.
 
-The console is the human surface over the accounts/keys (#210), usage and cost
-(#211), billing (#212), quota (#213), live sandboxes, and templates (#220)
+The console is the human surface over the accounts/keys, usage and cost,
+billing, quota, live sandboxes, and templates
 services. It must match Daytona's breadth (keys, usage, billing, org/team
 management) and beat both Daytona and E2B on live-sandbox inspection.
 
 PRODUCTION GATE: the console is a new public surface. It is NOT cleared for
-production tenants until the external security review (#194) covers it. See
+production tenants until the external security review covers it. See
 `docs/threat-model.md`.
 
 ## Stack decision
@@ -20,8 +20,8 @@ Decision: a thin client over a server-enforced BFF.
 - The verifiable, valuable core is the **BFF**: an org-scoped JSON API
   (`internal/saas/console`) that aggregates the existing services into the views
   the console needs, and enforces org-scoped data isolation SERVER-SIDE so the UI
-  layer is thin and cannot leak across tenants. This is what this slice ships and
-  tests.
+  layer is thin and cannot leak across tenants. This is what ships and
+  is tested today.
 - The **UI layer** is a thin SPA (React or Next.js) that renders the BFF
   responses. It is the documented follow-up. We deliberately do NOT scaffold a
   half-built, untested SPA in this Go-centric repo: a full JS app plus a browser
@@ -41,26 +41,26 @@ server-side, and exposes one org-scoped surface; the UI stays a thin renderer.
 
 `internal/saas/console.Console` is an `http.Handler` mounted at `/console/...`.
 Every endpoint reads the caller account and org from the request CONTEXT
-(attached by the #210 gateway / session auth via `WithCaller`), never from a
+(attached by the gateway / session auth via `WithCaller`), never from a
 query parameter, path, or body, and returns ONLY that org's data.
 
 | Endpoint | Method | Reads | Backing service |
 | --- | --- | --- | --- |
-| `/console/keys` | GET | list keys (masked) | #210 key service via `AccountService.ListKeys` |
-| `/console/keys` | POST | create key (raw returned once) | #210 `AccountService.CreateKey` |
-| `/console/keys/{id}/revoke` | POST | revoke key | #210 `AccountService.RevokeKey` |
-| `/console/usage` | GET | current + historical usage and cost | #211 `UsageStore` + `PriceList.Cost` |
-| `/console/billing` | GET | plan/status, spend, credit balance, dunning, ledger | #212 ledger + status + caps + rates |
+| `/console/keys` | GET | list keys (masked) | key service via `AccountService.ListKeys` |
+| `/console/keys` | POST | create key (raw returned once) | `AccountService.CreateKey` |
+| `/console/keys/{id}/revoke` | POST | revoke key | `AccountService.RevokeKey` |
+| `/console/usage` | GET | current + historical usage and cost | `UsageStore` + `PriceList.Cost` |
+| `/console/billing` | GET | plan/status, spend, credit balance, dunning, ledger | billing ledger + status + caps + rates |
 | `/console/sandboxes` | GET | list running sandboxes | `SandboxControl` seam |
 | `/console/sandboxes/{id}` | GET | inspect a sandbox | `SandboxControl` seam |
 | `/console/sandboxes/{id}` | DELETE | terminate a sandbox | `SandboxControl` seam |
-| `/console/members` | GET | org members + roles | #210 `AccountService.ListMembers` |
+| `/console/members` | GET | org members + roles | `AccountService.ListMembers` |
 | `/console/audit` | GET | org audit log | `AuditRecorder` seam |
-| `/console/templates` | GET | list templates | `TemplateLister` seam (ties to #220) |
+| `/console/templates` | GET | list templates | `TemplateLister` seam |
 
 Keys are always masked except the one-time raw key returned on create; the
 stored hash is never serialized. The billing view's "invoices" are the credit
-ledger entries in this slice; real Stripe invoice objects are a follow-up.
+ledger entries today; real Stripe invoice objects are a follow-up.
 
 ## Org-scoped data isolation: the load-bearing property
 
@@ -99,7 +99,7 @@ enforces org-scoping NOW behind two seams:
   is already built and tested elsewhere; wiring the proxy (an HTTP chunked or
   websocket bridge over the existing transport) is the follow-up.
 
-## What ships in this slice
+## What ships today
 
 - `internal/saas/console`: the BFF handler, the org-scoped seams
   (`SandboxControl`, `LogStreamer`, `TemplateLister`, `AuditRecorder`) and their
@@ -110,15 +110,15 @@ enforces org-scoping NOW behind two seams:
   exact usage-API estimator.
 - `cmd/console`: the BFF binary with a minimal `-dev` server-rendered index
   proving the wiring. The `-dev` header auth is a LOCAL smoke-test shim only; in
-  production the org context is attached by the #210 gateway / session auth.
+  production the org context is attached by the gateway / session auth.
 
 ## Documented follow-ups
 
 - The SPA frontend (React/Next) that renders the BFF.
 - The real control-plane `SandboxControl` (cluster query) and the `LogStreamer`
   proxy over the existing exec/log transport.
-- The `TemplateLister` over the #220 `SandboxPool` CRDs (inline `spec.template`).
-- Real Stripe invoice objects in the billing view (this slice shows the credit
+- The `TemplateLister` over the `SandboxPool` CRDs (inline `spec.template`).
+- Real Stripe invoice objects in the billing view (today it shows the credit
   ledger entries).
 - A durable (Postgres) audit log behind the `AuditRecorder` seam.
 - Session-cookie auth and the gateway mount that attaches the verified org

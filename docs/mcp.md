@@ -30,13 +30,13 @@ observe.
 `pool` maps to a sandbox-server template id in the HTTP backend (see below).
 
 Tool failures are returned as LLM-legible tool results, not bare codes: each
-carries a `code`, a one-sentence `cause`, and an actionable `remediation`
-(the API v2 error rule, issue #28), with `isError` set so the client can
+carries a `code`, a one-sentence `cause`, and an actionable `remediation`,
+with `isError` set so the client can
 distinguish a tool failure from a transport error.
 
 Workspace tools (`workspace_create`, `workspace_list`, `workspace_attach`,
 `workspace_delete`) are advertised only when `--enable-workspace-tools` is set
-and are not yet dispatched (issue #21).
+and are not yet dispatched.
 
 ## Launching it
 
@@ -148,12 +148,11 @@ Proven:
 
 Open:
 
-- Workspace tools (log/diff/revert/attach) pending Workspace (issue #21);
+- Workspace tools (log/diff/revert/attach) pending Workspace;
   advertised but not dispatched.
 - The Kubernetes claim backend (create a `Sandbox`, read its token
   Secret, exec via forkd); the HTTP backend is the v1 path.
-- Capability-budget advertisement pending issue #24.
-- Streaming exec and PTY over MCP pending the Connect runtime protocol
-  (issue #23).
+- Capability-budget advertisement pending.
+- Streaming exec and PTY over MCP pending the Connect runtime protocol.
 - Transport: stdio only in v1; no SSE or HTTP MCP transport yet.
 - MCP primitives: tools only in v1; no resources or prompts yet.

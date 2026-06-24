@@ -1,4 +1,4 @@
-# GPU support and larger sandbox sizes (issue #221)
+# GPU support and larger sandbox sizes
 
 This document is the HONEST design for GPU passthrough into the microVM and for
 sandbox sizes above the E2B 8 vCPU / 8 GiB / no-GPU class. It separates, clearly,
@@ -26,7 +26,7 @@ IMPLEMENTED and unit-tested on darwin (no hardware):
   KVM node selection pins husk pods to KVM nodes.
 - GPU-seconds as a billable metering unit (`internal/metering`,
   `Sample.GPUSeconds`/`Report.TotalGPUSeconds`), summed straight per sandbox so
-  the usage pipeline (#211) and Stripe metered billing (#212) can charge it
+  the usage pipeline and Stripe metered billing can charge it
   alongside vCPU-seconds.
 
 HARDWARE-GATED (NOT implemented, must be validated on real GPU KVM hardware):
@@ -113,8 +113,8 @@ holds its assigned GPU(s), multiplied by the device count (a 2-GPU sandbox alive
 
 The accounting math is unit-tested (`TestAggregatePassesGPUSeconds`). The REAL
 per-device measurement (reading actual on-device busy time, for example via NVML)
-is hardware-gated; today the field is the billing seam the usage pipeline (#211)
-and Stripe metered billing (#212) charge on, fed by wall-clock-held-device time.
+is hardware-gated; today the field is the billing seam the usage pipeline
+and Stripe metered billing charge on, fed by wall-clock-held-device time.
 
 ## Larger sizes and the CoW metering/quota interaction
 
@@ -137,7 +137,7 @@ sizes correct rather than just unbounded:
    (`docs/metering.md`), so density is preserved for the shared base; only each
    fork's UNIQUE divergence and its explicit size headroom are charged per fork.
    Quota (the budget model, `api/v1/budget.go`, and the per-org
-   quotas of #213) bounds the SUM of unique footprint and now GPU-seconds, so a
+   quotas) bounds the SUM of unique footprint and now GPU-seconds, so a
    tenant cannot request unbounded large or GPU sandboxes; the overcommit factor
    is the operator's lever for how hard to lean on CoW sharing when packing.
 

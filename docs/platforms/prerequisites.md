@@ -7,8 +7,7 @@ namespace**, NOT on the Kubernetes distribution. This page is the distro-neutral
 checklist; `talos-hetzner.md` is one concrete realization.
 
 These were learned the hard way on a clean-room bare-metal install (a rescue /
-minimal-kernel host fails several of them); see
-`docs/superpowers/plans/2026-06-18-deployment-ux-findings.md`.
+minimal-kernel host fails several of them).
 
 ## Every KVM node MUST provide
 

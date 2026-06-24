@@ -62,7 +62,7 @@ forkd for the decision.
 
 A Ready claim with `spec.idleTimeout` set is reaped once it has been idle past
 the timeout, measured from the later of `StartedAt` and last activity. Idle is
-WORK-AWARE (issue #218): activity comes from forkd via the `ListSandboxes`
+WORK-AWARE: activity comes from forkd via the `ListSandboxes`
 primitive, which reports each sandbox's last exec or file activity AND the
 work-aware signals: the count of OPEN streams (a running background job) and the
 paused flag. A sandbox with a live background process, or one that is paused, is
@@ -252,7 +252,7 @@ Shipped (was open, now in main):
   uid). The PID-recycle guard (`verifyPID`/`procfsVerifier`, `reconcile.go:22`,
   `reconcile.go:42`) adopts a journaled pid ONLY when it is genuinely our live
   Firecracker, so a recycled, unrelated pid is reaped/dropped rather than adopted
-  or wrongly killed (issue #12, the crash-reap PR).
+  or wrongly killed.
 - saturation behavior: the node enforces a per-node MaxSandboxes ceiling, an
   atomic slot reservation that closes the check/grab TOCTOU and fail-closes with
   `ErrAtCapacity` (`engine.go:39`, the reservation at `engine.go:196`-`207`),
@@ -265,7 +265,7 @@ Shipped (was open, now in main):
   re-pends through `reconcileNoCapacity` (`sandboxclaim_controller.go:580`)
   rather than hard-failing.
 
-Shipped since (now in main, all from issue #163):
+Shipped since (now in main):
 
 - volume orphan GC: see the Volume orphan sweep guarantee above. A per-sandbox
   volume backing whose claim object is gone is reclaimed past `OrphanGrace`,
@@ -288,7 +288,7 @@ Shipped since (now in main, all from issue #163):
 
 ### Not yet built (known gaps)
 
-The following are NOT yet built and are tracked in epic #12. Each is verified
+The following are NOT yet built. Each is verified
 against the code below so the gap is honest, not assumed:
 
 - raw-forkd CLAIM auto-replacement after node loss: in the husk default the warm

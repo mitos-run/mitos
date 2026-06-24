@@ -1,11 +1,10 @@
 # Dynamic CPU pinning and launch scheduling priority
 
-Tracking: issue #168. Status: DESIGN plus the packing-policy spec field, the
+Status: DESIGN plus the packing-policy spec field, the
 pure pin-plan selection logic, a Linux-gated affinity/RT applier skeleton, the
 post-ready hook wired into the fork path, and a bench aggregation. Every density
 and activate-success figure in this document is a TARGET until measured on the
-bare-metal reference node (#16). Nothing here is a measured claim (CLAUDE.md
-operating principle 1).
+bare-metal reference node. Nothing here is a measured claim.
 
 ## The problem
 
@@ -77,13 +76,13 @@ Defaults are filled by the API server (kubebuilder markers) and mirrored in Go b
 `CPUPinningSpec.Normalized()` for the in-process path. With `enabled: false` (the
 default) nothing is pinned and the behavior is exactly as before.
 
-## How it fits the cgroup / cpuset model (does NOT regress #33)
+## How it fits the cgroup / cpuset model
 
 The pin is applied WITHIN the husk pod's cpuset. The topology the planner reads
 is the pod's allowed CPU set, so a pinned vCPU thread can only land on a CPU the
 pod cgroup already grants. The pin therefore never escapes the pod cgroup and
 never changes which cgroup a fork's memory is charged to: the CoW memcg
-accounting (#33) is untouched, because affinity (which CPU a thread runs on) is
+accounting is untouched, because affinity (which CPU a thread runs on) is
 orthogonal to memory accounting (which memcg its pages are charged to). The husk
 pod cgroup model (the pod owns the cpuset and the memcg) is preserved; pinning
 only narrows the CPU placement inside that existing boundary.
@@ -116,7 +115,7 @@ only narrows the CPU placement inside that existing boundary.
   vCPU thread IDs come from the Firecracker process (`fc_vcpu` threads under
   `/proc/<pid>/task`, Linux-only).
 
-## Bench plan (TARGETS until measured on #16)
+## Bench plan (TARGETS until measured on the reference node)
 
 `cmd/bench --mode pinning` measures activate success rate and activate latency
 under a claim storm, pinning ON vs OFF, and reports the success-rate lift. The
@@ -126,8 +125,8 @@ needs Linux + KVM + bare metal + a real claim storm:
 
 - darwin and any non-KVM host: the mode refuses to emit a number (the applier is
   a no-op, so there is nothing to measure) rather than fabricating one.
-- bare-metal node (#16): the claim-storm activate-success driver, tied to the
-  chaos suite (#163), forks under contention with pinning off then on, records
+- bare-metal node: the claim-storm activate-success driver, tied to the
+  chaos suite, forks under contention with pinning off then on, records
   each `ActivateOutcome`, and hands both arms to `AggregatePinning`.
 
 Targets to validate (NOT yet met, motivated by the Browser Use numbers):
@@ -141,7 +140,7 @@ Targets to validate (NOT yet met, motivated by the Browser Use numbers):
 The claim-storm driver now exists and was run on a Hetzner i7-6700 (4 physical
 cores / 8 threads, KVM, NVMe XFS-reflink), python:3.12-slim template, 4 KiB
 file-backed restore. This is a real measured datapoint, NOT the bare-metal
-reference node (#16), and the result is honest-neutral, the win is NOT reproduced
+reference node, and the result is honest-neutral, the win is NOT reproduced
 on this hardware:
 
 | storm | arm | success-rate | activate p50 | activate p99 |

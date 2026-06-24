@@ -1,8 +1,7 @@
 # Trademarks
 
 The "Mitos" name, logo, and any associated marks are reserved by the project
-maintainer. This is a placeholder notice for the maintainer to formalize; it
-records intent, it is not a registered-trademark claim.
+maintainer. This notice records intent; it is not a registered-trademark claim.
 
 The code in this repository is licensed under the Apache License 2.0 (see
 `LICENSE`). The Apache 2.0 license grants rights to the code; it does NOT grant
@@ -16,6 +15,4 @@ any right to use the project's name, logo, or marks. In particular:
   own name to avoid confusion.
 
 For the open-source and open-core boundary, see docs/open-core.md. For
-trademark questions, contact the maintainer (see SECURITY.md for the contact;
-MAINTAINER TODO: confirm or replace with a dedicated trademark contact before
-any formal mark registration).
+trademark questions, contact the maintainer (see SECURITY.md for the contact).
