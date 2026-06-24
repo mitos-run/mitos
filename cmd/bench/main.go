@@ -10,12 +10,11 @@
 // the timing reflects fork + vsock + guest agent and nothing else.
 //
 // The --exec-transport flag selects the agent protocol:
-//   - json (default): legacy JSON-lines on AgentPort 52, works with the Go agent
+//   - grpc (default): gRPC Control.Ping RPC on AgentGRPCPort 53, works with
+//     the Rust production agent (port 53 only) AND the Go agent (serves 53 too).
+//     This is the transport for the apples-to-apples SP1 bench.
+//   - json: legacy JSON-lines on AgentPort 52, works with the Go agent
 //     (serves both 52 and 53) and the old spike agent.
-//   - grpc: gRPC Control.Ping RPC on AgentGRPCPort 53, works with the Rust
-//     production agent (port 53 only) AND the Go agent (serves 53 too). Use this
-//     mode for the apples-to-apples SP1 bench (both agents over the same gRPC
-//     contract).
 //
 // The engine validates /dev/kvm at construction, so the timing path runs only
 // on a Linux KVM host; on any other platform the tool builds and parses flags
@@ -53,13 +52,14 @@ const (
 	modePinning     = "pinning"
 	defaultFanOutNs = "1,4,16,64"
 
-	// execTransportJSON is the legacy JSON-lines exec path over AgentPort 52.
-	// It works with the Go agent (which serves both 52 and 53).
-	execTransportJSON = "json"
 	// execTransportGRPC drives the gRPC Control.Ping RPC over AgentGRPCPort 53.
 	// Both the Go agent and the Rust production agent serve port 53, making
-	// this the transport for the apples-to-apples SP1 bench.
+	// this the default transport and the one for the apples-to-apples SP1 bench.
 	execTransportGRPC = "grpc"
+	// execTransportJSON is the legacy JSON-lines exec path over AgentPort 52.
+	// It works with the Go agent (which serves both 52 and 53). Kept for
+	// backward compatibility; grpc is the default.
+	execTransportJSON = "json"
 )
 
 // config holds the parsed, validated flags. Parsing is split out so it can be
@@ -75,10 +75,10 @@ type config struct {
 	jsonPath    string
 	summary     bool
 	// execTransport selects the guest agent protocol for the exec round-trip
-	// in fork-exec and exec-rt modes. "json" uses the legacy JSON-lines path
-	// on AgentPort 52 (Go agent only). "grpc" uses a gRPC Control.Ping RPC
-	// on AgentGRPCPort 53, which both the Go agent and the Rust production
+	// in fork-exec and exec-rt modes. "grpc" (default) uses a gRPC Control.Ping
+	// RPC on AgentGRPCPort 53, which both the Go agent and the Rust production
 	// agent serve, making it the transport for the apples-to-apples SP1 bench.
+	// "json" uses the legacy JSON-lines path on AgentPort 52 (Go agent only).
 	execTransport string
 	// forks is the number of sandboxes the metering mode forks from one
 	// template before reading the CoW-aware metering report. It is unused by
@@ -110,7 +110,7 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.forks, "forks", 4, "metering mode: number of sandboxes to fork from one template before reading the report")
 	fs.IntVar(&cfg.settleMs, "settle-ms", 500, "metering mode: milliseconds to let the forks settle before reading the report")
 	fs.StringVar(&fanOutNs, "fanout-n", defaultFanOutNs, "fork-fanout mode: comma-separated fan-out widths (N) to measure, e.g. 1,4,16,64")
-	fs.StringVar(&cfg.execTransport, "exec-transport", execTransportJSON, "exec transport for fork-exec and exec-rt modes: json (legacy, AgentPort 52) or grpc (Control.Ping over AgentGRPCPort 53, works with both Go and Rust agents)")
+	fs.StringVar(&cfg.execTransport, "exec-transport", execTransportGRPC, "exec transport for fork-exec and exec-rt modes: grpc (default, Control.Ping over AgentGRPCPort 53, works with both Go and Rust agents) or json (legacy, AgentPort 52)")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -493,11 +493,11 @@ func pinningStormArm(engine *fork.Engine, cfg config, pin *cpupin.Config) (bench
 	return arm, nil
 }
 
-// oneStormActivate forks one sandbox (optionally pinned), execs a trivial command
-// to mark first-exec, and returns the activation outcome (success + fork->exec
-// latency). Any fork/connect/exec failure is recorded as a failed activation, so
-// the storm's success RATE is meaningful under contention. The sandbox is always
-// torn down.
+// oneStormActivate forks one sandbox (optionally pinned), calls Control.Ping over
+// gRPC to mark first-response, and returns the activation outcome (success +
+// fork->ping latency). Any fork/connect/ping failure is recorded as a failed
+// activation, so the storm's success RATE is meaningful under contention. The
+// sandbox is always torn down.
 func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpupin.Config) benchstat.ActivateOutcome {
 	t0 := time.Now()
 	opts := fork.ForkOpts{VCPUs: 1}
@@ -509,14 +509,11 @@ func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpup
 		return benchstat.ActivateOutcome{OK: false}
 	}
 	defer func() { _ = engine.Terminate(sandboxID) }()
-	client, err := connectWithRetry(res.VsockPath)
+	cc, err := connectGRPCWithRetry(res.VsockPath)
 	if err != nil {
 		return benchstat.ActivateOutcome{OK: false}
 	}
-	defer client.Close()
-	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		return benchstat.ActivateOutcome{OK: false}
-	}
+	defer func() { _ = cc.Close() }()
 	return benchstat.ActivateOutcome{OK: true, Latency: time.Since(t0)}
 }
 
@@ -616,32 +613,27 @@ func forkToReady(engine *fork.Engine, template, sandboxID string) (time.Duration
 	if err != nil {
 		return 0, fmt.Errorf("fork: %w", err)
 	}
-	client, err := connectWithRetry(res.VsockPath)
+	// connectGRPCWithRetry dials and verifies with a Control.Ping, so the
+	// returned conn has already received a ping response. The clock stops here.
+	cc, err := connectGRPCWithRetry(res.VsockPath)
 	if err != nil {
 		return 0, fmt.Errorf("connect: %w", err)
 	}
-	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		client.Close()
-		return 0, fmt.Errorf("exec: %w", err)
-	}
-	elapsed := time.Since(t0) // clock stops here
-	client.Close()
+	elapsed := time.Since(t0) // clock stops when the first ping is in
+	_ = cc.Close()
 	return elapsed, nil
 }
 
 // benchForkExec measures the time from fork start to the first successful
-// agent response (exec result for json transport; Control.Ping for grpc
-// transport), terminating the sandbox each iteration.
+// Control.Ping response over gRPC (AgentGRPCPort 53), terminating the sandbox
+// each iteration. The json flag value is accepted for backward compatibility but
+// also uses the gRPC path: the legacy JSON agent is being removed.
 func benchForkExec(engine *fork.Engine, cfg config) (benchstat.Result, error) {
-	forkExecFn := oneForkExec
-	if cfg.execTransport == execTransportGRPC {
-		forkExecFn = oneForkExecGRPC
-	}
 	// Warmup iterations are discarded; they pay the page-cache and
 	// snapshot-load costs that should not skew the measured samples.
 	for i := 0; i < cfg.warmup; i++ {
 		id := fmt.Sprintf("bench-warm-%d", i)
-		if _, err := forkExecFn(engine, cfg.template, id); err != nil {
+		if _, err := oneForkExecGRPC(engine, cfg.template, id); err != nil {
 			return benchstat.Result{}, fmt.Errorf("warmup iteration %d: %w", i, err)
 		}
 	}
@@ -649,63 +641,21 @@ func benchForkExec(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	samples := make([]time.Duration, 0, cfg.iterations)
 	for i := 0; i < cfg.iterations; i++ {
 		id := fmt.Sprintf("bench-fe-%d", i)
-		elapsed, err := forkExecFn(engine, cfg.template, id)
+		elapsed, err := oneForkExecGRPC(engine, cfg.template, id)
 		if err != nil {
 			return benchstat.Result{}, fmt.Errorf("iteration %d: %w", i, err)
 		}
 		samples = append(samples, elapsed)
 	}
 
-	name := "fork_to_first_exec"
-	if cfg.execTransport == execTransportGRPC {
-		name = "fork_to_first_grpc_ping"
-	}
-	return benchstat.Result{Name: name, Unit: "ms", Summary: benchstat.Summarize(samples)}, nil
-}
-
-// oneForkExec forks one sandbox, execs a trivial command over its vsock, and
-// terminates it, returning the measured fork-to-first-exec elapsed time.
-//
-// Measurement boundary (do not regress): the clock starts immediately before
-// Fork and stops the instant the first exec result is in. Teardown (client
-// close and engine.Terminate, which SIGKILLs Firecracker, waits on the
-// process, and removes the sandbox/jailer chroot) runs AFTER the elapsed value
-// is captured and is therefore NOT counted in the returned duration. The
-// directive is fork -> first successful exec, not fork -> teardown.
-func oneForkExec(engine *fork.Engine, template, sandboxID string) (time.Duration, error) {
-	t0 := time.Now()
-	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{})
-	if err != nil {
-		return 0, fmt.Errorf("fork: %w", err)
-	}
-	// From here every path must tear the sandbox down so a failed iteration
-	// does not leak a VM. cleanup is invoked explicitly (never deferred on the
-	// success path) so that it runs only AFTER elapsed is computed.
-	cleanup := func() { _ = engine.Terminate(sandboxID) }
-
-	client, err := connectWithRetry(res.VsockPath)
-	if err != nil {
-		cleanup()
-		return 0, fmt.Errorf("connect: %w", err)
-	}
-
-	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		client.Close()
-		cleanup()
-		return 0, fmt.Errorf("exec: %w", err)
-	}
-
-	elapsed := time.Since(t0) // clock stops here, before any teardown
-	client.Close()
-	cleanup() // teardown is NOT part of elapsed
-	return elapsed, nil
+	return benchstat.Result{Name: "fork_to_first_grpc_ping", Unit: "ms", Summary: benchstat.Summarize(samples)}, nil
 }
 
 // onePrefetchForkExec forks one sandbox (UFFD-backed; disablePrefetch selects the
-// lazy OFF arm vs the preloaded ON arm), execs a trivial command to mark
-// first-exec, and returns the userfaultfd lazy-fault count for the resume and the
-// claim->first-exec latency. The sandbox is always torn down before returning so
-// no iteration leaks a VM. The fault count is read AFTER the exec (faults accrue
+// lazy OFF arm vs the preloaded ON arm), pings over gRPC to mark first-response,
+// and returns the userfaultfd lazy-fault count for the resume and the
+// claim->first-ping latency. The sandbox is always torn down before returning so
+// no iteration leaks a VM. The fault count is read AFTER the ping (faults accrue
 // as the guest runs) and BEFORE teardown.
 func onePrefetchForkExec(engine *fork.Engine, template, sandboxID string, disablePrefetch bool) (int, time.Duration, error) {
 	t0 := time.Now()
@@ -715,69 +665,26 @@ func onePrefetchForkExec(engine *fork.Engine, template, sandboxID string, disabl
 	}
 	cleanup := func() { _ = engine.Terminate(sandboxID) }
 
-	client, err := connectWithRetry(res.VsockPath)
+	// connectGRPCWithRetry retries until the agent is reachable and verifies
+	// liveness via a Control.Ping, so the clock already covers the first ping.
+	cc, err := connectGRPCWithRetry(res.VsockPath)
 	if err != nil {
 		cleanup()
 		return 0, 0, fmt.Errorf("connect: %w", err)
 	}
-	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		client.Close()
-		cleanup()
-		return 0, 0, fmt.Errorf("exec: %w", err)
-	}
 	elapsed := time.Since(t0)
 	faults := int(engine.FaultsServed(sandboxID))
-	client.Close()
+	_ = cc.Close()
 	cleanup()
 	return faults, elapsed, nil
 }
 
-// benchExecRT forks one sandbox, warms it, then measures M trivial round-trips
-// against the live agent. For the json transport this runs /bin/true over the
-// JSON exec path; for the grpc transport this calls Control.Ping over gRPC.
+// benchExecRT measures M trivial Control.Ping round-trips over gRPC against a
+// forked sandbox. The --exec-transport flag is accepted for backward
+// compatibility; both json and grpc values use the gRPC path because the
+// legacy JSON agent is being removed.
 func benchExecRT(engine *fork.Engine, cfg config) (benchstat.Result, error) {
-	if cfg.execTransport == execTransportGRPC {
-		return benchExecRTGRPC(engine, cfg)
-	}
-	const sandboxID = "bench-execrt"
-	res, err := engine.Fork(cfg.template, sandboxID, fork.ForkOpts{})
-	if err != nil {
-		return benchstat.Result{}, fmt.Errorf("fork: %w", err)
-	}
-	defer func() { _ = engine.Terminate(sandboxID) }()
-
-	client, err := connectWithRetry(res.VsockPath)
-	if err != nil {
-		return benchstat.Result{}, err
-	}
-	defer client.Close()
-
-	// Connection establishment: one mandatory discarded exec that pays the
-	// first-exec costs (guest exec path cold start, any lazy connection
-	// setup) which must happen once before the agent can serve execs at all.
-	// This is distinct from and always runs in addition to the --warmup execs
-	// below; it is not counted by --warmup. With --warmup=0 the agent still
-	// gets this single connection-establishing exec, but zero discretionary
-	// warmup iterations on top of it.
-	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		return benchstat.Result{}, fmt.Errorf("connection-establishment exec: %w", err)
-	}
-	for i := 0; i < cfg.warmup; i++ {
-		if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-			return benchstat.Result{}, fmt.Errorf("warmup exec %d: %w", i, err)
-		}
-	}
-
-	samples := make([]time.Duration, 0, cfg.iterations)
-	for i := 0; i < cfg.iterations; i++ {
-		t0 := time.Now()
-		if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-			return benchstat.Result{}, fmt.Errorf("exec iteration %d: %w", i, err)
-		}
-		samples = append(samples, time.Since(t0))
-	}
-
-	return benchstat.Result{Name: "exec_round_trip", Unit: "ms", Summary: benchstat.Summarize(samples)}, nil
+	return benchExecRTGRPC(engine, cfg)
 }
 
 // benchExecRTGRPC forks one sandbox, warms up the gRPC connection, then
@@ -823,22 +730,6 @@ func benchExecRTGRPC(engine *fork.Engine, cfg config) (benchstat.Result, error) 
 	}
 
 	return benchstat.Result{Name: "grpc_ping_round_trip", Unit: "ms", Summary: benchstat.Summarize(samples)}, nil
-}
-
-// connectWithRetry dials the fork's vsock UDS, retrying briefly because the
-// guest agent needs a moment to accept connections after a restore.
-func connectWithRetry(vsockPath string) (*vsock.Client, error) {
-	const attempts = 50
-	var lastErr error
-	for i := 0; i < attempts; i++ {
-		client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-		if err == nil {
-			return client, nil
-		}
-		lastErr = err
-		time.Sleep(20 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("connect vsock %s after %d attempts: %w", vsockPath, attempts, lastErr)
 }
 
 // connectGRPCWithRetry dials the fork's gRPC vsock port (AgentGRPCPort 53),

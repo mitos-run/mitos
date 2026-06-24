@@ -30,14 +30,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
-	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestgrpc"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 func main() {
@@ -103,7 +107,7 @@ func run(o opts) error {
 	if err != nil {
 		return setupErr(fmt.Errorf("connect to forked guest agent: %w", err))
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck // best-effort
 
 	// T=0: the metered unique bytes right after the fork, before the workload.
 	// Engine.Metering re-stats smaps_rollup, so this is a live read.
@@ -146,35 +150,49 @@ func setupErr(err error) error {
 	return err
 }
 
-// execOK runs a command in the fork over the guest agent and returns its stdout,
+// execOK runs a command in the fork over the gRPC ExecStream RPC and returns its stdout,
 // failing if the transport errors or the command exits nonzero.
-func execOK(client *vsock.Client, command string) (string, error) {
-	res, err := client.Exec(command, "/", nil, 120)
+func execOK(client *guestgrpc.Client, command string) (string, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/",
+		TimeoutSeconds: 120,
+	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("exec stream: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return res.Stdout, fmt.Errorf("command %q exited %d: %s", command, res.ExitCode, res.Stderr)
+	var stdout, stderr strings.Builder
+	var exitCode int32
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("recv exec frame: %w", err)
+		}
+		switch m := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout.Write(m.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderr.Write(m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = m.Exit.GetExitCode()
+			if spawnErr := m.Exit.GetError(); spawnErr != "" {
+				return stdout.String(), fmt.Errorf("exec spawn error: %s", spawnErr)
+			}
+		}
 	}
-	return res.Stdout, nil
+	if exitCode != 0 {
+		return stdout.String(), fmt.Errorf("command %q exited %d: %s", command, exitCode, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
 // connect dials the forked guest agent over vsock with a bounded retry while the
 // restored VM finishes coming up.
-func connect(udsPath string) (*vsock.Client, error) {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < 30; attempt++ {
-		client, err = vsock.Connect(udsPath, vsock.AgentPort)
-		if err == nil {
-			_, perr := client.Ping()
-			if perr == nil {
-				return client, nil
-			}
-			_ = client.Close()
-			err = perr
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return nil, fmt.Errorf("connect after retries: %w", err)
+func connect(udsPath string) (*guestgrpc.Client, error) {
+	ctx := context.Background()
+	return guestgrpc.WaitReady(ctx, udsPath, 30*time.Second)
 }
