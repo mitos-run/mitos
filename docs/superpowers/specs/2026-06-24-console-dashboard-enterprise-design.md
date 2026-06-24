@@ -254,10 +254,26 @@ and no provisioning.
 - **OIDC (exists, hardened):** keep `oidcauth`; add an org-level **enforce-SSO**
   setting so a member of an SSO-enforced org must authenticate through the org's
   IdP. Self-host configures the issuer through Helm values (keystone section 5).
-- **SAML 2.0:** a new `internal/saas/saml` provider that issues the same session
-  contract as `oidcauth` (SP-initiated and IdP-initiated, an ACS endpoint, and
-  metadata exchange), mapping the assertion to an account and org membership.
-  Library: `russellhaering/gosaml2` (mature, widely used).
+- **Federation broker (non-SAML): Dex.** For LDAP, GitHub, Google, and generic
+  OIDC, the recommended self-host pattern is to front auth with Dex (the CNCF
+  OIDC broker), which exposes a single OIDC interface to the console. This keeps
+  `oidcauth` the only app-side integration for that whole family and is the
+  standard K8s-native pattern (ArgoCD, Harbor). Dex is optional: an operator can
+  point `oidcauth` straight at any OIDC issuer (Keycloak, Okta, Google) instead.
+- **SAML 2.0 (direct, not via the broker):** a new `internal/saas/saml`
+  provider that issues the same session contract as `oidcauth` (SP-initiated and
+  IdP-initiated, an ACS endpoint, and metadata exchange), mapping the assertion
+  to an account and org membership. **Library: `crewjam/saml`** (the de-facto
+  standard Go SAML library; its `samlsp` middleware handles the ACS endpoint,
+  metadata, and session plumbing, so the security-critical XML/assertion code is
+  the maintained library's, not ours). `russellhaering/gosaml2` (SP-only, pure-Go
+  XML-dsig, actively maintained) is the lean alternative if we choose to own the
+  ACS/session glue. SAML deliberately does **not** route through Dex: Dex's own
+  SAML connector is flagged unmaintained and prone to auth bypass, so SAML uses
+  the dedicated library directly. Every SAML library carries CVE history (SAML is
+  inherently footgun-prone), which is exactly why we lean on maintained
+  middleware rather than parsing assertions ourselves, and why the ACS path is a
+  named-human-reviewer surface (section 9).
 - **SCIM 2.0 provisioning:** a new `/scim/v2/Users` and `/scim/v2/Groups`
   endpoint (RFC 7644) authenticated by a per-org provisioning bearer token
   (write-only after creation), mapping SCIM Users to accounts and memberships and
