@@ -12,3 +12,9 @@ pub mod clock;
 /// fails so the host reaps the fork rather than serving it with shared CRNG
 /// state.
 pub mod reseed;
+
+/// Network reconfiguration: reconfigures eth0 with the per-fork address,
+/// default route, and optionally the MAC address and resolver, after a
+/// snapshot restore. Mirrors configureNetwork + writeResolvConf in
+/// notifyforked.go:193-232.
+pub mod network;
