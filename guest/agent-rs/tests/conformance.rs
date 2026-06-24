@@ -1002,6 +1002,124 @@ async fn upload_path_traversal_rejected() {
     // Note: workspace root is intentionally NOT reset; see set_workspace_root_for_test.
 }
 
+// ---------------------------------------------------------------------------
+// Watch RPC conformance tests (Task 2.4)
+// ---------------------------------------------------------------------------
+
+/// The Watch RPC must stream a CREATE FsEvent when a file is written under the
+/// watched directory. The watched path must be a directory; the event must carry
+/// kind=CREATE and a path ending in the created filename.
+#[tokio::test]
+async fn watch_detects_file_create() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-create.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let dir = "/tmp/agent-rs-watch-test";
+    std::fs::create_dir_all(dir).unwrap();
+    // Remove any leftover file from a prior run.
+    let _ = std::fs::remove_file(format!("{dir}/hello.txt"));
+
+    // Override workspace root so /tmp passes the allowlist check.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let stream = client
+        .watch(sandbox_v1::WatchRequest {
+            path: dir.into(),
+            recursive: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Give the watcher a moment to install before the file op.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    std::fs::write(format!("{dir}/hello.txt"), b"hi").unwrap();
+
+    tokio::pin!(stream);
+    let ev = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.next(),
+    )
+    .await
+    .expect("no event within 2s")
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        ev.kind,
+        sandbox_v1::fs_event::Kind::Create as i32,
+        "expected CREATE event, got kind={}",
+        ev.kind
+    );
+    assert!(
+        ev.path.ends_with("hello.txt"),
+        "expected path ending in hello.txt, got: {}",
+        ev.path
+    );
+}
+
+/// Watch on a non-directory path must return InvalidArgument.
+#[tokio::test]
+async fn watch_non_directory_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-notdir.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Override workspace root so /tmp passes the allowlist check.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    // Create a regular file to watch.
+    let file_path = "/tmp/agent-rs-watch-file.txt";
+    std::fs::write(file_path, b"not a directory").unwrap();
+
+    let result = client
+        .watch(sandbox_v1::WatchRequest {
+            path: file_path.into(),
+            recursive: false,
+        })
+        .await;
+
+    let status = result.expect_err("Watch on a non-directory must fail");
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "expected InvalidArgument for non-directory path, got {:?}",
+        status.code()
+    );
+}
+
+/// Watch on a path outside the workspace allowlist must return PermissionDenied.
+#[tokio::test]
+async fn watch_outside_workspace_returns_permission_denied() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-denied.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Do NOT override workspace root: /workspace is the default, so /etc is denied.
+    // However, the archive tests may have overridden it. Reset to /workspace here.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/workspace");
+
+    let result = client
+        .watch(sandbox_v1::WatchRequest {
+            path: "/etc".into(),
+            recursive: false,
+        })
+        .await;
+
+    let status = result.expect_err("Watch on /etc must fail with PermissionDenied");
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied for /etc, got {:?}",
+        status.code()
+    );
+}
+
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
 #[tokio::test]
 async fn exec_stderr_returned() {

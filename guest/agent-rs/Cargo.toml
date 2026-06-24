@@ -56,6 +56,11 @@ tar = "0.4"
 # Directory walker for tar creation (skips symlinks by default configuration).
 walkdir = "2"
 
+# Filesystem event watching: inotify on Linux (used by the Watch RPC).
+# v6 is the stable API; notify uses its own thread and delivers events via a
+# channel, which we bridge into the tonic server stream via tokio::sync::mpsc.
+notify = "6"
+
 [dev-dependencies]
 # For temp file creation in sys/crng tests (RNDADDENTROPY on plain file).
 tempfile = "3"

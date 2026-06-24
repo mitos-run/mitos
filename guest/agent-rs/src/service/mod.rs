@@ -26,6 +26,10 @@ pub mod files;
 /// implementations (Task 2.3).
 pub mod archive;
 
+/// Watch RPC implementation (Task 2.4): inotify event streaming via the
+/// `notify` crate, bridged into a bounded tonic server stream.
+pub mod watch;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -156,9 +160,9 @@ impl Sandbox for SandboxService {
 
     async fn watch(
         &self,
-        _request: Request<sandbox_v1::WatchRequest>,
+        request: Request<sandbox_v1::WatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        unimplemented_stream("Watch")
+        watch::watch(request).await
     }
 
     // --- Processes and network ------------------------------------------------

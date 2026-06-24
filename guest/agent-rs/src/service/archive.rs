@@ -106,7 +106,7 @@ const CHUNK_BYTES: usize = 32 << 10;
 /// `starts_with("/workspace")` while the OS resolves it to "/etc". The loop below
 /// mirrors filepath.Clean in Go: ParentDir pops the last stack entry (and errors
 /// if the stack would go above root), CurDir is skipped, everything else is pushed.
-fn path_allowed(p: &str) -> bool {
+pub(super) fn path_allowed(p: &str) -> bool {
     if p.is_empty() {
         return false;
     }
