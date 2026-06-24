@@ -33,9 +33,10 @@ import (
 )
 
 // newSingleSandboxAPI builds a SandboxAPI in single-sandbox mode with a
-// connected fake agent and a registered token under the LOCAL id, then returns
-// the API plus an httptest server over its Handler. This mirrors the husk-stub:
-// the sandbox is known locally as localID, but the SDK will send a different id.
+// connected gRPC fake agent and a registered token under the LOCAL id, then
+// returns the API plus an httptest server over its Handler. This mirrors the
+// husk-stub: the sandbox is known locally as localID, but the SDK will send a
+// different id.
 func newSingleSandboxAPI(t *testing.T, localID, token string) (*SandboxAPI, *httptest.Server) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "single")
@@ -45,15 +46,14 @@ func newSingleSandboxAPI(t *testing.T, localID, token string) (*SandboxAPI, *htt
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startFakeExecAgent(t, sockPath)
+	fake := &fakeGuestSandbox{execStdout: "hi\n", execExit: 0}
+	startFakeGuestGRPCUDS(t, sockPath, fake)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox(localID, sockPath); err != nil {
 		t.Fatal(err)
 	}
-	// No stream path registered: /v1/exec falls back to the shared connection's
-	// aggregated Exec, which the canned fake agent speaks (matching the forkd
-	// token_auth_test fake).
+	api.RegisterStreamPath(localID, sockPath)
 	api.RegisterToken(localID, token)
 	api.SetSingleSandbox(localID)
 
@@ -107,7 +107,8 @@ func TestSingleSandboxNoTokenFailsClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startFakeExecAgent(t, sockPath)
+	fake := &fakeGuestSandbox{}
+	startFakeGuestGRPCUDS(t, sockPath, fake)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox("husk", sockPath); err != nil {
@@ -137,8 +138,10 @@ func TestMultiSandboxModeStillRequiresExactIDMatch(t *testing.T) {
 
 	sockA := filepath.Join(dir, "a.sock")
 	sockB := filepath.Join(dir, "b.sock")
-	startFakeExecAgent(t, sockA)
-	startFakeExecAgent(t, sockB)
+	fakeA := &fakeGuestSandbox{execStdout: "hi-a\n", execExit: 0}
+	fakeB := &fakeGuestSandbox{execStdout: "hi-b\n", execExit: 0}
+	startFakeGuestGRPCUDS(t, sockA, fakeA)
+	startFakeGuestGRPCUDS(t, sockB, fakeB)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox("sb-a", sockA); err != nil {
@@ -147,6 +150,8 @@ func TestMultiSandboxModeStillRequiresExactIDMatch(t *testing.T) {
 	if err := api.RegisterSandbox("sb-b", sockB); err != nil {
 		t.Fatal(err)
 	}
+	api.RegisterStreamPath("sb-a", sockA)
+	api.RegisterStreamPath("sb-b", sockB)
 	api.RegisterToken("sb-a", "tok-a")
 	api.RegisterToken("sb-b", "tok-b")
 	// Multi-sandbox: SetSingleSandbox is NOT called.
@@ -173,6 +178,8 @@ func TestMultiSandboxModeStillRequiresExactIDMatch(t *testing.T) {
 
 // startFakePtyAgent serves the CONNECT preamble then echoes input frames as
 // output and exits on "exit\n", for the single-sandbox PTY auth test.
+// PTY still uses the JSON vsock stream (port 52), so this fake speaks that
+// protocol directly.
 func startFakePtyAgent(t *testing.T, sockPath string) {
 	t.Helper()
 	lis, err := net.Listen("unix", sockPath)

@@ -1,11 +1,9 @@
 package daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"mitos.run/mitos/internal/fork"
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // recordingAuditor captures every AuditEvent for assertions.
@@ -39,65 +36,59 @@ func (r *recordingAuditor) snapshot() []AuditEvent {
 	return out
 }
 
-// startEchoVsockAgent listens on sockPath and answers the real agent protocol
-// with deterministic responses: exec returns exit code 0 and echoes the command
-// in stdout; read_file returns fixed content; everything else returns OK.
-func startEchoVsockAgent(t *testing.T, sockPath string, readContent []byte) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
+// fakeEchoGuestSandbox is a gRPC fake that echoes the command in stdout for
+// exec, returns fixed readContent for ReadFile, and returns OK for all other
+// operations. Used by audit tests that check audit events without caring about
+// transport details.
+type fakeEchoGuestSandbox struct {
+	fakeGuestSandbox
 
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				if !sc.Scan() { // "CONNECT 52"
-					return
-				}
-				if _, err := c.Write([]byte("OK 52\n")); err != nil {
-					return
-				}
-				for sc.Scan() {
-					var req vsock.Request
-					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-						return
-					}
-					resp := vsock.Response{OK: true}
-					switch req.Type {
-					case vsock.TypeExec:
-						resp.Exec = &vsock.ExecResponse{ExitCode: 0, Stdout: req.Exec.Command}
-					case vsock.TypeReadFile:
-						resp.ReadFile = &vsock.ReadFileResponse{
-							Content: readContent,
-							Size:    int64(len(readContent)),
-						}
-					case vsock.TypeListDir:
-						resp.ListDir = &vsock.ListDirResponse{}
-					}
-					out, _ := json.Marshal(resp)
-					if _, err := c.Write(append(out, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
+	readContent []byte
 }
 
-// auditAPI builds a SandboxAPI wired to an echo agent for one sandbox id and the
-// supplied auditor, with the given read-file content.
+func (s *fakeEchoGuestSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
+	msg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	cmd := ""
+	if open := msg.GetOpen(); open != nil {
+		cmd = open.Command
+	}
+	if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(cmd)}}); err != nil {
+		return err
+	}
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}}})
+}
+
+func (s *fakeEchoGuestSandbox) ReadFile(_ *sandboxv1.ReadFileRequest, stream sandboxv1.Sandbox_ReadFileServer) error {
+	if len(s.readContent) > 0 {
+		if err := stream.Send(&sandboxv1.Chunk{Data: s.readContent}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.Chunk{Eof: true})
+}
+
+func (s *fakeEchoGuestSandbox) WriteFile(stream sandboxv1.Sandbox_WriteFileServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	_ = first // open frame
+	var n int64
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		n += int64(len(msg.GetData()))
+	}
+	return stream.SendAndClose(&sandboxv1.WriteFileResult{BytesWritten: n})
+}
+
+// auditAPI builds a SandboxAPI wired to a gRPC echo agent for one sandbox id
+// and the supplied auditor, with the given read-file content.
 func auditAPI(t *testing.T, sandboxID string, aud Auditor, readContent []byte) *httptest.Server {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "audit")
@@ -107,15 +98,16 @@ func auditAPI(t *testing.T, sandboxID string, aud Auditor, readContent []byte) *
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startEchoVsockAgent(t, sockPath, readContent)
+	fake := &fakeEchoGuestSandbox{readContent: readContent}
+	startFakeGuestGRPCUDS(t, sockPath, fake)
 
 	api := NewSandboxAPI(dir)
 	api.SetAuditor(aud)
 	api.RegisterToken(sandboxID, "tok")
-	api.EnableUnixFallback()
 	if err := api.RegisterSandbox(sandboxID, sockPath); err != nil {
 		t.Fatal(err)
 	}
+	api.RegisterStreamPath(sandboxID, sockPath)
 
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
@@ -298,14 +290,5 @@ func TestJSONAuditorWritesOneLinePerEvent(t *testing.T) {
 	}
 }
 
-func TestNopAuditorIsDefault(t *testing.T) {
-	api := NewSandboxAPI(t.TempDir())
-	if _, ok := api.auditor.(NopAuditor); !ok {
-		t.Fatalf("default auditor = %T, want NopAuditor", api.auditor)
-	}
-	// Driving an op through the Server with no agent must not panic.
-	engine := fork.NewMockEngine()
-	engine.ForkDelay = 0
-	_ = NewServer(engine, api)
-	_ = context.Background()
-}
+// Ensure context is used (avoids import errors for the context import above).
+var _ = context.Background

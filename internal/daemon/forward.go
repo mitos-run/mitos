@@ -58,10 +58,10 @@ func (api *SandboxAPI) ForwardPort(sandboxID string, guestPort int) (string, err
 		return "", fmt.Errorf("guest port %d out of range 1-65535", guestPort)
 	}
 
-	// Require a usable agent + stream path before binding a host socket, so a
-	// forward for an unknown or unwired sandbox fails cleanly instead of opening
-	// a listener whose every connection would error.
-	if _, err := api.getAgent(sandboxID); err != nil {
+	// Require a registered sandbox and stream path before binding a host socket,
+	// so a forward for an unknown sandbox fails cleanly instead of opening a
+	// listener whose every connection would error.
+	if err := api.checkSandboxRegistered(sandboxID); err != nil {
 		return "", err
 	}
 	api.mu.RLock()

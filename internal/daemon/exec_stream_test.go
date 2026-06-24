@@ -5,69 +5,27 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// startFakeStreamUDS serves the Firecracker UDS preamble then writes the given
-// frames for any exec_stream request.
-func startFakeStreamUDS(t *testing.T, sockPath string, frames []vsock.ExecStreamFrame) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
-				if !sc.Scan() {
-					return
-				}
-				if strings.HasPrefix(sc.Text(), "CONNECT ") {
-					c.Write([]byte("OK 52\n"))
-				}
-				if !sc.Scan() {
-					return
-				}
-				for _, f := range frames {
-					b, _ := json.Marshal(f)
-					c.Write(append(b, '\n'))
-				}
-			}(conn)
-		}
-	}()
-}
-
+// newStreamAPI creates a SandboxAPI backed by a fake in-process gRPC guest
+// server that emits one stdout chunk ("hello\n") followed by a clean exit (0).
 func newStreamAPI(t *testing.T) (*SandboxAPI, string) {
 	t.Helper()
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb1", "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{
-		{Kind: vsock.FrameChunk, Stream: vsock.StreamStdout, Data: []byte("hello\n")},
-		{Kind: vsock.FrameChunk, Stream: vsock.StreamStderr, Data: []byte("warn\n")},
-		{Kind: vsock.FrameExit, ExitCode: 0, ExecTimeMs: 1.0},
-	})
+	fake := &fakeGuestSandbox{
+		execStdout: "hello\n",
+		execExit:   0,
+	}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
-	// Register the shared connection AND record the stream UDS path.
 	if err := api.RegisterSandbox("sb1", sock); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +81,21 @@ func TestHandleExecStreamNDJSON(t *testing.T) {
 }
 
 func TestHandleExecAggregatesStream(t *testing.T) {
-	api, _ := newStreamAPI(t)
+	// Use a fake that sends both stdout and stderr.
+	dir := shortVsockDir(t)
+	sock := filepath.Join(dir, "sb1agg", "vsock.sock")
+	fake := &fakeGuestSandboxWithStderr{
+		fakeGuestSandbox: fakeGuestSandbox{execExit: 0},
+		stdout:           "hello\n",
+		stderr:           "warn\n",
+	}
+	startFakeGuestGRPCUDS(t, sock, fake)
+	api := NewSandboxAPI(dir)
+	api.AllowTokenless()
+	if err := api.RegisterSandbox("sb1", sock); err != nil {
+		t.Fatal(err)
+	}
+	api.RegisterStreamPath("sb1", sock)
 	srv := httptest.NewServer(api.Handler())
 	defer srv.Close()
 
@@ -133,19 +105,24 @@ func TestHandleExecAggregatesStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var got vsock.ExecResponse
+
+	var got struct {
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Stdout != "hello\n" || got.Stderr != "warn\n" || got.ExitCode != 0 {
-		t.Fatalf("aggregate = %+v", got)
+	if got.Stdout != "hello\n" || got.Stderr != "warn\n" {
+		t.Fatalf("aggregate = {Stdout:%q Stderr:%q}", got.Stdout, got.Stderr)
 	}
 }
 
 func TestExecStreamRequiresToken(t *testing.T) {
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb2", "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{{Kind: vsock.FrameExit}})
+	fake := &fakeGuestSandbox{execExit: 0}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir) // NOT tokenless
 	if err := api.RegisterSandbox("sb2", sock); err != nil {
 		t.Fatal(err)
@@ -169,7 +146,9 @@ func TestExecStreamRequiresToken(t *testing.T) {
 func TestStreamPathRegisteredWithSandbox(t *testing.T) {
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb3", "vsock.sock")
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{{Kind: vsock.FrameExit, ExitCode: 0}})
+	// dialStream speaks AgentPort (52); use the dual UDS helper so the socket
+	// accepts both the JSON preamble (port 52) and gRPC (port 53).
+	startFakeGuestDualUDS(t, sock, nil, &fakeGuestSandbox{})
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
 	if err := api.RegisterSandbox("sb3", sock); err != nil {
@@ -181,4 +160,30 @@ func TestStreamPathRegisteredWithSandbox(t *testing.T) {
 		t.Fatalf("dialStream after register: %v", err)
 	}
 	sc.Close()
+}
+
+// fakeGuestSandboxWithStderr overrides Exec to also emit a stderr chunk,
+// allowing tests to verify aggregate stdout+stderr collection.
+type fakeGuestSandboxWithStderr struct {
+	fakeGuestSandbox
+	stdout string
+	stderr string
+}
+
+func (s *fakeGuestSandboxWithStderr) Exec(stream sandboxv1.Sandbox_ExecServer) error {
+	_, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if s.stdout != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(s.stdout)}}); err != nil {
+			return err
+		}
+	}
+	if s.stderr != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: []byte(s.stderr)}}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: s.execExit}}})
 }

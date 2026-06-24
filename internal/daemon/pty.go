@@ -18,6 +18,30 @@ import (
 // (the SDKs and browser xterm.js front ends) must offer it.
 const ptySubprotocol = "mitos.pty.v1"
 
+// dialStream opens a dedicated vsock stream connection to the guest agent on
+// AgentPort (52) for PTY sessions and port-forward tunnels. It is NOT used for
+// exec or file operations, which use the gRPC path (AgentGRPCPort 53).
+//
+// dialStream is intentionally kept in pty.go (not sandbox_api.go) because only
+// PTY and forward paths require the legacy JSON streaming connection; all other
+// data paths (exec, run_code, files, Configure, NotifyForked) use gRPC.
+func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
+	api.mu.RLock()
+	path, ok := api.streamPaths[sandboxID]
+	api.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("sandbox %s: no stream path registered", sandboxID)
+	}
+	if path == "" {
+		return nil, fmt.Errorf("sandbox %s: empty stream path", sandboxID)
+	}
+	sc, err := vsock.DialStreamUnix(path)
+	if err != nil {
+		return nil, fmt.Errorf("dial stream for sandbox %s: %w", sandboxID, err)
+	}
+	return sc, nil
+}
+
 // ptyAuth authenticates a PTY WebSocket upgrade. Unlike requireBearer (which
 // peeks a JSON request body), the upgrade is a bodyless GET, so the sandbox id
 // comes from the ?sandbox= query parameter and the token from the
@@ -78,7 +102,7 @@ func (api *SandboxAPI) handlePty(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(sandbox)
 
-	if _, err := api.getAgent(sandbox); err != nil {
+	if err := api.checkSandboxRegistered(sandbox); err != nil {
 		writeErr(w, err.Error(), http.StatusNotFound)
 		return
 	}
