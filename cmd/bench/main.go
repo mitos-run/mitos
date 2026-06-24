@@ -9,12 +9,12 @@
 // trivial command. There is no forkd and no HTTP API in the path, so
 // the timing reflects fork + vsock + guest agent and nothing else.
 //
-// The --exec-transport flag selects the agent protocol:
-//   - grpc (default): gRPC Control.Ping RPC on AgentGRPCPort 53, works with
-//     the Rust production agent (port 53 only) AND the Go agent (serves 53 too).
-//     This is the transport for the apples-to-apples SP1 bench.
-//   - json: legacy JSON-lines on AgentPort 52, works with the Go agent
-//     (serves both 52 and 53) and the old spike agent.
+// The exec round-trip uses the gRPC runtime protocol: a Control.Ping RPC on
+// AgentGRPCPort 53, served by the Rust guest agent. The legacy JSON-lines guest
+// protocol and the Go agent were removed (#310), so gRPC on port 53 is the only
+// transport. The --exec-transport flag is retained for backward compatibility
+// of existing invocations: both its "grpc" (default) and "json" values now drive
+// the same gRPC path.
 //
 // The engine validates /dev/kvm at construction, so the timing path runs only
 // on a Linux KVM host; on any other platform the tool builds and parses flags
@@ -52,13 +52,14 @@ const (
 	modePinning     = "pinning"
 	defaultFanOutNs = "1,4,16,64"
 
-	// execTransportGRPC drives the gRPC Control.Ping RPC over AgentGRPCPort 53.
-	// Both the Go agent and the Rust production agent serve port 53, making
-	// this the default transport and the one for the apples-to-apples SP1 bench.
+	// execTransportGRPC drives the gRPC Control.Ping RPC over AgentGRPCPort 53,
+	// served by the Rust guest agent. This is the only runtime transport and the
+	// default.
 	execTransportGRPC = "grpc"
-	// execTransportJSON is the legacy JSON-lines exec path over AgentPort 52.
-	// It works with the Go agent (which serves both 52 and 53). Kept for
-	// backward compatibility; grpc is the default.
+	// execTransportJSON names the removed JSON-lines transport. The legacy JSON
+	// guest protocol and the Go agent are gone (#310); this value is accepted for
+	// backward compatibility of existing invocations and now drives the same gRPC
+	// path as "grpc".
 	execTransportJSON = "json"
 )
 
@@ -74,11 +75,11 @@ type config struct {
 	kernel      string
 	jsonPath    string
 	summary     bool
-	// execTransport selects the guest agent protocol for the exec round-trip
-	// in fork-exec and exec-rt modes. "grpc" (default) uses a gRPC Control.Ping
-	// RPC on AgentGRPCPort 53, which both the Go agent and the Rust production
-	// agent serve, making it the transport for the apples-to-apples SP1 bench.
-	// "json" uses the legacy JSON-lines path on AgentPort 52 (Go agent only).
+	// execTransport is retained for backward compatibility of existing bench
+	// invocations. The exec round-trip always uses the gRPC Control.Ping RPC on
+	// AgentGRPCPort 53 (the Rust guest agent); the legacy JSON-lines guest
+	// protocol and the Go agent were removed (#310). Both "grpc" (default) and
+	// "json" drive the same gRPC path.
 	execTransport string
 	// forks is the number of sandboxes the metering mode forks from one
 	// template before reading the CoW-aware metering report. It is unused by
@@ -110,7 +111,7 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.forks, "forks", 4, "metering mode: number of sandboxes to fork from one template before reading the report")
 	fs.IntVar(&cfg.settleMs, "settle-ms", 500, "metering mode: milliseconds to let the forks settle before reading the report")
 	fs.StringVar(&fanOutNs, "fanout-n", defaultFanOutNs, "fork-fanout mode: comma-separated fan-out widths (N) to measure, e.g. 1,4,16,64")
-	fs.StringVar(&cfg.execTransport, "exec-transport", execTransportGRPC, "exec transport for fork-exec and exec-rt modes: grpc (default, Control.Ping over AgentGRPCPort 53, works with both Go and Rust agents) or json (legacy, AgentPort 52)")
+	fs.StringVar(&cfg.execTransport, "exec-transport", execTransportGRPC, "retained for backward compatibility: the exec round-trip always uses gRPC Control.Ping over AgentGRPCPort 53 (Rust guest agent); the legacy JSON transport and Go agent were removed (#310), so grpc (default) and json both drive the gRPC path")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -627,7 +628,7 @@ func forkToReady(engine *fork.Engine, template, sandboxID string) (time.Duration
 // benchForkExec measures the time from fork start to the first successful
 // Control.Ping response over gRPC (AgentGRPCPort 53), terminating the sandbox
 // each iteration. The json flag value is accepted for backward compatibility but
-// also uses the gRPC path: the legacy JSON agent is being removed.
+// also uses the gRPC path: the legacy JSON agent was removed (#310).
 func benchForkExec(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	// Warmup iterations are discarded; they pay the page-cache and
 	// snapshot-load costs that should not skew the measured samples.
@@ -682,7 +683,7 @@ func onePrefetchForkExec(engine *fork.Engine, template, sandboxID string, disabl
 // benchExecRT measures M trivial Control.Ping round-trips over gRPC against a
 // forked sandbox. The --exec-transport flag is accepted for backward
 // compatibility; both json and grpc values use the gRPC path because the
-// legacy JSON agent is being removed.
+// legacy JSON agent was removed (#310).
 func benchExecRT(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	return benchExecRTGRPC(engine, cfg)
 }
@@ -738,8 +739,8 @@ func benchExecRTGRPC(engine *fork.Engine, cfg config) (benchstat.Result, error) 
 // connection with a single Control.Ping (which also pays the HTTP/2 handshake
 // so the first measured call is not cold).
 //
-// Both the Go agent (which serves 53 alongside JSON port 52) and the Rust
-// production agent (which serves 53 only) accept on this port.
+// The Rust production guest agent serves the gRPC runtime protocol on this port
+// (AgentGRPCPort 53); it is the only runtime transport since #310.
 func connectGRPCWithRetry(vsockPath string) (*grpc.ClientConn, error) {
 	const attempts = 50
 	var lastErr error

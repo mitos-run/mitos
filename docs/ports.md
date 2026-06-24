@@ -21,16 +21,16 @@ sandbox-server:
 host TCP client ──▶ host listener (127.0.0.1:N) ──▶ vsock tunnel ──▶ guest agent ──▶ guest 127.0.0.1:<port>
 ```
 
-- `vsock.TypeTunnel` (`internal/vsock`): a streaming frame that, like
-  `exec_stream`, uses a DEDICATED vsock connection. The host sends one
-  `TunnelRequest{port}`; the guest agent dials `127.0.0.1:<port>` inside the VM,
-  replies with one `TunnelAck`, and on success the connection becomes a raw
-  bidirectional byte pipe to the guest TCP socket until either side closes. One
-  tunnel carries exactly one TCP connection (no multiplexing).
-- Guest agent tunnel handler (`guest/agent/tunnel.go`): dials LOOPBACK only,
-  refuses a non-loopback or out-of-range port and a port with no listener with a
-  clean ack error (never a hang), and `io.Copy`s both directions with full
-  teardown on either close.
+- gRPC `PortForward` stream (`internal/sandboxrpc/portforward.go`): a
+  bidirectional gRPC stream over the guest vsock gRPC channel (vsock port 53).
+  The host opens one stream per accepted connection and sends the target port;
+  the guest dials `127.0.0.1:<port>` inside the VM and, on success, the stream
+  becomes a raw bidirectional byte splice to the guest TCP socket until either
+  side closes. One stream carries exactly one TCP connection (no multiplexing).
+- Guest agent port-forward handler (`guest/agent-rs/src/service/portforward.rs`):
+  dials LOOPBACK only, refuses a non-loopback or out-of-range port and a port
+  with no listener with a clean error (never a hang), and splices both directions
+  with full teardown on either close.
 - Host proxy (`internal/daemon` `SandboxAPI.ForwardPort` /
   `forward.go`): opens a host TCP listener on `127.0.0.1:0` and bridges every
   accepted connection over a fresh vsock tunnel to the guest port. Listeners and

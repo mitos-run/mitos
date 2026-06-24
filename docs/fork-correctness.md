@@ -12,7 +12,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
 | 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED on EVERY engine when the guest does not reseed; PLUS a baked-in virtio-rng device for a continuous host entropy source in every fork | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`, `TestForkFailsWhenGuestDoesNotReseed`, `TestForkRunningFailsWhenGuestDoesNotReseed` (daemon), `TestRealModeForkFailsClosedWhenGuestDoesNotReseed` (sandbox-server), `TestEntropyRequestJSON` + `TestDefaultVMConfigEnablesEntropy` (firecracker, virtio-rng config builder); KVM: two forks of one snapshot assert distinct `/dev/urandom`, distinct kernel UUID (`/proc/sys/kernel/random/uuid`), and distinct TLS client random (32 bytes from getrandom) | **done** (guest reseed + reseed handshake done; virtio-rng device NOW WIRED into the template build and baked into every snapshot, `firecracker.VMConfig.EntropyDevice` default-on, `Client.SetEntropy` -> `PUT /entropy`, darwin-unit-tested for the config/JSON shape, live behavior KVM-gated. Fail-closed is enforced on ALL engines: the husk path (`internal/husk` `productionNotifier`), the raw-forkd path (`internal/daemon/sandbox_api.go` `NotifyForked` now RETURNS the guest response and `internal/daemon/server.go` `notifyForked` refuses to mark the sandbox Ready when it is nil or reports `ReseededRNG:false`), and sandbox-server real-mode (`cmd/sandbox-server/main.go` `reseedFork`, the same gate). A guest that signals `ReseededRNG:false` with `OK:true` is reaped, not served; a transport `OK:false` and a `ReseededRNG:false` both fail the fork. The `ReseededRNG:false` failure mode is covered by the go tests listed above. The KVM fork-correctness phase (`kvm-test.yaml`, the `firecracker-test` job) boots two forks of one snapshot and asserts, with hard `exit 1` gates, distinct `/dev/urandom`, distinct kernel UUID, distinct TLS client random, each fork's wall clock within 2s of the runner, and the per-fork generation file; this phase runs and passes on every KVM CI run, so the RNG/UUID/TLS distinctness and clock resync are OBSERVED on KVM, not just unit-asserted. Both former `done` gaps are now closed: (a) the baked virtio-rng device is OBSERVED live on KVM, the fork-correctness phase asserts each restored guest's `/sys/class/misc/hw_random/rng_current` is `virtio_rng.N` (the guest kernel binds `CONFIG_HW_RANDOM_VIRTIO`), so the device is present and selected, not merely set in the VM JSON; and (b) the reseed is proven end-to-end THROUGH the production daemon notify code, not only test-agent-direct, the husk activate-correctness KVM phase drives `NotifyForked` via the husk stub `productionNotifier` (the same notify path the tenant husk activation uses) and asserts distinct RNG plus a stepped clock across two real activations, failing closed if a guest does not reseed.) |
-| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **done; CLOCK_MONOTONIC residual is an accepted OS limitation, not a gap** (guest wall-clock step implemented and tested IN the fork-correctness CI job: the go test carries `HostWallClockNanos`, and the KVM phase asserts each fork's `WALLCLOCK_NS` within 2s of the runner on every `firecracker-test` run, which is exactly what the legend defines as `done`. CLOCK_MONOTONIC cannot be stepped: Linux rejects `clock_settime(CLOCK_MONOTONIC)` with EINVAL, and a PAUSED-across-restore VM resumes the monotonic clock continuously so clean-restore monotonic timers do not mis-fire; the narrow mixed wall/monotonic-derived-deadline residual is handled by the existing SIGUSR2 userspace reset signal. This is an assessed, documented OS-level limitation accepted as out of scope for the reseed contract, NOT unfinished implementation or a missing test. See section 2 for the full assessment; `guest/agent/notifyforked.go` `stepClock` carries the rationale inline.) |
+| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **done; CLOCK_MONOTONIC residual is an accepted OS limitation, not a gap** (guest wall-clock step implemented and tested IN the fork-correctness CI job: the go test carries `HostWallClockNanos`, and the KVM phase asserts each fork's `WALLCLOCK_NS` within 2s of the runner on every `firecracker-test` run, which is exactly what the legend defines as `done`. CLOCK_MONOTONIC cannot be stepped: Linux rejects `clock_settime(CLOCK_MONOTONIC)` with EINVAL, and a PAUSED-across-restore VM resumes the monotonic clock continuously so clean-restore monotonic timers do not mis-fire; the narrow mixed wall/monotonic-derived-deadline residual is handled by the existing SIGUSR2 userspace reset signal. This is an assessed, documented OS-level limitation accepted as out of scope for the reseed contract, NOT unfinished implementation or a missing test. See section 2 for the full assessment.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestLiveForkOptInProceedsPastTheGate`, `TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **done** (the chosen default-safe policy is fully implemented and tested: a live fork of a secret-holding sandbox is REJECTED by default with a typed `Rejected` condition, and an opt-in is recorded as an audit condition, so secrets are never duplicated into a fork without an explicit, audited decision. Per-fork PLATFORM credential reissue is also enforced and tested: each fork's sandbox-API bearer token is freshly minted (`mintAPIToken`, 32 bytes crypto/rand) and DISTINCT from its parent's, so a fork cannot authenticate to the sandbox API as its parent. Documented residual, NOT part of the safe default and not a gap in the mitigation: revoke-and-reissue of TENANT secret VALUES over vsock (so a fork could safely inherit FRESH secrets instead of being rejected) requires the secret to be a dynamically reissuable/revocable credential from a broker; static Kubernetes Secret values have no upstream to revoke, so this is an additive better-UX future tracked as issue #7, and capability-token per-fork attenuation lands with the #25 runtime wiring. The hazard itself, secret duplication into forks, is fully closed today by the tested default-deny gate.) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestPrepareForkNetworkDistinctPerFork`, `TestBuildSetMACCarriesAddress` (guestnet netlink MAC set); KVM: `cmd/net-fork-smoke` boots two forks of one snapshot, asserts distinct guest MAC + distinct guest IP | **done** (per-fork networking is wired and each fork wakes with a DISTINCT guest network identity: a unique /30 (distinct guest IP and host tap) and a freshly derived locally-administered guest MAC, `netconf.deriveMAC(sandboxID)`, delivered over the NotifyForked network config and applied to eth0 by the guest agent, `internal/guestnet.Configure` sets the MAC (link down, set hw addr, link up) then flushes the old address and assigns the per-fork IP. Distinctness is unit-tested and OBSERVED on KVM: `cmd/net-fork-smoke` forks two sandboxes from one snapshot and asserts they have DIFFERENT guest MACs, each its derived MAC and NOT the shared placeholder baked in the snapshot, and DIFFERENT guest IPs. Parent TCP is dead in the fork because the agent FLUSHES the source's eth0 address and assigns the fork's own IP on restore, so a socket inherited in the snapshot, bound to the now-absent source address, can no longer send; the address replacement is KVM-observed (distinct IPs). Documented residuals, not gaps in the identity: a host-side conntrack flush is unnecessary today because every fork gets a fresh IP+MAC (no reuse), and a full open-TCP-socket-inheritance death assertion on KVM is a follow-up; egress allow/deny is separately proven by the guest-egress KVM phases.) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestUpdateMetricsPopulatesMemoryGauge`, `TestSampleMetricsTicksAndStopsOnContextCancel`, `TestUpdateMetricsLabelsMemoryPerSandbox`; KVM: `cmd/mem-smoke` forks, samples `Metering().TotalUnique` at T=0, touches 64 MiB in the guest, re-samples, asserts >= 32 MiB growth | **done** (lifetime re-sampling wired: `Engine.Metering` re-stats `smaps_rollup` each pass and `Server.SampleMetrics` refreshes the gauges periodically; the KVM growth assertion is OBSERVED on every `firecracker-test` run, the `kvm-test.yaml` lifetime-memory phase runs `cmd/mem-smoke --min-growth-bytes 33554432` and fails the job if metered unique bytes do not grow >= 32 MiB after a 64 MiB guest workload; and per-sandbox labels are now exported, `mitos_sandbox_memory_unique_bytes{sandbox,template}` is a GaugeVec set per live sandbox each pass and Reset so a terminated sandbox drops its series. Residual (not a row-5 gap): published density numbers after a representative workload are a `bench/` task.) |
@@ -42,8 +42,8 @@ produces children by SNAPSHOTTING the source pod's running VM (the husk stub
 resume unless `pauseSource`) and ACTIVATING each child husk pod from that fork
 snapshot. Each child activates through the SAME `Activate` path a warm pod uses,
 so it runs the identical RNG-reseed + clock-step `NotifyForked` fork-correctness
-handshake (`internal/husk` `productionNotifier` -> `guest/agent/notifyforked.go`
-`handleNotifyForked`): every child reseeds its kernel CRNG with fresh host entropy
+handshake (`internal/husk` `productionNotifier` -> Rust agent `NotifyForkedHandler`):
+every child reseeds its kernel CRNG with fresh host entropy
 and steps its wall clock, and a child whose guest does not report `ReseededRNG` is
 left unserved (fail closed). So a husk fork child is NOT a CRNG/clock clone of the
 source or its siblings; it inherits exactly the per-fork reseed an engine fork
@@ -120,10 +120,13 @@ Implemented reseed path: the host delivers fresh entropy over vsock. forkd
 calls `NotifyForked(generation, entropy)` immediately after restore
 (`internal/daemon/server.go:notifyForked` generates a fresh generation plus 32
 bytes of `crypto/rand` entropy). The guest agent on `NotifyForked` writes that
-entropy into the kernel CRNG via `RNDADDENTROPY`, records the generation at
-`/run/sandbox/fork-generation`, and signals userspace runtimes
-(`guest/agent/notifyforked.go`). VMGenID is not exposed by Firecracker, so this
-host-entropy-over-vsock hook is our equivalent.
+entropy into the kernel CRNG via the credited `RNDADDENTROPY` ioctl
+(`guest/agent-rs/src/sys/entropy.rs`, the only caller of that ioctl), records
+the generation at `/run/sandbox/fork-generation`, and signals userspace
+runtimes; the reseed step is `guest/agent-rs/src/fork/reseed.rs` and the
+orchestrator that drives reseed + clock step + userspace signal is
+`handle_notify_forked` in `guest/agent-rs/src/fork/mod.rs`. VMGenID is not
+exposed by Firecracker, so this host-entropy-over-vsock hook is our equivalent.
 
 **Continuous virtio-rng device (wired):** in addition to the one-shot
 NotifyForked reseed at fork time, every template snapshot now bakes a virtio-rng
@@ -156,9 +159,11 @@ fork rather than emitting duplicate CRNG output. See row 1.
 into the pool but does NOT credit entropy) and still returned `reseeded=true`.
 Because the host fail-closed gate keys entirely on that boolean, the over-report
 silently defeated the gate: a fork that could not be credibly reseeded would be
-served sharing its siblings' CRNG output. `reseedCRNG` (now `reseedCRNGAt`,
-`guest/agent/notifyforked.go`) returns `false` when the credited ioctl fails, so
-the host reaps such a fork. The guest agent runs as PID 1 with full capabilities
+served sharing its siblings' CRNG output. The Rust reseed step
+(`guest/agent-rs/src/fork/reseed.rs`, backed by the credited ioctl in
+`guest/agent-rs/src/sys/entropy.rs`) returns `false` whenever the credited ioctl
+fails and never falls back to an uncredited `/dev/urandom` write, so the host
+reaps such a fork. The guest agent runs as PID 1 with full capabilities
 on our shipped kernel, where `RNDADDENTROPY` succeeds, so the credited path is
 the normal path; the fallback was the unsafe one. The reseed contract is now
 "credited or refused" end to end.
@@ -166,9 +171,12 @@ the normal path; the fallback was the unsafe one. The reseed contract is now
 Tests. go (`internal/daemon`): `TestForkNotifiesAgentWithFreshEntropy` asserts
 forkd sends entropy, `TestForkGenerationIncrementsAcrossForks` asserts distinct
 generations across forks, `TestForkFailsWhenNotifyForkedErrors` asserts a
-real-engine fork fails closed when the guest cannot reseed. guest
-(`guest/agent`, linux): `TestReseedCRNGFailsClosedWhenNotCredited` asserts the
-uncredited path reports failure (the host then reaps the fork).
+real-engine fork fails closed when the guest cannot reseed. The host fail-closed
+gate that reaps a fork whose guest reports `ReseededRNG:false` (transport
+`OK:true` but uncredited reseed) is covered by `internal/daemon/delivery_test.go`.
+guest (Rust, linux): the reseed unit tests in `guest/agent-rs/src/fork/reseed.rs`
+(empty entropy is false; the credited-ioctl path) assert the reseed reports
+failure on any uncredited path, which the host then reaps.
 
 KVM (`kvm-test.yaml`): one snapshot is taken after the agent is up, two VMs are
 restored from it, and `test-agent --mode notify` runs against each. The phase
@@ -204,9 +212,12 @@ validation (`notBefore`) and JWT `iat`/`exp` checks fail silently or, worse,
 pass when they should fail.
 
 Implemented clock step: `NotifyForked` carries `HostWallClockNanos`, stamped by
-the host at send time (`internal/vsock/client.go`). The guest agent reads it
-and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a 500ms tolerance,
-then signals userspace as in section 1 (`guest/agent/notifyforked.go`). kvm-clock
+the host at send time in the gRPC NotifyForked path (`internal/daemon/sandbox_api.go`
+for the raw-forkd path, `internal/husk/stub.go` for the husk path). The guest
+agent reads it and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a
+500ms tolerance, then signals userspace as in section 1
+(`guest/agent-rs/src/fork/clock.rs`, orchestrated by
+`handle_notify_forked` in `guest/agent-rs/src/fork/mod.rs`). kvm-clock
 remaining the active clocksource and Firecracker's restore path updating it is
 relied on but not separately asserted here.
 
@@ -442,23 +453,18 @@ priority and blocks feature work (see `ROADMAP.md`).
 
 ## Rust guest agent path (`guest/agent-rs`)
 
-The Rust agent (`guest/agent-rs`) is the PRODUCTION DEFAULT since Phase D (#310).
-`guest/rootfs/build.sh` defaults to `AGENT_IMPL=rust` and `kvm-test.yaml` builds
-the Rust agent as `/tmp/mitos-test/agent`, so every firecracker-test phase now
-boots the Rust agent as /init. SP1.5 is merged: all host-side callers
-(`internal/fork/uffd_engine.go`, `internal/daemon/sandbox_api.go`,
+The Rust agent (`guest/agent-rs`) is the SOLE production guest agent since Phase
+E (#310). The Go agent (`guest/agent`) and the legacy JSON vsock protocol (port
+52) are removed. `guest/rootfs/build.sh` bakes only the Rust agent as /init;
+all host-side callers (`internal/fork/uffd_engine.go`, `internal/daemon/sandbox_api.go`,
 `internal/firecracker/template.go`, `internal/husk/stub.go`, and the smoke
-binaries in `cmd/`) speak gRPC on vsock port 53 (AgentGRPCPort). The legacy JSON
-protocol on port 52 is NOT served by the Rust agent; it is served only by the Go
-fallback (AGENT_IMPL=go). The Go agent is not yet removed (that is Phase E).
-
-Rollback: set `AGENT_IMPL=go` to re-bake the Go agent as /init. See
-`hack/rust-agent-cutover.md` for rollback and soak procedure.
+binaries in `cmd/`) speak gRPC on vsock port 53 (AgentGRPCPort). There is no
+rollback to a Go agent fallback; the cutover is complete.
 
 SECURITY-SENSITIVE: `guest/agent-rs/src/sys/`, `guest/agent-rs/src/fork/`,
 `guest/agent-rs/src/init/mod.rs`, and `guest/agent-rs/src/main.rs` require a
-named human reviewer before any PR touching them is merged to main. This is the
-same policy as `guest/agent` (stated in CLAUDE.md and `docs/threat-model.md`).
+named human reviewer before any PR touching them is merged to main. See
+`docs/threat-model.md` and `docs/security-review-policy.md`.
 
 ### Fork-correctness coverage for the Rust agent
 
@@ -467,16 +473,13 @@ via dedicated modules in `guest/agent-rs/src/fork/`:
 
 | Hazard | Rust implementation | Status |
 |---|---|---|
-| 1. RNG/CRNG reseed | `fork/reseed.rs`: `sys::entropy::reseed_crng` writes the host-supplied entropy bytes into the kernel CRNG via `RNDADDENTROPY` (credited ioctl); reports `reseeded_rng: false` if the ioctl fails, triggering host fail-closed reap | **done (gRPC path; KVM fork-correctness suite now exercises this as the production agent)** |
-| 2. Wall-clock step | `fork/clock.rs`: `sys::clock::step_realtime_ns` calls `clock_settime(CLOCK_REALTIME)` when drift exceeds 500ms; same threshold as the Go agent | **done (gRPC path; KVM-validated as production default)** |
-| 3. SIGUSR2 signal to userspace | `fork/signal.rs`: `sys::signal::signal_userspace` sends SIGUSR2 to all user-space processes after reseed + clock step | **done (gRPC path; KVM-validated as production default)** |
-| 4. Per-fork network reconfiguration | `fork/network.rs`: sets eth0 MAC via rtnetlink, flushes old address, assigns per-fork IP and default route | **done (gRPC path; KVM-validated as production default)** |
-| 5. Per-fork volume mounts | `fork/volumes.rs`: mounts per-fork volume block devices at the paths specified in the `NotifyForkedRequest` | **done (gRPC path; KVM-validated as production default)** |
+| 1. RNG/CRNG reseed | `fork/reseed.rs`: `sys::entropy::reseed_crng` writes the host-supplied entropy bytes into the kernel CRNG via `RNDADDENTROPY` (credited ioctl); reports `reseeded_rng: false` if the ioctl fails, triggering host fail-closed reap | **done (KVM fork-correctness suite exercises this as the sole production agent)** |
+| 2. Wall-clock step | `fork/clock.rs`: `sys::clock::step_realtime_ns` calls `clock_settime(CLOCK_REALTIME)` when drift exceeds 500ms | **done (KVM-validated)** |
+| 3. SIGUSR2 signal to userspace | `fork/signal.rs`: `sys::signal::signal_userspace` sends SIGUSR2 to all user-space processes after reseed + clock step | **done (KVM-validated)** |
+| 4. Per-fork network reconfiguration | `fork/network.rs`: sets eth0 MAC via rtnetlink, flushes old address, assigns per-fork IP and default route | **done (KVM-validated)** |
+| 5. Per-fork volume mounts | `fork/volumes.rs`: mounts per-fork volume block devices at the paths specified in the `NotifyForkedRequest` | **done (KVM-validated)** |
 
-The production KVM fork-correctness CI suite (`kvm-test.yaml`) now boots the Rust
+The production KVM fork-correctness CI suite (`kvm-test.yaml`) boots the Rust
 agent as /init for ALL phases: exec-via-vsock, fork-correctness (reseed, clock,
 signal, network, volume), workspace transfer, SDK example, snapshot distribution,
 and the jailer phase. These confirm the Rust agent is the live production path.
-
-See `hack/rust-agent-cutover.md` for the full prerequisite list, soak/canary
-procedure, and rollback instructions (AGENT_IMPL=go restores the Go agent).
