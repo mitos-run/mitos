@@ -36,6 +36,16 @@ hosted concern. Pricing and packaging are deliberately out of scope.
 
 - World-class developer experience: the console feels as fast and considered as
   Linear, Vercel, and PlanetScale, on the Fluorescence brand.
+- Truly exceptional, end-to-end experience. Three things are non-negotiable and
+  bind every view and every phase (not optional polish):
+  1. **Fully responsive and mobile-friendly** at 100% (section 4.6): the console
+     works and feels first-class on phone, tablet, and desktop. No view is
+     desktop-only.
+  2. **Accessible** (section 4.6): keyboard-operable, screen-reader-labelled,
+     WCAG 2.2 AA contrast and focus, respects reduced-motion.
+  3. **Best-practice roles and a best-practice user profile** (sections 5.4, 5.5):
+     a real role set (not just owner/member), an org -> projects hierarchy with
+     per-project roles, and a complete account profile with settings.
 - Every enterprise-grade feature ships in the open-source / self-host edition
   with first-class DX. No feature is gated; the open-core line is architectural,
   not commercial (section 2).
@@ -214,7 +224,14 @@ once), and the existing `Terminal` and `Division` from brand.
 | **Run** | Instruments (home cockpit); Sandboxes (list + detail tabs: Overview, Logs, Terminal, Filesystem, Metrics, Spending, Fork tree) |
 | **Build** | Workspaces; Templates; Secrets; API keys |
 | **Govern** | Members & roles; Audit; Data & retention; SSO; Trust & compliance; Usage & cost; Billing (hosted) |
-| **Settings** | Organization; Profile; Theme |
+| **Settings** | Organization (general, members, projects, SSO, billing, audit, retention); Account profile (section 5.5); Theme/appearance |
+
+Within an org, resources are grouped into **Projects** (the user-facing name for
+the resource groups in section 5.4): an org contains projects, projects contain
+sandboxes / templates / secrets, and a membership grants a role within a project
+(or org-wide). Best practice mirrored from Vercel projects, GitHub teams, and
+HuggingFace resource groups. The nav exposes an org switcher (hosted) and a
+project scope selector; both are server-resolved and capability-gated.
 
 Each view maps to an existing BFF endpoint or a seam this spec extends (section
 6, section 5). Every view ships a crafted empty state that teaches and links to
@@ -242,6 +259,32 @@ it appear in the cockpit). The honest "Why Mitos" Pareto panel from the keystone
 spec section 9 lives in empty states, framed exactly as the README frames it
 (the axis is the combination; any competitor figure carries the vendor-published,
 not-head-to-head label verbatim).
+
+### 4.6 Responsive, mobile, and accessibility (non-negotiable, every view)
+
+The console is fully responsive and mobile-first-capable; this is a hard
+acceptance criterion on every view in every phase, not a later polish pass.
+
+- **Layout:** a single responsive shell with breakpoints. On desktop the grouped
+  nav is a persistent sidebar; below a tablet breakpoint it collapses to a
+  top bar with a slide-over drawer (focus-trapped, closes on route change and
+  Escape). Content areas use fluid/responsive layout (CSS grid/flex with
+  `min()`/`clamp()`), and dense data tables degrade gracefully to stacked cards
+  or horizontal scroll with sticky first column on narrow screens. The fork-tree
+  and instrument cockpit reflow (not just shrink) on small screens.
+- **Touch:** all interactive targets meet a 44x44 px minimum; hover-only
+  affordances (link prefetch, row actions) have tap-equivalents; the command
+  palette is reachable from a visible control on touch (no keyboard required).
+- **Accessibility (WCAG 2.2 AA):** full keyboard operability (the palette already
+  models this), visible focus rings, correct landmarks/roles/labels, screen-
+  reader-announced async state and toasts (`aria-live`), color is never the only
+  signal (the Fluorescence "color = meaning" rule pairs with icon/text), AA
+  contrast against the `--field` ladder, and `prefers-reduced-motion` honored for
+  all transitions (`--dur`/`--ease`).
+- **Verification:** responsive + a11y are part of each view's test gate, not
+  optional. Component tests assert keyboard paths and ARIA; the Playwright smoke
+  runs a mobile viewport; an axe-core accessibility check runs in CI on the built
+  SPA.
 
 ## 5. Enterprise layer (all OSS, hosted operates)
 
@@ -320,21 +363,67 @@ the BFF sweeper. A "Data & retention" view exposes per-resource windows, a
 "what gets deleted when" preview, and a legal-hold toggle. This is the privacy /
 DPA retention canon rendered as product.
 
-### 5.4 RBAC and resource groups
+### 5.4 RBAC: best-practice roles, and the org -> projects hierarchy
 
 Today `Role = owner | member` (the model comment notes "richer RBAC is a
-follow-up"). Keep `owner` and `member` as built-in roles so existing tests and
-behavior hold, and add additively:
+follow-up"). That is not a best-practice role set. We keep `owner` and `member`
+as compatibility aliases so existing tests and behavior hold, and ship a real,
+best-practice model additively.
 
-- **Custom roles:** a named role maps to a permission set over the console verbs
-  (keys, secrets, sandboxes, members, billing, audit, settings).
-- **Resource groups:** a sandbox, template, or secret can belong to a group; a
-  membership grants a role *within* a group. This composes with the org-scoping
-  already enforced at every seam (a session for org A still never sees org B).
-- Surfaced in a real Members & roles UI: invite, assign role, build a custom role
-  on a permission matrix, manage group membership.
+**Best-practice built-in roles** (the canon from GitHub, Vercel, HuggingFace),
+present in OSS:
 
-### 5.5 Trust and compliance surface
+| Role | Can |
+| --- | --- |
+| **Owner** | everything, including delete the org and transfer ownership; manage billing |
+| **Admin** | manage members, projects, SSO/SCIM, secrets, retention, audit; not billing-delete-org |
+| **Billing manager** | view usage and manage billing/plan; no resource access |
+| **Member** | use resources in projects they belong to (create/fork/exec sandboxes, bind secrets) per their project role |
+| **Viewer** (read-only / guest) | read-only access to the projects they are added to; no mutations |
+
+`owner` maps to Owner and `member` to Member for backward compatibility.
+
+**Custom roles:** beyond the built-ins, an org can define named roles mapping to
+a permission set over the console verbs (keys, secrets, sandboxes, members,
+projects, billing, audit, settings, SSO), edited on a permission matrix. OSS.
+
+**Projects (the org -> project hierarchy):** an org contains **Projects** (the
+user-facing name for resource groups). A sandbox, template, workspace, or secret
+belongs to a project; a membership grants a role **scoped to a project** (or
+org-wide for Owner/Admin/Billing). So a user can be Admin of project A and Viewer
+of project B in the same org. This composes with the org-scoping already enforced
+at every seam (a session for org A never sees org B), adding a project dimension
+inside the org. Best practice mirrored from Vercel projects / GitHub teams /
+HuggingFace resource groups.
+
+**Surfaced in UI:** a Members & roles view (invite, assign org and per-project
+roles, build a custom role on a permission matrix) and a Projects view (create
+project, move resources, manage project membership). Both fully responsive and
+accessible per section 4.6.
+
+### 5.5 User profile and account settings (best practice)
+
+Distinct from org settings: the **account** is the person (section 2 model:
+`Account`), and every user gets a complete, best-practice profile, available in
+both editions.
+
+- **Profile:** display name, avatar, email (with verification), timezone and
+  locale, and the orgs/projects the user belongs to with their role in each.
+- **Security:** active sessions list with per-session revoke, sign-out-everywhere,
+  2FA/passkey enrollment (hosted-managed where the IdP is hosted; self-host
+  defers to the operator IdP), connected identity providers, and recent
+  account-security audit events (scoped to the user).
+- **Personal access tokens:** user-scoped API tokens (distinct from org service
+  keys), created/scoped/revoked, raw value shown exactly once (the existing
+  one-time-secret rule), each audited.
+- **Notifications:** per-event channel preferences (email, webhook, and in-app),
+  for example sandbox failures, quota/spend thresholds, security events.
+- **Appearance:** theme (the Fluorescence dark default plus a light variant),
+  density, and `prefers-reduced-motion` override.
+- **Storage:** profile and preferences live in the `internal/saas` store keyed by
+  account; no secret value is ever returned to the UI after creation.
+
+### 5.6 Trust and compliance surface
 
 A "Trust & compliance" view:
 
@@ -369,14 +458,20 @@ cross-org isolation test (section 8).
 - **B0 (design system + shell):** `@mitos/brand` consumption, `AppShell`,
   grouped nav, client-side routing with prefetch, the Cmd-K command palette, the
   data layer (typed client + query cache), and the empty-state / onboarding
-  primitives. Driven by the interface-design skill.
-- **B1 (hero views):** the Instruments cockpit and the live fork tree.
-- **B2 (core views):** Sandboxes (list + all detail tabs), Secrets, API keys,
-  Usage & cost, Members, Audit (query UI), Templates, Workspaces, Billing
-  (hosted).
+  primitives. Driven by the interface-design skill. **Includes the responsive +
+  accessibility foundation (section 4.6): the responsive shell (sidebar ->
+  mobile drawer), touch targets, focus/ARIA, reduced-motion, and the axe-core CI
+  check.** This foundation is set in B0 so every later view inherits it.
+- **B1 (hero views):** the Instruments cockpit and the live fork tree, each
+  responsive and accessible per section 4.6.
+- **B2 (core views + account/projects):** Sandboxes (list + all detail tabs),
+  Secrets, API keys, Usage & cost, Members & roles (best-practice role set),
+  Projects (org -> project hierarchy), the user **profile and account settings**
+  (section 5.5), Audit (query UI), Templates, Workspaces, Billing (hosted). Every
+  view responsive + accessible.
 - **B3 (enterprise layer):** SSO setup wizard (SAML + enforced OIDC) and the
   SCIM endpoint; audit retention + export sinks; data-retention policies; custom
-  RBAC + resource groups; the Trust & compliance view.
+  roles + per-project RBAC; the Trust & compliance view.
 
 Most of this runs against the mock engine and the existing BFF; no KVM is
 needed (the keystone validation note).
@@ -396,6 +491,13 @@ needed (the keystone validation note).
   built-in `owner` / `member` behavior unchanged.
 - SPA: component tests for the primitives, plus a Playwright smoke against
   `cmd/console -dev`; kept light, per the repo's Go-centric philosophy.
+- Responsive + accessibility (section 4.6, every view): component tests assert
+  keyboard operability and ARIA roles/labels; the Playwright smoke runs at a
+  mobile viewport (drawer nav opens, content reflows); an axe-core check runs in
+  CI on the built SPA and fails on AA violations.
+- RBAC + projects: per-project role checks (Admin of project A, Viewer of project
+  B in one org), best-practice built-in roles, and the `owner`/`member` aliases
+  preserved.
 - Helm: `helm template` golden tests for the new capability fields across
   `edition=community` and `edition=hosted`.
 
