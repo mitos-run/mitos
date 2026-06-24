@@ -5,8 +5,17 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/ && \
-    CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/agent ./guest/agent/
+RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/
+
+# Guest agent (Rust, guest/agent-rs). Built as a static musl binary so it can run
+# as PID 1 (/init) in a minimal rootfs with no libc present. The vsock feature
+# gates the Linux-only tokio-vsock transport the host gRPC caller talks to.
+FROM rust:1-bookworm AS rust-agent
+WORKDIR /build
+COPY . .
+RUN rustup target add x86_64-unknown-linux-musl && \
+    cd guest/agent-rs && \
+    cargo build --release --target x86_64-unknown-linux-musl --features vsock
 
 FROM ubuntu:22.04
 
@@ -36,9 +45,10 @@ RUN curl -fsSL -o /tmp/fc.tgz \
     rm -rf /tmp/fc.tgz /tmp/release-*
 
 COPY --from=builder /build/forkd /usr/local/bin/forkd
-# The guest agent injected as /init when forkd builds a rootfs from an OCI
-# image. cmd/forkd --agent-bin points here (deploy/daemon/daemonset.yaml).
-COPY --from=builder /usr/local/bin/agent /usr/local/bin/agent
+# The Rust guest agent (guest/agent-rs), injected as /init when forkd builds a
+# rootfs from an OCI image. cmd/forkd --agent-bin points here
+# (deploy/daemon/daemonset.yaml).
+COPY --from=rust-agent /build/guest/agent-rs/target/x86_64-unknown-linux-musl/release/sandbox-agent /usr/local/bin/agent
 
 VOLUME ["/var/lib/mitos"]
 EXPOSE 9090 9091

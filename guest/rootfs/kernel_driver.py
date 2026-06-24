@@ -40,8 +40,8 @@ _BINARY_MIMES = {"image/png", "image/jpeg"}
 
 # Wall-clock budget applied to a single run when the request omits a positive
 # timeout. Bounds a runaway cell (e.g. while True: pass) so it cannot wedge the
-# kernel for every later request. Kept in sync with the Go default in
-# guest/agent/kernel.go.
+# kernel for every later request. Kept in sync with the run-code default in the
+# Rust guest agent (guest/agent-rs/src/service/runcode.rs).
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 
 # Poll granularity for get_iopub_msg while waiting on the kernel. Small enough
