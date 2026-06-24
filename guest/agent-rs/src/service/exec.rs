@@ -338,6 +338,8 @@ async fn exec_shell(
         };
 
         let exec_time_ms = start.elapsed().as_micros() as f64 / 1000.0;
+        // Log only the exit code and timing; never the command or output.
+        tracing::info!(exit_code, exec_time_ms, "exec: process exited");
         let _ = tx_exit
             .send(Ok(exit_frame(exit_code, exec_time_ms, String::new())))
             .await;

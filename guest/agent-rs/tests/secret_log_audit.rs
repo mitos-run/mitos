@@ -1,37 +1,80 @@
 // Secret-log audit gate for sandbox-agent.
 //
-// Installs a per-thread tracing capture layer (tracing::subscriber::set_default
-// is thread-scoped; the returned guard reverts it when dropped) and exercises
-// the four secret classes mandated by the task brief:
+// Design: a GLOBAL subscriber captures log events from ALL threads (including
+// tokio worker threads). Because set_global_default can only be called once per
+// process, a single OnceCell installs it on first use. All audit classes share
+// one process-wide Arc<Mutex<Vec<String>>> capture buffer and run SEQUENTIALLY
+// inside a single #[tokio::test] function protected by a Mutex so parallel
+// cargo test runs in other binaries are unaffected (each test binary is its own
+// process). The buffer is snapshotted and cleared between classes so each class
+// sees only the events it produced.
 //
-//   1. Configure RPC: secrets HashMap with a sentinel value.
-//   2. NotifyForked: entropy bytes that encode a detectable hex/base64 sentinel.
-//   3. Exec handler: command string (argv) and stdout bytes containing a sentinel.
-//   4. WriteFile / ReadFile: file content bytes containing a sentinel.
+// Positive controls: after every real handler call the test asserts the
+// capture buffer is NON-EMPTY and contains an expected non-secret marker
+// logged by that handler. An empty buffer is a test-infrastructure failure
+// and is treated as a hard failure (the gate cannot give security assurance
+// over an empty buffer).
 //
-// For each class the test asserts that no captured tracing event contains the
-// sentinel substring. If any assertion fails it means there is a real log-safety
-// violation in the production code.
-//
-// Parallel-safety: set_default installs the subscriber on the current thread
-// only; each test thread has its own capture buffer. The guard is held for the
-// lifetime of each test function. No global subscriber is installed.
+// The four secret classes covered:
+//   1. Configure RPC: secret values via the REAL ControlService gRPC handler.
+//   2. NotifyForked: entropy raw bytes (hex + base64).
+//   3. Exec handler: command argv and stdout bytes.
+//   4. WriteFile / ReadFile: file content bytes.
 
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // The audit_lock() Mutex guard is intentionally held across .await points
+    // to serialize test classes and prevent cross-test buffer contamination.
+    // This is a test-only pattern; production code must not hold std::sync::Mutex
+    // across await points.
+    clippy::await_holding_lock
 )]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use tracing_subscriber::layer::SubscriberExt;
 
 // ---------------------------------------------------------------------------
-// Capture layer
+// Global capture layer: installs a SINGLE subscriber for the whole process.
+// Captures events emitted on ANY thread, including tokio worker threads.
 // ---------------------------------------------------------------------------
 
-/// Collects every tracing event field into a shared Vec<String>.
+static GLOBAL_LINES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
+
+/// Retrieve (and lazily install) the global capture buffer.
+///
+/// On first call this registers the global subscriber. Subsequent calls
+/// return the same Arc so all test code shares one buffer.
+fn global_lines() -> Arc<Mutex<Vec<String>>> {
+    GLOBAL_LINES
+        .get_or_init(|| {
+            let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let layer = CaptureLayer {
+                lines: Arc::clone(&lines),
+            };
+            // LevelFilter::DEBUG ensures all log levels (debug and above) are
+            // captured. Without this explicit filter, registry()'s max_level_hint
+            // may default to INFO and silently drop debug-level handler events
+            // (e.g. files.rs logs paths at debug level). We stop at DEBUG to
+            // avoid capturing trace-level h2 internal events that would pollute
+            // the buffer and slow down sentinel scans.
+            use tracing_subscriber::filter::LevelFilter;
+            let sub = tracing_subscriber::registry()
+                .with(LevelFilter::DEBUG)
+                .with(layer);
+            // set_global_default registers this subscriber for ALL threads.
+            // It can be called at most once per process; OnceLock ensures that.
+            tracing::subscriber::set_global_default(sub)
+                .expect("global tracing subscriber already set");
+            lines
+        })
+        .clone()
+}
+
+/// Collect every tracing event field into the shared buffer.
 struct CaptureLayer {
     lines: Arc<Mutex<Vec<String>>>,
 }
@@ -49,7 +92,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
     }
 }
 
-/// Collects all field names and their string representations.
 struct CaptureVisitor(String);
 
 impl tracing::field::Visit for CaptureVisitor {
@@ -68,29 +110,40 @@ impl tracing::field::Visit for CaptureVisitor {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Buffer helpers
 // ---------------------------------------------------------------------------
 
-/// Install the capture layer on the current thread. Returns the shared buffer
-/// and the subscriber guard. Hold the guard until assertions are complete.
-fn install_capture() -> (Arc<Mutex<Vec<String>>>, impl Drop) {
-    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
-    let layer = CaptureLayer {
-        lines: Arc::clone(&lines),
-    };
-    let sub = tracing_subscriber::registry().with(layer);
-    let guard = tracing::subscriber::set_default(sub);
-    (lines, guard)
+/// Drain and return all captured lines since the last snapshot.
+fn take_lines() -> Vec<String> {
+    global_lines().lock().unwrap().drain(..).collect()
 }
 
-/// Assert that none of the captured lines contains the sentinel.
+/// Assert the capture is non-empty (positive control: proves we saw events).
+fn assert_nonempty(lines: &[String], marker: &str, context: &str) {
+    assert!(
+        !lines.is_empty(),
+        "capture buffer is EMPTY for {context}: global subscriber did not capture \
+         any events. This means the audit cannot give security assurance. \
+         Expected to see marker: {marker:?}"
+    );
+}
+
+/// Assert at least one line contains the expected non-secret marker.
+fn assert_contains_marker(lines: &[String], marker: &str, context: &str) {
+    let found = lines.iter().any(|l| l.contains(marker));
+    assert!(
+        found,
+        "positive control FAILED for {context}: expected non-secret marker \
+         {marker:?} was not found in captured lines:\n{lines:#?}"
+    );
+}
+
+/// Assert that NO captured line contains the sentinel.
 fn assert_no_sentinel(lines: &[String], sentinel: &str, context: &str) {
     for line in lines {
         assert!(
             !line.contains(sentinel),
-            "secret leaked in {context}: sentinel {:?} found in log line: {:?}",
-            sentinel,
-            line
+            "SECRET LEAKED in {context}: sentinel {sentinel:?} found in log line: {line:?}"
         );
     }
 }
@@ -114,102 +167,19 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Configure (secret class 1 - secrets and env values).
-//
-// Exercises ConfiguredEnv::apply, which is the same path the Configure gRPC
-// handler calls. The handler emits tracing::info! with only counts (env_keys,
-// secret_keys); neither keys nor values must appear in logs.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn configure_secret_never_appears_in_logs() {
-    const SENTINEL: &str = "SENTINEL_SECRET_VALUE_d34db33f";
-
-    let (lines, _guard) = install_capture();
-
-    let configured = sandbox_agent::env::ConfiguredEnv::new();
-    let secrets = std::collections::HashMap::from([
-        ("API_KEY".to_string(), SENTINEL.to_string()),
-    ]);
-    let plain_env = std::collections::HashMap::from([
-        ("MY_ENV_VAR".to_string(), SENTINEL.to_string()),
-    ]);
-
-    // Production code path: apply() is called by the Configure gRPC handler.
-    configured.apply(plain_env, secrets).await;
-
-    // Emit the same tracing::info! that control.rs emits (counts only).
-    tracing::info!(env_keys = 1usize, secret_keys = 1usize, "control: Configure applied");
-
-    let captured = lines.lock().unwrap();
-    // Sanity: the capture layer is not a no-op.
-    assert!(
-        !captured.is_empty(),
-        "capture layer produced no events; check that set_default is working"
-    );
-    assert_no_sentinel(&captured, SENTINEL, "Configure secrets/env values");
-}
-
-// ---------------------------------------------------------------------------
-// Test 2: NotifyForked (secret class 2 - entropy bytes).
-//
-// Exercises handle_notify_forked_inner. The orchestrator logs a summary with
-// entropy_bytes=N (a count only). The raw entropy bytes must never appear as
-// hex or base64 in any log line.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn notify_forked_entropy_never_appears_in_logs() {
-    // Distinctive entropy bytes: hex "5e47abe1ef5ec4e7".
-    const ENTROPY: &[u8] = &[0x5e, 0x47, 0xab, 0xe1, 0xef, 0x5e, 0xc4, 0xe7];
-
-    let hex_sentinel: String = ENTROPY.iter().map(|b| format!("{b:02x}")).collect();
-    let b64_sentinel = base64_encode(ENTROPY);
-
-    let (lines, _guard) = install_capture();
-
-    // No-op signal: never sends SIGUSR2 to host processes (box2 safety contract).
-    fn noop() -> i32 { 0 }
-
-    let req = sandbox_agent::fork::NotifyForkedRequest {
-        generation: 7,
-        host_wall_clock_nanos: 0,
-        entropy: ENTROPY.to_vec(),
-        network: None,
-        volumes: vec![],
-    };
-
-    // Production orchestrator.
-    let _ = sandbox_agent::fork::handle_notify_forked_inner(&req, noop);
-
-    let captured = lines.lock().unwrap();
-    assert!(
-        !captured.is_empty(),
-        "capture layer produced no events; the orchestrator summary log was not emitted"
-    );
-    assert_no_sentinel(&captured, &hex_sentinel, "NotifyForked entropy (hex)");
-    assert_no_sentinel(&captured, &b64_sentinel, "NotifyForked entropy (base64)");
-}
-
-// ---------------------------------------------------------------------------
-// Tests 3 and 4 require a real Unix-domain-socket gRPC server (same approach
-// as tests/conformance.rs) and are Linux-only because exec requires /bin/sh
-// and the file tests write to tmp paths. The exec test runs a command that
-// echoes the sentinel to stdout; the file test writes/reads a sentinel byte.
-// In both cases the sentinel must NOT appear in any tracing log line.
+// Unix-socket gRPC server helpers
 // ---------------------------------------------------------------------------
 
 use sandbox_agent::sandbox_v1;
 
-/// Start a SandboxService on a Unix socket and return a connected client.
-/// Mirrors start_server_and_client from tests/conformance.rs.
+/// Start a SandboxService on a unique Unix socket and return a connected client.
 #[cfg(target_os = "linux")]
 async fn start_sandbox_client(
     sock: &str,
 ) -> sandbox_v1::sandbox_client::SandboxClient<tonic::transport::Channel> {
     use std::path::PathBuf;
     use std::sync::Arc as StdArc;
-    use tokio::sync::Mutex;
+    use tokio::sync::Mutex as TokioMutex;
 
     use sandbox_agent::env::ConfiguredEnv;
     use sandbox_agent::kernel::KernelManager;
@@ -222,7 +192,7 @@ async fn start_sandbox_client(
 
     let svc = SandboxService {
         env: StdArc::new(ConfiguredEnv::new()),
-        kernel: StdArc::new(Mutex::new(KernelManager::new())),
+        kernel: StdArc::new(TokioMutex::new(KernelManager::new())),
         workspace_root: PathBuf::from("/workspace"),
     };
 
@@ -251,22 +221,228 @@ async fn start_sandbox_client(
     sandbox_v1::sandbox_client::SandboxClient::new(channel)
 }
 
+/// Start a ControlService on a unique Unix socket and return a connected client.
+///
+/// The ControlService is the REAL production handler for Configure and
+/// NotifyForked. Tests drive it via a Unix-domain gRPC connection so the
+/// handler code (including its log emissions) runs on tokio worker threads,
+/// proving the global subscriber captures cross-thread events.
+#[cfg(target_os = "linux")]
+async fn start_control_client(
+    sock: &str,
+) -> sandbox_agent::control_v1::control_client::ControlClient<tonic::transport::Channel> {
+    use std::sync::Arc as StdArc;
+    use std::time::Instant;
+
+    use sandbox_agent::control_v1::control_server::ControlServer;
+    use sandbox_agent::env::ConfiguredEnv;
+    use sandbox_agent::service::control::ControlService;
+
+    let _ = std::fs::remove_file(sock);
+    let uds = tokio::net::UnixListener::bind(sock).expect("bind unix socket for ControlService");
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
+
+    let svc = ControlService {
+        start_time: Instant::now(),
+        env: StdArc::new(ConfiguredEnv::new()),
+        signal_fn: || 0, // no-op: must not broadcast SIGUSR2 on box2
+    };
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ControlServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+            .ok();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let sock_path = sock.to_owned();
+    let channel = tonic::transport::Endpoint::from_static("http://[::]:0")
+        .connect_with_connector(tower::service_fn(move |_| {
+            let p = sock_path.clone();
+            async move {
+                let s = tokio::net::UnixStream::connect(p).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(s))
+            }
+        }))
+        .await
+        .expect("connect to control unix socket");
+
+    sandbox_agent::control_v1::control_client::ControlClient::new(channel)
+}
+
 // ---------------------------------------------------------------------------
-// Test 3: Exec (secret class 3 - argv and stdout bytes).
+// Mutex serializing all audit classes in this binary.
 //
-// Runs `echo SENTINEL` via the real Exec gRPC stack. The command string and
-// the resulting stdout bytes must not appear in any tracing log line.
+// cargo test may run tests inside one binary in parallel on separate threads.
+// The global capture buffer is shared, so classes must run one at a time
+// and snapshot/clear the buffer atomically between them. A single Mutex
+// around a unit token (()) enforces this. Note: each test binary is its own
+// process, so this Mutex does NOT interact with other test binaries.
+// ---------------------------------------------------------------------------
+
+static AUDIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn audit_lock() -> &'static Mutex<()> {
+    AUDIT_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// ---------------------------------------------------------------------------
+// Cross-thread positive-control: prove global subscriber captures worker events.
+//
+// This test spawns a tokio task (which runs on a worker thread) and emits a
+// tracing event there. If the global subscriber does NOT capture it, the
+// positive-control assertion catches the empty buffer. This guards the entire
+// audit against silently regressing to a no-op capture.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn global_subscriber_captures_worker_thread_events() {
+    let _guard = audit_lock().lock().unwrap();
+    // Initialize the global subscriber (idempotent after first call).
+    let _ = global_lines();
+    // Clear any noise from earlier tests.
+    take_lines();
+
+    const WORKER_MARKER: &str = "audit_cross_thread_positive_control_7a3f";
+
+    // Emit the marker from a tokio worker thread.
+    tokio::spawn(async move {
+        tracing::info!(marker = WORKER_MARKER, "cross-thread positive control");
+    })
+    .await
+    .expect("worker task panicked");
+
+    // Give the subscriber a moment to flush (it is synchronous, but the
+    // spawn schedules on a worker; await above ensures it completed).
+    let lines = take_lines();
+
+    assert_nonempty(&lines, WORKER_MARKER, "cross-thread positive control");
+    assert_contains_marker(&lines, WORKER_MARKER, "cross-thread positive control");
+}
+
+// ---------------------------------------------------------------------------
+// Class 1: Configure (real ControlService gRPC handler).
+//
+// Drives the production configure() handler via a Unix-domain gRPC server.
+// The handler emits tracing::info! with only counts (env_keys, secret_keys).
+// Neither keys nor values must appear in logs.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn configure_secret_never_appears_in_logs() {
+    let _guard = audit_lock().lock().unwrap();
+    let _ = global_lines();
+    take_lines();
+
+    const SENTINEL: &str = "SENTINEL_SECRET_VALUE_d34db33f";
+
+    // Unique socket path avoids collisions with parallel test binaries.
+    let sock = format!(
+        "/tmp/audit-configure-{}.sock",
+        std::process::id()
+    );
+    let mut client = start_control_client(&sock).await;
+
+    use sandbox_agent::control_v1::ConfigureRequest;
+
+    let req = ConfigureRequest {
+        env: std::collections::HashMap::from([
+            ("MY_ENV_VAR".to_string(), SENTINEL.to_string()),
+        ]),
+        secrets: std::collections::HashMap::from([
+            ("API_KEY".to_string(), SENTINEL.to_string()),
+        ]),
+    };
+
+    // Call the REAL production Configure gRPC handler.
+    client
+        .configure(tonic::Request::new(req))
+        .await
+        .expect("Configure RPC failed");
+
+    // Small wait: handler runs on a tokio worker thread; await above ensures
+    // the future completed but the tracing event is emitted synchronously
+    // inside the handler, so no additional sleep is needed.
+    let lines = take_lines();
+
+    // Positive control: the handler MUST have logged "Configure applied".
+    assert_nonempty(&lines, "Configure applied", "Configure");
+    assert_contains_marker(&lines, "Configure applied", "Configure");
+
+    // Security gate: sentinel must not appear anywhere in logs.
+    assert_no_sentinel(&lines, SENTINEL, "Configure secrets/env values");
+}
+
+// ---------------------------------------------------------------------------
+// Class 2: NotifyForked (entropy bytes as raw, hex, base64).
+//
+// Exercises handle_notify_forked_inner directly (it runs synchronously on the
+// calling thread). The orchestrator logs a summary with entropy_bytes=N (a
+// count only). The raw bytes must never appear as hex or base64.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn notify_forked_entropy_never_appears_in_logs() {
+    let _guard = audit_lock().lock().unwrap();
+    let _ = global_lines();
+    take_lines();
+
+    // Distinctive entropy bytes: hex "5e47abe1ef5ec4e7".
+    const ENTROPY: &[u8] = &[0x5e, 0x47, 0xab, 0xe1, 0xef, 0x5e, 0xc4, 0xe7];
+
+    let hex_sentinel: String = ENTROPY.iter().map(|b| format!("{b:02x}")).collect();
+    let b64_sentinel = base64_encode(ENTROPY);
+
+    // No-op signal: never sends SIGUSR2 to host processes (box2 safety contract).
+    fn noop() -> i32 { 0 }
+
+    let req = sandbox_agent::fork::NotifyForkedRequest {
+        generation: 7,
+        host_wall_clock_nanos: 0,
+        entropy: ENTROPY.to_vec(),
+        network: None,
+        volumes: vec![],
+    };
+
+    // Production orchestrator (synchronous; runs on this thread).
+    let _ = sandbox_agent::fork::handle_notify_forked_inner(&req, noop);
+
+    let lines = take_lines();
+
+    // Positive control: the orchestrator MUST have logged entropy_bytes=N.
+    assert_nonempty(&lines, "entropy_bytes", "NotifyForked");
+    assert_contains_marker(&lines, "entropy_bytes", "NotifyForked");
+
+    // Security gate.
+    assert_no_sentinel(&lines, &hex_sentinel, "NotifyForked entropy (hex)");
+    assert_no_sentinel(&lines, &b64_sentinel, "NotifyForked entropy (base64)");
+}
+
+// ---------------------------------------------------------------------------
+// Class 3: Exec (argv and stdout bytes via real SandboxService gRPC handler).
+//
+// Runs `echo SENTINEL` via the Exec RPC. The command string and stdout bytes
+// must not appear in any tracing log line.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn exec_argv_and_output_never_appear_in_logs() {
+    let _guard = audit_lock().lock().unwrap();
+    let _ = global_lines();
+    take_lines();
+
     const SENTINEL: &str = "SENTINEL_EXEC_OUTPUT_c0ffee42";
 
-    let (lines, _guard) = install_capture();
-
-    let sock = "/tmp/audit-test-exec.sock";
-    let mut client = start_sandbox_client(sock).await;
+    let sock = format!(
+        "/tmp/audit-exec-{}.sock",
+        std::process::id()
+    );
+    let mut client = start_sandbox_client(&sock).await;
 
     use sandbox_agent::sandbox_v1::{exec_request::Msg as ReqMsg, ExecOpen, ExecRequest};
 
@@ -276,7 +452,8 @@ async fn exec_argv_and_output_never_appear_in_logs() {
             command: command.clone(),
             args: vec![],
             env: vec![],
-            cwd: String::new(),
+            // Use /tmp as cwd: /workspace may not exist outside the VM.
+            cwd: "/tmp".to_string(),
             timeout_seconds: 5,
             pty: None,
         })),
@@ -288,36 +465,51 @@ async fn exec_argv_and_output_never_appear_in_logs() {
         .expect("exec RPC call failed")
         .into_inner();
 
-    // Drain the response stream to allow the handler to complete.
+    // Drain the response stream: waits for the handler to complete and emit logs.
     while let Ok(Some(_)) = response_stream.message().await {}
 
-    let captured = lines.lock().unwrap();
-    assert_no_sentinel(&captured, &command, "Exec command string (argv)");
-    assert_no_sentinel(&captured, SENTINEL, "Exec stdout output bytes");
+    // Small sleep: ensure the handler's deferred tracing events (emitted on
+    // the worker after the stream drains) are flushed into the global buffer.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let lines = take_lines();
+
+    // Positive control: exec handler MUST log "exec: process exited".
+    // This proves the global subscriber captured events from the tokio worker thread.
+    assert_nonempty(&lines, "exec: process exited", "Exec");
+    assert_contains_marker(&lines, "exec: process exited", "Exec");
+
+    // Security gate: command string and output bytes must not appear.
+    assert_no_sentinel(&lines, &command, "Exec command string (argv)");
+    assert_no_sentinel(&lines, SENTINEL, "Exec stdout output bytes");
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: WriteFile / ReadFile (secret class 4 - file content bytes).
+// Class 4: WriteFile / ReadFile (file content bytes).
 //
-// Writes a file whose content is the sentinel, then reads it back. Neither the
-// write path nor the read path must log any file bytes.
+// Writes a file whose content is the sentinel, then reads it back. Neither
+// the write path nor the read path must log any file bytes.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn file_content_never_appears_in_logs() {
-    const SENTINEL: &str = "SENTINEL_FILE_CONTENT_baadf00d";
+    let _guard = audit_lock().lock().unwrap();
+    let _ = global_lines();
+    take_lines();
 
-    let (lines, _guard) = install_capture();
+    const SENTINEL: &str = "SENTINEL_FILE_CONTENT_baadf00d";
 
     let tmp = tempfile::tempdir().expect("create tmpdir");
     let file_path = tmp.path().join("audit-secret.txt");
     let path_str = file_path.to_string_lossy().into_owned();
 
-    let sock = "/tmp/audit-test-files.sock";
-    let mut client = start_sandbox_client(sock).await;
+    let sock = format!(
+        "/tmp/audit-files-{}.sock",
+        std::process::id()
+    );
+    let mut client = start_sandbox_client(&sock).await;
 
-    // WriteFile.
     use sandbox_agent::sandbox_v1::{
         write_file_request::Msg as WMsg, WriteFileOpen, WriteFileRequest,
     };
@@ -337,7 +529,6 @@ async fn file_content_never_appears_in_logs() {
         .await
         .expect("write_file RPC call failed");
 
-    // ReadFile: drain the response to let the handler complete.
     use sandbox_agent::sandbox_v1::ReadFileRequest;
     let mut read_stream = client
         .read_file(tonic::Request::new(ReadFileRequest {
@@ -359,6 +550,14 @@ async fn file_content_never_appears_in_logs() {
         "file round-trip sanity check: content did not match"
     );
 
-    let captured = lines.lock().unwrap();
-    assert_no_sentinel(&captured, SENTINEL, "WriteFile/ReadFile file content bytes");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let lines = take_lines();
+
+    // Positive control: write/read handlers MUST log the file path (non-secret).
+    assert_nonempty(&lines, &path_str, "WriteFile/ReadFile");
+    assert_contains_marker(&lines, &path_str, "WriteFile/ReadFile");
+
+    // Security gate: file content bytes must not appear.
+    assert_no_sentinel(&lines, SENTINEL, "WriteFile/ReadFile file content bytes");
 }
