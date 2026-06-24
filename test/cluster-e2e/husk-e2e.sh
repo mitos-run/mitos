@@ -305,8 +305,9 @@ set -e
 # empty and the host closes with `pty stream failed: unexpected pty frame kind:
 # ""`. The same stale agent breaks /v1/exec/stream identically (the blocking
 # /v1/exec path the claim-exec stage uses is unaffected, which is why that stage
-# passes). The guest agent SOURCE already implements TypePty (guest/agent/pty.go,
-# main.go); the fix is rebuilding the template snapshot with the current agent,
+# passes). The guest agent SOURCE already implements the PTY exec path
+# (guest/agent-rs/src/service/exec.rs, guest/agent-rs/src/sys/pty.rs); the fix is
+# rebuilding the template snapshot with the current agent,
 # owned by the template/build workstream. Until that lands, a PTY FAIL is
 # recorded as a non-fatal note so the suite stays green on the proven core + fork
 # while the snapshot-agent gap is tracked separately.

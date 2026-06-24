@@ -1,6 +1,6 @@
-# mitos Go SDK
+# Mitos Go SDK
 
-mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+Mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
 restore from snapshots and fork into parallel attempts, so an agent can branch a
 warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
@@ -142,7 +142,7 @@ surfaces in `err.Error()`.
 ## Sandbox ids
 
 Sandbox ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (the same allowlist
-every mitos SDK enforces). `Fork` validates the id (the explicit one or the
+every Mitos SDK enforces). `Fork` validates the id (the explicit one or the
 generated `sandbox-<hex>`) and returns a typed `invalid_sandbox_id` error before
 sending any request. `ValidSandboxID(id)` exposes the check.
 
@@ -160,19 +160,20 @@ go test ./... -count=1
 
 ## Scope
 
-This module is direct-mode only. Cluster mode (driving the Kubernetes CRDs) is
-served by the Python and TypeScript SDKs. Beyond the create / fork / exec / list
+This module is direct-mode only today. Cluster mode (driving the Kubernetes CRDs)
+ships in the Python and TypeScript SDKs and is planned for this module too, for
+full parity. Beyond the create / fork / exec / list
 / terminate surface above, the following direct-mode endpoints are not part of
 this module: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`),
 `run_code`, per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
 `get_host(port)` preview URLs.
 
-## The mitos SDK family
+## The Mitos SDK family
 
-mitos ships native clients in six languages. All of them share the same
+Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
-1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
-TypeScript only.
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
+and TypeScript today and is planned for the rest, for full parity.
 
 | Language | Install | Covers |
 | --- | --- | --- |

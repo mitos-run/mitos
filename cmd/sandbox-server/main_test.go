@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,12 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"mitos.run/mitos/internal/vsock"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 )
 
 // TestMaxStreamsPerSandboxFlagDefault verifies the standalone server exposes a
@@ -48,132 +49,94 @@ func TestNewServerPlumbsStreamCap(t *testing.T) {
 	}
 }
 
-// fakeAgent listens on sockPath speaking the Firecracker vsock UDS preamble and
-// the JSON agent protocol, recording notify_forked requests. On notify_forked it
-// replies OK:true with a NotifyForkedResponse reporting ReseededRNG=reseeded, so
-// a test can drive both the reseeded-OK and the un-reseeded fail-closed path. No
-// secrets or entropy are ever logged.
-func fakeAgent(t *testing.T, sockPath string, reseeded bool) *[]*vsock.NotifyForkedRequest {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-	var notifies []*vsock.NotifyForkedRequest
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				// The standalone server reaches this fake over the unix fallback
-				// (vsock.ConnectUnix), which sends no "CONNECT <port>" preamble:
-				// the JSON request protocol starts immediately.
-				for sc.Scan() {
-					var req vsock.Request
-					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-						return
-					}
-					if req.Type == vsock.TypeNotifyForked {
-						notifies = append(notifies, req.NotifyForked)
-						out, _ := json.Marshal(vsock.Response{
-							OK:           true,
-							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: reseeded},
-						})
-						if _, err := c.Write(append(out, '\n')); err != nil {
-							return
-						}
-						continue
-					}
-					out, _ := json.Marshal(vsock.Response{OK: true})
-					if _, err := c.Write(append(out, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-	return &notifies
+// fakeControlServer is an in-process gRPC Control server that records
+// NotifyForked calls and returns a fixed ReseededRng value. No entropy or
+// secret values are ever logged.
+type fakeControlServer struct {
+	internalv1.UnimplementedControlServer
+	reseeded bool
+	notifies []*vsock.NotifyForkedRequest
 }
 
-// flakyAgent is like fakeAgent but DROPS the connection without replying on the
-// first failFirst notify_forked requests it sees (across reconnects), then
-// behaves normally (reply OK with ReseededRNG:true). It models the post-restore
-// readiness race: after a snapshot restore the guest agent resets its vsock
-// listener, so the host's first connection can be stale and NotifyForked sees
-// "connection closed". A robust fork path must reconnect and retry. No secrets
-// or entropy are ever logged.
-func flakyAgent(t *testing.T, sockPath string, failFirst int) *int32 {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
+func (s *fakeControlServer) NotifyForked(_ context.Context, req *internalv1.NotifyForkedRequest) (*internalv1.NotifyForkedResponse, error) {
+	// Map gRPC request to vsock.NotifyForkedRequest for test assertions.
+	s.notifies = append(s.notifies, &vsock.NotifyForkedRequest{
+		Generation: req.GetGeneration(),
+		Entropy:    req.GetEntropy(),
+	})
+	return &internalv1.NotifyForkedResponse{ReseededRng: s.reseeded}, nil
+}
+
+func (s *fakeControlServer) Configure(_ context.Context, _ *internalv1.ConfigureRequest) (*internalv1.ConfigureResponse, error) {
+	return &internalv1.ConfigureResponse{}, nil
+}
+
+func (s *fakeControlServer) Ping(_ context.Context, _ *internalv1.PingRequest) (*internalv1.PingResponse, error) {
+	return &internalv1.PingResponse{}, nil
+}
+
+// flakyControlServer drops the first failFirst NotifyForked connections
+// (simulate post-restore readiness race), then behaves normally.
+type flakyControlServer struct {
+	internalv1.UnimplementedControlServer
+	failFirst int
+	seen      int32
+}
+
+func (s *flakyControlServer) NotifyForked(_ context.Context, _ *internalv1.NotifyForkedRequest) (*internalv1.NotifyForkedResponse, error) {
+	if atomic.AddInt32(&s.seen, 1) <= int32(s.failFirst) {
+		// Signal failure so the caller retries. Use Unavailable which the
+		// NotifyForked retry loop treats as a transient failure.
+		return nil, fmt.Errorf("simulated transient reseed failure")
 	}
+	return &internalv1.NotifyForkedResponse{ReseededRng: true}, nil
+}
+
+// startGRPCControlUnix starts a plain gRPC server on sockPath (no vsock preamble)
+// serving the Control service. The standalone server's EnableUnixFallback path
+// dials /tmp/sandbox-agent-53.sock directly via DialGRPCConnUnix (no preamble).
+func startGRPCControlUnix(t *testing.T, sockPath string, svc internalv1.ControlServer) {
+	t.Helper()
+	_ = os.Remove(sockPath)
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { lis.Close() })
-	var seen int32
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				for sc.Scan() {
-					var req vsock.Request
-					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-						return
-					}
-					if req.Type == vsock.TypeNotifyForked {
-						if atomic.AddInt32(&seen, 1) <= int32(failFirst) {
-							// Drop the connection without replying: the caller must
-							// reconnect and retry.
-							return
-						}
-						out, _ := json.Marshal(vsock.Response{
-							OK:           true,
-							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: true},
-						})
-						if _, err := c.Write(append(out, '\n')); err != nil {
-							return
-						}
-						continue
-					}
-					out, _ := json.Marshal(vsock.Response{OK: true})
-					if _, err := c.Write(append(out, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-	return &seen
+	srv := grpc.NewServer()
+	internalv1.RegisterControlServer(srv, svc)
+	go srv.Serve(lis) //nolint:errcheck // test
+	t.Cleanup(func() { srv.Stop(); lis.Close() })
+}
+
+// fakeAgent starts a gRPC Control server at sockPath, returns a pointer to the
+// slice of recorded NotifyForkedRequests. reseeded controls what ReseededRng
+// the server reports. No secrets or entropy are ever logged.
+func fakeAgent(t *testing.T, sockPath string, reseeded bool) *[]*vsock.NotifyForkedRequest {
+	t.Helper()
+	svc := &fakeControlServer{reseeded: reseeded}
+	startGRPCControlUnix(t, sockPath, svc)
+	return &svc.notifies
+}
+
+// flakyAgent starts a gRPC Control server that drops the first failFirst
+// NotifyForked calls (connection-level failures model the post-restore race),
+// then replies ReseededRng:true. Returns pointer to the atomic call counter.
+func flakyAgent(t *testing.T, sockPath string, failFirst int) *int32 {
+	t.Helper()
+	svc := &flakyControlServer{failFirst: failFirst}
+	startGRPCControlUnix(t, sockPath, svc)
+	return &svc.seen
 }
 
 // realServerWithAgent builds a real-mode server whose sandboxAPI dials a fake
-// guest agent for sandboxID at the standalone server's fixed vsock path. The
-// real-mode handleFork resolves the vsock UDS under dataDir/sandboxes/<id>;
-// since the path does not exist on disk, the EnableUnixFallback path the
-// standalone server sets routes the dial to the fixed local agent socket.
+// gRPC Control agent for sandboxID at the standalone server's fixed unix fallback
+// path. The real-mode handleFork resolves the vsock UDS under dataDir/sandboxes/<id>;
+// since the path does not exist on disk, EnableUnixFallback routes the dial to
+// /tmp/sandbox-agent-53.sock (AgentGRPCPort, plain unix socket, no preamble).
 func realServerWithAgent(t *testing.T, sandboxID string, reseeded bool) (*server, *[]*vsock.NotifyForkedRequest) {
 	t.Helper()
-	// The standalone server falls back to /tmp/sandbox-agent-52.sock when the
-	// per-sandbox vsock path does not exist, so the fake agent listens there.
-	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
-	_ = os.Remove(sock)
+	// EnableUnixFallback dials /tmp/sandbox-agent-<AgentGRPCPort>.sock.
+	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentGRPCPort)
 	notifies := fakeAgent(t, sock, reseeded)
 
 	dataDir, err := os.MkdirTemp("/tmp", "sbsrv")
@@ -244,8 +207,7 @@ func TestRealModeForkFailsClosedWhenGuestDoesNotReseed(t *testing.T) {
 // fork must still succeed.
 func TestRealModeForkRetriesReseedOnTransientFailure(t *testing.T) {
 	const id = "sb-flaky"
-	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
-	_ = os.Remove(sock)
+	sock := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentGRPCPort)
 	seen := flakyAgent(t, sock, 2) // drop the first two reseed attempts
 
 	dataDir, err := os.MkdirTemp("/tmp", "sbsrv")

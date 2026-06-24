@@ -1,6 +1,6 @@
 # Reversible sleep-consolidation demo
 
-The flagship W4 slice: an agent does work, "sleeps" (consolidates its state into
+An agent does work, "sleeps" (consolidates its state into
 a resumable head: filesystem state paired with a VM memory snapshot), "wakes"
 mid-execution from that head, and the whole thing is reversible because the head
 is a pointer over an immutable revision DAG.
@@ -24,7 +24,7 @@ on a real cluster through the released surface.
 
 ```bash
 # From a machine with kubectl + the mitos CLI + the Python SDK installed,
-# pointed at a running mitos cluster.
+# pointed at a running Mitos cluster.
 examples/sleep-consolidation/run.sh mitos-e2e ~/.kube/config
 ```
 

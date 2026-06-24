@@ -1,6 +1,6 @@
-# mitos Python SDK
+# Mitos Python SDK
 
-mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+Mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
 restore from snapshots and fork into parallel attempts, so an agent can branch a
 warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
@@ -120,7 +120,7 @@ sandbox.terminate()
 
 Cluster mode drives the Kubernetes CRDs (`SandboxPool`, `Sandbox`, `Workspace`)
 in API group `mitos.run/v1` and execs through the forkd sandbox API. It is for
-operators who run the mitos cluster themselves.
+operators who run the Mitos cluster themselves.
 
 ```python
 from mitos import AgentRun
@@ -286,7 +286,7 @@ the base SDK installs and tests without it.
 ### LangChain / deepagents
 
 LangChain and deepagents let you pick a pluggable sandbox backend (they ship
-`E2BSandbox` and `DaytonaSandbox`). `MitosSandbox` is the mitos backend: change
+`E2BSandbox` and `DaytonaSandbox`). `MitosSandbox` is the Mitos backend: change
 the backend, keep your agent code.
 
 ```python
@@ -311,14 +311,14 @@ sb.close()                           # alias: sb.stop()
 
 Install the extra only if you use the integration:
 `pip install "mitos-run[langchain]"`. `MitosSandbox` does not subclass any
-langchain type and is fully usable without langchain installed. Fork is a mitos
+langchain type and is fully usable without langchain installed. Fork is a Mitos
 op the LangChain backend interface does not expose, so it is reached through the
 adapter's native `fork`, which returns sibling `MitosSandbox` backends.
 
 ### OpenAI Agents SDK
 
 `MitosSandboxTools` binds `run_command` / `read_file` / `write_file` /
-`run_code` to a mitos sandbox: give the tools to your agent and its tool calls
+`run_code` to a Mitos sandbox: give the tools to your agent and its tool calls
 run inside the sandbox.
 
 ```python
@@ -345,7 +345,7 @@ raises a clear error naming the extra when absent.
 ### Claude Agent SDK
 
 The Claude Agent SDK takes custom tools as an in-process MCP server.
-`MitosSandboxTools` binds the same four tools to a mitos sandbox and wraps them
+`MitosSandboxTools` binds the same four tools to a Mitos sandbox and wraps them
 as an MCP server you pass to the agent.
 
 ```python
@@ -370,7 +370,7 @@ raises a clear error naming the extra when absent.
 
 ### VibeKit
 
-`MitosVibeKitProvider` is the mitos provider against VibeKit's provider shape: a
+`MitosVibeKitProvider` is the Mitos provider against VibeKit's provider shape: a
 named provider that creates sandboxes exposing command execution, a filesystem,
 and a lifecycle.
 
@@ -394,7 +394,7 @@ mitos-native op via `sandbox.fork(n)`.
 
 ### ZenML
 
-`MitosSandboxComponent` is the framework-neutral mitos backend (config, flavor
+`MitosSandboxComponent` is the framework-neutral Mitos backend (config, flavor
 name, and the provision / run_command / files / run_code / deprovision logic the
 flavor wraps).
 
@@ -416,15 +416,15 @@ Install the extra only if you use the integration:
 testable without ZenML; only `MitosSandboxComponent.flavor()` needs it and
 raises a clear error naming the extra when absent.
 
-Listing mitos as a selectable provider inside VibeKit or ZenML is a contribution
+Listing Mitos as a selectable provider inside VibeKit or ZenML is a contribution
 to those projects' own repositories, not something installing this SDK does. The
 adapters above implement the backend each aggregator expects; you use them
 directly today, and the module docstrings spell out the contract each upstream
 contribution would conform to.
 
-## The mitos SDK family
+## The Mitos SDK family
 
-mitos ships native clients in six languages. All of them share the same
+Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
 1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
 TypeScript only.

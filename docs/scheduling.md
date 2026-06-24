@@ -66,7 +66,7 @@ projectedCost(node, T) <= budget(node) - MemoryUsed(node)   # memory headroom
 
 ### Sandbox-count ceiling
 
-forkd enforces a per-node `MaxSandboxes` cap (the host-DoS ceiling, PR #110):
+forkd enforces a per-node `MaxSandboxes` cap (the host-DoS ceiling):
 `engine.Fork` past it returns gRPC `ResourceExhausted`. Both `ActiveSandboxes`
 and `MaxSandboxes` arrive on the capacity heartbeat, so the scheduler also
 enforces the cap at SCHEDULE time: a node where `MaxSandboxes > 0` and
@@ -152,7 +152,7 @@ GC, and `mitos_claim_errors_total{reason="capacity"}` bumped. Failing after a
 bounded wait is the boring, honest behavior: the claim does not hang forever and
 the controller never forces a placement that would OOM a node.
 
-Live and standard forks (`SandboxFork`) are NOT placed by this scheduler. A
+Live and standard forks (a `Sandbox` with `spec.source.fromSandbox`) are NOT placed by this scheduler. A
 `ForkRunning` copies the source VM's already-resident guest memory in place, so
 a fork is pinned to the source sandbox's node by construction; the node's own
 admission still guards it at the forkd layer.
@@ -174,13 +174,13 @@ OPEN (not implemented, do not assume):
 
 - NUMA-aware vCPU/memory pinning. (Dynamic, post-ready, single-node CPU pinning
   plus sibling-hyperthread pairing and a launch scheduling-priority bump is in
-  design + skeleton form; see `docs/perf/cpu-pinning.md` and issue #168. NUMA
+  design + skeleton form; see `docs/perf/cpu-pinning.md`. NUMA
   awareness across sockets is still open.)
 - Hugepage-backed guest memory.
 - KSM (kernel same-page merging) tuning for cross-template sharing.
 - Multi-resource bin-packing: disk, CPU, and the cold-start
   snapshot-distribution cost of fetching a template to a cold node (ties into
-  snapshot distribution, #14). Today only memory is packed.
+  snapshot distribution). Today only memory is packed.
 - Preemption / eviction under pressure, and predictive prewarming.
 - The MEASURED bare-metal density curve on the pinned reference node. The
   density numbers are a TARGET until they are run on that hardware and recorded

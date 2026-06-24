@@ -18,13 +18,78 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 
 	"mitos.run/mitos/internal/cas"
-	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/workspace"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
+
+// grpcTransport adapts a *guestgrpc.Client to the workspace.VsockTransport
+// interface (TarDir / UntarDir) using the gRPC Archive and Upload RPCs.
+type grpcTransport struct {
+	client *guestgrpc.Client
+}
+
+// TarDir downloads the directory tree at path from the guest as a tar stream
+// via the gRPC Archive (DOWNLOAD) RPC.
+func (t *grpcTransport) TarDir(path string) ([]byte, error) {
+	ctx := context.Background()
+	stream, err := t.client.Sandbox.Archive(ctx, &sandboxv1.ArchiveRequest{
+		Path:      path,
+		Direction: sandboxv1.ArchiveRequest_DOWNLOAD,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("archive download %s: %w", path, err)
+	}
+	var buf []byte
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recv archive chunk: %w", err)
+		}
+		buf = append(buf, chunk.GetData()...)
+		if chunk.GetEof() {
+			break
+		}
+	}
+	return buf, nil
+}
+
+// UntarDir uploads the tar bytes into the guest at path via the gRPC Upload RPC.
+func (t *grpcTransport) UntarDir(path string, data []byte) error {
+	ctx := context.Background()
+	stream, err := t.client.Sandbox.Upload(ctx)
+	if err != nil {
+		return fmt.Errorf("upload open %s: %w", path, err)
+	}
+	if err := stream.Send(&sandboxv1.UploadRequest{
+		Msg: &sandboxv1.UploadRequest_Open{Open: &sandboxv1.UploadOpen{Dest: path}},
+	}); err != nil {
+		return fmt.Errorf("send upload open: %w", err)
+	}
+	const chunkSize = 64 * 1024
+	for len(data) > 0 {
+		n := chunkSize
+		if n > len(data) {
+			n = len(data)
+		}
+		if err := stream.Send(&sandboxv1.UploadRequest{Msg: &sandboxv1.UploadRequest_Chunk{Chunk: data[:n]}}); err != nil {
+			return fmt.Errorf("send upload chunk: %w", err)
+		}
+		data = data[n:]
+	}
+	if _, err := stream.CloseAndRecv(); err != nil {
+		return fmt.Errorf("close upload stream: %w", err)
+	}
+	return nil
+}
 
 func main() {
 	casDir := flag.String("cas", "", "directory for the node CAS store")
@@ -43,10 +108,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	src := connect(*srcUDS, "source")
-	defer src.Close() //nolint:errcheck // best-effort close
-	dst := connect(*dstUDS, "destination")
-	defer dst.Close() //nolint:errcheck // best-effort close
+	srcClient := connect(*srcUDS, "source")
+	defer srcClient.Close() //nolint:errcheck // best-effort close
+	dstClient := connect(*dstUDS, "destination")
+	defer dstClient.Close() //nolint:errcheck // best-effort close
+
+	src := &grpcTransport{client: srcClient}
+	dst := &grpcTransport{client: dstClient}
 
 	// Known workspace content, including a nested path and binary bytes, so the
 	// proof covers directory structure and non-text content.
@@ -59,11 +127,11 @@ func main() {
 	// A file that should NOT survive a revision: it sits at a secret path the
 	// dehydrate exclude list strips. The destination must never see it.
 	secretPath := "/workspace/.netrc"
-	if err := src.WriteFile(secretPath, []byte("machine secret password hunter2\n"), 0o600); err != nil {
+	if err := grpcWriteFile(srcClient, secretPath, []byte("machine secret password hunter2\n"), 0o600); err != nil {
 		fail("write secret file into source workspace: %v", err)
 	}
 	for path, content := range want {
-		if err := src.WriteFile(path, content, 0o644); err != nil {
+		if err := grpcWriteFile(srcClient, path, content, 0o644); err != nil {
 			fail("write %s into source workspace: %v", path, err)
 		}
 	}
@@ -89,7 +157,7 @@ func main() {
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		got, err := dst.ReadFile(path)
+		got, err := grpcReadFile(dstClient, path)
 		if err != nil {
 			fail("read %s from destination workspace: %v", path, err)
 		}
@@ -100,7 +168,7 @@ func main() {
 	}
 
 	// The excluded secret must NOT have crossed into the revision.
-	if _, err := dst.ReadFile(secretPath); err == nil {
+	if _, err := grpcReadFile(dstClient, secretPath); err == nil {
 		fail("SECRET LEAK: %s reached the destination workspace; dehydrate exclude failed", secretPath)
 	}
 	fmt.Printf("WS_SMOKE OK secret %s excluded from the revision\n", secretPath)
@@ -108,16 +176,63 @@ func main() {
 	fmt.Println("WS_SMOKE PASS: workspace round trip byte-identical, secret excluded")
 }
 
-// connect dials a guest agent over the Firecracker vsock UDS on the agent port.
+// connect dials a guest agent over the Firecracker vsock UDS via gRPC.
 // A dial failure is a SETUP error (the VM did not boot or the agent is not
 // listening), distinct from a transfer FAILURE.
-func connect(udsPath, role string) *vsock.Client {
-	client, err := vsock.Connect(udsPath, vsock.AgentPort)
+func connect(udsPath, role string) *guestgrpc.Client {
+	client, err := guestgrpc.Dial(udsPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "SETUP: connect to %s guest agent at %s: %v\n", role, udsPath, err)
 		os.Exit(2)
 	}
 	return client
+}
+
+// grpcReadFile reads a file from the guest via the gRPC ReadFile streaming RPC.
+func grpcReadFile(client *guestgrpc.Client, path string) ([]byte, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ReadFile(ctx, &sandboxv1.ReadFileRequest{Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("read file stream: %w", err)
+	}
+	var buf []byte
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recv read_file chunk: %w", err)
+		}
+		buf = append(buf, chunk.GetData()...)
+		if chunk.GetEof() {
+			break
+		}
+	}
+	return buf, nil
+}
+
+// grpcWriteFile writes bytes into a file in the guest via the gRPC WriteFile streaming RPC.
+func grpcWriteFile(client *guestgrpc.Client, path string, content []byte, mode uint32) error {
+	ctx := context.Background()
+	stream, err := client.Sandbox.WriteFile(ctx)
+	if err != nil {
+		return fmt.Errorf("write file stream: %w", err)
+	}
+	if err := stream.Send(&sandboxv1.WriteFileRequest{
+		Msg: &sandboxv1.WriteFileRequest_Open{Open: &sandboxv1.WriteFileOpen{Path: path, Mode: mode}},
+	}); err != nil {
+		return fmt.Errorf("send write_file open: %w", err)
+	}
+	if len(content) > 0 {
+		if err := stream.Send(&sandboxv1.WriteFileRequest{Msg: &sandboxv1.WriteFileRequest_Data{Data: content}}); err != nil {
+			return fmt.Errorf("send write_file data: %w", err)
+		}
+	}
+	if _, err := stream.CloseAndRecv(); err != nil {
+		return fmt.Errorf("close write_file stream: %w", err)
+	}
+	return nil
 }
 
 func fail(format string, args ...any) {

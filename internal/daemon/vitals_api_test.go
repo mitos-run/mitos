@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,58 +11,10 @@ import (
 	"testing"
 
 	"mitos.run/mitos/internal/fork"
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// startVitalsVsockAgent answers the agent protocol, returning the supplied
-// vitals snapshot for a TypeVitals request (OK for everything else). It lets the
-// host-side consumer be exercised on darwin with no KVM.
-func startVitalsVsockAgent(t *testing.T, sockPath string, v *vsock.VitalsResponse) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				if !sc.Scan() { // "CONNECT 52"
-					return
-				}
-				if _, err := c.Write([]byte("OK 52\n")); err != nil {
-					return
-				}
-				for sc.Scan() {
-					var req vsock.Request
-					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-						return
-					}
-					resp := vsock.Response{OK: true}
-					if req.Type == vsock.TypeVitals {
-						resp.Vitals = v
-					}
-					out, _ := json.Marshal(resp)
-					if _, err := c.Write(append(out, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-}
-
-func vitalsAPI(t *testing.T, sandboxID string, v *vsock.VitalsResponse) *SandboxAPI {
+func vitalsAPI(t *testing.T, sandboxID string, fake *fakeGuestSandbox) *SandboxAPI {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "vitals")
 	if err != nil {
@@ -73,34 +23,39 @@ func vitalsAPI(t *testing.T, sandboxID string, v *vsock.VitalsResponse) *Sandbox
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startVitalsVsockAgent(t, sockPath, v)
+	startFakeGuestGRPCUDS(t, sockPath, fake)
 
 	api := NewSandboxAPI(dir)
 	api.RegisterToken(sandboxID, "tok")
-	api.EnableUnixFallback()
 	if err := api.RegisterSandbox(sandboxID, sockPath); err != nil {
 		t.Fatal(err)
 	}
+	api.RegisterStreamPath(sandboxID, sockPath)
 	return api
 }
 
 // TestHandleVitals_Labeled drives the host-side guest telemetry consumer: a
-// /v1/vitals request resolves a sandbox, asks its guest agent over vsock, and
-// returns the snapshot LABELED with the claim/pool/workspace the host knows. The
-// guest data (steal, memory, process table) is carried through verbatim.
+// /v1/vitals request resolves a sandbox, asks its guest agent over gRPC, and
+// returns the snapshot LABELED with the claim/pool/workspace the host knows.
 func TestHandleVitals_Labeled(t *testing.T) {
-	api := vitalsAPI(t, "sb-1", &vsock.VitalsResponse{
-		StealFraction:      0.2,
-		SampleWindowMs:     100,
-		MemTotalKB:         2048000,
-		MemAvailableKB:     1024000,
-		MemUsedKB:          1024000,
-		BalloonReclaimedKB: 512000,
-		Processes: []vsock.ProcessEntry{
-			{PID: 1, Comm: "agent", State: "S", CPUJiffies: 42, RSSKB: 4096},
-			{PID: 99, Comm: "python", State: "R", CPUJiffies: 7, RSSKB: 65536},
+	// Configure the fake to emit specific vitals and a process table.
+	// Mapping: StealFraction=0.2 -> CpuStealPercent=20.0; BalloonReclaimedKB=512000 -> MemBalloonBytes=524288000.
+	// MemTotalKB=2048000 -> MemTotalBytes=2097152000; MemUsedKB=1024000 -> MemUsedBytes=1048576000.
+	fake := &fakeGuestSandbox{
+		vitalsResponse: &sandboxv1.GuestVitals{
+			CpuStealPercent: 20.0,
+			MemTotalBytes:   2048000 * 1024,
+			MemUsedBytes:    1024000 * 1024,
+			MemBalloonBytes: 512000 * 1024,
 		},
-	})
+		processesResponse: &sandboxv1.ProcessList{
+			Processes: []*sandboxv1.ProcessInfo{
+				{Pid: 1, Command: "agent", State: "S", RssBytes: 4096 * 1024},
+				{Pid: 99, Command: "python", State: "R", RssBytes: 65536 * 1024},
+			},
+		},
+	}
+	api := vitalsAPI(t, "sb-1", fake)
 	api.SetVitalsLabels("sb-1", VitalsLabels{Claim: "claim-a", Pool: "pool-x", Workspace: "ws-1", Namespace: "team-ns"})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/vitals", strings.NewReader(`{"sandbox":"sb-1"}`))
@@ -119,7 +74,7 @@ func TestHandleVitals_Labeled(t *testing.T) {
 		t.Errorf("labels not applied: %+v", got)
 	}
 	if got.Vitals.StealFraction != 0.2 || got.Vitals.BalloonReclaimedKB != 512000 {
-		t.Errorf("vitals not carried: %+v", got.Vitals)
+		t.Errorf("vitals not carried: steal=%v balloon=%v", got.Vitals.StealFraction, got.Vitals.BalloonReclaimedKB)
 	}
 	if len(got.Vitals.Processes) != 2 || got.Vitals.Processes[1].Comm != "python" {
 		t.Errorf("process table not carried: %+v", got.Vitals.Processes)

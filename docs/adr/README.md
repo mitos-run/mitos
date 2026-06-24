@@ -76,6 +76,6 @@ The compliance & observability addendum (ROADMAP.md) requires that residuals shi
 as ADRs in this directory. ADRs 0003 through 0006 are the first application: each
 records a RESIDUAL design decision grounded in docs/threat-model.md. The
 companion guardrail in [docs/compliance-claims.md](../compliance-claims.md)
-codifies the honest-claim rule that these residuals back: mitos never claims to be
+codifies the honest-claim rule that these residuals back: Mitos never claims to be
 "fully Kubernetes conformant", permitted claim language is bounded to what a CI
 job proves, and anything beyond that ships as a residual ADR here.

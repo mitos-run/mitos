@@ -5,11 +5,11 @@
 # This is a SCAFFOLD, not a runnable measurement. E2B starts sandboxes from a
 # pre-built template rather than forking one warmed base, so its "fan-out" is N
 # creates from the same template. Measuring that SAME shape is the honest cold-
-# start baseline against mitos's live copy-on-write fan-out. To produce an E2B
+# start baseline against Mitos's live copy-on-write fan-out. To produce an E2B
 # number this repo can publish as OUR measurement, a reproducer must:
 #
 #   1. Deploy the open-source E2B infrastructure stack on the SAME hardware as
-#      the mitos run (issue #16 reference node).
+#      the Mitos run (issue #16 reference node).
 #   2. Pre-build the E2B template and warm any sandbox pool E2B supports
 #      (document what "warm" means).
 #   3. Implement fanout(N) below to: create N E2B sandboxes from the same warmed

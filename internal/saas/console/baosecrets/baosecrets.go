@@ -8,7 +8,7 @@
 // per-org policy/AppRole to that prefix. The console BFF additionally enforces
 // org scope on top, so a session for org A can never reference org B's path.
 //
-// Secrets are external_reference from mitos's perspective: the value lives in
+// Secrets are external_reference from Mitos's perspective: the value lives in
 // OpenBao, and the console returns only metadata (version + a non-sensitive
 // fingerprint stored as custom_metadata); the value is never read back through
 // the BFF.

@@ -11,7 +11,7 @@ Every reconciler sets a `Ready` condition (type `Ready`) with `status`
 and one of the reason codes below. Condition `message` is human/LLM-legible and
 carries remediation; it is not part of the contract and may change.
 
-## Workspace (`mitos.run/v1alpha1`)
+## Workspace (`mitos.run/v1`)
 
 Condition type `Ready`. The reconciler computes `status.head` (the latest
 committed revision, ordered by creationTimestamp then name),
@@ -24,7 +24,7 @@ head pairs with a memory snapshot).
 | `WorkspacePending` | False | No committed revision yet (the workspace has no head). |
 | `WorkspaceDegraded` | False | A revision has a broken `fromWorkspaceRevision` lineage edge (a parent that does not resolve to a revision in the same workspace). |
 
-## WorkspaceRevision (`mitos.run/v1alpha1`)
+## WorkspaceRevision (`mitos.run/v1`)
 
 Condition type `Ready`, mirrored by `status.phase` (`Pending`/`Committed`). A
 revision commits when its `contentManifest` is a valid content-addressed digest;
@@ -35,7 +35,7 @@ once committed it is immutable (single-writer-per-revision).
 | `RevisionCommitted` | True | `Committed` | `contentManifest` is a valid content-addressed digest; the revision is frozen. |
 | `RevisionPending` | False | `Pending` | Awaiting a valid `contentManifest` from dehydrate, or the revision's lineage edge does not resolve. |
 
-## SandboxClaim, SandboxPool, SandboxFork (`mitos.run/v1alpha1`)
+## Sandbox, SandboxPool (`mitos.run/v1`)
 
 Existing reason codes, recorded here so the catalogue is complete. See the
 respective reconcilers in `internal/controller` for the precise emission points.
@@ -44,18 +44,18 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | --- | --- | --- |
 | `SnapshotsReady` | SandboxPool | The pool's template snapshot is built on the desired number of holder nodes. |
 | `HuskPodsReady` | SandboxPool | The warm husk pod pool is at the desired replica count with at least one snapshot node. |
-| `HuskActivated` | SandboxClaim | A dormant husk pod was activated in place for the claim. |
-| `ActivateFailed` | SandboxClaim | Activating a husk pod failed; the claim re-pends. |
-| `HuskPodRaced` | SandboxClaim | Two claims raced for the same dormant husk pod; this one lost and retries. |
-| `NoHuskPod` | SandboxClaim | No dormant husk pod was available to activate. |
-| `NoCapacity` / `CapacityExhausted` | SandboxClaim | No node had capacity to admit the sandbox before the pending deadline. |
-| `NodeLost` | SandboxClaim | The node backing an active sandbox was lost (drain, eviction, deletion). |
-| `OrphanReaped` | SandboxClaim | The GC orphan sweep reaped a backing VM that lingered past this (terminal) claim's transition, e.g. a terminate that crashed or was missed and was then re-adopted by a restarted forkd. Informational; the VM is gone. |
-| `SecretInheritanceDenied` | SandboxFork | A fork was rejected because the source claim holds secrets and inheritance was not explicitly opted into. |
-| `ExplicitOptIn` | SandboxFork | Secret inheritance was explicitly permitted on the fork. |
-| `Forked` / `ForksCreated` | SandboxFork | The requested forks were created. |
-| `BudgetExhausted` | Sandbox (source.fromSandbox) | A self-initiated fork was rejected because the source sandbox's capability budget (`spec.budget.maxForks`) is spent; admitted forks are ranked deterministically by creation time, and the ones beyond the limit fail terminally with the LLM-legible `budget_exhausted` remediation (request a larger budget from the creator). Issue #25. |
-| `RevisionResumeNotImplemented` | Sandbox (source.fromRevision) | A `source.fromRevision` sandbox is declared in the v1 schema but its lineage-resume engine path is not yet served. The reconciler reports `Ready=False` with this reason and phase `Pending`, never silently dropping the sandbox; use `source.poolRef` or `source.fromSandbox` until the resume path lands. Issue #23 continuation. |
+| `HuskActivated` | Sandbox (source.poolRef) | A dormant husk pod was activated in place for the sandbox. |
+| `ActivateFailed` | Sandbox (source.poolRef) | Activating a husk pod failed; the sandbox re-pends. |
+| `HuskPodRaced` | Sandbox (source.poolRef) | Two sandboxes raced for the same dormant husk pod; this one lost and retries. |
+| `NoHuskPod` | Sandbox (source.poolRef) | No dormant husk pod was available to activate. |
+| `NoCapacity` / `CapacityExhausted` | Sandbox (source.poolRef) | No node had capacity to admit the sandbox before the pending deadline. |
+| `NodeLost` | Sandbox (source.poolRef) | The node backing an active sandbox was lost (drain, eviction, deletion). |
+| `OrphanReaped` | Sandbox (source.poolRef) | The GC orphan sweep reaped a backing VM that lingered past this (terminal) sandbox's transition, e.g. a terminate that crashed or was missed and was then re-adopted by a restarted forkd. Informational; the VM is gone. |
+| `SecretInheritanceDenied` | Sandbox (source.fromSandbox) | A fork was rejected because the source sandbox holds secrets and inheritance was not explicitly opted into. |
+| `ExplicitOptIn` | Sandbox (source.fromSandbox) | Secret inheritance was explicitly permitted on the fork. |
+| `Forked` / `ForksCreated` | Sandbox (source.fromSandbox) | The requested forks were created. |
+| `BudgetExhausted` | Sandbox (source.fromSandbox) | A self-initiated fork was rejected because the source sandbox's capability budget (`spec.budget.maxForks`) is spent; admitted forks are ranked deterministically by creation time, and the ones beyond the limit fail terminally with the LLM-legible `budget_exhausted` remediation (request a larger budget from the creator). |
+| `RevisionResumeNotImplemented` | Sandbox (source.fromRevision) | A `source.fromRevision` sandbox is declared in the v1 schema but its lineage-resume engine path is not yet served. The reconciler reports `Ready=False` with this reason and phase `Pending`, never silently dropping the sandbox; use `source.poolRef` or `source.fromSandbox` until the resume path lands. |
 | `WorkspaceBusy` | Sandbox (source.poolRef) | Another writer holds the single-writer-per-workspace lock for the sandbox's target workspace; this sandbox waits and retries until the first writer releases it. |
 
 After the v1 consolidation (ADR 0007) the former `SandboxClaim` and `SandboxFork`
@@ -64,19 +64,19 @@ reasons above are emitted on the single `Sandbox` kind: the claim reasons on a
 `ExplicitOptIn`, `Forked`/`ForksCreated`) on a `source.fromSandbox` Sandbox. The
 reason strings are unchanged; only the kind that emits them moved.
 
-### Operator actions per SandboxClaim reason
+### Operator actions per Sandbox reason
 
-The `Ready=False` SandboxClaim reasons above are not all the same severity. The
+The `Ready=False` Sandbox reasons above are not all the same severity. The
 catalogue is the normative reference the alerts and runbooks cite (see
 `deploy/monitoring/` and `docs/runbooks/`).
 
 | Reason | Status | Operator action |
 | --- | --- | --- |
 | `HuskActivated` | True | None; a dormant husk pod was activated in place. |
-| `ActivateFailed` | False | Transient; the claim re-pends. If sustained, check forkd and KVM health on the holder node (the ClaimErrorRateHigh `reason="fork"` runbook). |
-| `HuskPodRaced` | False | None; two claims raced for one husk pod, the loser retries. Benign under load. |
-| `NoHuskPod` | False | Warm pool is empty for this claim's pool; scale the SandboxPool warm count (the WarmPoolStarved runbook). |
+| `ActivateFailed` | False | Transient; the sandbox re-pends. If sustained, check forkd and KVM health on the holder node (the ClaimErrorRateHigh `reason="fork"` runbook). |
+| `HuskPodRaced` | False | None; two sandboxes raced for one husk pod, the loser retries. Benign under load. |
+| `NoHuskPod` | False | Warm pool is empty for this sandbox's pool; scale the SandboxPool warm count (the WarmPoolStarved runbook). |
 | `NoCapacity` / `CapacityExhausted` | False | No node had admission capacity before the pending deadline; add capacity or scale pools (the ClaimsPendingSustained runbook). |
-| `NodeLost` | False | The backing node was lost (drain, eviction, deletion); the claim re-places. Confirm the node and recover it if unexpected. |
-| `OrphanReaped` | False | None; the GC reaped a VM that outlived this terminal claim. Investigate only if it recurs, which would point at a forkd terminate path crashing or being missed. |
-| `WorkspaceBusy` | False | None; the claim waits on the single-writer-per-workspace lock and retries. Investigate only if a writer never releases it. |
+| `NodeLost` | False | The backing node was lost (drain, eviction, deletion); the sandbox re-places. Confirm the node and recover it if unexpected. |
+| `OrphanReaped` | False | None; the GC reaped a VM that outlived this terminal sandbox. Investigate only if it recurs, which would point at a forkd terminate path crashing or being missed. |
+| `WorkspaceBusy` | False | None; the sandbox waits on the single-writer-per-workspace lock and retries. Investigate only if a writer never releases it. |

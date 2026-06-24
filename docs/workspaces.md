@@ -134,8 +134,7 @@ the CRITICAL path (revision commit + head advance + fork-sees-state) is never
 blocked. The cluster e2e treats git push as best-effort. Fully wiring the husk
 `{git}` push (a node-CAS read op that returns the repo-paths content to the
 controller, which does the credentialed push so the credential stays in the
-controller and never reaches the pod) is tracked in
-`docs/superpowers/plans/2026-06-14-w4-workspace-prodgrade.md`. The raw-forkd
+controller and never reaches the pod) is a documented follow-up. The raw-forkd
 `{git}` path is fully wired.
 
 ## Single-writer-per-workspace
@@ -269,7 +268,7 @@ docs/threat-model.md section 3.
 ## The revision change feed for external indexers
 
 The controller emits a CloudEvents 1.0 feed so an external indexer (a vector DB,
-a search index, an audit sink) can react to workspace changes WITHOUT mitos
+a search index, an audit sink) can react to workspace changes WITHOUT Mitos
 embedding any indexer of its own. There is no built-in vector store by design
 (ROADMAP.md, EPIC W4): indexing is the consumer's job, fed by this event.
 
@@ -324,7 +323,7 @@ The verbs are git-shaped and map onto the revision DAG: a fork is a new
 `WorkspaceRevision` whose `source.fromWorkspaceRevision` points at the parent, in
 a (possibly new) workspace; a revert is a new tip in the same workspace that
 shares a past revision's content. Refusals carry an LLM-legible
-`{code, cause, remediation}` (issue #28): forking an uncommitted revision is
+`{code, cause, remediation}`: forking an uncommitted revision is
 `revision_not_committed`.
 
 Python:
@@ -469,7 +468,7 @@ PROVEN:
   `clusterbackend.go`), the Python `Workspace` handle plus
   `terminate(outputs=..., checkpoint=...)` (`sdk/python/mitos/workspace.py`), and
   the TypeScript parity (`sdk/typescript/src/workspace.ts`), each unit-tested.
-- Workspace store encryption at rest (#31): when `spec.store.encryptionKeyRef` is
+- Workspace store encryption at rest: when `spec.store.encryptionKeyRef` is
   set, every revision chunk and manifest is encrypted with AES-256-GCM under a
   data-encryption key (DEK). The DEK the controller generates is keyed
   per-template (by templateID, `internal/controller/enc_key_secret.go`), so a

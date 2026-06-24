@@ -48,7 +48,7 @@ snapshot's identity is `Digest()`: the sha256 of that canonical encoding. All
 digests are content addresses and are safe to log.
 
 `VMMVersion` is part of the manifest and therefore part of the digest. This
-aligns the snapshot identity with the version-compatibility contract (#32): a
+aligns the snapshot identity with the version-compatibility contract: a
 snapshot taken under one VMM version produces a different digest from the same
 memory bytes recorded under another, so a version mismatch cannot be masked by
 matching content. Build time is deliberately NOT part of the identity used for
@@ -163,7 +163,7 @@ peer could materialize and decrypt with a shared token. Encrypted templates are
 therefore built PER NODE, exactly as before, and the build-once-distribute path
 is skipped for them. Distributing encrypted templates requires the CAS chunk
 store itself to be encrypted (or a sealed, per-recipient key exchange); that is
-the prerequisite follow-up, tracked under #31.
+the prerequisite follow-up.
 
 ## Bounded cache eviction
 
@@ -237,8 +237,7 @@ stated anywhere until a multi-node testbed exists.
 - Measured cross-node propagation rate: the pull + fork path is proven on two
   processes on one machine in CI, but the actual node-to-node transfer rate
   (pool-update-to-all-nodes-ready at 10/50/100 nodes, over a real network
-  between hosts) requires a multi-node testbed; no numbers are stated (tracked
-  in #14).
+  between hosts) requires a multi-node testbed; no numbers are stated.
 - Per-node SAN pinning: all forkd nodes currently share the one serving identity
   (`pki.ServerName`); a distinct verified identity per holder is a follow-up,
   tracked with the per-pull-token work.
@@ -248,11 +247,8 @@ stated anywhere until a multi-node testbed exists.
 - A shared registry/object-store mirror as a pull source (instead of
   peer-to-peer pull from a holder node): not built.
 - Distributing encrypted templates: encrypted templates are built per node and
-  are NOT distributed; this needs the CAS chunk store itself encrypted (tracked
-  under #31).
+  are NOT distributed; this needs the CAS chunk store itself encrypted.
 - Lazy-load partial-fetch serving (`prefetch: full | lazy`): serving forks from
   a partially fetched snapshot is not built.
 - External snapshot import and its publish-authorization policy beyond the
   mTLS-gated `CreateTemplate`.
-
-See ROADMAP.md section 3 for status and #14 for the multi-node epic.

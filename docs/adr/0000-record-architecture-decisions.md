@@ -7,7 +7,7 @@ compliance & observability addendum in ROADMAP.md ("residuals ship as ADRs in
 
 ## Context
 
-mitos already carried load-bearing design decisions in prose: the
+Mitos already carried load-bearing design decisions in prose: the
 `agents.x-k8s.io` facade and the our-vs-their naming collision (recorded ad hoc
 as ADR 0001), the Workspace-not-CSI choice (ADR 0002), and a set of RESIDUAL
 security decisions documented only inside docs/threat-model.md and CLAUDE.md
@@ -29,7 +29,7 @@ Two problems followed from having no adopted framework:
 
 ## Decision: adopt Architecture Decision Records
 
-We adopt ADRs (in the Nygard sense) as the way mitos records significant,
+We adopt ADRs (in the Nygard sense) as the way Mitos records significant,
 hard-to-reverse, or honesty-sensitive design decisions. The mechanics:
 
 - ADRs live in `docs/adr/` as Markdown, one file per decision, named
@@ -49,7 +49,7 @@ hard-to-reverse, or honesty-sensitive design decisions. The mechanics:
   to point at the superseding ADR. This preserves the decision history.
 - Every ADR decision must TRACE to something real: a line in the code, a row in
   docs/threat-model.md, a rule in CLAUDE.md, or a plan in
-  docs/superpowers/plans/. mitos has a no-unverified-claims operating principle
+  docs/superpowers/plans/. Mitos has a no-unverified-claims operating principle
   (CLAUDE.md, operating principle 1); an ADR that asserts a behavior the code
   does not yet implement must say so explicitly and cite the plan, exactly as a
   threat-model row distinguishes mitigated from open.

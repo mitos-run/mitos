@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
-	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestgrpc"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // test-agent connects to a guest agent via Firecracker vsock UDS and exercises
@@ -57,7 +61,7 @@ func main() {
 	udsPath := args[0]
 
 	client := connect(udsPath)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck // best-effort
 
 	switch *mode {
 	case "notify":
@@ -111,7 +115,7 @@ type egressOpts struct {
 // The guest cannot influence the host ruleset, so a success on allowed plus a
 // block on denied is a genuine end-to-end proof that the default-deny egress
 // allowlist is enforced host-side. All values here (IPs, ports) are safe to log.
-func runEgress(client *vsock.Client, o egressOpts) {
+func runEgress(client *guestgrpc.Client, o egressOpts) {
 	if o.guestIP == "" || o.gateway == "" || o.allowed == "" || o.denied == "" {
 		fmt.Fprintln(os.Stderr, "egress mode requires --guest-ip, --gateway, --allowed, --denied")
 		os.Exit(1)
@@ -186,7 +190,7 @@ type nameEgressOpts struct {
 // The guest cannot influence the host ruleset or the resolver allowlist, so this
 // is a genuine end-to-end proof. All values here (IPs, names, ports) are safe to
 // log.
-func runNameEgress(client *vsock.Client, o nameEgressOpts) {
+func runNameEgress(client *guestgrpc.Client, o nameEgressOpts) {
 	if o.guestIP == "" || o.gateway == "" || o.resolver == "" || o.allowName == "" ||
 		o.wrongPort == "" || o.deniedName == "" || o.directIP == "" {
 		fmt.Fprintln(os.Stderr, "name-egress mode requires --guest-ip, --gateway, --resolver, --allow-name, --wrong-port, --denied-name, --direct-ip")
@@ -281,40 +285,39 @@ func splitHostPort(s string) (host, port string) {
 }
 
 // connect retries while the guest agent finishes starting.
-func connect(udsPath string) *vsock.Client {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < 10; attempt++ {
-		client, err = vsock.Connect(udsPath, vsock.AgentPort)
-		if err == nil {
-			return client
-		}
-		fmt.Printf("connect attempt %d failed: %v (retrying in 2s)\n", attempt+1, err)
-		time.Sleep(2 * time.Second)
+func connect(udsPath string) *guestgrpc.Client {
+	ctx := context.Background()
+	client, err := guestgrpc.WaitReady(ctx, udsPath, 20*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect failed: %v\n", err)
+		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "connect failed after 10 attempts: %v\n", err)
-	os.Exit(1)
-	return nil
+	return client
 }
 
 // runNotify sends a fork notification and prints proof lines for the workflow:
 // URANDOM, WALLCLOCK_NS, and FORKGEN. It does NOT exercise forkd; sending
 // NotifyForked directly is the unit-level proof that the guest applies a
 // reseed/clock step. forkd end-to-end notify is covered by go tests.
-func runNotify(client *vsock.Client, generation uint64) {
+func runNotify(client *guestgrpc.Client, generation uint64) {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL rand: %v\n", err)
 		os.Exit(1)
 	}
 
-	resp, err := client.NotifyForked(generation, entropy)
+	ctx := context.Background()
+	resp, err := client.Control.NotifyForked(ctx, &internalv1.NotifyForkedRequest{
+		Generation:         generation,
+		HostWallClockNanos: time.Now().UnixNano(),
+		Entropy:            entropy,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL notify_forked: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("PASS notify_forked: reseeded_rng=%v clock_step_ns=%d signaled=%d\n",
-		resp.ReseededRNG, resp.AppliedClockStepNanos, resp.SignaledProcesses)
+		resp.GetReseededRng(), resp.GetAppliedClockStepNanos(), resp.GetSignaledProcesses())
 
 	urandom := execOrDie(client, "head -c 32 /dev/urandom | base64 | tr -d '\\n'")
 	wallclock := execOrDie(client, "date +%s%N")
@@ -368,7 +371,7 @@ func runNotify(client *vsock.Client, generation uint64) {
 // value is printed only because the workflow must read it back from the guest;
 // it is the SAME value the workflow then greps the host stub log to confirm is
 // absent there. test-agent prints to its own stdout, not the stub log.
-func runRead(client *vsock.Client, readEnv string) {
+func runRead(client *guestgrpc.Client, readEnv string) {
 	urandom := execOrDie(client, "head -c 32 /dev/urandom | base64 | tr -d '\\n'")
 	wallclock := execOrDie(client, "date +%s%N")
 	fmt.Printf("URANDOM=%s\n", strings.TrimSpace(urandom))
@@ -383,10 +386,67 @@ func runRead(client *vsock.Client, readEnv string) {
 	}
 }
 
+// execResult holds the output of a single exec call.
+type execResult struct {
+	Stdout     string
+	Stderr     string
+	ExitCode   int32
+	ExecTimeMs float64
+}
+
+// grpcExec runs a shell command in the guest over the gRPC ExecStream RPC and
+// returns its combined result.
+func grpcExec(client *guestgrpc.Client, cmd, cwd string, env map[string]string, timeoutSeconds int32) (*execResult, error) {
+	ctx := context.Background()
+	var envVars []*sandboxv1.EnvVar
+	for k, v := range env {
+		envVars = append(envVars, &sandboxv1.EnvVar{Key: k, Value: v})
+	}
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
+		Command:        cmd,
+		Cwd:            cwd,
+		Env:            envVars,
+		TimeoutSeconds: timeoutSeconds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exec stream: %w", err)
+	}
+	var stdout, stderr strings.Builder
+	var exitCode int32
+	var execTimeMs float64
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recv exec frame: %w", err)
+		}
+		switch m := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout.Write(m.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderr.Write(m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = m.Exit.GetExitCode()
+			execTimeMs = m.Exit.GetExecTimeMs()
+			if spawnErr := m.Exit.GetError(); spawnErr != "" {
+				return nil, fmt.Errorf("exec spawn error: %s", spawnErr)
+			}
+		}
+	}
+	return &execResult{
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		ExitCode:   exitCode,
+		ExecTimeMs: execTimeMs,
+	}, nil
+}
+
 // execOrDie runs a shell command in the guest and returns stdout, failing hard
 // on a transport error or non-zero exit.
-func execOrDie(client *vsock.Client, cmd string) string {
-	result, err := client.Exec(cmd, "/workspace", nil, 10)
+func execOrDie(client *guestgrpc.Client, cmd string) string {
+	result, err := grpcExec(client, cmd, "/workspace", nil, 10)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL exec %q: %v\n", cmd, err)
 		os.Exit(1)
@@ -398,18 +458,77 @@ func execOrDie(client *vsock.Client, cmd string) string {
 	return result.Stdout
 }
 
+// grpcReadFile reads a file from the guest via the gRPC ReadFile streaming RPC.
+func grpcReadFile(client *guestgrpc.Client, path string) ([]byte, error) {
+	ctx := context.Background()
+	stream, err := client.Sandbox.ReadFile(ctx, &sandboxv1.ReadFileRequest{Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("read file stream: %w", err)
+	}
+	var buf []byte
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recv read_file chunk: %w", err)
+		}
+		buf = append(buf, chunk.GetData()...)
+		if chunk.GetEof() {
+			break
+		}
+	}
+	return buf, nil
+}
+
+// grpcWriteFile writes bytes into a file in the guest via the gRPC WriteFile streaming RPC.
+func grpcWriteFile(client *guestgrpc.Client, path string, content []byte, mode uint32) error {
+	ctx := context.Background()
+	stream, err := client.Sandbox.WriteFile(ctx)
+	if err != nil {
+		return fmt.Errorf("write file stream: %w", err)
+	}
+	if err := stream.Send(&sandboxv1.WriteFileRequest{
+		Msg: &sandboxv1.WriteFileRequest_Open{Open: &sandboxv1.WriteFileOpen{Path: path, Mode: mode}},
+	}); err != nil {
+		return fmt.Errorf("send write_file open: %w", err)
+	}
+	if len(content) > 0 {
+		if err := stream.Send(&sandboxv1.WriteFileRequest{Msg: &sandboxv1.WriteFileRequest_Data{Data: content}}); err != nil {
+			return fmt.Errorf("send write_file data: %w", err)
+		}
+	}
+	if _, err := stream.CloseAndRecv(); err != nil {
+		return fmt.Errorf("close write_file stream: %w", err)
+	}
+	return nil
+}
+
+// grpcListDir lists a directory in the guest via the gRPC List RPC.
+func grpcListDir(client *guestgrpc.Client, path string) ([]*sandboxv1.FileInfo, error) {
+	ctx := context.Background()
+	resp, err := client.Sandbox.List(ctx, &sandboxv1.ListRequest{Parent: path})
+	if err != nil {
+		return nil, fmt.Errorf("list dir: %w", err)
+	}
+	return resp.GetEntries(), nil
+}
+
 // runDefault is the original ping/exec/files/configure suite.
-func runDefault(client *vsock.Client) {
-	// Test ping
-	uptime, err := client.Ping()
+func runDefault(client *guestgrpc.Client) {
+	ctx := context.Background()
+
+	// Test ping via Control.Ping RPC.
+	pingResp, err := client.Control.Ping(ctx, &internalv1.PingRequest{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL ping: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("PASS ping: uptime=%.2fs\n", uptime)
+	fmt.Printf("PASS ping: uptime=%.2fs\n", pingResp.GetUptimeSeconds())
 
-	// Test exec
-	result, err := client.Exec("echo hello from sandbox", "/workspace", nil, 10)
+	// Test exec.
+	result, err := grpcExec(client, "echo hello from sandbox", "/workspace", nil, 10)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL exec: %v\n", err)
 		os.Exit(1)
@@ -417,13 +536,12 @@ func runDefault(client *vsock.Client) {
 	fmt.Printf("PASS exec: exit_code=%d stdout=%q exec_time=%.2fms\n",
 		result.ExitCode, result.Stdout, result.ExecTimeMs)
 
-	// Test write + read file
-	err = client.WriteFile("/workspace/test.txt", []byte("hello sandbox"), 0o644)
-	if err != nil {
+	// Test write + read file.
+	if err := grpcWriteFile(client, "/workspace/test.txt", []byte("hello sandbox"), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL write: %v\n", err)
 		os.Exit(1)
 	}
-	content, err := client.ReadFile("/workspace/test.txt")
+	content, err := grpcReadFile(client, "/workspace/test.txt")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL read: %v\n", err)
 		os.Exit(1)
@@ -434,24 +552,34 @@ func runDefault(client *vsock.Client) {
 	}
 	fmt.Printf("PASS files: wrote and read back %q\n", string(content))
 
-	// Test list dir
-	entries, err := client.ListDir("/workspace")
+	// Test list dir.
+	entries, err := grpcListDir(client, "/workspace")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL listdir: %v\n", err)
 		os.Exit(1)
 	}
-	data, _ := json.Marshal(entries)
+	// Marshal as a slice of name strings to preserve the existing output format.
+	type fileEntryJSON struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"is_dir"`
+		Size  int64  `json:"size"`
+	}
+	jsonEntries := make([]fileEntryJSON, 0, len(entries))
+	for _, e := range entries {
+		jsonEntries = append(jsonEntries, fileEntryJSON{Name: e.GetName(), IsDir: e.GetIsDir(), Size: e.GetSize()})
+	}
+	data, _ := json.Marshal(jsonEntries)
 	fmt.Printf("PASS listdir: %s\n", string(data))
 
 	// Test configure: claim-time env+secrets must reach exec sessions.
-	if err := client.Configure(
-		map[string]string{"CFG_VAR": "cfg"},
-		map[string]string{"TEST_SECRET": "s3cr3t-canary"},
-	); err != nil {
+	if _, err := client.Control.Configure(ctx, &internalv1.ConfigureRequest{
+		Env:     map[string]string{"CFG_VAR": "cfg"},
+		Secrets: map[string]string{"TEST_SECRET": "s3cr3t-canary"},
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL configure: %v\n", err)
 		os.Exit(1)
 	}
-	result, err = client.Exec(`echo -n "$CFG_VAR:$TEST_SECRET"`, "/workspace", nil, 10)
+	result, err = grpcExec(client, `echo -n "$CFG_VAR:$TEST_SECRET"`, "/workspace", nil, 10)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL exec after configure: %v\n", err)
 		os.Exit(1)
@@ -461,7 +589,7 @@ func runDefault(client *vsock.Client) {
 		os.Exit(1)
 	}
 	// Per-request env must override configured values.
-	result, err = client.Exec(`echo -n "$CFG_VAR"`, "/workspace", map[string]string{"CFG_VAR": "override"}, 10)
+	result, err = grpcExec(client, `echo -n "$CFG_VAR"`, "/workspace", map[string]string{"CFG_VAR": "override"}, 10)
 	if err != nil || result.Stdout != "override" {
 		fmt.Fprintf(os.Stderr, "FAIL configure precedence: err=%v stdout=%q\n", err, result.Stdout)
 		os.Exit(1)

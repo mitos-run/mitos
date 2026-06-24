@@ -62,6 +62,9 @@ controller:
   poolSecretsClusterRoleName: mitos-pool-secrets
   # Extra args appended verbatim to the controller container args.
   extraArgs: []
+  # Extra env vars appended verbatim to the controller container. FORKD_NAMESPACE
+  # is always set to the controller's own namespace via the downward API.
+  extraEnv: []
 
 # huskStub image: the image husk pods run; passed to the controller via
 # --husk-stub-image. No standalone workload is rendered for it.

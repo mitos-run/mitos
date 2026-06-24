@@ -1,4 +1,4 @@
-# mitos Helm chart
+# Mitos Helm chart
 
 Snapshot-fork sandboxes for AI agents on Kubernetes. This chart installs the
 mitos.run operator: the controller Deployment, the privileged forkd DaemonSet,
@@ -90,7 +90,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
+| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every Mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
 | `controller.image.tag` | `v0.13.0` | Controller image tag. |
@@ -146,8 +146,8 @@ The chart reproduces the security-critical fields of the source manifests
 verbatim and does not expose them as knobs:
 
 - forkd runs `privileged: true` with hostPath mounts for `/var/lib/mitos` and the
-  `/dev/kvm` char device. It is the privileged snapshot builder; the jailer-in-pod
-  follow-up will narrow this. See `docs/threat-model.md`.
+  `/dev/kvm` char device. It is the privileged snapshot builder. See
+  `docs/threat-model.md`.
 - The controller, facade, and device plugin run unprivileged with
   `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, all
   capabilities dropped, and the controller and facade pods set

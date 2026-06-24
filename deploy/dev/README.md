@@ -4,9 +4,8 @@ This directory is the local-dev control plane that `mitos dev up` applies to a
 kind cluster. It runs a MOCK-mode control plane so the full claim path completes
 without KVM:
 
-- **controller** Deployment with `--mock --disable-pki-bootstrap`. `--mock` is a
-  no-op on the controller today (mock mode lives in forkd), but it documents the
-  intent; `--disable-pki-bootstrap` skips the control plane CA and TLS Secrets so
+- **controller** Deployment with `--mock --disable-pki-bootstrap`.
+  `--disable-pki-bootstrap` skips the control plane CA and TLS Secrets so
   the controller dials forkd over insecure gRPC.
 - **forkd** DaemonSet with `--mock` and no TLS flags. forkd fails closed without
   mTLS by default, so the dev manifest passes `--allow-insecure-grpc` to opt in to

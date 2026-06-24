@@ -2,7 +2,7 @@
 // the same way console.SecretStore abstracts the secret backend. Stripe is one
 // provider; a Merchant of Record (Polar, Paddle, Lemon Squeezy) is another —
 // and an MoR is the likely end state, since it becomes the legal seller and
-// handles global sales-tax/VAT so mitos does not have to. The console reads
+// handles global sales-tax/VAT so Mitos does not have to. The console reads
 // billing through the provider-neutral BillingReader seam and never names a
 // provider; only the webhook (signature scheme + event names) and the
 // portal/checkout link are provider-specific, and both live behind this seam.

@@ -37,8 +37,7 @@ make generate manifests   # regenerate deepcopy + CRD YAML after api/ changes
 
 - Direct controller tests: `eval $(~/go/bin/setup-envtest use 1.31 -p env) && go test ./internal/controller/`
 - Python tests directly: `cd sdk/python && PYTHONPATH=. python3 -m pytest tests/`
-- Lint, BOTH invocations are required: `golangci-lint run --timeout=5m` AND `GOOS=linux golangci-lint run --timeout=5m`. The guest agent is linux-only and invisible to the darwin run.
-- Cross-build check for the guest agent: `GOOS=linux GOARCH=amd64 go build ./guest/agent/`
+- Lint, BOTH invocations are required: `golangci-lint run --timeout=5m` AND `GOOS=linux golangci-lint run --timeout=5m`. Some packages are linux-only and invisible to the darwin run.
 
 ## Architecture
 
@@ -46,7 +45,7 @@ make generate manifests   # regenerate deepcopy + CRD YAML after api/ changes
 - **forkd** (`cmd/forkd`, `internal/daemon`): node daemon that owns VMs; gRPC service on :9090 (fork, prepare-pool, heartbeat), HTTP sandbox API on :9091 (exec, files, status).
 - **fork engines** (`internal/fork`): the real engine (internal/fork/engine.go) drives Firecracker snapshot/restore and needs KVM; the mock engine (internal/fork/mock.go, KVMAvailable=false) is used by kind e2e and envtest.
 - **firecracker client** (`internal/firecracker`): VM lifecycle over the Firecracker API socket.
-- **guest agent** (`guest/agent`): PID 1 inside the VM; serves exec, file IO, and env over vsock (`internal/vsock` is the host side).
+- **guest agent** (`guest/agent-rs`): PID 1 inside the VM; serves gRPC on vsock port 53 (`internal/vsock` and `internal/guestgrpc` are the host side). The legacy JSON protocol and Go agent are removed (#310).
 - **sandbox-server** (`cmd/sandbox-server`): standalone REST API on the same engine, no k8s.
 - **Python SDK** (`sdk/python/mitos`): talks to forkd or sandbox-server.
 
@@ -104,7 +103,7 @@ All six are required checks on main; main requires branches to be up to date.
 
 - The forkd threat surface is documented in docs/threat-model.md with per-row status; keep it current in the same PR as any surface change.
 - Fork-correctness hazards (RNG, clocks, secret inheritance) live in docs/fork-correctness.md.
-- Security-sensitive paths require extra care and a named human reviewer before merge: `internal/fork`, `internal/firecracker`, `internal/daemon`, `guest/agent`, and future token/attenuation code.
+- Security-sensitive paths require extra care and a named human reviewer before merge: `internal/fork`, `internal/firecracker`, `internal/daemon`, `guest/agent-rs`, and future token/attenuation code.
 - Sequencing gates: the fork-correctness suite and failure/GC semantics must be green in CI before any integration workstream ships to production tenants.
 
 ## Workflow Pointers

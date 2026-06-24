@@ -1,8 +1,8 @@
 # Building templates from images
 
-A `SandboxTemplate` snapshot is a paused, booted Firecracker microVM captured to
+A pool template snapshot is a paused, booted Firecracker microVM captured to
 disk. Forks restore it copy-on-write. This document describes how the engine
-turns a `SandboxTemplate.spec.image` into that snapshot on a real (KVM) node,
+turns a `SandboxPool.spec.template.image` into that snapshot on a real (KVM) node,
 the image-vs-file heuristic, the agent-binary requirement, and what init
 commands mean.
 
@@ -38,7 +38,7 @@ commands. On the real engine (`internal/fork`) `CreateTemplate` does:
    answers once it is up as PID 1, so this confirms the guest booted before
    anything is snapshotted. This wait ALWAYS runs, even with no init commands,
    so a half-booted VM is never captured.
-7. Run init IN the VM. Each `spec.init` command runs inside the booted VM
+7. Run init IN the VM. Each `spec.template.init` command runs inside the booted VM
    through the guest agent. If any command exits nonzero the build aborts and
    nothing is snapshotted (a template whose `pip install` failed must never be
    served). Init runs at BUILD TIME, before any claim-time env or secrets exist,
@@ -51,7 +51,7 @@ each fork.
 
 ## The OCI-ref vs file-path heuristic
 
-`spec.image` may be an OCI reference (`busybox:stable`, `python:3.12-slim`) or a
+`spec.template.image` may be an OCI reference (`busybox:stable`, `python:3.12-slim`) or a
 path to a pre-built rootfs file (back-compat for hand-built rootfs images and
 tests). The engine decides as follows (`internal/fork/imageref.go`):
 
@@ -83,7 +83,7 @@ file-path templates do not need it.
   served.
 - `template.Spec.InitCommands()` is plumbed end to end: pool reconciler ->
   `CreateTemplateRequest.init_commands` -> forkd -> engine -> the VM. It returns
-  the legacy `spec.init` list, or, when `spec.buildSteps` is set, the flattened
+  the legacy `spec.template.init` list, or, when `spec.template.buildSteps` is set, the flattened
   run/env/workdir steps in order (see the code-first section below).
 
 ## CI proof
@@ -99,8 +99,8 @@ production answer.
 
 ## Define a custom environment (code-first)
 
-You do not have to hand-write the `SandboxTemplate` YAML. The Python SDK ships a
-fluent `Template` builder (issue #220) that authors the spec from code, in the
+You do not have to hand-write the `SandboxPool` YAML. The Python SDK ships a
+fluent `Template` builder that authors the spec from code, in the
 shape E2B and Daytona use:
 
 ```python
@@ -120,11 +120,11 @@ spec = (
 )
 ```
 
-`to_spec()` emits the `SandboxTemplateSpec` dict; `to_template("my-tmpl")` wraps
-it in a full object you can apply to a cluster. The ordered step list maps onto
-the CRD `spec.buildSteps` (copy / run / env / workdir); the build path flattens
+`to_spec()` emits the `PoolTemplateSpec` dict; `to_pool("my-pool")` wraps
+it in a full `SandboxPool` object you can apply to a cluster. The ordered step list maps onto
+the CRD `spec.template.buildSteps` (copy / run / env / workdir); the build path flattens
 run, env, and workdir steps into the in-VM init commands in order, so a template
-authored with `buildSteps` builds exactly like one authored with `spec.init`. A
+authored with `buildSteps` builds exactly like one authored with `spec.template.init`. A
 template may set either; `buildSteps` is the recommended code-first form.
 
 ### From the CLI, from a Dockerfile or a spec
@@ -141,7 +141,7 @@ mitos template push web
 ```
 
 `mitos template build` parses the source into a spec, prints the build plan
-(which steps a cached build would reuse), and authors the `SandboxTemplate`. The
+(which steps a cached build would reuse), and authors the `SandboxPool` with inline `spec.template`. The
 node then builds the snapshot on a KVM host. A failing build step surfaces the
 typed `build_failed` error (HTTP 422) whose `context` names the failing step
 index and kind and whose remediation tells you to fix that step and rebuild.

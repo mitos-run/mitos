@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   publish:
-    # Build, push, cosign keyless-sign, and SBOM-attest the seven mitos images
+    # Build, push, cosign keyless-sign, and SBOM-attest the seven Mitos images
     # under ghcr.io/mitos-run (supply chain, issue #35). Keyless signing
     # uses the workflow GitHub OIDC identity (id-token: write); there is NO
     # private key in the repo or in secrets. Each image is pushed by digest and
@@ -115,3 +115,51 @@ jobs:
         with:
           name: sbom-${{ matrix.name }}
           path: sbom-${{ matrix.name }}.spdx.json
+
+  verify-public-images:
+    # Release guard: after publishing, assert that every image the chart points
+    # at (the artifacthub.io/images annotation, which is exactly what Artifact
+    # Hub scans and what `helm install` pulls) actually exists in GHCR AND is
+    # anonymously pullable, i.e. public. A brand new component package defaults
+    # to private, and a failed build leaves no image at all; either way this job
+    # turns that into a loud red release here instead of a silent Artifact Hub
+    # scan-failure email weeks later. Anonymous-pullable is the precise contract:
+    # if the GHCR token endpoint denies an anonymous pull scope, the package is
+    # private or missing, and this fails.
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Every chart-referenced image is public and pullable
+        run: |
+          set -euo pipefail
+          imgs=$(grep -oE 'ghcr\.io/mitos-run/[a-z0-9-]+:[A-Za-z0-9._-]+' \
+            deploy/charts/mitos/Chart.yaml | sort -u)
+          echo "Chart-referenced images:"; echo "${imgs}"
+          fail=0
+          for ref in ${imgs}; do
+            repo="${ref%:*}"; tag="${ref##*:}"; path="${repo#ghcr.io/}"
+            # An anonymous bearer token is only granted for public packages; a 403
+            # here means private or nonexistent (GHCR returns DENIED for both).
+            token=$(curl -fsSL \
+              "https://ghcr.io/token?scope=repository:${path}:pull&service=ghcr.io" \
+              | sed -E 's/.*"token":"([^"]+)".*/\1/') || token=""
+            if [ -z "${token}" ]; then
+              echo "::error::${ref} is not anonymously pullable (private or missing package)"
+              fail=1; continue
+            fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${path}/manifests/${tag}")
+            if [ "${code}" != "200" ]; then
+              echo "::error::${ref} manifest is not publicly resolvable (HTTP ${code})"
+              fail=1
+            else
+              echo "ok: ${ref}"
+            fi
+          done
+          if [ "${fail}" != "0" ]; then
+            echo "::error::One or more chart-referenced images are missing or private in GHCR"
+            exit 1
+          fi

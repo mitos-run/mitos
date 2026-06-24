@@ -1,11 +1,11 @@
 # Recipe: host an HTTP daemon (coding-agent harness) in a sandbox
 
-Issue #230 asks whether a mitos sandbox can host a coding-agent harness (a
+A Mitos sandbox can host a coding-agent harness (a
 Rivet `sandbox-agent` style daemon, `opencode` web, or any in-box HTTP server)
 and be driven from outside over HTTP. The integration surface such a harness
-needs is exactly two things: shell access (mitos has `exec` over vsock) and a
-reachable network port. The port half shipped as the foundation slice of issue
-#228 (`docs/ports.md`): a TCP-over-vsock tunnel through the standalone
+needs is exactly two things: shell access (Mitos has `exec` over vsock) and a
+reachable network port. The port half ships today (`docs/ports.md`): a
+TCP-over-vsock tunnel through the standalone
 `sandbox-server`. This recipe shows the end-to-end flow using what ships today,
 and is explicit about what is still a follow-up.
 
@@ -48,7 +48,7 @@ The forward is per sandbox, loopback-only on the host, bounded by a per-sandbox
 concurrency cap, and torn down automatically when the sandbox terminates (see
 `docs/ports.md`).
 
-## The mitos fork angle
+## The Mitos fork angle
 
 The distinguishing property: you can warm one sandbox with the daemon installed
 and the harness's dependencies in place, then `fork(n)` it into a swarm. Each
@@ -60,15 +60,13 @@ connections, so treat a fork as a fresh, independently-reachable instance.
 
 ## Follow-ups (not yet shipped)
 
-Tracked under issues #228 and #230:
-
 - Auth on the forward path. The standalone forward inherits the standalone
   server's tokenless trust model; an authenticated forward for the hosted /
   multi-tenant path is a follow-up.
 - Kubernetes Service / Ingress routing to the owning node's forwarded port (the
   forkd / cluster path); today the forward is standalone-server only.
-- A first-class CRD field to declare exposed guest ports on a SandboxTemplate /
-  SandboxClaim.
+- A first-class CRD field to declare exposed guest ports on a SandboxPool.spec.template /
+  Sandbox.
 - SSE / long-lived streaming specifics for the agent-session use case, and a
   worked Rivet `sandbox-agent` integration.
 - For internet-facing, signed, expiring per-sandbox URLs (the E2B

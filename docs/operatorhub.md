@@ -1,9 +1,26 @@
-# Submitting mitos to OperatorHub.io
+# Submitting Mitos to OperatorHub.io
 
-This runbook covers packaging the mitos OLM bundle and submitting it to
+This runbook covers packaging the Mitos OLM bundle and submitting it to
 [operatorhub.io](https://operatorhub.io) via the
 [k8s-operatorhub/community-operators](https://github.com/k8s-operatorhub/community-operators)
 repository.
+
+The initial listing (mitos 0.13.0) is already submitted. Every later version is
+meant to submit itself: the `Release operator bundle` workflow
+(`.github/workflows/operator-release.yaml`) rebuilds the bundle for the release,
+validates it, and opens the community-operators PR. Two repository secrets gate
+the automation:
+
+- `RELEASE_PLEASE_TOKEN` (on this repo): a PAT or GitHub App token used by
+  release-please so the release it cuts actually triggers downstream workflows.
+  A release cut with the default `GITHUB_TOKEN` does not start them.
+- `COMMUNITY_OPERATORS_TOKEN`: a PAT whose account owns a fork of
+  community-operators (the `stubbi/community-operators` fork), used to push the
+  branch and open the PR. Without it the bundle is uploaded as a CI artifact.
+
+The `operators/mitos/ci.yaml` update graph is `semver-mode` and lists the
+maintainer as a reviewer, so community-operators can fast-track later version
+bumps. The steps below are the manual fallback (and how the first PR was made).
 
 The bundle skeleton lives at `deploy/olm/bundle/`:
 
@@ -12,10 +29,7 @@ deploy/olm/bundle/
   bundle.Dockerfile
   manifests/
     mitos.clusterserviceversion.yaml
-    mitos.run_sandboxtemplates.yaml
     mitos.run_sandboxpools.yaml
-    mitos.run_sandboxclaims.yaml
-    mitos.run_sandboxforks.yaml
     mitos.run_sandboxes.yaml
     mitos.run_workspaces.yaml
     mitos.run_workspacerevisions.yaml
@@ -27,13 +41,12 @@ deploy/olm/bundle/
 
 The CSV deploys `ghcr.io/mitos-run/mitos-controller:v0.4.0` and references
 `ghcr.io/mitos-run/mitos-husk-stub:v0.4.0`. The controller in turn deploys the
-node images (`mitos-forkd`, `mitos-kvm-device-plugin`, `mitos-facade`). The
-project is migrating its registry from `ghcr.io/paperclipinc` to
-`ghcr.io/mitos-run`. Before this bundle can install and run, every referenced
+node images (`mitos-forkd`, `mitos-kvm-device-plugin`, `mitos-facade`).
+Before this bundle can install and run, every referenced
 image MUST be published and pullable under `ghcr.io/mitos-run`. Confirm this
 first; OLM will report ImagePullBackOff otherwise.
 
-mitos also requires KVM nodes and a privileged DaemonSet (see the README and
+Mitos also requires KVM nodes and a privileged DaemonSet (see the README and
 `docs/redhat-certification.md`). Community OperatorHub does not test against
 your hardware, but reviewers will read the CSV requirements section. Keep it
 honest.
@@ -83,10 +96,9 @@ Common things this catches and how to fix them:
   `metadata.name` suffix (`mitos.v0.4.0`).
 - Every owned CRD in the CSV must have a matching CRD manifest in `manifests/`,
   and the `version` in each `customresourcedefinitions.owned` entry must be the
-  CRD storage version. NOTE: `Sandbox` is served at `v1alpha2` (storage) and
-  `SandboxPool` storage is `v1alpha1`; the rest are `v1alpha1`. The CSV already
-  reflects this. If you bump a CRD version, update both the CRD YAML and the CSV
-  owned entry.
+  CRD storage version. NOTE: every CRD is served and stored at `mitos.run/v1`.
+  The CSV already reflects this. If you bump a CRD version, update both the CRD
+  YAML and the CSV owned entry.
 - Image references must be digest-pinnable; community-operators may require
   immutable references at submission time. Replace the `:v0.4.0` tags with
   `@sha256:...` digests if the reviewer asks.
@@ -120,7 +132,7 @@ Then apply an example CR and confirm the controller reconciles it:
 
 ```bash
 kubectl apply -n mitos -f examples/python-pool.yaml
-kubectl get sandboxpools,sandboxtemplates -n mitos
+kubectl get sandboxpools,sandboxes -n mitos
 ```
 
 Clean up:
@@ -143,10 +155,7 @@ operators/mitos/
   0.4.0/
     manifests/
       mitos.clusterserviceversion.yaml
-      mitos.run_sandboxtemplates.yaml
       mitos.run_sandboxpools.yaml
-      mitos.run_sandboxclaims.yaml
-      mitos.run_sandboxforks.yaml
       mitos.run_sandboxes.yaml
       mitos.run_workspaces.yaml
       mitos.run_workspacerevisions.yaml
@@ -183,7 +192,7 @@ validation green. Sign-off (`-s`) and the DCO check are required.
 
 ## Notes
 
-- Channel: `alpha` only, default `alpha`. mitos is pre-1.0 and the CSV maturity
+- Channel: `alpha` only, default `alpha`. Mitos is pre-1.0 and the CSV maturity
   is `alpha`.
 - For the next version, add `operators/mitos/0.5.0/` and set the CSV
   `spec.replaces: mitos.v0.4.0` (or `spec.skips`) so the update graph is

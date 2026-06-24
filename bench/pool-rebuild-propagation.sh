@@ -24,7 +24,7 @@
 # a REAL cluster; with no reachable cluster it fails with a clear message and
 # produces NO number (no unverified claims).
 #
-# Requirements: a running mitos cluster (ideally multi-node) with the controller
+# Requirements: a running Mitos cluster (ideally multi-node) with the controller
 # and an existing SandboxPool, Go, and a KUBECONFIG that can update the pool and
 # read its status.
 #

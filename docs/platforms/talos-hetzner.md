@@ -1,6 +1,6 @@
 # Talos + Hetzner AX: bare-metal provisioning runbook
 
-This document is the end-to-end guide for running the mitos operator on
+This document is the end-to-end guide for running the Mitos operator on
 Talos Linux atop Hetzner AX dedicated servers (Robot fleet). It covers hardware
 selection, OS install, machine configuration, operator deployment, KVM
 readiness checks, and capacity planning pointers.
@@ -440,8 +440,7 @@ kubectl -n mitos delete sandboxpool busybox-pool
 > **No density or cost numbers are stated here.** Per the project's
 > no-unverified-claims rule, every number must be reproducible from `bench/`
 > on pinned hardware. The items below are TARGETS; they will be updated when
-> measured on the Hetzner AX reference node (ROADMAP section 4, open item:
-> "bare-metal reference numbers on the Hetzner + Talos reference node").
+> measured on the Hetzner AX reference node.
 
 The variables that drive per-node density:
 
@@ -456,8 +455,8 @@ The variables that drive per-node density:
 - **NVMe throughput**: fork restore time depends on reading the snapshot from
   disk. The bench harness (`cmd/bench` in `fork-exec` mode) measures
   fork-to-first-exec distribution; see `BENCHMARKS.md` for methodology and
-  current shared-CI-class numbers. Bare-metal AX numbers are a target in
-  ROADMAP section 4.
+  current shared-CI-class numbers. Bare-metal AX numbers are a target, not yet
+  measured.
 - **forkd data volume**: all snapshots, the chunk store, and jailer chroot
   bases live under `/var/lib/mitos` (the data partition in
   `deploy/talos/worker-kvm.yaml`). The CoW disk accounting (`mitos_metered_disk_bytes`)
@@ -468,7 +467,6 @@ References:
 - `BENCHMARKS.md`: methodology and current CI-class numbers
 - `docs/metering.md`: CoW-aware memory and disk accounting
 - `bench/README.md`: how to reproduce the bench harness on your hardware
-- ROADMAP section 4: open item for pinned bare-metal measurements
 
 ---
 

@@ -51,6 +51,17 @@ spec:
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          env:
+            # Run the control plane (PKI bootstrap, forkd discovery) in the
+            # namespace the controller is deployed into, so an install into any
+            # namespace works without crash-looping on a missing "mitos" default.
+            - name: FORKD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

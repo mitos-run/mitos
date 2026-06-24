@@ -38,7 +38,7 @@ code, by design) could fetch the node's cloud IAM credentials. This was the TOP
 must-fix-first blocker for running untrusted code, now closed by the decision
 below.
 
-The enforcement model mitos already proved on the raw-forkd path is host-side
+The enforcement model Mitos already proved on the raw-forkd path is host-side
 nftables on the tap: a per-tap default-deny egress ruleset, accept
 established/related, accept the allowlisted destinations, accept DNS only to the
 controlled node resolver, terminal drop, with the policy rendered and applied

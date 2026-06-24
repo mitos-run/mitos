@@ -42,7 +42,7 @@ export interface SecretMount {
   envVar: string;
 }
 
-/** The mitos NetworkPolicy shape this plugin emits (a subset of #219). */
+/** The Mitos NetworkPolicy shape this plugin emits (a subset of #219). */
 export interface NetworkPolicy {
   /** Default verdict for traffic matching no allow rule. */
   egress: "deny" | "allow";
@@ -56,7 +56,7 @@ export interface OutputSpec {
   diff?: boolean;
 }
 
-/** The Sandbox object the plugin hands to a mitos cluster client. */
+/** The Sandbox object the plugin hands to a Mitos cluster client. */
 export interface MitosSandbox {
   apiVersion: string;
   kind: "Sandbox";

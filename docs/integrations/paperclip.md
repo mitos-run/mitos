@@ -1,9 +1,9 @@
 # Paperclip / OpenClaw / Hermes integration
 
-This document describes how mitos serves as the execution substrate for the
-Paperclip ecosystem (issue #20, workstream W3). The integration implements the
+This document describes how Mitos serves as the execution substrate for the
+Paperclip ecosystem. The integration implements the
 upstream pluggable sandbox-provider contract (Environments plus a lease
-lifecycle) and maps it onto mitos Sandboxes instead of `batch/v1` Jobs.
+lifecycle) and maps it onto Mitos Sandboxes instead of `batch/v1` Jobs.
 
 The in-repo plugin lives at `plugins/paperclip`. It is a TypeScript Paperclip
 plugin (`@paperclipai/sandbox-provider-sandbox`) that registers an environment
@@ -13,17 +13,17 @@ backends, selected by `config.backend`:
 - `server`: the original skeleton path, talking to the standalone
   sandbox-server REST API (`/v1/fork`, `/v1/exec`, `/v1/sandboxes`). No
   Kubernetes.
-- `claim`: the workstream-A target. The provider contract is realized as a
-  mitos `Sandbox` (`mitos.run/v1`) on Kubernetes.
+- `claim`: the Kubernetes target. The provider contract is realized as a
+  Mitos `Sandbox` (`mitos.run/v1`) on Kubernetes.
 
 ## Production gate (read first)
 
 Claim mode does NOT ship to production tenants until BOTH of these are green in
 CI:
 
-- **#3 fork-correctness** (hostile inputs and real credentials in forked VMs;
+- **fork-correctness** (hostile inputs and real credentials in forked VMs;
   see `docs/fork-correctness.md`).
-- **#163 failure / GC semantics** (crash, node loss, residual GC; see
+- **failure / GC semantics** (crash, node loss, residual GC; see
   `docs/failure-gc.md`).
 
 Both have advanced but remain open 1.0 gates. The plugin's `claim` backend is
@@ -31,14 +31,14 @@ implemented and unit tested, but enabling it for production tenants is blocked
 on those two gates. This is called out in the manifest's `backend` config
 description as well.
 
-## Provider-contract mapping (workstream A)
+## Provider-contract mapping
 
-The contract maps onto mitos as follows. The pure mapping is in
+The contract maps onto Mitos as follows. The pure mapping is in
 `plugins/paperclip/src/claim-mapping.ts`; the lifecycle orchestration is in
 `plugins/paperclip/src/claim-client.ts`. Both are unit tested with no cluster
 (`plugins/paperclip/test/*.test.ts`).
 
-| Provider contract | mitos mapping | Code |
+| Provider contract | Mitos mapping | Code |
 | --- | --- | --- |
 | create environment / acquire lease | create a `Sandbox` from a pool, wait Ready | `leaseToClaim`, `acquireWithAssertion` |
 | lease max lifetime | `sandbox.spec.lifetime.ttl` (wall-clock cap; zero is no limit) | `minutesToDuration` |
@@ -76,7 +76,7 @@ paths each `/workspace` subtree becomes a narrowing, diff-bearing output.
 A conforming run reaches exactly one external endpoint: the instance
 callback-bridge. `bridgeToEgressAllow` derives a `NetworkPolicy` with
 `egress: "deny"` and the bridge `host:port` as the sole `allow` entry, reusing
-the #219 egress model (`api/v1/types.go` `NetworkPolicy`,
+the egress model (`api/v1/types.go` `NetworkPolicy`,
 `docs/networking.md`, `docs/threat-model.md`). Everything else is denied by
 default. A bare `host:port`, or an `http`/`https`/`ws`/`wss` URL, is accepted;
 the scheme is stripped and a default port inferred. An unparseable or portless
@@ -89,7 +89,7 @@ bridge entry first.
 
 Secret VALUES never travel through the plugin. `secretsToClaimMounts` maps each
 ref to a `SandboxSpec.Secrets` entry that carries only a Secret name and
-key; the mitos controller resolves the plaintext server-side at sandbox time
+key; the Mitos controller resolves the plaintext server-side at sandbox time
 (`internal/controller/sandboxclaim_controller.go` `resolveSecrets`). This
 enforces the secret-inheritance policy (`docs/fork-correctness.md` section 3):
 sandbox-time secrets are injected at sandbox time and are never baked into a pool
@@ -125,11 +125,11 @@ Paperclip monorepo), and the real `MitosClaimClient` over `@mitos/sdk`
 the contract mapping and lifecycle are proven here; the end-to-end binding lands
 in the Paperclip monorepo.
 
-### Workstreams B and C (external repos)
+### Related work in external repos
 
 These live in the Paperclip and OpenClaw repos, not here:
 
-- **B: paperclip-operator backend `microvm`.** A
+- **paperclip-operator backend `microvm`.** A
   `spec.adapters.cloudSandbox.backend: jobs | microvm` knob, with knob mapping:
   `idleTimeoutMin` to claim idle reaping, `inferenceProxy` to a claim-time
   injection (an extra egress allow plus a secret ref), the image allow-list to a
@@ -137,7 +137,7 @@ These live in the Paperclip and OpenClaw repos, not here:
   quota. The mitos-side primitives those knobs map onto already exist
   (`idleTimeout`, egress allow entries, claim-time secrets, pool quotas); the
   operator wiring is external.
-- **C: shared operator core plus drivers.** Extract the common reconciler
+- **Shared operator core plus drivers.** Extract the common reconciler
   machinery into a versioned library and add the OpenClaw sandbox driver. Wholly
   external.
 

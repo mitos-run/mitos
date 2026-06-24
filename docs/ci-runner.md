@@ -1,4 +1,4 @@
-# Bare-metal CI: the in-cluster self-hosted runner (issue #16)
+# Bare-metal CI: the in-cluster self-hosted runner
 
 This turns the maintainer's manual cluster verification into standing CI. A
 self-hosted GitHub Actions runner runs INSIDE the single-node Talos KVM cluster
@@ -32,7 +32,7 @@ controller (namespace mitos)  ->  husk pods (namespace mitos-e2e, do the KVM)
 The runner itself does NOT need docker or KVM. The husk pods do the KVM (they
 request the `mitos.run/kvm` device-plugin resource, the production pod-native
 path). The runner only drives the cluster with `kubectl` and talks to each
-claim's sandbox HTTP API over the in-cluster pod network via the mitos Python
+claim's sandbox HTTP API over the in-cluster pod network via the Mitos Python
 SDK (`in_cluster=True`).
 
 Images are built and pushed to `ghcr.io/mitos-run/mitos-{controller,husk-stub,...}`
@@ -105,7 +105,7 @@ TRUSTED triggers ONLY. There are three independent layers:
      controller's own RBAC.
    - cluster-scoped: `get/list nodes` (the e2e checks for a KVM-capable node)
      plus `patch/update nodes` for CORDON, so the chaos suite can exercise
-     cross-node failover on the multi-node KVM cluster (issue #163: cordon a
+     cross-node failover on the multi-node KVM cluster (cordon a
      node, assert the claim recovers elsewhere, uncordon). This is the
      `mitos-ci-runner-nodes` ClusterRole (renamed from `mitos-ci-runner-nodes-read`).
 
@@ -142,7 +142,7 @@ admin of the GitHub repo.
 ### 1. Build and push the runner image
 
 The runner image is the official `actions-runner` plus `kubectl`, `git`, `jq`,
-`python3`, and the mitos Python SDK. Build it on a trusted machine and push to
+`python3`, and the Mitos Python SDK. Build it on a trusted machine and push to
 GHCR:
 
 ```bash
@@ -257,12 +257,12 @@ waits and a cleanup trap, each printing a `PASS:` / `FAIL:` line:
 
 0. a node labeled `mitos.run/kvm=true` is present.
 1. a `SandboxPool` warms at least one dormant husk pod.
-2. a `SandboxClaim` activates to Ready and `exec("echo ...")` returns the
+2. a `Sandbox` activates to Ready and `exec("echo ...")` returns the
    expected stdout with exit 0.
 3. `fork(2)` produces two independent sandboxes (a marker written in one is not
    visible in the other).
 4. `run_code` returns a result, OR a clean `KernelUnavailable` (the husk OCI
-   base may lack the code-interpreter kernel; per issue #16 a clean
+   base may lack the code-interpreter kernel; a clean
    `KernelUnavailable` is ACCEPTED as a pass and does NOT fail the suite). A
    non-`KernelUnavailable` kernel error IS a failure.
 5. a PTY allocates and echoes its input.

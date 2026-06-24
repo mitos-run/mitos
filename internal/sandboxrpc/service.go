@@ -1,12 +1,15 @@
 // Package sandboxrpc serves the Sandbox runtime protocol (proto/sandbox/v1,
-// issue #24) over Connect. This is the PROTOCOL FOUNDATION slice: it lands the
-// Connect transport plus a real, streaming Exec that bridges to the existing
-// sandbox-server exec path (SandboxAPI -> vsock -> guest agent), and a real
-// unary Budget. Every other RPC returns a CodeUnimplemented error with an
-// LLM-legible message naming issue #24, so the service compiles and is honestly
-// partial. The wire migration (guest agent JSON-lines -> this proto, the forkd
-// cluster-internal bridge, the vsock and browser transports, PTY end to end) is
-// a well-scoped set of follow-up slices (docs/api/runtime-protocol.md).
+// issue #24) over Connect. This is the PROTOCOL FOUNDATION slice plus the file
+// RPC group: it lands the Connect transport, a real streaming Exec that bridges
+// to the existing sandbox-server exec path (SandboxAPI -> vsock -> guest agent),
+// a real unary Budget, and the six file RPCs (ReadFile, WriteFile, List, Stat,
+// Mkdir, Remove) which are real when a GuestConn is wired (s.Guest != nil) and
+// otherwise report an LLM-legible CodeUnimplemented follow-up. The remaining
+// RPCs return a CodeUnimplemented error with an LLM-legible message naming issue
+// #24, so the service compiles and is honestly partial. The wire migration
+// (guest agent JSON-lines -> this proto, the forkd cluster-internal bridge, the
+// vsock and browser transports, PTY end to end) is a well-scoped set of
+// follow-up slices (docs/api/runtime-protocol.md).
 package sandboxrpc
 
 import (
@@ -59,6 +62,10 @@ type BudgetProvider interface {
 // The remaining overrides exist only to return an LLM-legible #24 follow-up
 // message instead of the generated default, so a caller learns WHY the RPC is
 // unavailable and where it is tracked.
+//
+// Guest, when non-nil, is the GuestConn port (Task 2.1 pattern). When it is
+// set, Service.Exec delegates through it instead of the ExecBackend. Tasks
+// 2.2-2.7 wire additional RPC groups through GuestConn.
 type Service struct {
 	sandboxv1connect.UnimplementedSandboxHandler
 	exec   ExecBackend
@@ -69,6 +76,10 @@ type Service struct {
 	// sandbox-server wiring can override it with WithSandboxResolver once
 	// per-sandbox routing lands.
 	resolve func(ctx context.Context) (string, error)
+	// Guest, when set, is the GuestConn factory used by the Task 2.1 path.
+	// Takes priority over exec when non-nil. Zero-value Service{Guest: ...}
+	// is valid for tests that drive the GuestConn seam directly.
+	Guest func(sandboxID string) (GuestConn, error)
 }
 
 // NewService builds the Connect Sandbox handler. exec is required (the streaming
@@ -103,19 +114,33 @@ func WithSandboxResolver(r func(ctx context.Context) (string, error)) Option {
 func followup(rpc string) error {
 	return connect.NewError(connect.CodeUnimplemented, fmt.Errorf(
 		"sandbox.v1.Sandbox/%s is not implemented yet: it is a tracked follow-up of issue #24 (Connect runtime protocol). "+
-			"The streaming Exec and the unary Budget RPCs are live on this transport; the remaining runtime surface "+
-			"(files, watch, archive, processes, signal, port-forward, fork/checkpoint/extend, vitals) still rides the "+
+			"The streaming Exec and RunCode, the unary Budget, the file RPCs (ReadFile, WriteFile, List, Stat, Mkdir, Remove), "+
+			"and the runtime RPCs (Watch, Processes, Signal, PortForward, Vitals) are live on this transport when a GuestConn "+
+			"is wired; the remaining surface (archive, fork/checkpoint/extend) still rides the "+
 			"current JSON-over-HTTP sandbox API and the JSON-lines vsock protocol. See docs/api/runtime-protocol.md", rpc))
 }
 
+// connectErr builds an LLM-legible connect.Error (issue #28). code is the
+// Connect error code; cause is the underlying error; remediation is a
+// human/LLM-legible string suggesting how to resolve the problem. Secret
+// values MUST NOT appear in remediation.
+func connectErr(code connect.Code, cause error, remediation string) *connect.Error {
+	if remediation == "" {
+		return connect.NewError(code, cause)
+	}
+	// Preserve the error chain via %w so callers can errors.Is/As the cause,
+	// and append the LLM-legible remediation text.
+	return connect.NewError(code, fmt.Errorf("%w; %s", cause, remediation))
+}
+
 // Exec runs a command and streams its IO over the Connect bidi stream. The first
-// client message MUST carry the open oneof; the handler bridges to the exec
-// backend (the existing SandboxAPI -> vsock -> guest agent path) and forwards
-// each output chunk as an ExecResponse stdout/stderr frame the instant it
-// arrives, then a terminal ExecExit. Stdin and PTY resize messages are accepted
-// by the protocol but not yet forwarded in this foundation slice (PTY end to end
-// and stdin streaming are #24 follow-ups); they are drained so the client is not
-// blocked.
+// client message MUST carry the open oneof; the handler bridges to either the
+// GuestConn port (when s.Guest is set, Task 2.1 path) or the ExecBackend
+// (legacy callback path) and forwards each output chunk as an ExecResponse
+// stdout/stderr frame the instant it arrives, then a terminal ExecExit. Stdin
+// and PTY resize messages are accepted by the protocol but not yet forwarded in
+// this foundation slice (PTY end to end and stdin streaming are #24 follow-ups);
+// they are drained so the client is not blocked.
 func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1.ExecRequest, sandboxv1.ExecResponse]) error {
 	first, err := stream.Receive()
 	if err != nil {
@@ -126,7 +151,12 @@ func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("first ExecRequest must carry the open oneof (command, env, cwd, pty), got %T", first.Msg))
 	}
 
-	sandboxID, err := s.resolve(ctx)
+	// GuestConn path (Task 2.1): delegate through the port when it is wired.
+	if s.Guest != nil {
+		return s.execViaGuest(ctx, stream, open)
+	}
+
+	sandboxID, err := s.resolveID(ctx)
 	if err != nil {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
 	}
@@ -184,6 +214,123 @@ func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1
 	}}})
 }
 
+// execViaGuest implements the Task 2.1 GuestConn path for Exec: opens an
+// ExecStream from the GuestConn and copies frames to the Connect response stream
+// until the terminal Done frame. Errors from the guest are surfaced as an
+// LLM-legible exit frame so the client always reads a clean terminal frame.
+func (s *Service) execViaGuest(ctx context.Context, stream *connect.BidiStream[sandboxv1.ExecRequest, sandboxv1.ExecResponse], open *sandboxv1.ExecOpen) error {
+	sandboxID, err := s.resolveID(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
+	}
+
+	conn, err := s.Guest(sandboxID)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+	}
+
+	es, err := conn.Exec(ctx, open)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest exec open failed: %w; check that the command is accessible in the sandbox filesystem", err))
+	}
+	defer es.Close()
+
+	return copyExecFrames(ctx, es, stream.Send)
+}
+
+// copyExecFrames drains a guest ExecStream and forwards each frame to send as
+// an ExecResponse: stdout/stderr chunks then a terminal ExecExit. It is shared
+// by the bidi Exec (Service.execViaGuest) and the server-streaming ExecStream
+// so both transports have identical copy semantics. A guest Recv error is
+// surfaced as an LLM-legible terminal exit frame (never a secret value) so the
+// client always reads a clean terminal frame rather than a bare transport
+// error.
+func copyExecFrames(ctx context.Context, es ExecStream, send func(*sandboxv1.ExecResponse) error) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		frame, recvErr := es.Recv()
+		if recvErr != nil {
+			// io.EOF is handled by the Done frame below, not here; any other
+			// error is a transport failure surfaced as an LLM-legible exit.
+			_ = send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+				ExitCode: 1,
+				Error:    fmt.Sprintf("exec stream read error: %v; the guest agent may have crashed or the vsock connection was lost", recvErr),
+			}}})
+			return nil
+		}
+		if frame.Done {
+			return send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+				ExitCode:   frame.ExitCode,
+				ExecTimeMs: frame.ExecTimeMs,
+			}}})
+		}
+		if len(frame.Stdout) > 0 {
+			if err := send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: frame.Stdout}}); err != nil {
+				return err
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			if err := send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: frame.Stderr}}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// ExecStream runs a non-interactive command and streams its output over a
+// server-streaming RPC, the HTTP/1.1-reachable counterpart to the bidi Exec
+// (Connect serves bidi only over HTTP/2). It builds the equivalent ExecOpen
+// from the unary request (no pty, no stdin), opens the guest exec via the SAME
+// GuestConn.Exec path the bidi Exec uses, and copies frames with the shared
+// copyExecFrames helper. The per-sandbox concurrent-stream cap is enforced
+// inside GuestConn.Exec (the daemon vsockGuestConn acquires the slot), so this
+// RPC inherits the same ceiling as the bidi Exec.
+//
+// When s.Guest is nil the handler returns the honest #24 follow-up message.
+func (s *Service) ExecStream(ctx context.Context, req *connect.Request[sandboxv1.ExecStreamRequest], stream *connect.ServerStream[sandboxv1.ExecResponse]) error {
+	if s.Guest == nil {
+		return followup("ExecStream")
+	}
+
+	r := req.Msg
+	open := &sandboxv1.ExecOpen{
+		Command:        r.GetCommand(),
+		Args:           r.GetArgs(),
+		Env:            r.GetEnv(),
+		Cwd:            r.GetCwd(),
+		TimeoutSeconds: r.GetTimeoutSeconds(),
+	}
+
+	sandboxID, err := s.resolveID(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
+	}
+
+	conn, err := s.Guest(sandboxID)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("open guest connection for sandbox %q: %w; ensure the sandbox is running and the guest agent is healthy", sandboxID, err))
+	}
+
+	es, err := conn.Exec(ctx, open)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("guest exec open failed: %w; check that the command is accessible in the sandbox filesystem", err))
+	}
+	defer es.Close()
+
+	return copyExecFrames(ctx, es, stream.Send)
+}
+
+// resolveID returns the sandbox id from the resolver, or the empty string when
+// the resolver is nil (zero-value Service used in tests with the Guest field).
+func (s *Service) resolveID(ctx context.Context) (string, error) {
+	if s.resolve == nil {
+		return "", nil
+	}
+	return s.resolve(ctx)
+}
+
 // streamName mirrors the daemon/vsock stream identifiers so the handler does not
 // import the vsock package (keeping the transport seam clean).
 type streamName string
@@ -199,7 +346,7 @@ func (s *Service) Budget(ctx context.Context, req *connect.Request[sandboxv1.Bud
 	if s.budget == nil {
 		return nil, followup("Budget")
 	}
-	sandboxID, err := s.resolve(ctx)
+	sandboxID, err := s.resolveID(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("resolve target sandbox: %w", err))
 	}
@@ -213,42 +360,6 @@ func (s *Service) Budget(ctx context.Context, req *connect.Request[sandboxv1.Bud
 // --- Honest #24 follow-ups: every RPC below rides the current HTTP/vsock
 // surface until its dedicated slice lands. ---
 
-func (s *Service) ReadFile(_ context.Context, _ *connect.Request[sandboxv1.ReadFileRequest], _ *connect.ServerStream[sandboxv1.Chunk]) error {
-	return followup("ReadFile")
-}
-
-func (s *Service) WriteFile(_ context.Context, _ *connect.ClientStream[sandboxv1.WriteFileRequest]) (*connect.Response[sandboxv1.WriteFileResult], error) {
-	return nil, followup("WriteFile")
-}
-
-func (s *Service) List(_ context.Context, _ *connect.Request[sandboxv1.ListRequest]) (*connect.Response[sandboxv1.ListResponse], error) {
-	return nil, followup("List")
-}
-
-func (s *Service) Stat(_ context.Context, _ *connect.Request[sandboxv1.StatRequest]) (*connect.Response[sandboxv1.FileInfo], error) {
-	return nil, followup("Stat")
-}
-
-func (s *Service) Archive(_ context.Context, _ *connect.Request[sandboxv1.ArchiveRequest], _ *connect.ServerStream[sandboxv1.Chunk]) error {
-	return followup("Archive")
-}
-
-func (s *Service) Watch(_ context.Context, _ *connect.Request[sandboxv1.WatchRequest], _ *connect.ServerStream[sandboxv1.FsEvent]) error {
-	return followup("Watch")
-}
-
-func (s *Service) Processes(_ context.Context, _ *connect.Request[sandboxv1.ProcessesRequest]) (*connect.Response[sandboxv1.ProcessList], error) {
-	return nil, followup("Processes")
-}
-
-func (s *Service) Signal(_ context.Context, _ *connect.Request[sandboxv1.SignalRequest]) (*connect.Response[sandboxv1.SignalResponse], error) {
-	return nil, followup("Signal")
-}
-
-func (s *Service) PortForward(_ context.Context, _ *connect.BidiStream[sandboxv1.Frame, sandboxv1.Frame]) error {
-	return followup("PortForward")
-}
-
 func (s *Service) Fork(_ context.Context, _ *connect.Request[sandboxv1.ForkRequest]) (*connect.Response[sandboxv1.Operation], error) {
 	return nil, followup("Fork")
 }
@@ -259,8 +370,4 @@ func (s *Service) Checkpoint(_ context.Context, _ *connect.Request[sandboxv1.Che
 
 func (s *Service) ExtendLifetime(_ context.Context, _ *connect.Request[sandboxv1.ExtendRequest]) (*connect.Response[sandboxv1.Lease], error) {
 	return nil, followup("ExtendLifetime")
-}
-
-func (s *Service) Vitals(_ context.Context, _ *connect.Request[sandboxv1.VitalsRequest], _ *connect.ServerStream[sandboxv1.GuestVitals]) error {
-	return followup("Vitals")
 }
