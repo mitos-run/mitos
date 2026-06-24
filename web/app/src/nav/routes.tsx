@@ -22,7 +22,7 @@ export type RouteDef = {
 export const ROUTES: RouteDef[] = [
   { path: '/', label: 'Instruments', group: 'Run', element: () => <Instruments />, when: (c) => c.proof },
   { path: '/sandboxes', label: 'Sandboxes', group: 'Run', element: () => <Sandboxes /> },
-  { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/templates" phase="B2" /> },
+  { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Placeholder title="Templates" endpoint="/console/templates" phase="B2" /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
   { path: '/keys', label: 'API keys', group: 'Build', element: () => <Placeholder title="API keys" endpoint="/console/keys" phase="B2" /> },

@@ -6,7 +6,7 @@ export function Placeholder({ title, endpoint, phase }: { title: string; endpoin
     <section>
       <h2>{title}</h2>
       <p className="t-dim">
-        Reads <code>{endpoint}</code>. The rich view ships in {phase}; the org-scoped BFF endpoint is live today.
+        Reads <code>{endpoint}</code>. The rich view ships in {phase}. It reads the org-scoped BFF endpoint named above.
       </p>
     </section>
   )
