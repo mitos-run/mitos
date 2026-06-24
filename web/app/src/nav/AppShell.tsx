@@ -5,6 +5,7 @@ import { Link, Outlet } from '@tanstack/react-router'
 import { Division } from '@mitos/brand'
 import { useCapabilities } from '../data/query'
 import { visibleRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
+import { CommandPalette } from './CommandPalette'
 import type { Capabilities } from '../api'
 
 export function AppShell() {
@@ -26,6 +27,7 @@ export function AppShell() {
       <main style={{ flex: 1, padding: 'var(--space-6)' }}>
         <Outlet />
       </main>
+      <CommandPalette caps={caps} />
     </div>
   )
 }
