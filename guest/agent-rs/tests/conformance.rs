@@ -1120,6 +1120,176 @@ async fn watch_outside_workspace_returns_permission_denied() {
     );
 }
 
+/// Watch detects a rename within the watched directory and reports a RENAME event
+/// with the new path set. This exercises the highest-risk event arm: the inotify
+/// backend must correlate MOVED_FROM / MOVED_TO via cookie and deliver a single
+/// Modify(Name(Both)) event with both paths populated.
+#[tokio::test]
+async fn watch_detects_rename() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-rename.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let dir = "/tmp/agent-rs-watch-rename-test";
+    std::fs::create_dir_all(dir).unwrap();
+    let src = format!("{dir}/old.txt");
+    let dst = format!("{dir}/new.txt");
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&dst);
+    std::fs::write(&src, b"rename me").unwrap();
+
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let stream = client
+        .watch(sandbox_v1::WatchRequest {
+            path: dir.into(),
+            recursive: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Give the watcher a moment to install before the file op.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    std::fs::rename(&src, &dst).unwrap();
+
+    tokio::pin!(stream);
+    // Poll for a RENAME event; skip any CREATE/MODIFY/DELETE events that may
+    // arrive before it (e.g. the initial write settling). Fail if no RENAME
+    // arrives within 2 seconds.
+    let deadline = std::time::Duration::from_secs(2);
+    let mut rename_ev: Option<sandbox_v1::FsEvent> = None;
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        let next = tokio::time::timeout(remaining, stream.next()).await;
+        let Ok(Some(Ok(ev))) = next else { break };
+        if ev.kind == sandbox_v1::fs_event::Kind::Rename as i32 {
+            rename_ev = Some(ev);
+            break;
+        }
+    }
+    let ev = rename_ev.expect("expected a RENAME event within 2s");
+    assert!(
+        ev.path.ends_with("old.txt"),
+        "expected old path ending in old.txt, got: {}",
+        ev.path
+    );
+    assert!(
+        ev.new_path.ends_with("new.txt"),
+        "expected new_path ending in new.txt, got: {}",
+        ev.new_path
+    );
+}
+
+/// Watch detects file removal and reports a DELETE event with the removed path.
+#[tokio::test]
+async fn watch_detects_delete() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-delete.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let dir = "/tmp/agent-rs-watch-delete-test";
+    std::fs::create_dir_all(dir).unwrap();
+    let file = format!("{dir}/to-delete.txt");
+    std::fs::write(&file, b"delete me").unwrap();
+
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let stream = client
+        .watch(sandbox_v1::WatchRequest {
+            path: dir.into(),
+            recursive: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Give the watcher a moment to install before the file op.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    std::fs::remove_file(&file).unwrap();
+
+    tokio::pin!(stream);
+    // Poll for a DELETE event with a bounded timeout.
+    let deadline = std::time::Duration::from_secs(2);
+    let mut delete_ev: Option<sandbox_v1::FsEvent> = None;
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        let next = tokio::time::timeout(remaining, stream.next()).await;
+        let Ok(Some(Ok(ev))) = next else { break };
+        if ev.kind == sandbox_v1::fs_event::Kind::Delete as i32 {
+            delete_ev = Some(ev);
+            break;
+        }
+    }
+    let ev = delete_ev.expect("expected a DELETE event within 2s");
+    assert!(
+        ev.path.ends_with("to-delete.txt"),
+        "expected path ending in to-delete.txt, got: {}",
+        ev.path
+    );
+}
+
+/// With recursive=true, Watch detects a file created in a subdirectory and
+/// reports a CREATE event for the new file path.
+#[tokio::test]
+async fn watch_recursive_detects_subdir_create() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-watch-recursive.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let dir = "/tmp/agent-rs-watch-recursive-test";
+    let subdir = format!("{dir}/sub");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let file = format!("{subdir}/deep.txt");
+    let _ = std::fs::remove_file(&file);
+
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let stream = client
+        .watch(sandbox_v1::WatchRequest {
+            path: dir.into(),
+            recursive: true,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Give the watcher a moment to install before the file op.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    std::fs::write(&file, b"deep file").unwrap();
+
+    tokio::pin!(stream);
+    // Poll for a CREATE event whose path contains the subdir filename.
+    let deadline = std::time::Duration::from_secs(2);
+    let mut create_ev: Option<sandbox_v1::FsEvent> = None;
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        let next = tokio::time::timeout(remaining, stream.next()).await;
+        let Ok(Some(Ok(ev))) = next else { break };
+        if ev.kind == sandbox_v1::fs_event::Kind::Create as i32
+            && ev.path.ends_with("deep.txt")
+        {
+            create_ev = Some(ev);
+            break;
+        }
+    }
+    let ev = create_ev.expect("expected a CREATE event for deep.txt within 2s");
+    assert!(
+        ev.path.ends_with("deep.txt"),
+        "expected path ending in deep.txt, got: {}",
+        ev.path
+    );
+}
+
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
 #[tokio::test]
 async fn exec_stderr_returned() {

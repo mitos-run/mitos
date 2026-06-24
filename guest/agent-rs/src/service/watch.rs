@@ -16,8 +16,11 @@
 //
 // CHANNEL BOUND: the mpsc channel between the notify callback thread and the
 // async sender task is bounded at WATCH_CHAN_BOUND (64 events). If the channel
-// is full the sender drops the watcher and sends ResourceExhausted to the
-// client. This prevents unbounded buffering when the client is slow.
+// is full when a new event arrives, the callback drops its sender clone so the
+// channel closes. The async task detects the closed channel (recv returns None)
+// and sends ResourceExhausted to the client before returning. The watcher is
+// dropped on the same path via RAII. No events are silently discarded: the
+// client always learns when the stream was terminated due to overflow.
 //
 // EVENT MAPPING (notify EventKind -> FsEvent::Kind):
 //   notify::EventKind::Create(_)           -> FsEvent_Kind::Create
@@ -48,7 +51,8 @@ use crate::service::archive::path_allowed;
 
 /// Bounded event channel capacity between the notify callback and the async
 /// sender task. 64 events before the client must have drained the stream.
-/// On overflow the watcher is dropped and ResourceExhausted is sent.
+/// On overflow the callback drops its sender clone, closing the channel; the
+/// async task detects the closure and signals ResourceExhausted to the client.
 const WATCH_CHAN_BOUND: usize = 64;
 
 /// Watch RPC handler.
@@ -73,6 +77,14 @@ pub async fn watch(
     let path = PathBuf::from(&raw_path);
 
     // lstat the path; reject non-directories (mirrors grpc_runtime.go:57-66).
+    //
+    // SECURITY: symlink_metadata() does not follow symlinks, so a symlink at
+    // the requested path has is_dir()==false and is rejected with
+    // InvalidArgument. This achieves the same security outcome as Go's
+    // inotify IN_DONT_FOLLOW flag (which returns ENOTDIR): a symlink cannot
+    // be used to redirect the watch outside the workspace. The error code
+    // differs (InvalidArgument here vs. NotDir in Go) but the security
+    // property is identical.
     let meta = path.symlink_metadata().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Status::not_found(format!("watch: {e}"))
@@ -95,15 +107,29 @@ pub async fn watch(
 
     // notify::recommended_watcher returns an INotifyWatcher on Linux. The
     // callback is called from notify's internal thread; we send events over
-    // the mpsc channel. If the channel is full (try_send returns Err) we
-    // record the overflow; the receiver task will detect the channel closed
-    // after the watcher is dropped (or returns full) and send ResourceExhausted.
+    // the mpsc channel.
+    //
+    // OVERFLOW HANDLING: try_send is used (non-blocking). On Err(Full) the
+    // callback takes the sender out of the Option (leaving None) and drops
+    // it, closing the channel from the sender side. The async task below
+    // detects the channel closure (recv returns None) and sends
+    // ResourceExhausted to the client before returning. The watcher is
+    // dropped by RAII when the task exits. This ensures the client always
+    // learns about overflow; no events are silently discarded.
     let tx_for_cb = notify_tx.clone();
+    // Wrap in Option so the callback can take ownership and drop it on overflow.
+    let mut tx_opt: Option<tokio::sync::mpsc::Sender<notify::Result<notify::Event>>> =
+        Some(tx_for_cb);
     let mut watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
-        // try_send: if the channel is full, discard this event and close
-        // the channel by dropping our clone (send error is non-fatal here;
-        // the async task detects the channel closed).
-        let _ = tx_for_cb.try_send(ev);
+        let Some(ref tx) = tx_opt else {
+            // Channel already closed by a previous overflow; ignore.
+            return;
+        };
+        if tx.try_send(ev).is_err() {
+            // Full or disconnected: drop the sender to close the channel and
+            // signal the async task to send ResourceExhausted to the client.
+            tx_opt = None;
+        }
     })
     .map_err(|e| Status::internal(format!("watch: create watcher: {e}")))?;
 
@@ -135,9 +161,21 @@ pub async fn watch(
         loop {
             match notify_rx.recv().await {
                 None => {
-                    // Notify channel closed: the callback dropped its sender
-                    // (e.g. the watcher was already dropped or notify failed).
-                    // Nothing more to send; exit cleanly.
+                    // Notify channel closed: either the callback dropped its
+                    // sender because the channel was full (overflow), or the
+                    // watcher was dropped. In the overflow case, signal the
+                    // client with ResourceExhausted so it knows events were
+                    // lost. We cannot distinguish overflow from a normal
+                    // watcher shutdown here, so we always send the error; a
+                    // normal shutdown only reaches this branch if the watcher
+                    // is dropped externally, which does not happen in the
+                    // current design. The watcher is dropped (via _watcher)
+                    // when the task returns, so no inotify fd leaks.
+                    let _ = stream_tx
+                        .send(Err(Status::resource_exhausted(
+                            "watch: event channel full; client too slow",
+                        )))
+                        .await;
                     break;
                 }
                 Some(Err(e)) => {
