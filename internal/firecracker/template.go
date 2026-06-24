@@ -1,12 +1,14 @@
 package firecracker
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/vsock"
 )
 
@@ -51,39 +53,64 @@ func runInitCommands(exec execFunc, commands []string) error {
 	return nil
 }
 
-// connectInitExec connects to the guest agent over the template VM's vsock UDS,
-// confirms the guest has finished booting by Pinging the agent, and returns an
-// execFunc that runs commands in /workspace. The connect+ping is retried while
-// the agent finishes starting (mirrors cmd/test-agent's bounded retry). A
-// successful ping is the boot-readiness signal: the agent only answers once it
-// is up as PID 1, so the caller knows the VM is booted and is safe to snapshot.
-// This runs regardless of whether there are init commands, so a half-booted VM
-// is never snapshotted.
-func connectInitExec(vsockPath string) (execFunc, func(), error) {
+// initReadyTimeout is the total time budget for gRPC Control.Ping readiness in
+// connectInitExecGRPC. It preserves the legacy vsock loop semantics: 30 attempts
+// at 1 s each. The gRPC retry loop in guestgrpc.WaitReady uses 20 ms intervals;
+// this timeout caps the total wait to the same 30 s the vsock loop would take.
+const initReadyTimeout = initConnectAttempts * initConnectDelay
+
+// connectInitExecGRPC is the production connectInit implementation. It waits for
+// the guest agent's gRPC Control service to answer Ping (via tm.waitReady, port 53),
+// then opens a separate vsock connection (port 52) for the exec seam that runs init
+// commands. Separating readiness (gRPC Ping, port 53) from exec (JSON, port 52)
+// lets the Rust guest agent (which serves gRPC) act as the readiness signal while
+// init commands still use the JSON exec path during the transition.
+//
+// A successful Ping is the boot-readiness signal: the agent only answers once it is
+// up as PID 1, so the caller knows the VM is booted and is safe to snapshot.
+func (tm *TemplateManager) connectInitExecGRPC(vsockPath string) (execFunc, func(), error) {
+	waitReady := tm.waitReady
+	if waitReady == nil {
+		waitReady = guestgrpc.WaitReady
+	}
+	ctx := context.Background()
+	grpcClient, err := waitReady(ctx, vsockPath, initReadyTimeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to guest agent for init (%s): %w", vsockPath, err)
+	}
+	// gRPC readiness confirmed. Close the gRPC client (ping only) and open a
+	// vsock JSON connection for init-command exec (port 52, legacy protocol).
+	// The JSON exec path is kept during the SP1.5 transition: init commands
+	// rely on vsock.Client.Exec which speaks the JSON protocol.
+	grpcClient.Close() //nolint:errcheck // best-effort; readiness check done
+	dial := tm.dialExec
+	if dial == nil {
+		dial = dialVsockExec
+	}
+	jsonClient, jerr := dial(vsockPath)
+	if jerr != nil {
+		return nil, nil, fmt.Errorf("connect to guest agent for exec (%s): %w", vsockPath, jerr)
+	}
+	exec := func(command string) (*vsock.ExecResponse, error) {
+		return jsonClient.Exec(command, "/workspace", nil, initExecTimeoutSecs)
+	}
+	return exec, func() { _ = jsonClient.Close() }, nil
+}
+
+// dialVsockExec opens a vsock JSON connection (AgentPort 52) for init-command
+// exec, retrying while the agent finishes starting. This is the production
+// implementation of the dialExec seam in connectInitExecGRPC.
+func dialVsockExec(vsockPath string) (*vsock.Client, error) {
 	var client *vsock.Client
 	var err error
 	for attempt := 0; attempt < initConnectAttempts; attempt++ {
 		client, err = vsock.Connect(vsockPath, vsock.AgentPort)
 		if err == nil {
-			// Connected: confirm the agent actually answers before treating the
-			// guest as booted. A bare connect can race the agent's listener
-			// coming up; a successful Ping is the real readiness signal.
-			if _, perr := client.Ping(); perr == nil {
-				break
-			} else {
-				_ = client.Close()
-				err = perr
-			}
+			return client, nil
 		}
 		time.Sleep(initConnectDelay)
 	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect to guest agent for init (%s): %w", vsockPath, err)
-	}
-	exec := func(command string) (*vsock.ExecResponse, error) {
-		return client.Exec(command, "/workspace", nil, initExecTimeoutSecs)
-	}
-	return exec, func() { _ = client.Close() }, nil
+	return nil, err
 }
 
 // VsockRelPath is the vsock uds_path configured before snapshot and thus
@@ -114,10 +141,22 @@ type TemplateManager struct {
 	jailer         JailerConfig
 
 	// connectInit resolves the booted template VM's vsock path to an execFunc
-	// for running init commands. It is a seam: the default connects over vsock
-	// to the guest agent; tests override it. It returns the exec, a cleanup to
-	// close the connection, and an error.
+	// for running init commands. It is a seam: the default is connectInitExecGRPC
+	// (gRPC Control.Ping for readiness, then vsock for exec); tests override it.
+	// It returns the exec, a cleanup to close the connection, and an error.
 	connectInit func(vsockPath string) (execFunc, func(), error)
+
+	// waitReady waits for the guest agent gRPC Control service to answer Ping.
+	// It is an injectable seam so connectInitExecGRPC can be tested with an
+	// in-process gRPC server (guestgrpc.WaitReadyUnix) instead of a real vsock.
+	// Nil (and the default) uses the production guestgrpc.WaitReady (vsock port 53).
+	waitReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
+
+	// dialExec opens a vsock JSON connection (port 52) for init-command exec after
+	// gRPC readiness is confirmed. It is an injectable seam so connectInitExecGRPC
+	// can be tested without a real vsock server for the exec half. Nil uses
+	// vsock.Connect(vsockPath, vsock.AgentPort) with the production retry loop.
+	dialExec func(vsockPath string) (*vsock.Client, error)
 
 	// fallbackWait is the fixed wait used when the guest agent never answers and
 	// there are no init commands (boot readiness could not be confirmed). sleep
@@ -129,15 +168,19 @@ type TemplateManager struct {
 // NewTemplateManager builds a template manager. A zero jailer config
 // keeps the direct-exec launch path.
 func NewTemplateManager(firecrackerBin, kernelPath, dataDir string, jailer JailerConfig) *TemplateManager {
-	return &TemplateManager{
+	tm := &TemplateManager{
 		firecrackerBin: firecrackerBin,
 		kernelPath:     kernelPath,
 		dataDir:        dataDir,
 		jailer:         jailer,
-		connectInit:    connectInitExec,
+		waitReady:      guestgrpc.WaitReady,
 		fallbackWait:   noAgentFallbackWait,
 		sleep:          time.Sleep,
 	}
+	// connectInit defaults to the gRPC-readiness path: Control.Ping for boot
+	// confirmation (port 53), then vsock for init-command exec (port 52).
+	tm.connectInit = tm.connectInitExecGRPC
+	return tm
 }
 
 // awaitReadyAndRunInit confirms the booted template VM is ready and runs its
