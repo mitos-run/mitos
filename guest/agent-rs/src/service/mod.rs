@@ -30,6 +30,10 @@ pub mod archive;
 /// `notify` crate, bridged into a bounded tonic server stream.
 pub mod watch;
 
+/// Processes and Signal RPC implementations (Task 2.5): /proc table read
+/// and libc::kill delivery.
+pub mod processes;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -169,16 +173,16 @@ impl Sandbox for SandboxService {
 
     async fn processes(
         &self,
-        _request: Request<sandbox_v1::ProcessesRequest>,
+        request: Request<sandbox_v1::ProcessesRequest>,
     ) -> Result<Response<sandbox_v1::ProcessList>, Status> {
-        Err(unimplemented("Processes"))
+        processes::processes(request).await
     }
 
     async fn signal(
         &self,
-        _request: Request<sandbox_v1::SignalRequest>,
+        request: Request<sandbox_v1::SignalRequest>,
     ) -> Result<Response<sandbox_v1::SignalResponse>, Status> {
-        Err(unimplemented("Signal"))
+        processes::signal(request).await
     }
 
     async fn port_forward(

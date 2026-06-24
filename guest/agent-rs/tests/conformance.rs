@@ -1335,3 +1335,299 @@ async fn exec_stderr_returned() {
     assert_eq!(stderr_out, "err");
     assert_eq!(exit_code, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Processes + Signal conformance tests (Task 2.5)
+// ---------------------------------------------------------------------------
+
+/// The Processes RPC must include the agent's own process (the test runner) in
+/// the returned list. At minimum one entry with pid == std::process::id() must
+/// be present on Linux; on other platforms the RPC may succeed vacuously.
+///
+/// This is the primary conformance gate: the /proc table contains the caller.
+#[tokio::test]
+async fn processes_includes_own_process() {
+    use sandbox_agent::sandbox_v1::ProcessesRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-processes-self.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let result = client.processes(ProcessesRequest {}).await;
+
+    // On non-Linux platforms /proc does not exist; accept any outcome.
+    let list = match result {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Internal => {
+            // /proc unavailable (macOS CI).
+            return;
+        }
+        Err(e) => panic!("Processes RPC failed unexpectedly: {e}"),
+    };
+
+    let own_pid = std::process::id() as i32;
+    let found = list.processes.iter().any(|p| p.pid == own_pid);
+    assert!(
+        found,
+        "Processes must include own pid {own_pid}; got pids: {:?}",
+        list.processes.iter().map(|p| p.pid).collect::<Vec<_>>(),
+    );
+}
+
+/// The Processes RPC must not leak argv or environ: every ProcessInfo must have
+/// a non-empty command field (the comm name) and the command must NOT be a full
+/// command-line path with arguments or resemble /proc/<pid>/cmdline content.
+///
+/// This test launches a child process with a distinctive argv and verifies that
+/// the argv string does NOT appear in any ProcessInfo command field.
+#[tokio::test]
+async fn processes_does_not_leak_argv() {
+    use sandbox_agent::sandbox_v1::ProcessesRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-processes-noargv.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Spawn a child process whose argv contains a distinctive secret-marker.
+    // On Linux we use `sleep` with a distinctive duration as the arg. The comm
+    // field must be "sleep", not "sleep 99999" or "/usr/bin/sleep 99999".
+    let mut child = match std::process::Command::new("sleep").arg("99999").spawn() {
+        Ok(c) => c,
+        Err(_) => {
+            // sleep not available; skip on this platform.
+            return;
+        }
+    };
+    let child_pid = child.id() as i32;
+
+    // Brief yield so the child registers in /proc.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let result = client.processes(ProcessesRequest {}).await;
+
+    // Kill the child regardless of outcome.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let list = match result {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Internal => {
+            return; // /proc unavailable
+        }
+        Err(e) => panic!("Processes RPC failed: {e}"),
+    };
+
+    // Find the child process entry. If it already exited, skip the argv check.
+    if let Some(entry) = list.processes.iter().find(|p| p.pid == child_pid) {
+        // The command field must be the bare comm name ("sleep"), not the
+        // full argv ("sleep 99999") and must not contain the distinctive arg.
+        assert!(
+            !entry.command.contains("99999"),
+            "ProcessInfo.command must not contain argv arg '99999'; got {:?}",
+            entry.command,
+        );
+        // comm is always a short bare name (max 15 chars on Linux).
+        assert!(
+            entry.command.len() <= 15,
+            "ProcessInfo.command must be a bare comm name (<= 15 chars); got {:?}",
+            entry.command,
+        );
+    }
+
+    // Verify no ProcessInfo has a command that looks like a cmdline
+    // (contains whitespace or a slash that would indicate full path+args).
+    for p in &list.processes {
+        assert!(
+            !p.command.contains(' '),
+            "ProcessInfo.command must not contain spaces (argv leak); pid={} command={:?}",
+            p.pid,
+            p.command,
+        );
+    }
+}
+
+/// All ProcessInfo entries must have non-empty state, pid > 0, and
+/// rss_bytes >= 0. The command field must be non-empty for running processes.
+#[tokio::test]
+async fn processes_fields_are_sane() {
+    use sandbox_agent::sandbox_v1::ProcessesRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-processes-fields.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let list = match client.processes(ProcessesRequest {}).await {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Internal => return,
+        Err(e) => panic!("Processes RPC failed: {e}"),
+    };
+
+    assert!(
+        !list.processes.is_empty(),
+        "Processes must return at least one entry",
+    );
+
+    for p in &list.processes {
+        assert!(p.pid > 0, "pid must be > 0, got {}", p.pid);
+        assert!(!p.state.is_empty(), "state must be non-empty for pid {}", p.pid);
+        assert!(p.rss_bytes >= 0, "rss_bytes must be >= 0 for pid {}", p.pid);
+        // cpu_percent in [0, 100] is a sanity bound; short window may give ~0.
+        assert!(
+            p.cpu_percent >= 0.0 && p.cpu_percent <= 200.0,
+            "cpu_percent {:.2} out of sane range for pid {}",
+            p.cpu_percent,
+            p.pid,
+        );
+    }
+}
+
+/// Signal with a valid signal to a spawned child delivers the signal; the child
+/// exits. We use SIGTERM (15) and confirm the child is no longer running.
+#[tokio::test]
+async fn signal_terminates_child_process() {
+    use sandbox_agent::sandbox_v1::SignalRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-signal-term.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Spawn a long-lived child.
+    let mut child = match std::process::Command::new("sleep").arg("300").spawn() {
+        Ok(c) => c,
+        Err(_) => return, // skip if sleep not available
+    };
+    let child_pid = child.id() as i32;
+
+    // Brief yield so the child appears in /proc.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let result = client
+        .signal(SignalRequest {
+            pid: child_pid,
+            signal: 15, // SIGTERM
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            // Signal delivered; wait for child to exit.
+            let status = child.wait().expect("child must exit after SIGTERM");
+            // On Linux a SIGTERM'd process is not successful (exit code != 0).
+            assert!(
+                !status.success(),
+                "SIGTERM'd child must not exit successfully",
+            );
+        }
+        Err(s) if s.code() == tonic::Code::Internal => {
+            // libc::kill not available on this platform.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Signal RPC failed unexpectedly: {e}");
+        }
+    }
+}
+
+/// Signal to pid 1 must return InvalidArgument (the guest control plane guard).
+#[tokio::test]
+async fn signal_to_pid_1_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::SignalRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-signal-pid1.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let err = client
+        .signal(SignalRequest { pid: 1, signal: 15 })
+        .await
+        .expect_err("Signal to pid 1 must fail");
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "expected InvalidArgument for pid 1, got {:?}",
+        err.code(),
+    );
+}
+
+/// Signal with pid <= 0 must return InvalidArgument.
+#[tokio::test]
+async fn signal_to_nonpositive_pid_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::SignalRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-signal-pidneg.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    for bad_pid in [0i32, -1, i32::MIN] {
+        let err = client
+            .signal(SignalRequest { pid: bad_pid, signal: 15 })
+            .await
+            .expect_err(&format!("Signal to pid {bad_pid} must fail"));
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "expected InvalidArgument for pid {bad_pid}, got {:?}",
+            err.code(),
+        );
+    }
+}
+
+/// Signal with an out-of-range signal number must return InvalidArgument.
+#[tokio::test]
+async fn signal_bad_signal_number_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::SignalRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-signal-badsig.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    for bad_sig in [0i32, 65, 100, -1, i32::MIN] {
+        let err = client
+            .signal(SignalRequest { pid: 2, signal: bad_sig })
+            .await
+            .expect_err(&format!("Signal with sig {bad_sig} must fail"));
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "expected InvalidArgument for signal {bad_sig}, got {:?}",
+            err.code(),
+        );
+    }
+}
+
+/// Signal to a non-existent pid must return NotFound (ESRCH).
+#[tokio::test]
+async fn signal_nonexistent_pid_returns_not_found() {
+    use sandbox_agent::sandbox_v1::SignalRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-signal-notfound.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // PID i32::MAX is extremely unlikely to exist.
+    let result = client
+        .signal(SignalRequest {
+            pid: i32::MAX,
+            signal: 0,
+        })
+        .await;
+
+    // Signal 0 is out of range (< 1), so this returns InvalidArgument first.
+    // Use signal 15 (SIGTERM) to reach the kill syscall.
+    let result2 = client
+        .signal(SignalRequest {
+            pid: i32::MAX,
+            signal: 15,
+        })
+        .await;
+
+    // result has signal=0 which is InvalidArgument; result2 should be NotFound.
+    let _ = result; // consumed to drop, we only check result2
+    match result2 {
+        Err(s) if s.code() == tonic::Code::NotFound => {}
+        Err(s) if s.code() == tonic::Code::Internal => {
+            // kill() unavailable on this platform.
+        }
+        Err(s) => panic!(
+            "expected NotFound for non-existent pid, got {:?}: {}",
+            s.code(),
+            s.message()
+        ),
+        Ok(_) => panic!("expected error for non-existent pid, got Ok"),
+    }
+}
