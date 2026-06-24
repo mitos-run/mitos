@@ -3,13 +3,16 @@ package firecracker
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // execFunc runs a single shell command in the booted template VM and returns
@@ -61,13 +64,11 @@ const initReadyTimeout = initConnectAttempts * initConnectDelay
 
 // connectInitExecGRPC is the production connectInit implementation. It waits for
 // the guest agent's gRPC Control service to answer Ping (via tm.waitReady, port 53),
-// then opens a separate vsock connection (port 52) for the exec seam that runs init
-// commands. Separating readiness (gRPC Ping, port 53) from exec (JSON, port 52)
-// lets the Rust guest agent (which serves gRPC) act as the readiness signal while
-// init commands still use the JSON exec path during the transition.
+// then runs init commands over the SAME gRPC client via Sandbox.ExecStream (port 53).
 //
 // A successful Ping is the boot-readiness signal: the agent only answers once it is
 // up as PID 1, so the caller knows the VM is booted and is safe to snapshot.
+// The gRPC client is kept open for exec and closed by the returned cleanup func.
 func (tm *TemplateManager) connectInitExecGRPC(vsockPath string) (execFunc, func(), error) {
 	waitReady := tm.waitReady
 	if waitReady == nil {
@@ -78,39 +79,68 @@ func (tm *TemplateManager) connectInitExecGRPC(vsockPath string) (execFunc, func
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to guest agent for init (%s): %w", vsockPath, err)
 	}
-	// gRPC readiness confirmed. Close the gRPC client (ping only) and open a
-	// vsock JSON connection for init-command exec (port 52, legacy protocol).
-	// The JSON exec path is kept during the SP1.5 transition: init commands
-	// rely on vsock.Client.Exec which speaks the JSON protocol.
-	grpcClient.Close() //nolint:errcheck // best-effort; readiness check done
-	dial := tm.dialExec
-	if dial == nil {
-		dial = dialVsockExec
-	}
-	jsonClient, jerr := dial(vsockPath)
-	if jerr != nil {
-		return nil, nil, fmt.Errorf("connect to guest agent for exec (%s): %w", vsockPath, jerr)
-	}
+	// gRPC readiness confirmed. Reuse the same client for Sandbox.ExecStream so
+	// init commands run over gRPC port 53 (the Rust agent's only exec transport).
 	exec := func(command string) (*vsock.ExecResponse, error) {
-		return jsonClient.Exec(command, "/workspace", nil, initExecTimeoutSecs)
+		return execOverGRPC(ctx, grpcClient, command)
 	}
-	return exec, func() { _ = jsonClient.Close() }, nil
+	return exec, func() { _ = grpcClient.Close() }, nil
 }
 
-// dialVsockExec opens a vsock JSON connection (AgentPort 52) for init-command
-// exec, retrying while the agent finishes starting. This is the production
-// implementation of the dialExec seam in connectInitExecGRPC.
-func dialVsockExec(vsockPath string) (*vsock.Client, error) {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < initConnectAttempts; attempt++ {
-		client, err = vsock.Connect(vsockPath, vsock.AgentPort)
-		if err == nil {
-			return client, nil
-		}
-		time.Sleep(initConnectDelay)
+// execOverGRPC runs a single shell command in the guest VM via
+// Sandbox.ExecStream and returns its combined output and exit code as a
+// vsock.ExecResponse, matching the semantics of the old JSON vsock.Client.Exec:
+//
+//   - command is run through the shell (args is empty, so the guest uses sh -c).
+//   - cwd is /workspace, matching the legacy JSON exec path.
+//   - timeout is initExecTimeoutSecs seconds.
+//   - stdout and stderr bytes are collected into the response fields.
+//   - a non-zero exit code is returned in ExecResponse.ExitCode (not as an error).
+//   - a stream-level error (connection drop, server crash) is returned as error.
+//
+// Secret hygiene: no argv, env, or output bytes are logged.
+func execOverGRPC(ctx context.Context, client *guestgrpc.Client, command string) (*vsock.ExecResponse, error) {
+	execCtx, cancel := context.WithTimeout(ctx, initExecTimeoutSecs*time.Second)
+	defer cancel()
+
+	stream, err := client.Sandbox.ExecStream(execCtx, &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/workspace",
+		TimeoutSeconds: initExecTimeoutSecs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ExecStream open: %w", err)
 	}
-	return nil, err
+
+	var stdoutBuf strings.Builder
+	var stderrBuf strings.Builder
+	var exitCode int32
+
+	for {
+		msg, rerr := stream.Recv()
+		if rerr != nil {
+			// io.EOF is the normal stream-end signal after the Exit frame.
+			// Any other error is a transport or server failure.
+			if rerr == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("ExecStream recv: %w", rerr)
+		}
+		switch v := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdoutBuf.Write(v.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderrBuf.Write(v.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = v.Exit.GetExitCode()
+		}
+	}
+
+	return &vsock.ExecResponse{
+		ExitCode: int(exitCode),
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+	}, nil
 }
 
 // VsockRelPath is the vsock uds_path configured before snapshot and thus
@@ -151,12 +181,6 @@ type TemplateManager struct {
 	// in-process gRPC server (guestgrpc.WaitReadyUnix) instead of a real vsock.
 	// Nil (and the default) uses the production guestgrpc.WaitReady (vsock port 53).
 	waitReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
-
-	// dialExec opens a vsock JSON connection (port 52) for init-command exec after
-	// gRPC readiness is confirmed. It is an injectable seam so connectInitExecGRPC
-	// can be tested without a real vsock server for the exec half. Nil uses
-	// vsock.Connect(vsockPath, vsock.AgentPort) with the production retry loop.
-	dialExec func(vsockPath string) (*vsock.Client, error)
 
 	// fallbackWait is the fixed wait used when the guest agent never answers and
 	// there are no init commands (boot readiness could not be confirmed). sleep

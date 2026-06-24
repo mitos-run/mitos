@@ -1,27 +1,25 @@
 package firecracker
 
-// Tests for the gRPC Control readiness probe migration in connectInitExecGRPC.
+// Tests for the gRPC Control readiness probe and gRPC Sandbox.ExecStream
+// init-command path in connectInitExecGRPC.
 //
-// Strategy: stand up an in-process gRPC Control server on a temp unix socket
-// and verify that the waitReady seam drives Control.Ping before returning the
-// exec func. The dialExec seam is also injected so the vsock exec connection
-// is short-circuited; without it the retry loop would take 30 s in tests with
-// no real vsock server. Tests cover:
-//   1. Readiness: waitReady is called and Ping hits the in-process server.
-//   2. ExecFunc returned: after readiness succeeds and dialExec returns a fake
-//      client, the exec func is non-nil.
-//   3. Timeout: connectInitExecGRPC bounds when the gRPC server is unreachable.
-//
-// The existing awaitReadyAndRunInit tests in template_init_test.go cover the
-// full connectInit -> exec -> init-command pipeline via the injectable seam;
-// these tests focus only on the gRPC readiness gate.
+// Strategy: stand up an in-process gRPC server on a temp unix socket that
+// implements BOTH sandbox.internal.v1.Control (Ping) AND sandbox.v1.Sandbox
+// (ExecStream). Tests verify:
+//   1. Readiness: waitReady calls Control.Ping on the in-process server.
+//   2. ExecStream: init commands are run via Sandbox.ExecStream (not JSON vsock).
+//   3. Zero-exit success: a command that exits 0 causes exec to return no error.
+//   4. Non-zero exit failure: a command that exits non-zero causes exec to fail.
+//   5. Stream error failure: a stream error on ExecStream causes exec to fail.
+//   6. Timeout: connectInitExecGRPC bounds when the gRPC server is unreachable.
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,8 +27,8 @@ import (
 	"google.golang.org/grpc"
 
 	"mitos.run/mitos/internal/guestgrpc"
-	"mitos.run/mitos/internal/vsock"
 	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // recordingControlServerFC is the in-process Control gRPC server for the
@@ -50,9 +48,51 @@ func (s *recordingControlServerFC) Ping(_ context.Context, _ *internalv1.PingReq
 	return &internalv1.PingResponse{UptimeSeconds: 1.0}, nil
 }
 
-// startControlGRPC starts an in-process Control gRPC server on a temp unix
-// socket and returns the socket path and a cleanup function.
-func startControlGRPC(t *testing.T, srv *recordingControlServerFC) (sockPath string, cleanup func()) {
+// recordingSandboxServerFC is the in-process Sandbox gRPC server for the
+// firecracker-package tests. It implements ExecStream and records the requests
+// it receives so tests can assert the correct command and cwd were sent.
+type recordingSandboxServerFC struct {
+	sandboxv1.UnimplementedSandboxServer
+
+	mu       sync.Mutex
+	requests []*sandboxv1.ExecStreamRequest
+
+	// exitCode is the exit code the server sends in the terminal Exit frame.
+	exitCode int32
+	// streamErr, if non-nil, is returned from ExecStream instead of streaming.
+	streamErr error
+	// stderr is sent as a stderr frame before the Exit frame.
+	stderr []byte
+}
+
+func (s *recordingSandboxServerFC) ExecStream(req *sandboxv1.ExecStreamRequest, stream sandboxv1.Sandbox_ExecStreamServer) error {
+	s.mu.Lock()
+	s.requests = append(s.requests, req)
+	exitCode := s.exitCode
+	streamErr := s.streamErr
+	stderr := s.stderr
+	s.mu.Unlock()
+
+	if streamErr != nil {
+		return streamErr
+	}
+	if len(stderr) > 0 {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: stderr}}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: exitCode}}})
+}
+
+// fullGRPCServer bundles both the Control and Sandbox in-process servers.
+type fullGRPCServer struct {
+	ctrl    *recordingControlServerFC
+	sandbox *recordingSandboxServerFC
+}
+
+// startFullGRPC starts an in-process gRPC server with both Control and Sandbox
+// services on a temp unix socket and returns the socket path and a cleanup func.
+func startFullGRPC(t *testing.T, s *fullGRPCServer) (sockPath string, cleanup func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "fc-grpc-")
 	if err != nil {
@@ -65,7 +105,8 @@ func startControlGRPC(t *testing.T, srv *recordingControlServerFC) (sockPath str
 		t.Fatalf("listen unix %s: %v", sockPath, err)
 	}
 	grpcSrv := grpc.NewServer()
-	internalv1.RegisterControlServer(grpcSrv, srv)
+	internalv1.RegisterControlServer(grpcSrv, s.ctrl)
+	sandboxv1.RegisterSandboxServer(grpcSrv, s.sandbox)
 	go grpcSrv.Serve(lis) //nolint:errcheck // test server; errors surface via RPC failures
 	cleanup = func() {
 		grpcSrv.Stop()
@@ -75,29 +116,31 @@ func startControlGRPC(t *testing.T, srv *recordingControlServerFC) (sockPath str
 	return sockPath, cleanup
 }
 
-// fakeVsockClient is a minimal *vsock.Client stand-in returned by the fake
-// dialExec seam. vsock.Connect uses the unexported type; we use a real (but
-// disconnected) unix socket so the test does not require Firecracker.
-func fakeDialExec(vsockPath string) (*vsock.Client, error) {
-	// Return an error immediately so the exec path fails fast without
-	// spinning the 30-attempt retry loop. The test only needs the exec func
-	// to be non-nil when dialExec SUCCEEDS; here we verify the readiness gate.
-	// A separate test covers the success path via a fake exec seam.
-	return nil, fmt.Errorf("fake dial exec: no vsock server in test")
+// newGRPCTestTM builds a TemplateManager with the waitReady seam pointing at a
+// unix socket (no real vsock). Used by the gRPC ExecStream tests.
+func newGRPCTestTM(sockPath string) *TemplateManager {
+	return &TemplateManager{
+		waitReady: func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error) {
+			return guestgrpc.WaitReadyUnix(ctx, sockPath, timeout)
+		},
+		fallbackWait: 5 * time.Second,
+		sleep:        func(time.Duration) {},
+	}
 }
 
 // TestConnectInitExec_GRPCPingReadiness verifies that connectInitExecGRPC calls
-// the waitReady seam (which drives Control.Ping) before proceeding to the exec
-// connection. The dialExec seam fails fast so the test does not spin 30 retries.
+// the waitReady seam (which drives Control.Ping) before returning the exec func.
 func TestConnectInitExec_GRPCPingReadiness(t *testing.T) {
-	rcs := &recordingControlServerFC{}
-	sockPath, cleanup := startControlGRPC(t, rcs)
+	srv := &fullGRPCServer{
+		ctrl:    &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{exitCode: 0},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
 	defer cleanup()
 
 	waitReadyCalled := false
 	tm := &TemplateManager{
 		waitReady: func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error) {
-			// Dial the in-process server to exercise the real Ping round-trip.
 			client, err := guestgrpc.WaitReadyUnix(ctx, sockPath, timeout)
 			if err != nil {
 				return nil, err
@@ -105,68 +148,160 @@ func TestConnectInitExec_GRPCPingReadiness(t *testing.T) {
 			waitReadyCalled = true
 			return client, nil
 		},
-		// Fail fast on the vsock exec connection so the test does not take 30 s.
-		dialExec:     fakeDialExec,
 		fallbackWait: 5 * time.Second,
 		sleep:        func(time.Duration) {},
 	}
 
-	// connectInitExecGRPC: waitReady succeeds; dialExec fails fast (expected).
-	// We care only that waitReady was called and Ping hit the server.
-	_, _, _ = tm.connectInitExecGRPC("vsock.sock") //nolint:errcheck // expected error from dialExec
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	defer closeFn()
 
 	if !waitReadyCalled {
 		t.Error("expected waitReady to be called for gRPC Control.Ping readiness")
 	}
 
-	rcs.mu.Lock()
-	pings := rcs.pingCalls
-	rcs.mu.Unlock()
-
+	srv.ctrl.mu.Lock()
+	pings := srv.ctrl.pingCalls
+	srv.ctrl.mu.Unlock()
 	if pings < 1 {
 		t.Errorf("expected at least 1 Ping on Control server, got %d", pings)
-	}
-}
-
-// TestConnectInitExec_GRPCPingAndExecFunc verifies the happy path: when both
-// waitReady and dialExec succeed, connectInitExecGRPC returns a non-nil exec func
-// and a non-nil cleanup. It uses a fake exec seam (the full integration path via
-// connectInit is covered by awaitReadyAndRunInit tests in template_init_test.go).
-func TestConnectInitExec_GRPCPingAndExecFunc(t *testing.T) {
-	rcs := &recordingControlServerFC{}
-	sockPath, cleanup := startControlGRPC(t, rcs)
-	defer cleanup()
-
-	// Simulate a fake vsock client that does nothing (no real agent needed).
-	// vsock.NewTestClient is not exported; instead inject via the fakeExec
-	// pattern already used in this package's other tests.
-	fakeClosed := false
-	var fakeClient *vsock.Client // nil; exec func is never called in this test
-	tm := &TemplateManager{
-		waitReady: func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error) {
-			return guestgrpc.WaitReadyUnix(ctx, sockPath, timeout)
-		},
-		dialExec: func(vsockPath string) (*vsock.Client, error) {
-			// Return nil client (vsock.Client methods would panic if called,
-			// but we only test that the exec func is non-nil here).
-			return fakeClient, nil
-		},
-		fallbackWait: 5 * time.Second,
-		sleep:        func(time.Duration) {},
-	}
-	_ = fakeClosed // unused but kept for documentation
-
-	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
-	if err != nil {
-		// If dialExec returned nil client and that caused a panic we would not
-		// reach here; but the exec func is captured in a closure so it is safe.
-		t.Fatalf("connectInitExecGRPC: %v", err)
 	}
 	if exec == nil {
 		t.Error("expected non-nil exec func on success")
 	}
-	if closeFn == nil {
-		t.Error("expected non-nil cleanup func on success")
+}
+
+// TestConnectInitExec_ExecStreamCalledWithCommandAndCwd verifies that when the
+// returned exec func is called, it sends an ExecStream request with the correct
+// command and cwd (/workspace) to the Sandbox service on the SAME gRPC client
+// used for readiness (no second vsock connection is opened).
+func TestConnectInitExec_ExecStreamCalledWithCommandAndCwd(t *testing.T) {
+	srv := &fullGRPCServer{
+		ctrl:    &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{exitCode: 0},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
+	defer cleanup()
+
+	tm := newGRPCTestTM(sockPath)
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	defer closeFn()
+
+	res, err := exec("pip install numpy")
+	if err != nil {
+		t.Fatalf("exec returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", res.ExitCode)
+	}
+
+	srv.sandbox.mu.Lock()
+	reqs := srv.sandbox.requests
+	srv.sandbox.mu.Unlock()
+
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 ExecStream request, got %d", len(reqs))
+	}
+	if reqs[0].Command != "pip install numpy" {
+		t.Errorf("expected command %q, got %q", "pip install numpy", reqs[0].Command)
+	}
+	if reqs[0].Cwd != "/workspace" {
+		t.Errorf("expected cwd /workspace, got %q", reqs[0].Cwd)
+	}
+	wantTimeout := int32(initExecTimeoutSecs)
+	if reqs[0].TimeoutSeconds != wantTimeout {
+		t.Errorf("expected timeout_seconds %d, got %d", wantTimeout, reqs[0].TimeoutSeconds)
+	}
+}
+
+// TestConnectInitExec_ZeroExitSucceeds verifies that a command that exits 0
+// causes the exec func to return nil error, matching the old JSON Exec behavior.
+func TestConnectInitExec_ZeroExitSucceeds(t *testing.T) {
+	srv := &fullGRPCServer{
+		ctrl:    &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{exitCode: 0},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
+	defer cleanup()
+
+	tm := newGRPCTestTM(sockPath)
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	defer closeFn()
+
+	res, err := exec("echo hello")
+	if err != nil {
+		t.Fatalf("exec returned error for zero exit: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", res.ExitCode)
+	}
+}
+
+// TestConnectInitExec_NonZeroExitInResponse verifies that a non-zero exit code
+// from ExecStream is surfaced in the ExecResponse.ExitCode field (not as an
+// error), exactly matching vsock.Client.Exec semantics. runInitCommands then
+// treats it as a hard failure.
+func TestConnectInitExec_NonZeroExitInResponse(t *testing.T) {
+	srv := &fullGRPCServer{
+		ctrl: &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{
+			exitCode: 1,
+			stderr:   []byte("No matching distribution found"),
+		},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
+	defer cleanup()
+
+	tm := newGRPCTestTM(sockPath)
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	defer closeFn()
+
+	res, err := exec("pip install nope")
+	if err != nil {
+		t.Fatalf("non-zero exit must be in ExecResponse, not an error: %v", err)
+	}
+	if res.ExitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", res.ExitCode)
+	}
+	if !strings.Contains(res.Stderr, "No matching distribution found") {
+		t.Errorf("expected stderr to contain failure message, got %q", res.Stderr)
+	}
+}
+
+// TestConnectInitExec_StreamError verifies that a gRPC stream error on
+// ExecStream is surfaced as a non-nil error from the exec func, triggering the
+// hard-error branch in runInitCommands.
+func TestConnectInitExec_StreamError(t *testing.T) {
+	srv := &fullGRPCServer{
+		ctrl: &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{
+			streamErr: errors.New("guest agent crashed"),
+		},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
+	defer cleanup()
+
+	tm := newGRPCTestTM(sockPath)
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	defer closeFn()
+
+	_, err = exec("echo hello")
+	if err == nil {
+		t.Fatal("expected error from exec when ExecStream returns an error")
 	}
 }
 
@@ -186,7 +321,6 @@ func TestConnectInitExec_GRPCPingTimeout(t *testing.T) {
 			// Short timeout so the test does not block.
 			return guestgrpc.WaitReadyUnix(ctx, noSock, 150*time.Millisecond)
 		},
-		dialExec:     fakeDialExec,
 		fallbackWait: 5 * time.Second,
 		sleep:        func(time.Duration) {},
 	}
@@ -202,4 +336,29 @@ func TestConnectInitExec_GRPCPingTimeout(t *testing.T) {
 	if elapsed > 5*time.Second {
 		t.Errorf("connectInitExecGRPC did not bound within timeout: took %v", elapsed)
 	}
+}
+
+// TestConnectInitExec_GRPCPingAndExecFunc verifies the happy path: when
+// waitReady succeeds, connectInitExecGRPC returns a non-nil exec func and a
+// non-nil cleanup.
+func TestConnectInitExec_GRPCPingAndExecFunc(t *testing.T) {
+	srv := &fullGRPCServer{
+		ctrl:    &recordingControlServerFC{},
+		sandbox: &recordingSandboxServerFC{exitCode: 0},
+	}
+	sockPath, cleanup := startFullGRPC(t, srv)
+	defer cleanup()
+
+	tm := newGRPCTestTM(sockPath)
+	exec, closeFn, err := tm.connectInitExecGRPC("vsock.sock")
+	if err != nil {
+		t.Fatalf("connectInitExecGRPC: %v", err)
+	}
+	if exec == nil {
+		t.Error("expected non-nil exec func on success")
+	}
+	if closeFn == nil {
+		t.Error("expected non-nil cleanup func on success")
+	}
+	closeFn()
 }
