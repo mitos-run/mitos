@@ -1,4 +1,4 @@
-# Bare-metal CI: the in-cluster self-hosted runner (issue #16)
+# Bare-metal CI: the in-cluster self-hosted runner
 
 This turns the maintainer's manual cluster verification into standing CI. A
 self-hosted GitHub Actions runner runs INSIDE the single-node Talos KVM cluster
@@ -105,7 +105,7 @@ TRUSTED triggers ONLY. There are three independent layers:
      controller's own RBAC.
    - cluster-scoped: `get/list nodes` (the e2e checks for a KVM-capable node)
      plus `patch/update nodes` for CORDON, so the chaos suite can exercise
-     cross-node failover on the multi-node KVM cluster (issue #163: cordon a
+     cross-node failover on the multi-node KVM cluster (cordon a
      node, assert the claim recovers elsewhere, uncordon). This is the
      `mitos-ci-runner-nodes` ClusterRole (renamed from `mitos-ci-runner-nodes-read`).
 
@@ -262,7 +262,7 @@ waits and a cleanup trap, each printing a `PASS:` / `FAIL:` line:
 3. `fork(2)` produces two independent sandboxes (a marker written in one is not
    visible in the other).
 4. `run_code` returns a result, OR a clean `KernelUnavailable` (the husk OCI
-   base may lack the code-interpreter kernel; per issue #16 a clean
+   base may lack the code-interpreter kernel; a clean
    `KernelUnavailable` is ACCEPTED as a pass and does NOT fail the suite). A
    non-`KernelUnavailable` kernel error IS a failure.
 5. a PTY allocates and echoes its input.

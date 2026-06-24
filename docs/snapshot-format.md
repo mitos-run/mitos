@@ -37,7 +37,7 @@ content-addressed digest:
 | `CPUModel` | The host CPU model the snapshot was captured on. |
 | `KernelVersion` | The host kernel at capture (informational). |
 | `ConfigHash` | A sha256 over the microvm machine config (vcpu count, memory size, kernel and rootfs identity) the snapshot was captured under. |
-| `HotPages` | OPTIONAL hot-page working set for snapshot-resume prefetch (issue #167). Part of the digest only when present and non-empty; omitted entirely otherwise. See below. |
+| `HotPages` | OPTIONAL hot-page working set for snapshot-resume prefetch. Part of the digest only when present and non-empty; omitted entirely otherwise. See below. |
 
 The `HotPages` field is additive and does NOT require a format-version bump. It
 is the captured set of guest memory page offsets a userfaultfd handler preloads

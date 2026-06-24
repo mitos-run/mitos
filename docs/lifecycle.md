@@ -2,8 +2,8 @@
 
 This is the reference for how long a sandbox lives, what keeps it alive, how to
 adjust its TTL while it runs, and how to pause and resume it. It reconciles the
-controller-side reaping (ROADMAP section 2, `docs/failure-gc.md`) with the
-sandbox HTTP API surface (issue #218) that the SDKs expose.
+controller-side reaping (`docs/failure-gc.md`) with the
+sandbox HTTP API surface that the SDKs expose.
 
 The three controls:
 
@@ -46,10 +46,10 @@ activity signal forkd reports through `ListSandboxes`.
 The live deadline takes authority over the idle clock: while a live deadline is
 set and in the future, the sandbox is not idle-reaped (the caller has taken
 explicit control of the TTL). A live deadline in the past reaps the sandbox with
-the `TimeoutExpired` reason. This is the seam the E2B compat shim (#206) maps its
+the `TimeoutExpired` reason. This is what the E2B compat shim maps its
 `setTimeout` onto.
 
-Ceiling and rejection (issue #216): a requested timeout over the server ceiling
+Ceiling and rejection: a requested timeout over the server ceiling
 (`--max-exec-timeout-seconds`, default 86400 s = 24 h) is REJECTED with the typed
 `timeout_too_large` error, never silently clamped. The deadline you set is the
 deadline you get, or you get a clear rejection that names the ceiling.
@@ -81,9 +81,8 @@ Default: there is no implicit idle window; idle reaping is off unless
 
 Pause snapshots the sandbox's FULL state (guest memory + filesystem) and pauses
 the VM; resume restores it exactly. A paused sandbox is held, not reaped: its
-idle clock is stopped and the billing meter stops (coordinate with the usage
-pipeline, #208). Repeated pause/resume cycles preserve both memory and
-filesystem state.
+idle clock is stopped and the billing meter stops. Repeated pause/resume cycles
+preserve both memory and filesystem state.
 
 Exposed as:
 

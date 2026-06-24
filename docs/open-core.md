@@ -2,7 +2,7 @@
 
 This page states what is open source, the contribution licensing bar, and the
 trademark reservation. It is deliberately minimal and honest: it describes only
-what exists today. Tracked in issue #34.
+what exists today.
 
 ## What is open source
 

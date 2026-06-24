@@ -22,18 +22,17 @@ Every KVM node MUST provide all of the following:
 A rescue/recovery environment (minimal kernel, ramdisk root) typically FAILS the
 `nf_tables` and the real-filesystem requirements. Install a real OS on the node.
 
-The following is REQUIRED only for the snapshot-resume performance path (issue
-#167); the node still serves sandboxes without it, just on the slower 4 KiB
-file-backed restore:
+The following is REQUIRED only for the snapshot-resume performance path; the node
+still serves sandboxes without it, just on the slower 4 KiB file-backed restore:
 
 | Requirement | Why | One-line check |
 | --- | --- | --- |
 | `CONFIG_USERFAULTFD=y` kernel | Hugepage-backed restore and snapshot-resume prefetch both ride userfaultfd; Firecracker refuses to restore a hugetlbfs snapshot without it | `mitos doctor` (userfaultfd check) |
 | 2 MiB hugepage pool reserved | `huge_pages: 2M` templates need free hugepages to restore into | `grep HugePages_Total /proc/meminfo` |
 
-## userfaultfd: required for hugepages and prefetch (#167)
+## userfaultfd: required for hugepages and prefetch
 
-The snapshot-resume performance work (issue #167) backs guest memory with 2 MiB
+The snapshot-resume performance work backs guest memory with 2 MiB
 hugepages and preloads a captured hot-page working set before resume. Both ride
 the kernel `userfaultfd(2)` facility: Firecracker hands the restore's guest
 memory to an external handler over a unix socket, and that handler fills pages

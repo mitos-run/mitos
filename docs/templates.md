@@ -100,7 +100,7 @@ production answer.
 ## Define a custom environment (code-first)
 
 You do not have to hand-write the `SandboxPool` YAML. The Python SDK ships a
-fluent `Template` builder (issue #220) that authors the spec from code, in the
+fluent `Template` builder that authors the spec from code, in the
 shape E2B and Daytona use:
 
 ```python

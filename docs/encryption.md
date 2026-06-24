@@ -1,7 +1,4 @@
-# Encryption at rest (#31)
-
-Status: mechanism done and CI-proven (PR1); key-custody hardening done (PR2).
-Issue #31 is addressed: mechanism in PR1, custody in PR2.
+# Encryption at rest
 
 This document describes how Mitos encrypts template snapshots and volumes at
 rest, why copy-on-write (CoW) page sharing across forks is preserved, how
@@ -17,7 +14,7 @@ flag off the behavior is exactly as before, plaintext snapshots on disk.
 ## Design: a per-scope LUKS container at the block layer
 
 A scope is the unit that gets its own key and its own encrypted container. In
-PR1 the scope is a template; when Workspace (#21) lands the scope becomes a
+PR1 the scope is a template; when Workspace lands the scope becomes a
 workspace, so erasing a workspace crypto-shreds everything built under it.
 
 Each scope gets its own LUKS2 container (`internal/storecrypt`):
@@ -312,7 +309,7 @@ above.
   work installs.
 - **DEK rotation and re-encryption:** rotate the DEK and re-encrypt the LUKS
   container without rebuilding the template.
-- **Per-workspace scope (Workspace #21):** make the scope a workspace so erasing
+- **Per-workspace scope (Workspace):** make the scope a workspace so erasing
   a workspace crypto-shreds all its templates and volumes.
 - **Encrypting the CAS chunk store:** the content-addressed snapshot store is not
   encrypted today; only per-template containers are.

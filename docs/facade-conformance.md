@@ -1,7 +1,7 @@
 # agents.x-k8s.io facade conformance
 
-This document records how the `agents.x-k8s.io` conformance facade (issue #19,
-`cmd/facade` + `internal/facade`) is held to the upstream SIG agent-sandbox API,
+This document records how the `agents.x-k8s.io` conformance facade
+(`cmd/facade` + `internal/facade`) is held to the upstream SIG agent-sandbox API,
 what is PROVEN today, and what is deferred. See ADR 0001
 (docs/adr/0001-facade-and-naming.md) for the facade design and the toolchain
 decision.
@@ -20,7 +20,7 @@ is a bug.
 - NEEDS-BARE-METAL: the upstream predicate requires a RUNNING sandbox (a booted
   in-VM workload: PodReady / ChromeReady / the "Pod is Ready; Service Exists"
   status). Our run path reaches Ready only when a dormant Firecracker VMM boots
-  inside the husk pod, which needs a KVM-capable kubelet. That is the #18
+  inside the husk pod, which needs a KVM-capable kubelet. That is the
   nested-VMM boundary; it is proven on the KVM runner in kvm-test.yaml, not on a
   shared kind runner.
 - JUSTIFIED-EXCEPTION: a field or behavior the facade maps differently (or does
@@ -87,7 +87,7 @@ trap:
   pause releases the claim, scaling back to replicas 1 RE-ACTIVATES it (the
   facade re-creates the bridged sandbox). This is the object-level half of the
   pause/resume mapping; the in-VM resume tail (snapshot load + resume +
-  guest-ready) is the #18 bare-metal boundary, not asserted here.
+  guest-ready) is the bare-metal boundary, not asserted here.
 
 The job then applies their three extension example manifests UNCHANGED
 (`sandboxtemplate.yaml`, `sandboxwarmpool.yaml`, `sandboxclaim.yaml`) and asserts
@@ -104,7 +104,7 @@ the extension mappings object-level:
   owner-reference cascade).
 
 The job echoes that the in-VM Ready tail (PodReady / ChromeReady) needs a
-KVM-capable kubelet (the #18 boundary) and is not asserted there.
+KVM-capable kubelet (the bare-metal boundary) and is not asserted there.
 
 ## Did we run their Go e2e suite? (honest answer: no, by design)
 
@@ -135,18 +135,18 @@ NEEDS-BARE-METAL accordingly.
 
 | Upstream test | What it asserts upstream | Status | Notes |
 | --- | --- | --- | --- |
-| `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot (#18). Object-level Sandbox admission + the bridged sandbox ARE proven on kind (facade-conformance (a),(b)). |
-| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The pause/resume contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 RELEASES the bridged sandbox (warm-pool release) and (f) asserts a replicas 1->0->1 toggle RE-ACTIVATES it (object-level resume). The upstream Pod/Service deletion + the in-VM resume tail need their controller + a running sandbox (#18). |
+| `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot. Object-level Sandbox admission + the bridged sandbox ARE proven on kind (facade-conformance (a),(b)). |
+| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The pause/resume contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 RELEASES the bridged sandbox (warm-pool release) and (f) asserts a replicas 1->0->1 toggle RE-ACTIVATES it (object-level resume). The upstream Pod/Service deletion + the in-VM resume tail need their controller + a running sandbox. |
 | `test/e2e/shutdown_test.go` :: `TestSandboxShutdownTime`, `TestSandboxRetainedExpiryPreservesFinishedCondition` | shutdown tears down Pod/Service in bounded time; Finished condition retained | NEEDS-BARE-METAL | Requires a running Pod that succeeds and the upstream Finished-condition controller. The deletion/GC object contract is proven object-level (facade-conformance (d)). |
 | `test/e2e/parallelism_test.go` :: `TestParallelSandboxes`, `TestParallelSandboxClaimsWith{Sufficient,Insufficient}WarmPool` | many Sandboxes/Claims reach Ready in parallel via a warm pool | NEEDS-BARE-METAL | Waits `ReadyConditionIsTrue` on running sandboxes drawn from a warm pool; needs the in-VM boot and the warm-pool/claim extension mappings (a later slice). |
 | `test/e2e/volumeclaimtemplate_test.go` :: `TestSandboxVolumeClaimTemplates` | `volumeClaimTemplates` produce PVCs bound to the Pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The facade does not yet map `volumeClaimTemplates` (storage contract, exception 4 below); upstream also needs a running Pod. The manifest still applies unchanged and the claim bridges (proven object-level). |
-| `test/e2e/chromesandbox_test.go` :: `TestRunChromeSandbox`, `BenchmarkChromeSandboxStartup` | Chrome serves CDP inside the sandbox; measures PodReady + ChromeReady | NEEDS-BARE-METAL | The canonical running-sandbox predicate (ChromeReady on the CDP port). Pure in-VM boot; the #18 boundary. |
+| `test/e2e/chromesandbox_test.go` :: `TestRunChromeSandbox`, `BenchmarkChromeSandboxStartup` | Chrome serves CDP inside the sandbox; measures PodReady + ChromeReady | NEEDS-BARE-METAL | The canonical running-sandbox predicate (ChromeReady on the CDP port). Pure in-VM boot; the bare-metal boundary. |
 | `test/e2e/chromesandbox_claim_test.go` :: `BenchmarkChromeSandboxClaimStartup` | Chrome via a `SandboxClaim` drawn from a warm pool | NEEDS-BARE-METAL | Running sandbox + the warm-pool/claim extension mapping (later slice). |
 | `test/e2e/extensions/pythonruntime_test.go` :: `TestRunPythonRuntimeSandbox`, `...Claim`, `...Warmpool` | a python runtime sandbox/claim/warmpool serves requests | NEEDS-BARE-METAL | Running sandbox + the extension mappings (later slice). |
-| `test/e2e/extensions/shutdown_policy_test.go` :: `TestSandboxClaim{DeleteForeground,TTL...,ExpiryUsesEarlier...,FinishedWithoutTTLIsRetained,TTLZeroRetain...}` | SandboxClaim TTL / shutdown-policy / finished-condition retention | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The `SandboxClaim` extension is now MAPPED object-level (their claim -> our fork-from-snapshot claim; ttl/shutdownTime mapped, shutdownPolicy a documented exception 5). The TTL/finished-condition timing predicates need a running claim that finishes (the #18 boundary). |
+| `test/e2e/extensions/shutdown_policy_test.go` :: `TestSandboxClaim{DeleteForeground,TTL...,ExpiryUsesEarlier...,FinishedWithoutTTLIsRetained,TTLZeroRetain...}` | SandboxClaim TTL / shutdown-policy / finished-condition retention | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The `SandboxClaim` extension is now MAPPED object-level (their claim -> our fork-from-snapshot claim; ttl/shutdownTime mapped, shutdownPolicy a documented exception 5). The TTL/finished-condition timing predicates need a running claim that finishes (the bare-metal boundary). |
 | `test/e2e/extensions/warmpool_rollout_test.go` :: `TestWarmPoolRollout`, `...MultiTemplateIsolation`, `...SwitchTemplate`, `...MetadataUpdate` | SandboxWarmPool rollout/template-switch semantics | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The `SandboxWarmPool` extension is now MAPPED object-level (their warm pool -> our pool at replicas). The per-pod rollout/`updateStrategy` semantics are unmapped (exception 3) and the rollout predicates need running pool pods. |
-| `test/e2e/extensions/warmpool_sandbox_watcher_test.go` :: `TestWarmPoolSandboxWatcher`, `TestWarmPoolPodNameAnnotationBeforeReady` | warm-pool watcher annotates the bound pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | `SandboxWarmPool` mapped object-level; the bound-pod annotation predicate needs a running pod (the #18 boundary). |
-| `test/e2e/extensions/sandboxclaim_metric_test.go` :: `TestSandboxClaimObservabilityAnnotation` | a SandboxClaim observability annotation is set | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | `SandboxClaim` mapped object-level; the observability annotation is set by the upstream controller on a running claim (the #18 boundary). |
+| `test/e2e/extensions/warmpool_sandbox_watcher_test.go` :: `TestWarmPoolSandboxWatcher`, `TestWarmPoolPodNameAnnotationBeforeReady` | warm-pool watcher annotates the bound pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | `SandboxWarmPool` mapped object-level; the bound-pod annotation predicate needs a running pod (the bare-metal boundary). |
+| `test/e2e/extensions/sandboxclaim_metric_test.go` :: `TestSandboxClaimObservabilityAnnotation` | a SandboxClaim observability annotation is set | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | `SandboxClaim` mapped object-level; the observability annotation is set by the upstream controller on a running claim (the bare-metal boundary). |
 | `test/e2e/framework/watchset_test.go` :: `TestWatchSet...` | the framework's own watch-set unit test | JUSTIFIED-EXCEPTION (not a facade conformance test) | Tests the upstream test framework internals, not the Sandbox API surface; nothing for the facade to satisfy. Vendored for completeness of the reference. |
 
 ### Vendored example manifests (apply-unchanged)
@@ -213,14 +213,14 @@ maps.
    cold-creates a fresh one on 1). The facade maps it onto the husk warm pool:
    replicas 0 (pause) RELEASES the bridged sandbox so the bound husk pod returns
    dormant to the warm pool; replicas 1 after a 0 (resume) RE-ACTIVATES a dormant
-   warm husk pod via the same fast path as create (the ~42ms husk activation,
-   #66). The conformant observable is preserved: `Status.Replicas` reflects 0/1,
+   warm husk pod via the same fast path as create (the ~42ms husk
+   activation). The conformant observable is preserved: `Status.Replicas` reflects 0/1,
    the Ready condition reflects Paused/Ready honestly, and pause clears
    `serviceFQDN` + `podIPs` while resume re-populates them. This OBJECT-LEVEL
    behavior is proven on kind (envtest `internal/facade` + the `facade-conformance`
    job's replicas 1->0->1 resume assertion). The resume-latency advantage (warm
    re-activation vs a cold pod create) is the DESIGN claim; the in-VM
-   head-to-head number is a bare-metal-reference-node TARGET (#16), measured by
+   head-to-head number is a bare-metal-reference-node TARGET, measured by
    `bench/facade/` (see [`../bench/facade/README.md`](../bench/facade/README.md)
    and the "Facade vs upstream reference: resume latency" section of
    `BENCHMARKS.md`). Note our resume is STATE-FRESH (a warm dormant pod, not the
@@ -331,12 +331,12 @@ maps.
   UNCHANGED and the object-level facts (g)-(j) hold (their template/warmpool/claim
   map to our template/pool/claim; deletion GCs ours).
 - `bench/facade/`: the reproducible pause/resume latency harness + methodology
-  (object-level resume on kind; the in-VM head-to-head a bare-metal target, #16).
+  (object-level resume on kind; the in-VM head-to-head a bare-metal target).
 
-## What is OPEN (later #19 slices)
+## What is OPEN
 
 - The in-VM conformance (PodReady / ChromeReady, the "Pod is Ready; Service
-  Exists" status) on a KVM-capable kubelet / bare-metal reference node (the #18
+  Exists" status) on a KVM-capable kubelet / bare-metal reference node (the
   nested-VMM boundary).
 - Running the full upstream Go e2e suite green end to end (needs their controller
   + the running-sandbox tail).
@@ -346,7 +346,7 @@ maps.
   Checkpoint primitive) so resume restores the exact pre-pause in-VM state, not a
   fresh warm pod. The object-level pause/resume mapping (warm-pool release + fast
   re-activation) and the `bench/facade/` methodology are DONE; the in-VM
-  head-to-head resume number stays a bare-metal target (#16).
+  head-to-head resume number stays a bare-metal target.
 - Full podTemplate fidelity (image/resources/ports/volumeMounts honored
   per-Sandbox), the upstream `volumeClaimTemplates` storage contract mapped onto
   our template volumes, and the running-sandbox identity (a booted in-VM
