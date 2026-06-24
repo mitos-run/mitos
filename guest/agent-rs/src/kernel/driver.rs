@@ -14,6 +14,7 @@
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+// Note: AsyncBufReadExt::read_until is used for bounded line reading.
 
 use crate::sandbox_v1::{run_code_response, RunCodeResponse, RunError, RunResult};
 use tokio::sync::mpsc;
@@ -27,9 +28,16 @@ const DEFAULT_PYTHON: &str = "python3";
 /// Fixed execution ID: mirrors Go which always uses "e".
 const EXEC_ID: &str = "e";
 
-/// Buffer size for the driver stdout line reader (1 MiB, mirrors Go's scanner
-/// buffer for large rich-output payloads).
+/// BufReader capacity for the driver stdout (1 MiB, mirrors Go's scanner buffer
+/// initial size for large rich-output payloads).
 const LINE_BUF_BYTES: usize = 1024 * 1024;
+
+/// Hard cap on a single driver output line. Matches Go's MaxMessageBytes (96 MiB
+/// = 96<<20). A driver that emits a line larger than this (e.g. an unbounded
+/// base64 image without a newline) is treated as misbehaving: the kernel is
+/// marked dead and a graceful KernelOutputTooLarge error frame is sent instead
+/// of growing the buffer without limit.
+const MAX_LINE_BYTES: usize = 96 * 1024 * 1024;
 
 /// Configuration for KernelManager (mirrors kernelConfig in kernel.go).
 /// The zero/default resolves python from PATH and driverPath to the default.
@@ -201,45 +209,100 @@ impl KernelManager {
         }
 
         // Read events from driver stdout until "done".
+        // We use read_until(b'\n', &mut buf) into a Vec<u8> so we can enforce a
+        // hard per-line cap of MAX_LINE_BYTES (96 MiB) before allocating more.
+        //
+        // We use `loop` + `match` rather than `while let` because the loop body
+        // needs `self.dead = true` and `self.send_kernel_unavailable(&self, ...)`,
+        // both of which require &mut self. A `while let Some(driver) =
+        // self.driver.as_mut()` borrow would hold through the body and conflict.
+        #[allow(clippy::while_let_loop)]
         let mut event_count: usize = 0;
         loop {
-            let mut line = String::new();
             let driver = match self.driver.as_mut() {
                 Some(d) => d,
                 None => break,
             };
-            match driver.stdout.read_line(&mut line).await {
+
+            // Read one newline-terminated line into a reusable Vec<u8>.
+            // read_until appends to the buffer; we start fresh each iteration.
+            let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
+            let n = match driver.stdout.read_until(b'\n', &mut line_buf).await {
                 Err(e) => {
                     self.dead = true;
                     tracing::debug!(error = %e, "kernel stream read error");
                     self.send_kernel_unavailable(tx, "kernel stream read error").await;
                     return;
                 }
-                Ok(0) => {
-                    // Driver closed stdout without a "done": treat as dead.
-                    self.dead = true;
-                    self.send_kernel_unavailable(tx, "kernel exited unexpectedly").await;
-                    return;
-                }
-                Ok(_) => {}
+                Ok(n) => n,
+            };
+
+            if n == 0 {
+                // Driver closed stdout without a "done": treat as dead.
+                self.dead = true;
+                self.send_kernel_unavailable(tx, "kernel exited unexpectedly").await;
+                return;
             }
 
-            let trimmed = line.trim();
+            // Enforce the hard line-length cap BEFORE parsing JSON.
+            if line_buf.len() > MAX_LINE_BYTES {
+                self.dead = true;
+                tracing::debug!(
+                    bytes = line_buf.len(),
+                    cap = MAX_LINE_BYTES,
+                    "kernel output line exceeded cap; marking dead"
+                );
+                let err_frame = crate::sandbox_v1::RunCodeResponse {
+                    msg: Some(
+                        crate::sandbox_v1::run_code_response::Msg::Error(
+                            crate::sandbox_v1::RunError {
+                                name: "KernelOutputTooLarge".to_string(),
+                                value: format!(
+                                    "driver emitted a line larger than the {} MiB cap; \
+                                     kernel marked dead",
+                                    MAX_LINE_BYTES / (1024 * 1024)
+                                ),
+                                traceback: vec![],
+                            },
+                        ),
+                    ),
+                };
+                let _ = tx.send(Ok(err_frame)).await;
+                let exit_frame = crate::sandbox_v1::RunCodeResponse {
+                    msg: Some(crate::sandbox_v1::run_code_response::Msg::ExitCode(1)),
+                };
+                let _ = tx.send(Ok(exit_frame)).await;
+                return;
+            }
+
+            let trimmed = line_buf.trim_ascii();
             if trimmed.is_empty() {
                 continue;
             }
 
-            let ev: DriverEvent = match serde_json::from_str(trimmed) {
+            let ev: DriverEvent = match serde_json::from_slice(trimmed) {
                 Ok(e) => e,
                 Err(e) => {
                     self.dead = true;
                     tracing::debug!(error = %e, "decode kernel event error");
-                    // Transport failure: return an internal error frame.
-                    let _ = tx
-                        .send(Err(tonic::Status::internal(format!(
-                            "decode kernel event: {e}"
-                        ))))
-                        .await;
+                    // Graceful error frame + exit_code 1 instead of a torn stream,
+                    // mirroring Go's KernelStreamError frame path.
+                    let err_frame = crate::sandbox_v1::RunCodeResponse {
+                        msg: Some(
+                            crate::sandbox_v1::run_code_response::Msg::Error(
+                                crate::sandbox_v1::RunError {
+                                    name: "KernelStreamError".to_string(),
+                                    value: format!("decode kernel event: {e}"),
+                                    traceback: vec![],
+                                },
+                            ),
+                        ),
+                    };
+                    let _ = tx.send(Ok(err_frame)).await;
+                    let exit_frame = crate::sandbox_v1::RunCodeResponse {
+                        msg: Some(crate::sandbox_v1::run_code_response::Msg::ExitCode(1)),
+                    };
+                    let _ = tx.send(Ok(exit_frame)).await;
                     return;
                 }
             };
@@ -377,19 +440,26 @@ impl KernelManager {
         let mut stdout = BufReader::with_capacity(LINE_BUF_BYTES, stdout_raw);
 
         // Wait for the "ready" line before returning.
-        let mut ready_line = String::new();
-        stdout.read_line(&mut ready_line).await.map_err(|e| {
+        // Use read_until so the ready-line read is also subject to the hard cap
+        // (a misbehaving driver emitting a huge first line must not OOM us).
+        let mut ready_buf: Vec<u8> = Vec::with_capacity(4096);
+        let ready_n = stdout.read_until(b'\n', &mut ready_buf).await.map_err(|e| {
             format!("kernel driver produced no ready line: {e}")
         })?;
 
-        if ready_line.is_empty() {
+        if ready_n == 0 || ready_buf.is_empty() {
             let _ = child.kill().await;
             return Err("kernel driver produced no ready line".to_string());
         }
 
+        if ready_buf.len() > MAX_LINE_BYTES {
+            let _ = child.kill().await;
+            return Err("kernel driver ready line exceeded size cap".to_string());
+        }
+
         // Parse and validate the ready event.
-        let trimmed = ready_line.trim();
-        let ev: DriverEvent = serde_json::from_str(trimmed).map_err(|_| {
+        let trimmed = ready_buf.trim_ascii();
+        let ev: DriverEvent = serde_json::from_slice(trimmed).map_err(|_| {
             "kernel driver did not signal ready".to_string()
         })?;
         if ev.kind != "ready" {

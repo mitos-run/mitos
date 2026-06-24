@@ -2002,3 +2002,329 @@ async fn vitals_interval_streams_multiple_samples_then_cancels() {
     // No assertion needed: if the task leaked it will be caught by the process
     // exiting cleanly (no hung tokio tasks blocking shutdown).
 }
+
+// ---------------------------------------------------------------------------
+// RunCode gRPC-stack conformance tests (Task 2.8)
+//
+// These tests drive the full gRPC path: tonic client -> SandboxService ->
+// KernelManager -> kernel_driver.py. They require a live Python 3 interpreter
+// and ipykernel at the default driver path (/opt/mitos/kernel_driver.py).
+// Each test owns a fresh SandboxService (and thus a fresh KernelManager) so
+// they are parallel-safe with no shared kernel state.
+// ---------------------------------------------------------------------------
+
+/// Helper: collect all RunCodeResponse frames from a streaming gRPC response.
+/// Returns (stdout_text, stderr_text, error_name, exit_code).
+async fn collect_run_code_stream(
+    stream: tonic::codec::Streaming<sandbox_agent::sandbox_v1::RunCodeResponse>,
+) -> (String, String, Option<String>, Option<i32>) {
+    use sandbox_agent::sandbox_v1::run_code_response::Msg;
+    use tokio_stream::StreamExt;
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut error_name: Option<String> = None;
+    let mut exit_code: Option<i32> = None;
+
+    tokio::pin!(stream);
+    while let Some(item) = stream.next().await {
+        let resp = item.expect("RunCode stream frame must not be a transport error");
+        match resp.msg {
+            Some(Msg::Stdout(b)) => stdout.push_str(&String::from_utf8_lossy(&b)),
+            Some(Msg::Stderr(b)) => stderr.push_str(&String::from_utf8_lossy(&b)),
+            Some(Msg::Error(e)) => {
+                // Record the first error name (KernelUnavailable, NameError, etc.).
+                if error_name.is_none() {
+                    error_name = Some(e.name.clone());
+                }
+            }
+            Some(Msg::ExitCode(c)) => {
+                exit_code = Some(c);
+                break;
+            }
+            Some(Msg::Result(_)) | None => {}
+        }
+    }
+
+    (stdout, stderr, error_name, exit_code)
+}
+
+/// Helper: build a fresh SandboxService with its own KernelManager and start
+/// a server + client on the given socket path. Parallel-safe: each call
+/// creates an independent kernel process.
+async fn start_runcode_client(
+    sock: &str,
+) -> sandbox_agent::sandbox_v1::sandbox_client::SandboxClient<tonic::transport::Channel> {
+    start_server_and_client(sock).await
+}
+
+// (a) print(2+2) -> stdout frame containing "4" + exit_code 0.
+#[tokio::test]
+async fn runcode_grpc_print_stdout_and_exit_zero() {
+    use sandbox_agent::sandbox_v1::{self, run_code_request};
+
+    const SOCK: &str = "/tmp/agent-conformance-runcode-print.sock";
+    let mut client = start_runcode_client(SOCK).await;
+
+    let open_msg = sandbox_v1::RunCodeRequest {
+        msg: Some(run_code_request::Msg::Open(sandbox_v1::RunCodeOpen {
+            code: "print(2+2)".into(),
+            language: "python".into(),
+            timeout_seconds: 30,
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    // If the driver is not installed on this host, accept KernelUnavailable gracefully.
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Unavailable => return,
+        Err(e) => panic!("RunCode RPC failed unexpectedly: {e}"),
+    };
+
+    let (stdout, _stderr, error_name, exit_code) = collect_run_code_stream(stream).await;
+
+    // If the kernel driver is missing the first frame is KernelUnavailable; skip.
+    if error_name.as_deref() == Some("KernelUnavailable") {
+        return;
+    }
+
+    assert!(
+        stdout.contains('4'),
+        "expected '4' in stdout, got: {:?}",
+        stdout
+    );
+    assert_eq!(exit_code, Some(0), "expected exit_code 0 for print(2+2)");
+}
+
+// (b) Exception -> RunError frame with the exception name (e.g. NameError).
+#[tokio::test]
+async fn runcode_grpc_exception_produces_run_error_frame() {
+    use sandbox_agent::sandbox_v1::{self, run_code_request};
+
+    const SOCK: &str = "/tmp/agent-conformance-runcode-exception.sock";
+    let mut client = start_runcode_client(SOCK).await;
+
+    let open_msg = sandbox_v1::RunCodeRequest {
+        msg: Some(run_code_request::Msg::Open(sandbox_v1::RunCodeOpen {
+            code: "undefined_variable_xyz_conformance".into(),
+            language: "".into(),
+            timeout_seconds: 30,
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Unavailable => return,
+        Err(e) => panic!("RunCode RPC failed unexpectedly: {e}"),
+    };
+
+    let (_stdout, _stderr, error_name, exit_code) = collect_run_code_stream(stream).await;
+
+    if error_name.as_deref() == Some("KernelUnavailable") {
+        return;
+    }
+
+    assert_eq!(
+        error_name.as_deref(),
+        Some("NameError"),
+        "expected NameError error frame, got: {:?}",
+        error_name
+    );
+    assert_eq!(exit_code, Some(1), "expected exit_code 1 after NameError");
+}
+
+// (c) State persistence: x=41 in call 1, print(x+1) in call 2 prints "42".
+//
+// Both calls must use the SAME kernel (same SandboxService instance). We achieve
+// this by reusing the same client (and thus the same server-side kernel) across
+// two sequential run_code calls.
+#[tokio::test]
+async fn runcode_grpc_state_persists_across_calls() {
+    use sandbox_agent::sandbox_v1::{self, run_code_request};
+
+    const SOCK: &str = "/tmp/agent-conformance-runcode-state.sock";
+    let mut client = start_runcode_client(SOCK).await;
+
+    // Call 1: define x = 41.
+    let open1 = sandbox_v1::RunCodeRequest {
+        msg: Some(run_code_request::Msg::Open(sandbox_v1::RunCodeOpen {
+            code: "x = 41".into(),
+            language: "python".into(),
+            timeout_seconds: 30,
+        })),
+    };
+    let (tx1, rx1) = tokio::sync::mpsc::channel(4);
+    tx1.send(open1).await.unwrap();
+    drop(tx1);
+
+    let stream1 = match client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx1))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Unavailable => return,
+        Err(e) => panic!("RunCode call 1 failed unexpectedly: {e}"),
+    };
+
+    let (_stdout1, _stderr1, error1, exit1) = collect_run_code_stream(stream1).await;
+    if error1.as_deref() == Some("KernelUnavailable") {
+        return;
+    }
+    assert_eq!(exit1, Some(0), "call 1 (x=41) must exit cleanly");
+
+    // Call 2: read x.
+    let open2 = sandbox_v1::RunCodeRequest {
+        msg: Some(run_code_request::Msg::Open(sandbox_v1::RunCodeOpen {
+            code: "print(x + 1)".into(),
+            language: "python".into(),
+            timeout_seconds: 30,
+        })),
+    };
+    let (tx2, rx2) = tokio::sync::mpsc::channel(4);
+    tx2.send(open2).await.unwrap();
+    drop(tx2);
+
+    let stream2 = match client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx2))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Unavailable => return,
+        Err(e) => panic!("RunCode call 2 failed unexpectedly: {e}"),
+    };
+
+    let (stdout2, _stderr2, error2, exit2) = collect_run_code_stream(stream2).await;
+    if error2.as_deref() == Some("KernelUnavailable") {
+        return;
+    }
+
+    assert!(
+        stdout2.contains("42"),
+        "expected '42' in stdout of call 2 (state persistence), got: {:?}",
+        stdout2
+    );
+    assert_eq!(exit2, Some(0), "call 2 must exit cleanly");
+}
+
+// (d) Unsupported language -> error frame with name "KernelUnavailable" + exit_code 127.
+#[tokio::test]
+async fn runcode_grpc_unsupported_language_returns_kernel_unavailable() {
+    use sandbox_agent::sandbox_v1::{self, run_code_request};
+
+    const SOCK: &str = "/tmp/agent-conformance-runcode-lang.sock";
+    let mut client = start_runcode_client(SOCK).await;
+
+    let open_msg = sandbox_v1::RunCodeRequest {
+        msg: Some(run_code_request::Msg::Open(sandbox_v1::RunCodeOpen {
+            code: "puts 'hello'".into(),
+            language: "ruby".into(),
+            timeout_seconds: 30,
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Unavailable => return,
+        Err(e) => panic!("RunCode RPC failed unexpectedly: {e}"),
+    };
+
+    let (_stdout, _stderr, error_name, exit_code) = collect_run_code_stream(stream).await;
+
+    assert_eq!(
+        error_name.as_deref(),
+        Some("KernelUnavailable"),
+        "expected KernelUnavailable error frame for unsupported language, got: {:?}",
+        error_name
+    );
+    assert_eq!(
+        exit_code,
+        Some(127),
+        "expected exit_code 127 for unsupported language, got: {:?}",
+        exit_code
+    );
+}
+
+// (e) First message is not `open` -> InvalidArgument status returned by the server.
+#[tokio::test]
+async fn runcode_grpc_missing_open_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-runcode-noopen.sock";
+    let mut client = start_runcode_client(SOCK).await;
+
+    // Send a non-open message as the first (and only) message. The sandbox
+    // protocol requires the first RunCodeRequest to carry `open`.
+    // We send an Open with no msg variant set (msg: None) which triggers the
+    // "first message must carry open" validation path.
+    let bad_first = sandbox_v1::RunCodeRequest { msg: None };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(bad_first).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .run_code(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    // The server must reject this with InvalidArgument. The error may surface as
+    // an RPC-level status or as the first message on the stream.
+    match result {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "expected InvalidArgument when first message is not open, got {:?}",
+                status.code()
+            );
+        }
+        Ok(response) => {
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            // The server returns the InvalidArgument via the run_code_handler
+            // returning Err, which tonic surfaces as a Status error on the stream.
+            let first = stream.next().await.expect("stream must have at least one item");
+            // The stream item must be an Err with InvalidArgument.
+            // (tonic propagates the handler's Err(Status) as a stream error.)
+            match first {
+                Err(status) => {
+                    assert_eq!(
+                        status.code(),
+                        tonic::Code::InvalidArgument,
+                        "expected InvalidArgument, got {:?}",
+                        status.code()
+                    );
+                }
+                Ok(frame) => {
+                    // If somehow the server sends a frame instead of an error,
+                    // check that the error is embedded in the frame.
+                    panic!(
+                        "expected InvalidArgument status, got a response frame: {:?}",
+                        frame
+                    );
+                }
+            }
+        }
+    }
+}
