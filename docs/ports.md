@@ -1,12 +1,12 @@
-# Guest port forwarding (issue #228)
+# Guest port forwarding
 
-This document describes the FOUNDATION slice of issue #228: making a TCP port
+This document describes guest port forwarding: making a TCP port
 inside a running sandbox reachable from the host, through the standalone
 sandbox-server, by tunneling raw bytes over the existing vsock channel.
 
-It is the standalone-only, first slice. The Kubernetes Service/Ingress routing
-and the CRD template/claim port-declaration fields are EXPLICIT follow-ups of
-issue #228 and are NOT built here (see "Follow-ups" below). For the
+It is the standalone-only path. The Kubernetes Service/Ingress routing
+and the CRD template/claim port-declaration fields are explicit follow-ups
+and are NOT built here (see "Follow-ups" below). For the
 internet-facing, signed-URL, per-sandbox reverse-proxy exposure (the E2B
 `get_host(port)` equivalent), see `docs/preview-urls.md`; that is a separate
 mechanism. This document is about a plain host TCP socket bridged to a guest
@@ -85,15 +85,15 @@ These are recorded as a row in `docs/threat-model.md` (section 3); the summary:
   forward and all its tunnels are closed on terminate.
 - **No auth on the host listener.** This is the SAME tokenless trust model as the
   rest of the standalone sandbox-server (a single-tenant local server that runs
-  with `AllowTokenless`), not a new weakening. Auth on the forward path is a
-  follow-up; do not expose the standalone server's forward listeners to an
+  with `AllowTokenless`), not a new weakening. Auth on the forward path is not
+  yet available; do not expose the standalone server's forward listeners to an
   untrusted network.
 - **No secret logging.** The tunnel bytes are application traffic and are never
   logged; only the sandbox id, host address, and guest port are logged.
 
 ## Follow-ups (NOT in this slice)
 
-These are tracked under issue #228 and are explicitly out of scope here:
+These are explicitly out of scope here:
 
 - Kubernetes Service/Ingress routing for the forkd path (this slice is the
   standalone sandbox-server only).

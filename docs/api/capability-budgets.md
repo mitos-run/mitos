@@ -1,12 +1,12 @@
 # Capability budgets and attenuated per-sandbox tokens
 
-Status: design + verifiable core. The attenuation core (`internal/captoken`) and
-the API/error shapes in this document are implemented and tested. The runtime
-wiring (controller materializing budget-gated forks, depth-aggregate accounting,
-`status.budgetSpend`) is the follow-up plan in the last section.
+Status: the attenuation core (`internal/captoken`) and the API/error shapes in
+this document are implemented and tested. The runtime wiring (controller
+materializing budget-gated forks, depth-aggregate accounting,
+`status.budgetSpend`) is not yet active; it is described in the last section.
 
-This document is the normative design for issue #25 and is the companion to
-`docs/api/v2-spec.md` section 3 (capability budgets), the #24 runtime protocol
+This document is the normative design for capability budgets and is the companion
+to `docs/api/v2-spec.md` section 3 (capability budgets), the runtime protocol
 (`proto/sandbox/v1/sandbox.proto`), and ADR 0007
 (`docs/adr/0007-api-v2-three-noun-consolidation.md`).
 
@@ -165,10 +165,10 @@ within the remaining budget reported by the `Budget` RPC. The error's structured
 `context` names the exhausted `dimension` and the `remaining` allowance so the
 reading model knows exactly which ceiling it hit.
 
-## 6. Runtime-wiring follow-up (out of scope for this slice)
+## 6. Runtime wiring (not yet active)
 
-This slice is the verifiable core plus the API and error shapes. The following is
-the multi-slice follow-up that spans the controller and the #24 Connect runtime:
+The verifiable core plus the API and error shapes are in place. The following
+runtime wiring spans the controller and the Connect runtime:
 
 1. Mint the per-sandbox root token at claim/Sandbox creation with the creator-set
    `spec.budget`, store it as the existing `<name>-sandbox-token` Secret value
@@ -184,16 +184,15 @@ the multi-slice follow-up that spans the controller and the #24 Connect runtime:
 4. Extend the proto `BudgetStatus`/`Allowance` set with `cpu_seconds` and
    `egress_bytes` so the runtime `Budget` RPC reports all five dimensions.
 
-Sequencing gate (per CLAUDE.md): the fork-correctness suite and failure/GC
-semantics stay green; the threat model (`docs/threat-model.md`) gains a row for
-the token-attenuation surface when the runtime wiring lands (the surface does not
-move in this design-only slice).
+Sequencing gate: the fork-correctness suite and failure/GC semantics stay green;
+the threat model (`docs/threat-model.md`) gains a row for the token-attenuation
+surface when the runtime wiring lands. The surface does not move until then.
 
 ## Cross-references
 
 - `docs/api/v2-spec.md` section 3: capability budgets, the budget block, and the
   attenuation requirement.
-- `proto/sandbox/v1/sandbox.proto`: the #24 runtime `Fork`/`Checkpoint`/
+- `proto/sandbox/v1/sandbox.proto`: the runtime `Fork`/`Checkpoint`/
   `ExtendLifetime`/`Budget` RPCs and their `Budget`/`Allowance` messages.
 - `docs/adr/0007-api-v2-three-noun-consolidation.md`: why the budget lands on the
   v2 `Sandbox` noun and the v1 kinds stay unchanged.

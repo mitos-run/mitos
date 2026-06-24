@@ -1,7 +1,7 @@
 # Acceptable Use Policy (hosted offering)
 
 This Acceptable Use Policy (AUP) governs the hosted Mitos sandbox cloud. It is
-the human-readable counterpart to the technical abuse controls (issue #213): the
+the human-readable counterpart to the technical abuse controls: the
 per-organization quotas, the per-org and per-IP rate limits, the per-tier egress
 policy, and the kill-switch. By using the hosted offering you agree to these
 terms; we enforce them automatically and, where needed, manually.

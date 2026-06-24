@@ -1,4 +1,4 @@
-# SDK conformance parity suite (issue #22)
+# SDK conformance parity suite
 
 This directory holds ONE shared scenario, `scenario.json`, that both SDKs run
 against the SAME backend so we can prove they behave identically.

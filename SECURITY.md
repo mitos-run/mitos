@@ -4,8 +4,8 @@
 
 Please do not file public issues for vulnerabilities.
 
-- **Preferred**: GitHub private vulnerability reporting. Go to the Security tab of this repository and click "Report a vulnerability". MAINTAINER TODO: enable private vulnerability reporting in the repository Security settings if it is not already on.
-- **Fallback**: email the security contact. MAINTAINER TODO: confirm or replace this address: `security@mitos.run` (placeholder; currently routes to `jannes@mitos.run`).
+- **Preferred**: GitHub private vulnerability reporting. Go to the Security tab of this repository and click "Report a vulnerability".
+- **Fallback**: email the security contact at `security@mitos.run`.
 
 We will acknowledge your report within 72 hours and keep you informed of progress toward a fix and disclosure.
 
@@ -98,5 +98,4 @@ Substantial portions of this codebase are AI-assisted. Security-sensitive paths
 receive named-human review before merge: `internal/fork`,
 `internal/firecracker`, `internal/daemon`, `internal/vsock`, `guest/`, and
 future token/attenuation code. The policy is documented in
-[docs/security-review-policy.md](docs/security-review-policy.md) and tracked in
-issue #35.
+[docs/security-review-policy.md](docs/security-review-policy.md).

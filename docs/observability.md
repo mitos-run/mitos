@@ -112,11 +112,11 @@ field carries a secret value, env value, file content, or token.
 
 - The guest-side first-exec and guest-ready spans (the in-VM telemetry bridge
   over vsock: cpu steal, balloon pressure, in-guest process table) are the
-  bare-metal tail and are not yet wired; see issue #29.
+  bare-metal tail and are not yet wired.
 - A single trace id stamped across Hubble network flows needs the Cilium/Hubble
   integration.
 - Grafana dashboards and PrometheusRule alerts that pivot on the trace id are a
-  1.0 maturity item (#29).
+  1.0 maturity item.
 
 ## Audit log
 
@@ -236,7 +236,7 @@ pending-requeue, orphan-sweep, claim-error, and pool-reconcile paths).
   the pull site, and alerted on (`SnapshotDistributionLagHigh`). Its VALUE is
   populated only on the multi-node distribution path; a single-node cluster
   leaves the series empty by design (#3).
-- OpenCost and Hubble layers ride on husk pods (#18); the per-sandbox resolution
+- OpenCost and Hubble layers ride on husk pods; the per-sandbox resolution
   and reconcile logic is implemented and unit-tested (see "Layers 1-3" below),
   with the live integrations cluster-gated.
 
@@ -284,7 +284,7 @@ strings, empty-list messages, and missing-cell dashes
 
 ### OPEN
 
-`kubectl mitos top/tree/exec/logs` are documented follow-ups (#29); invoking
+`kubectl mitos top/tree/exec/logs` are documented follow-ups; invoking
 them prints a "not yet implemented" notice.
 
 ## Dashboards, alerts, runbooks
@@ -346,7 +346,7 @@ busy or virtualized node does not page on the target itself.
 
 - Per-cluster threshold tuning is left to the operator (the runbooks say to tune).
 - Hubble flow panels and OpenCost cost-attribution dashboards need the live
-  Cilium/OpenCost integrations (#18); the resolution and reconcile logic is
+  Cilium/OpenCost integrations; the resolution and reconcile logic is
   implemented and unit-tested (see "Layers 1-3" below).
 
 The dashboard and the PrometheusRule alerts are packaged BOTH as the
@@ -355,7 +355,7 @@ The dashboard and the PrometheusRule alerts are packaged BOTH as the
 `SnapshotDistributionLagHigh` alert ships in both layers; its metric is
 populated only on the multi-node distribution path.
 
-## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge (#164)
+## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge
 
 The observability stack is structured in layers. Layers 1 and 2 attribute
 network flows and cost to a sandbox; Layer 3 reaches inside the guest. The

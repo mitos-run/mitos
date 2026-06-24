@@ -10,7 +10,7 @@ index for how we track and patch vulnerabilities across the three surfaces:
 
 It links the disclosure policy (SECURITY.md), the kernel currency doc
 (docs/kernel-cve.md), and the supply-chain verification doc
-(docs/supply-chain.md). Tracked in issue #35.
+(docs/supply-chain.md).
 
 ## What already exists
 

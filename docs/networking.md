@@ -49,7 +49,7 @@ the /30.
 `ForkRunning` (live fork) of a networked sandbox **fails closed**: a live fork
 restores the source's baked NIC, which would collide on tap/MAC/IP with the
 source's live network. Until each fork's interface is isolated in its own
-per-VM network namespace (husk pods, #18), live-forking a networked sandbox is
+per-VM network namespace (husk pods), live-forking a networked sandbox is
 unsupported and returns an error rather than producing a colliding VM.
 
 ## nftables dispatch model
@@ -94,7 +94,7 @@ runner). The Go unit tests assert command order and idempotency with a fake
 runner; the darwin gap (no `nft` to accept the rendered syntax) is closed by the
 KVM CI phases below.
 
-## Network-posture knobs (issue #219)
+## Network-posture knobs
 
 The per-sandbox `NetworkPolicy` (CRD `template.Spec.networkPolicy`, proto
 `NetworkConfig`, SDK `Network`) expresses the full posture, threaded unchanged
@@ -123,7 +123,7 @@ neither reach out nor be dialed into until the policy explicitly opens a path.
 
 **Egress byte counter.** Each per-sandbox chain carries a named nftables counter
 (`sb_<tap>_egress`) incremented on every guest-sourced egress packet, so the
-metering pipeline (#211) reads per-sandbox egress bytes by name. It is a passive
+metering pipeline reads per-sandbox egress bytes by name. It is a passive
 counting rule with no verdict, so it never affects enforcement.
 
 The rule RENDERING of each dimension is unit-tested in `internal/netconf`
@@ -135,7 +135,7 @@ enforcement reuses the SAME KVM-gated datapath as the existing egress allowlist.
 A literal `ip daddr . tcp dport` rule cannot enforce a NAME, because nftables
 matches on the resolved IP and never sees the name the guest looked up. The
 `--enable-dns-egress` path closes this with a controlled per-node resolver
-(`internal/dnsproxy`, #47). The design:
+(`internal/dnsproxy`). The design:
 
 - **Single node resolver IP.** forkd binds the controlled resolver on a node-wide
   address (`--dns-resolver`, default `169.254.1.1`) on `udp/tcp 53`. Every
@@ -234,7 +234,7 @@ given sandbox, never both (threat model section 0, surface 5).
   allowlisted name at an attacker IP. There is no per-name rate limit and no
   DNSSEC validation in v1 (see `docs/threat-model.md`).
 - **Snapshot-fork networking under a per-VM netns.** Live-fork fails closed;
-  per-VM netns isolation lands with husk pods (#18).
+  per-VM netns isolation lands with husk pods.
 - **Per-fork conntrack flush**, parent-connection-death semantics beyond
   fresh-identity, bandwidth/rate limiting, and IPv6.
 
@@ -266,8 +266,8 @@ sandbox; exactly one applies, decided by the run mode.
 - **Raw-forkd mode (`--enable-raw-forkd`, and `--mock`).** There is no pod; the
   VM's tap lives on the HOST (forkd's netns). A Kubernetes `NetworkPolicy` cannot
   see a host-netns tap, so the bespoke host-nftables egress engine
-  (`internal/network` + `internal/netconf`, the default-deny per-tap allowlist,
-  issues #47/#48) plus the controlled DNS resolver (`internal/dnsproxy`) ARE the
+  (`internal/network` + `internal/netconf`, the default-deny per-tap allowlist)
+  plus the controlled DNS resolver (`internal/dnsproxy`) ARE the
   enforcement mechanism. This is the engine the rest of this document describes.
 
 So the bespoke nftables engine is RETAINED, because raw-forkd still needs it; it

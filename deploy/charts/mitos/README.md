@@ -146,8 +146,8 @@ The chart reproduces the security-critical fields of the source manifests
 verbatim and does not expose them as knobs:
 
 - forkd runs `privileged: true` with hostPath mounts for `/var/lib/mitos` and the
-  `/dev/kvm` char device. It is the privileged snapshot builder; the jailer-in-pod
-  follow-up will narrow this. See `docs/threat-model.md`.
+  `/dev/kvm` char device. It is the privileged snapshot builder. See
+  `docs/threat-model.md`.
 - The controller, facade, and device plugin run unprivileged with
   `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, all
   capabilities dropped, and the controller and facade pods set

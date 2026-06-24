@@ -111,7 +111,7 @@ NOT bare-metal figures.
 ## Husk-stub activation latency datapoint
 
 A separate datapoint measures the claim-time cost of the husk-pods prepare/
-activate split (issue #18; see [`docs/husk-pods.md`](docs/husk-pods.md)). In that
+activate split (see [`docs/husk-pods.md`](docs/husk-pods.md)). In that
 model the Firecracker VMM is pre-started DORMANT before a claim arrives
 (prepare), so the only cost paid at claim time is activating it: loading the
 template snapshot in place, resuming, and waiting for the guest agent to answer
@@ -304,7 +304,7 @@ activation latency is not stated.
 ## Facade vs upstream reference: resume latency
 
 This section frames the resume-latency comparison between our `agents.x-k8s.io`
-facade (issue #19) and the upstream reference controller, for the upstream
+facade and the upstream reference controller, for the upstream
 pause/resume contract (the Sandbox `spec.replicas` 0<->1 toggle; upstream v0.4.6
 has no stateful hibernate field, so pause/resume IS that toggle). The harness is
 `bench/facade/` (see [`bench/facade/README.md`](bench/facade/README.md)).
