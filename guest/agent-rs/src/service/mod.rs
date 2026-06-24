@@ -19,6 +19,9 @@ use sandbox_v1::sandbox_server::Sandbox;
 /// Exec and PTY RPC implementation (Task 2.1).
 pub mod exec;
 
+/// File RPC implementations (Task 2.2): ReadFile, WriteFile, List, Stat, Mkdir, Remove.
+pub mod files;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -114,30 +117,30 @@ impl Sandbox for SandboxService {
 
     async fn read_file(
         &self,
-        _request: Request<sandbox_v1::ReadFileRequest>,
+        request: Request<sandbox_v1::ReadFileRequest>,
     ) -> Result<Response<Self::ReadFileStream>, Status> {
-        unimplemented_stream("ReadFile")
+        files::read_file(request).await
     }
 
     async fn write_file(
         &self,
-        _request: Request<tonic::Streaming<sandbox_v1::WriteFileRequest>>,
+        request: Request<tonic::Streaming<sandbox_v1::WriteFileRequest>>,
     ) -> Result<Response<sandbox_v1::WriteFileResult>, Status> {
-        Err(unimplemented("WriteFile"))
+        files::write_file(request).await
     }
 
     async fn list(
         &self,
-        _request: Request<sandbox_v1::ListRequest>,
+        request: Request<sandbox_v1::ListRequest>,
     ) -> Result<Response<sandbox_v1::ListResponse>, Status> {
-        Err(unimplemented("List"))
+        files::list(request).await
     }
 
     async fn stat(
         &self,
-        _request: Request<sandbox_v1::StatRequest>,
+        request: Request<sandbox_v1::StatRequest>,
     ) -> Result<Response<sandbox_v1::FileInfo>, Status> {
-        Err(unimplemented("Stat"))
+        files::stat(request).await
     }
 
     async fn archive(
@@ -236,16 +239,16 @@ impl Sandbox for SandboxService {
 
     async fn mkdir(
         &self,
-        _request: Request<sandbox_v1::MkdirRequest>,
+        request: Request<sandbox_v1::MkdirRequest>,
     ) -> Result<Response<sandbox_v1::MkdirResponse>, Status> {
-        Err(unimplemented("Mkdir"))
+        files::mkdir(request).await
     }
 
     async fn remove(
         &self,
-        _request: Request<sandbox_v1::RemoveRequest>,
+        request: Request<sandbox_v1::RemoveRequest>,
     ) -> Result<Response<sandbox_v1::RemoveResponse>, Status> {
-        Err(unimplemented("Remove"))
+        files::remove(request).await
     }
 
     async fn upload(

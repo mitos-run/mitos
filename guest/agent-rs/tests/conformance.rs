@@ -73,28 +73,21 @@ async fn start_server_and_client(sock_path: &str) -> SandboxClient<tonic::transp
     SandboxClient::new(channel)
 }
 
-/// The server must accept a connection and return Code::Unimplemented for the
-/// Stat RPC (which is a stub in this slice). This validates that the tonic
-/// service is correctly wired and the gRPC framing works over a Unix socket.
+/// The Stat RPC must return a valid FileInfo for the root path.
+/// This validates that the tonic service is correctly wired and the gRPC
+/// framing works over a Unix socket.
 #[tokio::test]
-async fn stat_returns_unimplemented() {
+async fn stat_root_returns_dir() {
     let mut client = start_server_and_client(TEST_SOCK).await;
 
     let result = client
         .stat(StatRequest { path: "/".into() })
         .await;
 
-    let status = result.expect_err("stub Stat must return an error");
-    assert_eq!(
-        status.code(),
-        Code::Unimplemented,
-        "stub Stat must return Code::Unimplemented, got {:?}",
-        status.code()
-    );
+    let fi = result.expect("Stat / must succeed");
     assert!(
-        status.message().contains("Stat"),
-        "error message must name the RPC, got: {}",
-        status.message()
+        fi.into_inner().is_dir,
+        "/ must be a directory",
     );
 }
 
@@ -366,6 +359,180 @@ async fn exec_pty_echo_returns_stdout_and_exit_zero() {
         "expected exit_code=0 for PTY exec, got: {:?}",
         exit_code,
     );
+}
+
+// ---------------------------------------------------------------------------
+// File RPC conformance tests (Task 2.2)
+// ---------------------------------------------------------------------------
+
+/// WriteFile followed by ReadFile must round-trip the exact bytes written.
+#[tokio::test]
+async fn write_then_read_file_roundtrips() {
+    use sandbox_agent::sandbox_v1;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-write-read.sock";
+    let mut client = start_server_and_client(SOCK).await;
+    let path = "/tmp/agent-rs-conformance-test.txt";
+
+    let open_msg = sandbox_v1::WriteFileRequest {
+        msg: Some(sandbox_v1::write_file_request::Msg::Open(sandbox_v1::WriteFileOpen {
+            path: path.into(),
+            mode: 0o644,
+        })),
+    };
+    let data_msg = sandbox_v1::WriteFileRequest {
+        msg: Some(sandbox_v1::write_file_request::Msg::Data(b"hello world".to_vec())),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
+    tx.send(open_msg).await.unwrap();
+    tx.send(data_msg).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .write_file(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(result.bytes_written, 11);
+
+    let stream = client
+        .read_file(sandbox_v1::ReadFileRequest { path: path.into() })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut content = Vec::new();
+    tokio::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        let c = chunk.unwrap();
+        content.extend_from_slice(&c.data);
+        if c.eof {
+            break;
+        }
+    }
+    assert_eq!(content, b"hello world");
+}
+
+/// Stat on /tmp must return is_dir=true and path=/tmp.
+#[tokio::test]
+async fn stat_tmp_is_dir() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-stat-tmp.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let fi = client
+        .stat(sandbox_v1::StatRequest { path: "/tmp".into() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(fi.is_dir, "expected /tmp to be a directory");
+    assert_eq!(fi.path, "/tmp");
+}
+
+/// Mkdir creates a directory; List then shows the entry in the parent.
+#[tokio::test]
+async fn mkdir_then_list_sees_entry() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-mkdir-list.sock";
+    let mut client = start_server_and_client(SOCK).await;
+    let dir = "/tmp/agent-rs-mkdir-test";
+
+    client
+        .mkdir(sandbox_v1::MkdirRequest { path: dir.into() })
+        .await
+        .unwrap();
+
+    let resp = client
+        .list(sandbox_v1::ListRequest {
+            parent: "/tmp".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"agent-rs-mkdir-test"),
+        "expected agent-rs-mkdir-test in /tmp listing, got: {:?}",
+        names,
+    );
+}
+
+/// Stat on a missing path must return NotFound.
+#[tokio::test]
+async fn stat_missing_path_returns_not_found() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-stat-notfound.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let err = client
+        .stat(sandbox_v1::StatRequest {
+            path: "/tmp/agent-rs-does-not-exist-xyz".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+/// Remove deletes a file created by WriteFile.
+#[tokio::test]
+async fn remove_deletes_file() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-remove.sock";
+    let mut client = start_server_and_client(SOCK).await;
+    let path = "/tmp/agent-rs-remove-test.txt";
+
+    // Write the file first.
+    let open_msg = sandbox_v1::WriteFileRequest {
+        msg: Some(sandbox_v1::write_file_request::Msg::Open(sandbox_v1::WriteFileOpen {
+            path: path.into(),
+            mode: 0o644,
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    drop(tx);
+    client
+        .write_file(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap();
+
+    // Remove it.
+    client
+        .remove(sandbox_v1::RemoveRequest {
+            path: path.into(),
+            recursive: false,
+        })
+        .await
+        .unwrap();
+
+    // Stat must now return NotFound.
+    let err = client
+        .stat(sandbox_v1::StatRequest { path: path.into() })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+/// Remove on a missing path must succeed (mirrors Go's os.RemoveAll no-op).
+#[tokio::test]
+async fn remove_missing_path_is_ok() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-remove-missing.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    client
+        .remove(sandbox_v1::RemoveRequest {
+            path: "/tmp/agent-rs-never-existed-xyz".into(),
+            recursive: false,
+        })
+        .await
+        .unwrap();
 }
 
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
