@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 # gRPC stack: tonic for the service layer, prost for generated types.
-tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost", "router"] }
+tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost", "router", "channel"] }
 prost = "0.13"
 
 # Typed errors with Display derivation. Used by error.rs.
@@ -29,6 +29,14 @@ tokio-vsock = { version = "0.6", optional = true }
 # libc for PID-1 init (mount, sethostname) and fork-correctness syscalls.
 libc = "0.2"
 
+# Structured logging. tracing macros are used in init/ and service/ startup paths.
+tracing = "0.1"
+# Subscriber for test and binary: fmt layer + RUST_LOG env filter.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Stream utilities: UnixListenerStream used by the conformance test harness.
+tokio-stream = { version = "0.1", features = ["net"] }
+
 # Legacy JSON serde kept alive during the wire migration; removed once Task 0.x
 # stubs are the last callers (deferred per task-0.1 brief).
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +45,11 @@ serde_json = "1"
 [dev-dependencies]
 # For temp file creation in sys/crng tests (RNDADDENTROPY on plain file).
 tempfile = "3"
+# tower::service_fn is used in the conformance test to connect to a unix socket.
+tower = "0.5"
+# TokioIo wrapper: required by tonic 0.13 connect_with_connector (hyper's IO traits
+# differ from tokio's AsyncRead/AsyncWrite; TokioIo bridges them).
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [build-dependencies]
 # tonic-build compiles proto/sandbox/v1/sandbox.proto at build time.

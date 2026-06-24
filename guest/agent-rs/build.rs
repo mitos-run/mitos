@@ -22,7 +22,7 @@ fn main() {
     }
 
     tonic_build::configure()
-        .build_client(false)
+        .build_client(true)
         .build_server(true)
         .compile_protos(
             &["proto/sandbox/v1/sandbox.proto"],

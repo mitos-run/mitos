@@ -46,12 +46,29 @@ pub mod sandbox_v1 {
 }
 
 // ---------------------------------------------------------------------------
-// PID-1 init module (task 1.3 builds the init/ module on this).
+// PID-1 init module (task 1.3).
 // ---------------------------------------------------------------------------
 
 /// PID-1 init: mounts filesystems, creates /workspace, sets hostname.
+/// Converted from init.rs to init/ module in task 1.3 to add MOUNT_TABLE const
+/// and tracing integration.
 #[allow(unsafe_code, missing_docs)]
 pub mod init;
+
+// ---------------------------------------------------------------------------
+// Kernel manager stub (task 1.3; filled in by Phase 2 RunCode task).
+// ---------------------------------------------------------------------------
+
+/// In-guest code-execution kernel (Jupyter-style). Stub at this stage.
+pub mod kernel;
+
+// ---------------------------------------------------------------------------
+// tonic Sandbox service skeleton (task 1.3).
+// ---------------------------------------------------------------------------
+
+/// The tonic Sandbox gRPC service implementation.
+/// All RPCs return Unimplemented until Phase 2 tasks fill them in.
+pub mod service;
 
 // ---------------------------------------------------------------------------
 // sys/ module: the ONLY place in the crate with unsafe code (task 1.2).

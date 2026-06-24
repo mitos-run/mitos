@@ -20,11 +20,13 @@
 
 pub mod clock;
 pub mod entropy;
+pub mod mount;
 pub mod vsock;
 
 // Re-export the most-used surface so callers write sys::reseed_crng etc.
 pub use clock::{clock_now_nanos, clock_set_realtime, step_clock, CLOCK_STEP_THRESHOLD_NS};
 pub use entropy::{reseed_crng, reseed_crng_at};
+pub use mount::{mount, sethostname};
 pub use vsock::{AGENT_GRPC_PORT, AGENT_LEGACY_PORT};
 #[cfg(feature = "vsock")]
 pub use vsock::bind_vsock;
