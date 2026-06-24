@@ -1,6 +1,6 @@
 # API v1alpha1 to v2: conversion notes
 
-Status: design record for issue #23. Related: docs/adr/0007-api-v2-three-noun-consolidation.md,
+Status: design record for the API v2 three-noun consolidation. Related: docs/adr/0007-api-v2-three-noun-consolidation.md,
 docs/api/v2-spec.md section 5, docs/adr/0001-facade-and-naming.md,
 docs/adr/0002-workspace-not-csi.md, docs/conditions.md.
 
@@ -37,7 +37,7 @@ scaleDownAfterSnapshot, storage) with the warm autoscaler under `spec.warm`
 | Kind renamed | `SandboxClaim` | `Sandbox` | a claim IS the running sandbox; one noun |
 | Required oneof added | `SandboxClaim.poolRef` (single source) | `Sandbox.source` oneof `{poolRef, fromSandbox, fromRevision}` | unify pool-start, live-fork, revision-resume |
 | Field renamed | `SandboxFork.allowSecretInheritance: bool` | `Sandbox.secretInheritance: reissue\|inherit` | safer default stated explicitly (reissue) |
-| New v2-only surface | (none) | `Sandbox.budget`, `Sandbox.resume`, `source.fromRevision` | capability budgets (#25), lineage resume; documented defaults |
+| New v2-only surface | (none) | `Sandbox.budget`, `Sandbox.resume`, `source.fromRevision` | capability budgets, lineage resume; documented defaults |
 | Kind unchanged | `Workspace`, `WorkspaceRevision` | unchanged | ADR 0002 already shipped the target shape |
 
 A blank v2 cell means the field has no v2 counterpart and is dropped by the
@@ -81,7 +81,7 @@ becomes one of a oneof with the new inline `template`.
 | `snapshotStorage` | `snapshots` block | folded into the `snapshots` config |
 | `drainPolicy` (`Kill\|Checkpoint`) | `drainPolicy` | unchanged; husk drain behavior |
 | `autoscale` (`PoolAutoscaleSpec`) | `warm` (min/max/targetPending) | the v2 `warm` block is the autoscaler; v1 `autoscale.minWarm/maxWarm/targetSpare/scaleDownCooldownSeconds` map onto `warm.min/warm.max/warm.targetPending` and a cooldown field |
-| `placement` (`PoolPlacement`) | `placement` | unchanged; dedicated-node pinning (#172) |
+| `placement` (`PoolPlacement`) | `placement` | unchanged; dedicated-node pinning |
 | `SandboxPoolStatus` (all fields) | `SandboxPoolStatus` | unchanged: readySnapshots, totalSnapshots, restoringCount, lastSnapshotTime, conditions, nodeDistribution, templateDigest, desiredWarm, lastScaleDownTime |
 
 The `warm`/`snapshots` regrouping is a presentation change in the v2 spec; the
@@ -125,7 +125,7 @@ converts to `source.fromSandbox` + `replicas: <its replicas>`.
 | `ttlSecondsAfterFinished` (`*int32`) | `lifetime.ttlSecondsAfterFinished` | unchanged meaning; finished-sandbox etcd TTL, re-homed under `lifetime` |
 | `outputs` (`[]OutputSpec`) | `lifetime.onTerminate.outputs` | unchanged `OutputSpec` shape (path, diff, git); re-homed under `lifetime.onTerminate` |
 | (none) | `resume` (`memory\|filesystem`) | NEW: warm-memory vs filesystem-only restore for `fromSandbox`/`fromRevision`; default `memory`; cross-principal handoff forces `filesystem` |
-| (none) | `budget` (`SandboxBudget`) | NEW: capability budget (maxForks, maxCheckpoints, maxCpuSeconds, maxLifetimeExtension, maxEgressBytes); defaults from pool `defaultBudget`; runtime enforcement is #25 |
+| (none) | `budget` (`SandboxBudget`) | NEW: capability budget (maxForks, maxCheckpoints, maxCpuSeconds, maxLifetimeExtension, maxEgressBytes); defaults from pool `defaultBudget`; runtime enforcement not yet active |
 | (none) | `network.extraAllow` | NEW per-sandbox egress additions on top of the pool network policy; default empty |
 | (none) | `secretInheritance` (`reissue\|inherit`) | for a `poolRef` source this is always `reissue` (no parent secrets to inherit); see the fork table for the `fromSandbox` mapping |
 
@@ -158,7 +158,7 @@ converts to `source.fromSandbox` + `replicas: <its replicas>`.
 | `SandboxClaimStatus.conditions` | `conditions` | unchanged; typed conditions with observedGeneration |
 | (none) | `pod` | NEW explicit husk pod name (`heartbeat-7f3a-husk`), visible to kubectl, quotas, OpenCost |
 | (none) | `revision` | NEW: the WorkspaceRevision produced on terminate |
-| (none) | `budgetSpend` | NEW: `{forks, cpuSeconds, ...}` capability-budget accounting (#25) |
+| (none) | `budgetSpend` | NEW: `{forks, cpuSeconds, ...}` capability-budget accounting |
 | `SandboxForkStatus.readyForks` | `readyReplicas` | the ready child count for a `replicas > 1` Sandbox |
 | `SandboxForkStatus.totalForks` | `replicas` (desired) / a status total | the total child count |
 | `SandboxForkStatus.forks` (`[]ForkInfo`) | `children` (per-replica status) | the per-child list (name, sandboxID, endpoint, node, phase) for a fan-out Sandbox |

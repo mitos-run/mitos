@@ -54,7 +54,7 @@ sb.terminate()
 ```
 
 ```bash
-pip install mitos
+pip install mitos-run
 export MITOS_API_KEY=sk-...   # a key from https://mitos.run; no Kubernetes required
 ```
 
@@ -71,7 +71,7 @@ Agent harnesses need fast, isolated environments where agents read and write fil
 Two ways to run it:
 
 - **Self-hosted (today):** any Kubernetes cluster with KVM nodes. Your data never leaves your infrastructure. Bare metal (Talos + Hetzner) is the first-class reference platform.
-- **Hosted (in progress, [#208](https://github.com/mitos-run/mitos/issues/208)):** the same engine and API operated by us, for teams that want milliseconds without managing nodes.
+- **Hosted (in progress):** the same engine and API operated by us, for teams that want milliseconds without managing nodes.
 
 > Two engine paths exist. The **husk pod-native path is the default**: each VM runs in its own unprivileged pod, and the source husk pod snapshots its running VM so N child pods restore it via CoW. The **raw-forkd path** runs forks in forkd's in-process engine. Everything below runs on the husk default unless explicitly marked `engine path`.
 
@@ -126,12 +126,12 @@ Every SDK speaks the same sandbox-server REST API in **direct mode** (standalone
 
 | Language | Install | Direct mode | Cluster mode | SDK docs |
 |---|---|---|---|---|
-| Python | `pip install mitos` | yes (sync + async) | yes (`AgentRun`) | [sdk/python](sdk/python) |
+| Python | `pip install mitos-run` | yes (sync + async) | yes (`AgentRun`) | [sdk/python](sdk/python) |
 | TypeScript | `npm i @mitos/sdk` | yes | yes (`AgentRun`) | [sdk/typescript](sdk/typescript/README.md) |
-| Go | `go get github.com/mitos-run/mitos/sdk/go` | yes (typed, `errors.Is`-friendly) | planned ([#303](https://github.com/mitos-run/mitos/issues/303)) | [sdk/go](sdk/go/README.md) |
-| Ruby | gem (stdlib only) | yes | planned ([#304](https://github.com/mitos-run/mitos/issues/304)) | [sdk/ruby](sdk/ruby/README.md) |
-| Rust | crate (blocking) | yes | planned ([#305](https://github.com/mitos-run/mitos/issues/305)) | [sdk/rust](sdk/rust/README.md) |
-| Java | JDK 17 (stdlib only) | yes | planned ([#306](https://github.com/mitos-run/mitos/issues/306)) | [sdk/java](sdk/java/README.md) |
+| Go | `go get github.com/mitos-run/mitos/sdk/go` | yes (typed, `errors.Is`-friendly) | planned | [sdk/go](sdk/go/README.md) |
+| Ruby | gem (stdlib only) | yes | planned | [sdk/ruby](sdk/ruby/README.md) |
+| Rust | crate (blocking) | yes | planned | [sdk/rust](sdk/rust/README.md) |
+| Java | JDK 17 (stdlib only) | yes | planned | [sdk/java](sdk/java/README.md) |
 
 The Go SDK ships in its own nested module (`github.com/mitos-run/mitos/sdk/go`), so importing it never pulls the controller into your build.
 
@@ -145,7 +145,7 @@ mitos run echo hello --pool dev-default
 mitos sandbox ls
 ```
 
-`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools for any MCP-speaking agent, and an [Agent Skill](skills/mitos/SKILL.md) teaches skill-aware agents the workflow (fork vs. fresh, best-of-N, isolation, cost). The full install matrix (script, Homebrew, deb/rpm, scoop/winget, checksums) is in [docs/install.md](docs/install.md); packaging beyond `go install` lands with releases ([#253](https://github.com/mitos-run/mitos/issues/253)).
+`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools for any MCP-speaking agent, and an [Agent Skill](skills/mitos/SKILL.md) teaches skill-aware agents the workflow (fork vs. fresh, best-of-N, isolation, cost). The full install matrix (script, Homebrew, deb/rpm, scoop/winget, checksums) is in [docs/install.md](docs/install.md); packaging beyond `go install` lands with releases.
 
 ### Beyond exec
 
@@ -161,7 +161,7 @@ print(ex.text)            # the REPL's last value, rendered
 sb.exec_background("python train.py > /workspace/train.log 2>&1")
 ```
 
-Blocking `exec` works on the husk default. Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) run on the engine path; the husk template guest-agent rebuild that brings them to the default is tracked in [#24](https://github.com/mitos-run/mitos/issues/24). `run_code` returns a fail-closed `KernelUnavailable` until the kernel ships in the husk base image.
+Blocking `exec` works on the husk default. Streaming exec (`/v1/exec/stream`) and the interactive PTY (`/v1/pty`) run on the engine path and are being brought to the husk default. `run_code` returns a fail-closed `KernelUnavailable` until the kernel ships in the husk base image.
 
 ### Integrations
 
@@ -169,12 +169,12 @@ Drop a Mitos sandbox into the agent framework you already use. Each adapter is a
 
 | Framework | Import | Status |
 |---|---|---|
-| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | [#203](https://github.com/mitos-run/mitos/issues/203) |
-| OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | [#204](https://github.com/mitos-run/mitos/issues/204) |
-| VibeKit / ZenML | `from mitos.integrations.vibekit import MitosVibeKitProvider` | [#205](https://github.com/mitos-run/mitos/issues/205) |
+| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | Planned |
+| OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | Planned |
+| VibeKit / ZenML | `from mitos.integrations.vibekit import MitosVibeKitProvider` | Planned |
 | E2B (migration) | `from mitos.e2b import Sandbox` | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 
-The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface over the standalone sandbox-server. `get_host(port)` returns a signed, expiring preview URL once the per-sandbox preview proxy is deployed ([#126](https://github.com/mitos-run/mitos/issues/126)).
+The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface over the standalone sandbox-server. `get_host(port)` returns a signed, expiring preview URL once the per-sandbox preview proxy is deployed.
 
 ### On a cluster
 
@@ -182,7 +182,7 @@ The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-
 kubectl apply -k deploy/
 ```
 
-The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. A Helm chart is planned ([#37](https://github.com/mitos-run/mitos/issues/37)).
+The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. The Helm chart is published at `https://mitos.run/charts` and listed on Artifact Hub: `helm repo add mitos https://mitos.run/charts`. See [deploy/charts/mitos](deploy/charts/mitos/README.md) for the install command and values.
 
 ```yaml
 apiVersion: mitos.run/v1
@@ -236,9 +236,9 @@ The husk pod-native path is the default. A few capabilities run today only on th
 | Capability | What you get | Docs |
 |---|---|---|
 | Blocking exec | Correct stdout and exit code over the sandbox API | [docs/cli.md](docs/cli.md) |
-| Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (`engine path`; husk wiring [#24](https://github.com/mitos-run/mitos/issues/24)) | [#24](https://github.com/mitos-run/mitos/issues/24) |
+| Streaming exec and PTY | Incremental stdout/stderr, background processes, and a token-gated interactive WebSocket terminal (`engine path`) | [docs/cli.md](docs/cli.md) |
 | Code interpreter | `run_code` with a stateful kernel and rich multi-MIME results, in both SDKs and the MCP server; fail-closed `KernelUnavailable` until the kernel ships in the husk base image | [docs/mcp.md](docs/mcp.md) |
-| LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by the SDKs into a structured `AgentRunError` | [#28](https://github.com/mitos-run/mitos/issues/28) |
+| LLM-legible errors | Every failure carries `{code, cause, remediation}`, parsed by the SDKs into a structured `AgentRunError` | [docs/api/errors.md](docs/api/errors.md) |
 
 ### Kubernetes-native
 
@@ -256,7 +256,7 @@ The husk pod-native path is the default. A few capabilities run today only on th
 |---|---|---|
 | Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox. `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Verified create -> commit -> fork on a real KVM cluster | [docs/workspaces.md](docs/workspaces.md) |
 | Outputs and diff | `spec.lifetime.onTerminate.outputs` narrows the dehydrate to listed subtrees; `{diff: true}` records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
-| Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (the engine pushes; a human or CI merges). Best-effort on husk today; full wiring tracked | [#21](https://github.com/mitos-run/mitos/issues/21) |
+| Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (the engine pushes; a human or CI merges). Best-effort on husk today | [docs/workspaces.md](docs/workspaces.md) |
 
 ### Operable
 
@@ -360,7 +360,7 @@ Early development, pre-1.0 (latest release `v0.3.0`). Do not run untrusted code 
 
 **Verified on a real KVM cluster (husk default):** warm-claim activate, blocking exec, `run_code` failing closed with `KernelUnavailable`, self-heal / re-pend, pool warming plus demand autoscaling, live sandbox fork (the source husk pod snapshots its VM and N child pods restore it via CoW, each an independent Ready child), durable forkable workspaces (create -> commit -> fork), and pod egress isolation (default-deny, cloud-metadata block, per-template allowlist), all proven inside a restored VM with no node prerequisite.
 
-**Tracked tails not yet on the husk default:** streaming exec and the interactive PTY ([#24](https://github.com/mitos-run/mitos/issues/24)); live-VM memory snapshot hooks for resumable workspace heads (`--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection; the husk `{git}` workspace push ([#21](https://github.com/mitos-run/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/mitos-run/mitos/issues/3)).
+**Tracked tails not yet on the husk default:** streaming exec and the interactive PTY; live-VM memory snapshot hooks for resumable workspace heads (`--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection; the husk `{git}` workspace push; and multi-node N>1 (designed, single-node-verified).
 
 [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated. The operating rule: this repository never describes a system that does not exist.
 

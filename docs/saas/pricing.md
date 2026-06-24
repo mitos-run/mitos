@@ -1,18 +1,18 @@
 # SaaS pricing and Stripe metered billing
 
-Status: foundational slice (issue #212). This wires the money for the hosted
+Status: foundational. This wires the money for the hosted
 offering: Stripe usage-based (metered) billing, plans, free signup credits,
 prepaid top-ups, hard and soft spend caps, and dunning. It sits on the usage
-records from #211 (`internal/usage`), the accounts/orgs/keys model from #210
-(`internal/saas`), and the kill-switch from #213 (`internal/saas/quota`).
+records (`internal/usage`), the accounts/orgs/keys model
+(`internal/saas`), and the kill-switch (`internal/saas/quota`).
 
-CRITICAL: Stripe is an external service. Real charges need test-mode API keys
-that are NOT available in this slice, and those keys are SECRETS. Nothing in
-this slice makes a real charge. The whole billing core is built against a
+CRITICAL: Stripe is an external service. Real charges need test-mode API keys,
+and those keys are SECRETS. Nothing here makes a real charge. The whole billing
+core is built against a
 `StripeClient` INTERFACE with an in-memory `FakeStripe` for tests; the real
 Stripe SDK adapter and the real webhook signature verification are documented
 seams a maintainer runs with test-mode keys. The Stripe Go SDK is NOT a hard
-dependency of this slice.
+dependency.
 
 Security: a Stripe API key, the webhook signing secret, or any customer payment
 method detail is NEVER logged, NEVER placed in an error message, and NEVER put
@@ -32,7 +32,7 @@ Stripe meter and price:
 - `egress_gib`: per-GiB outbound egress (see the egress decision below).
 - `gpu_second`: per-GPU-second accelerator time.
 
-These dimensions are exactly the billable units the #211 `usage.UsageRecord`
+These dimensions are exactly the billable units the `usage.UsageRecord`
 already integrates (`VCPUSeconds`, `MemGiBSeconds`, `StorageGiBHours`,
 `EgressBytes`, `GPUSeconds`), so a usage record maps one-to-one to metered
 quantities with no re-derivation.
@@ -44,7 +44,7 @@ the classic abuse subsidy: a sandbox platform that gives away outbound bandwidth
 underwrites scraping, exfiltration relays, and outbound-attack traffic. So:
 
 - Free-tier exposure is bounded by a HARD egress posture (deny-by-default and
-  the abuse-port block) from #213, not by giving egress away.
+  the abuse-port block), not by giving egress away.
 - Paid orgs pay per GiB of egress, like every other dimension.
 
 This keeps the directional economics honest and removes the abuse subsidy.
@@ -58,11 +58,11 @@ placeholders, NOT published prices (the no-unverified-claims rule). A hosted
 deployment overrides them from config. Only the SHAPE (decoupled per-second
 compute, storage GiB-hours, metered egress) is committed here.
 
-`billing.DefaultRates()` mirrors the magnitude of the #211 placeholder
+`billing.DefaultRates()` mirrors the magnitude of the placeholder
 `usage.DefaultPriceList` re-expressed in milli-cents, and `billing.FromPriceList`
 is the single bridge between the two so the usage API's display-cost estimate
 and the real billing rates derive from one table and never drift. This is the
-reconciliation of the #211 `PriceList` placeholder to the billing model.
+reconciliation of the `PriceList` placeholder to the billing model.
 
 Directional competitor figures (Modal, Daytona, E2B published per-second or
 per-resource prices) may be cited as vendor-published when comparing the model's
@@ -85,8 +85,8 @@ event per non-zero meter. The Stripe idempotency key for each event is
 
     {org}|{sandbox}|{window}|{meter}
 
-i.e. the #211 `(org, sandbox, window)` record key plus the meter. Because the
-usage record key is itself idempotent (the #211 store upserts by it and
+i.e. the `(org, sandbox, window)` record key plus the meter. Because the
+usage record key is itself idempotent (the store upserts by it and
 `Integrate` is pure), re-pushing the SAME record reports the SAME keys, so
 Stripe de-duplicates and a RETRIED push never double-reports. The real adapter
 passes this as the Stripe `Idempotency-Key` request header; `FakeStripe` records
@@ -101,7 +101,7 @@ sum of its entries, never a mutated field, so the accounting is auditable and
 cannot silently drift.
 
 - Signup credit (`GrantSignupCredit`): the free credit at signup. The default is
-  $100 (`DefaultSignupCredit`), within the $100-$200 bar in the issue.
+  $100 (`DefaultSignupCredit`), within the $100-$200 self-serve bar.
   Illustrative and configurable.
 - Top-ups (`TopUp`): prepaid purchases on a Daytona-style ladder
   (`TopUpLadder`: $10/$25/$50/$100/$250, illustrative). Added after the payment
@@ -122,7 +122,7 @@ usage push never double-credits or double-debits. All unit-tested.
 
 - SOFT cap breach: fires a budget alert through the `AlertSink` seam (email,
   webhook, console banner). No suspension.
-- HARD cap breach: SUSPENDS the org through the #213 kill-switch (the
+- HARD cap breach: SUSPENDS the org through the kill-switch (the
   `Suspender` seam, satisfied by `quota.BillingSuspender` wrapping
   `quota.KillSwitch`) with a MANUAL HOLD, so a runaway agent cannot generate an
   unbounded bill and the org is not auto-lifted back into the same bill.
@@ -147,7 +147,7 @@ status (`active`, `past_due`, `suspended`):
 
 It is pure so the transitions are exhaustively unit-tested with no side effects.
 `Service.applyDunning` pairs it with the side effects: a transition INTO
-suspended drives the #213 kill-switch; every transition persists the new status.
+suspended drives the kill-switch; every transition persists the new status.
 The billing status reflects payment standing; whether a kill-switch manual hold
 blocks the actual un-suspend is the kill-switch's concern.
 
@@ -162,7 +162,7 @@ event.
 
 Signature verification is a SEAM (`billing.SignatureVerifier`). The real
 verifier needs the endpoint signing secret and constant-time checks the
-`Stripe-Signature` header; that secret is not available in this slice, so the
+`Stripe-Signature` header; that secret is not wired here, so the
 test uses `FakeVerifier` (parses and trusts the body). The HTTP entry point
 never echoes the body or the signature in any error.
 
@@ -174,7 +174,7 @@ maintainer with test-mode keys:
 
 - Real Stripe SDK adapter (implements `StripeClient`): a small file in
   `internal/saas/billing` (for example `stripe_sdk.go`, build-tagged or guarded
-  so the Stripe Go SDK is not a hard dependency of this slice) wrapping the
+  so the Stripe Go SDK is not a hard dependency) wrapping the
   Stripe Go SDK for products/prices, metered usage reporting (passing the
   idempotency key as the `Idempotency-Key` header), subscriptions, invoices, and
   payment methods. Exercised against test-mode keys.

@@ -1,6 +1,6 @@
 # Snapshot-resume page-fault prefetch
 
-Tracking: issue #167. Status: IMPLEMENTED and MEASURED. The hugepage build-time
+Status: IMPLEMENTED and MEASURED. The hugepage build-time
 plumbing, the Firecracker userfaultfd restore backend, the manifest hot-page +
 hugepage descriptors, capture-at-template, and the off-vs-on prefetch benchmark
 are all in place, and the fault-count + claim->first-exec numbers are measured on
@@ -116,14 +116,15 @@ type HotPageSet struct {
 }
 ```
 
-### Compatibility with the snapshot format freeze (#32)
+### Compatibility with the snapshot format freeze
 
 The field is purely additive. A snapshot that never captured a hot-page set
 carries a nil `HotPages`, and the manifest's canonical encoding OMITS the field
 entirely in that case, so the canonical bytes and the digest are byte-identical
 to a snapshot built before the field existed. An empty (non-nil, zero-offset)
 set is treated the same way: identity-neutral, omitted. This is proven by
-`TestManifestNilHotPagesPreservesLegacyDigest`.
+`TestManifestNilHotPagesPreservesLegacyDigest`. The field is format-version-safe:
+it does not change a legacy snapshot's digest.
 
 Therefore the field does NOT require a `SnapshotFormatVersion` bump: it does not
 change the on-disk snapshot layout or the restore contract, and an old build
@@ -134,7 +135,7 @@ version bump is needed only if the descriptor itself changes incompatibly (for
 example a different offset encoding), at which point the format-version policy in
 docs/snapshot-format.md governs the transition.
 
-### Content-addressing and the #33 CoW reconciliation
+### Content-addressing and the CoW reconciliation
 
 When the hot-page set is present and non-empty it IS part of the
 content-addressed digest. The canonical encoding sorts and de-duplicates the
@@ -143,7 +144,7 @@ and two that prefetch different pages produce different digests (proven by
 `TestManifestHotPagesChangeDigest` and
 `TestManifestHotPagesCanonicalOrderInvariant`).
 
-This reconciles cleanly with the #33 copy-on-write fork story. Under #33, N forks
+This reconciles cleanly with the copy-on-write fork story. N forks
 of one template share the template's restored page set, and CoW-aware metering
 (docs/metering.md) counts that shared set ONCE rather than once per fork. The
 hot-page set is a property of the TEMPLATE snapshot, not of an individual fork:
@@ -172,7 +173,7 @@ set it accelerates.
 
 The bench hook is `cmd/bench --mode prefetch`, backed by the pure, unit-tested
 aggregation `benchstat.AggregatePrefetch` / `benchstat.PrefetchComparison`. The
-plan, on the bare-metal reference node (#16):
+plan, on the bare-metal reference node:
 
 - Two arms: prefetch-OFF (lazy-fault baseline) and prefetch-ON (hot-page set
   preloaded before resume).
@@ -220,7 +221,7 @@ not read anyway, just sooner. No new external input, trust boundary, or
 host-path write is introduced by the descriptor or the selection logic. The
 actual userfaultfd handler is a security-sensitive restore-path change and gets
 its threat-model review when its syscall wiring lands (it is gated and not wired
-in this slice).
+yet).
 
 ## How the userfaultfd backend works (implemented)
 
@@ -238,7 +239,7 @@ manifest records a hugepage backing, or a hot-page set is present; the handler i
 closed on Terminate and on any fork failure.
 
 The snapshot is SELF-DESCRIBING: `cas.Manifest.HugePages` records the page backing
-(omitempty, #32-safe like `HotPages`), so any node, even one whose own config does
+(omitempty, format-version-safe like `HotPages`), so any node, even one whose own config does
 not request hugepages, knows it must restore a hugepage snapshot through UFFD.
 
 ## What is implemented now vs deferred
@@ -247,7 +248,7 @@ Implemented and tested (darwin unit + Linux build; KVM integration on a
 userfaultfd-capable node):
 
 - `cas.HotPageSet` and `cas.Manifest.HugePages` manifest descriptors, optional and
-  additive, content-addressed when present, identity-neutral when empty (#32-safe).
+  additive, content-addressed when present, identity-neutral when empty (format-version-safe).
 - `fork.SelectHotPages` capture-selection and the pure region/offset arithmetic
   (`internal/fork/uffd.go`), unit-tested on any host.
 - The Firecracker userfaultfd restore backend: handshake (SCM_RIGHTS recv +

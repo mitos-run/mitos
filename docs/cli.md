@@ -59,7 +59,7 @@ overrides the file. The token VALUE is never logged or echoed in an error.
 
 ### Preflight: `mitos doctor`
 
-`mitos doctor` runs an install/node preflight (issue #174) and prints a report
+`mitos doctor` runs an install/node preflight and prints a report
 with an actionable, LLM-legible remediation per failing check. It is meant to run
 on a KVM worker node, or as an in-cluster Job, and exits non-zero if any check
 fails so it composes in an install pipeline.
@@ -259,8 +259,7 @@ fabricated value.
 pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
 plane (kind) there is no husk pod or no live guest, so the stub console is
 reported absent and the guest console states it needs a running sandbox: the
-guest serial/vsock console streams only from a live VMM (the
-[#18](https://github.com/mitos-run/mitos/issues/18) boundary), not from this
+guest serial/vsock console streams only from a live VMM, not from this
 read-only operator path.
 
 ### exec
@@ -276,16 +275,12 @@ shell pipelines.
 
 On kind the mock engine has no guest VM, so `exec`/`top`/`logs` of a REAL running
 sandbox are the KVM/bare-metal tail; the kind-e2e smoke proves `ls`/`ps`/`tree`
-at the object level. `cp` and `port-forward` for operators remain the documented
-ergonomics longtail.
+at the object level. `cp` and `port-forward` for operators are not yet available.
 
 ## Follow-ups
 
-- workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace
-  ([#21](https://github.com/mitos-run/mitos/issues/21));
+- workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace;
 - `mitos pool create|refresh` beyond what `dev up` needs;
-- streaming exec / PTY (`exec_stream`) pending the Connect protocol
-  ([#23](https://github.com/mitos-run/mitos/issues/23));
-- a `curl | sh` installer and `get.mitos.run` distribution
-  ([#37](https://github.com/mitos-run/mitos/issues/37));
+- streaming exec / PTY (`exec_stream`) pending the Connect protocol;
+- a `curl | sh` installer and `get.mitos.run` distribution;
 - shell completions and a code-interpreter-compatible API shim.

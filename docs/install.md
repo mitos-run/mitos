@@ -5,8 +5,7 @@ file IO, fork, terminate, list) and brings a local dev cluster up or down.
 
 This page covers every install method, what works today versus what arrives with
 the first tagged release, the environment variables the installer honors, and how
-to verify a download. A MAINTAINER section at the end records the one-time setup a
-repo admin must complete for the package-manager paths to go live.
+to verify a download.
 
 ## Status of each method
 
@@ -20,7 +19,7 @@ first tagged release.
 | Build from a checkout (`go build ./cmd/mitos`) | Works today. Requires a Go toolchain. |
 | `curl -fsSL https://get.mitos.run \| sh` | Available from the first tagged release. |
 | Manual release binary | Available from the first tagged release. |
-| Homebrew (`brew install mitos-run/tap/mitos`) | Coming with releases (needs the tap repo + token, see MAINTAINER). |
+| Homebrew (`brew install mitos-run/tap/mitos`) | Coming with releases. |
 | Debian/RPM packages (`.deb`, `.rpm`) | Coming with releases. |
 | Windows (`scoop`, `winget`) | Coming with releases. |
 
@@ -107,8 +106,7 @@ their `PATH`.
 
 These paths are configured in `.goreleaser.yaml` and produced by a tagged release.
 They are listed here so the docs match the config, but they only work once the
-release publishes them (and, for Homebrew, once the MAINTAINER steps below are
-done). Do not assume they work before then.
+release publishes them. Do not assume they work before then.
 
 - Homebrew (macOS and linuxbrew):
 
@@ -133,36 +131,3 @@ sha256sum --ignore-missing -c mitos_<version>_checksums.txt
 # macOS:
 shasum -a 256 -c mitos_<version>_checksums.txt --ignore-missing
 ```
-
-## MAINTAINER: one-time setup
-
-The release pipeline and the package-manager paths need infrastructure that a repo
-admin must set up once. Until these are done, a tagged release still produces
-binaries, archives, checksums, and deb/rpm packages; only the Homebrew publish and
-the `get.mitos.run` shortcut depend on them.
-
-1. Create the Homebrew tap repository `mitos-run/homebrew-tap` (a public GitHub
-   repo). goreleaser pushes the generated cask into it on each release.
-
-2. Create a `HOMEBREW_TAP_TOKEN` repository secret on `mitos-run/mitos`. It must be
-   a personal access token (or fine-grained token) with `contents: write` on the
-   `mitos-run/homebrew-tap` repo only. The release workflow
-   (`.github/workflows/release.yaml`) reads this secret: when it is present the
-   cask is published; when it is absent the brew step is skipped with
-   `--skip=homebrew` so the rest of the release still succeeds. This is why a
-   release cut before the tap exists does not hard-fail.
-
-3. Point `get.mitos.run` at the raw `install.sh`. Either:
-   - serve a redirect from `https://get.mitos.run` to
-     `https://raw.githubusercontent.com/mitos-run/mitos/main/install.sh`, or
-   - host the file directly at that hostname.
-
-   Keep it pointed at a stable ref (`main`) so `curl | sh` always fetches the
-   current installer. DNS and the redirect/host need account-level access that is
-   outside this repo.
-
-4. How a tagged release produces all artifacts: the release-please flow lands the
-   `chore(main): release X` PR and tags the commit. Pushing that `v*` tag triggers
-   `.github/workflows/release.yaml`, which runs goreleaser to build the
-   cross-platform binaries, tar.gz/zip archives, the checksums file, the deb/rpm
-   packages, and (when the tap token is present) the Homebrew cask.

@@ -211,8 +211,8 @@ Stated honestly so operators do not over-trust the current posture:
   credential (the bearer token) is reissued per fork, but revoke-and-reissue of
   TENANT secret VALUES over vsock (so a fork could safely inherit FRESH secrets
   instead of being rejected) is a documented residual: static Kubernetes Secret
-  values have no upstream to revoke, so this is tracked as issue #7, and
-  capability-token per-fork attenuation lands with the issue #25 runtime wiring
+  values have no upstream to revoke, and
+  capability-token per-fork attenuation lands with the runtime wiring
   (`docs/fork-correctness.md:16`, `docs/fork-correctness.md:270-286`). The
   default-deny gate (section 3) is what closes the hazard today.
 - **In-memory key exposure to a node-root attacker.** While an encrypted

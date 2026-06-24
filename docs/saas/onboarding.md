@@ -7,8 +7,8 @@ reason developers pick a sandbox provider, so the funnel is built as a tested
 core with clean seams, and the "fast self-serve UX" claim is measured, not
 asserted.
 
-Implementation: `internal/saas/onboarding` (issue #215). It composes the #210
-accounts/keys layer, the #212 credit ledger, and the #213 free-tier defaults.
+Implementation: `internal/saas/onboarding`. It composes the
+accounts/keys layer, the credit ledger, and the free-tier defaults.
 
 ## The funnel
 
@@ -21,12 +21,12 @@ In open self-serve mode the flow is:
    accepts the token and, in one step, provisions everything below.
 3. **Org auto-created.** A Personal organization is created (Daytona-style), so a
    brand-new user can act immediately without first creating a team. This reuses
-   the #210 `AccountService.SignUp`.
+   `AccountService.SignUp`.
 4. **Free signup credit granted.** The free-tier signup credit lands on the new
-   org via the #212 credit ledger (`billing.GrantSignupCredit`). The grant is
+   org via the credit ledger (`billing.GrantSignupCredit`). The grant is
    idempotent per org, so a retried verify never double-grants.
 5. **First API key issued.** A scoped key (the `sandboxes` scope) is minted for
-   the org via #210; the raw key is shown exactly once.
+   the org; the raw key is shown exactly once.
 
 The user then drops straight into the [quickstart](../quickstart.md): one
 `pip install mitos-run` (installs the `mitos-run` distribution; you still `import
@@ -44,7 +44,7 @@ mitos`), one `mitos.create(...)`, code execution, no second SDK.
 
 ## Free-credit grant
 
-The signup credit is wired to the #212 ledger and defaults to
+The signup credit is wired to the credit ledger and defaults to
 `billing.DefaultSignupCredit()` (the $100 illustrative default, inside the
 $100-$200 self-serve bar; coordinated with the ledger's default and configurable
 per deployment via `WithSignupCredit`). The credit lands exactly once per org;
@@ -54,11 +54,11 @@ claims).
 
 ## Availability gate: waitlist vs open self-serve
 
-Per the #208 hosted-SaaS gate, the funnel does NOT run open public self-serve
+Per the hosted-SaaS gate, the funnel does NOT run open public self-serve
 until the production gates pass:
 
-- #163 chaos suite and residual garbage collection,
-- #194 external security review,
+- chaos suite and residual garbage collection,
+- external security review,
 - multitenancy isolation.
 
 Until then the funnel runs in **waitlist / design-partner mode** (`ModeWaitlist`,
@@ -106,11 +106,11 @@ are documented seams / follow-ups:
 - **Email provider.** `EmailSender` is an interface; the tested default is
   `FakeEmailSender`. The real SMTP/provider integration is a follow-up. The raw
   token is never logged by any sender.
-- **Web signup UI.** The hosted console (#214) drives this service; this slice is
+- **Web signup UI.** The hosted console drives this service; what ships here is
   the service, not the UI.
 - **Live dashboard.** The in-memory `EventRecorder` is the seam for a real
   analytics sink and the live time-to-first-sandbox dashboard.
-- **Durable store.** `PendingStore` and the #210 `Store` are in-memory here; the
+- **Durable store.** `PendingStore` and the accounts `Store` are in-memory here; the
   Postgres store is a follow-up behind the same interfaces.
 
 ## Security notes
