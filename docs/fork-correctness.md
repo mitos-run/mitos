@@ -120,10 +120,13 @@ Implemented reseed path: the host delivers fresh entropy over vsock. forkd
 calls `NotifyForked(generation, entropy)` immediately after restore
 (`internal/daemon/server.go:notifyForked` generates a fresh generation plus 32
 bytes of `crypto/rand` entropy). The guest agent on `NotifyForked` writes that
-entropy into the kernel CRNG via `RNDADDENTROPY`, records the generation at
-`/run/sandbox/fork-generation`, and signals userspace runtimes
-(`guest/agent/notifyforked.go`). VMGenID is not exposed by Firecracker, so this
-host-entropy-over-vsock hook is our equivalent.
+entropy into the kernel CRNG via the credited `RNDADDENTROPY` ioctl
+(`guest/agent-rs/src/sys/entropy.rs`, the only caller of that ioctl), records
+the generation at `/run/sandbox/fork-generation`, and signals userspace
+runtimes; the reseed step is `guest/agent-rs/src/fork/reseed.rs` and the
+orchestrator that drives reseed + clock step + userspace signal is
+`handle_notify_forked` in `guest/agent-rs/src/fork/mod.rs`. VMGenID is not
+exposed by Firecracker, so this host-entropy-over-vsock hook is our equivalent.
 
 **Continuous virtio-rng device (wired):** in addition to the one-shot
 NotifyForked reseed at fork time, every template snapshot now bakes a virtio-rng
@@ -156,9 +159,11 @@ fork rather than emitting duplicate CRNG output. See row 1.
 into the pool but does NOT credit entropy) and still returned `reseeded=true`.
 Because the host fail-closed gate keys entirely on that boolean, the over-report
 silently defeated the gate: a fork that could not be credibly reseeded would be
-served sharing its siblings' CRNG output. `reseedCRNG` (now `reseedCRNGAt`,
-`guest/agent/notifyforked.go`) returns `false` when the credited ioctl fails, so
-the host reaps such a fork. The guest agent runs as PID 1 with full capabilities
+served sharing its siblings' CRNG output. The Rust reseed step
+(`guest/agent-rs/src/fork/reseed.rs`, backed by the credited ioctl in
+`guest/agent-rs/src/sys/entropy.rs`) returns `false` whenever the credited ioctl
+fails and never falls back to an uncredited `/dev/urandom` write, so the host
+reaps such a fork. The guest agent runs as PID 1 with full capabilities
 on our shipped kernel, where `RNDADDENTROPY` succeeds, so the credited path is
 the normal path; the fallback was the unsafe one. The reseed contract is now
 "credited or refused" end to end.
@@ -166,9 +171,12 @@ the normal path; the fallback was the unsafe one. The reseed contract is now
 Tests. go (`internal/daemon`): `TestForkNotifiesAgentWithFreshEntropy` asserts
 forkd sends entropy, `TestForkGenerationIncrementsAcrossForks` asserts distinct
 generations across forks, `TestForkFailsWhenNotifyForkedErrors` asserts a
-real-engine fork fails closed when the guest cannot reseed. guest
-(`guest/agent`, linux): `TestReseedCRNGFailsClosedWhenNotCredited` asserts the
-uncredited path reports failure (the host then reaps the fork).
+real-engine fork fails closed when the guest cannot reseed. The host fail-closed
+gate that reaps a fork whose guest reports `ReseededRNG:false` (transport
+`OK:true` but uncredited reseed) is covered by `internal/daemon/delivery_test.go`.
+guest (Rust, linux): the reseed unit tests in `guest/agent-rs/src/fork/reseed.rs`
+(empty entropy is false; the credited-ioctl path) assert the reseed reports
+failure on any uncredited path, which the host then reaps.
 
 KVM (`kvm-test.yaml`): one snapshot is taken after the agent is up, two VMs are
 restored from it, and `test-agent --mode notify` runs against each. The phase
@@ -204,9 +212,12 @@ validation (`notBefore`) and JWT `iat`/`exp` checks fail silently or, worse,
 pass when they should fail.
 
 Implemented clock step: `NotifyForked` carries `HostWallClockNanos`, stamped by
-the host at send time (`internal/vsock/client.go`). The guest agent reads it
-and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a 500ms tolerance,
-then signals userspace as in section 1 (`guest/agent/notifyforked.go`). kvm-clock
+the host at send time in the gRPC NotifyForked path (`internal/daemon/sandbox_api.go`
+for the raw-forkd path, `internal/husk/stub.go` for the husk path). The guest
+agent reads it and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a
+500ms tolerance, then signals userspace as in section 1
+(`guest/agent-rs/src/fork/clock.rs`, orchestrated by
+`handle_notify_forked` in `guest/agent-rs/src/fork/mod.rs`). kvm-clock
 remaining the active clocksource and Firecracker's restore path updating it is
 relied on but not separately asserted here.
 

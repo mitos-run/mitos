@@ -58,15 +58,15 @@ definition is transport-agnostic; only the dialing and the credential differ.
 
 | Transport | Path | Who dials | Credential | Status |
 | --- | --- | --- | --- | --- |
-| vsock (in-guest) | host forkd <-> guest agent over vsock (CID 3, port 52) | forkd | none (vsock is the in-VM trust boundary) | the guest agent JSON-lines protocol is live; the gRPC binding is a follow-up |
+| vsock (in-guest) | host forkd <-> guest agent over vsock (CID 3, port 53) | forkd | none (vsock is the in-VM trust boundary) | gRPC on vsock port 53 is the SOLE runtime protocol; the legacy JSON-lines protocol and the Go agent were removed (#310) |
 | cluster-internal | SDK / controller <-> forkd :9091 | in-cluster client | per-sandbox bearer token (today), attenuated capability token (planned) | the HTTP sandbox API is live; the gRPC/Connect binding is a follow-up |
 | browser | Paperclip UI <-> forkd edge | browser | scoped token | Connect HTTP semantics, follow-up; no current equivalent |
 
 forkd is the bridge: it terminates the cluster-internal and browser transports at
-its edge and relays to the guest agent over vsock. In the end state all three hops
-speak the one `Sandbox` service; today they speak the existing two
-protocols and forkd already performs the bridge in those terms
-(`internal/daemon/sandbox_api.go` relays HTTP to vsock today).
+its edge and relays to the guest agent over vsock. The vsock hop already speaks
+the one `Sandbox` service end to end: forkd relays to the Rust guest agent's gRPC
+server on vsock port 53 (`internal/daemon/sandbox_api.go`), and the
+cluster-internal and browser bindings are the remaining follow-ups.
 
 ## 4. Endpoint mapping (current surface -> v2 RPC)
 

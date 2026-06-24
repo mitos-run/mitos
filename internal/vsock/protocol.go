@@ -1,115 +1,28 @@
 package vsock
 
-// Protocol for host ↔ guest agent communication over vsock.
-// JSON-encoded messages, newline-delimited.
+// Host-side data types for the gRPC runtime protocol the Rust guest agent
+// serves on AgentGRPCPort. The legacy JSON wire protocol and its envelope
+// (Request/Response and the per-op JSON structs) were removed with the Go agent
+// (#310); the types that remain here are the small value types the host gRPC
+// callers in internal/daemon, internal/husk, and internal/guestgrpc still pass
+// across the host code, plus the vsock dial constants.
 
-type RequestType string
-
-const (
-	TypeExec         RequestType = "exec"
-	TypeReadFile     RequestType = "read_file"
-	TypeWriteFile    RequestType = "write_file"
-	TypeListDir      RequestType = "list_dir"
-	TypeMkdir        RequestType = "mkdir"
-	TypeRemove       RequestType = "remove"
-	TypePing         RequestType = "ping"
-	TypeConfigure    RequestType = "configure"
-	TypeNotifyForked RequestType = "notify_forked"
-	TypeTarDir       RequestType = "tar_dir"
-	TypeUntarDir     RequestType = "untar_dir"
-	TypeExecStream   RequestType = "exec_stream"
-	TypeRunCode      RequestType = "run_code"
-	TypePty          RequestType = "pty"
-	// TypeVitals asks the guest agent for a one-shot telemetry snapshot: CPU
-	// steal over a short sampling window, memory vs balloon, and the in-guest
-	// process table. It is the Layer 3 guest telemetry bridge (issue #164). The
-	// request carries no fields; the guest samples /proc on receipt. The reply is
-	// VitalsResponse. Process names (comm) and pids are not secret values; the
-	// guest never includes process environments or command-line arguments, which
-	// could carry secrets, only the program name.
-	TypeVitals RequestType = "vitals"
-	// TypeTunnel opens a raw TCP-over-vsock tunnel to a guest loopback port
-	// (issue #228). Like exec_stream it uses a DEDICATED vsock connection: the
-	// host sends one TunnelRequest line, the guest dials 127.0.0.1:<port> inside
-	// the VM, replies with a single TunnelAck line, and on success the connection
-	// becomes a raw bidirectional byte pipe between the host and the guest TCP
-	// socket until either side closes. No further framing follows the ack, so a
-	// tunnel never multiplexes; one stream carries exactly one TCP connection.
-	// The guest dials ONLY loopback (any other target is refused) so the tunnel
-	// cannot be used to reach the guest's other interfaces or the host network.
-	TypeTunnel RequestType = "tunnel"
-)
-
-// MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
-// the base64 the JSON encoder applies to a []byte field). The tar of a guest
+// MaxTarBytes bounds a single archive (tar) payload. The tar of a guest
 // directory is buffered whole in memory on both the guest and host (this slice
 // does not stream), so the cap keeps the workspace transfer to one bounded
-// allocation per side. A directory whose tar would exceed this is refused rather
-// than risking an unbounded guest allocation; a streaming (chunked) transfer for
-// very large workspaces is a later W4 slice. The guest enforces the cap on the
-// tar it produces (TarDir) and on the tar it accepts (UntarDir); the host client
-// enforces it before sending. MaxMessageBytes is the matching line-buffer size
-// on both vsock ends (the base64 JSON message is ~4/3 the raw bytes plus
-// framing).
+// allocation per side. A directory whose tar would exceed this is refused
+// rather than risking an unbounded guest allocation; a streaming (chunked)
+// transfer for very large workspaces is a later W4 slice. The guest enforces
+// the cap on the tar it produces and on the tar it accepts; the host enforces
+// it before sending.
 const MaxTarBytes = 64 << 20
 
-// MaxMessageBytes is the vsock line-buffer capacity on both the host client and
-// the guest agent. It must hold the largest framed JSON message, which for the
-// tar ops is the base64 encoding of up to MaxTarBytes (~4/3) plus the JSON
-// envelope, with headroom.
-const MaxMessageBytes = 96 << 20
-
-type Request struct {
-	Type         RequestType          `json:"type"`
-	Exec         *ExecRequest         `json:"exec,omitempty"`
-	ReadFile     *ReadFileRequest     `json:"read_file,omitempty"`
-	WriteFile    *WriteFileRequest    `json:"write_file,omitempty"`
-	ListDir      *ListDirRequest      `json:"list_dir,omitempty"`
-	Mkdir        *MkdirRequest        `json:"mkdir,omitempty"`
-	Remove       *RemoveRequest       `json:"remove,omitempty"`
-	Configure    *ConfigureRequest    `json:"configure,omitempty"`
-	NotifyForked *NotifyForkedRequest `json:"notify_forked,omitempty"`
-	TarDir       *TarDirRequest       `json:"tar_dir,omitempty"`
-	UntarDir     *UntarDirRequest     `json:"untar_dir,omitempty"`
-	ExecStream   *ExecRequest         `json:"exec_stream,omitempty"`
-	RunCode      *RunCodeRequest      `json:"run_code,omitempty"`
-	Pty          *PtyRequest          `json:"pty,omitempty"`
-	Vitals       *VitalsRequest       `json:"vitals,omitempty"`
-	Tunnel       *TunnelRequest       `json:"tunnel,omitempty"`
-}
-
-// TunnelRequest opens a raw TCP-over-vsock tunnel (issue #228) to Port on the
-// guest's loopback interface (127.0.0.1:Port). It is sent once on a DEDICATED
-// vsock connection; the guest replies with a single TunnelAck line and, on
-// success, the connection becomes a raw bidirectional byte pipe to the guest
-// TCP socket. Port is a plain port number and is safe to log; the bytes that
-// flow afterward are the tunneled application traffic and are NEVER logged.
-type TunnelRequest struct {
-	Port int `json:"port"`
-}
-
-// TunnelAck is the single newline-delimited JSON line the guest writes in reply
-// to a TunnelRequest, BEFORE any raw bytes flow. OK true means the guest dialed
-// 127.0.0.1:Port successfully and the connection is now a raw byte pipe; OK
-// false means the dial was refused (the guest port is not listening, or the
-// target was not loopback) and Error carries the LLM-legible cause. Error never
-// carries a secret value: it is the guest dial error string only.
-type TunnelAck struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-// VitalsRequest is the (currently empty) payload for a TypeVitals telemetry
-// snapshot. It is a struct rather than a bare type so future knobs (sampling
-// window, process-table cap) can be added without changing the wire tag.
-type VitalsRequest struct{}
-
-// VitalsResponse is the guest telemetry snapshot returned for a TypeVitals
-// request: CPU steal over the guest's sampling window, the guest-visible memory
-// figures (and what the host has reclaimed via the balloon), and the in-guest
-// process table. The host side labels this with claim/pool/workspace; the guest
-// reports raw values only. None of these fields carry secrets: process entries
-// are the program name and resource counters, never argv or environment.
+// VitalsResponse is the guest telemetry snapshot returned for a Vitals request:
+// CPU steal over the guest's sampling window, the guest-visible memory figures
+// (and what the host has reclaimed via the balloon), and the in-guest process
+// table. The host side labels this with claim/pool/workspace; the guest reports
+// raw values only. None of these fields carry secrets: process entries are the
+// program name and resource counters, never argv or environment.
 type VitalsResponse struct {
 	// StealFraction is the fraction of the sampling window the vCPUs spent
 	// involuntarily descheduled by the host (from /proc/stat steal), in [0,1].
@@ -129,30 +42,13 @@ type VitalsResponse struct {
 
 // ProcessEntry is one row of the in-guest process table: the pid, program name,
 // single-letter state, accrued CPU jiffies (user + system), and resident set in
-// kilobytes. These map directly onto the guestvitals.PidStat the guest parsed
-// from /proc; the host carries them verbatim to kubectl mitos ps.
+// kilobytes. The host carries them verbatim to kubectl mitos ps.
 type ProcessEntry struct {
 	PID        int    `json:"pid"`
 	Comm       string `json:"comm"`
 	State      string `json:"state"`
 	CPUJiffies uint64 `json:"cpu_jiffies"`
 	RSSKB      uint64 `json:"rss_kb"`
-}
-
-// RunCodeRequest asks the guest agent to run a code snippet in the stateful
-// in-guest kernel and stream the result back as ExecStreamFrame NDJSON lines
-// (the same framing as TypeExecStream). The kernel is started lazily on the
-// first RunCode and persists for the sandbox lifetime, so Code observes state
-// left by prior RunCode calls. Language defaults to "python"; any other value
-// is refused with a KernelUnavailable error frame. Timeout bounds one
-// execution in seconds; on the deadline the kernel is interrupted and a
-// TimeoutError frame is returned, leaving the kernel usable. A value <= 0 means
-// the agent applies its 60s default. Code is not a secret value and is safe to
-// truncate-log.
-type RunCodeRequest struct {
-	Code     string `json:"code"`
-	Language string `json:"language,omitempty"`
-	Timeout  int    `json:"timeout,omitempty"`
 }
 
 // NotifyForkedRequest tells the guest a restore just happened so it can repair
@@ -224,78 +120,6 @@ type NotifyForkedNetwork struct {
 	ResolverIP string `json:"resolver_ip,omitempty"`
 }
 
-// ConfigureRequest delivers claim-time environment and secrets to the guest
-// after restore. Values must never be logged or echoed by either side; they
-// exist only in the request payload and the guest process environment.
-type ConfigureRequest struct {
-	Env     map[string]string `json:"env,omitempty"`
-	Secrets map[string]string `json:"secrets,omitempty"`
-}
-
-type ExecRequest struct {
-	Command    string            `json:"command"`
-	WorkingDir string            `json:"working_dir,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Timeout    int               `json:"timeout,omitempty"`
-}
-
-type ReadFileRequest struct {
-	Path string `json:"path"`
-}
-
-type WriteFileRequest struct {
-	Path    string `json:"path"`
-	Content []byte `json:"content"`
-	Mode    uint32 `json:"mode,omitempty"`
-}
-
-type ListDirRequest struct {
-	Path string `json:"path"`
-}
-
-type MkdirRequest struct {
-	Path string `json:"path"`
-}
-
-type RemoveRequest struct {
-	Path string `json:"path"`
-}
-
-// TarDirRequest asks the guest agent to tar a directory tree and return the tar
-// bytes. Path is restricted by the guest to a workspace-transfer allowlist (only
-// /workspace and paths under it); the guest never tars / or any secret/token
-// path. The whole tar is buffered in the response, bounded by MaxTarBytes.
-type TarDirRequest struct {
-	Path string `json:"path"`
-}
-
-// UntarDirRequest asks the guest agent to extract a tar (produced by TarDir or by
-// the host's CAS materialize -> tar path) into Path. The guest sanitizes every
-// member name against traversal (no absolute paths, no ".." escape outside Path)
-// before writing. The tar is bounded by MaxTarBytes.
-type UntarDirRequest struct {
-	Path string `json:"path"`
-	Tar  []byte `json:"tar"`
-}
-
-type Response struct {
-	OK           bool                  `json:"ok"`
-	Error        string                `json:"error,omitempty"`
-	Exec         *ExecResponse         `json:"exec,omitempty"`
-	ReadFile     *ReadFileResponse     `json:"read_file,omitempty"`
-	ListDir      *ListDirResponse      `json:"list_dir,omitempty"`
-	Ping         *PingResponse         `json:"ping,omitempty"`
-	NotifyForked *NotifyForkedResponse `json:"notify_forked,omitempty"`
-	TarDir       *TarDirResponse       `json:"tar_dir,omitempty"`
-	Vitals       *VitalsResponse       `json:"vitals,omitempty"`
-}
-
-// TarDirResponse carries the tar bytes of the requested directory. The tar is
-// buffered whole, bounded by MaxTarBytes.
-type TarDirResponse struct {
-	Tar []byte `json:"tar"`
-}
-
 // NotifyForkedResponse reports what the guest did in response to a fork
 // notification, for host-side observability. AppliedClockStepNanos is the
 // signed adjustment applied to CLOCK_REALTIME (0 when drift was within
@@ -308,6 +132,7 @@ type NotifyForkedResponse struct {
 	SignaledProcesses     int   `json:"signaled_processes"`
 }
 
+// ExecResponse is the one-shot result of a non-streaming exec.
 type ExecResponse struct {
 	ExitCode   int     `json:"exit_code"`
 	Stdout     string  `json:"stdout"`
@@ -321,10 +146,10 @@ type FrameKind string
 const (
 	FrameChunk FrameKind = "chunk"
 	FrameExit  FrameKind = "exit"
-	// FrameResult and FrameError are emitted by the run_code (TypeRunCode) path
-	// only. A FrameResult carries one rich display artifact (Result); a
-	// FrameError carries a structured exception (ErrorInfo). Plain exec_stream
-	// never emits these, so the exec_stream reader rejecting unknown kinds is
+	// FrameResult and FrameError are emitted by the run_code path only. A
+	// FrameResult carries one rich display artifact (Result); a FrameError
+	// carries a structured exception (ErrorInfo). Plain exec streaming never
+	// emits these, so the exec-stream reader rejecting unknown kinds is
 	// unaffected.
 	FrameResult FrameKind = "result"
 	FrameError  FrameKind = "error"
@@ -338,13 +163,9 @@ const (
 	StreamStderr StreamName = "stderr"
 )
 
-// ExecStreamFrame is one newline-delimited JSON line in a streaming exec reply.
-// The guest emits zero or more FrameChunk frames (each carrying a slice of one
-// stream's bytes) followed by exactly one FrameExit frame. Data is a []byte so
-// the JSON encoder base64s it: binary output survives and no embedded newline
-// is mistaken for a frame boundary. The stream uses a dedicated vsock
-// connection, so these multi-line replies never interleave with the shared
-// connection's one-shot Response calls.
+// ExecStreamFrame is one frame in a streaming exec reply. The guest emits zero
+// or more FrameChunk frames (each carrying a slice of one stream's bytes)
+// followed by exactly one FrameExit frame.
 type ExecStreamFrame struct {
 	Kind       FrameKind  `json:"kind"`
 	Stream     StreamName `json:"stream,omitempty"`
@@ -384,42 +205,13 @@ type ErrorFrame struct {
 	Traceback []string `json:"traceback,omitempty"`
 }
 
-type ReadFileResponse struct {
-	Content []byte `json:"content"`
-	Size    int64  `json:"size"`
-}
-
+// FileEntry is one entry of a directory listing.
 type FileEntry struct {
 	Name       string `json:"name"`
 	IsDir      bool   `json:"is_dir"`
 	Size       int64  `json:"size"`
 	Mode       uint32 `json:"mode"`
 	ModifiedAt int64  `json:"modified_at"`
-}
-
-type ListDirResponse struct {
-	Entries []FileEntry `json:"entries"`
-}
-
-type PingResponse struct {
-	Uptime float64 `json:"uptime_seconds"`
-}
-
-// PtyRequest opens an interactive pseudo-terminal in the guest and starts a
-// shell attached to it. Command is the shell to run (default /bin/sh when
-// empty); WorkingDir defaults to /workspace. Cols and Rows are the initial
-// window size in characters (each defaulting to a sane minimum when zero). The
-// reply is a stream of PtyFrame lines on the same DEDICATED connection, which
-// the host also writes input and resize frames to: a PTY is bidirectional,
-// unlike exec_stream. Env is merged like exec. None of these fields are secret
-// values, but a PTY is a live shell into the VM and is gated by the per-sandbox
-// bearer token at the forkd edge.
-type PtyRequest struct {
-	Command    string            `json:"command,omitempty"`
-	WorkingDir string            `json:"working_dir,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Cols       int               `json:"cols,omitempty"`
-	Rows       int               `json:"rows,omitempty"`
 }
 
 // PtyFrameKind tags a PtyFrame. input/resize flow client->guest; output/exit
@@ -433,11 +225,10 @@ const (
 	PtyExit   PtyFrameKind = "exit"
 )
 
-// PtyFrame is one newline-delimited JSON line on the dedicated PTY connection
-// (and one WebSocket text frame at the forkd edge). Data is a []byte so the
-// JSON encoder base64s it: raw terminal bytes (control sequences) survive and
-// no embedded newline is mistaken for a frame boundary. Cols/Rows are set only
-// on a resize frame; ExitCode and Error only on the terminal exit frame.
+// PtyFrame is one frame on the bidirectional PTY stream (and one WebSocket text
+// frame at the forkd edge). Data is raw terminal bytes (control sequences).
+// Cols/Rows are set only on a resize frame; ExitCode and Error only on the
+// terminal exit frame.
 type PtyFrame struct {
 	Kind     PtyFrameKind `json:"kind"`
 	Data     []byte       `json:"data,omitempty"`
