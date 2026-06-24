@@ -28,17 +28,23 @@ This spec designs the two things that turn that stub into the product:
    queryable audit with retention and export, data-retention policies, custom
    RBAC with resource groups, and a trust / compliance surface.
 
-The load-bearing product decision is the **open-core line** (section 2).
+The load-bearing architectural decision is the **open-core line** (section 2):
+every enterprise feature is compiled in and free; only its managed operation is a
+hosted concern. Pricing and packaging are deliberately out of scope.
 
 ## Goals
 
 - World-class developer experience: the console feels as fast and considered as
   Linear, Vercel, and PlanetScale, on the Fluorescence brand.
 - Every enterprise-grade feature ships in the open-source / self-host edition
-  with first-class DX. No feature is gated behind a paid tier.
-- The hosted SaaS sells the **managed operation** of those features (we run
-  them, plus compliance attestations, SLA, support, data residency, hosted IdP
-  convenience), priced per seat.
+  with first-class DX. No feature is gated; the open-core line is architectural,
+  not commercial (section 2).
+- The architecture assumes a hosted deployment will exist and **operate** the
+  managed version of those features (hosted IdP, managed audit retention,
+  compliance, residency, support). Pricing, packaging, and tiering are out of
+  scope for this spec (section 2).
+- The payment layer is built behind an **abstract seam**: no billing provider,
+  price, or packaging is baked into the design (section 2.1).
 - The whole thing honors the project gates: no unverified numbers; nothing flips
   to public untrusted multi-tenancy before the gates in section 10.
 
@@ -52,6 +58,9 @@ The load-bearing product decision is the **open-core line** (section 2).
 - Engine-level metering correctness (#33) and the operational Grafana dashboard
   (already shipped, unchanged).
 - Re-implementing payment UI: hosted deep-links the billing provider portal.
+- Pricing, tier packaging, and any per-seat or usage price points. The design
+  must support hosted billing later; choosing or naming prices is explicitly not
+  this spec's job.
 
 ## 1. Stack decisions (confirmed)
 
@@ -72,47 +81,66 @@ The load-bearing product decision is the **open-core line** (section 2).
   from the Go controller / forkd ecosystem. Rust stays scoped to the guest agent
   (#310 / PR #324), where binary size and cold-start latency pay off.
 
-## 2. The open-core line (load-bearing rule)
+## 2. The open-core line (architectural principle)
 
-**Every enterprise feature is open source with world-class DX. The hosted SaaS
-sells the managed operation around those features, never the unlock.**
+**Every enterprise feature is open source with world-class DX. A hosted
+deployment operates the managed version of those features; it never gates the
+feature itself.** This is a technical principle about how the code is structured,
+not a commercial or pricing decision. Pricing, tier packaging, and per-seat
+economics are explicitly out of scope for this spec (see Non-goals).
 
-| Capability | OSS / self-host (free) | Hosted Team / Enterprise (per seat) |
+The principle has two concrete technical consequences:
+
+1. **Features are always present, never edition flags.** SSO, SCIM, RBAC, audit,
+   retention, and export are compiled into the one binary and available in every
+   deployment. The capabilities document (section 3) advertises only *who
+   operates* a thing (self-managed vs hosted-managed), never *whether a feature
+   exists*. No capability can switch a security feature off.
+2. **Managed operation is a runtime concern, not a build concern.** The
+   difference between self-host and hosted is which implementation of an operated
+   seam is wired in (a self-run audit store vs a hosted retention service, an
+   operator's IdP vs a hosted IdP). Same code, same features, different operator.
+
+| Capability | OSS / self-host | Hosted (managed by us) |
 | --- | --- | --- |
-| SSO (SAML / OIDC), SCIM, RBAC, audit log, retention policies, audit export / SIEM, data-retention controls | All present, full DX | We operate them: hosted IdP, managed SCIM endpoint, audit retention store we run, managed SIEM sinks |
+| SSO (SAML / OIDC), SCIM, RBAC, audit log, retention policies, audit export / SIEM, data-retention controls | All present, full DX | Same features, operated for you: hosted IdP, managed SCIM endpoint, hosted audit retention store, managed SIEM sinks |
 | Compliance (SOC2 / ISO, HIPAA / BAA, DPA) | N/A by nature (contractual, not code) | Delivered: attestations, signed questionnaires, BAA / DPA |
 | Data residency, VPC peering, single-tenant, dedicated capacity | Customer controls their own cluster | Guaranteed and operated |
 | Uptime SLA, dedicated support | Community (GitHub / Discord) | Contractual |
 
-This is the deliberate inverse of the GitHub / Vercel "SSO tax." Cross-vendor
-research (HuggingFace, Vercel, Modal, E2B, Daytona, Northflank, Render, GitHub,
-Baseten, Replicate) shows SSO is the single most common paid gate, but also the
-most resented (sso.tax). For an open-source, self-hostable, K8s-native product
-whose whole positioning is no lock-in and "data stays on your infra," withholding
-security primitives is both off-brand and unenforceable (it is the customer's own
-cluster). Selling the managed operation, with guarantees and paper, is the
-defensible model the research points to.
+This is the deliberate inverse of the "SSO tax." For an open-source,
+self-hostable, K8s-native product whose whole positioning is no lock-in and
+"data stays on your infra," withholding security primitives is both off-brand and
+unenforceable (it is the customer's own cluster). The architecture therefore
+makes every feature free and reserves only *operation* (and the contractual,
+non-code things: attestations, SLA, residency guarantees) for hosting. Whether
+and how hosting is priced is a later, separate decision.
 
-### Tier shape (grounded, no invented prices)
+### 2.1 Payment layer (abstract; no pricing baked in)
 
-- **Free / self-host ($0):** the full engine and the full feature set, Apache /
-  MIT, in the user's own cluster. The adoption funnel, not a revenue tier. Never
-  gate self-hosting or the fork primitive.
-- **Team (hosted, per seat):** everything, fully managed (no cluster to run),
-  hosted IdP, managed audit retention, multi-region placement, team support.
-  Benchmark band is roughly $20 to $25 per user per month (HuggingFace Team $20,
-  Vercel Pro $20, Render flat $25 is the closest analog). The exact number comes
-  from a willingness-to-pay study, not from this spec.
-- **Enterprise (hosted, custom / contact-sales):** everything in Team plus
-  managed SCIM, SIEM export with long retention, compliance artifacts (SOC2 Type
-  II, ISO 27001, HIPAA + BAA, DPA), data-residency guarantees, private
-  networking, single-tenant / dedicated capacity, self-serve BYOC (managed
-  control plane in the customer's cloud, the Northflank-style differentiator vs
-  E2B / Daytona's manual Helm), uptime SLA, and dedicated support. Price is
-  custom, matching every peer; do not publish a number.
+Billing already sits behind a provider-neutral seam in the codebase
+(`billingprovider.Provider`, the console's `BillingReader`, and `PortalLinker`),
+which the keystone spec established. This spec keeps payment fully abstract and
+adds nothing concrete:
 
-`docs/saas/pricing.md` is updated to this model. Numbers in it follow the repo
-no-unverified-claims rule.
+- The console reads billing only through the provider-neutral `BillingReader`
+  (status, balance, ledger, caps) and links out through `PortalLinker`. It never
+  imports a concrete provider.
+- No price, plan, seat rate, or tier is encoded anywhere in the console or BFF.
+  Quantities the system already meters (usage records, member count, active
+  sandboxes) are exposed as neutral counts; turning a count into a charge is the
+  provider's job, behind the seam.
+- A deployment with no billing provider configured runs with `billing:false`;
+  the console simply does not mount the billing view. Self-host is this case by
+  default.
+- The provider seam stays provider-agnostic by design so a Merchant-of-Record
+  (Polar / Paddle / Lemon Squeezy) can be the implementation as easily as Stripe,
+  with only the webhook signature scheme and the portal link living behind it
+  (the keystone billing-abstraction decision, unchanged).
+
+The net effect: the hosted deployment *can* bill per seat (or any other way)
+later by wiring a provider, but this spec commits to no pricing model and bakes
+none into the code.
 
 ## 3. Capabilities model (minimal change)
 
@@ -384,6 +412,8 @@ they are server-controlled capability fields.
 
 ## 11. Proposed new sub-issues under #208
 
+These are proposals only; they are not filed yet.
+
 - **Enterprise SSO: SAML + enforced OIDC + SCIM provisioning** (with the setup
   wizard and connection doctor DX).
 - **Audit: queryable log + retention policy + export / SIEM sinks.**
@@ -391,15 +421,18 @@ they are server-controlled capability fields.
 - **Custom RBAC + resource groups** (additive over `owner` / `member`).
 - **Console dashboard SPA (Phase B): shell, hero views, core views** (B0 to B2).
 
-The Trust & compliance view and the tier / pricing model update attach to the
-existing #208 and #276 (proof surface) issues rather than new ones.
+The Trust & compliance view attaches to the existing #208 and #276 (proof
+surface) issues rather than a new one.
 
 ## 12. Open questions (resolved during brainstorming)
 
 - Scope: design the dashboard and the enterprise layer **together** so the IA
   carries the enterprise surfaces from day one.
-- Open-core line: **every enterprise feature is OSS with world-class DX; hosted
-  sells the managed operation, never the unlock** (section 2).
+- Open-core line: **every enterprise feature is OSS with world-class DX; a
+  hosted deployment operates the managed version, never the unlock**. This is an
+  architectural principle; pricing and tiering are out of scope (section 2).
+- Payment layer: kept fully **abstract** behind the existing provider seam, with
+  no provider, price, or packaging baked in (section 2.1).
 - Design feel: **Linear / Vercel-grade product polish** (command palette,
   instant navigation, optimistic UI, crafted empty states), with the instrument
   cockpit and live fork tree as the hero moments.
