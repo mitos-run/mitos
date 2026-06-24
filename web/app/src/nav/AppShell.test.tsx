@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { waitFor, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
@@ -31,5 +32,31 @@ describe('AppShell', () => {
   it('shows the self-hosted ownership badge', async () => {
     await renderAt('/sandboxes', caps)
     await waitFor(() => expect(screen.getByText('Self-hosted')).toBeInTheDocument())
+  })
+})
+
+describe('AppShell responsive drawer', () => {
+  it('exposes a menu button that toggles the nav drawer and reports aria-expanded', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('closes the drawer on Escape', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('gives the primary nav an accessible name', async () => {
+    await renderAt('/sandboxes', caps)
+    expect(await screen.findByRole('navigation', { name: /primary/i })).toBeInTheDocument()
   })
 })
