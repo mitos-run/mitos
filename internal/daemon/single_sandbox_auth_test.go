@@ -17,10 +17,8 @@ package daemon
 // authorize sandbox B.
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,50 +174,11 @@ func TestMultiSandboxModeStillRequiresExactIDMatch(t *testing.T) {
 	}
 }
 
-// startFakePtyAgent serves the CONNECT preamble then echoes input frames as
-// output and exits on "exit\n", for the single-sandbox PTY auth test.
-// PTY still uses the JSON vsock stream (port 52), so this fake speaks that
-// protocol directly.
+// startFakePtyAgent serves a gRPC PTY-capable Exec handler on sockPath for the
+// single-sandbox PTY auth test. PTY now uses the gRPC Exec stream (port 53).
 func startFakePtyAgent(t *testing.T, sockPath string) {
 	t.Helper()
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
-				if !sc.Scan() {
-					return
-				}
-				if strings.HasPrefix(sc.Text(), "CONNECT ") {
-					_, _ = c.Write([]byte("OK 52\n"))
-				}
-				if !sc.Scan() {
-					return // pty request line
-				}
-				for sc.Scan() {
-					var f vsock.PtyFrame
-					if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
-						return
-					}
-					if f.Kind == vsock.PtyInput && string(f.Data) == "exit\n" {
-						b, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 0})
-						_, _ = c.Write(append(b, '\n'))
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
+	startFakePtyGRPCUDS(t, sockPath)
 }
 
 // In single-sandbox mode the PTY upgrade authenticates against the single

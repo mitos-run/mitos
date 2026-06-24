@@ -43,7 +43,7 @@ type SandboxAPI struct {
 	// now is the clock used to stamp lastActivity. Defaults to time.Now;
 	// tests override it for determinism.
 	now func() time.Time
-	// unixFallback allows dialGuestGRPC (and dialStream in pty.go) to fall back
+	// unixFallback allows dialGuestGRPC to fall back
 	// to the agent's fixed local unix socket when the vsock UDS path does not
 	// exist. Opt-in: see EnableUnixFallback.
 	unixFallback bool
@@ -322,11 +322,10 @@ func (api *SandboxAPI) RegisterToken(sandboxID, token string) {
 	api.mu.Unlock()
 }
 
-// EnableUnixFallback lets dialGuestGRPC and dialStream (pty.go) fall back to
-// the guest agent's fixed local unix socket (/tmp/sandbox-agent-<port>.sock)
-// when the vsock UDS path does not exist. This supports the standalone
-// sandbox-server's local-testing workflow (agent running on the host, no
-// Firecracker).
+// EnableUnixFallback lets dialGuestGRPC fall back to the guest agent's fixed
+// local unix socket (/tmp/sandbox-agent-<port>.sock) when the vsock UDS path
+// does not exist. This supports the standalone sandbox-server's local-testing
+// workflow (agent running on the host, no Firecracker).
 //
 // forkd deliberately does NOT enable this: its vsock paths come from the
 // fork engine, and a fallback to a global socket could deliver claim-time
@@ -379,15 +378,13 @@ func (api *SandboxAPI) RegisterStreamPath(sandboxID, vsockPath string) {
 }
 
 // dialGuestGRPC opens a RAW net.Conn to the sandbox's guest gRPC server on
-// vsock.AgentGRPCPort, performing the Firecracker UDS CONNECT preamble. It reuses
-// the SAME per-sandbox vsock UDS path resolution as dialStream (streamPaths,
-// registered by RegisterStreamPath) so the gRPC runtime path and the legacy JSON
-// path address the same guest, just on a different in-guest port. The returned
-// conn is handed to vsock.DialGRPCOverConn to build the gRPC client.
+// vsock.AgentGRPCPort, performing the Firecracker UDS CONNECT preamble. It uses
+// the per-sandbox vsock UDS path stored in streamPaths (registered by
+// RegisterStreamPath or RegisterSandbox). The returned conn is handed to
+// vsock.DialGRPCOverConn to build the gRPC client.
 //
 // When the standalone unix fallback is enabled and the Firecracker UDS is
-// absent, it dials the guest's plain gRPC unix socket (no preamble), mirroring
-// dialStream's fallback.
+// absent, it dials the guest's plain gRPC unix socket (no preamble).
 func (api *SandboxAPI) dialGuestGRPC(sandboxID string) (net.Conn, error) {
 	api.mu.RLock()
 	path, ok := api.streamPaths[sandboxID]

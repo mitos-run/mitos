@@ -1,30 +1,32 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"net"
 	"sync"
+
+	"mitos.run/mitos/internal/sandboxrpc"
 )
 
 // defaultMaxForwards is the per-sandbox ceiling on concurrent OPEN port forwards
-// (issue #228). Each forward holds a host TCP listener plus one vsock tunnel
+// (issue #228). Each forward holds a host TCP listener plus one gRPC tunnel
 // goroutine pair per accepted connection, so an unbounded number would exhaust
 // host sockets and goroutines. It mirrors the streaming-exec ceiling intent
 // (production-blocker #2): a sandbox cannot exhaust host resources via forwards.
 const defaultMaxForwards = 16
 
 // portForward is one live host-side forward (issue #228): a host TCP listener on
-// loopback bridged over a per-connection vsock tunnel to a guest loopback port.
-// It tracks every accepted host connection plus the tunnel it opened so Close
-// tears the whole forward down with no goroutine or fd leak.
+// loopback bridged over a per-connection gRPC PortForward tunnel to a guest
+// loopback port. It tracks every accepted host connection so Close tears the
+// whole forward down with no goroutine or fd leak.
 type portForward struct {
 	guestPort int
 	listener  net.Listener
 	hostAddr  string
 
 	mu     sync.Mutex
-	conns  map[io.Closer]struct{}
+	conns  map[net.Conn]struct{}
 	closed bool
 }
 
@@ -37,11 +39,11 @@ func (api *SandboxAPI) SetMaxForwardsPerSandbox(n int) {
 }
 
 // ForwardPort opens a host TCP listener on 127.0.0.1:0 and bridges every
-// accepted connection over a fresh vsock tunnel to the guest's 127.0.0.1:
-// guestPort (issue #228). It returns the host address (host:port) the caller
-// dials. The listener and all its tunnels are tracked under sandboxID and torn
-// down by CloseForwards (which UnregisterSandbox calls on terminate), so no host
-// listener or tunnel goroutine outlives the sandbox.
+// accepted connection over a fresh gRPC PortForward tunnel to the guest's
+// 127.0.0.1:guestPort (issue #228). It returns the host address (host:port) the
+// caller dials. The listener and all its tunnels are tracked under sandboxID and
+// torn down by CloseForwards (which UnregisterSandbox calls on terminate), so no
+// host listener or tunnel goroutine outlives the sandbox.
 //
 // The host listener binds to loopback ONLY: the standalone server has no token
 // on this path (the same tokenless trust model as the rest of the standalone
@@ -88,7 +90,7 @@ func (api *SandboxAPI) ForwardPort(sandboxID string, guestPort int) (string, err
 		guestPort: guestPort,
 		listener:  lis,
 		hostAddr:  lis.Addr().String(),
-		conns:     make(map[io.Closer]struct{}),
+		conns:     make(map[net.Conn]struct{}),
 	}
 
 	api.mu.Lock()
@@ -108,9 +110,8 @@ func (api *SandboxAPI) ForwardPort(sandboxID string, guestPort int) (string, err
 }
 
 // acceptForward is the host listener accept loop for one forward: each accepted
-// host connection is bridged over a fresh vsock tunnel to the guest port. The
-// loop ends when the listener is closed (CloseForwards). It owns no shared state
-// beyond pf, which it guards for the conn registry.
+// host connection is bridged over a fresh gRPC PortForward tunnel to the guest
+// port. The loop ends when the listener is closed (CloseForwards).
 func (api *SandboxAPI) acceptForward(sandboxID string, pf *portForward) {
 	for {
 		hostConn, err := pf.listener.Accept()
@@ -121,62 +122,95 @@ func (api *SandboxAPI) acceptForward(sandboxID string, pf *portForward) {
 	}
 }
 
-// bridgeForwardConn opens a vsock tunnel to the guest port and splices the
-// accepted host connection to it bidirectionally. A tunnel open failure (the
-// guest port is not listening) closes the host connection with no hang. The host
-// connection and its tunnel are registered on pf so CloseForwards tears them
-// down, and deregistered when the bridge ends.
+// bridgeForwardConn opens a gRPC PortForward tunnel to the guest port and
+// splices the accepted host connection to it bidirectionally. A tunnel open
+// failure (the guest port is not listening) closes the host connection with no
+// hang. The host connection is tracked on pf so CloseForwards tears it down,
+// and deregistered when the bridge ends.
 func (api *SandboxAPI) bridgeForwardConn(sandboxID string, pf *portForward, hostConn net.Conn) {
 	defer hostConn.Close()
 
-	sc, err := api.dialStream(sandboxID)
-	if err != nil {
-		return // agent unreachable; the host connection is closed by the defer
+	// Register the host connection so CloseForwards can close it even mid-copy.
+	if !pf.trackConn(hostConn) {
+		return // the forward was closed between Accept and here
 	}
-	defer sc.Close()
+	defer pf.untrackConn(hostConn)
 
-	tun, err := sc.Tunnel(pf.guestPort)
+	// Dial a fresh gRPC PortForward stream to the guest. Use a background context
+	// so the tunnel lifetime is not tied to an HTTP request context; the tunnel
+	// is torn down by hostConn.Close() (tracked on pf) or CloseForwards.
+	g := newVsockGuestConn(api, sandboxID).(*vsockGuestConn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pfStream, err := g.PortForward(ctx, uint32(pf.guestPort))
 	if err != nil {
 		return // guest refused (port not listening); host connection closed
 	}
+	defer pfStream.Close()
 
-	// Register both closers so a teardown closes them even mid-copy.
-	if !pf.track(hostConn) {
-		return // the forward was closed between Accept and here
-	}
-	defer pf.untrack(hostConn)
-	if !pf.track(tun) {
-		return
-	}
-	defer pf.untrack(tun)
-
-	// Splice host<->tunnel. Each direction closes both ends when it finishes so a
-	// half-close promptly tears the other down. The bytes are never logged.
+	// Splice host<->tunnel bidirectionally. Both goroutines close both sides when
+	// they finish so a half-close promptly tears the other down. Bytes are never
+	// logged (secret hygiene).
 	var once sync.Once
 	closeBoth := func() {
 		once.Do(func() {
+			cancel()
+			pfStream.Close() //nolint:errcheck // teardown
 			hostConn.Close()
-			tun.Close()
 		})
 	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// Guest-to-host: receive gRPC frames and write raw bytes to the host conn.
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(tun, hostConn)
-		closeBoth()
+		defer closeBoth()
+		for {
+			frame, recvErr := pfStream.Recv()
+			if recvErr != nil {
+				return
+			}
+			if frame.Close {
+				return
+			}
+			if len(frame.Data) > 0 {
+				if _, werr := hostConn.Write(frame.Data); werr != nil {
+					return
+				}
+			}
+		}
 	}()
+
+	// Host-to-guest: read raw bytes from the host conn and send as gRPC frames.
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(hostConn, tun)
-		closeBoth()
+		defer closeBoth()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := hostConn.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				if serr := pfStream.Send(chunk); serr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
 	}()
+
 	wg.Wait()
 }
 
-// track registers c on the forward so a teardown can close it. It returns false
-// if the forward is already closed, in which case the caller must abandon c.
-func (pf *portForward) track(c io.Closer) bool {
+// trackConn registers c on the forward so a teardown can close it. It returns
+// false if the forward is already closed, in which case the caller must abandon
+// c.
+func (pf *portForward) trackConn(c net.Conn) bool {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
 	if pf.closed {
@@ -186,13 +220,13 @@ func (pf *portForward) track(c io.Closer) bool {
 	return true
 }
 
-func (pf *portForward) untrack(c io.Closer) {
+func (pf *portForward) untrackConn(c net.Conn) {
 	pf.mu.Lock()
 	delete(pf.conns, c)
 	pf.mu.Unlock()
 }
 
-// close shuts the listener and every tracked connection/tunnel for this forward.
+// close shuts the listener and every tracked connection for this forward.
 // Idempotent.
 func (pf *portForward) close() {
 	pf.mu.Lock()
@@ -201,7 +235,7 @@ func (pf *portForward) close() {
 		return
 	}
 	pf.closed = true
-	conns := make([]io.Closer, 0, len(pf.conns))
+	conns := make([]net.Conn, 0, len(pf.conns))
 	for c := range pf.conns {
 		conns = append(conns, c)
 	}
@@ -228,3 +262,7 @@ func (api *SandboxAPI) CloseForwards(sandboxID string) {
 		pf.close()
 	}
 }
+
+// portForwardStream is the interface used by bridgeForwardConn to splice bytes,
+// exposed for testing without a real gRPC connection.
+var _ sandboxrpc.PortForwardStream = (*grpcPortForwardStream)(nil)

@@ -7,9 +7,8 @@ package daemon
 // to the transport-neutral GuestConn frame types.
 //
 // This replaces daemonGuestConn (the JSON-bridge stub) as forkd's Connect
-// Sandbox GuestConn factory. The legacy JSON /v1/* handlers keep using the
-// JSON path (RunExecStream over vsock.AgentPort = 52); the guest serves BOTH
-// ports during the wire migration, so this change does not break the JSON SDK.
+// Sandbox GuestConn factory. All guest communication now uses AgentGRPCPort
+// (53); the legacy JSON port (52) is no longer used by any host-side caller.
 //
 // Connection lifecycle (no goroutine or fd leak):
 //   - Each GuestConn method opens a FRESH *grpc.ClientConn via dialGRPC, which
@@ -90,8 +89,43 @@ func (g *vsockGuestConn) Exec(ctx context.Context, open *sandboxv1.ExecOpen) (sa
 		return nil, fmt.Errorf("send exec open: %w", err)
 	}
 	// No more client messages for a non-PTY exec: close the send direction so the
-	// guest sees EOF on its input reader.
+	// guest sees EOF on its input reader. PTY callers use ExecPTY, which keeps
+	// the send direction open so stdin and resize frames can flow.
 	_ = stream.CloseSend()
+	return &grpcExecStream{cc: cc, stream: stream, release: release}, nil
+}
+
+// ExecPTY opens the guest Exec bidi stream in PTY mode and returns the raw
+// stream handle so the caller can send stdin and resize frames interactively.
+// Unlike Exec, the send direction is NOT closed after the open frame; the
+// caller owns the stream and must call Close when the session ends. The
+// concurrent-stream slot is acquired here and released via Close; a cap
+// rejection returns a recognisable error (same message as Exec) so callers can
+// map it to 429.
+func (g *vsockGuestConn) ExecPTY(ctx context.Context, open *sandboxv1.ExecOpen) (*grpcExecStream, error) {
+	release, ok := g.api.acquireStream(g.sandboxID)
+	if !ok {
+		return nil, fmt.Errorf("sandbox %q is at its concurrent exec-stream limit; close an existing stream before opening another", g.sandboxID)
+	}
+
+	cc, client, err := g.connect()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	stream, err := client.Exec(ctx)
+	if err != nil {
+		_ = cc.Close()
+		release()
+		return nil, fmt.Errorf("open guest PTY Exec stream: %w", err)
+	}
+	if err := stream.Send(&sandboxv1.ExecRequest{Msg: &sandboxv1.ExecRequest_Open{Open: open}}); err != nil {
+		_ = cc.Close()
+		release()
+		return nil, fmt.Errorf("send PTY exec open: %w", err)
+	}
+	// Do NOT call CloseSend here: the PTY bridge will send stdin and resize frames
+	// over the send direction for the session lifetime.
 	return &grpcExecStream{cc: cc, stream: stream, release: release}, nil
 }
 

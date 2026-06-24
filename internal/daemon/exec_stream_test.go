@@ -147,20 +147,20 @@ func TestExecStreamRequiresToken(t *testing.T) {
 func TestStreamPathRegisteredWithSandbox(t *testing.T) {
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb3", "vsock.sock")
-	// dialStream speaks AgentPort (52); use the dual UDS helper so the socket
-	// accepts both the JSON preamble (port 52) and gRPC (port 53).
-	startFakeGuestDualUDS(t, sock, nil, &fakeGuestSandbox{})
+	// Use the gRPC fake UDS so dialGuestGRPC (AgentGRPCPort 53) can connect.
+	startFakeGuestGRPCUDS(t, sock, &fakeGuestSandbox{})
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
 	if err := api.RegisterSandbox("sb3", sock); err != nil {
 		t.Fatal(err)
 	}
 	api.RegisterStreamPath("sb3", sock)
-	sc, err := api.dialStream("sb3")
+	// Verify the registered gRPC path is reachable via dialGuestGRPC.
+	conn, err := api.dialGuestGRPC("sb3")
 	if err != nil {
-		t.Fatalf("dialStream after register: %v", err)
+		t.Fatalf("dialGuestGRPC after register: %v", err)
 	}
-	sc.Close()
+	conn.Close()
 }
 
 // fakeGuestSandboxWithStderr overrides Exec to also emit a stderr chunk,
