@@ -1311,4 +1311,168 @@ git commit -s -m "feat(brand): add token-driven shell styles for nav, palette, t
 
 **Type consistency:** `Capabilities` is imported from `api.ts` everywhere; `RouteDef` / `NavGroupName` / `visibleRoutes` / `GROUP_ORDER` defined in Task 3 are used unchanged in Tasks 4, 5, 6; `createConsoleRouter(caps)` defined in Task 4 is consumed by Tasks 4 (helper), 5, 8; `useCapabilities()` defined in Task 2 is consumed by Tasks 5, 8; `useToast()` / `ToastProvider` defined in Task 7 are consumed in Task 8. `fuzzyMatch` is exported by Task 6 and unit-tested there. No signature drift found.
 
-**Out-of-B0 (deferred to later plans, intentionally not here):** instrument-cockpit charts and the live fork-tree (B1); rich Sandboxes detail tabs, real Members / Audit / Usage / Keys / Billing views (B2); SSO wizard, SCIM, audit retention / export, data-retention, RBAC, trust view (B3). The nav and routes for these exist now as gated entries rendering honest placeholders, so the shell is complete and the later phases drop their views into known slots.
+**Out-of-B0 (deferred to later plans, intentionally not here):** instrument-cockpit charts and the live fork-tree (B1); rich Sandboxes detail tabs, real Members / Audit / Usage / Keys / Billing views, Projects, and the user profile / account settings (B2); SSO wizard, SCIM, audit retention / export, data-retention, custom roles + per-project RBAC, trust view (B3). The nav and routes for these exist now as gated entries rendering honest placeholders, so the shell is complete and the later phases drop their views into known slots.
+
+---
+
+### Task 10: Responsive shell + accessibility foundation
+
+This task makes the shell fully responsive (desktop sidebar collapses to a mobile slide-over drawer) and accessible (WCAG 2.2 AA: keyboard, ARIA, reduced-motion), and adds an automated axe-core check. It is the foundation every later view inherits, per spec section 4.6. This is a hard B0 requirement, not polish.
+
+**Files:**
+- Modify: `web/app/src/nav/AppShell.tsx` (mobile menu button, drawer open state, ARIA landmarks/labels, close on Escape and route change)
+- Modify: `web/packages/brand/src/base.css` (responsive breakpoint, drawer + backdrop, 44px touch targets, `prefers-reduced-motion`)
+- Modify: `web/app/package.json` (add `vitest-axe`)
+- Test: `web/app/src/nav/AppShell.test.tsx` (extend: menu button toggles drawer; Escape closes; nav has an accessible name; menu button exposes `aria-expanded`/`aria-controls`)
+- Test: `web/app/src/nav/AppShell.a11y.test.tsx` (axe: no violations in closed and open states)
+- Modify: `web/app/e2e/smoke.spec.ts` (add a mobile-viewport assertion: the menu button is present and opens the drawer)
+
+**Interfaces:**
+- Consumes: `useCapabilities()`, `visibleRoutes`, `GROUP_ORDER`, `Division`, the router `Link` and `useRouterState` (or `useLocation`) from `@tanstack/react-router`.
+- Produces: an `AppShell` whose sidebar is a labelled `<nav aria-label="Primary">` landmark that is persistent on desktop and a focus-managed slide-over on mobile, toggled by a menu `<button aria-expanded aria-controls="primary-nav">`. No new exported symbol; behavior is internal.
+
+**Design constraints (apply throughout):**
+- Token-driven CSS only (`var(--*)`); the responsive breakpoint at `768px`; no raw hex (the existing scrim exception aside).
+- The drawer open/closed state is explicit React state (so it is testable in jsdom, which has no layout); CSS uses a state class plus a `@media (max-width: 768px)` query for presentation. On desktop (`min-width: 769px`) the menu button is `display: none` and the nav is always visible; on mobile the nav is a fixed slide-over hidden until the open class is set.
+- All nav links and the menu button meet a 44x44 px minimum touch target.
+- A `@media (prefers-reduced-motion: reduce)` block disables transitions/animations.
+
+- [ ] **Step 1: Add the axe dependency**
+
+```bash
+pnpm -C web/app add -D vitest-axe@^0.1.0 @types/node
+```
+
+If `vitest-axe@^0.1.0` does not resolve, use `jest-axe@^9.0.0` with `@types/jest-axe` instead and adapt the import in Step 6 (`expect(await axe(container)).toHaveNoViolations()`); document the choice in the report.
+
+- [ ] **Step 2: Write the failing drawer-behavior tests (append to `web/app/src/nav/AppShell.test.tsx`)**
+
+```tsx
+describe('AppShell responsive drawer', () => {
+  it('exposes a menu button that toggles the nav drawer and reports aria-expanded', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('closes the drawer on Escape', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('gives the primary nav an accessible name', async () => {
+    await renderAt('/sandboxes', caps)
+    expect(await screen.findByRole('navigation', { name: /primary/i })).toBeInTheDocument()
+  })
+})
+```
+
+(`caps`, `renderAt`, `userEvent`, `screen`, `waitFor` are already imported at the top of this file from Task 5.)
+
+- [ ] **Step 3: Run the tests and confirm they fail**
+
+Run: `pnpm -C web/app test src/nav/AppShell.test.tsx`
+Expected: FAIL (no menu button / no `aria-label="Primary"` yet).
+
+- [ ] **Step 4: Implement the responsive AppShell in `web/app/src/nav/AppShell.tsx`**
+
+Add `useState` for `drawerOpen`, a menu button, ARIA wiring, and close-on-Escape and close-on-route-change. The nav landmark gets `aria-label="Primary"` and `id="primary-nav"`; the menu button gets `aria-expanded={drawerOpen}` and `aria-controls="primary-nav"`. Close the drawer when the route changes (subscribe to the router location via `useRouterState({ select: s => s.location.pathname })` and reset `drawerOpen` to false in an effect keyed on it) and on Escape (window keydown listener, cleaned up on unmount). Apply a class to the nav reflecting open state (for example `nav-drawer ${drawerOpen ? 'nav-drawer-open' : ''}`) and render a backdrop when open that closes the drawer on click. Keep the existing groups/links/ownership badge. Preserve the existing loading guard. Use `var(--*)` tokens for any inline spacing (replace the loading state's `padding: 32` with `var(--space-6)` while here).
+
+The implementer writes this with the interface-design skill's craft; the tests above pin the behavior.
+
+- [ ] **Step 5: Run the behavior tests and confirm they pass**
+
+Run: `pnpm -C web/app test src/nav/AppShell.test.tsx`
+Expected: PASS (existing AppShell tests plus the three new ones).
+
+- [ ] **Step 6: Write the axe a11y test `web/app/src/nav/AppShell.a11y.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { waitFor, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+import * as matchers from 'vitest-axe/matchers'
+import { renderAt } from '../test/utils'
+import type { Capabilities } from '../api'
+
+expect.extend(matchers)
+
+const caps: Capabilities = {
+  edition: 'community', billing: false, signup: false, teams: true, idp: 'oidc',
+  orgSwitcher: false, secrets: { providers: ['kube'] }, proof: true, ownership: 'self-hosted',
+}
+
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+    const url = String(input)
+    if (url.endsWith('/console/capabilities')) {
+      return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    return Promise.resolve(new Response(JSON.stringify({ sandboxes: [], secrets: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+  })
+})
+
+describe('AppShell accessibility', () => {
+  it('has no axe violations with the drawer closed', async () => {
+    const { container } = await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Sandboxes' })).toBeInTheDocument())
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('has no axe violations with the drawer open', async () => {
+    const user = userEvent.setup()
+    const { container } = await renderAt('/sandboxes', caps)
+    await user.click(await screen.findByRole('button', { name: /menu/i }))
+    expect(await axe(container)).toHaveNoViolations()
+  })
+})
+```
+
+- [ ] **Step 7: Run the a11y test; fix any violations it reports**
+
+Run: `pnpm -C web/app test src/nav/AppShell.a11y.test.tsx`
+Expected: PASS. If axe reports a violation (missing label, contrast, button name), fix it in `AppShell.tsx` until clean. Do not suppress rules.
+
+- [ ] **Step 8: Add the responsive CSS to `web/packages/brand/src/base.css`**
+
+Append a token-driven responsive block: a `@media (max-width: 768px)` section that hides the desktop sidebar layout and renders `.nav-drawer` as a fixed, off-canvas slide-over (transform translateX) revealed by `.nav-drawer-open`, with a `.nav-backdrop` scrim (reuse the palette scrim color `rgba(4, 5, 10, 0.6)`); a `.menu-button` shown only on mobile (`display: none` at `min-width: 769px`); a rule ensuring `.nav-link` and `.menu-button` are at least `44px` tall; and a `@media (prefers-reduced-motion: reduce)` block that sets transitions/animations to none. No raw hex other than the scrim.
+
+- [ ] **Step 9: Add a mobile-viewport check to `web/app/e2e/smoke.spec.ts`**
+
+Add a second test that sets a mobile viewport and asserts the menu button opens the drawer:
+
+```ts
+test('mobile: menu button opens the nav drawer', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  const menu = page.getByRole('button', { name: /menu/i })
+  await expect(menu).toBeVisible()
+  await menu.click()
+  await expect(page.getByRole('navigation', { name: /primary/i })).toBeVisible()
+})
+```
+
+(This runs in CI against `cmd/console -dev`, like the existing smoke; it is best-effort locally.)
+
+- [ ] **Step 10: Full verification**
+
+Run: `pnpm -C web/app test` (must exit 0; all unit + a11y tests pass)
+Run: `pnpm -C web/app typecheck` (clean)
+Run: `pnpm -C web/app build` (succeeds, dist emitted)
+Run: `grep -rnP '\xe2\x80\x94|\xe2\x80\x93' web/app/src/nav/AppShell.tsx web/app/src/nav/AppShell.a11y.test.tsx web/packages/brand/src/base.css web/app/e2e/smoke.spec.ts` (empty)
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add web/app/src/nav/AppShell.tsx web/app/src/nav/AppShell.test.tsx web/app/src/nav/AppShell.a11y.test.tsx web/packages/brand/src/base.css web/app/package.json web/pnpm-lock.yaml web/app/e2e/smoke.spec.ts
+git commit -s -m "feat(console): responsive shell with mobile drawer and accessibility foundation"
+```
