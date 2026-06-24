@@ -1634,3 +1634,229 @@ async fn signal_nonexistent_pid_returns_not_found() {
         Ok(_) => panic!("expected error for non-existent pid, got Ok"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// PortForward conformance tests (Task 2.6)
+// ---------------------------------------------------------------------------
+
+/// PortForward echo roundtrip: start a loopback TCP echo server, open a
+/// PortForward to it, send bytes, confirm they echo back, then close cleanly.
+///
+/// This is the primary conformance gate for the PortForward RPC.
+#[tokio::test]
+async fn port_forward_echo_roundtrip() {
+    use sandbox_agent::sandbox_v1::{self, frame};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-portforward-echo.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Bind a loopback echo server on an OS-assigned port.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port() as u32;
+
+    // Spawn the echo server: accept one connection, copy it back.
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (mut r, mut w) = sock.split();
+        let _ = tokio::io::copy(&mut r, &mut w).await;
+    });
+
+    // Build the client stream: open frame then data frame then close.
+    let open_frame = sandbox_v1::Frame {
+        msg: Some(frame::Msg::Open(sandbox_v1::PortForwardOpen { port })),
+    };
+    let data_frame = sandbox_v1::Frame {
+        msg: Some(frame::Msg::Data(b"hello portforward".to_vec())),
+    };
+    let close_frame = sandbox_v1::Frame {
+        msg: Some(frame::Msg::Close(true)),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tx.send(open_frame).await.unwrap();
+    tx.send(data_frame).await.unwrap();
+    tx.send(close_frame).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .port_forward(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("PortForward must succeed on a listening port")
+        .into_inner();
+
+    tokio::pin!(stream);
+
+    // Collect all data frames from the server response stream.
+    let mut received = Vec::<u8>::new();
+    while let Some(frame_result) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.next(),
+    )
+    .await
+    .unwrap_or(None)
+    {
+        let f = frame_result.expect("PortForward stream frame must not be an error");
+        match f.msg {
+            Some(frame::Msg::Data(b)) => received.extend_from_slice(&b),
+            Some(frame::Msg::Close(_)) | None => break,
+            Some(frame::Msg::Open(_)) => {}
+        }
+    }
+
+    assert_eq!(
+        received,
+        b"hello portforward",
+        "PortForward must echo back the exact bytes sent",
+    );
+}
+
+/// PortForward to a non-listening port must return a gRPC error (Unavailable
+/// or Internal) with a dial-refused message; it must NOT hang.
+#[tokio::test]
+async fn port_forward_refused_port_returns_error() {
+    use sandbox_agent::sandbox_v1::{self, frame};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-portforward-refused.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Find a free port by binding then immediately closing it, so nothing listens.
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = probe.local_addr().unwrap().port() as u32;
+    drop(probe);
+
+    let open_frame = sandbox_v1::Frame {
+        msg: Some(frame::Msg::Open(sandbox_v1::PortForwardOpen { port: dead_port })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_frame).await.unwrap();
+    drop(tx);
+
+    // The RPC must return an error promptly (within 10 seconds, well inside the
+    // 5-second dial timeout) for a connection-refused scenario.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.port_forward(tokio_stream::wrappers::ReceiverStream::new(rx)),
+    )
+    .await
+    .expect("PortForward refused must not hang");
+
+    // Either the initial RPC call fails with a status error, or the stream is
+    // opened but the first message is an error. Accept both forms.
+    match result {
+        Err(status) => {
+            // Direct RPC-level error: must not be Unimplemented.
+            assert_ne!(
+                status.code(),
+                tonic::Code::Unimplemented,
+                "refused port must not return Unimplemented; got {:?}",
+                status.code(),
+            );
+        }
+        Ok(response) => {
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.next(),
+            )
+            .await
+            .expect("first frame must arrive within 10s");
+            let status = first
+                .expect("stream must have at least one item")
+                .expect_err("first frame must be an error for a refused port");
+            assert_ne!(
+                status.code(),
+                tonic::Code::Unimplemented,
+                "refused port must not return Unimplemented; got {:?}",
+                status.code(),
+            );
+        }
+    }
+}
+
+/// PortForward with an invalid port (0 and 65536) must return InvalidArgument.
+#[tokio::test]
+async fn port_forward_invalid_port_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::{self, frame};
+    use tokio_stream::StreamExt;
+
+    for bad_port in [0u32, 65536] {
+        let sock = format!("/tmp/agent-conformance-portforward-badport-{bad_port}.sock");
+        let mut client = start_server_and_client(&sock).await;
+
+        let open_frame = sandbox_v1::Frame {
+            msg: Some(frame::Msg::Open(sandbox_v1::PortForwardOpen { port: bad_port })),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(open_frame).await.unwrap();
+        drop(tx);
+
+        let result = client
+            .port_forward(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .await;
+
+        match result {
+            Err(status) => {
+                assert_eq!(
+                    status.code(),
+                    tonic::Code::InvalidArgument,
+                    "port {bad_port} must return InvalidArgument; got {:?}",
+                    status.code(),
+                );
+            }
+            Ok(response) => {
+                let stream = response.into_inner();
+                tokio::pin!(stream);
+                let first = stream.next().await.expect("at least one item");
+                let status = first.expect_err("must be an error for invalid port");
+                assert_eq!(
+                    status.code(),
+                    tonic::Code::InvalidArgument,
+                    "port {bad_port} must return InvalidArgument; got {:?}",
+                    status.code(),
+                );
+            }
+        }
+    }
+}
+
+/// PortForward with no open frame (first frame is data) must return
+/// InvalidArgument: the protocol requires the first frame to carry `open`.
+#[tokio::test]
+async fn port_forward_missing_open_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::{self, frame};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-portforward-noopen.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Send a data frame as the first frame (no open).
+    let bad_first = sandbox_v1::Frame {
+        msg: Some(frame::Msg::Data(b"too early".to_vec())),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(bad_first).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .port_forward(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    match result {
+        Err(status) => {
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+        Ok(response) => {
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one item");
+            let status = first.expect_err("must be an error when open is missing");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+}

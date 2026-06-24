@@ -35,6 +35,11 @@ pub mod watch;
 /// and libc::kill delivery.
 pub mod processes;
 
+/// PortForward RPC implementation (Task 2.6): bidirectional TCP splice to
+/// a guest loopback port. Dials 127.0.0.1:<port> only; client supplies the
+/// port number; the host is hardcoded for security.
+pub mod portforward;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -191,9 +196,12 @@ impl Sandbox for SandboxService {
 
     async fn port_forward(
         &self,
-        _request: Request<tonic::Streaming<sandbox_v1::Frame>>,
+        request: Request<tonic::Streaming<sandbox_v1::Frame>>,
     ) -> Result<Response<Self::PortForwardStream>, Status> {
-        unimplemented_stream("PortForward")
+        let inbound = request.into_inner();
+        let rx = portforward::port_forward(inbound).await?;
+        let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     // --- Budget-gated self-service --------------------------------------------
