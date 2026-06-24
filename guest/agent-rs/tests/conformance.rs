@@ -1351,6 +1351,190 @@ async fn exec_stderr_returned() {
 }
 
 // ---------------------------------------------------------------------------
+// ExecStream conformance tests (Task 4.2)
+// ---------------------------------------------------------------------------
+
+/// ExecStream must stream stdout bytes then send ExecExit with exit_code=0 for
+/// a simple printf. This is the primary conformance gate for the server-streaming
+/// exec path.
+#[tokio::test]
+async fn exec_stream_echo_returns_stdout_and_exit_zero() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stream-echo.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .exec_stream(sandbox_v1::ExecStreamRequest {
+            command: "printf 'hello from exec_stream'".into(),
+            cwd: "/tmp".into(),
+            timeout_seconds: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("ExecStream must succeed")
+        .into_inner();
+
+    let mut out = String::new();
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stdout(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            exec_response::Msg::Exit(e) => {
+                exit_code = e.exit_code;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(out, "hello from exec_stream");
+    assert_eq!(exit_code, 0);
+}
+
+/// ExecStream must propagate non-zero exit codes from the child process.
+#[tokio::test]
+async fn exec_stream_nonzero_exit_code_propagated() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stream-exit.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .exec_stream(sandbox_v1::ExecStreamRequest {
+            command: "exit 42".into(),
+            cwd: "/tmp".into(),
+            timeout_seconds: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("ExecStream must succeed")
+        .into_inner();
+
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        if let exec_response::Msg::Exit(e) = msg.unwrap().msg.unwrap() {
+            exit_code = e.exit_code;
+            break;
+        }
+    }
+    assert_eq!(exit_code, 42);
+}
+
+/// ExecStream must stream stderr bytes for commands that write to stderr.
+#[tokio::test]
+async fn exec_stream_stderr_returned() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stream-stderr.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .exec_stream(sandbox_v1::ExecStreamRequest {
+            command: "printf 'errout' >&2".into(),
+            cwd: "/tmp".into(),
+            timeout_seconds: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("ExecStream must succeed")
+        .into_inner();
+
+    let mut stderr_out = String::new();
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stderr(b) => {
+                stderr_out.push_str(&String::from_utf8_lossy(&b));
+            }
+            exec_response::Msg::Exit(e) => {
+                exit_code = e.exit_code;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(stderr_out, "errout");
+    assert_eq!(exit_code, 0);
+}
+
+/// ExecStream with timeout_seconds=1 on a command that sleeps 30 s must
+/// return exit_code=124 (the conventional timeout exit code).
+#[tokio::test]
+async fn exec_stream_timeout_returns_124() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stream-timeout.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .exec_stream(sandbox_v1::ExecStreamRequest {
+            command: "sleep 30".into(),
+            cwd: "/tmp".into(),
+            timeout_seconds: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("ExecStream must succeed")
+        .into_inner();
+
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        if let exec_response::Msg::Exit(e) = msg.unwrap().msg.unwrap() {
+            exit_code = e.exit_code;
+            break;
+        }
+    }
+    assert_eq!(exit_code, 124, "timeout must produce exit_code=124, got {exit_code}");
+}
+
+/// ExecStream with args set must return Unimplemented (argv exec not yet
+/// implemented in this slice, matching the Go agent and bidi Exec).
+#[tokio::test]
+async fn exec_stream_args_returns_unimplemented() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stream-args.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let result = client
+        .exec_stream(sandbox_v1::ExecStreamRequest {
+            command: "echo".into(),
+            args: vec!["hello".into()],
+            cwd: "/tmp".into(),
+            timeout_seconds: 10,
+            ..Default::default()
+        })
+        .await;
+
+    match result {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                Code::Unimplemented,
+                "expected Unimplemented for args, got {:?}",
+                status.code()
+            );
+        }
+        Ok(response) => {
+            use tokio_stream::StreamExt;
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one message");
+            let status = first.expect_err("must be an error");
+            assert_eq!(status.code(), Code::Unimplemented);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Processes + Signal conformance tests (Task 2.5)
 // ---------------------------------------------------------------------------
 

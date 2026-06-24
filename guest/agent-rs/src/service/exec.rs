@@ -56,8 +56,68 @@ const STREAM_CHUNK_BYTES: usize = 32 << 10;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points
 // ---------------------------------------------------------------------------
+
+/// Handle the ExecStream server-streaming RPC.
+///
+/// Takes a single ExecStreamRequest (command, cwd, env, timeout; no stdin, no
+/// pty), spawns the command and streams ExecResponse stdout/stderr chunks
+/// followed by a terminal ExecExit frame to the caller via the returned
+/// BoxStream. Reuses exec_shell_nostin, which is the same spawn and drain
+/// machinery as exec_shell but without the stdin forwarding task (ExecStream
+/// has no stdin by proto contract).
+///
+/// Security invariants (identical to bidi Exec non-PTY path):
+/// - env values are never logged (only key count is observable).
+/// - The child runs in its own process group so kills propagate to children.
+/// - Timeout -> exit code 124; signal-killed -> exit code -1.
+/// - On any path (normal exit, timeout, client cancellation), the process
+///   group is killed and reaped before this function returns.
+///
+/// argv (args non-empty) exec is deferred and returns Unimplemented, matching
+/// the Go agent and the bidi Exec path.
+#[allow(clippy::result_large_err)]
+pub async fn exec_stream_handler(
+    env: Arc<ConfiguredEnv>,
+    request: tonic::Request<sandbox_v1::ExecStreamRequest>,
+) -> Result<tonic::Response<super::BoxStream<sandbox_v1::ExecResponse>>, Status> {
+    let req = request.into_inner();
+
+    // argv (shell-less) exec is not yet implemented, matching the Go agent.
+    if !req.args.is_empty() {
+        return Err(Status::unimplemented(
+            "exec_stream: argv (shell-less) exec is not implemented in this slice; \
+             pass the command as a single shell string",
+        ));
+    }
+
+    let command = req.command;
+    let cwd = if req.cwd.is_empty() {
+        "/workspace".to_string()
+    } else {
+        req.cwd
+    };
+    let timeout_secs = if req.timeout_seconds > 0 {
+        req.timeout_seconds as u64
+    } else {
+        DEFAULT_TIMEOUT_SECS
+    };
+    let req_env = req.env;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+    tokio::spawn(async move {
+        if let Err(status) =
+            exec_shell_nostdin(env, command, cwd, timeout_secs, req_env, tx.clone()).await
+        {
+            let _ = tx.send(Err(status)).await;
+        }
+    });
+
+    let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Ok(tonic::Response::new(Box::pin(out_stream)))
+}
 
 /// Handle the Exec bidi stream.
 ///
@@ -128,7 +188,158 @@ fn build_merged_env(
 }
 
 // ---------------------------------------------------------------------------
-// Non-PTY shell exec
+// Non-PTY shell exec (no stdin): used by ExecStream
+// ---------------------------------------------------------------------------
+
+/// Spawn /bin/sh -c command with merged env, stream stdout/stderr as
+/// ExecResponse chunks, then send a terminal ExecExit. No stdin is connected
+/// (stdin is /dev/null semantics: the child inherits Stdio::null). This is
+/// the ExecStream exec engine; it is structurally equivalent to exec_shell
+/// but omits the stdin forwarder task entirely and has no client-gone
+/// cancellation token (ExecStream is server-streaming: client disconnection
+/// is signalled by the tokio task future being dropped, which in turn drops
+/// tx and the drain tasks will break on send errors).
+///
+/// Security invariants match exec_shell:
+/// - Env values are never logged.
+/// - Child runs in its own process group (process_group(0)).
+/// - Timeout -> exit code 124; signal-killed -> exit code -1.
+async fn exec_shell_nostdin(
+    env: Arc<ConfiguredEnv>,
+    command: String,
+    cwd: String,
+    timeout_secs: u64,
+    req_env: Vec<sandbox_v1::EnvVar>,
+    tx: mpsc::Sender<Result<sandbox_v1::ExecResponse, Status>>,
+) -> Result<(), Status> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    let configured = env.snapshot().await;
+    let merged_env = build_merged_env(&configured, &req_env);
+
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&cwd)
+        .envs(merged_env.iter().filter_map(|kv| {
+            kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+        }))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| {
+            let _ = tx.try_send(Ok(exit_frame(1, 0.0, format!("start: {e}"))));
+            Status::internal(format!("exec_stream: spawn: {e}"))
+        })?;
+
+    let child_pid = child.id().unwrap_or(0);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let (drain_done_tx, drain_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Stdout drain task.
+    let tx_out = tx.clone();
+    let stdout_task = tokio::spawn(async move {
+        if let Some(mut pipe) = stdout_pipe {
+            let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Some(chunk) = buf.get(..n) {
+                            let chunk = chunk.to_vec();
+                            if tx_out
+                                .send(Ok(sandbox_v1::ExecResponse {
+                                    msg: Some(RespMsg::Stdout(chunk)),
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Stderr drain task.
+    let tx_err = tx.clone();
+    let stderr_task = tokio::spawn(async move {
+        if let Some(mut pipe) = stderr_pipe {
+            let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Some(chunk) = buf.get(..n) {
+                            let chunk = chunk.to_vec();
+                            if tx_err
+                                .send(Ok(sandbox_v1::ExecResponse {
+                                    msg: Some(RespMsg::Stderr(chunk)),
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Drain joiner: fires drain_done when both pipes are exhausted.
+    let drain_join = tokio::spawn(async move {
+        let _ = tokio::join!(stdout_task, stderr_task);
+        let _ = drain_done_tx.send(());
+    });
+
+    // Wait/watchdog: drain done OR timeout -> kill, reap, send ExecExit.
+    let tx_exit = tx.clone();
+    let wait_task = tokio::spawn(async move {
+        let timed_out;
+        tokio::select! {
+            _ = drain_done_rx => {
+                timed_out = false;
+            }
+            _ = tokio::time::sleep(timeout) => {
+                timed_out = true;
+                crate::sys::pty::kill_pgroup(child_pid);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+
+        let exit_code = match child.wait().await {
+            Ok(status) => {
+                if timed_out {
+                    124
+                } else {
+                    status.code().unwrap_or(-1)
+                }
+            }
+            Err(_) => -1,
+        };
+
+        let exec_time_ms = start.elapsed().as_micros() as f64 / 1000.0;
+        tracing::info!(exit_code, exec_time_ms, "exec_stream: process exited");
+        let _ = tx_exit
+            .send(Ok(exit_frame(exit_code, exec_time_ms, String::new())))
+            .await;
+    });
+
+    let _ = tokio::join!(wait_task, drain_join);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Non-PTY shell exec (with stdin): used by bidi Exec
 // ---------------------------------------------------------------------------
 
 async fn exec_shell(
