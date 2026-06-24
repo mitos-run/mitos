@@ -46,6 +46,12 @@ pub mod portforward;
 /// client cancels. No argv or environ is ever read.
 pub mod vitals;
 
+/// RunCode and RunCodeStream RPC implementations (Task 2.8): drives the
+/// persistent Python kernel driver subprocess via JSON-lines stdin/stdout;
+/// maps driverEvent kinds to RunCodeResponse frames; serializes executions
+/// via the shared Arc<Mutex<KernelManager>>.
+pub mod runcode;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -253,16 +259,28 @@ impl Sandbox for SandboxService {
 
     async fn run_code(
         &self,
-        _request: Request<tonic::Streaming<sandbox_v1::RunCodeRequest>>,
+        request: Request<tonic::Streaming<sandbox_v1::RunCodeRequest>>,
     ) -> Result<Response<Self::RunCodeStream>, Status> {
-        unimplemented_stream("RunCode")
+        let kernel = Arc::clone(&self.kernel);
+        let stream = request.into_inner();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            if let Err(status) = runcode::run_code_handler(kernel, stream, tx.clone()).await {
+                let _ = tx.send(Err(status)).await;
+            }
+        });
+
+        let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     async fn run_code_stream(
         &self,
-        _request: Request<sandbox_v1::RunCodeStreamRequest>,
+        request: Request<sandbox_v1::RunCodeStreamRequest>,
     ) -> Result<Response<Self::RunCodeStreamStream>, Status> {
-        unimplemented_stream("RunCodeStream")
+        runcode::run_code_stream_handler(Arc::clone(&self.kernel), request).await
     }
 
     // --- Filesystem helpers ---------------------------------------------------

@@ -56,10 +56,12 @@ pub mod sandbox_v1 {
 pub mod init;
 
 // ---------------------------------------------------------------------------
-// Kernel manager stub (task 1.3; filled in by Phase 2 RunCode task).
+// Kernel manager (task 2.8: RunCode + kernel/ module).
 // ---------------------------------------------------------------------------
 
-/// In-guest code-execution kernel (Jupyter-style). Stub at this stage.
+/// In-guest code-execution kernel (Jupyter-style). Drives the persistent
+/// Python kernel driver subprocess via JSON-lines stdin/stdout; serializes
+/// executions; maps driverEvent kinds to RunCodeResponse frames.
 pub mod kernel;
 
 // ---------------------------------------------------------------------------
