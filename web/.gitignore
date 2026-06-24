@@ -4,3 +4,7 @@ node_modules/
 app/dist/
 packages/*/dist/
 *.tsbuildinfo
+
+# Playwright e2e artifacts.
+app/test-results/
+app/playwright-report/

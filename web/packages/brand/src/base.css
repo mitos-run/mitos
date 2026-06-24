@@ -106,3 +106,178 @@ code, kbd, pre, .mono { font-family: var(--mono); }
 .dot-fork { background: var(--magenta); }
 .dot-parent { background: var(--cyan); }
 .dot-warn { background: var(--amber); }
+
+/* Console shell: nav, command palette, toasts, skeletons. Token-driven. */
+.nav-link {
+  color: var(--ink-2);
+  text-decoration: none;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.nav-link:hover { color: var(--ink); background: var(--field-1); }
+.nav-link-active { color: var(--ink); background: var(--field-2); }
+
+.palette-backdrop {
+  position: fixed; inset: 0; background: rgba(4, 5, 10, 0.6);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh;
+}
+.palette {
+  width: min(560px, 92vw); background: var(--field-1);
+  border: 1px solid var(--hairline-strong); border-radius: var(--r-lg); overflow: hidden;
+}
+.palette input {
+  width: 100%; padding: var(--space-4); background: transparent; border: 0;
+  color: var(--ink); font: inherit; border-bottom: 1px solid var(--hairline);
+}
+.palette ul { list-style: none; margin: 0; padding: var(--space-2); max-height: 40vh; overflow: auto; }
+.palette li button {
+  width: 100%; text-align: left; padding: var(--space-2) var(--space-3);
+  background: transparent; border: 0; color: var(--ink); border-radius: var(--r-sm); cursor: pointer;
+}
+.palette li button:hover { background: var(--field-2); }
+
+.toast-stack { display: flex; flex-direction: column; gap: var(--space-2); }
+.toast {
+  padding: var(--space-2) var(--space-4); border-radius: var(--r-md);
+  border: 1px solid var(--hairline-strong); background: var(--field-1); color: var(--ink);
+}
+.toast-ok { border-color: var(--green); }
+.toast-error { border-color: var(--magenta); }
+
+.skeleton-row { animation: pulse 1.2s var(--ease) infinite; }
+@keyframes pulse { 50% { opacity: 0.5; } }
+
+/* Screen-reader only: visually hidden but accessible to assistive technology. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Minimum touch targets: nav links and the menu button must be >= 44x44 px. */
+.nav-link {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.menu-button {
+  min-width: 44px;
+  min-height: 44px;
+  display: none; /* hidden on desktop; shown by the mobile media query below */
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: var(--space-2);
+  transition: background var(--dur) var(--ease);
+}
+
+.menu-button:hover { background: var(--field-1); }
+.menu-button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* Top bar: visible on mobile only (desktop sidebar already shows the brand). */
+.top-bar {
+  display: none;
+}
+
+/* Mobile drawer: nav slides in from the left as an off-canvas layer. The
+   transition moves from -100% to 0 on open; a backdrop dims the content. */
+@media (max-width: 768px) {
+  /* Show the top bar (hamburger + inline brand mark). */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    padding: 0 var(--space-4);
+    background: var(--field);
+    border-bottom: 1px solid var(--hairline);
+    z-index: var(--z-overlay, 200);
+  }
+
+  .top-bar-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Reveal the hamburger button. */
+  .menu-button {
+    display: flex;
+  }
+
+  /* Offset main content below the fixed top bar. */
+  .app-shell > main {
+    padding-top: calc(56px + var(--space-4));
+  }
+
+  /* The primary nav becomes a fixed slide-over drawer. */
+  .nav-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: var(--z-drawer, 300);
+    width: 280px;
+    background: var(--field);
+    border-right: 1px solid var(--hairline);
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform var(--dur) var(--ease);
+    padding-top: calc(var(--space-5) + 56px);
+  }
+
+  .nav-drawer.nav-drawer-open {
+    transform: translateX(0);
+  }
+
+  /* Dimmed scrim behind the open drawer; closes on click (wired in React). */
+  .nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-backdrop, 250);
+    background: rgba(4, 5, 10, 0.6);
+  }
+
+  /* Hide the inline nav brand on desktop (the top bar shows it on mobile). */
+  .nav-brand {
+    display: none;
+  }
+}
+
+/* Desktop: persistent sidebar, no top bar, no drawer behavior. */
+@media (min-width: 769px) {
+  .menu-button { display: none; }
+  .top-bar { display: none; }
+  .nav-backdrop { display: none; }
+  .nav-drawer { transform: none; transition: none; }
+  .nav-brand { display: flex; }
+}
+
+/* Respect reduced-motion: disable all transitions and animations. */
+@media (prefers-reduced-motion: reduce) {
+  .nav-drawer,
+  .menu-button,
+  .nav-link,
+  .btn,
+  .skeleton-row {
+    transition: none;
+    animation: none;
+  }
+}
