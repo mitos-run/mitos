@@ -69,6 +69,28 @@ describe('ForkTree view', () => {
     renderForkTree()
     await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
     const link = screen.getByRole('link', { name: /fork-a/i })
-    expect(link).toHaveAttribute('href', expect.stringContaining('fork-a'))
+    expect(link).toHaveAttribute('href', '/sandboxes/fork-a')
+  })
+
+  it('shows an error state when the fetch fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/forktree')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'internal server error' }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    })
+    renderForkTree()
+    await waitFor(() =>
+      expect(screen.getByText(/fork tree unavailable/i)).toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/no forks yet/i)).not.toBeInTheDocument()
   })
 })

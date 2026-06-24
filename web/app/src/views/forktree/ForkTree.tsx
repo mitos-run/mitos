@@ -26,7 +26,19 @@ function nodeClass(node: PositionedNode): string {
 }
 
 export function ForkTree() {
-  const { data, isLoading } = useForkTree()
+  const { data, isLoading, isError } = useForkTree()
+
+  if (isError) {
+    return (
+      <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
+        <h2 style={{ marginBottom: 'var(--space-4)' }}>Fork tree</h2>
+        <EmptyState
+          title="Fork tree unavailable"
+          body="The fork tree could not be read for this organization."
+        />
+      </section>
+    )
+  }
 
   if (isLoading) {
     return (
