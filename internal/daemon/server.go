@@ -258,18 +258,6 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	// Register the sandbox vsock path unconditionally so checkSandboxRegistered
-	// passes on both real and mock engines. On a real engine deliverConfig calls
-	// RegisterSandbox again with the same path (idempotent). On a mock engine
-	// deliverConfig is a no-op and this is the only registration call, so the
-	// sandbox HTTP API can verify that the fork was accepted (the subsequent agent
-	// dial will fail because no VM exists, which is the correct behavior).
-	if err := s.sandboxAPI.RegisterSandbox(result.SandboxID, result.VsockPath); err != nil {
-		_ = s.engine.Terminate(result.SandboxID)
-		activeSandboxes.Dec()
-		return nil, fmt.Errorf("sandbox %s: register vsock path: %w", result.SandboxID, err)
-	}
-
 	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork, result.VolumeMounts); err != nil {
 		// A sandbox that reports Ready without its secrets is a lie; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
@@ -401,15 +389,6 @@ func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID 
 
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
-
-	// Register the sandbox vsock path unconditionally for the same reason as in
-	// Fork: checkSandboxRegistered must pass on both real and mock engines.
-	// notifyForkedRunning calls RegisterSandbox again on a real engine (idempotent).
-	if err := s.sandboxAPI.RegisterSandbox(result.SandboxID, result.VsockPath); err != nil {
-		_ = s.engine.Terminate(result.SandboxID)
-		activeSandboxes.Dec()
-		return nil, fmt.Errorf("sandbox %s: register vsock path: %w", result.SandboxID, err)
-	}
 
 	if err := s.notifyForkedRunning(result.SandboxID, result.VsockPath); err != nil {
 		// A live fork that did not reseed shares its parent's RNG state; reap it.
