@@ -1,0 +1,15 @@
+[
+  {
+    "name": "grpc_ping_round_trip",
+    "unit": "ms",
+    "summary": {
+      "count": 200,
+      "min_ns": 297040,
+      "p50_ns": 338399,
+      "p90_ns": 392062,
+      "p99_ns": 475373,
+      "max_ns": 587223,
+      "mean_ns": 347773
+    }
+  }
+]

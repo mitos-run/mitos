@@ -1,0 +1,15 @@
+[
+  {
+    "name": "fork_to_first_grpc_ping",
+    "unit": "ms",
+    "summary": {
+      "count": 200,
+      "min_ns": 73032555,
+      "p50_ns": 115313147,
+      "p90_ns": 134645260,
+      "p99_ns": 146898753,
+      "max_ns": 156592066,
+      "mean_ns": 114083320
+    }
+  }
+]
