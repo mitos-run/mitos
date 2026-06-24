@@ -6,6 +6,7 @@
 //
 // No unsafe code in this module; tonic-generated code is isolated in lib.rs.
 
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -54,6 +55,9 @@ pub struct SandboxService {
     pub env: Arc<ConfiguredEnv>,
     /// The in-guest code-execution kernel, started lazily on first RunCode.
     pub kernel: Arc<Mutex<KernelManager>>,
+    /// Workspace root for path allowlist checks in Archive, Upload, and Watch.
+    /// Defaults to /workspace in production; tests pass their own temp root.
+    pub workspace_root: PathBuf,
 }
 
 /// Return an Unimplemented status for any RPC stub. The message names the
@@ -159,14 +163,14 @@ impl Sandbox for SandboxService {
         &self,
         request: Request<sandbox_v1::ArchiveRequest>,
     ) -> Result<Response<Self::ArchiveStream>, Status> {
-        archive::archive(request).await
+        archive::archive(&self.workspace_root, request).await
     }
 
     async fn watch(
         &self,
         request: Request<sandbox_v1::WatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        watch::watch(request).await
+        watch::watch(&self.workspace_root, request).await
     }
 
     // --- Processes and network ------------------------------------------------
@@ -267,6 +271,6 @@ impl Sandbox for SandboxService {
         &self,
         request: Request<tonic::Streaming<sandbox_v1::UploadRequest>>,
     ) -> Result<Response<sandbox_v1::UploadResult>, Status> {
-        archive::upload(request).await
+        archive::upload(&self.workspace_root, request).await
     }
 }

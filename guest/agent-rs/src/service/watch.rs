@@ -38,7 +38,7 @@
 // MOVED_TO (a move into the directory) arrives as a Create event. Both map
 // correctly via the table above without requiring explicit cookie handling.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind, RecursiveMode, Watcher as _};
@@ -61,13 +61,14 @@ const WATCH_CHAN_BOUND: usize = 64;
 /// client cancels (the response stream is dropped). Mirrors the Go Watch RPC
 /// in grpc_runtime.go.
 pub async fn watch(
+    workspace_root: &Path,
     request: tonic::Request<sandbox_v1::WatchRequest>,
 ) -> Result<Response<BoxStream<sandbox_v1::FsEvent>>, Status> {
     let req = request.into_inner();
     let raw_path = req.path.clone();
 
     // Workspace allowlist check (mirrors pathAllowed in grpc_runtime.go:54-56).
-    if !path_allowed(&raw_path) {
+    if !path_allowed(workspace_root, &raw_path) {
         return Err(Status::permission_denied(format!(
             "watch: path {:?} is outside the workspace allowlist",
             raw_path

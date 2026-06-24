@@ -47,7 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env = Arc::new(ConfiguredEnv::new());
     let kernel = Arc::new(Mutex::new(KernelManager::new()));
 
-    let service = SandboxService { env, kernel };
+    let service = SandboxService {
+        env,
+        kernel,
+        workspace_root: std::path::PathBuf::from("/workspace"),
+    };
 
     tracing::info!(
         port = AGENT_GRPC_PORT,

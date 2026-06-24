@@ -53,38 +53,6 @@ use crate::service::BoxStream;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Workspace allowlist root. Only /workspace and its descendants are accessible
-/// to Archive and Upload. This matches workspaceRoot in tardir.go.
-///
-/// The test helper set_workspace_root_for_test overrides this at runtime so
-/// conformance tests can point the allowlist at /tmp without writing to the
-/// real /workspace. The variable is static and mutated via a raw pointer only
-/// in test builds; production never calls the setter.
-static WORKSPACE_ROOT: std::sync::OnceLock<std::sync::RwLock<String>> =
-    std::sync::OnceLock::new();
-
-fn workspace_root() -> String {
-    WORKSPACE_ROOT
-        .get_or_init(|| std::sync::RwLock::new("/workspace".to_owned()))
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_else(|_| "/workspace".to_owned())
-}
-
-/// Override the workspace root for tests. MUST only be called from test code.
-/// The function is `pub` so conformance tests can access it via
-/// `sandbox_agent::service::archive::set_workspace_root_for_test`.
-///
-/// This function is safe: it acquires a RwLock before writing. Tests must not
-/// run archive/upload tests in parallel with each other (use distinct socket
-/// paths and reset the root at the end of each test).
-pub fn set_workspace_root_for_test(root: &str) {
-    let lock = WORKSPACE_ROOT.get_or_init(|| std::sync::RwLock::new("/workspace".to_owned()));
-    if let Ok(mut guard) = lock.write() {
-        *guard = root.to_owned();
-    }
-}
-
 /// Maximum tar size in bytes: 64 MiB, matching MaxTarBytes in
 /// internal/vsock/protocol.go. Exceeding this limit causes ResourceExhausted
 /// so a large workspace or a malicious tar cannot exhaust guest memory.
@@ -106,11 +74,10 @@ const CHUNK_BYTES: usize = 32 << 10;
 /// `starts_with("/workspace")` while the OS resolves it to "/etc". The loop below
 /// mirrors filepath.Clean in Go: ParentDir pops the last stack entry (and errors
 /// if the stack would go above root), CurDir is skipped, everything else is pushed.
-pub(super) fn path_allowed(p: &str) -> bool {
+pub(super) fn path_allowed(root: &Path, p: &str) -> bool {
     if p.is_empty() {
         return false;
     }
-    let root = workspace_root();
     let mut normalized: Vec<std::ffi::OsString> = Vec::new();
     for c in Path::new(p).components() {
         match c {
@@ -122,8 +89,7 @@ pub(super) fn path_allowed(p: &str) -> bool {
         }
     }
     let clean: PathBuf = normalized.iter().collect();
-    let ws = Path::new(&root);
-    clean == ws || clean.starts_with(ws)
+    clean == root || clean.starts_with(root)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +163,7 @@ fn safe_join(dst: &Path, name: &Path) -> Result<PathBuf, AgentError> {
 /// Tars the subtree in a spawn_blocking task, then streams the bytes in CHUNK_BYTES
 /// frames, ending with Chunk{eof: true}.
 pub async fn archive(
+    workspace_root: &Path,
     request: tonic::Request<sandbox_v1::ArchiveRequest>,
 ) -> Result<Response<BoxStream<sandbox_v1::Chunk>>, Status> {
     let req = request.into_inner();
@@ -211,7 +178,7 @@ pub async fn archive(
     let path = req.path.clone();
 
     // Workspace allowlist check.
-    if !path_allowed(&path) {
+    if !path_allowed(workspace_root, &path) {
         return Err(Status::permission_denied(format!(
             "archive: path {:?} is outside the workspace transfer allowlist",
             path
@@ -421,6 +388,7 @@ fn tar_dir(dir: &str) -> Result<Vec<u8>, AgentError> {
 /// spawn_blocking task using safe_join to reject path traversal. Returns
 /// UploadResult{bytes_written} on success.
 pub async fn upload(
+    workspace_root: &Path,
     request: tonic::Request<tonic::Streaming<sandbox_v1::UploadRequest>>,
 ) -> Result<Response<sandbox_v1::UploadResult>, Status> {
     let mut stream = request.into_inner();
@@ -442,7 +410,7 @@ pub async fn upload(
     };
 
     // Workspace allowlist check.
-    if !path_allowed(&dest) {
+    if !path_allowed(workspace_root, &dest) {
         return Err(Status::permission_denied(format!(
             "upload: dest {:?} is outside the workspace transfer allowlist",
             dest
@@ -588,32 +556,28 @@ mod tests {
 
     #[test]
     fn path_allowed_workspace_root_exact() {
-        set_workspace_root_for_test("/workspace");
-        assert!(path_allowed("/workspace"));
+        assert!(path_allowed(Path::new("/workspace"), "/workspace"));
     }
 
     #[test]
     fn path_allowed_workspace_subpath() {
-        set_workspace_root_for_test("/workspace");
-        assert!(path_allowed("/workspace/project/main.py"));
+        assert!(path_allowed(Path::new("/workspace"), "/workspace/project/main.py"));
     }
 
     #[test]
     fn path_allowed_rejects_etc() {
-        set_workspace_root_for_test("/workspace");
-        assert!(!path_allowed("/etc"));
+        assert!(!path_allowed(Path::new("/workspace"), "/etc"));
     }
 
     #[test]
     fn path_allowed_rejects_workspace_prefix_but_different_dir() {
         // /workspaceExtra must not pass just because it starts with /workspace.
-        set_workspace_root_for_test("/workspace");
-        assert!(!path_allowed("/workspaceExtra"));
+        assert!(!path_allowed(Path::new("/workspace"), "/workspaceExtra"));
     }
 
     #[test]
     fn path_allowed_rejects_empty() {
-        assert!(!path_allowed(""));
+        assert!(!path_allowed(Path::new("/workspace"), ""));
     }
 
     // C1: path traversal via ".." must be rejected by path_allowed.
@@ -623,28 +587,24 @@ mod tests {
     // lexically (like filepath.Clean) before the workspace comparison.
     #[test]
     fn path_allowed_rejects_dotdot_traversal() {
-        set_workspace_root_for_test("/workspace");
-        assert!(!path_allowed("/workspace/../etc"));
+        assert!(!path_allowed(Path::new("/workspace"), "/workspace/../etc"));
     }
 
     #[test]
     fn path_allowed_rejects_dotdot_absolute() {
-        set_workspace_root_for_test("/workspace");
-        assert!(!path_allowed("/etc"));
+        assert!(!path_allowed(Path::new("/workspace"), "/etc"));
     }
 
     #[test]
     fn path_allowed_workspace_root_exact_after_normalization() {
-        set_workspace_root_for_test("/workspace");
         // "/workspace/." normalizes to "/workspace" and must be allowed.
-        assert!(path_allowed("/workspace/."));
+        assert!(path_allowed(Path::new("/workspace"), "/workspace/."));
     }
 
     #[test]
     fn path_allowed_workspace_subpath_after_normalization() {
-        set_workspace_root_for_test("/workspace");
         // "/workspace/a/../b" normalizes to "/workspace/b" and must be allowed.
-        assert!(path_allowed("/workspace/a/../b"));
+        assert!(path_allowed(Path::new("/workspace"), "/workspace/a/../b"));
     }
 
     #[test]
