@@ -8,22 +8,18 @@ set -euo pipefail
 #   ./guest/rootfs/build.sh [output_path] [size_mb]
 #
 # Agent implementation selector:
-#   AGENT_IMPL=go   (default, unset means go) - builds the Go guest agent
-#                   (guest/agent) as /init. This is the production default;
-#                   the Go agent serves BOTH the legacy JSON protocol on
-#                   vsock port 52 (AgentPort) and the gRPC protocol on
-#                   vsock port 53 (AgentGRPCPort).
-#   AGENT_IMPL=rust - builds the Rust guest agent (guest/agent-rs) as /init.
-#                   The Rust agent serves ONLY gRPC on vsock port 53.
-#                   IMPORTANT: baking the Rust agent as /init makes the gRPC
-#                   surface work (bench, conformance), but the production
-#                   fork/exec/file host-side callers still speak the legacy
-#                   JSON protocol on port 52. A rootfs baked with AGENT_IMPL=rust
-#                   will NOT function on the production data path until the
-#                   JSON->gRPC host-caller migration (SP1.5) lands. Use only for
-#                   gRPC bench and conformance testing. See hack/rust-agent-cutover.md.
+#   AGENT_IMPL=rust (default, unset means rust) - builds the Rust guest agent
+#                   (guest/agent-rs) as /init. This is the production default;
+#                   the Rust agent serves ONLY gRPC on vsock port 53 (AgentGRPCPort).
+#                   SP1.5 is merged: all host-side callers speak gRPC on port 53.
+#                   See guest/agent-rs/ and docs/fork-correctness.md.
+#   AGENT_IMPL=go   - builds the Go guest agent (guest/agent) as /init.
+#                   The Go agent serves BOTH gRPC (port 53) and the legacy JSON
+#                   protocol (port 52). Use AGENT_IMPL=go as the fallback/opt-out
+#                   while the Go agent has not yet been removed (Phase E). See
+#                   hack/rust-agent-cutover.md for rollback instructions.
 #
-# Re-baking with AGENT_IMPL=go (or with AGENT_IMPL unset) restores the Go agent.
+# Re-baking with AGENT_IMPL=go restores the Go agent as /init.
 # The selector is reversible: only /init changes; the rest of the rootfs is identical.
 #
 # Produces: rootfs.ext4 with:
@@ -42,8 +38,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR=$(mktemp -d)
 MOUNT_DIR="${WORK_DIR}/mnt"
 
-# AGENT_IMPL: "go" (default) or "rust" (opt-in gRPC-only build).
-AGENT_IMPL="${AGENT_IMPL:-go}"
+# AGENT_IMPL: "rust" (default, production) or "go" (fallback/opt-out).
+AGENT_IMPL="${AGENT_IMPL:-rust}"
 
 cleanup() {
     umount "$MOUNT_DIR" 2>/dev/null || true
@@ -51,18 +47,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "$AGENT_IMPL" = "rust" ]; then
-    echo "==> Building Rust guest agent (static musl binary, gRPC-only, vsock port 53)"
-    echo "    NOTE: this agent serves ONLY gRPC (port 53). The production host-side"
-    echo "    callers still speak the legacy JSON protocol (port 52). This rootfs is"
-    echo "    for gRPC bench and conformance only. See hack/rust-agent-cutover.md."
+if [ "$AGENT_IMPL" = "go" ]; then
+    echo "==> Building Go guest agent (fallback/opt-out, static binary, JSON+gRPC, ports 52+53)"
+    cd "$PROJECT_ROOT"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "${WORK_DIR}/agent" ./guest/agent/
+else
+    echo "==> Building Rust guest agent (production default, static musl binary, gRPC-only, vsock port 53)"
     cd "$PROJECT_ROOT/guest/agent-rs"
     cargo build --release --target x86_64-unknown-linux-musl --features vsock
     cp "$PROJECT_ROOT/guest/agent-rs/target/x86_64-unknown-linux-musl/release/sandbox-agent" "${WORK_DIR}/agent"
-else
-    echo "==> Building Go guest agent (static binary, JSON+gRPC, ports 52+53)"
-    cd "$PROJECT_ROOT"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "${WORK_DIR}/agent" ./guest/agent/
 fi
 
 echo "==> Creating ext4 image (${SIZE_MB}MB)"

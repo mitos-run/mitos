@@ -356,7 +356,17 @@ jobs:
 
       - name: Build guest agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/mitos-test/agent ./guest/agent/
+          # Phase D (#310): the Rust agent is now the production default.
+          # Build a static musl binary and place it at /tmp/mitos-test/agent so
+          # every downstream phase (tmpl-smoke, inject-and-exec, gRPC proof,
+          # SDK example, ws-smoke, fork-correctness, etc.) boots the Rust agent
+          # as /init. All host callers speak gRPC on vsock port 53 (SP1.5 merged).
+          # AGENT_IMPL=go or the Go build below restores the Go agent as fallback.
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
+          cd guest/agent-rs
+          cargo build --release --target x86_64-unknown-linux-musl --features vsock
+          cp target/x86_64-unknown-linux-musl/release/sandbox-agent /tmp/mitos-test/agent
           ls -lh /tmp/mitos-test/agent
 
       # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
@@ -504,7 +514,7 @@ jobs:
           echo "Checking vsock UDS exists..."
           ls -la $VSOCK_UDS || echo "WARNING: vsock UDS not found"
 
-          echo "Testing vsock connection to guest agent on port 52..."
+          echo "Testing vsock connection to guest agent (gRPC, port 53)..."
           go build -o /tmp/test-agent ./cmd/test-agent/
           timeout 30 /tmp/test-agent "$VSOCK_UDS" || {
             echo "=== FAILURE: serial log ==="
@@ -543,15 +553,13 @@ jobs:
       # relative "vsock.sock" used for fork-correctness, which relies on Firecracker
       # cwd resolution): this phase boots a fresh single VM, not a forked restore.
       #
-      # NON-BLOCKING (continue-on-error) for now: the guest gRPC SERVER boots
-      # cleanly and the runtime logic is covered by unit and in-process gRPC
-      # tests, but the host to Firecracker-vsock to guest gRPC TRANSPORT is not
-      # yet proven end to end here: it currently fails with a broken pipe during
-      # the gRPC handshake over the Firecracker vsock device (the net.Pipe unit
-      # tests do not exercise the vsock CONNECT preamble plus the HTTP/2 preface).
-      # The legacy JSON-lines runtime path on AgentPort still gates above and
-      # remains the live path. Tracked as a follow-up of issue #24; make this
-      # phase gate again once the transport is green.
+      # NON-BLOCKING (continue-on-error) for now: the Rust agent is the
+      # production default (Phase D, #310) and test-agent gates the gRPC exec
+      # path above; grpc-exec-smoke additionally proves STREAMING and PTY
+      # semantics via a separate driver over the same vsock gRPC transport.
+      # Kept non-blocking until this phase has been green on KVM CI for one
+      # full run (tracked as a follow-up of issue #24). Remove continue-on-error
+      # once the transport is consistently proven end to end here.
       - name: gRPC runtime protocol proof, streaming Exec and interactive PTY over vsock gRPC
         continue-on-error: true
         timeout-minutes: 8
