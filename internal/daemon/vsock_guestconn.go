@@ -129,7 +129,7 @@ func (s *grpcExecStream) Recv() (*sandboxrpc.ExecFrame, error) {
 		if spawnErr := m.Exit.GetError(); spawnErr != "" {
 			return nil, fmt.Errorf("guest exec failed: %s", spawnErr)
 		}
-		return &sandboxrpc.ExecFrame{Done: true, ExitCode: m.Exit.GetExitCode()}, nil
+		return &sandboxrpc.ExecFrame{Done: true, ExitCode: m.Exit.GetExitCode(), ExecTimeMs: m.Exit.GetExecTimeMs()}, nil
 	default:
 		return nil, fmt.Errorf("guest Exec sent an unexpected frame type")
 	}

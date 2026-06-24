@@ -835,6 +835,7 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 	}
 	defer stream.Close()
 	var exitCode int
+	var execTimeMs float64
 	for {
 		frame, ferr := stream.Recv()
 		if ferr == io.EOF {
@@ -845,6 +846,7 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 		}
 		if frame.Done {
 			exitCode = int(frame.ExitCode)
+			execTimeMs = frame.ExecTimeMs
 			break
 		}
 		if len(frame.Stdout) > 0 {
@@ -858,7 +860,7 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 			}
 		}
 	}
-	return &vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: exitCode}, nil
+	return &vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: exitCode, ExecTimeMs: execTimeMs}, nil
 }
 
 func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) {
@@ -880,17 +882,37 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): reject a
-	// NEW stream when the sandbox is already at the cap, BEFORE writing the 200
-	// header or dialing the gRPC connection. Existing streams are never touched.
-	// Checked at OPEN, off the activate path.
-	release, ok := api.acquireStream(req.Sandbox)
-	if !ok {
-		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
-			WithContext(map[string]any{"sandbox": req.Sandbox}))
+	// Open the exec stream BEFORE writing the 200 header so a cap rejection
+	// (vsockGuestConn.Exec is the single point of slot acquisition) surfaces as
+	// a clean 429 envelope rather than a terminal frame inside a 200 body.
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = defaultExecTimeoutSeconds
+	}
+	g := newVsockGuestConn(api, req.Sandbox).(*vsockGuestConn)
+	open := &sandboxv1.ExecOpen{
+		Command:        req.Command,
+		Cwd:            req.WorkingDir,
+		TimeoutSeconds: int32(timeout),
+	}
+	for k, v := range req.Env {
+		open.Env = append(open.Env, &sandboxv1.EnvVar{Key: k, Value: v})
+	}
+	stream, err := g.Exec(r.Context(), open)
+	if err != nil {
+		// vsockGuestConn.Exec returns a recognisable "concurrent exec-stream limit"
+		// message when the per-sandbox slot cap is full; map that to the typed 429
+		// so callers can branch. Any other open failure (dial, vsock) maps to 503.
+		if strings.Contains(err.Error(), "concurrent exec-stream limit") {
+			writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+				WithContext(map[string]any{"sandbox": req.Sandbox}))
+		} else {
+			writeAPIErr(w, apierr.Get(apierr.CodeExecFailed).WithCause(fmt.Sprintf("exec failed: %v", err)).
+				WithContext(map[string]any{"sandbox": req.Sandbox}))
+		}
 		return
 	}
-	defer release()
+	defer stream.Close()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
@@ -904,22 +926,49 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		return rc.Flush()
 	}
 
-	exit, err := api.runExecStream(r.Context(), req, func(stream vsock.StreamName, data []byte) error {
-		return writeLine(map[string]any{"stream": string(stream), "data": data})
-	})
-	if err != nil {
+	var exitCode int
+	var execTimeMs float64
+	var streamErr error
+	for {
+		frame, ferr := stream.Recv()
+		if ferr == io.EOF {
+			break
+		}
+		if ferr != nil {
+			streamErr = ferr
+			break
+		}
+		if frame.Done {
+			exitCode = int(frame.ExitCode)
+			execTimeMs = frame.ExecTimeMs
+			break
+		}
+		if len(frame.Stdout) > 0 {
+			if werr := writeLine(map[string]any{"stream": string(vsock.StreamStdout), "data": frame.Stdout}); werr != nil {
+				streamErr = werr
+				break
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			if werr := writeLine(map[string]any{"stream": string(vsock.StreamStderr), "data": frame.Stderr}); werr != nil {
+				streamErr = werr
+				break
+			}
+		}
+	}
+	if streamErr != nil {
 		// The stream has already started; emit a terminal error frame rather
 		// than an HTTP status (status was sent 200 with the first byte). The
 		// message carries actionable text and never echoes secrets.
-		_ = writeLine(map[string]any{"exit_code": 1, "error": fmt.Sprintf("exec stream failed: %v", err)})
+		_ = writeLine(map[string]any{"exit_code": 1, "error": fmt.Sprintf("exec stream failed: %v", streamErr)})
 		return
 	}
-	_ = writeLine(map[string]any{"exit_code": exit.ExitCode, "exec_time_ms": exit.ExecTimeMs, "error": exit.Error})
+	_ = writeLine(map[string]any{"exit_code": exitCode, "exec_time_ms": execTimeMs})
 
 	api.auditor.Record(AuditEvent{
 		SandboxID: req.Sandbox,
 		Op:        "exec_stream",
-		Detail:    fmt.Sprintf("exit=%d cmd=%s", exit.ExitCode, truncateCommand(req.Command)),
+		Detail:    fmt.Sprintf("exit=%d cmd=%s", exitCode, truncateCommand(req.Command)),
 		OK:        true,
 	})
 }
@@ -1192,15 +1241,24 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Map gRPC FileInfo entries to the legacy vsock.FileEntry shape so existing
-	// SDK callers see the same JSON structure.
+	// SDK callers see the same JSON structure, including mode and modified_at
+	// which the gRPC FileInfo carries and the legacy JSON entry always exposed.
 	type legacyEntry struct {
-		Name  string `json:"name"`
-		IsDir bool   `json:"is_dir"`
-		Size  int64  `json:"size"`
+		Name       string `json:"name"`
+		IsDir      bool   `json:"is_dir"`
+		Size       int64  `json:"size"`
+		Mode       uint32 `json:"mode"`
+		ModifiedAt int64  `json:"modified_at"`
 	}
 	entries := make([]legacyEntry, 0, len(result.Entries))
 	for _, e := range result.Entries {
-		entries = append(entries, legacyEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size})
+		entries = append(entries, legacyEntry{
+			Name:       e.Name,
+			IsDir:      e.IsDir,
+			Size:       e.Size,
+			Mode:       e.Mode,
+			ModifiedAt: e.ModifiedAtUnix,
+		})
 	}
 	writeJSON(w, map[string]any{"entries": entries})
 }

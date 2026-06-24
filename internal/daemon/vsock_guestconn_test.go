@@ -42,10 +42,12 @@ type fakeGuestSandbox struct {
 
 	files map[string][]byte // path -> content, for ReadFile/WriteFile round-trip
 
-	// execStdout/execExit configure the scripted Exec reply. When execStdout is
-	// empty it defaults to "hello grpc\n" and execExit defaults to 7.
+	// execStdout/execExit/execTimeMs configure the scripted Exec reply. When
+	// execStdout is empty it defaults to "hello grpc\n" and execExit defaults to
+	// 7. execTimeMs is forwarded on the ExecExit frame.
 	execStdout string
 	execExit   int32
+	execTimeMs float64
 
 	// runCodeResponses, when set, is the sequence of RunCodeResponse messages
 	// the scripted RunCode handler sends before closing the stream. When nil,
@@ -79,7 +81,7 @@ func (s *fakeGuestSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
 	if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(out)}}); err != nil {
 		return err
 	}
-	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: exit}}})
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: exit, ExecTimeMs: s.execTimeMs}}})
 }
 
 // ReadFile streams the stored content for the requested path as one Chunk then eof.

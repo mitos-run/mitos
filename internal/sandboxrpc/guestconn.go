@@ -87,8 +87,8 @@ type RunCodeStream interface {
 }
 
 // ExecFrame is one output event from a guest exec: either a stdout/stderr chunk
-// or the terminal exit. When Done is true the ExitCode field is valid and the
-// stream is exhausted.
+// or the terminal exit. When Done is true the ExitCode and ExecTimeMs fields
+// are valid and the stream is exhausted.
 type ExecFrame struct {
 	// Stdout carries bytes written to the process stdout. Empty unless this
 	// is a stdout chunk (Stderr and Done are both false).
@@ -96,11 +96,15 @@ type ExecFrame struct {
 	// Stderr carries bytes written to the process stderr. Empty unless this
 	// is a stderr chunk (Stdout and Done are both false).
 	Stderr []byte
-	// Done is true for the terminal frame. ExitCode is valid only when Done
-	// is true.
+	// Done is true for the terminal frame. ExitCode and ExecTimeMs are valid
+	// only when Done is true.
 	Done bool
 	// ExitCode is the process exit code, valid only when Done is true.
 	ExitCode int32
+	// ExecTimeMs is the guest-reported wall-clock execution time in
+	// milliseconds, valid only when Done is true. Carried from the guest
+	// proto ExecExit.exec_time_ms field; 0 when the guest did not report it.
+	ExecTimeMs float64
 }
 
 // ExecStream is the handle returned by GuestConn.Exec. Recv returns successive

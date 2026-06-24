@@ -105,6 +105,13 @@ func (api *SandboxAPI) handleVitals(w http.ResponseWriter, r *http.Request) {
 
 	// Map gRPC GuestVitals to vsock.VitalsResponse for wire compatibility.
 	// CpuStealPercent is [0,100]; StealFraction is [0,1].
+	//
+	// Note: VitalsResponse.SampleWindowMs and ProcessEntry.CPUJiffies are
+	// intentionally absent (always 0) on the gRPC vitals path. The guest proto
+	// GuestVitals (sandbox.v1) does not carry a sample_window_ms field, and
+	// ProcessInfo does not carry cpu_jiffies; these fields were JSON-only in the
+	// legacy path. No test or SDK should assert non-zero values for them on the
+	// gRPC path.
 	v := vsock.VitalsResponse{}
 	if sample != nil {
 		v.StealFraction = sample.CpuStealPercent / 100.0
@@ -114,12 +121,14 @@ func (api *SandboxAPI) handleVitals(w http.ResponseWriter, r *http.Request) {
 			v.MemAvailableKB = v.MemTotalKB - v.MemUsedKB
 		}
 		v.BalloonReclaimedKB = uint64(sample.MemBalloonBytes) / 1024
+		// SampleWindowMs not provided by gRPC GuestVitals; remains 0.
 	}
 	if pl != nil {
 		for _, p := range pl.GetProcesses() {
 			v.Processes = append(v.Processes, vsock.ProcessEntry{
-				PID:   int(p.Pid),
-				Comm:  p.Command,
+				PID:  int(p.Pid),
+				Comm: p.Command,
+				// CPUJiffies not provided by gRPC ProcessInfo; remains 0.
 				State: p.State,
 				RSSKB: uint64(p.RssBytes) / 1024,
 			})

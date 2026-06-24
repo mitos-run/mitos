@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -28,6 +29,7 @@ const ptySubprotocol = "mitos.pty.v1"
 func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
 	api.mu.RLock()
 	path, ok := api.streamPaths[sandboxID]
+	unixFallback := api.unixFallback
 	api.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("sandbox %s: no stream path registered", sandboxID)
@@ -36,10 +38,19 @@ func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
 		return nil, fmt.Errorf("sandbox %s: empty stream path", sandboxID)
 	}
 	sc, err := vsock.DialStreamUnix(path)
-	if err != nil {
-		return nil, fmt.Errorf("dial stream for sandbox %s: %w", sandboxID, err)
+	if err == nil {
+		return sc, nil
 	}
-	return sc, nil
+	// In standalone sandbox-server mode the vsock UDS may not exist; fall back
+	// to the guest agent's fixed local unix socket, matching the behaviour of
+	// dialGuestGRPC (sandbox_api.go). Only enabled when EnableUnixFallback is set.
+	if unixFallback && errors.Is(err, fs.ErrNotExist) {
+		sc, ferr := vsock.DialStreamUnix(fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort))
+		if ferr == nil {
+			return sc, nil
+		}
+	}
+	return nil, fmt.Errorf("dial stream for sandbox %s: %w", sandboxID, err)
 }
 
 // ptyAuth authenticates a PTY WebSocket upgrade. Unlike requireBearer (which
