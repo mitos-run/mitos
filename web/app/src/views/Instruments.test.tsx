@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Instruments } from './Instruments'
+import { fmtBytes } from '../api'
 
 function wrap(ui: React.ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -21,8 +22,15 @@ describe('Instruments cockpit', () => {
     wrap(<Instruments />)
     await waitFor(() => expect(screen.getByText('27')).toBeInTheDocument())
     expect(screen.getByText(/Activate P50/i)).toBeInTheDocument()
+    // P99 tile
     expect(screen.getByText(/Activate P99/i)).toBeInTheDocument()
+    expect(screen.getByText('41')).toBeInTheDocument()
+    // Forks served tile
     expect(screen.getByText(/Forks served/i)).toBeInTheDocument()
     expect(screen.getByText('10')).toBeInTheDocument()
+    // CoW savings tile: mock returns cow_savings_bytes: 2415919104
+    expect(screen.getByText(fmtBytes(2415919104))).toBeInTheDocument()
+    // Marginal bytes per fork tile: mock returns marginal_bytes_per_fork: 3145728
+    expect(screen.getByText(fmtBytes(3145728))).toBeInTheDocument()
   })
 })

@@ -1,11 +1,12 @@
 // Behavior test for ForkTree: renders the accessible table with one row per
-// fork-tree node, and links each id row to /sandboxes/{id}. The component is
-// rendered directly (not via a route) using a minimal query + router harness
-// so Link and useNavigate have the context they need. The /forks route is
-// wired in Task 8; the route-level navigation assertion lives in the
+// fork-tree node. Each node id links to /sandboxes (the list route). B2 will
+// deep-link to the sandbox detail view once that route exists. The component
+// is rendered directly (not via a route) using a minimal query + router
+// harness so Link and useNavigate have the context they need. The /forks route
+// is wired in Task 8; the route-level navigation assertion lives in the
 // 'ForkTree route' describe block below.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render } from '@testing-library/react'
+import { render, fireEvent } from '@testing-library/react'
 import { waitFor, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
@@ -63,6 +64,11 @@ beforeEach(() => {
         new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }),
       )
     }
+    if (url.endsWith('/console/sandboxes')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ sandboxes: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
     return Promise.resolve(
       new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }),
     )
@@ -84,11 +90,21 @@ describe('ForkTree view', () => {
     expect(screen.getByRole('link', { name: 'fork-a' })).toBeInTheDocument()
   })
 
-  it('links each id cell to /sandboxes/{id}', async () => {
-    renderForkTree()
-    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+  it('node id links resolve to the sandboxes list route (not a dead-end)', async () => {
+    // Render the full app at /forks so navigation to /sandboxes actually
+    // works. This proves the link resolves to a real route rather than the
+    // not-found fallback. B2 will replace /sandboxes with /sandboxes/$id
+    // once the sandbox detail route exists.
+    await renderAt('/forks', caps)
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree nodes/i })).toBeInTheDocument())
     const link = screen.getByRole('link', { name: /fork-a/i })
-    expect(link).toHaveAttribute('href', '/sandboxes/fork-a')
+    // Confirm the href points at the list route, not the non-existent detail route.
+    expect(link).toHaveAttribute('href', '/sandboxes')
+    // Click the link and confirm the Sandboxes view appears (real route resolved).
+    fireEvent.click(link)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /sandboxes/i })).toBeInTheDocument())
+    // The not-found fallback must NOT appear.
+    expect(screen.queryByText(/not found/i)).not.toBeInTheDocument()
   })
 
   it('shows an error state when the fetch fails', async () => {
@@ -115,10 +131,11 @@ describe('ForkTree view', () => {
 })
 
 describe('ForkTree route', () => {
-  it('mounts at /forks and a node links to its sandbox', async () => {
+  it('mounts at /forks and table is labelled Fork tree nodes', async () => {
     await renderAt('/forks', caps) // caps + fetch mock from the top of this file
-    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree nodes/i })).toBeInTheDocument())
+    // Node id links point at the sandboxes list; B2 will add the detail route.
     const link = screen.getByRole('link', { name: /fork-a/i })
-    expect(link).toHaveAttribute('href', expect.stringContaining('fork-a'))
+    expect(link).toHaveAttribute('href', '/sandboxes')
   })
 })

@@ -132,7 +132,7 @@ export function ForkTree() {
       {/* Accessible table: one row per node. This is the screen-reader source
           of truth; the SVG above is aria-hidden and adds no information. */}
       <div style={{ overflowX: 'auto' }}>
-        <table className="tbl" aria-label="Fork tree">
+        <table className="tbl" aria-label="Fork tree nodes">
           <thead>
             <tr>
               <th scope="col">ID</th>
@@ -146,9 +146,9 @@ export function ForkTree() {
             {data.nodes.map((node) => (
               <tr key={node.id}>
                 <td>
-                  <Link to="/sandboxes/$id" params={{ id: node.id }}>
-                    {node.id}
-                  </Link>
+                  {/* Link to the sandboxes list. B2 will deep-link to the
+                      specific sandbox detail view once that route exists. */}
+                  <Link to="/sandboxes">{node.id}</Link>
                 </td>
                 <td>{node.parent_id || '-'}</td>
                 <td>{node.phase}</td>
