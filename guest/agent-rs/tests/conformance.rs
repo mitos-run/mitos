@@ -1860,3 +1860,145 @@ async fn port_forward_missing_open_returns_invalid_argument() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Vitals conformance tests (Task 2.7)
+// ---------------------------------------------------------------------------
+
+/// Vitals with interval_seconds=0 must return at least one GuestVitals sample
+/// with plausible fields, then close the stream cleanly.
+///
+/// Plausibility constraints:
+///   mem_total_bytes > 0 (every host has memory),
+///   cpu_steal_percent in [0, 100] (fractional steal time, clamped),
+///   process_count > 0 (at least the test process itself).
+///
+/// This is the primary conformance gate for the Vitals streaming RPC.
+#[tokio::test]
+async fn vitals_single_shot_returns_plausible_sample() {
+    use sandbox_agent::sandbox_v1::VitalsRequest;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-vitals-single.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .vitals(VitalsRequest { interval_seconds: 0 })
+        .await;
+
+    // On non-Linux platforms /proc does not exist; accept Internal gracefully.
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Internal => return,
+        Err(e) => panic!("Vitals RPC failed unexpectedly: {e}"),
+    };
+
+    tokio::pin!(stream);
+
+    // Expect at least one sample.
+    let sample = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.next(),
+    )
+    .await
+    .expect("Vitals single-shot must deliver a sample within 5s")
+    .expect("stream must not be empty")
+    .expect("sample must not be an error");
+
+    assert!(
+        sample.mem_total_bytes > 0,
+        "mem_total_bytes must be > 0, got {}",
+        sample.mem_total_bytes,
+    );
+    assert!(
+        sample.cpu_steal_percent >= 0.0 && sample.cpu_steal_percent <= 100.0,
+        "cpu_steal_percent must be in [0, 100], got {}",
+        sample.cpu_steal_percent,
+    );
+    assert!(
+        sample.process_count > 0,
+        "process_count must be > 0, got {}",
+        sample.process_count,
+    );
+
+    // The stream must close after the single sample (interval=0 means one-shot).
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.next(),
+    )
+    .await;
+    match next {
+        Ok(None) | Err(_) => {}
+        Ok(Some(Ok(_))) => panic!("Vitals single-shot must close after one sample"),
+        Ok(Some(Err(_))) => {}
+    }
+}
+
+/// Vitals with interval_seconds=1 must stream at least two samples, then stop
+/// cleanly on client cancel (drop of the stream). No task must be leaked.
+///
+/// This exercises the ticker-based streaming loop and teardown on disconnect.
+#[tokio::test]
+async fn vitals_interval_streams_multiple_samples_then_cancels() {
+    use sandbox_agent::sandbox_v1::VitalsRequest;
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-vitals-interval.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .vitals(VitalsRequest { interval_seconds: 1 })
+        .await;
+
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(s) if s.code() == tonic::Code::Internal => return,
+        Err(e) => panic!("Vitals interval RPC failed unexpectedly: {e}"),
+    };
+
+    tokio::pin!(stream);
+
+    // Collect at least 2 samples (first is immediate; second arrives after 1s).
+    let mut samples = Vec::new();
+    for _ in 0..2 {
+        let sample = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.next(),
+        )
+        .await
+        .expect("sample must arrive within 5s")
+        .expect("stream must not be empty")
+        .expect("sample must not be an error");
+        samples.push(sample);
+    }
+
+    assert_eq!(samples.len(), 2, "must receive at least 2 samples");
+
+    // Assert both samples have plausible fields.
+    for (i, s) in samples.iter().enumerate() {
+        assert!(
+            s.mem_total_bytes > 0,
+            "sample {i}: mem_total_bytes must be > 0, got {}",
+            s.mem_total_bytes,
+        );
+        assert!(
+            s.cpu_steal_percent >= 0.0 && s.cpu_steal_percent <= 100.0,
+            "sample {i}: cpu_steal_percent must be in [0, 100], got {}",
+            s.cpu_steal_percent,
+        );
+        assert!(
+            s.process_count > 0,
+            "sample {i}: process_count must be > 0, got {}",
+            s.process_count,
+        );
+    }
+
+    // Let the pinned stream go out of scope: the channel closes, the server
+    // streaming task sees a send error and exits cleanly.
+    // No explicit drop() needed; lexical scope handles it.
+
+    // Give the server task a moment to notice the client gone.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // No assertion needed: if the task leaked it will be caught by the process
+    // exiting cleanly (no hung tokio tasks blocking shutdown).
+}

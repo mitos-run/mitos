@@ -163,6 +163,42 @@ fn parse_pid_stat(line: &[u8]) -> Result<PidStat, AgentError> {
 // /proc/stat aggregate total jiffies
 // ---------------------------------------------------------------------------
 
+/// Parse the aggregate "cpu " line of /proc/stat and return the total jiffies
+/// and the steal jiffies.
+///
+/// Returns (0, 0) on any parse error; a zero total_delta causes cpu_percent to
+/// be 0 for all processes (conservative, not wrong).
+///
+/// Shared with service::vitals for steal-fraction computation.
+pub(crate) fn read_total_and_steal_jiffies(proc: &str) -> (u64, u64) {
+    let path = format!("{proc}/stat");
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return (0, 0),
+    };
+    for line in data.lines() {
+        if !line.starts_with("cpu ") && !line.starts_with("cpu\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // fields[0] = "cpu"; user nice system idle iowait irq softirq steal ...
+        // We need at least 9 fields (0-indexed: cpu + 8 jiffy columns).
+        if fields.len() < 9 {
+            return (0, 0);
+        }
+        let total: u64 = fields
+            .iter()
+            .skip(1)
+            .take(8)
+            .filter_map(|f| f.parse::<u64>().ok())
+            .sum();
+        // steal is the 8th column (0-indexed: fields[8]).
+        let steal: u64 = fields.get(8).and_then(|f| f.parse().ok()).unwrap_or(0);
+        return (total, steal);
+    }
+    (0, 0)
+}
+
 /// Parse the aggregate "cpu " line of /proc/stat and return the total jiffies.
 ///
 /// Returns 0 on any parse error; a zero totalDelta causes cpu_percent to be 0
@@ -246,6 +282,33 @@ fn snapshot(proc: &str) -> Result<Snapshot, AgentError> {
         procs,
         total_jiffies,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shared process-count helper for vitals
+// ---------------------------------------------------------------------------
+
+/// Count the number of live processes by walking /proc numeric directories.
+///
+/// Used by service::vitals to populate GuestVitals.process_count without
+/// duplicating the /proc walk logic. Pids that vanish mid-walk are silently
+/// skipped. Returns 0 on error (conservative fallback).
+///
+/// NEVER reads /proc/<pid>/cmdline or /proc/<pid>/environ: argv and environ
+/// can carry secrets and are excluded by the secret-hygiene policy.
+pub(crate) fn count_processes(proc: &str) -> i32 {
+    let entries = match std::fs::read_dir(proc) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut count = 0i32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().parse::<u32>().is_ok() {
+            count += 1;
+        }
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------

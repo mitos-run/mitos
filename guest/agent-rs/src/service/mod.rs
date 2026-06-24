@@ -40,6 +40,12 @@ pub mod processes;
 /// port number; the host is hardcoded for security.
 pub mod portforward;
 
+/// Vitals streaming RPC implementation (Task 2.7): CPU steal fraction from
+/// /proc/stat (two-snapshot window), memory from /proc/meminfo, and process
+/// count from /proc. Streams GuestVitals at the requested interval until the
+/// client cancels. No argv or environ is ever read.
+pub mod vitals;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -238,9 +244,9 @@ impl Sandbox for SandboxService {
 
     async fn vitals(
         &self,
-        _request: Request<sandbox_v1::VitalsRequest>,
+        request: Request<sandbox_v1::VitalsRequest>,
     ) -> Result<Response<Self::VitalsStream>, Status> {
-        unimplemented_stream("Vitals")
+        vitals::vitals(request).await
     }
 
     // --- Code execution -------------------------------------------------------
