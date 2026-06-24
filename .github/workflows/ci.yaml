@@ -253,6 +253,16 @@ jobs:
       # pod-native default, issue #18). It is referenced by the controller
       # Deployment's --husk-stub-image, so it must build cleanly here.
       - run: docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
+      # Mirror the full publish.yaml image matrix here so a release-only image
+      # can never break unseen. console, facade, gateway, and kvm-device-plugin
+      # were previously built only at tag time, so a broken Dockerfile (for
+      # example the console SPA build) shipped a release with a missing image
+      # and a chart that referenced it. Building them on every PR turns that
+      # into a red required check instead.
+      - run: docker build -f Dockerfile.kvm-device-plugin -t mitos-kvm-device-plugin:ci .
+      - run: docker build -f Dockerfile.facade -t mitos-facade:ci .
+      - run: docker build -f Dockerfile.console -t mitos-console:ci .
+      - run: docker build -f Dockerfile.gateway -t mitos-gateway:ci .
       # Trivy scans each locally built image for known OS/library CVEs (CVE
       # pipeline, issue #35). Installed directly from a pinned release (the
       # marketplace action's binary installer proved flaky in CI). Phased in as
@@ -274,7 +284,7 @@ jobs:
             exit 0
           fi
           trivy --version || { echo "::warning::Trivy not runnable; skipping advisory image scan"; exit 0; }
-          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci; do
+          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci mitos-kvm-device-plugin:ci mitos-facade:ci mitos-console:ci mitos-gateway:ci; do
             echo "=== Trivy scan ${img} (HIGH,CRITICAL, fixable) ==="
             trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
               --ignorefile .trivyignore "${img}" \

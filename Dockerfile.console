@@ -4,6 +4,13 @@
 # 1) Build the SPA bundle from the web/ pnpm workspace.
 FROM node:22-bookworm AS spa
 WORKDIR /web
+# Corepack provisions pnpm from the "packageManager" field in web/package.json,
+# so the build uses the exact pinned pnpm (and matching lockfile semantics)
+# everywhere: local, CI, and release. Without the pin, corepack fetches the
+# latest major (pnpm 11), whose supply-chain policy check and relocated build
+# allowlist reject this lockfile and fail the build. Disable the interactive
+# download prompt so a no-TTY build provisions pnpm without blocking.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 # Install with the lockfile first for caching, then build.
 COPY web/pnpm-workspace.yaml web/package.json web/pnpm-lock.yaml ./
