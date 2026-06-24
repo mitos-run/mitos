@@ -39,6 +39,7 @@ pub fn getpid() -> i32 {
 /// Exclusion rules match Go exactly:
 ///   - pid == 1: skip (init/PID-1 guest agent).
 ///   - pid == self (getpid()): skip.
+///   - Non-directory entries: skip (mirrors Go's !e.IsDir() guard).
 ///   - Non-numeric directory entries: skip (not a PID dir).
 ///   - Kernel threads: NOT explicitly excluded. Go calls kill(pid, SIGUSR2)
 ///     and ignores errors. We do the same: ESRCH/EPERM from kernel threads
@@ -46,9 +47,6 @@ pub fn getpid() -> i32 {
 ///
 /// Returns the count of processes that received SIGUSR2.
 pub fn signal_userspace_at(proc_path: &str) -> i32 {
-    // SIGUSR2 is signal 12 on Linux (POSIX value; stable on amd64/arm64).
-    const SIGUSR2: i32 = 12;
-
     let self_pid = getpid();
 
     let entries = match fs::read_dir(proc_path) {
@@ -65,6 +63,16 @@ pub fn signal_userspace_at(proc_path: &str) -> i32 {
             Ok(e) => e,
             Err(_) => continue,
         };
+        // Skip non-directory entries. Mirrors Go's !e.IsDir() guard in
+        // signalUserspace (notifyforked.go:309). /proc/$PID is always a
+        // directory; files and symlinks at the top level are not PID entries.
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
         let name = entry.file_name();
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -77,7 +85,7 @@ pub fn signal_userspace_at(proc_path: &str) -> i32 {
         if pid == 1 || pid == self_pid {
             continue;
         }
-        if crate::sys::kill(pid, SIGUSR2).is_ok() {
+        if crate::sys::kill(pid, libc::SIGUSR2).is_ok() {
             signaled += 1;
         }
     }
@@ -113,9 +121,10 @@ mod tests {
     // Host-safe SIGUSR2 test: fork a child that signals readiness via a pipe,
     // then pauses. The parent waits for the readiness byte before building a
     // synthetic /proc dir (one entry: the child PID) and calling
-    // signal_userspace_at. This guarantees the child is in pause() when the
-    // signal arrives, eliminating the race. No real /proc is enumerated;
-    // system processes (k3s, etc.) are never touched.
+    // signal_userspace_at. The pipe close() on the child side after the write
+    // happens before the child enters pause(), so the race window is reduced
+    // to a single close() syscall. No real /proc is enumerated; system
+    // processes (k3s, etc.) are never touched.
     //
     // Linux-only (fork/pause/sigaction); skips on non-Linux.
     #[cfg(target_os = "linux")]
