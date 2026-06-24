@@ -1,8 +1,6 @@
-// tonic Sandbox service skeleton: all RPCs return Unimplemented.
-//
-// Phase 2 tasks replace each stub with a real implementation. The shared state
-// held by SandboxService is defined here so Phase 2 tasks can depend on it
-// without touching this file's structure.
+// Sandbox gRPC service implementation. Phase 2 tasks have replaced each stub
+// with a real implementation. The shared state held by SandboxService is
+// defined here so all task modules can access it.
 //
 // No unsafe code in this module; tonic-generated code is isolated in lib.rs.
 //
@@ -92,19 +90,6 @@ fn unimplemented(rpc: &'static str) -> Status {
     Status::unimplemented(format!("{rpc}: not yet implemented in this slice"))
 }
 
-/// Return an empty server-streaming Unimplemented response.
-///
-/// Returns `Err(Status)` boxed via a direct `Err(...)` call. The `Status`
-/// type is large (>= 176 bytes per clippy); we suppress the lint here because
-/// all callers are stub stubs returning immediately and the allocation cost
-/// of boxing would add complexity for no runtime benefit at a stub callsite.
-#[allow(clippy::result_large_err)]
-fn unimplemented_stream<T>(rpc: &'static str) -> Result<Response<BoxStream<T>>, Status>
-where
-    T: Send + 'static,
-{
-    Err(unimplemented(rpc))
-}
 
 #[tonic::async_trait]
 impl Sandbox for SandboxService {
@@ -150,9 +135,10 @@ impl Sandbox for SandboxService {
 
     async fn exec_stream(
         &self,
-        _request: Request<sandbox_v1::ExecStreamRequest>,
+        request: Request<sandbox_v1::ExecStreamRequest>,
     ) -> Result<Response<Self::ExecStreamStream>, Status> {
-        unimplemented_stream("ExecStream")
+        let env = Arc::clone(&self.env);
+        exec::exec_stream_handler(env, request).await
     }
 
     // --- Filesystem -----------------------------------------------------------
