@@ -201,8 +201,8 @@ func NewTemplateManager(firecrackerBin, kernelPath, dataDir string, jailer Jaile
 		fallbackWait:   noAgentFallbackWait,
 		sleep:          time.Sleep,
 	}
-	// connectInit defaults to the gRPC-readiness path: Control.Ping for boot
-	// confirmation (port 53), then vsock for init-command exec (port 52).
+	// connectInit defaults to the all-gRPC path: Control.Ping for boot
+	// confirmation, then Sandbox.ExecStream for init-command exec (both port 53).
 	tm.connectInit = tm.connectInitExecGRPC
 	return tm
 }
