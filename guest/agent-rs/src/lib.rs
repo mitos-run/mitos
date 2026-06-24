@@ -81,3 +81,12 @@ pub mod service;
 /// clock_gettime / clock_settime. Every unsafe block carries a SAFETY comment.
 #[allow(unsafe_code, missing_docs)]
 pub mod sys;
+
+// ---------------------------------------------------------------------------
+// fork/ module: post-restore state repair (task 3.1+).
+// Safe wrappers over sys primitives for the notify-forked path.
+// ---------------------------------------------------------------------------
+
+/// Fork-correctness modules: credited CRNG reseed and other post-restore
+/// state repair steps invoked by the notify-forked handler (Task 3.5).
+pub mod fork;
