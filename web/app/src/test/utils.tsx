@@ -3,6 +3,9 @@
 import type { ReactElement, ReactNode } from 'react'
 import { render } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { RouterProvider } from '@tanstack/react-router'
+import { createConsoleRouter } from '../router'
+import type { Capabilities } from '../api'
 
 export function renderWithQuery(ui: ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -10,4 +13,17 @@ export function renderWithQuery(ui: ReactElement) {
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   )
   return render(ui, { wrapper: Wrapper })
+}
+
+// Render the app at a given path with a given capabilities document, inside the
+// query provider. Used by AppShell and CommandPalette tests.
+export async function renderAt(path: string, caps: Capabilities) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const router = createConsoleRouter(caps)
+  await router.navigate({ to: path })
+  return render(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  )
 }
