@@ -8,6 +8,7 @@ describe('EmptyState', () => {
     const onClick = vi.fn()
     render(<EmptyState title="No sandboxes yet" body="Fork your first one." action={{ label: 'Fork', onClick }} />)
     expect(screen.getByText('No sandboxes yet')).toBeInTheDocument()
+    expect(screen.getByText('Fork your first one.')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Fork' }))
     expect(onClick).toHaveBeenCalledOnce()
   })

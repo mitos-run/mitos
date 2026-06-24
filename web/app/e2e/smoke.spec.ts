@@ -1,9 +1,8 @@
 import { test, expect } from '@playwright/test'
 
 // One smoke: the SPA boots, the shell nav renders, and Cmd-K opens the palette.
-// Capabilities are served by the embedded default (community edition) when run
-// against the console binary; against `vite preview` the dev proxy is absent, so
-// this test is marked to run only when a backing console is reachable.
+// Requires a backing console serving /console/capabilities; intended for CI
+// against `cmd/console -dev`. Running locally without that binary will fail.
 test('console boots and the command palette opens', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText('mitos')).toBeVisible()

@@ -50,4 +50,31 @@ describe('console router', () => {
     const router = createConsoleRouter(billingCaps)
     expect(Object.keys(router.routesByPath)).toContain('/billing')
   })
+
+  it('redirects / to first visible route when proof is off (no dead-end on gated path)', async () => {
+    // When proof:false, the '/' (Instruments) route is not built. Navigating to
+    // '/' must resolve to the first visible route (Sandboxes) rather than a
+    // "Not Found" dead-end. This test genuinely fails without the not-found
+    // redirect in createConsoleRouter.
+    const noproofCaps: Capabilities = { ...caps, proof: false }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(noproofCaps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ sandboxes: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const router = createConsoleRouter(noproofCaps)
+    // Navigate to '/' which is not a built route when proof:false.
+    await router.navigate({ to: '/' })
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+    // Must show Sandboxes (first visible route), never "Not Found".
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Sandboxes/i })).toBeInTheDocument())
+    expect(screen.queryByText('Not Found')).not.toBeInTheDocument()
+  })
 })

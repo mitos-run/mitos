@@ -30,7 +30,10 @@ export function CommandPalette({ caps }: { caps: Capabilities }) {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        setOpen((v) => !v)
+        setOpen((v) => {
+          if (!v) setQuery('')
+          return !v
+        })
       }
       if (e.key === 'Escape') setOpen(false)
     }
