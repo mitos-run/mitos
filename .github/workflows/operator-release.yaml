@@ -2,18 +2,25 @@ name: Release operator bundle
 
 # Build and publish the OLM operator bundle for a release, and (optionally) open
 # the version PR to k8s-operatorhub/community-operators. The committed bundle
-# under deploy/olm/bundle is the 0.4.0 base; this workflow rewrites it to the
+# under deploy/olm/bundle is the version base; this workflow rewrites it to the
 # release version in a throwaway workspace, validates it, pushes the bundle
 # image, and prepares the community-operators contribution.
 #
 # Prerequisites and notes:
 #   * Images must already be published to ghcr.io/mitos-run for the version.
-#   * The first community-operators listing is still a manual PR; this automates
-#     subsequent versions once a fork and token exist.
+#   * The first community-operators listing (mitos 0.13.0) was submitted manually
+#     in k8s-operatorhub/community-operators#8488. This workflow handles every
+#     subsequent version automatically once the token below exists.
+#   * This fires on release: published, which only reaches this workflow when the
+#     release is cut with a non-default token; see RELEASE_PLEASE_TOKEN in
+#     release-please.yml. Without that, trigger it manually via workflow_dispatch.
 #   * To open the PR automatically, set the COMMUNITY_OPERATORS_TOKEN secret to a
 #     PAT (repo scope) whose account has a fork of k8s-operatorhub/community-
-#     operators. Without it, the versioned bundle is uploaded as an artifact.
-#   * Pass `previous` so the bundle gets a spec.replaces upgrade edge.
+#     operators (the stubbi/community-operators fork). Without it, the versioned
+#     bundle is uploaded as an artifact instead.
+#   * The operators/mitos/ci.yaml update graph is semver-mode, so a new version
+#     orders by semver and does not require a spec.replaces edge. Passing
+#     `previous` still adds an explicit replaces edge when you want one.
 
 on:
   release:
