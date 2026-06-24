@@ -182,6 +182,82 @@ func (s *sandboxServer) Exec(stream sandboxv1.Sandbox_ExecServer) error {
 	return nil
 }
 
+// ExecStream runs a non-interactive command and streams its output over a
+// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+// Exec RPC: the request carries command/cwd/env/timeout but NO pty and NO
+// stdin, so this is non-interactive only. The reply reuses ExecResponse
+// (stdout/stderr chunks then a terminal ExecExit). ExecStream REUSES the same
+// runExecStream engine the bidi Exec non-PTY path uses so all security
+// invariants (env merge, process-group kill on timeout/cancel, no-secret-log)
+// are byte-for-byte identical. The stream's ctx cancel propagates into the
+// engine to kill the child process tree. argv (shell-less) exec (args non-empty)
+// is deferred to a follow-up slice and returns Unimplemented.
+func (s *sandboxServer) ExecStream(req *sandboxv1.ExecStreamRequest, stream sandboxv1.Sandbox_ExecStreamServer) error {
+	if len(req.GetArgs()) > 0 {
+		return status.Error(codes.Unimplemented, "exec_stream: argv (shell-less) exec is not implemented in this slice; pass the command as a single shell string")
+	}
+	vsockReq := &vsock.ExecRequest{
+		Command:    req.GetCommand(),
+		WorkingDir: req.GetCwd(),
+		Timeout:    int(req.GetTimeoutSeconds()),
+		Env:        envVarsToMap(req.GetEnv()),
+	}
+	sink := &grpcExecStreamSink{stream: stream}
+	runExecStream(stream.Context(), vsockReq, sink)
+	if sendErr := sink.sendErr(); sendErr != nil {
+		return status.Errorf(codes.Unavailable, "exec_stream: stream send failed: %v", sendErr)
+	}
+	return nil
+}
+
+// grpcExecStreamSink adapts the shared exec engine (runExecStream) to the
+// server-streaming ExecStream reply stream. It is the server-streaming
+// counterpart of grpcExecSink (which adapts to the bidi Exec stream); the
+// frame shapes are identical because both send ExecResponse. Sink calls are
+// already serialized by runExecStream's mutex, so stream.Send is never called
+// concurrently. A send error is recorded so the engine's later emissions
+// become no-ops and the RPC returns it.
+type grpcExecStreamSink struct {
+	stream sandboxv1.Sandbox_ExecStreamServer
+	mu     sync.Mutex
+	err    error
+}
+
+func (s *grpcExecStreamSink) chunk(stream vsock.StreamName, data []byte) {
+	var msg *sandboxv1.ExecResponse
+	if stream == vsock.StreamStderr {
+		msg = &sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: data}}
+	} else {
+		msg = &sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: data}}
+	}
+	s.send(msg)
+}
+
+func (s *grpcExecStreamSink) exit(exitCode int, execTimeMs float64, spawnErr string) {
+	s.send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{
+		ExitCode:   int32(exitCode),
+		ExecTimeMs: execTimeMs,
+		Error:      spawnErr,
+	}}})
+}
+
+func (s *grpcExecStreamSink) send(msg *sandboxv1.ExecResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return
+	}
+	if err := s.stream.Send(msg); err != nil {
+		s.err = err
+	}
+}
+
+func (s *grpcExecStreamSink) sendErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
 // execPTY drives an interactive PTY exec over the gRPC Exec bidi stream by
 // REUSING the shared runPTY engine. The grpcPtyTransport translates the wire
 // shapes: ExecResponse stdout frames carry PTY output (the merged terminal
@@ -513,6 +589,37 @@ func (s *sandboxServer) RunCode(stream sandboxv1.Sandbox_RunCodeServer) error {
 	}
 	if sendErr != nil {
 		return status.Errorf(codes.Unavailable, "run_code: stream send failed: %v", sendErr)
+	}
+	return nil
+}
+
+// RunCodeStream runs a code snippet and streams the result over a
+// server-streaming RPC. It is the HTTP/1.1-reachable counterpart to the bidi
+// RunCode RPC: the request carries code/language/timeout but NO stdin, so this
+// is non-interactive only. The reply reuses RunCodeResponse (stdout/stderr
+// chunks, rich result/error frames, then a terminal exit_code). RunCodeStream
+// REUSES the same guestKernel.run engine the bidi RunCode path uses so the
+// kernel state persists across calls, the language gate, the KernelUnavailable
+// remediation, and the rich result/error frames are byte-for-byte identical.
+// The stream's ctx cancel propagates: run() is synchronous under the kernel
+// mutex, so no goroutine outlives this call. Code and output are never logged.
+func (s *sandboxServer) RunCodeStream(req *sandboxv1.RunCodeStreamRequest, stream sandboxv1.Sandbox_RunCodeStreamServer) error {
+	var sendErr error
+	emit := func(fr vsock.ExecStreamFrame) {
+		if sendErr != nil {
+			return
+		}
+		sendErr = stream.Send(runCodeResponseFromFrame(fr))
+	}
+	if runErr := guestKernel.run(req.GetCode(), req.GetLanguage(), int(req.GetTimeoutSeconds()), emit); runErr != nil {
+		// A transport failure mid-stream: surface a kernel error frame then exit 1,
+		// matching the JSON handleRunCodeStream tail and the bidi RunCode path.
+		// runErr carries no secret.
+		emit(vsock.ExecStreamFrame{Kind: vsock.FrameError, ErrorInfo: &vsock.ErrorFrame{Name: "KernelStreamError", Value: runErr.Error()}})
+		emit(vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: 1})
+	}
+	if sendErr != nil {
+		return status.Errorf(codes.Unavailable, "run_code_stream: stream send failed: %v", sendErr)
 	}
 	return nil
 }
