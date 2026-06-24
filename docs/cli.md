@@ -124,19 +124,20 @@ For every `run` and `sandbox` verb, `mitos` resolves a Kubernetes connection
 from the standard kubeconfig (`KUBECONFIG`, `--kubeconfig`, or in-cluster). It
 then:
 
-- `sandbox create` creates a `SandboxClaim` referencing the pool and waits for it
-  to reach the `Ready` phase, then prints the claim name as the sandbox id.
-- `sandbox exec` / file IO reads the per-sandbox bearer token from the claim's
-  Secret at request time and calls the claim's HTTP sandbox API. The token value
+- `sandbox create` creates a `Sandbox` with `spec.source.poolRef` referencing the
+  pool and waits for it to reach the `Ready` phase, then prints the sandbox name
+  as the sandbox id.
+- `sandbox exec` / file IO reads the per-sandbox bearer token from the sandbox's
+  Secret at request time and calls the sandbox's HTTP API. The token value
   is held in memory only for the request and is never logged; it is redacted from
   any error string.
-- `sandbox fork` creates a `SandboxFork` and waits for the requested number of
-  forks to be `Ready`.
-- `sandbox ls` lists `SandboxClaim`s (a namespace with `-n`, all namespaces with
+- `sandbox fork` creates a `Sandbox` with `spec.source.fromSandbox` and waits for
+  the requested number of forks to be `Ready`.
+- `sandbox ls` lists `Sandbox`es (a namespace with `-n`, all namespaces with
   `-A`, or the backend default otherwise).
-- `sandbox terminate` deletes the `SandboxClaim`, which the controller reaps.
+- `sandbox terminate` deletes the `Sandbox`, which the controller reaps.
 
-This is the same `SandboxClaim` path the controller and forkd implement; the CLI
+This is the same `Sandbox` path the controller and forkd implement; the CLI
 is a thin client over the CRDs plus the token-scoped HTTP exec.
 
 ### Dev mock-mode local cluster
@@ -156,8 +157,8 @@ The dev overlay (`deploy/dev/`) runs:
 - a **forkd** DaemonSet with `--mock` and no TLS flags, using the no-KVM mock fork
   engine. It mounts no `/dev/kvm` and carries no `mitos.run/kvm` nodeSelector,
   so it schedules on the plain kind node.
-- a default `SandboxTemplate` + `SandboxPool` named `dev-default` in the `default`
-  namespace.
+- a default `SandboxPool` named `dev-default` with `spec.template` inline in the
+  `default` namespace.
 
 The controller discovers the mock forkd by its `app.kubernetes.io/component:
 forkd` pod label, builds the `dev-default` pool snapshot over insecure gRPC, and a
@@ -195,7 +196,7 @@ a node with `/dev/kvm` and the production manifests (`deploy/controller/` +
 PROVEN in CI:
 
 - command dispatch for `run` and every `sandbox` verb;
-- the cluster `SandboxClaim` claim path with token-scoped exec;
+- the cluster `Sandbox` claim path with token-scoped exec;
 - `mitos dev up` orchestration (CRDs + mock controller + mock forkd + pool);
 - `sandbox ls` over the control plane;
 - on the dev mock cluster on kind: `sandbox create` reaches `Ready`, `sandbox ls`
@@ -217,8 +218,8 @@ go build -o /usr/local/bin/kubectl-mitos ./cmd/kubectl-mitos/
 ```
 
 ```
-kubectl mitos ls   [-n ns] [-A]            list SandboxClaims
-kubectl mitos ps   [name] [-n ns] [-A]     list SandboxForks (or one claim's forks)
+kubectl mitos ls   [-n ns] [-A]            list Sandboxes
+kubectl mitos ps   [name] [-n ns] [-A]     list fork Sandboxes (or one sandbox's forks)
 kubectl mitos tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
 kubectl mitos top  [-n ns] [-A]            per-sandbox CoW-aware metering
 kubectl mitos logs <sandbox> [-n ns]       husk stub pod console for a claim
@@ -227,10 +228,11 @@ kubectl mitos exec <sandbox> [-n ns] -- cmd run a command in a sandbox
 
 ### tree
 
-`tree` walks the lineage DAG: each `SandboxClaim` is a root, and a `SandboxFork`
-nests under whatever object its `spec.sourceRef` names (a claim OR another fork,
-so a multi-level fork chain nests). Siblings sort by name; an orphan fork whose
-source is out of scope is surfaced as its own root rather than dropped.
+`tree` walks the lineage DAG: each `Sandbox` with `spec.source.poolRef` is a root,
+and a `Sandbox` with `spec.source.fromSandbox` nests under whatever sandbox its
+`spec.source.fromSandbox` names (a pool-ref sandbox OR another fork sandbox,
+so a multi-level fork chain nests). Siblings sort by name; an orphan fork sandbox
+whose source is out of scope is surfaced as its own root rather than dropped.
 `--pool <name>` scopes to one pool via a transitive walk over the source refs.
 
 ### top

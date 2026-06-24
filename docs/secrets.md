@@ -37,10 +37,10 @@ A tenant declares secrets as references to existing Kubernetes Secrets, not as
 inline values. In the Python SDK, `create(secrets=...)` takes a map of env-var
 name to a `(secret_name, secret_key)` tuple
 (`sdk/python/mitos/client.py:216`, `sdk/python/mitos/client.py:226`), which the
-SDK renders into the `SandboxClaim.spec.secrets` list as `secretRef` entries
+SDK renders into the `Sandbox.spec.secrets` list as `secretRef` entries
 (`sdk/python/mitos/client.py:252-260`). The CRD field is `SecretMount`, carrying
 a `SecretRef` (a `corev1.SecretKeySelector`) and the target `EnvVar`
-(`api/v1alpha1/types.go:731-736`).
+(`api/v1/types.go`).
 
 ### Resolved
 
@@ -124,13 +124,13 @@ reaching another, with its citation.
 - **Secret-inheritance default-deny gate.** Because a live fork duplicates guest
   memory (and therefore any delivered secret VALUES), a fork of a
   secret-holding source is REJECTED by default with a typed `Rejected`/`SecretInheritanceDenied`
-  condition; proceeding requires `spec.allowSecretInheritance: true`, and the
+  condition; proceeding requires `spec.secretInheritance: inherit`, and the
   opt-in is recorded as an audit condition
   (`internal/controller/sandboxfork_controller.go:151-183`). The CRD field and its
   default-deny semantics are documented on the type
-  (`api/v1alpha1/types.go:801-806`).
+  (`api/v1/types.go`).
 
-- **Workspace credential-path exclusion.** When a bound claim's `/workspace` is
+- **Workspace credential-path exclusion.** When a bound sandbox's `/workspace` is
   persisted into a committed revision, the dehydrate strips conventional
   credential paths so a captured revision never carries credential material:
   `.netrc`, `.git-credentials`, `.ssh`, `.aws`, `.config/gh`, and `.npmrc`
@@ -262,7 +262,7 @@ Stated honestly so operators do not over-trust the current posture:
   `<sandbox>-sandbox-token` Secrets owner-referenced to the claim or fork
   (`docs/encryption.md:135-152`, `internal/controller/token_secret.go:16-18`,
   `internal/controller/token_secret.go:62-79`).
-- **Rotation.** Deleting a `SandboxTemplate` GC's its key Secret, crypto-shredding
+- **Rotation.** Deleting a `SandboxPool` GC's its key Secret, crypto-shredding
   the at-rest key (`docs/encryption.md:198-211`). Per-sandbox tokens rotate with
   the sandbox lifecycle (GC'd with the owner,
   `internal/controller/token_secret.go:62-79`). KEK rotation with DEK re-wrap, and
@@ -273,8 +273,8 @@ Stated honestly so operators do not over-trust the current posture:
   removed and the controller reaches Secrets only in the controller namespace and
   adopted pool namespaces (`docs/threat-model.md` Controller RBAC for Secrets
   row).
-- **Restrict the secret-holding fork path.** Leave `allowSecretInheritance`
-  unset (the default) so forks of secret-holding sandboxes are rejected rather
+- **Restrict the secret-holding fork path.** Leave `spec.secretInheritance` at
+  its `reissue` default so forks of secret-holding sandboxes are rejected rather
   than silently duplicating tenant secrets into a child
   (`internal/controller/sandboxfork_controller.go:151-168`,
-  `api/v1alpha1/types.go:801-806`).
+  `api/v1/types.go`).

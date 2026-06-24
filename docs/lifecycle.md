@@ -15,16 +15,16 @@ The three controls:
 
 ## Timeouts and TTL
 
-Two creation-time bounds, set on the SandboxClaim spec (k8s mode) or implied by
+Two creation-time bounds, set on the Sandbox spec (k8s mode) or implied by
 the standalone sandbox-server defaults:
 
 | Bound | Field | Meaning | Default |
 | --- | --- | --- | --- |
-| maxLifetime | `spec.timeout` | Hard wall-clock cap from start. The sandbox is reaped at `startedAt + timeout` regardless of activity. | unset (no cap) |
-| idleTimeout | `spec.idleTimeout` | Reap after this much time with no ACTUAL activity (see below). | unset (no idle limit) |
+| maxLifetime | `spec.lifetime.ttl` | Hard wall-clock cap from start. The sandbox is reaped at `startedAt + ttl` regardless of activity. | unset (no cap) |
+| idleTimeout | `spec.lifetime.idleTimeout` | Reap after this much time with no ACTUAL activity (see below). | unset (no idle limit) |
 
 There is no implicit default for either: a zero or unset value means "no limit".
-Operators set these per claim or per pool. The standalone sandbox-server does
+Operators set these per sandbox or per pool. The standalone sandbox-server does
 not reap on its own; reaping is a controller (k8s) behavior, and the live
 `set_timeout` deadline below is the standalone path's TTL control.
 

@@ -18,8 +18,8 @@ IMPLEMENTED and unit-tested on darwin (no hardware):
   (`SelectNodeForFork`, `internal/controller/scheduler.go`), so a sandbox above
   8 GiB lands only on a node that has the RAM, and is rejected with
   `ErrNoCapacity` when no node can hold it.
-- The `resources.gpu: {count, type}` field on `SandboxTemplate`
-  (`api/v1alpha1/types.go`, `SandboxResources.GPU`).
+- The `resources.gpu: {count, type}` field on `SandboxPool.spec.template`
+  (`api/v1/types.go`, `SandboxResources.GPU`).
 - GPU-aware node SELECTION: a GPU pool is scheduled ONLY onto GPU-capable nodes
   (the registry's `GPUTotal`/`GPUType`, fed from the `mitos.run/gpu` and
   `mitos.run/gpu-type` node labels via `GPUFromNodeLabels`), mirroring how the
@@ -136,7 +136,7 @@ sizes correct rather than just unbounded:
    forks of one template still share that template's resident page set once
    (`docs/metering.md`), so density is preserved for the shared base; only each
    fork's UNIQUE divergence and its explicit size headroom are charged per fork.
-   Quota (the budget model, `api/v1alpha1/budget_types.go`, and the per-org
+   Quota (the budget model, `api/v1/budget.go`, and the per-org
    quotas of #213) bounds the SUM of unique footprint and now GPU-seconds, so a
    tenant cannot request unbounded large or GPU sandboxes; the overcommit factor
    is the operator's lever for how hard to lean on CoW sharing when packing.

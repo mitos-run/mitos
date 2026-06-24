@@ -97,7 +97,7 @@ These are tracked under issue #228 and are explicitly out of scope here:
 
 - Kubernetes Service/Ingress routing for the forkd path (this slice is the
   standalone sandbox-server only).
-- CRD template/claim port-declaration fields (declaring exposed ports on
-  `SandboxTemplate` / `SandboxClaim`).
+- CRD template/sandbox port-declaration fields (declaring exposed ports on
+  `SandboxPool.spec.template` / `Sandbox`).
 - Auth on the forward path (a token gate on the host listener).
 - UDP forwarding (this slice is TCP only).
