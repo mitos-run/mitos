@@ -5,6 +5,23 @@ This runbook covers packaging the Mitos OLM bundle and submitting it to
 [k8s-operatorhub/community-operators](https://github.com/k8s-operatorhub/community-operators)
 repository.
 
+The initial listing (mitos 0.13.0) is already submitted. Every later version is
+meant to submit itself: the `Release operator bundle` workflow
+(`.github/workflows/operator-release.yaml`) rebuilds the bundle for the release,
+validates it, and opens the community-operators PR. Two repository secrets gate
+the automation:
+
+- `RELEASE_PLEASE_TOKEN` (on this repo): a PAT or GitHub App token used by
+  release-please so the release it cuts actually triggers downstream workflows.
+  A release cut with the default `GITHUB_TOKEN` does not start them.
+- `COMMUNITY_OPERATORS_TOKEN`: a PAT whose account owns a fork of
+  community-operators (the `stubbi/community-operators` fork), used to push the
+  branch and open the PR. Without it the bundle is uploaded as a CI artifact.
+
+The `operators/mitos/ci.yaml` update graph is `semver-mode` and lists the
+maintainer as a reviewer, so community-operators can fast-track later version
+bumps. The steps below are the manual fallback (and how the first PR was made).
+
 The bundle skeleton lives at `deploy/olm/bundle/`:
 
 ```
