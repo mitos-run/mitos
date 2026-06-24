@@ -40,7 +40,6 @@ on:
       # the example's agent + fork engine.
       - 'cmd/sandbox-server/**'
       - 'sdk/python/**'
-      - 'bench/agent-conformance/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -356,12 +355,11 @@ jobs:
 
       - name: Build guest agent
         run: |
-          # Phase D (#310): the Rust agent is now the production default.
+          # Phase E (#310): the Rust agent is the SOLE production agent.
           # Build a static musl binary and place it at /tmp/mitos-test/agent so
           # every downstream phase (tmpl-smoke, inject-and-exec, gRPC proof,
           # SDK example, ws-smoke, fork-correctness, etc.) boots the Rust agent
-          # as /init. All host callers speak gRPC on vsock port 53 (SP1.5 merged).
-          # AGENT_IMPL=go or the Go build below restores the Go agent as fallback.
+          # as /init. All host callers speak gRPC on vsock port 53.
           source "$HOME/.cargo/env" 2>/dev/null || true
           rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
           cd guest/agent-rs

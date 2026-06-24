@@ -329,10 +329,10 @@ func (c *clientVMM) Close() error {
 	return c.Client.Kill()
 }
 
-// productionGuestReady waits for the guest agent's gRPC Control service to
-// answer a Ping RPC on vsock.AgentGRPCPort (53). It replaces the legacy JSON
-// poll on vsock.AgentPort (52) so the Rust guest agent (which serves only gRPC)
-// works in production. The retry semantics mirror the legacy JSON loop.
+// productionGuestReady waits for the Rust guest agent's gRPC Control service
+// to answer a Ping RPC on vsock.AgentGRPCPort (53). The Rust agent is the sole
+// guest agent and serves gRPC only (#310). The retry semantics mirror the
+// removed JSON poll.
 func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) error {
 	return guestReadyGRPC(ctx, vsockPath, timeout, guestgrpc.Dial)
 }

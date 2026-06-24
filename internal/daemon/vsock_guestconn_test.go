@@ -17,12 +17,10 @@ package daemon
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,18 +180,11 @@ func (s *fakeGuestSandbox) RunCode(stream sandboxv1.Sandbox_RunCodeServer) error
 // vsock mux; the byte-at-a-time DialGRPCConn read on the host side stops at the
 // newline so the gRPC HTTP/2 preface is not consumed. fake may be any
 // sandboxv1.SandboxServer implementation.
+// startFakeGuestGRPCUDS serves a single fake guest UDS that accepts the
+// Firecracker CONNECT preamble and hands the conn to an in-process gRPC server
+// serving fake. All host callers speak gRPC on AgentGRPCPort (53); the legacy
+// JSON protocol on port 52 has been removed (#310).
 func startFakeGuestGRPCUDS(t *testing.T, sockPath string, fake sandboxv1.SandboxServer) {
-	t.Helper()
-	startFakeGuestDualUDS(t, sockPath, nil, fake)
-}
-
-// startFakeGuestDualUDS serves a single fake guest UDS that dispatches on the
-// CONNECT port: "CONNECT <AgentPort>" speaks the legacy JSON-lines exec_stream
-// protocol for PTY/forward tests (echoing jsonFrames), and "CONNECT
-// <AgentGRPCPort>" hands the conn to an in-process gRPC server serving fake.
-// jsonFrames may be nil to serve only the gRPC port. fake may be any
-// sandboxv1.SandboxServer implementation.
-func startFakeGuestDualUDS(t *testing.T, sockPath string, jsonFrames []vsock.ExecStreamFrame, fake sandboxv1.SandboxServer) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -234,25 +225,9 @@ func startFakeGuestDualUDS(t *testing.T, sockPath string, jsonFrames []vsock.Exe
 					c.Close()
 					return
 				}
-				if portStr == strconv.Itoa(vsock.AgentPort) {
-					// Legacy JSON-lines exec_stream: wait for the request line, then
-					// echo the scripted frames.
-					if _, err := r.ReadString('\n'); err != nil {
-						c.Close()
-						return
-					}
-					for _, f := range jsonFrames {
-						b, _ := json.Marshal(f)
-						if _, err := c.Write(append(b, '\n')); err != nil {
-							break
-						}
-					}
-					c.Close()
-					return
-				}
-				// gRPC port: replay any bytes buffered past the preamble newline
-				// (the HTTP/2 preface coalesced with CONNECT) ahead of the raw conn.
-				served := c
+				// Replay any bytes buffered past the preamble newline (the HTTP/2
+				// preface coalesced with CONNECT) ahead of the raw conn.
+				served := net.Conn(c)
 				if n := r.Buffered(); n > 0 {
 					buffered, _ := r.Peek(n)
 					served = &replayConn{Conn: c, leftover: append([]byte(nil), buffered...)}
@@ -316,9 +291,8 @@ func startFakeControlUDS(t *testing.T, sockPath string, sandbox sandboxv1.Sandbo
 					c.Close()
 					return
 				}
-				// Both AgentGRPCPort (53) and AgentPort (52) arrive on this socket;
-				// route everything to the gRPC server (Control handles configure and
-				// notify_forked; port 52 is unused by these tests).
+				// Route all connections to the gRPC server; Control handles
+				// configure and notify_forked.
 				served := net.Conn(c)
 				if n := r.Buffered(); n > 0 {
 					buffered, _ := r.Peek(n)

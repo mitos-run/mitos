@@ -653,7 +653,6 @@ type Sandbox struct {
 	MemoryUnique int64
 	MemoryShared int64
 	fcClient     *firecracker.Client
-	agentClient  *vsock.Client
 	VsockPath    string
 	// rootfsPath is the host path of the drive backing file embedded in
 	// the snapshot this sandbox was restored from; live-forks inherit it
@@ -1606,9 +1605,6 @@ func (e *Engine) Terminate(sandboxID string) error {
 	// later forks (issue #168). No-op when the fork was never pinned.
 	e.forgetPin(sandboxID)
 
-	if sandbox.agentClient != nil {
-		sandbox.agentClient.Close()
-	}
 	if sandbox.fcClient != nil {
 		_ = sandbox.fcClient.Kill()
 	} else if sandbox.adopted {

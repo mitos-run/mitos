@@ -450,14 +450,9 @@ type PtyFrame struct {
 const (
 	// GuestCID is the vsock CID assigned to the guest by Firecracker.
 	GuestCID = 3
-	// AgentPort is the vsock port the guest agent listens on for the legacy
-	// JSON-lines protocol (exec, files, configure, notify_forked, pty, tunnel).
-	AgentPort = 52
-	// AgentGRPCPort is the vsock port the guest agent serves the gRPC runtime
-	// protocol on: the public sandbox.v1.Sandbox service and the host-trusted
-	// sandbox.internal.v1.Control service. It is distinct from AgentPort so the
-	// gRPC server and the legacy JSON-lines loop coexist during the wire
-	// migration (issue #24). The transport is insecure: the microVM boundary is
-	// the isolation, identical to the JSON path which has no in-guest auth.
+	// AgentGRPCPort is the vsock port the Rust guest agent serves the gRPC
+	// runtime protocol on: the public sandbox.v1.Sandbox service and the
+	// host-trusted sandbox.internal.v1.Control service. The transport is
+	// insecure; the microVM boundary is the isolation layer.
 	AgentGRPCPort = 53
 )
