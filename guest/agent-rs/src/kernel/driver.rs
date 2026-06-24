@@ -216,8 +216,11 @@ impl KernelManager {
         // needs `self.dead = true` and `self.send_kernel_unavailable(&self, ...)`,
         // both of which require &mut self. A `while let Some(driver) =
         // self.driver.as_mut()` borrow would hold through the body and conflict.
-        #[allow(clippy::while_let_loop)]
         let mut event_count: usize = 0;
+        // The #[allow] must be directly on the loop statement so clippy attributes it
+        // to the right AST node; placing it on the preceding let would leave the loop
+        // lint active.
+        #[allow(clippy::while_let_loop)]
         loop {
             let driver = match self.driver.as_mut() {
                 Some(d) => d,

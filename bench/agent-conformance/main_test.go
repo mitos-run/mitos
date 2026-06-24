@@ -1117,6 +1117,12 @@ func TestConformancePortForwardInvalidPort(t *testing.T) {
 
 // TestConformancePortForwardMissingOpen checks that both agents reject a
 // stream whose first frame is not open with InvalidArgument.
+//
+// NOTE: PortForward echo (bidirectional data proxying to a real TCP port inside
+// the VM) is NOT tested here. The harness only covers protocol-error paths
+// (invalid port, missing open frame). A full echo test requires a live TCP
+// service inside each agent process, which is out of scope for the unix-socket
+// conformance harness. See task-5.2-report.md for the rationale.
 func TestConformancePortForwardMissingOpen(t *testing.T) {
 	goA, rustA := agents(t)
 
@@ -1154,7 +1160,10 @@ func TestConformancePortForwardMissingOpen(t *testing.T) {
 // TestConformanceVitalsSingleShot checks that both agents return a plausible
 // single vitals sample. sampled_at_unix, cpu_steal_percent, mem_used_bytes, and
 // process_count are non-deterministic between two separate processes; we assert
-// mem_total_bytes > 0 (every host has memory) on each agent independently.
+// mem_total_bytes > 0 (every host has memory) on each agent independently and
+// cross-compare them: both agents read /proc/meminfo on the same host, so
+// MemTotal must be identical (or within a tiny tolerance to account for any
+// rounding difference in parsing).
 func TestConformanceVitalsSingleShot(t *testing.T) {
 	goA, rustA := agents(t)
 
@@ -1189,6 +1198,14 @@ func TestConformanceVitalsSingleShot(t *testing.T) {
 	}
 	if rMem <= 0 {
 		t.Errorf("Vitals rust: mem_total_bytes=%d, want > 0", rMem)
+	}
+	// Cross-agent check: both agents run on the same host and read the same
+	// /proc/meminfo MemTotal field. The values must be equal; allow a 1 MiB
+	// tolerance to absorb any implementation rounding (kB vs bytes conversion).
+	const memTotalToleranceBytes = 1024 * 1024
+	if diff := gMem - rMem; diff > memTotalToleranceBytes || diff < -memTotalToleranceBytes {
+		t.Errorf("Vitals mem_total_bytes diverge: go=%d rust=%d (diff=%d, tolerance=%d)",
+			gMem, rMem, diff, memTotalToleranceBytes)
 	}
 	if gProc <= 0 {
 		t.Errorf("Vitals go: process_count=%d, want > 0", gProc)
@@ -1291,3 +1308,21 @@ func TestConformanceControlNotifyForked(t *testing.T) {
 		t.Errorf("NotifyForked go: zero clock must yield step=0, got %d", gStep)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// COVERAGE OMISSIONS (auditable in source, documented in task-5.2-report.md)
+// ---------------------------------------------------------------------------
+//
+// RunCode RPC: not tested here. RunCode requires a live Python kernel subprocess
+// inside each agent process. The unix-socket harness runs agents as plain
+// binaries without a Python interpreter available, making the kernel startup
+// path fail. Conformance for RunCode is deferred to a dedicated integration
+// test that bootstraps a kernel environment. This omission is intentional and
+// documented; add a test here once the agent gains a --no-kernel flag or a
+// mock kernel driver for testing.
+//
+// PortForward echo (bidirectional data proxy): not tested beyond protocol-error
+// paths (TestConformancePortForwardInvalidPort, TestConformancePortForwardMissingOpen).
+// A full echo test requires a real TCP listener inside each agent process and is
+// out of scope for the unix-socket harness. See TestConformancePortForwardMissingOpen
+// for the rationale note.

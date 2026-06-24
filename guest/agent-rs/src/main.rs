@@ -13,6 +13,11 @@
 #![deny(clippy::panic)]
 #![deny(clippy::indexing_slicing)]
 #![warn(missing_docs)]
+// tonic::Status is a framework type with a large Err variant (~176 bytes).
+// Boxing every Result<_, tonic::Status> fights the gRPC framework pattern and
+// adds unnecessary indirection. This is a framework-inherent lint, not our own
+// error type. Allow crate-wide to keep service handler signatures idiomatic.
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 use std::time::Instant;

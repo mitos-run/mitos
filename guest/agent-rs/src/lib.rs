@@ -19,6 +19,12 @@
 // in-progress stubs.
 #![warn(missing_docs)]
 
+// tonic::Status is a framework type with a large Err variant (~176 bytes).
+// Boxing every Result<_, tonic::Status> in our service handlers fights the
+// gRPC framework pattern and adds unnecessary indirection. This lint fires on
+// framework-inherent code, not on our own error types; allow it crate-wide.
+#![allow(clippy::result_large_err)]
+
 // ---------------------------------------------------------------------------
 // Shared primitives: error types and environment merge.
 // ---------------------------------------------------------------------------
