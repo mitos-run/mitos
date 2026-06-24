@@ -10,6 +10,65 @@
 
 use std::io;
 
+/// MS_RDONLY: mount the filesystem read-only. Mirrors unix.MS_RDONLY in the Go
+/// agent (golang.org/x/sys/unix). Value is 1 on Linux (all architectures).
+pub const MS_RDONLY: u64 = libc::MS_RDONLY;
+
+/// MS_REC: recursive mount flag. Used with MS_PRIVATE to mark every mount in
+/// the subtree private so propagation is confined to the namespace.
+pub const MS_REC: u64 = libc::MS_REC;
+
+/// MS_PRIVATE: do not propagate mount events to or from this mount point.
+/// Combined with MS_REC after unshare(CLONE_NEWNS) to create a fully isolated
+/// mount namespace for host-safe mount tests.
+pub const MS_PRIVATE: u64 = libc::MS_PRIVATE;
+
+/// Check whether a path is currently a mount point by scanning /proc/mounts.
+///
+/// Returns true when the path matches field 2 (the mount target) in any line.
+/// Returns false on any read error so the caller retries the mount (a redundant
+/// mount fails loudly rather than silently skipping). This mirrors isMounted in
+/// guest/agent/notifyforked.go:283-296.
+///
+/// On non-Linux platforms always returns false (mount is a no-op there).
+pub fn is_mounted(mount_path: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        is_mounted_linux(mount_path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mount_path;
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_mounted_linux(mount_path: &str) -> bool {
+    use std::io::BufRead;
+
+    let f = match std::fs::File::open("/proc/mounts") {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let reader = std::io::BufReader::new(f);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        let mut fields = line.split_ascii_whitespace();
+        // Field 0: device, field 1: mount target.
+        let _device = fields.next();
+        if let Some(target) = fields.next()
+            && target == mount_path
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Mount a filesystem.
 ///
 /// Wraps the Linux mount(2) syscall. Flags is passed directly (0 = no flags,

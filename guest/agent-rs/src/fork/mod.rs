@@ -18,3 +18,10 @@ pub mod reseed;
 /// snapshot restore. Mirrors configureNetwork + writeResolvConf in
 /// notifyforked.go:193-232.
 pub mod network;
+
+/// Volume mounts: mounts per-fork volume entries delivered in the notify-forked
+/// request. Idempotent on re-fork (skips already-mounted paths). Mirrors
+/// mountVolumes in notifyforked.go:247-276.
+pub mod volumes;
+
+pub use volumes::{VolumeMountEntry, mount_volumes};

@@ -30,7 +30,7 @@ pub mod vsock;
 pub use clock::{clock_now_nanos, clock_set_realtime, step_clock, CLOCK_STEP_THRESHOLD_NS};
 pub use entropy::{reseed_crng, reseed_crng_at};
 pub use kill::kill;
-pub use mount::{mount, sethostname};
+pub use mount::{is_mounted, mount, sethostname, MS_PRIVATE, MS_RDONLY, MS_REC};
 pub use vsock::{AGENT_GRPC_PORT, AGENT_LEGACY_PORT};
 #[cfg(feature = "vsock")]
 pub use vsock::bind_vsock;
