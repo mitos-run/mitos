@@ -2,6 +2,9 @@
 
 ## [1.0.0](https://github.com/mitos-run/mitos/compare/v0.14.0...v1.0.0) (2026-06-24)
 
+The Rust guest agent is now the sole guest agent. SP1.5 migrated every host caller to the gRPC contract (AgentGRPCPort 53); the legacy JSON vsock protocol and the Go agent are removed. Measured on bare metal (both agents, same gRPC contract, only /init differs): about 17 to 19 percent faster fork-to-first-response, about 4.7x smaller static binary, with round-trip latency and per-VM RSS within noise and no regression.
+
+
 
 ### Features
 
@@ -114,12 +117,12 @@
 * **console:** billing provider abstraction (Stripe first, MoR-ready) ([1d5359d](https://github.com/mitos-run/mitos/commit/1d5359d920df49058b3f1a56006b3f6a48e59587))
 * **console:** embed the SPA in cmd/console + capabilities-from-env + Dockerfile ([095e4c6](https://github.com/mitos-run/mitos/commit/095e4c604146dc039cbe38c7acbd4ed34c4ed5e3)), closes [#214](https://github.com/mitos-run/mitos/issues/214)
 * **console:** GET /console/billing/portal (provider-neutral manage-subscription link) ([ca3f85c](https://github.com/mitos-run/mitos/commit/ca3f85c7fff5300dced86f7c1f2654401a9d66eb))
-* **console:** hosted/self-hosted dashboard — spec + Phase A backend seams ([baca9a7](https://github.com/mitos-run/mitos/commit/baca9a7f1e9590918ab12165204f46b8a1eb46ea))
+* **console:** hosted/self-hosted dashboard: spec + Phase A backend seams ([baca9a7](https://github.com/mitos-run/mitos/commit/baca9a7f1e9590918ab12165204f46b8a1eb46ea))
 * **console:** kube SecretStore provider (org-namespaced Secrets) ([4d56aaa](https://github.com/mitos-run/mitos/commit/4d56aaa426f0a2b27401810b1a1f4454777c39ae)), closes [#275](https://github.com/mitos-run/mitos/issues/275)
 * **console:** mount the signature-verified billing webhook + portal wiring ([a5f91cc](https://github.com/mitos-run/mitos/commit/a5f91cc57251bd8bd36767bdb8cef8801d92c231))
 * **console:** OpenBao/Vault SecretStore provider (per-org KV-v2 path scoping) ([8dea216](https://github.com/mitos-run/mitos/commit/8dea216df3cef3435ef4ba11994d7f5802bedefd)), closes [#275](https://github.com/mitos-run/mitos/issues/275)
 * **console:** org-scoped SandboxControl + hard-isolation tenant convention ([#2](https://github.com/mitos-run/mitos/issues/2)) ([#287](https://github.com/mitos-run/mitos/issues/287)) ([586f7aa](https://github.com/mitos-run/mitos/commit/586f7aa276b830d540fc8e85a5d1f5e502d4e6f4))
-* **console:** phase 2 — billing portal, secret provider selection, billing webhook ([0eb75f1](https://github.com/mitos-run/mitos/commit/0eb75f13f9c9c2fca53e7a6a1cf15eec51b2d321))
+* **console:** phase 2: billing portal, secret provider selection, billing webhook ([0eb75f1](https://github.com/mitos-run/mitos/commit/0eb75f13f9c9c2fca53e7a6a1cf15eec51b2d321))
 * **console:** real go-oidc verifier + /auth login flow ([caa8201](https://github.com/mitos-run/mitos/commit/caa820117125692115c8831ee2222828424c5144)), closes [#214](https://github.com/mitos-run/mitos/issues/214)
 * **console:** select the real secret backend in cmd/console ([d156a7d](https://github.com/mitos-run/mitos/commit/d156a7d60bf93701771ec82bb8c9db00b69b39d6))
 * **sdk:** official Java SDK (direct mode, hosted mitos.run) ([#250](https://github.com/mitos-run/mitos/issues/250)) ([#290](https://github.com/mitos-run/mitos/issues/290)) ([279da4f](https://github.com/mitos-run/mitos/commit/279da4fc603e8464f814adf58e18fa1dee9d62ba))
