@@ -1,0 +1,15 @@
+[
+  {
+    "name": "exec_round_trip",
+    "unit": "ms",
+    "summary": {
+      "count": 100,
+      "min_ns": 572675,
+      "p50_ns": 610614,
+      "p90_ns": 651692,
+      "p99_ns": 691276,
+      "max_ns": 703197,
+      "mean_ns": 615984
+    }
+  }
+]
