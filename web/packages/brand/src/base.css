@@ -106,3 +106,42 @@ code, kbd, pre, .mono { font-family: var(--mono); }
 .dot-fork { background: var(--magenta); }
 .dot-parent { background: var(--cyan); }
 .dot-warn { background: var(--amber); }
+
+/* Console shell: nav, command palette, toasts, skeletons. Token-driven. */
+.nav-link {
+  color: var(--ink-2);
+  text-decoration: none;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.nav-link:hover { color: var(--ink); background: var(--field-1); }
+.nav-link-active { color: var(--ink); background: var(--field-2); }
+
+.palette-backdrop {
+  position: fixed; inset: 0; background: rgba(4, 5, 10, 0.6);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh;
+}
+.palette {
+  width: min(560px, 92vw); background: var(--field-1);
+  border: 1px solid var(--hairline-strong); border-radius: var(--r-lg); overflow: hidden;
+}
+.palette input {
+  width: 100%; padding: var(--space-4); background: transparent; border: 0;
+  color: var(--ink); font: inherit; border-bottom: 1px solid var(--hairline);
+}
+.palette ul { list-style: none; margin: 0; padding: var(--space-2); max-height: 40vh; overflow: auto; }
+.palette li button {
+  width: 100%; text-align: left; padding: var(--space-2) var(--space-3);
+  background: transparent; border: 0; color: var(--ink); border-radius: var(--r-sm); cursor: pointer;
+}
+.palette li button:hover { background: var(--field-2); }
+
+.toast-stack { display: flex; flex-direction: column; gap: var(--space-2); }
+.toast {
+  padding: var(--space-2) var(--space-4); border-radius: var(--r-md);
+  border: 1px solid var(--hairline-strong); background: var(--field-1); color: var(--ink);
+}
+.toast-ok { border-color: var(--green); }
+.toast-error { border-color: var(--magenta); }
+
+.skeleton-row { animation: pulse 1.2s var(--ease) infinite; }
+@keyframes pulse { 50% { opacity: 0.5; } }
