@@ -281,3 +281,11 @@ code, kbd, pre, .mono { font-family: var(--mono); }
     animation: none;
   }
 }
+
+/* Instrument cockpit: responsive tile grid. */
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
