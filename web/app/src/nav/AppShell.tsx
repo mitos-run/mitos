@@ -7,7 +7,7 @@
 // state is explicit React state so it is testable in jsdom (which has no layout
 // engine). CSS media queries handle the visual switching; state + ARIA wiring
 // provide the accessible, keyboard-driven interface.
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { Division } from '@mitos/brand'
 import { useCapabilities } from '../data/query'
@@ -18,6 +18,12 @@ import type { Capabilities } from '../api'
 export function AppShell() {
   const { data: caps } = useCapabilities()
   const [drawerOpen, setDrawerOpen] = useState(false)
+
+  // Refs for focus management.
+  const navRef = useRef<HTMLElement>(null)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  // Tracks whether the drawer was ever opened so we do not steal focus on initial mount.
+  const wasOpen = useRef(false)
 
   // Close the drawer whenever the route changes (handles nav-link clicks on mobile).
   const pathname = useRouterState({ select: (s) => s.location.pathname })
@@ -36,6 +42,17 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // Focus management: move focus into the nav when the drawer opens;
+  // return focus to the menu button when it closes (but not on initial mount).
+  useEffect(() => {
+    if (drawerOpen) {
+      wasOpen.current = true
+      navRef.current?.focus()
+    } else if (wasOpen.current) {
+      menuButtonRef.current?.focus()
+    }
+  }, [drawerOpen])
+
   if (!caps) {
     return (
       <main style={{ padding: 'var(--space-6)' }}>
@@ -49,8 +66,9 @@ export function AppShell() {
   return (
     <div className="app-shell" style={{ display: 'flex', minHeight: '100vh', maxWidth: 'var(--maxw)', margin: '0 auto' }}>
       {/* Mobile top bar: hamburger + palette affordance */}
-      <div className="top-bar" aria-hidden="false">
+      <div className="top-bar">
         <button
+          ref={menuButtonRef}
           className="menu-button"
           type="button"
           aria-label="Open navigation menu"
@@ -78,8 +96,10 @@ export function AppShell() {
 
       {/* Primary navigation: persistent sidebar on desktop, slide-over on mobile */}
       <nav
+        ref={navRef}
         id="primary-nav"
         aria-label="Primary"
+        tabIndex={-1}
         className={`nav-drawer${drawerOpen ? ' nav-drawer-open' : ''}`}
         style={{ width: 220, padding: 'var(--space-5)', borderRight: '1px solid var(--hairline)' }}
       >

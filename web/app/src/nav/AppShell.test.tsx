@@ -59,4 +59,22 @@ describe('AppShell responsive drawer', () => {
     await renderAt('/sandboxes', caps)
     expect(await screen.findByRole('navigation', { name: /primary/i })).toBeInTheDocument()
   })
+
+  it('moves focus into the primary nav when the drawer opens', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    await user.click(menu)
+    const nav = screen.getByRole('navigation', { name: /primary/i })
+    expect(nav).toHaveFocus()
+  })
+
+  it('returns focus to the menu button when the drawer closes via Escape', async () => {
+    const user = userEvent.setup()
+    await renderAt('/sandboxes', caps)
+    const menu = await screen.findByRole('button', { name: /menu/i })
+    await user.click(menu)
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveFocus()
+  })
 })
