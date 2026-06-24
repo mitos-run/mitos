@@ -11,10 +11,18 @@ RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/
 # as PID 1 (/init) in a minimal rootfs with no libc present. The vsock feature
 # gates the Linux-only tokio-vsock transport the host gRPC caller talks to.
 FROM rust:1-bookworm AS rust-agent
+# musl-tools supplies musl-gcc for any C dependency linked into the static
+# musl binary. The musl target is added AFTER entering guest/agent-rs so the
+# rust-toolchain.toml channel (stable) is the active toolchain rustup adds it
+# to: adding it before the directory override lands it on the wrong toolchain
+# and the build then fails with "can't find crate for core".
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
+WORKDIR /build/guest/agent-rs
 RUN rustup target add x86_64-unknown-linux-musl && \
-    cd guest/agent-rs && \
     cargo build --release --target x86_64-unknown-linux-musl --features vsock
 
 FROM ubuntu:22.04
