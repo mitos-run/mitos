@@ -21,7 +21,7 @@ prost = "0.13"
 thiserror = "2"
 
 # Async runtime.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "fs"] }
 
 # vsock transport (Linux only; stub on non-Linux via feature flag).
 tokio-vsock = { version = "0.6", optional = true }
@@ -34,8 +34,9 @@ tracing = "0.1"
 # Subscriber for test and binary: fmt layer + RUST_LOG env filter.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Stream utilities: UnixListenerStream used by the conformance test harness.
-tokio-stream = { version = "0.1", features = ["net"] }
+# Stream utilities: UnixListenerStream used by the conformance test harness;
+# sync feature provides ReceiverStream used by the Exec conformance test.
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 
 # Legacy JSON serde kept alive during the wire migration; removed once Task 0.x
 # stubs are the last callers (deferred per task-0.1 brief).

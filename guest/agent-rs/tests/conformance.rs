@@ -119,3 +119,216 @@ async fn budget_returns_unimplemented() {
         status.code()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Exec conformance tests (Task 2.1)
+// ---------------------------------------------------------------------------
+
+/// The Exec RPC must stream stdout bytes then send ExecExit with exit_code=0
+/// for a simple printf command. This is the primary conformance gate for the
+/// non-PTY exec path.
+#[tokio::test]
+async fn exec_echo_returns_stdout() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const EXEC_ECHO_SOCK: &str = "/tmp/agent-conformance-exec-echo.sock";
+    let mut client = start_server_and_client(EXEC_ECHO_SOCK).await;
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            command: "printf 'hello'".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
+    tx.send(open).await.unwrap();
+    drop(tx); // no more stdin
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut out = String::new();
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stdout(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            exec_response::Msg::Exit(e) => {
+                exit_code = e.exit_code;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(out, "hello");
+    assert_eq!(exit_code, 0);
+}
+
+/// The Exec RPC must propagate non-zero exit codes from the child process.
+#[tokio::test]
+async fn exec_nonzero_exit_code_propagated() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-exit.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            command: "exit 42".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        if let exec_response::Msg::Exit(e) = msg.unwrap().msg.unwrap() {
+            exit_code = e.exit_code;
+            break;
+        }
+    }
+    assert_eq!(exit_code, 42);
+}
+
+/// The Exec RPC must reject a stream with args set (argv exec not implemented).
+#[tokio::test]
+async fn exec_args_returns_unimplemented() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-args.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            command: "echo".into(),
+            args: vec!["hello".into()],
+            ..Default::default()
+        })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    // The RPC must either return an initial error or deliver an error message.
+    // In practice tonic returns the Unimplemented status as an error on the
+    // stream itself (the handler sends it after reading the first message).
+    // Accept either form.
+    match stream {
+        Err(status) => {
+            assert_eq!(status.code(), Code::Unimplemented);
+        }
+        Ok(response) => {
+            use tokio_stream::StreamExt;
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one message");
+            let status = first.expect_err("must be an error");
+            assert_eq!(status.code(), Code::Unimplemented);
+        }
+    }
+}
+
+/// The Exec RPC must reject a stream whose first message is not `open`.
+#[tokio::test]
+async fn exec_missing_open_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-noopen.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Send a stdin message as the first message (not open).
+    let bad_first = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Stdin(b"hello".to_vec())),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(bad_first).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    match stream {
+        Err(status) => {
+            assert_eq!(status.code(), Code::InvalidArgument);
+        }
+        Ok(response) => {
+            use tokio_stream::StreamExt;
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one message");
+            let status = first.expect_err("must be an error");
+            assert_eq!(status.code(), Code::InvalidArgument);
+        }
+    }
+}
+
+/// The Exec RPC must stream stderr bytes for commands that write to stderr.
+#[tokio::test]
+async fn exec_stderr_returned() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-stderr.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            command: "printf 'err' >&2".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
+    tx.send(open).await.unwrap();
+    drop(tx);
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut stderr_out = String::new();
+    let mut exit_code = -1i32;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stderr(b) => {
+                stderr_out.push_str(&String::from_utf8_lossy(&b));
+            }
+            exec_response::Msg::Exit(e) => {
+                exit_code = e.exit_code;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(stderr_out, "err");
+    assert_eq!(exit_code, 0);
+}

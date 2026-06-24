@@ -16,6 +16,9 @@ use crate::kernel::KernelManager;
 use crate::sandbox_v1;
 use sandbox_v1::sandbox_server::Sandbox;
 
+/// Exec and PTY RPC implementation (Task 2.1).
+pub mod exec;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -79,9 +82,25 @@ impl Sandbox for SandboxService {
 
     async fn exec(
         &self,
-        _request: Request<tonic::Streaming<sandbox_v1::ExecRequest>>,
+        request: Request<tonic::Streaming<sandbox_v1::ExecRequest>>,
     ) -> Result<Response<Self::ExecStream>, Status> {
-        unimplemented_stream("Exec")
+        let env = Arc::clone(&self.env);
+        let stream = request.into_inner();
+
+        // Bounded channel: the sender is the exec handler task; the receiver is
+        // converted into the response stream the tonic runtime polls. The bound
+        // of 32 keeps back-pressure without blocking drain tasks indefinitely.
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            if let Err(status) = exec::exec_handler(env, stream, tx.clone()).await {
+                // Best-effort: send the error as a status; ignore if client is gone.
+                let _ = tx.send(Err(status)).await;
+            }
+        });
+
+        let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     async fn exec_stream(

@@ -20,6 +20,7 @@
 
 pub mod clock;
 pub mod entropy;
+pub mod pty;
 pub mod mount;
 pub mod vsock;
 
