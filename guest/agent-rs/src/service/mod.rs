@@ -5,6 +5,10 @@
 // without touching this file's structure.
 //
 // No unsafe code in this module; tonic-generated code is isolated in lib.rs.
+//
+// Task 4.1: adds the Control service (sandbox.internal.v1.Control), served on
+// the same gRPC port alongside the Sandbox service, mirroring Go's
+// newGuestGRPCServer (grpc_server.go:43-48).
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -51,6 +55,11 @@ pub mod vitals;
 /// maps driverEvent kinds to RunCodeResponse frames; serializes executions
 /// via the shared Arc<Mutex<KernelManager>>.
 pub mod runcode;
+
+/// Control service (Task 4.1): implements sandbox.internal.v1.Control
+/// (NotifyForked, Configure, Ping). Host-trusted; served on the same gRPC port
+/// as SandboxService (AGENT_GRPC_PORT = 53), matching Go's newGuestGRPCServer.
+pub mod control;
 
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound

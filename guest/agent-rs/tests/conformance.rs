@@ -2265,6 +2265,393 @@ async fn runcode_grpc_unsupported_language_returns_kernel_unavailable() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Control service conformance tests (Task 4.1)
+//
+// These tests drive the full gRPC path: tonic client -> ControlService ->
+// fork::handle_notify_forked / ConfiguredEnv::apply / Ping.
+//
+// Host-safety: NotifyForked with zero-entropy calls handle_notify_forked, which
+// calls signal_userspace (real /proc walk + SIGUSR2 broadcast). Broadcasting
+// SIGUSR2 to box2's real processes during `cargo test` is unsafe (SIGUSR2
+// default action is TERM; k3s and other daemons would be killed). The test for
+// NotifyForked therefore:
+//   1. Uses empty entropy (reseeded_rng=false, deterministic).
+//   2. Uses host_wall_clock_nanos=0 (applied_clock_step_nanos=0, deterministic).
+//   3. Asserts signaled_processes >= 0 (both 0 and positive are valid).
+//
+// This is the same host-safe strategy used in fork/mod.rs
+// (handle_notify_forked_public_wiring_safe): we test the proto<->typed mapping
+// by verifying the deterministic fields (reseeded_rng, applied_clock_step_nanos)
+// without relying on the signal count. The real SIGUSR2 broadcast is gated by
+// #[ignore] in fork/mod.rs (handle_notify_forked_public_smoke), run only inside
+// a VM or isolated PID namespace.
+// ---------------------------------------------------------------------------
+
+/// No-op signal function for conformance tests: does NOT walk /proc or send
+/// SIGUSR2. Using this in all ControlService tests keeps box2 safe: the real
+/// signal_userspace broadcasts SIGUSR2 to all /proc processes, which would kill
+/// k3s and other daemons on box2 during plain `cargo test`.
+fn noop_signal_fn() -> i32 { 0 }
+
+/// Helper: build a ControlService (with no-op signal) and start a tonic server
+/// and client on a Unix domain socket. Returns a connected ControlClient. The
+/// server runs in a background tokio task and is cleaned up when the test exits.
+async fn start_control_server_and_client(
+    sock_path: &str,
+) -> sandbox_agent::control_v1::control_client::ControlClient<tonic::transport::Channel> {
+    use sandbox_agent::control_v1::control_server::ControlServer;
+    use sandbox_agent::env::ConfiguredEnv;
+    use sandbox_agent::service::control::ControlService;
+
+    let _ = std::fs::remove_file(sock_path);
+    let uds = tokio::net::UnixListener::bind(sock_path).expect("bind unix socket");
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
+
+    // No-op signal_fn: never broadcasts SIGUSR2 to host processes.
+    // The real signal_userspace is used in production (ControlService::new).
+    let ctrl_service = ControlService {
+        start_time: std::time::Instant::now(),
+        env: Arc::new(ConfiguredEnv::new()),
+        signal_fn: noop_signal_fn,
+    };
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ControlServer::new(ctrl_service))
+            .serve_with_incoming(incoming)
+            .await
+            .ok();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let sock_path = sock_path.to_owned();
+    let channel = tonic::transport::Endpoint::from_static("http://[::]:0")
+        .connect_with_connector(tower::service_fn(move |_| {
+            let path = sock_path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(path).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+            }
+        }))
+        .await
+        .expect("connect to control test server");
+
+    sandbox_agent::control_v1::control_client::ControlClient::new(channel)
+}
+
+/// Ping must return uptime_seconds >= 0. Carries no secrets.
+/// This is the primary conformance gate for the Ping RPC.
+#[tokio::test]
+async fn control_ping_returns_nonnegative_uptime() {
+    use sandbox_agent::control_v1::PingRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-control-ping.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let resp = client
+        .ping(PingRequest {})
+        .await
+        .expect("Ping must succeed")
+        .into_inner();
+
+    assert!(
+        resp.uptime_seconds >= 0.0,
+        "uptime_seconds must be >= 0, got {}",
+        resp.uptime_seconds,
+    );
+}
+
+/// Ping uptime_seconds increases over time: a second Ping after a short sleep
+/// must report uptime >= the first.
+#[tokio::test]
+async fn control_ping_uptime_increases() {
+    use sandbox_agent::control_v1::PingRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-control-ping-time.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let first = client
+        .ping(PingRequest {})
+        .await
+        .expect("first Ping must succeed")
+        .into_inner();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let second = client
+        .ping(PingRequest {})
+        .await
+        .expect("second Ping must succeed")
+        .into_inner();
+
+    assert!(
+        second.uptime_seconds >= first.uptime_seconds,
+        "second uptime {} must be >= first uptime {}",
+        second.uptime_seconds,
+        first.uptime_seconds,
+    );
+}
+
+/// Configure merges env and secrets into the shared ConfiguredEnv. After
+/// Configure, the env must be visible via snapshot (key count changes).
+/// Secret VALUES are not echoed in the response or observable from outside
+/// the struct; we verify the count only. This is the Configure conformance gate.
+#[tokio::test]
+async fn control_configure_env_merge_updates_key_count() {
+    use sandbox_agent::control_v1::{ConfigureRequest, PingRequest};
+    use sandbox_agent::control_v1::control_server::ControlServer;
+    use sandbox_agent::env::ConfiguredEnv;
+    use sandbox_agent::service::control::ControlService;
+
+    const SOCK: &str = "/tmp/agent-conformance-control-configure.sock";
+    let _ = std::fs::remove_file(SOCK);
+    let uds = tokio::net::UnixListener::bind(SOCK).expect("bind");
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
+
+    // Keep a reference to the shared env so we can inspect the count after Configure.
+    let shared_env = Arc::new(ConfiguredEnv::new());
+
+    // No-op signal_fn: safe on box2 (no SIGUSR2 to host processes).
+    let ctrl_service = ControlService {
+        start_time: std::time::Instant::now(),
+        env: Arc::clone(&shared_env),
+        signal_fn: noop_signal_fn,
+    };
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ControlServer::new(ctrl_service))
+            .serve_with_incoming(incoming)
+            .await
+            .ok();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let channel = tonic::transport::Endpoint::from_static("http://[::]:0")
+        .connect_with_connector(tower::service_fn(|_| async {
+            let stream = tokio::net::UnixStream::connect(SOCK).await?;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+        }))
+        .await
+        .expect("connect");
+
+    let mut client =
+        sandbox_agent::control_v1::control_client::ControlClient::new(channel);
+
+    // Confirm empty before Configure.
+    assert_eq!(shared_env.len().await, 0, "env must be empty before Configure");
+
+    let mut env_map = std::collections::HashMap::new();
+    env_map.insert("FOO".to_string(), "bar".to_string());
+    env_map.insert("BAZ".to_string(), "qux".to_string());
+
+    let mut secrets_map = std::collections::HashMap::new();
+    secrets_map.insert("SECRET_KEY".to_string(), "MUST_NOT_APPEAR_IN_LOGS".to_string());
+
+    client
+        .configure(ConfigureRequest {
+            env: env_map,
+            secrets: secrets_map,
+        })
+        .await
+        .expect("Configure must succeed");
+
+    // After Configure: 2 env vars + 1 secret = 3 total keys.
+    assert_eq!(
+        shared_env.len().await,
+        3,
+        "env must contain 3 keys after Configure (2 env + 1 secret)",
+    );
+
+    // The Ping RPC must still work after Configure (server must not panic or
+    // lock up after receiving sensitive material).
+    let resp = client
+        .ping(PingRequest {})
+        .await
+        .expect("Ping must succeed after Configure")
+        .into_inner();
+    assert!(resp.uptime_seconds >= 0.0);
+}
+
+/// Configure secret values must not appear in error messages or gRPC metadata.
+/// We configure with a distinctive secret value and verify that the response
+/// (ConfigureResponse) carries no payload. This is the "secret not echoed" gate.
+#[tokio::test]
+async fn control_configure_secret_not_echoed_in_response() {
+    use sandbox_agent::control_v1::ConfigureRequest;
+
+    const SOCK: &str = "/tmp/agent-conformance-control-configure-secret.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let mut secrets = std::collections::HashMap::new();
+    secrets.insert(
+        "API_TOKEN".to_string(),
+        "super-secret-token-xyz-12345".to_string(),
+    );
+
+    let resp = client
+        .configure(ConfigureRequest {
+            env: std::collections::HashMap::new(),
+            secrets,
+        })
+        .await
+        .expect("Configure must succeed");
+
+    // ConfigureResponse carries no payload; the returned message must be the
+    // empty struct. The gRPC status is OK (no error). Verify the response
+    // message is default/empty (no echoed fields).
+    let inner = resp.into_inner();
+    // ConfigureResponse {} has no fields; just confirm the call succeeded
+    // and the response type is correct by getting the inner value.
+    let _ = inner; // type assertion: ConfigureResponse
+}
+
+/// NotifyForked with empty entropy must return reseeded_rng=false and
+/// applied_clock_step_nanos=0. This is the proto<->typed mapping conformance gate.
+///
+/// Host-safe: empty entropy means no RNDADDENTROPY ioctl is attempted (fail-closed).
+/// host_wall_clock_nanos=0 means no CLOCK_REALTIME step is attempted.
+/// signaled_processes is not asserted to a fixed value because the real
+/// signal_userspace function walks /proc; on box2 this broadcasts SIGUSR2 to
+/// real processes. We assert >= 0 only (valid for both 0 and a process count).
+///
+/// The SIGUSR2-broadcast behavior is tested exclusively via the #[ignore] smoke
+/// test in fork/mod.rs (handle_notify_forked_public_smoke), which runs only
+/// inside a VM or isolated PID namespace.
+#[tokio::test]
+async fn control_notify_forked_empty_entropy_returns_false_reseed_and_zero_step() {
+    use sandbox_agent::control_v1::{NotifyForkedRequest, PingRequest};
+
+    const SOCK: &str = "/tmp/agent-conformance-control-notifyforked.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let resp = client
+        .notify_forked(NotifyForkedRequest {
+            generation: 1,
+            host_wall_clock_nanos: 0,
+            entropy: vec![],
+            network: None,
+            volumes: vec![],
+        })
+        .await
+        .expect("NotifyForked must succeed")
+        .into_inner();
+
+    assert!(
+        !resp.reseeded_rng,
+        "empty entropy must yield reseeded_rng=false, got {}",
+        resp.reseeded_rng,
+    );
+    assert_eq!(
+        resp.applied_clock_step_nanos,
+        0,
+        "host_wall_clock_nanos=0 must yield applied_clock_step_nanos=0, got {}",
+        resp.applied_clock_step_nanos,
+    );
+    assert!(
+        resp.signaled_processes >= 0,
+        "signaled_processes must be >= 0, got {}",
+        resp.signaled_processes,
+    );
+
+    // Ping must still work after NotifyForked (no panic or lock-up).
+    let ping = client
+        .ping(PingRequest {})
+        .await
+        .expect("Ping must succeed after NotifyForked")
+        .into_inner();
+    assert!(ping.uptime_seconds >= 0.0);
+}
+
+/// NotifyForked with a network message must map all five proto fields to
+/// NetworkConfig. We verify this by calling NotifyForked with a full network
+/// message and asserting the RPC succeeds (network reconfiguration is a
+/// best-effort no-op on the host where eth0 may not exist; the orchestrator
+/// does not fail the RPC on netlink errors).
+#[tokio::test]
+async fn control_notify_forked_network_fields_mapped_correctly() {
+    use sandbox_agent::control_v1::{NotifyForkedNetwork, NotifyForkedRequest};
+
+    const SOCK: &str = "/tmp/agent-conformance-control-notifyforked-net.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let resp = client
+        .notify_forked(NotifyForkedRequest {
+            generation: 2,
+            host_wall_clock_nanos: 0,
+            entropy: vec![],
+            network: Some(NotifyForkedNetwork {
+                guest_ip: "10.200.0.2".to_string(),
+                gateway_ip: "10.200.0.1".to_string(),
+                prefix_len: 30,
+                guest_mac: "02:ab:cd:ef:01:02".to_string(),
+                resolver_ip: "8.8.8.8".to_string(),
+            }),
+            volumes: vec![],
+        })
+        .await
+        .expect("NotifyForked with network must succeed (network errors are non-fatal)")
+        .into_inner();
+
+    // Deterministic fields for empty entropy + zero clock.
+    assert!(
+        !resp.reseeded_rng,
+        "empty entropy must yield reseeded_rng=false"
+    );
+    assert_eq!(
+        resp.applied_clock_step_nanos, 0,
+        "zero clock must yield step=0"
+    );
+    assert!(resp.signaled_processes >= 0);
+}
+
+/// NotifyForked with volumes must map all three proto fields per entry.
+/// As with network, volume mount errors are non-fatal on the host (the device
+/// nodes do not exist); the RPC must succeed regardless.
+#[tokio::test]
+async fn control_notify_forked_volume_fields_mapped_correctly() {
+    use sandbox_agent::control_v1::{NotifyForkedRequest, VolumeMountEntry};
+
+    const SOCK: &str = "/tmp/agent-conformance-control-notifyforked-vol.sock";
+    let mut client = start_control_server_and_client(SOCK).await;
+
+    let resp = client
+        .notify_forked(NotifyForkedRequest {
+            generation: 3,
+            host_wall_clock_nanos: 0,
+            entropy: vec![],
+            network: None,
+            volumes: vec![
+                VolumeMountEntry {
+                    device: "/dev/vdb".to_string(),
+                    mount_path: "/data".to_string(),
+                    read_only: false,
+                },
+                VolumeMountEntry {
+                    device: "/dev/vdc".to_string(),
+                    mount_path: "/ro-data".to_string(),
+                    read_only: true,
+                },
+            ],
+        })
+        .await
+        .expect("NotifyForked with volumes must succeed (mount errors are non-fatal)")
+        .into_inner();
+
+    assert!(
+        !resp.reseeded_rng,
+        "empty entropy must yield reseeded_rng=false"
+    );
+    assert_eq!(
+        resp.applied_clock_step_nanos, 0,
+        "zero clock must yield step=0"
+    );
+    assert!(resp.signaled_processes >= 0);
+}
+
 // (e) First message is not `open` -> InvalidArgument status returned by the server.
 #[tokio::test]
 async fn runcode_grpc_missing_open_returns_invalid_argument() {

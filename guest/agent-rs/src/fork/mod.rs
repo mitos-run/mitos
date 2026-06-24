@@ -142,7 +142,12 @@ pub fn handle_notify_forked(req: &NotifyForkedRequest) -> NotifyForkedResponse {
 /// Inner orchestrator with an injectable signal function. Keeps tests
 /// parallel-safe: tests pass a no-op so they never send SIGUSR2 to sibling
 /// test-runner processes (which are forked children visible in /proc).
-fn handle_notify_forked_inner(
+///
+/// `#[doc(hidden)]` + `pub`: exposed for integration tests in `tests/` so the
+/// conformance test harness can call NotifyForked via gRPC but route through
+/// a no-op signal function, keeping box2 safe from SIGUSR2 broadcasts.
+#[doc(hidden)]
+pub fn handle_notify_forked_inner(
     req: &NotifyForkedRequest,
     do_signal: fn() -> i32,
 ) -> NotifyForkedResponse {

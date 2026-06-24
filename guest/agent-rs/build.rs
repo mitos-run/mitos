@@ -25,8 +25,11 @@ fn main() {
         .build_client(true)
         .build_server(true)
         .compile_protos(
-            &["proto/sandbox/v1/sandbox.proto"],
+            &[
+                "proto/sandbox/v1/sandbox.proto",
+                "proto/sandbox/controlv1/internal.proto",
+            ],
             &["proto"],
         )
-        .expect("tonic_build: failed to compile sandbox.proto");
+        .expect("tonic_build: failed to compile protos");
 }

@@ -45,6 +45,18 @@ pub mod sandbox_v1 {
     tonic::include_proto!("sandbox.v1");
 }
 
+/// Generated types for the sandbox.internal.v1 Control gRPC service.
+///
+/// The source of truth is proto/sandbox/controlv1/internal.proto (vendored
+/// under guest/agent-rs/proto/ for a self-contained build). tonic-build
+/// generates this module at build time via build.rs. This service is served
+/// on the same vsock gRPC port as Sandbox (AGENT_GRPC_PORT = 53), matching
+/// the Go guest agent's newGuestGRPCServer (grpc_server.go:43-48).
+pub mod control_v1 {
+    #![allow(missing_docs, unsafe_code)]
+    tonic::include_proto!("sandbox.internal.v1");
+}
+
 // ---------------------------------------------------------------------------
 // PID-1 init module (task 1.3).
 // ---------------------------------------------------------------------------

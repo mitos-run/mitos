@@ -1,9 +1,10 @@
 //! sandbox-agent binary entry point.
 //!
 //! Runs PID-1 init when invoked as init (pid == 1), then builds shared state
-//! and serves the tonic Sandbox gRPC service over an AF_VSOCK listener on
-//! AGENT_GRPC_PORT (53). The vsock feature must be enabled for production use;
-//! non-vsock builds are compile-only stubs.
+//! and serves the tonic Sandbox gRPC service AND the Control gRPC service over
+//! an AF_VSOCK listener on AGENT_GRPC_PORT (53). Both services share one port,
+//! mirroring Go's newGuestGRPCServer (grpc_server.go:43-48). The vsock feature
+//! must be enabled for production use; non-vsock builds are compile-only stubs.
 
 // Mirror the crate-wide lint set from lib.rs for the binary compilation unit.
 #![deny(unsafe_code)]
@@ -14,11 +15,14 @@
 #![warn(missing_docs)]
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
+use sandbox_agent::control_v1::control_server::ControlServer;
 use sandbox_agent::env::ConfiguredEnv;
 use sandbox_agent::kernel::KernelManager;
 use sandbox_agent::sandbox_v1::sandbox_server::SandboxServer;
+use sandbox_agent::service::control::ControlService;
 use sandbox_agent::service::SandboxService;
 use sandbox_agent::sys::AGENT_GRPC_PORT;
 
@@ -42,37 +46,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sandbox_agent::init::init_system();
     }
 
+    // Record the agent start time for Ping uptime. Captured before any
+    // async work so the uptime covers the full agent lifetime.
+    let start_time = Instant::now();
+
     // Build shared state. Both fields are Arc-wrapped so the service struct
     // can be cloned per tonic request without cloning the underlying state.
     let env = Arc::new(ConfiguredEnv::new());
     let kernel = Arc::new(Mutex::new(KernelManager::new()));
 
     let service = SandboxService {
-        env,
+        env: Arc::clone(&env),
         kernel,
         workspace_root: std::path::PathBuf::from("/workspace"),
     };
 
+    // Control service shares the same ConfiguredEnv as SandboxService so
+    // Configure writes are immediately visible to exec handlers. ControlService::new
+    // wires the real signal_userspace function for the production path.
+    let ctrl_service = ControlService::new(start_time, env);
+
     tracing::info!(
         port = AGENT_GRPC_PORT,
-        "sandbox-agent: gRPC ready, binding vsock"
+        "sandbox-agent: gRPC ready, binding vsock (Sandbox + Control)"
     );
 
-    serve(service).await
+    serve(service, ctrl_service).await
 }
 
-/// Serve the Sandbox gRPC service over AF_VSOCK (vsock feature) or exit
-/// immediately (no vsock feature, compile-only stub).
+/// Serve the Sandbox and Control gRPC services over AF_VSOCK (vsock feature)
+/// or exit immediately (no vsock feature, compile-only stub).
 ///
 /// Under the `vsock` feature: binds `AGENT_GRPC_PORT` on `VMADDR_CID_ANY`
 /// and adapts the `VsockListener::incoming()` stream into tonic's
-/// `serve_with_incoming`. `VsockStream` is wrapped in `VsockConnected` which
-/// implements `tonic::transport::server::Connected` for tonic 0.13, because
-/// the `tonic-conn` feature of tokio-vsock 0.6 targets tonic 0.12 and is not
+/// `serve_with_incoming`. Both services are registered on the same server,
+/// mirroring Go's newGuestGRPCServer (grpc_server.go:43-48). `VsockStream` is
+/// wrapped in `VsockConnected` which implements
+/// `tonic::transport::server::Connected` for tonic 0.13, because the
+/// `tonic-conn` feature of tokio-vsock 0.6 targets tonic 0.12 and is not
 /// compatible. The wrapper is minimal: `AsyncRead + AsyncWrite + Unpin +
 /// Connected` only.
 #[cfg(feature = "vsock")]
-async fn serve(service: SandboxService) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(
+    service: SandboxService,
+    ctrl_service: ControlService,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -140,6 +158,7 @@ async fn serve(service: SandboxService) -> Result<(), Box<dyn std::error::Error>
 
     tonic::transport::Server::builder()
         .add_service(SandboxServer::new(service))
+        .add_service(ControlServer::new(ctrl_service))
         .serve_with_incoming(incoming)
         .await?;
 
@@ -147,7 +166,10 @@ async fn serve(service: SandboxService) -> Result<(), Box<dyn std::error::Error>
 }
 
 #[cfg(not(feature = "vsock"))]
-async fn serve(_service: SandboxService) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(
+    _service: SandboxService,
+    _ctrl_service: ControlService,
+) -> Result<(), Box<dyn std::error::Error>> {
     tracing::warn!(
         "vsock feature not enabled: sandbox-agent has no listener. \
          Enable the `vsock` Cargo feature for production use."
