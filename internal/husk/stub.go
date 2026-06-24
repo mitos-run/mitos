@@ -21,7 +21,6 @@ import (
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/snapcompat"
 	"mitos.run/mitos/internal/volume"
-	"mitos.run/mitos/internal/vsock"
 	"mitos.run/mitos/internal/workspace"
 	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 )
@@ -294,21 +293,19 @@ func waitForFile(ctx context.Context, path string, timeout time.Duration) error 
 // wsTransporter resolves a workspace.VsockTransport (the bulk tar TarDir/UntarDir
 // slice of the guest agent) for the active VM at vsockPath. The dehydrate and
 // hydrate workspace ops run the KVM-proven internal/workspace round trip through
-// it. The production seam connects a vsock client to the guest agent; tests
-// inject a fake in-memory transport so the ops can be exercised with no VM.
+// it. The production seam returns a gRPC-backed transport (Archive/Upload on
+// AgentGRPCPort 53); tests inject a fake in-memory transport so the ops can be
+// exercised with no VM.
 type wsTransporter func(vsockPath string) (workspace.VsockTransport, error)
 
-// productionWorkspaceTransport connects the vsock client to the guest agent at
-// vsockPath (AgentPort 52, the legacy JSON protocol used for bulk tar transfer)
-// and returns it as a workspace.VsockTransport (it satisfies TarDir/UntarDir).
-// The caller closes the client when done. Workspace content bytes never appear
-// in any log line: only the operation and the transport error are reported.
+// productionWorkspaceTransport returns a gRPC-backed workspace.VsockTransport
+// that uses the guest Sandbox Archive and Upload RPCs on AgentGRPCPort 53 to
+// perform bulk tar transfers. This replaces the legacy JSON path on AgentPort 52
+// so workspace dehydrate/hydrate works against the gRPC-only Rust agent.
+// Workspace content bytes never appear in any log line: only the operation and
+// the transport error are reported.
 func productionWorkspaceTransport(vsockPath string) (workspace.VsockTransport, error) {
-	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-	if err != nil {
-		return nil, fmt.Errorf("connect guest agent for workspace transfer: %w", err)
-	}
-	return client, nil
+	return &grpcWorkspaceTransport{vsockPath: vsockPath}, nil
 }
 
 // productionStarter wraps firecracker.StartVM. *firecracker.Client satisfies
@@ -422,8 +419,8 @@ type Options struct {
 	// not a secret; workspace CONTENT is never logged.
 	CASDir string
 	// WorkspaceTransport resolves the guest-agent bulk-tar transport for the
-	// workspace ops. Nil uses the production seam (connect a vsock client to the
-	// active VM's guest agent). Tests inject a fake in-memory transport.
+	// workspace ops. Nil uses the production seam (gRPC Archive/Upload on
+	// AgentGRPCPort 53). Tests inject a fake in-memory transport.
 	WorkspaceTransport wsTransporter
 }
 
