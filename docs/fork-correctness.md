@@ -439,3 +439,49 @@ secret value absent from every host-side stub/client log.
 
 Until every row above is `done`, fork correctness is the top engineering
 priority and blocks feature work (see `ROADMAP.md`).
+
+## Rust guest agent path (`guest/agent-rs`)
+
+The Rust agent (`guest/agent-rs`) is an opt-in alternative to the Go agent.
+When baked as `/init` via `AGENT_IMPL=rust` in `guest/rootfs/build.sh`, it
+serves ONLY gRPC on vsock port 53 (AgentGRPCPort). It does NOT serve the
+legacy JSON protocol on vsock port 52.
+
+SECURITY-SENSITIVE: `guest/agent-rs/src/sys/`, `guest/agent-rs/src/fork/`,
+`guest/agent-rs/src/init/mod.rs`, and `guest/agent-rs/src/main.rs` require a
+named human reviewer before any PR touching them is merged to main. This is the
+same policy as `guest/agent` (stated in CLAUDE.md and `docs/threat-model.md`).
+
+### Fork-correctness coverage for the Rust agent
+
+The Rust agent implements all five fork-correctness hazards from the table above
+via dedicated modules in `guest/agent-rs/src/fork/`:
+
+| Hazard | Rust implementation | Status |
+|---|---|---|
+| 1. RNG/CRNG reseed | `fork/reseed.rs`: `sys::entropy::reseed_crng` writes the host-supplied entropy bytes into the kernel CRNG via `RNDADDENTROPY` (credited ioctl); reports `reseeded_rng: false` if the ioctl fails, triggering host fail-closed reap | **done (gRPC path, gated by conformance and bench)** |
+| 2. Wall-clock step | `fork/clock.rs`: `sys::clock::step_realtime_ns` calls `clock_settime(CLOCK_REALTIME)` when drift exceeds 500ms; same threshold as the Go agent | **done (gRPC path)** |
+| 3. SIGUSR2 signal to userspace | `fork/signal.rs`: `sys::signal::signal_userspace` sends SIGUSR2 to all user-space processes after reseed + clock step | **done (gRPC path)** |
+| 4. Per-fork network reconfiguration | `fork/network.rs`: sets eth0 MAC via rtnetlink, flushes old address, assigns per-fork IP and default route | **done (gRPC path)** |
+| 5. Per-fork volume mounts | `fork/volumes.rs`: mounts per-fork volume block devices at the paths specified in the `NotifyForkedRequest` | **done (gRPC path)** |
+
+The "gRPC path" qualifier means these are exercised by the Rust agent conformance
+harness (`guest/agent-rs/tests/conformance.rs`) and the gRPC bench gate, NOT yet
+by the production KVM fork-correctness CI suite (`kvm-test.yaml`), because the
+production CI suite boots VMs via the Go host callers that speak the JSON protocol
+on port 52. The KVM fork-correctness suite will cover the Rust agent once the
+JSON->gRPC host-caller migration (SP1.5) lands and the CI suite is updated to
+optionally boot a Rust-agent rootfs.
+
+### Production cutover gate
+
+A Rust-agent rootfs is NOT a production drop-in today. The host-side callers
+(`internal/fork/uffd_engine.go`, `internal/daemon/sandbox_api.go`,
+`internal/firecracker/template.go`, `internal/husk/stub.go`, and the smoke
+binaries in `cmd/`) still speak the JSON protocol on vsock port 52. Until those
+callers are migrated to the gRPC protocol (vsock port 53) in the SP1.5 workstream,
+a VM running the Rust agent will not complete template creation, fork-readiness
+checks, or any exec/file operation on the production data path.
+
+See `hack/rust-agent-cutover.md` for the full prerequisite list, soak/canary
+procedure, and rollback instructions.

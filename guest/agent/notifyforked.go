@@ -296,11 +296,21 @@ func isMounted(mountPath string) bool {
 	return false
 }
 
+// signalUserspaceImpl is the injectable implementation of signalUserspace. In
+// production it is nil and signalUserspace uses its own /proc walk. Tests that
+// run on a real host (e.g. the conformance server started by the cross-agent
+// harness) set this to a no-op to avoid broadcasting SIGUSR2 to host processes.
+// This is the only seam; production code and the vsock path are unaffected.
+var signalUserspaceImpl func() int
+
 // signalUserspace sends SIGUSR2 to every userspace process except PID 1 (this
 // init) and the agent itself, prompting language runtimes and TLS libraries to
 // reseed their PRNGs. Best effort: failures per pid are ignored and the count
 // of successful signals is returned.
 func signalUserspace() int {
+	if signalUserspaceImpl != nil {
+		return signalUserspaceImpl()
+	}
 	self := os.Getpid()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {

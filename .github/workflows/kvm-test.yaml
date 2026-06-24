@@ -40,6 +40,7 @@ on:
       # the example's agent + fork engine.
       - 'cmd/sandbox-server/**'
       - 'sdk/python/**'
+      - 'bench/agent-conformance/**'
   pull_request:
     branches: [main]
   workflow_dispatch:

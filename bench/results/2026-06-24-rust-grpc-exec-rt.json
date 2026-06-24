@@ -1,0 +1,47 @@
+[
+  {
+    "name": "grpc_ping_round_trip",
+    "run": "pass1",
+    "iters": 200,
+    "unit": "ms",
+    "summary": {
+      "count": 200,
+      "min_ns": 201843,
+      "p50_ns": 223297,
+      "p90_ns": 357062,
+      "p99_ns": 500978,
+      "max_ns": 1235343,
+      "mean_ns": 255090
+    }
+  },
+  {
+    "name": "grpc_ping_round_trip",
+    "run": "pass3",
+    "iters": 100,
+    "unit": "ms",
+    "summary": {
+      "count": 100,
+      "min_ns": 204601,
+      "p50_ns": 235038,
+      "p90_ns": 270439,
+      "p99_ns": 424677,
+      "max_ns": 471205,
+      "mean_ns": 241863
+    }
+  },
+  {
+    "name": "grpc_ping_round_trip",
+    "run": "pass4",
+    "iters": 100,
+    "unit": "ms",
+    "summary": {
+      "count": 100,
+      "min_ns": 228273,
+      "p50_ns": 255322,
+      "p90_ns": 547275,
+      "p99_ns": 705644,
+      "max_ns": 749331,
+      "mean_ns": 340004
+    }
+  }
+]
