@@ -152,12 +152,32 @@ fn parse_mac(mac: &str) -> Result<[u8; 6], String> {
 /// Write a single `nameserver <ip>` line to path.
 /// No-op when resolver_ip is empty. Replaces the file in full (idempotent on
 /// re-delivery). Mirrors writeResolvConf in notifyforked.go:223-232.
+/// Mode 0o644 is set explicitly (matching Go's os.WriteFile call) so the
+/// result is umask-independent.
 fn write_resolv_conf(path: &str, resolver_ip: &str) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::OpenOptionsExt;
+
     if resolver_ip.is_empty() {
         return Ok(());
     }
     let content = format!("nameserver {resolver_ip}\n");
-    std::fs::write(path, content)
+    #[cfg(target_os = "linux")]
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(path)?;
+        f.write_all(content.as_bytes())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::fs::write(path, content)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +283,13 @@ mod tests {
         // SAFETY: fork()+unshare() pattern is the same as in sys::netlink tests;
         // see the SAFETY comment there for the rationale.
         fn in_netns<F: FnOnce() + std::panic::UnwindSafe>(test_name: &str, f: F) {
+            // Skip without failing when not running as root: unshare(CLONE_NEWNET)
+            // requires CAP_SYS_ADMIN. A non-root cargo test run counts as pass.
+            // SAFETY: geteuid() is always safe to call; it has no side effects.
+            if unsafe { libc::geteuid() } != 0 {
+                eprintln!("skipping {test_name}: requires root/CAP_SYS_ADMIN");
+                return;
+            }
             // SAFETY: fork() duplicates the calling process; the child is single-threaded
             // after fork and calls only _exit, not Rust runtime teardown.
             let pid = unsafe { libc::fork() };
