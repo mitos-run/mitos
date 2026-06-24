@@ -47,8 +47,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Tar archive creation and extraction (Archive + Upload RPCs, Task 2.3).
-# The tar crate's Archive::unpack guards against "../" escapes by default;
-# we additionally apply safe_join for defense-in-depth.
+# Extraction uses a manual entry loop with safe_join as the sole path-traversal
+# barrier (NOT tar::Archive::unpack, which is not used). Only Regular and
+# Directory entry types are materialized; symlinks, hard links, and all other
+# types are rejected so a restored symlink cannot re-introduce an escape.
 tar = "0.4"
 
 # Directory walker for tar creation (skips symlinks by default configuration).

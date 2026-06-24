@@ -52,6 +52,12 @@ pub enum AgentError {
     /// distinguish this from a workspace-allowlist rejection.
     #[error("path denied: {0}")]
     PathDenied(String),
+
+    /// A resource limit was exceeded (e.g. MAX_TAR_BYTES for archive/upload).
+    /// Maps to gRPC ResourceExhausted so callers can distinguish this from
+    /// argument or internal errors.
+    #[error("resource exhausted: {0}")]
+    ResourceExhausted(String),
 }
 
 impl From<AgentError> for Status {
@@ -65,6 +71,7 @@ impl From<AgentError> for Status {
             AgentError::Io(err) => Status::new(Code::Internal, err.to_string()),
             AgentError::Unavailable(msg) => Status::new(Code::Unavailable, msg),
             AgentError::PathDenied(msg) => Status::new(Code::PermissionDenied, msg),
+            AgentError::ResourceExhausted(msg) => Status::new(Code::ResourceExhausted, msg),
         }
     }
 }

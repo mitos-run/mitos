@@ -8,16 +8,18 @@
 //   - Tars the subtree (regular files and directories only; symlinks skipped).
 //   - Streams the tar in CHUNK_BYTES (32 KiB) Chunk frames; sends a final
 //     Chunk{eof: true} to signal completion.
-//   - Bounds the tar at MAX_TAR_BYTES (512 MiB); returns ResourceExhausted if
-//     the limit is exceeded, so a large workspace cannot exhaust memory.
+//   - Bounds the tar at MAX_TAR_BYTES (64 MiB, matching Go MaxTarBytes); returns
+//     ResourceExhausted if the limit is exceeded (checked as a running total during
+//     build to cap peak allocation, not only after the buffer is complete).
 //
 // Upload(stream UploadRequest) -> UploadResult
 //   - First message must carry UploadOpen{dest}; rejects if dest is outside the
 //     workspace allowlist.
 //   - Accumulates chunk bytes up to MAX_TAR_BYTES; returns ResourceExhausted on
 //     overflow.
-//   - Extracts the tar using safe_join, which rejects absolute paths and "../"
-//     escapes before any write; only TypeReg and TypeDir members are materialized.
+//   - Extracts via a manual entry loop with safe_join as the sole path-traversal
+//     barrier (NOT tar::Archive::unpack); rejects absolute paths and "../" escapes
+//     before any write; only TypeReg and TypeDir members are materialized.
 //   - Returns UploadResult{bytes_written: total_chunk_bytes}.
 //
 // SECURITY (path traversal):
@@ -83,10 +85,10 @@ pub fn set_workspace_root_for_test(root: &str) {
     }
 }
 
-/// Maximum tar size in bytes: 512 MiB, matching vsock.MaxTarBytes on the Go
-/// side (internal/vsock/vsock.go). Exceeding this limit causes ResourceExhausted
+/// Maximum tar size in bytes: 64 MiB, matching MaxTarBytes in
+/// internal/vsock/protocol.go. Exceeding this limit causes ResourceExhausted
 /// so a large workspace or a malicious tar cannot exhaust guest memory.
-const MAX_TAR_BYTES: usize = 512 << 20;
+const MAX_TAR_BYTES: usize = 64 << 20;
 
 /// Chunk size for streaming: 32 KiB, matching grpcChunkBytes in grpc_server.go.
 const CHUNK_BYTES: usize = 32 << 10;
@@ -96,13 +98,30 @@ const CHUNK_BYTES: usize = 32 << 10;
 // ---------------------------------------------------------------------------
 
 /// Returns true if p is the workspace root or a descendant of it.
-/// Mirrors pathAllowed in tardir.go.
+/// Mirrors pathAllowed in tardir.go (which uses filepath.Clean before comparing).
+///
+/// SECURITY: We normalize ".." lexically (without touching the filesystem) before
+/// comparing against the workspace root. A naive `Path::new(p).components().collect()`
+/// does NOT resolve ".." components, so "/workspace/../etc" would still
+/// `starts_with("/workspace")` while the OS resolves it to "/etc". The loop below
+/// mirrors filepath.Clean in Go: ParentDir pops the last stack entry (and errors
+/// if the stack would go above root), CurDir is skipped, everything else is pushed.
 fn path_allowed(p: &str) -> bool {
     if p.is_empty() {
         return false;
     }
     let root = workspace_root();
-    let clean: PathBuf = Path::new(p).components().collect();
+    let mut normalized: Vec<std::ffi::OsString> = Vec::new();
+    for c in Path::new(p).components() {
+        match c {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str().to_owned()),
+        }
+    }
+    let clean: PathBuf = normalized.iter().collect();
     let ws = Path::new(&root);
     clean == ws || clean.starts_with(ws)
 }
@@ -222,17 +241,32 @@ pub async fn archive(
         let total = tar_data.len();
         while offset < total {
             let end = (offset + CHUNK_BYTES).min(total);
-            // Slicing is safe: end <= total = tar_data.len().
-            let data = tar_data
-                .get(offset..end)
-                .unwrap_or(&[])
-                .to_vec();
-            let _ = tx
+            let data = match tar_data.get(offset..end) {
+                Some(slice) => slice.to_vec(),
+                // This branch is unreachable: end = (offset + CHUNK_BYTES).min(total)
+                // guarantees end <= total = tar_data.len(). If it were ever reached
+                // it would mean a logic error, so we surface it as an Internal error
+                // rather than silently sending an empty chunk.
+                None => {
+                    let _ = tx
+                        .send(Err(tonic::Status::internal(
+                            "archive: slice out of bounds (logic error)",
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            if tx
                 .send(Ok(sandbox_v1::Chunk { data, eof: false }))
-                .await;
+                .await
+                .is_err()
+            {
+                // Receiver dropped (client disconnected); stop building/sending.
+                return;
+            }
             offset = end;
         }
-        // Final eof sentinel.
+        // Final eof sentinel; ignore send error (receiver may have gone).
         let _ = tx
             .send(Ok(sandbox_v1::Chunk {
                 data: vec![],
@@ -276,9 +310,24 @@ fn tar_dir(dir: &str) -> Result<Vec<u8>, AgentError> {
         )));
     }
 
-    let mut buf: Vec<u8> = Vec::new();
+    // CountingWriter wraps a Vec<u8> and tracks the total bytes written so we
+    // can check the running total while builder holds the mutable borrow on buf.
+    struct CountingWriter {
+        inner: Vec<u8>,
+        written: usize,
+    }
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(data).inspect(|&n| { self.written += n; })
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    let mut cw = CountingWriter { inner: Vec::new(), written: 0 };
     {
-        let mut builder = tar::Builder::new(&mut buf);
+        let mut builder = tar::Builder::new(&mut cw);
 
         // walkdir visits the root first; follow_links(false) keeps symlinks as
         // symlink entries (we skip them below) rather than resolving them.
@@ -344,11 +393,21 @@ fn tar_dir(dir: &str) -> Result<Vec<u8>, AgentError> {
                     .map_err(AgentError::Io)?;
             }
             // Symlinks and other entry types are skipped (no else branch).
+
+            // Running-total check via the CountingWriter: abort early so we never
+            // accumulate a multi-GiB buffer before the post-build size check in
+            // the Archive handler. builder.get_ref() gives &CountingWriter.
+            if builder.get_ref().written > MAX_TAR_BYTES {
+                return Err(AgentError::ResourceExhausted(format!(
+                    "tar size exceeded max {} bytes while building archive",
+                    MAX_TAR_BYTES
+                )));
+            }
         }
 
         builder.finish()?;
-    } // builder dropped here, releasing the borrow on buf
-    Ok(buf)
+    } // builder dropped here, releasing the borrow on cw
+    Ok(cw.inner)
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +614,37 @@ mod tests {
     #[test]
     fn path_allowed_rejects_empty() {
         assert!(!path_allowed(""));
+    }
+
+    // C1: path traversal via ".." must be rejected by path_allowed.
+    // The naive components().collect() does NOT resolve "..", so
+    // "/workspace/../etc" would have passed starts_with("/workspace") while the
+    // OS resolves the path to "/etc". The fixed implementation normalizes ".."
+    // lexically (like filepath.Clean) before the workspace comparison.
+    #[test]
+    fn path_allowed_rejects_dotdot_traversal() {
+        set_workspace_root_for_test("/workspace");
+        assert!(!path_allowed("/workspace/../etc"));
+    }
+
+    #[test]
+    fn path_allowed_rejects_dotdot_absolute() {
+        set_workspace_root_for_test("/workspace");
+        assert!(!path_allowed("/etc"));
+    }
+
+    #[test]
+    fn path_allowed_workspace_root_exact_after_normalization() {
+        set_workspace_root_for_test("/workspace");
+        // "/workspace/." normalizes to "/workspace" and must be allowed.
+        assert!(path_allowed("/workspace/."));
+    }
+
+    #[test]
+    fn path_allowed_workspace_subpath_after_normalization() {
+        set_workspace_root_for_test("/workspace");
+        // "/workspace/a/../b" normalizes to "/workspace/b" and must be allowed.
+        assert!(path_allowed("/workspace/a/../b"));
     }
 
     #[test]
