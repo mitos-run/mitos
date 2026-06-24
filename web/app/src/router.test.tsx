@@ -3,7 +3,6 @@ import { render, waitFor, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { createConsoleRouter } from './router'
 import type { Capabilities } from './api'
-import { visibleRoutes } from './nav/routes'
 
 const caps: Capabilities = {
   edition: 'community', billing: false, signup: false, teams: true, idp: 'oidc',
@@ -21,17 +20,21 @@ describe('console router', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sandboxes/i })).toBeInTheDocument())
   })
 
-  it('does not build a billing route when billing is off', () => {
-    // The brief suggested accessing router.routeTree.children directly, but
-    // TanStack Router v1.170 does not expose .children on the routeTree object
-    // in a stable way. We instead verify via visibleRoutes (the same function
-    // createConsoleRouter uses) that /billing is absent. This proves the same
-    // invariant: if billing is off, visibleRoutes filters it out, and since
-    // createConsoleRouter maps exactly over visibleRoutes, no /billing route
-    // is registered. The test fails if visibleRoutes ever adds /billing for a
-    // caps where billing is false.
-    const routes = visibleRoutes(caps)
-    const paths = routes.map((r) => r.path)
-    expect(paths).not.toContain('/billing')
+  it('omits /billing from the router when billing is off (negative control)', () => {
+    // router.routesByPath is a Record<string, RouteObject> that TanStack Router
+    // v1 populates during createRouter; it excludes the __root__ entry and
+    // contains exactly the registered path routes. Asserting here (not on
+    // visibleRoutes) means the test genuinely exercises createConsoleRouter.
+    const router = createConsoleRouter(caps)
+    expect(Object.keys(router.routesByPath)).not.toContain('/billing')
+  })
+
+  it('includes /billing in the router when billing is on (positive control)', () => {
+    // Positive control: ensure the test would fail if gating were inverted or
+    // createConsoleRouter ignored the capability. Build a router with billing
+    // enabled and assert the route IS registered.
+    const billingCaps: Capabilities = { ...caps, billing: true }
+    const router = createConsoleRouter(billingCaps)
+    expect(Object.keys(router.routesByPath)).toContain('/billing')
   })
 })
