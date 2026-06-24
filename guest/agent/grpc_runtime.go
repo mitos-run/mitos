@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,6 +35,17 @@ import (
 // per-request deadline while still registering a busy process across at least
 // one scheduler tick.
 const processCPUSampleWindow = 100 * time.Millisecond
+
+// toInt32 narrows an int to int32. Values outside [0, math.MaxInt32] are
+// clamped to 0 so that the proto field is always a defined value. In practice
+// Linux PIDs never exceed 4,194,304, well inside int32 range; the guard
+// satisfies static analysis and prevents undefined narrowing behavior.
+func toInt32(n int) int32 {
+	if n < 0 || n > math.MaxInt32 {
+		return 0
+	}
+	return int32(n)
+}
 
 // Watch streams filesystem change events under the requested directory using
 // inotify. SECURITY: the watched path is gated by pathAllowed (the same
@@ -243,8 +255,8 @@ func (s *sandboxServer) Processes(_ context.Context, _ *sandboxv1.ProcessesReque
 			}
 		}
 		out.Processes = append(out.Processes, &sandboxv1.ProcessInfo{
-			Pid:        int32(p.PID),
-			Ppid:       int32(p.PPID),
+			Pid:        toInt32(p.PID),
+			Ppid:       toInt32(p.PPID),
 			Command:    p.Comm, // comm only; NEVER cmdline (argv may carry secrets)
 			State:      p.State,
 			CpuPercent: cpuPercent,

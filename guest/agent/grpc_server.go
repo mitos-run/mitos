@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -587,6 +588,18 @@ func (s *sandboxServer) Vitals(req *sandboxv1.VitalsRequest, stream sandboxv1.Sa
 	}
 }
 
+// kbToBytes converts a kilobyte count (uint64, from ParseUint or /proc/meminfo)
+// to a byte count (int64). Values that would overflow int64 after the multiply
+// are clamped to math.MaxInt64 so the proto field is always a defined value.
+// In practice guest memory never approaches the int64 ceiling; the guard
+// satisfies static analysis and prevents undefined narrowing behavior.
+func kbToBytes(kb uint64) int64 {
+	if kb > math.MaxInt64/1024 {
+		return math.MaxInt64
+	}
+	return int64(kb) * 1024
+}
+
 // guestVitalsFromResponse maps the internal vsock vitals snapshot to the proto
 // GuestVitals. KB fields are converted to bytes; the steal fraction is reported
 // as a percent. No secret data is involved.
@@ -594,9 +607,9 @@ func guestVitalsFromResponse(v *vsock.VitalsResponse) *sandboxv1.GuestVitals {
 	return &sandboxv1.GuestVitals{
 		SampledAtUnix:   time.Now().Unix(),
 		CpuStealPercent: v.StealFraction * 100,
-		MemUsedBytes:    int64(v.MemUsedKB) * 1024,
-		MemTotalBytes:   int64(v.MemTotalKB) * 1024,
-		MemBalloonBytes: int64(v.BalloonReclaimedKB) * 1024,
+		MemUsedBytes:    kbToBytes(v.MemUsedKB),
+		MemTotalBytes:   kbToBytes(v.MemTotalKB),
+		MemBalloonBytes: kbToBytes(v.BalloonReclaimedKB),
 		ProcessCount:    int32(len(v.Processes)),
 	}
 }
