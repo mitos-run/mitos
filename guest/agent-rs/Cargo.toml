@@ -38,6 +38,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # sync feature provides ReceiverStream used by the Exec conformance test.
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 
+# CancellationToken for prompt client-disconnect kill signalling in exec.rs.
+tokio-util = { version = "0.7", features = ["rt"] }
+
 # Legacy JSON serde kept alive during the wire migration; removed once Task 0.x
 # stubs are the last callers (deferred per task-0.1 brief).
 serde = { version = "1", features = ["derive"] }

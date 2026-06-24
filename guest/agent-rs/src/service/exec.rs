@@ -7,23 +7,26 @@
 // 1. Env values are NEVER logged (keys and counts only).
 // 2. The process runs in its own process group (Setpgid for non-PTY; Setsid
 //    implied by setsid() in pre_exec for PTY) so kills propagate to children.
-// 3. Exit-code mapping mirrors Go: timeout -> 124; ExitError -> its code;
-//    spawn failure -> 1 with LLM-legible remediation text; clean -> 0.
+// 3. Exit-code mapping mirrors Go: timeout -> 124; signal-killed -> -1;
+//    ExitError -> its code; spawn failure -> 1 with LLM-legible remediation
+//    text; clean -> 0.
 //
 // Concurrency model (non-PTY):
 //   A stdout drain task and a stderr drain task each read from the child pipe
 //   and send ExecResponse::Stdout / Stderr frames. A stdin forwarder task reads
 //   the client stream and writes bytes to the child stdin pipe. A wait/watchdog
-//   task waits for both drain tasks to finish or for a timeout, then kills the
-//   process group and sends the ExecExit frame. All tasks are join-awaited
-//   before this function returns: no task or fd leaks on any path.
+//   task waits for both drain tasks to finish, a client-disconnect signal, or a
+//   timeout; on any of the latter two it kills the process group immediately and
+//   sends the ExecExit frame. All tasks are join-awaited before this function
+//   returns: no task or fd leaks on any path.
 //
 // Concurrency model (PTY):
 //   A reader task drains the PTY master and sends ExecResponse::Stdout frames.
 //   A writer task reads the client stream and writes stdin bytes to the master;
 //   resize messages call sys::pty::set_winsize via a separately duped master fd.
-//   A wait/watchdog task awaits the reader task or a timeout, kills the process
-//   group, and sends ExecExit. All tasks are join-awaited before returning.
+//   A wait/watchdog task awaits the reader task completion, a client-disconnect
+//   signal, or a timeout; it kills the process group, reaps the child, and sends
+//   ExecExit. All tasks are join-awaited before returning.
 //
 // No unsafe code in this module: all syscalls are delegated to sys/pty.rs.
 
@@ -32,8 +35,12 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::io::Read as _;
+use std::io::Write as _;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 use crate::env::ConfiguredEnv;
@@ -179,8 +186,10 @@ async fn exec_shell(
     // Signal channel: drain tasks signal the watchdog when both pipes are empty.
     let (drain_done_tx, drain_done_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Atomic flag set when the client hangs up so the watchdog kills the group.
-    let client_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // CancellationToken: set by the stdin forwarder when the client disconnects.
+    // The wait/watchdog selects on this as a third arm so it kills the child
+    // immediately rather than waiting for the full timeout.
+    let client_gone = CancellationToken::new();
 
     // Stdout drain task.
     let tx_out = tx.clone();
@@ -245,7 +254,12 @@ async fn exec_shell(
     });
 
     // Stdin forwarder task: reads the client stream and writes to the child.
-    let client_gone_stdin = Arc::clone(&client_gone);
+    // Cancels the client_gone token ONLY on a stream error (true disconnect).
+    // A clean Ok(None) (half-close, client done sending stdin) is normal and
+    // does NOT cancel: the child may keep producing output. This mirrors Go's
+    // stream.Context() which cancels only on connection drop, not on a clean
+    // stdin close.
+    let client_gone_stdin = client_gone.clone();
     let stdin_fwd_task = tokio::spawn(async move {
         use sandbox_v1::exec_request::Msg as ReqMsg;
         let mut pipe = stdin_pipe;
@@ -269,8 +283,14 @@ async fn exec_shell(
                     | Some(ReqMsg::Open(_))
                     | None => {}
                 },
-                Ok(None) | Err(_) => {
-                    client_gone_stdin.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Ok(None): client cleanly closed their send half. Normal EOF
+                // on stdin; do not treat as a disconnect.
+                Ok(None) => {
+                    break;
+                }
+                // Err: transport error - the client is truly gone.
+                Err(_) => {
+                    client_gone_stdin.cancel();
                     break;
                 }
             }
@@ -279,15 +299,23 @@ async fn exec_shell(
         drop(pipe);
     });
 
-    // Kill watchdog: waits for drain done OR timeout, kills the group, reaps
-    // the child, then sends ExecExit.
-    let client_gone_wait = Arc::clone(&client_gone);
+    // Kill watchdog: waits for drain done, client disconnect, OR timeout.
+    // Client disconnect and timeout both result in an immediate SIGKILL of the
+    // process group; this matches Go's behavior where stream.Context() cancels
+    // and kills the child as soon as the client disconnects.
     let tx_exit = tx.clone();
     let wait_task = tokio::spawn(async move {
         let timed_out;
         tokio::select! {
             _ = drain_done_rx => {
                 timed_out = false;
+            }
+            _ = client_gone.cancelled() => {
+                // Client disconnected: kill immediately.
+                timed_out = false;
+                crate::sys::pty::kill_pgroup(child_pid);
+                // Brief pause to let drain tasks see the EOF from the killed child.
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             _ = tokio::time::sleep(timeout) => {
                 timed_out = true;
@@ -297,19 +325,16 @@ async fn exec_shell(
             }
         }
 
-        if client_gone_wait.load(std::sync::atomic::Ordering::Relaxed) {
-            crate::sys::pty::kill_pgroup(child_pid);
-        }
-
         let exit_code = match child.wait().await {
             Ok(status) => {
                 if timed_out {
                     124
                 } else {
-                    status.code().unwrap_or(1)
+                    // Signal-killed processes report no code; mirror Go's -1.
+                    status.code().unwrap_or(-1)
                 }
             }
-            Err(_) => 1,
+            Err(_) => -1,
         };
 
         let exec_time_ms = start.elapsed().as_micros() as f64 / 1000.0;
@@ -419,12 +444,24 @@ async fn exec_pty(
     pty_sys::apply_pty_session_leader(&mut std_cmd)
         .map_err(|e| Status::internal(format!("exec: apply_pty_session_leader: {e}")))?;
 
-    // Convert the master to a tokio async file for non-blocking IO.
+    // Convert the master to an AsyncFd for epoll-driven IO. tokio::fs::File
+    // uses spawn_blocking and does not work correctly with O_NONBLOCK on a PTY
+    // master character device: it would return EAGAIN immediately on reads
+    // before data arrives. AsyncFd uses epoll readiness so the read is only
+    // attempted when the kernel reports data available, which is correct for
+    // character devices and sockets. master_to_async_file sets O_NONBLOCK and
+    // moves the fd into a std::fs::File; we recover the fd via into_std +
+    // into_raw_fd and wrap it in AsyncFd.
     let master_async = pty_sys::master_to_async_file(pty_pair.master)
         .map_err(|e| Status::internal(format!("exec: master_to_async_file: {e}")))?;
-
-    let (mut master_read, master_write_half) = tokio::io::split(master_async);
-    let master_write = Arc::new(tokio::sync::Mutex::new(master_write_half));
+    // into_std() converts the tokio async file back to a std::fs::File.
+    let master_std = master_async
+        .into_std()
+        .await;
+    let master_afd = tokio::io::unix::AsyncFd::new(master_std)
+        .map_err(|e| Status::internal(format!("exec: AsyncFd::new: {e}")))?;
+    let master_afd = Arc::new(master_afd);
+    let master_write_afd = Arc::clone(&master_afd);
 
     let mut child = tokio::process::Command::from(std_cmd)
         .spawn()
@@ -435,13 +472,34 @@ async fn exec_pty(
 
     let child_pid = child.id().unwrap_or(0);
 
+    // CancellationToken: set by the writer task when the client disconnects.
+    // The wait/watchdog selects on this as a third arm for immediate kill.
+    let client_gone = CancellationToken::new();
+
     // PTY reader task: drain master output -> ExecResponse::Stdout.
+    // Uses AsyncFd::readable() for epoll-driven readiness, then a non-blocking
+    // std::io::Read to pull available data. This is correct for PTY master
+    // character devices: tokio::fs::File uses spawn_blocking and would return
+    // EAGAIN immediately in non-blocking mode before any data arrives.
+    // AsyncFd registers the fd with epoll so readable() only wakes when the
+    // kernel reports data available (EPOLLIN).
+    // Declared mut so the wait_task can take &mut reader_task in select!.
     let tx_pty = tx.clone();
-    let reader_task = tokio::spawn(async move {
+    let master_read_afd = Arc::clone(&master_afd);
+    let mut reader_task = tokio::spawn(async move {
         let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
         loop {
-            match master_read.read(&mut buf).await {
-                Ok(0) => break,
+            // Wait for the fd to be readable (epoll-driven, no busy wait).
+            let mut guard = match master_read_afd.readable().await {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            // Perform a non-blocking read now that epoll says data is ready.
+            match guard.get_inner().read(&mut buf) {
+                Ok(0) => {
+                    // 0-byte read: treat as EOF (should not normally occur on PTY).
+                    break;
+                }
                 Ok(n) => {
                     if let Some(chunk) = buf.get(..n) {
                         let chunk = chunk.to_vec();
@@ -455,15 +513,28 @@ async fn exec_pty(
                             break;
                         }
                     }
+                    // Guard drops here, re-arming epoll for the next iteration.
                 }
-                Err(_) => break, // EIO when all slave fds close (shell exited)
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // EAGAIN: must clear the readiness flag before looping so
+                    // epoll is re-armed and we wait properly on the next call.
+                    guard.clear_ready();
+                }
+                Err(_) => {
+                    // EIO when all slave fds close (shell exited), or other error.
+                    break;
+                }
             }
         }
     });
 
     // PTY writer task: forward stdin bytes and resize events from the client.
-    let client_gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let client_gone_writer = Arc::clone(&client_gone);
+    // Cancels the client_gone token ONLY on a stream error (true disconnect).
+    // Ok(None) is a clean half-close (client done sending); the shell may still
+    // be running and producing output, so we do not treat it as a disconnect.
+    // Writes go through the AsyncFd's inner std::fs::File directly (PTY writes
+    // are typically small and do not block for long; no writable wait needed).
+    let client_gone_writer = client_gone.clone();
     let writer_task = tokio::spawn(async move {
         use sandbox_v1::exec_request::Msg as ReqMsg;
         let mut stream = stream;
@@ -473,10 +544,8 @@ async fn exec_pty(
             match stream.message().await {
                 Ok(Some(msg)) => match msg.msg {
                     Some(ReqMsg::Stdin(bytes)) => {
-                        let mut w = master_write.lock().await;
-                        if w.write_all(&bytes).await.is_err() {
-                            client_gone_writer
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                        if master_write_afd.get_ref().write_all(&bytes).is_err() {
+                            client_gone_writer.cancel();
                             break;
                         }
                     }
@@ -490,8 +559,13 @@ async fn exec_pty(
                     }
                     Some(ReqMsg::StdinClose(_)) | Some(ReqMsg::Open(_)) | None => {}
                 },
-                Ok(None) | Err(_) => {
-                    client_gone_writer.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Ok(None): clean half-close; not a disconnect.
+                Ok(None) => {
+                    break;
+                }
+                // Err: transport error - the client is truly gone.
+                Err(_) => {
+                    client_gone_writer.cancel();
                     break;
                 }
             }
@@ -499,24 +573,33 @@ async fn exec_pty(
         drop(resize_fd);
     });
 
-    // Wait/watchdog task: awaits reader completion OR timeout, kills group,
-    // reaps the child, sends ExecExit.
+    // Wait/watchdog task: awaits reader completion, client disconnect, OR
+    // timeout. Client disconnect and timeout both kill the child immediately.
+    // reader_task is aborted on the cancel/timeout arms so no task is left
+    // detached: every exit arm either awaits or aborts reader_task.
     let tx_exit = tx.clone();
     let wait_task = tokio::spawn(async move {
         let timed_out;
         tokio::select! {
-            _ = reader_task => {
+            _ = &mut reader_task => {
+                // Normal completion: the shell exited and closed the PTY.
                 timed_out = false;
+            }
+            _ = client_gone.cancelled() => {
+                // Client disconnected: kill immediately, then abort reader.
+                timed_out = false;
+                crate::sys::pty::kill_pgroup(child_pid);
+                reader_task.abort();
+                let _ = reader_task.await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             _ = tokio::time::sleep(timeout) => {
                 timed_out = true;
                 crate::sys::pty::kill_pgroup(child_pid);
+                reader_task.abort();
+                let _ = reader_task.await;
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-        }
-
-        if client_gone.load(std::sync::atomic::Ordering::Relaxed) {
-            crate::sys::pty::kill_pgroup(child_pid);
         }
 
         let exit_code = match child.wait().await {
@@ -524,10 +607,11 @@ async fn exec_pty(
                 if timed_out {
                     124
                 } else {
-                    status.code().unwrap_or(1)
+                    // Signal-killed processes report no code; mirror Go's -1.
+                    status.code().unwrap_or(-1)
                 }
             }
-            Err(_) => 1,
+            Err(_) => -1,
         };
 
         let exec_time_ms = start.elapsed().as_micros() as f64 / 1000.0;

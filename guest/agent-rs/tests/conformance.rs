@@ -287,6 +287,87 @@ async fn exec_missing_open_returns_invalid_argument() {
     }
 }
 
+/// The Exec RPC with PTY mode must allocate a PTY, run the command through it,
+/// stream the output as Stdout frames, and send ExecExit with exit_code=0.
+/// This exercises exec_pty, apply_pty_session_leader, and the reader/writer
+/// task concurrency end to end.
+///
+/// Only runs on Linux where openpty is available. On other platforms the server
+/// returns Unimplemented which we accept gracefully.
+#[tokio::test]
+async fn exec_pty_echo_returns_stdout_and_exit_zero() {
+    use sandbox_agent::sandbox_v1::{self, exec_response};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-exec-pty-echo.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(sandbox_v1::exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            // Use printf via /bin/sh -c so we get a deterministic marker with
+            // no trailing newline complications; the PTY may echo input but the
+            // marker string is present in output regardless.
+            command: "printf 'PTYMARKER'".into(),
+            cwd: "/tmp".into(),
+            pty: Some(sandbox_v1::PtyOptions {
+                term: "xterm-256color".into(),
+                size: Some(sandbox_v1::WindowSize {
+                    cols: 80,
+                    rows: 24,
+                }),
+            }),
+            timeout_seconds: 10,
+            ..Default::default()
+        })),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
+    tx.send(open).await.unwrap();
+    drop(tx); // no further stdin; shell will exit after printf
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    // On non-Linux platforms the server returns Unimplemented; accept that.
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(status) if status.code() == Code::Unimplemented => {
+            // PTY not available on this platform; test passes vacuously.
+            return;
+        }
+        Err(e) => panic!("exec rpc failed unexpectedly: {e}"),
+    };
+
+    let mut all_stdout = String::new();
+    let mut exit_code: Option<i32> = None;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stdout(b) => {
+                all_stdout.push_str(&String::from_utf8_lossy(&b));
+            }
+            exec_response::Msg::Exit(e) => {
+                exit_code = Some(e.exit_code);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        all_stdout.contains("PTYMARKER"),
+        "expected PTYMARKER in PTY output, got: {:?}",
+        all_stdout,
+    );
+    assert_eq!(
+        exit_code,
+        Some(0),
+        "expected exit_code=0 for PTY exec, got: {:?}",
+        exit_code,
+    );
+}
+
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
 #[tokio::test]
 async fn exec_stderr_returned() {
