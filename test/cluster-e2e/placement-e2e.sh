@@ -114,6 +114,8 @@ spec:
     resources: { cpu: "250m", memory: "512Mi" }
   snapshots:
     replicasPerNode: 2
+  warm:
+    min: 2
   placement:
     nodeSelector:
       ${TENANT_KEY}: "${TENANT_VAL}"

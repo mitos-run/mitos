@@ -732,6 +732,8 @@ jobs:
                 memory: 512Mi
             snapshots:
               replicasPerNode: 2
+            warm:
+              min: 2
           YAML
           kubectl -n default get sandboxpool husk-e2e
       - name: The pool creates husk pods that schedule onto the KVM node
