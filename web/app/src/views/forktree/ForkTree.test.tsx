@@ -2,7 +2,8 @@
 // fork-tree node, and links each id row to /sandboxes/{id}. The component is
 // rendered directly (not via a route) using a minimal query + router harness
 // so Link and useNavigate have the context they need. The /forks route is
-// wired in Task 8; navigation assertions at the route level belong there.
+// wired in Task 8; the route-level navigation assertion lives in the
+// 'ForkTree route' describe block below.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render } from '@testing-library/react'
 import { waitFor, screen } from '@testing-library/react'
@@ -13,6 +14,20 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { ForkTree } from './ForkTree'
+import { renderAt } from '../../test/utils'
+import type { Capabilities } from '../../api'
+
+const caps: Capabilities = {
+  edition: 'community',
+  billing: false,
+  signup: false,
+  teams: true,
+  idp: 'oidc',
+  orgSwitcher: false,
+  secrets: { providers: ['kube'] },
+  proof: true,
+  ownership: 'self-hosted',
+}
 
 // Tiny router harness: a single root route renders ForkTree so Link and
 // useNavigate get a real TanStack Router context without pulling in AppShell.
@@ -27,21 +42,25 @@ function renderForkTree() {
   )
 }
 
+const forkTreePayload = {
+  org_id: 'o1',
+  nodes: [
+    { id: 'root', parent_id: '', phase: 'Running', private_dirty_bytes: 0, shared_bytes: 209715200 },
+    { id: 'fork-a', parent_id: 'root', phase: 'Running', private_dirty_bytes: 3145728, shared_bytes: 209715200 },
+  ],
+}
+
 beforeEach(() => {
   vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = String(input)
+    if (url.endsWith('/console/capabilities')) {
+      return Promise.resolve(
+        new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
     if (url.endsWith('/console/forktree')) {
       return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            org_id: 'o1',
-            nodes: [
-              { id: 'root', parent_id: '', phase: 'Running', private_dirty_bytes: 0, shared_bytes: 209715200 },
-              { id: 'fork-a', parent_id: 'root', phase: 'Running', private_dirty_bytes: 3145728, shared_bytes: 209715200 },
-            ],
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        ),
+        new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }),
       )
     }
     return Promise.resolve(
@@ -92,5 +111,14 @@ describe('ForkTree view', () => {
       expect(screen.getByText(/fork tree unavailable/i)).toBeInTheDocument(),
     )
     expect(screen.queryByText(/no forks yet/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('ForkTree route', () => {
+  it('mounts at /forks and a node links to its sandbox', async () => {
+    await renderAt('/forks', caps) // caps + fetch mock from the top of this file
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const link = screen.getByRole('link', { name: /fork-a/i })
+    expect(link).toHaveAttribute('href', expect.stringContaining('fork-a'))
   })
 })

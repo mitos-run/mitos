@@ -5,6 +5,7 @@
 import type { Capabilities } from '../api'
 import { Instruments } from '../views/Instruments'
 import { Sandboxes } from '../views/Sandboxes'
+import { ForkTree } from '../views/forktree/ForkTree'
 import { Secrets } from '../views/Secrets'
 import { Placeholder } from '../views/Placeholder'
 
@@ -22,6 +23,7 @@ export type RouteDef = {
 export const ROUTES: RouteDef[] = [
   { path: '/', label: 'Instruments', group: 'Run', element: () => <Instruments />, when: (c) => c.proof },
   { path: '/sandboxes', label: 'Sandboxes', group: 'Run', element: () => <Sandboxes /> },
+  { path: '/forks', label: 'Fork tree', group: 'Run', element: () => <ForkTree /> },
   { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Placeholder title="Templates" endpoint="/console/templates" phase="B2" /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
