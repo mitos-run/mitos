@@ -22,6 +22,10 @@ pub mod exec;
 /// File RPC implementations (Task 2.2): ReadFile, WriteFile, List, Stat, Mkdir, Remove.
 pub mod files;
 
+/// Archive (tar streaming download) and Upload (tar streaming extract) RPC
+/// implementations (Task 2.3).
+pub mod archive;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.
@@ -145,9 +149,9 @@ impl Sandbox for SandboxService {
 
     async fn archive(
         &self,
-        _request: Request<sandbox_v1::ArchiveRequest>,
+        request: Request<sandbox_v1::ArchiveRequest>,
     ) -> Result<Response<Self::ArchiveStream>, Status> {
-        unimplemented_stream("Archive")
+        archive::archive(request).await
     }
 
     async fn watch(
@@ -253,8 +257,8 @@ impl Sandbox for SandboxService {
 
     async fn upload(
         &self,
-        _request: Request<tonic::Streaming<sandbox_v1::UploadRequest>>,
+        request: Request<tonic::Streaming<sandbox_v1::UploadRequest>>,
     ) -> Result<Response<sandbox_v1::UploadResult>, Status> {
-        Err(unimplemented("Upload"))
+        archive::upload(request).await
     }
 }

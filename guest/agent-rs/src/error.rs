@@ -46,6 +46,12 @@ pub enum AgentError {
     /// The downstream service or transport was unavailable.
     #[error("unavailable: {0}")]
     Unavailable(String),
+
+    /// A tar member path was rejected by the traversal guard: absolute path or
+    /// "../" escape detected. Maps to PermissionDenied so the caller can
+    /// distinguish this from a workspace-allowlist rejection.
+    #[error("path denied: {0}")]
+    PathDenied(String),
 }
 
 impl From<AgentError> for Status {
@@ -58,6 +64,7 @@ impl From<AgentError> for Status {
             AgentError::Internal(msg) => Status::new(Code::Internal, msg),
             AgentError::Io(err) => Status::new(Code::Internal, err.to_string()),
             AgentError::Unavailable(msg) => Status::new(Code::Unavailable, msg),
+            AgentError::PathDenied(msg) => Status::new(Code::PermissionDenied, msg),
         }
     }
 }

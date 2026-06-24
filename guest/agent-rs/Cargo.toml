@@ -46,9 +46,19 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Tar archive creation and extraction (Archive + Upload RPCs, Task 2.3).
+# The tar crate's Archive::unpack guards against "../" escapes by default;
+# we additionally apply safe_join for defense-in-depth.
+tar = "0.4"
+
+# Directory walker for tar creation (skips symlinks by default configuration).
+walkdir = "2"
+
 [dev-dependencies]
 # For temp file creation in sys/crng tests (RNDADDENTROPY on plain file).
 tempfile = "3"
+# Used in archive/upload conformance tests to construct test tars.
+tar = "0.4"
 # tower::service_fn is used in the conformance test to connect to a unix socket.
 tower = "0.5"
 # TokioIo wrapper: required by tonic 0.13 connect_with_connector (hyper's IO traits

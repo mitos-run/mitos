@@ -73,6 +73,70 @@ async fn start_server_and_client(sock_path: &str) -> SandboxClient<tonic::transp
     SandboxClient::new(channel)
 }
 
+/// Build a minimal ustar (POSIX tar) with one entry at the given name and the
+/// given content. This bypasses the tar crate's path validation so we can craft
+/// a tar with a "../" traversal entry to test the server-side guard.
+///
+/// Format: one 512-byte header block followed by content padded to a 512-byte
+/// boundary, then two zero-filled 512-byte end-of-archive blocks.
+fn build_traversal_tar(entry_name: &str, content: &[u8]) -> Vec<u8> {
+    let mut header = [0u8; 512];
+
+    // name field: bytes 0-99 (100 bytes, NUL-padded).
+    let name_bytes = entry_name.as_bytes();
+    let name_len = name_bytes.len().min(99);
+    header[..name_len].copy_from_slice(&name_bytes[..name_len]);
+
+    // mode field: bytes 100-107 (octal, space-terminated).
+    header[100..107].copy_from_slice(b"0000644");
+    header[107] = b' ';
+
+    // uid/gid fields (bytes 108-123): all zeros (NUL-terminated octal 0).
+    header[108..115].copy_from_slice(b"0000000");
+    header[115] = b' ';
+    header[116..123].copy_from_slice(b"0000000");
+    header[123] = b' ';
+
+    // size field: bytes 124-135 (octal, space-terminated).
+    let size_str = format!("{:011o} ", content.len());
+    let size_bytes = size_str.as_bytes();
+    let sz_len = size_bytes.len().min(12);
+    header[124..124 + sz_len].copy_from_slice(&size_bytes[..sz_len]);
+
+    // mtime field: bytes 136-147 (octal, space-terminated). Use "00000000000 ".
+    header[136..147].copy_from_slice(b"00000000000");
+    header[147] = b' ';
+
+    // checksum placeholder: bytes 148-155. Set to spaces for checksum calculation.
+    for b in header[148..156].iter_mut() {
+        *b = b' ';
+    }
+
+    // typeflag: byte 156. '0' = regular file.
+    header[156] = b'0';
+
+    // magic (ustar): bytes 257-262.
+    header[257..263].copy_from_slice(b"ustar ");
+    header[263] = b' ';
+
+    // Compute and write the checksum (simple sum of all header bytes).
+    let checksum: u32 = header.iter().map(|&b| b as u32).sum();
+    let cksum_str = format!("{:06o}\0 ", checksum);
+    let cksum_bytes = cksum_str.as_bytes();
+    let ck_len = cksum_bytes.len().min(8);
+    header[148..148 + ck_len].copy_from_slice(&cksum_bytes[..ck_len]);
+
+    // Pad content to 512-byte boundary.
+    let padded_len = content.len().div_ceil(512) * 512;
+    let mut tar = Vec::with_capacity(512 + padded_len + 1024);
+    tar.extend_from_slice(&header);
+    tar.extend_from_slice(content);
+    tar.resize(512 + padded_len, 0);
+    // Two end-of-archive zero blocks.
+    tar.resize(512 + padded_len + 1024, 0);
+    tar
+}
+
 /// The Stat RPC must return a valid FileInfo for the root path.
 /// This validates that the tonic service is correctly wired and the gRPC
 /// framing works over a Unix socket.
@@ -604,6 +668,338 @@ async fn mkdir_sets_explicit_0o755_mode() {
         mode, 0o755,
         "expected directory mode 0o755, got 0o{mode:o}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Archive + Upload conformance tests (Task 2.3)
+// ---------------------------------------------------------------------------
+
+/// Archive with UNTAR direction must return InvalidArgument (mirrors Go grpc_server.go:414-415).
+#[tokio::test]
+async fn archive_untar_direction_returns_invalid_argument() {
+    use sandbox_agent::sandbox_v1::{self, archive_request};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-archive-untar-dir.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .archive(sandbox_v1::ArchiveRequest {
+            direction: archive_request::Direction::Untar as i32,
+            path: "/tmp".into(),
+        })
+        .await;
+
+    // The error surfaces either as the RPC call itself failing or as the first
+    // message on the stream being an error.
+    match stream {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "expected InvalidArgument for UNTAR direction, got {:?}",
+                status.code()
+            );
+        }
+        Ok(response) => {
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one message");
+            let status = first.expect_err("must be an error for UNTAR direction");
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "expected InvalidArgument for UNTAR direction, got {:?}",
+                status.code()
+            );
+        }
+    }
+}
+
+/// Archive with a path outside /workspace must return PermissionDenied.
+#[tokio::test]
+async fn archive_outside_workspace_returns_permission_denied() {
+    use sandbox_agent::sandbox_v1::{self, archive_request};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-archive-outside-ws.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let stream = client
+        .archive(sandbox_v1::ArchiveRequest {
+            direction: archive_request::Direction::Download as i32,
+            path: "/etc".into(),
+        })
+        .await;
+
+    match stream {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "expected PermissionDenied for /etc, got {:?}",
+                status.code()
+            );
+        }
+        Ok(response) => {
+            let stream = response.into_inner();
+            tokio::pin!(stream);
+            let first = stream.next().await.expect("at least one message");
+            let status = first.expect_err("must be an error for /etc path");
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "expected PermissionDenied for /etc, got {:?}",
+                status.code()
+            );
+        }
+    }
+}
+
+/// Archive streams a tar of a directory under /tmp (used as workspace stand-in
+/// in tests), and the tar bytes end with an eof=true Chunk. The tar must be
+/// parseable (non-empty bytes before the eof chunk means a valid tar header was
+/// produced).
+#[tokio::test]
+async fn archive_download_streams_tar_with_eof_chunk() {
+    use sandbox_agent::sandbox_v1::{self, archive_request};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-archive-download.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Create a small directory tree under /tmp/agent-rs-archive-src.
+    let src = "/tmp/agent-rs-archive-src";
+    let _ = std::fs::remove_dir_all(src);
+    std::fs::create_dir_all(src).unwrap();
+    std::fs::write(format!("{src}/hello.txt"), b"hello from archive test").unwrap();
+
+    // Override the workspace root to /tmp so the allowlist check passes.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let response = client
+        .archive(sandbox_v1::ArchiveRequest {
+            direction: archive_request::Direction::Download as i32,
+            path: src.into(),
+        })
+        .await
+        .expect("Archive must succeed");
+
+    let stream = response.into_inner();
+    tokio::pin!(stream);
+
+    let mut all_bytes: Vec<u8> = Vec::new();
+    let mut saw_eof = false;
+    while let Some(chunk) = stream.next().await {
+        let c = chunk.expect("chunk must not be an error");
+        all_bytes.extend_from_slice(&c.data);
+        if c.eof {
+            saw_eof = true;
+            break;
+        }
+    }
+    assert!(saw_eof, "Archive stream must end with an eof=true Chunk");
+    // A valid tar of at least one file is well above 512 bytes.
+    assert!(
+        all_bytes.len() >= 512,
+        "expected at least 512 bytes of tar data, got {}",
+        all_bytes.len()
+    );
+
+    // Note: workspace root is intentionally NOT reset here; all archive/upload
+    // tests use /tmp as the root, and /etc is rejected by any root != /etc.
+}
+
+/// Upload extracts a tar sent as Chunk bytes into a destination directory. The
+/// UploadResult must report bytes_written > 0 and the extracted file must exist.
+#[tokio::test]
+async fn upload_extracts_tar_and_returns_bytes_written() {
+    use sandbox_agent::sandbox_v1;
+    const SOCK: &str = "/tmp/agent-conformance-upload-extract.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Build a minimal tar in memory with one regular file.
+    let mut tar_bytes: Vec<u8> = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        let content = b"uploaded file content";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder.append_data(&mut header, "uploaded.txt", content.as_ref()).unwrap();
+        builder.finish().unwrap();
+    }
+
+    let dest = "/tmp/agent-rs-upload-dest";
+    let _ = std::fs::remove_dir_all(dest);
+
+    // Override workspace root so /tmp passes the allowlist.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    let open_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Open(sandbox_v1::UploadOpen {
+            dest: dest.into(),
+        })),
+    };
+    let chunk_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Chunk(tar_bytes.clone())),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    tx.send(chunk_msg).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .upload(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("Upload must succeed")
+        .into_inner();
+
+    assert!(
+        result.bytes_written > 0,
+        "Upload must report bytes_written > 0, got {}",
+        result.bytes_written
+    );
+
+    let extracted = std::fs::read(format!("{dest}/uploaded.txt"))
+        .expect("extracted file must exist");
+    assert_eq!(extracted, b"uploaded file content");
+
+    // Note: workspace root is intentionally NOT reset; see set_workspace_root_for_test.
+}
+
+/// Archive -> Upload roundtrip: archive a directory, stream the tar bytes, then
+/// Upload them back into a new destination, and confirm the files match.
+#[tokio::test]
+async fn archive_upload_roundtrip() {
+    use sandbox_agent::sandbox_v1::{self, archive_request};
+    use tokio_stream::StreamExt;
+
+    const SOCK: &str = "/tmp/agent-conformance-archive-upload-roundtrip.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Override workspace root.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    // Create source directory.
+    let src = "/tmp/agent-rs-roundtrip-src";
+    let _ = std::fs::remove_dir_all(src);
+    std::fs::create_dir_all(src).unwrap();
+    std::fs::write(format!("{src}/data.txt"), b"roundtrip content").unwrap();
+
+    // Archive it.
+    let archive_stream = client
+        .archive(sandbox_v1::ArchiveRequest {
+            direction: archive_request::Direction::Download as i32,
+            path: src.into(),
+        })
+        .await
+        .expect("Archive must succeed")
+        .into_inner();
+
+    tokio::pin!(archive_stream);
+
+    let mut tar_bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = archive_stream.next().await {
+        let c = chunk.expect("archive chunk must not be error");
+        tar_bytes.extend_from_slice(&c.data);
+        if c.eof {
+            break;
+        }
+    }
+    assert!(!tar_bytes.is_empty(), "archive must produce non-empty tar");
+
+    // Upload the tar to a new destination.
+    let dest = "/tmp/agent-rs-roundtrip-dest";
+    let _ = std::fs::remove_dir_all(dest);
+
+    let open_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Open(sandbox_v1::UploadOpen {
+            dest: dest.into(),
+        })),
+    };
+    let chunk_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Chunk(tar_bytes)),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    tx.send(chunk_msg).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .upload(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("Upload must succeed")
+        .into_inner();
+    assert!(result.bytes_written > 0, "roundtrip upload must report bytes_written > 0");
+
+    let extracted = std::fs::read(format!("{dest}/data.txt"))
+        .expect("roundtrip file must exist after upload");
+    assert_eq!(extracted, b"roundtrip content");
+
+    // Note: workspace root is intentionally NOT reset; see set_workspace_root_for_test.
+}
+
+/// Upload of a tar containing a path-traversal entry ("../escape.txt") must be
+/// rejected with PermissionDenied; no file must be written outside dest.
+#[tokio::test]
+async fn upload_path_traversal_rejected() {
+    use sandbox_agent::sandbox_v1;
+
+    const SOCK: &str = "/tmp/agent-conformance-upload-traversal.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    // Override workspace root so /tmp passes the allowlist.
+    sandbox_agent::service::archive::set_workspace_root_for_test("/tmp");
+
+    // Build a tar with a malicious "../escape.txt" entry manually, because
+    // tar::Builder rejects "../" names at build time. We craft the raw POSIX
+    // ustar bytes directly to test the server-side guard.
+    let tar_bytes = build_traversal_tar("../escape.txt", b"ESCAPED");
+
+    let dest = "/tmp/agent-rs-traversal-dest";
+    let _ = std::fs::remove_dir_all(dest);
+    let escape_path = "/tmp/escape.txt";
+    let _ = std::fs::remove_file(escape_path);
+
+    let open_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Open(sandbox_v1::UploadOpen {
+            dest: dest.into(),
+        })),
+    };
+    let chunk_msg = sandbox_v1::UploadRequest {
+        msg: Some(sandbox_v1::upload_request::Msg::Chunk(tar_bytes)),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    tx.send(chunk_msg).await.unwrap();
+    drop(tx);
+
+    let result = client
+        .upload(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    // The RPC must return an error (PermissionDenied).
+    let status = result.expect_err("path-traversal upload must fail");
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied for path-traversal tar, got {:?}",
+        status.code()
+    );
+
+    // The escape file must NOT have been written outside dest.
+    assert!(
+        !std::path::Path::new(escape_path).exists(),
+        "path-traversal must not write outside dest: {escape_path} must not exist",
+    );
+
+    // Note: workspace root is intentionally NOT reset; see set_workspace_root_for_test.
 }
 
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
