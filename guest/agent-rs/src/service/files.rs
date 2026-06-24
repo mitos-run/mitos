@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+use tokio::io::AsyncWriteExt as _;
 use tokio::io::AsyncReadExt;
 use tonic::{Request, Response, Status};
 
@@ -150,17 +151,21 @@ pub async fn write_file(
             .map_err(|e| io_err_to_status("write_file: create parent dirs", e))?;
     }
 
-    // Write file. tokio::fs::write creates or truncates.
-    tokio::fs::write(&path, &content)
+    // Open with the requested mode atomically at creation (O_CREAT carries the
+    // mode bits), matching Go's os.WriteFile which opens O_CREATE with the mode.
+    // This avoids the brief window between create and chmod that the two-step
+    // write + set_permissions approach would leave under a restrictive umask.
+    let mut file = tokio::fs::OpenOptions::new()
+        .mode(mode)
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .await
+        .map_err(|e| io_err_to_status("write_file: open", e))?;
+    file.write_all(&content)
         .await
         .map_err(|e| io_err_to_status("write_file: write", e))?;
-
-    // Apply mode bits after writing (set_permissions).
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode);
-    tokio::fs::set_permissions(&path, perms)
-        .await
-        .map_err(|e| io_err_to_status("write_file: set_permissions", e))?;
 
     Ok(Response::new(sandbox_v1::WriteFileResult { bytes_written }))
 }
@@ -263,17 +268,28 @@ pub async fn stat(
     }))
 }
 
-/// Mkdir creates a directory and all parents. Mirrors grpc_server.go:390-395
-/// (os.MkdirAll with mode 0o755).
+/// Mkdir creates a directory and all parents with explicit mode 0o755.
+/// Mirrors grpc_server.go:390-395 (os.MkdirAll(path, 0o755)).
+/// tokio::fs::create_dir_all is umask-dependent; DirBuilder::mode(0o755)
+/// passes the mode to mkdir(2) directly, matching Go parity.
+/// The blocking fs call runs in spawn_blocking so it does not stall the
+/// async runtime.
 pub async fn mkdir(
     request: Request<sandbox_v1::MkdirRequest>,
 ) -> Result<Response<sandbox_v1::MkdirResponse>, Status> {
     let path = request.into_inner().path;
     tracing::debug!(path = %path, "Mkdir: creating directory");
 
-    tokio::fs::create_dir_all(&path)
-        .await
-        .map_err(|e| io_err_to_status("mkdir", e))?;
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .recursive(true)
+            .create(&path)
+            .map_err(|e| io_err_to_status("mkdir", e))
+    })
+    .await
+    .map_err(|e| Status::internal(format!("mkdir: spawn_blocking panicked: {e}")))??;
 
     Ok(Response::new(sandbox_v1::MkdirResponse {}))
 }

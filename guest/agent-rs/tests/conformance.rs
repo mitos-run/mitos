@@ -535,6 +535,77 @@ async fn remove_missing_path_is_ok() {
         .unwrap();
 }
 
+/// WriteFile must set the file mode atomically: the file's mode bits must equal
+/// the requested mode (0o600) immediately after the RPC returns, with no
+/// intermediate window at a umask-dependent mode.
+#[tokio::test]
+async fn write_file_mode_is_set_atomically() {
+    use sandbox_agent::sandbox_v1;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const SOCK: &str = "/tmp/agent-conformance-writefile-mode.sock";
+    let mut client = start_server_and_client(SOCK).await;
+    let path = "/tmp/agent-rs-mode-test.txt";
+
+    // Remove any leftover from a prior run.
+    let _ = std::fs::remove_file(path);
+
+    let open_msg = sandbox_v1::WriteFileRequest {
+        msg: Some(sandbox_v1::write_file_request::Msg::Open(
+            sandbox_v1::WriteFileOpen {
+                path: path.into(),
+                mode: 0o600,
+            },
+        )),
+    };
+    let data_msg = sandbox_v1::WriteFileRequest {
+        msg: Some(sandbox_v1::write_file_request::Msg::Data(b"secret".to_vec())),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(open_msg).await.unwrap();
+    tx.send(data_msg).await.unwrap();
+    drop(tx);
+
+    client
+        .write_file(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap();
+
+    let meta = std::fs::metadata(path).expect("file must exist after WriteFile");
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "expected file mode 0o600, got 0o{mode:o}",
+    );
+}
+
+/// Mkdir must create the directory tree with mode 0o755, not a umask-dependent
+/// mode, matching Go's os.MkdirAll(path, 0o755).
+#[tokio::test]
+async fn mkdir_sets_explicit_0o755_mode() {
+    use sandbox_agent::sandbox_v1;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const SOCK: &str = "/tmp/agent-conformance-mkdir-mode.sock";
+    let mut client = start_server_and_client(SOCK).await;
+    let dir = "/tmp/agent-rs-mkdir-mode-test";
+
+    // Remove any leftover from a prior run.
+    let _ = std::fs::remove_dir_all(dir);
+
+    client
+        .mkdir(sandbox_v1::MkdirRequest { path: dir.into() })
+        .await
+        .unwrap();
+
+    let meta = std::fs::metadata(dir).expect("directory must exist after Mkdir");
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "expected directory mode 0o755, got 0o{mode:o}",
+    );
+}
+
 /// The Exec RPC must stream stderr bytes for commands that write to stderr.
 #[tokio::test]
 async fn exec_stderr_returned() {
