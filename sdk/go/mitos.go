@@ -5,10 +5,12 @@
 // the Ruby SDK (sdk/ruby), the Rust SDK (sdk/rust), and the Java SDK (sdk/java):
 // create a template, fork a sandbox, run exec, list, and terminate.
 //
-// Scope: this SDK covers DIRECT mode only, the standalone cmd/sandbox-server and
-// the hosted control plane at https://mitos.run. The Kubernetes / cluster mode
-// (the controller, forkd, and the SandboxTemplate / SandboxPool / SandboxClaim /
-// SandboxFork CRDs) is NOT part of this SDK.
+// Scope: this SDK covers both DIRECT mode (the standalone cmd/sandbox-server and
+// the hosted control plane at https://mitos.run, via SandboxServer) and CLUSTER
+// mode (driving the mitos.run/v1 CRDs SandboxPool, Sandbox, and Workspace on a
+// Kubernetes cluster, via AgentRun, see cluster.go). Direct mode pulls nothing;
+// cluster mode is built on a minimal standard-library Kubernetes REST client and
+// adds no third-party dependency either.
 //
 // Quickstart (hosted): set MITOS_API_KEY in the environment; it is sent as
 // Authorization: Bearer <key> and is never logged.
