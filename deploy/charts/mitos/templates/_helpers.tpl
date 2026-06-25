@@ -67,6 +67,9 @@ block, and the global tag override. Call with a dict carrying "root" and
 {{- if .root.Values.global.imageTag -}}
 {{- $tag = .root.Values.global.imageTag -}}
 {{- end -}}
+{{- if not $tag -}}
+{{- $tag = .root.Chart.AppVersion -}}
+{{- end -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- end -}}
 

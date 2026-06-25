@@ -1,0 +1,171 @@
+{{- /*
+The expose proxy (cmd/preview-proxy) terminates TLS for wildcard sandbox
+preview URLs and proxies traffic to the correct running sandbox. Gated by
+expose.enabled (default false). expose.domain is required when enabled.
+*/}}
+{{- if .Values.expose.enabled }}
+{{- $domain := required "expose.domain is required when expose.enabled" .Values.expose.domain }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-expose
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expose-proxy
+spec:
+  replicas: {{ .Values.expose.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "expose-proxy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "expose-proxy") | nindent 8 }}
+    spec:
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: expose-proxy
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.expose.image) }}
+          imagePullPolicy: {{ .Values.expose.image.pullPolicy }}
+          args:
+            - --addr=:8443
+            - --http-addr=:8080
+            - --domain={{ $domain }}
+            - --tls-cert=/tls/tls.crt
+            - --tls-key=/tls/tls.key
+          env:
+            - name: MITOS_PREVIEW_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: signing-secret
+            - name: MITOS_EXPOSE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: admin-token
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: admin
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.expose.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.expose.tls.secretName }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-expose
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expose-proxy
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "expose-proxy") | nindent 4 }}
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+  type: {{ .Values.expose.service.type }}
+---
+# Separate ClusterIP-only admin Service for the plaintext route-sync listener.
+# Never exposed via the public Service, Ingress, or LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-expose-admin
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expose-proxy
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "expose-proxy") | nindent 4 }}
+  ports:
+    - name: admin
+      port: 8080
+      targetPort: admin
+  type: ClusterIP
+{{- if .Values.expose.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mitos-expose
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expose-proxy
+  {{- with .Values.expose.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.expose.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ printf "*.%s" $domain | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mitos-expose
+                port:
+                  name: https
+{{- end }}
+{{- if .Values.expose.tls.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mitos-expose-tls
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expose-proxy
+spec:
+  secretName: {{ .Values.expose.tls.secretName }}
+  dnsNames:
+    - {{ printf "*.%s" $domain | quote }}
+  issuerRef:
+    name: {{ required "expose.tls.certManager.issuerRef.name is required when expose.tls.certManager.enabled" .Values.expose.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.expose.tls.certManager.issuerRef.kind }}
+{{- end }}
+{{- end }}

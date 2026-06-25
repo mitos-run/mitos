@@ -92,6 +92,51 @@ func (p *SelfSignedProvider) mint(host string) (*tls.Certificate, error) {
 	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: p.caKey}, nil
 }
 
+// WildcardProvider serves a single operator-provided certificate (a wildcard
+// *.<expose-domain> cert) for every SNI host. The certificate is loaded once at
+// startup via tls.LoadX509KeyPair; matching the hostname to the wildcard is the
+// certificate's job, performed by the client. This is the production and bare
+// metal TLS path (a cert-manager-issued or operator-provided wildcard), distinct
+// from the self-signed test provider and the documented on-demand CertMagic seam.
+type WildcardProvider struct {
+	cert tls.Certificate
+}
+
+// NewWildcardProvider loads the cert and key from disk. It returns an error if
+// either file is missing or unparseable, so a misconfigured deployment fails
+// closed at startup rather than serving a broken handshake.
+func NewWildcardProvider(certFile, keyFile string) (*WildcardProvider, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("preview: load wildcard cert: %w", err)
+	}
+	return &WildcardProvider{cert: cert}, nil
+}
+
+// GetCertificate returns the loaded wildcard certificate for any non-empty SNI.
+func (p *WildcardProvider) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if hello == nil || hello.ServerName == "" {
+		return nil, errors.New("preview: no SNI server name")
+	}
+	c := p.cert
+	return &c, nil
+}
+
+// ServerTLSConfig returns the TLS config the expose proxy serves with. It sets
+// GetCertificate from the provider and a TLS 1.2 floor (TLS 1.3 is negotiated
+// when the client supports it). It deliberately leaves CurvePreferences NIL so
+// Go's default key-exchange preference applies, which on Go 1.24 and newer leads
+// with the hybrid post-quantum group X25519MLKEM768 (FIPS 203 ML-KEM-768 plus
+// X25519), giving harvest-now-decrypt-later confidentiality. DO NOT set
+// CurvePreferences here: pinning the curve list silently drops the post-quantum
+// default. The guardrail test in tls_pq_test.go fails if this regresses.
+func ServerTLSConfig(cp CertProvider) *tls.Config {
+	return &tls.Config{
+		GetCertificate: cp.GetCertificate,
+		MinVersion:     tls.VersionTLS12,
+	}
+}
+
 // CertMagicProvider documents the production on-demand TLS adapter. It is NOT
 // compiled with the certmagic dependency in this slice: real ACME issuance
 // needs a public domain, a DNS record for *.<domain> (or per-host A

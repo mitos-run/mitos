@@ -51,6 +51,9 @@ spec:
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- if .Values.expose.enabled }}
+            - --expose-proxy-admin-url=http://mitos-expose-admin.{{ include "mitos.namespace" . }}.svc:8080
+            {{- end }}
           env:
             # Run the control plane (PKI bootstrap, forkd discovery) in the
             # namespace the controller is deployed into, so an install into any
@@ -59,6 +62,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if .Values.expose.enabled }}
+            - name: EXPOSE_PROXY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: admin-token
+            {{- end }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

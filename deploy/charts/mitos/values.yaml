@@ -214,7 +214,7 @@ imagePullSecrets:
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}
 
-# Console (Deployment): the hosted/self-hosted web console (issue #214) — the BFF
+# Console (Deployment): the hosted/self-hosted web console (issue #214). The BFF
 # plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
 # BOTH editions; behavior is driven entirely by the capabilities below, which the
 # binary advertises at GET /console/capabilities. Self-host runs the defaults
@@ -272,7 +272,7 @@ console:
     host: ""
     annotations: {}
 
-# Gateway (Deployment): the public customer API front door (issue #210) — API-key
+# Gateway (Deployment): the public customer API front door (issue #210) -- API-key
 # auth, org resolution, quota, and forwarding to the control plane. The
 # programmatic counterpart to the console.
 gateway:
@@ -294,3 +294,49 @@ gateway:
     className: ""
     host: ""
     annotations: {}
+
+# Expose proxy (Deployment): cmd/preview-proxy terminates TLS for wildcard
+# sandbox preview URLs and proxies traffic to the correct sandbox. Gated by
+# expose.enabled (default false). Requires expose.domain when enabled.
+expose:
+  # Gate the expose-proxy Deployment, Service, and optional Ingress/Certificate.
+  enabled: false
+  image:
+    # Image repository for the preview proxy (appended to image.registry).
+    repository: preview-proxy
+    # Image tag. Defaults to the chart appVersion via mitos.image when empty.
+    tag: ""
+    # Image pull policy for the proxy container.
+    pullPolicy: IfNotPresent
+  # Number of proxy replicas.
+  replicas: 1
+  # The expose domain, e.g. mitos.app. Required when expose.enabled is true.
+  domain: ""
+  service:
+    # Service type: ClusterIP (default) or LoadBalancer.
+    type: ClusterIP
+  ingress:
+    # Gate the Ingress resource for the expose proxy.
+    enabled: false
+    # ingressClassName for the Ingress.
+    className: ""
+    # Annotations applied to the Ingress resource.
+    annotations: {}
+  tls:
+    # certManager issues a wildcard *.<domain> Certificate via the named issuer.
+    certManager:
+      # When true, renders a cert-manager Certificate for the wildcard domain.
+      enabled: false
+      issuerRef:
+        # Name of the ClusterIssuer or Issuer.
+        name: ""
+        # Kind of the issuer reference: ClusterIssuer or Issuer.
+        kind: ClusterIssuer
+    # secretName is the TLS Secret mounted into the proxy at /tls. Created by
+    # cert-manager when certManager.enabled, or provided by the operator otherwise.
+    secretName: mitos-expose-tls
+  # Name of the Secret holding signing-secret and admin-token keys shared by the
+  # proxy and the controller. If absent from the cluster, create it out of band.
+  secretName: mitos-expose
+  # Proxy container resource requests and limits.
+  resources: {}
