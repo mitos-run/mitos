@@ -6,12 +6,19 @@ warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
 cluster.
 
-This is the Go client for the direct sandbox API: create a template, fork a
-sandbox, run `exec`, list, and terminate. It uses only the Go standard library
-(`net/http`, `encoding/json`, `crypto/rand`, `os`), so there are no third-party
-dependencies. It lives in its own nested Go module, so importing it does not pull
-the rest of the repository (the controller, forkd, and their dependencies) into
-your build.
+This is the Go client for both surfaces:
+
+- **Direct mode** (`SandboxServer`): the standalone or hosted sandbox API, create
+  a template, fork a sandbox, run `exec`, list, and terminate.
+- **Cluster mode** (`AgentRun`): drive the `mitos.run/v1` CRDs (`SandboxPool`,
+  `Sandbox`, `Workspace`) directly on a Kubernetes cluster, the same surface the
+  Python and TypeScript SDKs expose.
+
+It uses only the Go standard library (`net/http`, `crypto/tls`, `encoding/json`,
+`crypto/rand`, `os`), so there are no third-party dependencies: cluster mode is a
+minimal Kubernetes REST client, not `k8s.io/client-go`. It lives in its own
+nested Go module, so importing it does not pull the rest of the repository (the
+controller, forkd, and their dependencies) into your build.
 
 ## Install
 
@@ -158,13 +165,78 @@ cd sdk/go
 go test ./... -count=1
 ```
 
+## Cluster mode (Kubernetes)
+
+`AgentRun` is the operator path: it drives the `mitos.run/v1` CRDs directly, so a
+sandbox is born from a `SandboxPool` (or forked from another sandbox) and the
+controller drives it to `Ready`. This is the Go analogue of the Python and
+TypeScript `AgentRun`.
+
+```go
+ctx := context.Background()
+
+// In a pod: mitos.WithInCluster(). Locally: mitos.WithKubeconfig("") loads
+// $KUBECONFIG, then ~/.kube/config.
+ar, err := mitos.NewAgentRun(mitos.WithNamespace("agents"), mitos.WithInCluster())
+if err != nil {
+	log.Fatal(err)
+}
+
+// One-liner: ensure the default pool for the image exists, then start a sandbox.
+sb, err := ar.Sandbox(ctx, "python:3.12")
+if err != nil {
+	log.Fatal(err)
+}
+defer sb.Terminate(ctx)
+
+// Or claim from an explicit pool with env, a TTL, and a workspace binding.
+sb2, err := ar.Create(ctx,
+	mitos.WithPool("my-pool"),
+	mitos.WithEnv(map[string]string{"FOO": "bar"}),
+	mitos.WithTTL("30m"),
+	mitos.WithWorkspace("ws-a"),
+)
+
+// Reconnect to a running sandbox by name across processes.
+again, err := ar.FromName(ctx, sb.Name)
+
+// Inspect pool capacity.
+ps, err := ar.PoolStatus(ctx, "my-pool")
+fmt.Println(ps.ReadySnapshots, ps.Desired)
+```
+
+| Method | CRD op | Returns |
+| --- | --- | --- |
+| `NewAgentRun(opts ...AgentRunOption)` | none | `*AgentRun` |
+| `(*AgentRun).Sandbox(ctx, image, opts...)` | get-or-create `SandboxPool`, create `Sandbox` | `*ClusterSandbox` |
+| `(*AgentRun).Create(ctx, opts...)` | create `Sandbox` (`spec.source.poolRef`) | `*ClusterSandbox` |
+| `(*AgentRun).Get(ctx, name)` / `FromName(ctx, name)` | get `Sandbox` | `*ClusterSandbox` |
+| `(*AgentRun).List(ctx, pool)` | list `Sandbox`, filter by pool | `[]*ClusterSandbox` |
+| `(*AgentRun).PoolStatus(ctx, name)` | get `SandboxPool` status | `*PoolStatus` |
+| `(*AgentRun).CreateWorkspace(ctx, name)` | create `Workspace` | `*Workspace` |
+| `(*AgentRun).Workspace(name)` | lazy handle | `*Workspace` |
+| `(*AgentRun).GetWorkspace(ctx, name)` | get `Workspace` (404 -> `workspace_not_found`) | `*Workspace` |
+| `(*AgentRun).ListWorkspaces(ctx)` | list `Workspace` | `[]*Workspace` |
+| `(*ClusterSandbox).Terminate(ctx)` | delete `Sandbox` | `error` |
+
+Connection options: `WithInCluster()` (service-account mount), `WithKubeconfig(path)`
+(current context; empty path uses `$KUBECONFIG` then `~/.kube/config`),
+`WithNamespace(ns)`, and `WithAllowDefaultPool(bool)`. The kubeconfig parser
+supports a common subset (server, CA, bearer token, or client cert/key for
+mutual-TLS clusters like kind and minikube); it does not support exec credential
+plugins or `auth-provider` blocks. Per-sandbox bearer tokens read from the
+`<name>-sandbox-token` Secret are held in memory only and never logged.
+
+`DefaultPoolName(image)` is exported and computes the default-pool slug
+identically to the Python and TypeScript SDKs (lowercase, `/` and `:` to `-`,
+other unsafe characters collapsed, bounded to 40 characters, prefixed
+`mitos-default-`).
+
 ## Scope
 
-This module is direct-mode only today. Cluster mode (driving the Kubernetes CRDs)
-ships in the Python and TypeScript SDKs and is planned for this module too, for
-full parity. Beyond the create / fork / exec / list
-/ terminate surface above, the following direct-mode endpoints are not part of
-this module: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`),
+Beyond the direct-mode create / fork / exec / list / terminate surface and the
+cluster-mode surface above, the following direct-mode endpoints are not yet part
+of this module: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`),
 `run_code`, per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
 `get_host(port)` preview URLs.
 
@@ -172,16 +244,16 @@ this module: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`),
 
 Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
-1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
-and TypeScript today and is planned for the rest, for full parity.
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python,
+TypeScript, and Go today and is planned for the rest, for full parity (#296).
 
 | Language | Install | Covers |
 | --- | --- | --- |
 | Python | `pip install mitos-run` | direct + cluster + async |
 | TypeScript | `npm install @mitos/sdk` | direct + cluster |
+| Go | `go get github.com/mitos-run/mitos/sdk/go` | direct + cluster |
 | Ruby | `gem install mitos` | direct |
 | Rust | `cargo add mitos` | direct |
-| Go | `go get github.com/mitos-run/mitos/sdk/go` | direct |
 | Java | build from source | direct |
 
 Project home: [https://mitos.run](https://mitos.run). Source and all six SDKs:
