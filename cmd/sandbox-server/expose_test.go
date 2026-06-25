@@ -14,6 +14,9 @@ func TestStandaloneExposeHandlerReachable(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.sandboxAPI.HandleExpose(w, r)
 
+	// 502 (not 401) because newServer calls AllowTokenless() on its sandboxAPI,
+	// so the tokenless auth passes and the request fails at route resolution for
+	// the unknown sandbox "ghost".
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for unknown sandbox through the standalone server, got %d (body %q)", w.Code, w.Body.String())
 	}

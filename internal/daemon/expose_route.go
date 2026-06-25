@@ -51,13 +51,16 @@ func (api *SandboxAPI) handleExpose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expose path must be /v1/sandboxes/{id}/expose/{port}/", http.StatusBadRequest)
 		return
 	}
+	// Auth runs before port validation so an unauthenticated caller with a
+	// malformed port receives 401, not 400 (defense-in-depth: do not reveal
+	// port validity to unauthenticated callers).
+	if !api.checkBearer(id, r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
 		http.Error(w, "guest port must be an integer in 1-65535", http.StatusBadRequest)
-		return
-	}
-	if !api.checkBearer(id, r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	prefix := "/v1/sandboxes/" + id + "/expose/" + portStr

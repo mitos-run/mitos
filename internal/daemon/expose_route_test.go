@@ -56,6 +56,24 @@ func TestHandleExposeRejectsBadPort(t *testing.T) {
 	}
 }
 
+// TestHandleExposeRejectsBadPortWithoutAuth proves that an unauthenticated
+// caller with a malformed port receives 401 (auth-first), not 400, so port
+// validity is not leaked to unauthenticated callers.
+func TestHandleExposeRejectsBadPortWithoutAuth(t *testing.T) {
+	api := newExposeTestAPI(t, "127.0.0.1:1")
+	api.RegisterToken("sb1", "secret-token")
+
+	r := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/sb1/expose/notaport/", nil)
+	r.SetPathValue("id", "sb1")
+	r.SetPathValue("port", "notaport")
+	// No Authorization header.
+	w := httptest.NewRecorder()
+	api.handleExpose(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for bad port without auth, got %d", w.Code)
+	}
+}
+
 // TestHandleExposeNoTrailingSlashIsRouted proves the bare (no trailing slash)
 // app-root form /v1/sandboxes/{id}/expose/{port} reaches handleExpose and its
 // bearer gate, rather than falling through to the JSON catch-all (which would
