@@ -607,3 +607,44 @@ html[data-reduce-motion="1"] * {
     padding: var(--space-4);
   }
 }
+
+/* Audit view: retention/export panel and sinks panel layout. Panels are .card
+   instances; this section adds the audit-specific form row arrangement and the
+   add-sink row that wraps on narrow viewports. No raw hex; token-driven only. */
+.audit-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.audit-form-row label {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.audit-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.audit-hint {
+  color: var(--ink-3);
+  font-size: var(--step--2);
+}
+
+/* Mobile: audit form rows stack vertically; inputs expand to full width. */
+@media (max-width: 768px) {
+  .audit-form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .audit-form-row input,
+  .audit-form-row select {
+    width: 100%;
+  }
+}
