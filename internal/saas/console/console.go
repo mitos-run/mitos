@@ -52,6 +52,11 @@ type Deps struct {
 	ForkTree    ForkTreeSource
 	Projects    ProjectStore
 	Portal      PortalLinker
+	// Retention is the per-org audit-retention policy seam. It stores and
+	// exposes the retention window in days for each org; the GC sweep that
+	// enforces the policy runs in the controller (issue #163). Defaults to the
+	// in-memory fake so the BFF is safe to instantiate without a real store.
+	Retention RetentionStore
 	// Sessions is the account-scoped session-listing seam. It is used by the
 	// account-session endpoints (list, revoke one, revoke all) and defaults to a
 	// no-op in-memory implementation so the BFF is safe to instantiate without a
@@ -101,6 +106,9 @@ func New(deps Deps) *Console {
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
 	}
+	if deps.Retention == nil {
+		deps.Retention = NewMemRetentionStore()
+	}
 	if deps.Sessions == nil {
 		deps.Sessions = noopSessionLister{}
 	}
@@ -149,6 +157,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
+	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
+	mux.HandleFunc("GET /console/audit/retention", c.handleGetRetention)
+	mux.HandleFunc("PUT /console/audit/retention", c.handleSetRetention)
 	mux.HandleFunc("GET /console/templates", c.handleListTemplates)
 	mux.HandleFunc("GET /console/secrets", c.handleListSecrets)
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
