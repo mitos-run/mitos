@@ -10,7 +10,7 @@ func TestSelfSignedProviderIssuesPerHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSelfSignedProvider: %v", err)
 	}
-	hello := &tls.ClientHelloInfo{ServerName: "sb-1.preview.example.com"}
+	hello := &tls.ClientHelloInfo{ServerName: "sb-1.example.com"}
 	cert, err := cp.GetCertificate(hello)
 	if err != nil {
 		t.Fatalf("GetCertificate: %v", err)

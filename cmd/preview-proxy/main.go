@@ -1,6 +1,6 @@
 // Command preview-proxy is the per-sandbox preview URL reverse proxy (issue
 // #126). One entrypoint fronts many ephemeral per-sandbox backends: it parses
-// <sandbox-id>.preview.<domain>, verifies a signed expiring preview token plus
+// <label>.<domain>, verifies a signed expiring preview token plus
 // the per-sandbox bearer gate, looks up the backend in a route table built from
 // Ready claims, and proxies to it. Automatic TLS is wired behind the
 // preview.CertProvider seam; this binary ships the self-signed provider so it
@@ -35,7 +35,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8443", "HTTPS listen address")
 	httpAddr := flag.String("http-addr", "", "optional plaintext HTTP listen address (testing / behind a TLS terminator)")
-	domain := flag.String("domain", "", "base preview domain; routes <sandbox-id>.preview.<domain>")
+	domain := flag.String("domain", "", "base preview domain; routes <label>.<domain>")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
