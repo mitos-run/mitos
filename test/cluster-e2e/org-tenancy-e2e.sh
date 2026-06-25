@@ -30,7 +30,16 @@ NS_B="mitos-org-${ORG_B}"
 
 pass() { echo "PASS: $*"; }
 setup_fail() { echo "TENANCY-SETUP: $*"; exit 1; }
-fail() { echo "TENANCY-FAIL: $*"; exit 1; }
+# On a real failure, dump the controller logs and Org state so the reconciler
+# error (RBAC forbidden, owner-ref, etc.) is visible in the CI log directly.
+fail() {
+  echo "TENANCY-FAIL: $*"
+  echo "=== mitos-controller logs (tail 100) ==="
+  kubectl -n mitos logs deployment/mitos-controller --tail=100 2>&1 || true
+  echo "=== orgs ==="
+  kubectl get orgs.mitos.run -o wide 2>&1 || true
+  exit 1
+}
 
 echo "== 0. preconditions =="
 kubectl get crd orgs.mitos.run >/dev/null 2>&1 || setup_fail "Org CRD not installed"
