@@ -60,6 +60,26 @@ controller:
   # Name of the chart-provisioned ClusterRole the controller binds per pool
   # namespace for Secrets access. Must match the controller's expectation.
   poolSecretsClusterRoleName: mitos-pool-secrets
+  # Per-org namespace tenancy (issue #288, the hosted-SaaS multi-tenant
+  # boundary). When true, render --enable-org-tenancy so the controller runs the
+  # OrgReconciler: for each Org CR it provisions a per-org isolation namespace
+  # (mitos-org-<id>) with PSA privileged labels, a ResourceQuota ceiling, a
+  # LimitRange, a default-deny NetworkPolicy + DNS egress, and the
+  # mitos-pool-secrets RoleBinding, all owner-referenced to the Org. It also adds
+  # the controller RBAC rules the reconciler needs (namespaces, resourcequotas,
+  # limitranges, orgs). Default false so a self-host single-tenant install is
+  # unaffected; the hosted edition sets it true. Cross-org isolation is the
+  # separate namespace + default-deny NetworkPolicy + ResourceQuota + the microVM
+  # (a NetworkPolicy-enforcing CNI is required; see docs/threat-model.md).
+  orgTenancy:
+    enabled: false
+    # Default per-org sandbox/pod count ceiling for an Org's ResourceQuota when the
+    # Org sets no spec.quota override (the abuse-control primitive).
+    defaultMaxSandboxes: 50
+    # Default per-org aggregate CPU limit ceiling (a Kubernetes quantity).
+    defaultCPU: "32"
+    # Default per-org aggregate memory limit ceiling (a Kubernetes quantity).
+    defaultMemory: "64Gi"
   # Extra args appended verbatim to the controller container args.
   extraArgs: []
   # Extra env vars appended verbatim to the controller container. FORKD_NAMESPACE

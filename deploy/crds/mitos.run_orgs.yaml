@@ -1,0 +1,208 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: orgs.mitos.run
+spec:
+  group: mitos.run
+  names:
+    kind: Org
+    listKind: OrgList
+    plural: orgs
+    shortNames:
+    - org
+    singular: org
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.namespace
+      name: Namespace
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Org is the cluster-scoped account record for one hosted-SaaS tenant (issue
+          #288). It is the declarative source the org-namespace reconciler provisions a
+          per-org isolation namespace from: mitos-org-<id>, where <id> is the Org's
+          name. Each org's sandboxes, pools, warm husk pods, claims, and secrets live in
+          that namespace under a default-deny NetworkPolicy and a ResourceQuota ceiling.
+
+          The Org is CLUSTER-SCOPED because it OWNS a cluster-scoped Namespace: an owner
+          reference from a namespaced object to a cluster-scoped object is invalid, so
+          the owner (Org) must itself be cluster-scoped for the namespace to be
+          garbage-collected when the org is deleted.
+
+          Self-host is unaffected: the OrgReconciler only runs when the controller is
+          started with --enable-org-tenancy (default false), so a single-tenant install
+          never reconciles Orgs.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              Spec is the desired org account configuration: its display name, tier, and
+              an optional quota override.
+            properties:
+              displayName:
+                description: |-
+                  DisplayName is the human-facing name of the org (the company or account
+                  name). It is presentational only; the org id is the Org's metadata.name and
+                  is what NamespaceForOrg maps to a namespace.
+                type: string
+              quota:
+                description: |-
+                  Quota optionally overrides the controller-default per-org ceilings. When
+                  set, its fields populate the org namespace's ResourceQuota; unset fields fall
+                  back to the controller defaults (the --org-default-* flags). A nil Quota uses
+                  the controller defaults entirely. This is the per-org abuse-control surface.
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      CPU caps the aggregate CPU limit across the org namespace. The zero quantity
+                      falls back to the controller default.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxPods:
+                    description: |-
+                      MaxPods caps the total pod count in the org namespace (husk pods plus any
+                      supporting pods). Zero falls back to the controller default. It is a separate
+                      ceiling from MaxSandboxes so warm husk capacity and active sandboxes can be
+                      bounded independently.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxSandboxes:
+                    description: |-
+                      MaxSandboxes caps the number of Sandbox-bearing pods (the count/pods ceiling)
+                      in the org namespace. Zero falls back to the controller default. This is the
+                      primary abuse-control primitive: it bounds how much an org can schedule.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      Memory caps the aggregate memory limit across the org namespace. The zero
+                      quantity falls back to the controller default.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              tier:
+                description: |-
+                  Tier is the org's plan tier (for example "free", "pro", "enterprise"). It is
+                  a label the control plane and pricing layer interpret; the reconciler does
+                  not branch on it today (quota overrides are explicit via Quota). Empty by
+                  default.
+                type: string
+            type: object
+          status:
+            description: Status reports the provisioned namespace, phase, and conditions.
+            properties:
+              conditions:
+                description: |-
+                  Conditions carries the standard condition set (Ready) for the org's
+                  namespace provisioning.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              namespace:
+                description: |-
+                  Namespace is the org's provisioned isolation namespace (mitos-org-<id>).
+                  Empty until the first successful reconcile.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the Org generation the status reflects.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is Provisioning, Ready, or Failed.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

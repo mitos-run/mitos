@@ -1052,6 +1052,38 @@ operator has provisioned dedicated, tainted node pools and placed each tenant's
 pools onto them. This posture is recorded as a residual decision in
 docs/adr/0004-node-flat-snapshot-trust-domain.md.
 
+## 7a. Per-org namespace tenancy boundary (issue #288)
+
+The hosted offering hardens the namespace boundary above into a declarative
+per-org isolation namespace. An `Org` CR (cluster-scoped; its name is the org id)
+is reconciled into `mitos-org-<id>` by the `OrgReconciler`
+(`internal/controller/org_controller.go`), gated behind `--enable-org-tenancy`
+(default OFF, so a self-host single-tenant install is unaffected). Each org's
+pools, warm husk pods, claims, sandboxes, and secrets live in its own namespace.
+The reconciler is self-healing: it watches the objects it owns, so a manually
+deleted or drifted stack object enqueues the Org and is recreated; org deletion
+cascades through owner references (the cluster-scoped Org owns the cluster-scoped
+Namespace, a valid owner edge).
+
+What isolates two orgs: **the separate namespace + the per-org default-deny
+NetworkPolicy + the per-org ResourceQuota ceiling + the microVM.** No single one
+of these is the whole boundary; the microVM remains the in-pod isolation
+guarantee, the namespace + NetworkPolicy is the cross-tenant control-plane
+boundary, and the ResourceQuota is the abuse-control ceiling.
+
+| Boundary | Status | Mechanism |
+|---|---|---|
+| Per-org namespace separation | mitigated | Each org's workloads land in `mitos-org-<id>` (`tenant.NamespaceForOrg`), stamped with the `mitos.run/org` label. Cross-org objects are in different namespaces, so RBAC on the CRDs and the default-deny NetworkPolicy below apply per namespace. The namespace is owner-referenced to the cluster-scoped Org so deletion garbage-collects the whole stack. |
+| Cross-org network reachability | partial | The reconciler creates a per-org default-deny `networking.k8s.io/v1` NetworkPolicy (`mitos-org-default-deny`) selecting ALL pods in the namespace (empty PodSelector), declaring BOTH Ingress and Egress policy types with NO ingress rules (deny all ingress) and a single egress rule allowing only cluster DNS (UDP/TCP 53). Pods can resolve names but cannot otherwise egress or be reached, and pods in different org namespaces cannot reach each other. HONEST CNI CAVEAT: a NetworkPolicy only enforces on a CNI that implements it (Calico, Cilium, etc.); on a CNI without NetworkPolicy support this object is inert, so a NetworkPolicy-enforcing CNI is REQUIRED in a hosted multi-tenant cluster. The in-pod nftables filter the husk-stub programs remains the per-pod egress guarantee regardless of CNI (mirrors `husknetworkpolicy.go`). |
+| Per-org resource ceiling / abuse control | mitigated | A per-org `ResourceQuota` (`mitos-org-quota`) caps the pod count, the `count/sandboxes.mitos.run` object count, and the aggregate CPU/memory limits in the namespace. The ceiling comes from the Org's `spec.quota` override or the controller defaults (`--org-default-max-sandboxes`, `--org-default-cpu`, `--org-default-memory`); a partial override keeps the defaults for the unset fields. A per-org `LimitRange` (`mitos-org-limits`) supplies default container limits so a pod that omits limits still counts against the quota. This bounds the blast radius of one org's abuse (cluster-wide ceilings still apply on top). |
+| Privileged PSA per org | accepted (documented) | The org namespace carries `pod-security.kubernetes.io/enforce: privileged` (plus audit/warn = privileged) because the husk pod needs `/dev/kvm` via the device plugin, `NET_ADMIN` for the in-pod egress firewall, and a short-lived privileged init container for name-egress pools. **PSA level governs what a POD in the namespace may REQUEST, not cross-tenant access:** the cross-org boundary is the separate namespace + the NetworkPolicy + the microVM, none of which privileged PSA weakens. This is the same privileged-PSA posture the husk pod already requires (section 0), now per org. |
+| Per-org Secrets RBAC | partial | The reconciler binds the existing cluster-wide `mitos-pool-secrets` ClusterRole (a DEFINITION shipped by the chart, never bound cluster-wide) to the controller's ServiceAccount INSIDE each org namespace via the `mitos-pool-secrets` RoleBinding, so the controller manages pool Secrets there without a cluster-wide Secrets grant. This extends the existing `namespacedSecretsRBAC` narrowing to org namespaces. |
+
+PRODUCTION GATE: per the #208 sequencing, public self-serve untrusted
+multi-tenancy does NOT switch on until fork-correctness (#1), failure/GC (#163),
+and the external security review (#194) are green and this per-boundary checklist
+passes. Until then, run in waitlist / design-partner mode.
+
 ## 7b. Customer front door: accounts, orgs, and the public API gateway (issue #210)
 
 The hosted offering adds a NEW public attack surface layered ABOVE the internal

@@ -55,7 +55,7 @@ func TestCommunityEditionDefaults(t *testing.T) {
 }
 
 // TestHostedEditionFlipsServerControlledFlags asserts the hosted SaaS render of
-// the SAME chart turns on edition/signup/billing and adds the openbao provider —
+// the SAME chart turns on edition/signup/billing and adds the openbao provider:
 // all from values, no separate chart or image.
 func TestHostedEditionFlipsServerControlledFlags(t *testing.T) {
 	out := render(t,
@@ -120,6 +120,73 @@ func TestConsoleOIDCRedirectURLOmittedByDefault(t *testing.T) {
 func TestConsoleExtraEnv(t *testing.T) {
 	out := render(t, "console.extraEnv[0].name=MITOS_CONSOLE_CUSTOM", "console.extraEnv[0].value=on")
 	mustEnv(t, out, "MITOS_CONSOLE_CUSTOM", "on")
+}
+
+// TestOrgTenancyDisabledByDefault asserts the per-org tenancy surface is OFF in
+// the default render: no --enable-org-tenancy flag and no namespace-management
+// RBAC rules, so a self-host single-tenant install is unaffected.
+func TestOrgTenancyDisabledByDefault(t *testing.T) {
+	out := render(t)
+	if strings.Contains(out, "--enable-org-tenancy") {
+		t.Fatal("--enable-org-tenancy rendered by default; per-org tenancy must be opt-in")
+	}
+	// The controller ClusterRole must not grant namespace management by default.
+	// Match the resource LIST entry (a YAML "- namespaces" line), not a comment
+	// that happens to mention "pool namespaces".
+	if hasResourceRule(controllerClusterRole(t, out), "namespaces") {
+		t.Fatal("controller ClusterRole grants namespaces by default; should be gated behind controller.orgTenancy.enabled")
+	}
+}
+
+// TestOrgTenancyEnabledAddsFlagAndRBAC asserts controller.orgTenancy.enabled
+// renders the --enable-org-tenancy flag with the default-quota flags AND the
+// controller RBAC the OrgReconciler needs (namespaces, resourcequotas,
+// limitranges, orgs).
+func TestOrgTenancyEnabledAddsFlagAndRBAC(t *testing.T) {
+	out := render(t,
+		"controller.orgTenancy.enabled=true",
+		"controller.orgTenancy.defaultMaxSandboxes=75",
+		"controller.orgTenancy.defaultCPU=48",
+		"controller.orgTenancy.defaultMemory=96Gi",
+	)
+	mustContain(t, out, "--enable-org-tenancy")
+	mustContain(t, out, "--org-default-max-sandboxes=75")
+	mustContain(t, out, "--org-default-cpu=48")
+	mustContain(t, out, "--org-default-memory=96Gi")
+
+	role := controllerClusterRole(t, out)
+	for _, res := range []string{"namespaces", "resourcequotas", "limitranges", "orgs"} {
+		if !hasResourceRule(role, res) {
+			t.Fatalf("controller ClusterRole missing %q rule when org tenancy is enabled", res)
+		}
+	}
+}
+
+// hasResourceRule reports whether the rendered ClusterRole lists the given
+// resource as a rule entry (a YAML "- <resource>" list line), so a comment that
+// mentions the word does not falsely satisfy the check.
+func hasResourceRule(role, resource string) bool {
+	for _, ln := range strings.Split(role, "\n") {
+		if strings.TrimSpace(ln) == "- "+resource {
+			return true
+		}
+	}
+	return false
+}
+
+// controllerClusterRole extracts the mitos-controller ClusterRole YAML document
+// from the rendered manifests so an assertion targets that role specifically and
+// is not satisfied by some other resource mentioning the same word.
+func controllerClusterRole(t *testing.T, out string) string {
+	t.Helper()
+	docs := strings.Split(out, "\n---\n")
+	for _, d := range docs {
+		if strings.Contains(d, "kind: ClusterRole") && strings.Contains(d, "name: mitos-controller") {
+			return d
+		}
+	}
+	t.Fatal("mitos-controller ClusterRole not found in rendered manifests")
+	return ""
 }
 
 func mustContain(t *testing.T, out, want string) {

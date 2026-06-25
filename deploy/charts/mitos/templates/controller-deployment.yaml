@@ -48,6 +48,12 @@ spec:
             {{- if .Values.apiV2.poolConversionWebhook.enabled }}
             - --enable-pool-conversion-webhook
             {{- end }}
+            {{- if .Values.controller.orgTenancy.enabled }}
+            - --enable-org-tenancy
+            - --org-default-max-sandboxes={{ .Values.controller.orgTenancy.defaultMaxSandboxes }}
+            - --org-default-cpu={{ .Values.controller.orgTenancy.defaultCPU }}
+            - --org-default-memory={{ .Values.controller.orgTenancy.defaultMemory }}
+            {{- end }}
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
