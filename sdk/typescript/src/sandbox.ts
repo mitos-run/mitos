@@ -210,8 +210,10 @@ export class Sandbox {
     const wsBase = toBaseUrl(this.endpoint)
       .replace(/^http:\/\//, "ws://")
       .replace(/^https:\/\//, "wss://");
-    const url = `${wsBase}/v1/pty?sandbox=${this.id}&cols=${cols}&rows=${rows}`;
-    return createPty({ url, token: this.token, onData });
+    // The PTY rides the Connect sandbox.v1.Sandbox/Exec RPC over a WebSocket; the
+    // size travels in the opening ExecRequest{open}, not the URL query.
+    const url = `${wsBase}/sandbox.v1.Sandbox/Exec?sandbox=${this.id}`;
+    return createPty({ url, cols, rows, token: this.token, onData });
   }
 
   /**

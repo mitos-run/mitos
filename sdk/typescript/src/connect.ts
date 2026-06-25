@@ -96,8 +96,9 @@ export function bytesToB64(bytes: Uint8Array): string {
 }
 
 // encodeFrame wraps one message payload in the Connect 5-byte envelope prefix:
-// 1 flag byte, then a 4-byte big-endian length, then the payload.
-function encodeFrame(payload: Uint8Array, endStream = false): Uint8Array {
+// 1 flag byte, then a 4-byte big-endian length, then the payload. Exported so the
+// ws PTY transport reuses the same framing rather than duplicating it.
+export function encodeFrame(payload: Uint8Array, endStream = false): Uint8Array {
   const out = new Uint8Array(5 + payload.length);
   out[0] = endStream ? FLAG_END_STREAM : 0;
   const len = payload.length;
@@ -112,8 +113,9 @@ function encodeFrame(payload: Uint8Array, endStream = false): Uint8Array {
 // FrameReader reassembles Connect enveloped frames from a response body's
 // ReadableStream reader, buffering raw bytes until a full frame (5-byte prefix +
 // payload) is available, so it is robust to fetch delivering arbitrary chunk
-// sizes and to a frame that spans multiple chunks.
-class FrameReader {
+// sizes and to a frame that spans multiple chunks. Exported so the ws PTY
+// transport decodes incoming binary messages with the same reassembly logic.
+export class FrameReader {
   private buf = new Uint8Array(0);
   private done = false;
 
