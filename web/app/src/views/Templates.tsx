@@ -4,16 +4,14 @@
 import { useTemplates } from '../data/account'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
+import { PageHeader } from '../ui/PageHeader'
 
 export function Templates() {
   const { data: templates = [], isLoading } = useTemplates()
 
   return (
     <section>
-      <h2>Templates</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Preconfigured sandbox images available to this org.
-      </p>
+      <PageHeader title="Templates" lede="Preconfigured sandbox images available to this org." />
 
       {isLoading ? (
         <Skeleton rows={3} />

@@ -5,6 +5,7 @@ import { useProjects, useCreateProject } from '../data/org'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
+import { PageHeader } from '../ui/PageHeader'
 
 export function Projects() {
   const { data: projects = [], isLoading, isError } = useProjects()
@@ -31,10 +32,7 @@ export function Projects() {
 
   return (
     <section>
-      <h2>Projects</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Projects group sandboxes and workspaces within the org.
-      </p>
+      <PageHeader title="Projects" lede="Projects group sandboxes and workspaces within the org." />
 
       <form onSubmit={onSubmit} style={{ marginBottom: 'var(--space-6)' }}>
         <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'flex-end' }}>

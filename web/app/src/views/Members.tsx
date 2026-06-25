@@ -5,6 +5,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { Role } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 
 const ROLES: Role[] = ['owner', 'admin', 'billing', 'member', 'viewer']
 
@@ -25,10 +26,7 @@ export function Members() {
 
   return (
     <section>
-      <h2>Members</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Manage org membership and roles. Changes take effect immediately.
-      </p>
+      <PageHeader title="Members" lede="Manage org membership and roles. Changes take effect immediately." />
 
       {isLoading ? (
         <Skeleton rows={3} />

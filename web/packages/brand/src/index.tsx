@@ -4,6 +4,7 @@
 // the console renders on-brand without redefining anything.
 //
 // Import the styles once at the app root: `import '@mitos/brand/base.css'`.
+import { useId } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 
 export type ButtonProps = {
@@ -12,6 +13,41 @@ export type ButtonProps = {
   onClick?: () => void
   type?: 'button' | 'submit'
   disabled?: boolean
+}
+
+/**
+ * Mark is the mitos logo: two overlapping circles, a filled disc dividing into
+ * an open ring, geometry shared with the marketing site (Mark.astro). Drawn in
+ * currentColor so it inherits the surrounding text color; the overlap arc is cut
+ * in --mark-bg (the field) to keep the figure/ground read on any surface.
+ * Decorative by default (aria-hidden) since it sits beside the "mitos" wordmark.
+ */
+export function Mark({ size = 22, glow = false }: { size?: number; glow?: boolean }) {
+  // Unique clip id per instance so multiple marks on one page stay valid.
+  const uid = 'mitos-mark-' + useId().replace(/:/g, '')
+  // The marketing site nav applies this exact magenta drop-shadow to the brand
+  // mark; the console matches it so the website -> app handoff is seamless.
+  const glowFilter = 'drop-shadow(0 0 6px color-mix(in srgb, var(--magenta) 60%, transparent))'
+  return (
+    <svg
+      width={size}
+      height={(size * 214.59) / 330.902}
+      viewBox="100 154.508 330.902 214.59"
+      fill="none"
+      aria-hidden
+      focusable="false"
+      style={glow ? { filter: glowFilter } : undefined}
+    >
+      <clipPath id={uid}>
+        <circle cx="200" cy="261.803" r="100" />
+      </clipPath>
+      <circle cx="200" cy="261.803" r="100" fill="currentColor" />
+      <circle cx="323.607" cy="261.803" r="100" stroke="currentColor" strokeWidth="14.59" />
+      <g clipPath={`url(#${uid})`}>
+        <circle cx="323.607" cy="261.803" r="100" stroke="var(--mark-bg)" strokeWidth="14.59" />
+      </g>
+    </svg>
+  )
 }
 
 /** Imperative-labelled button. Primary = magenta emission; ghost = hairline. */

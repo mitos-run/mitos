@@ -9,15 +9,16 @@
 // provide the accessible, keyboard-driven interface.
 import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { Division } from '@mitos/brand'
 import { useCapabilities } from '../data/query'
 import { navRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
 import { CommandPalette } from './CommandPalette'
+import { TopBar } from './TopBar'
 import type { Capabilities } from '../api'
 
 export function AppShell() {
   const { data: caps } = useCapabilities()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
 
   // Refs for focus management.
   const navRef = useRef<HTMLElement>(null)
@@ -42,6 +43,18 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // Toggle the command palette on Cmd-K / Ctrl-K.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   // Focus management: move focus into the nav when the drawer opens;
   // return focus to the menu button when it closes (but not on initial mount).
   useEffect(() => {
@@ -64,76 +77,29 @@ export function AppShell() {
   const routes = navRoutes(caps)
 
   return (
-    <div className="app-shell" style={{ display: 'flex', minHeight: '100vh', maxWidth: 'var(--maxw)', margin: '0 auto' }}>
-      {/* Mobile top bar: hamburger + palette affordance */}
-      <div className="top-bar">
-        <button
-          ref={menuButtonRef}
-          className="menu-button"
-          type="button"
-          aria-label="Open navigation menu"
-          aria-expanded={drawerOpen}
-          aria-controls="primary-nav"
-          onClick={() => setDrawerOpen((v) => !v)}
-        >
-          <MenuIcon />
-          <span className="sr-only">Menu</span>
-        </button>
-        <div className="top-bar-brand" aria-hidden="true">
-          <Division size={22} />
-          <strong>mitos</strong>
-        </div>
+    <div className="app-shell-frame">
+      <TopBar
+        onSearch={() => setPaletteOpen(true)}
+        onToggleDrawer={() => setDrawerOpen((v) => !v)}
+        drawerOpen={drawerOpen}
+        menuButtonRef={menuButtonRef}
+      />
+      <div className="app-shell" style={{ display: 'flex', minHeight: 'calc(100vh - 64px)', maxWidth: 'var(--maxw)', margin: '0 auto' }}>
+        {drawerOpen && <div className="nav-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />}
+        <nav ref={navRef} id="primary-nav" aria-label="Primary" tabIndex={-1}
+             className={`nav-drawer${drawerOpen ? ' nav-drawer-open' : ''}`}
+             style={{ width: 220, padding: 'var(--space-5)', borderRight: '1px solid var(--hairline)' }}>
+          {GROUP_ORDER.map((group) => (
+            <NavSection key={group} group={group} routes={routes.filter((r) => r.group === group)} />
+          ))}
+          <OwnershipBadge caps={caps} />
+        </nav>
+        <main style={{ flex: 1, padding: 'var(--space-6)' }}>
+          <Outlet />
+        </main>
       </div>
-
-      {/* Backdrop: dimmed scrim that closes the drawer on click (mobile only) */}
-      {drawerOpen && (
-        <div
-          className="nav-backdrop"
-          aria-hidden="true"
-          onClick={() => setDrawerOpen(false)}
-        />
-      )}
-
-      {/* Primary navigation: persistent sidebar on desktop, slide-over on mobile */}
-      <nav
-        ref={navRef}
-        id="primary-nav"
-        aria-label="Primary"
-        tabIndex={-1}
-        className={`nav-drawer${drawerOpen ? ' nav-drawer-open' : ''}`}
-        style={{ width: 220, padding: 'var(--space-5)', borderRight: '1px solid var(--hairline)' }}
-      >
-        <div className="nav-brand" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-6)' }}>
-          <Division size={28} />
-          <strong>mitos</strong>
-        </div>
-        {GROUP_ORDER.map((group) => (
-          <NavSection
-            key={group}
-            group={group}
-            routes={routes.filter((r) => r.group === group)}
-          />
-        ))}
-        <OwnershipBadge caps={caps} />
-      </nav>
-
-      <main style={{ flex: 1, padding: 'var(--space-6)' }}>
-        <Outlet />
-      </main>
-
-      <CommandPalette caps={caps} />
+      <CommandPalette caps={caps} open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
-  )
-}
-
-// Simple three-line hamburger icon; purely presentational.
-function MenuIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false">
-      <rect x="2" y="4" width="16" height="2" rx="1" />
-      <rect x="2" y="9" width="16" height="2" rx="1" />
-      <rect x="2" y="14" width="16" height="2" rx="1" />
-    </svg>
   )
 }
 
@@ -172,7 +138,7 @@ function OwnershipBadge({ caps }: { caps: Capabilities }) {
   const selfHosted = caps.ownership === 'self-hosted'
   return (
     <div className="card" style={{ marginTop: 'var(--space-6)', fontSize: 'var(--step--1)' }}>
-      <div style={{ color: 'var(--cyan)' }}>{selfHosted ? 'Self-hosted' : 'Hosted by mitos'}</div>
+      <div style={{ color: 'var(--cyan)' }}>{selfHosted ? 'Self-hosted' : 'Hosted by Mitos'}</div>
       <div className="t-dim">
         {selfHosted
           ? 'Your data never leaves your infrastructure.'

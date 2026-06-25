@@ -4,6 +4,7 @@ import { useUsage } from '../data/account'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { StatTile } from '../ui/StatTile'
+import { PageHeader } from '../ui/PageHeader'
 
 function fmtLabel(key: string): string {
   return key.replace(/_/g, ' ')
@@ -22,10 +23,7 @@ export function Usage() {
 
   return (
     <section>
-      <h2>Usage</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Consumption metrics for the current billing period. All numbers come directly from the BFF.
-      </p>
+      <PageHeader title="Usage" lede="Consumption metrics for the current billing period. All numbers come directly from the BFF." />
 
       {isLoading ? (
         <Skeleton rows={3} />

@@ -44,3 +44,10 @@ export function useRevokeAllSessions() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['sessions'] }),
   })
 }
+
+export function useSignOut() {
+  return useMutation({
+    mutationFn: () => api.revokeAllSessions(),
+    onSuccess: () => { window.location.assign('/') },
+  })
+}

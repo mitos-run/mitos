@@ -8,6 +8,7 @@ import { fmtBytes } from '../../api'
 import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
 import { useToast } from '../../ui/Toast'
+import { PageHeader } from '../../ui/PageHeader'
 
 function phaseEntity(phase: string): Entity {
   if (phase === 'Running') return 'ready'
@@ -30,7 +31,7 @@ export function SandboxList() {
   if (isError) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <EmptyState title="Sandboxes unavailable" body="The sandbox list could not be loaded." />
       </section>
     )
@@ -39,7 +40,7 @@ export function SandboxList() {
   if (isLoading) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <Skeleton rows={4} />
       </section>
     )
@@ -48,7 +49,7 @@ export function SandboxList() {
   if (rows.length === 0) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <EmptyState title="No live sandboxes" body="Fork your first sandbox to see it here." />
       </section>
     )
@@ -56,7 +57,7 @@ export function SandboxList() {
 
   return (
     <section>
-      <h2>Sandboxes</h2>
+      <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
       <div style={{ overflowX: 'auto' }}>
         <table className="tbl" aria-label="Live sandboxes">
           <thead>
