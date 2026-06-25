@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -62,7 +63,8 @@ func (r *Resolver) Resolve(ctx context.Context, email string) (accountID string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		// Do not include the token in any error message.
+		// Drain so the connection returns to the pool; never include the token.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", nil, fmt.Errorf("resolve: unexpected status %d", resp.StatusCode)
 	}
 
