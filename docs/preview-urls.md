@@ -54,6 +54,16 @@ Slice 2b (the controller route-sync loop, completing the end-to-end path):
   is set on the controller. The admin token is read from `EXPOSE_PROXY_ADMIN_TOKEN`
   (environment variable, never argv, never logged).
 
+Known limitation, label uniqueness is not yet enforced. The route table keys by
+`label`, and `label` is the public subdomain, so it must be globally unique by
+construction. If two sandboxes declare the same `spec.expose.label` (even in
+different org namespaces) they collide in the posted set and the last one written
+wins non-deterministically. This is an availability and squatting concern, not a
+credential leak: each route still carries only its own sandbox's bearer (the token
+map is namespace-scoped, regression-tested). A global label-allocation registry
+with reserved-name enforcement across tenants is a later slice; until then label
+uniqueness is operator-owned.
+
 Together slices 2a and 2b complete the end-to-end path: a `Sandbox` with
 `spec.expose` set and `Status.Phase==Ready` is reachable at
 `<label>.<expose-domain>` through the proxy, with routes kept current by the
