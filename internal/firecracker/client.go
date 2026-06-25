@@ -86,6 +86,14 @@ func StartVM(cfg VMConfig) (*Client, error) {
 		args = append(args, "--id", cfg.ID)
 	}
 
+	// Fail closed if any path ever tried to disable the built-in seccomp filter
+	// (issue #353). Firecracker installs its production filter unless
+	// --no-seccomp is passed, so this keeps the VMM's second wall behind KVM
+	// always on.
+	if err := assertSeccompEnforced(args); err != nil {
+		return nil, err
+	}
+
 	cmd := exec.Command(cfg.FirecrackerBin, args...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Stdout = os.Stdout
@@ -170,7 +178,14 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	socketPath := jailedAPISocketPath(cfg.Jailer.ChrootBaseDir, id)
 	os.Remove(socketPath)
 
-	cmd := exec.Command(cfg.Jailer.JailerBin, jailerArgs(cfg, id, uid, gid)...)
+	jArgs := jailerArgs(cfg, id, uid, gid)
+	// Fail closed if the firecracker portion of the jailer argv (after `--`)
+	// ever disabled seccomp (issue #353): the jailed VMM is exactly the
+	// post-escape process whose syscall surface seccomp bounds.
+	if err := assertSeccompEnforced(jArgs); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(cfg.Jailer.JailerBin, jArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
