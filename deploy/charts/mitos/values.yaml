@@ -214,7 +214,7 @@ imagePullSecrets:
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}
 
-# Console (Deployment): the hosted/self-hosted web console (issue #214) — the BFF
+# Console (Deployment): the hosted/self-hosted web console (issue #214). The BFF
 # plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
 # BOTH editions; behavior is driven entirely by the capabilities below, which the
 # binary advertises at GET /console/capabilities. Self-host runs the defaults
