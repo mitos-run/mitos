@@ -3,33 +3,54 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 
 import { Sandbox } from "../src/sandbox.js";
-import { AgentRunError } from "../src/errors.js";
+import { AgentRunError, ExecutionDeadlineError } from "../src/errors.js";
+import { b64, decodeFrames, streamBody } from "./connect_helpers.js";
 
 interface Recorded {
   method?: string;
   url?: string;
   auth?: string;
-  body: unknown;
+  sandboxId?: string;
+  contentType?: string;
+  raw: Buffer;
+  // The decoded body: a single JSON object for the legacy /v1/* routes, or the
+  // array of Connect request frames for a /sandbox.v1.Sandbox/* call.
+  json?: unknown;
+  frames?: Array<Record<string, unknown>>;
 }
 
 let server: Server;
 let baseUrl: string;
 let recorded: Recorded[];
-let responder: (req: IncomingMessage, body: string, res: ServerResponse) => void;
+let responder: (req: IncomingMessage, rec: Recorded, res: ServerResponse) => void;
 
 beforeEach(async () => {
   recorded = [];
   server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c as Buffer));
     req.on("end", () => {
-      recorded.push({
+      const raw = Buffer.concat(chunks);
+      const url = req.url ?? "";
+      const isConnect = url.startsWith("/sandbox.v1.Sandbox/");
+      const contentType = req.headers["content-type"];
+      const rec: Recorded = {
         method: req.method,
-        url: req.url,
-        auth: req.headers["authorization"],
-        body: body ? JSON.parse(body) : undefined,
-      });
-      responder(req, body, res);
+        url,
+        auth: req.headers["authorization"] as string | undefined,
+        sandboxId: req.headers["x-sandbox-id"] as string | undefined,
+        contentType,
+        raw,
+      };
+      // A streaming Connect call carries enveloped frames; a unary Connect call
+      // and the legacy /v1/* routes carry plain JSON.
+      if (isConnect && contentType === "application/connect+json") {
+        rec.frames = decodeFrames(raw);
+      } else if (raw.length > 0) {
+        rec.json = JSON.parse(raw.toString("utf-8"));
+      }
+      recorded.push(rec);
+      responder(req, rec, res);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -41,14 +62,25 @@ afterEach(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-describe("Sandbox.exec", () => {
-  it("sends {sandbox, command, timeout} with the bearer header and parses ExecResult", async () => {
-    responder = (_req, _body, res) => {
-      res.setHeader("content-type", "application/json");
-      res.end(
-        JSON.stringify({ exit_code: 7, stdout: "hi", stderr: "err", exec_time_ms: 12.5 }),
-      );
-    };
+// connectStream ends a Connect server-stream response (application/connect+json
+// enveloped frames + a terminal end-stream frame).
+function connectStream(
+  res: ServerResponse,
+  messages: Array<Record<string, unknown>>,
+  error?: { code: string; message: string },
+) {
+  res.setHeader("content-type", "application/connect+json");
+  res.end(streamBody(messages, error));
+}
+
+describe("Sandbox.exec (Connect ExecStream)", () => {
+  it("posts to /sandbox.v1.Sandbox/ExecStream with the bearer + sandbox headers and aggregates", async () => {
+    responder = (_req, _rec, res) =>
+      connectStream(res, [
+        { stdout: b64("hi") },
+        { stderr: b64("err") },
+        { exit: { exitCode: 7, execTimeMs: 12.5 } },
+      ]);
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl, token: "tok-1" });
     const result = await sandbox.exec("echo hi", { timeoutSeconds: 9 });
 
@@ -59,81 +91,104 @@ describe("Sandbox.exec", () => {
       execTimeMs: 12.5,
     });
     const call = recorded[0];
-    expect(call.url).toBe("/v1/exec");
+    expect(call.url).toBe("/sandbox.v1.Sandbox/ExecStream");
     expect(call.auth).toBe("Bearer tok-1");
-    expect(call.body).toEqual({ sandbox: "sbx-1", command: "echo hi", timeout: 9 });
+    expect(call.sandboxId).toBe("sbx-1");
+    expect(call.contentType).toBe("application/connect+json");
+    // The single request frame is the ExecStreamRequest (camelCase).
+    expect(call.frames).toEqual([{ command: "echo hi", timeoutSeconds: 9 }]);
   });
 
-  it("omits timeout when not provided", async () => {
-    responder = (_req, _body, res) => res.end(JSON.stringify({ exit_code: 0 }));
+  it("omits timeoutSeconds when not provided", async () => {
+    responder = (_req, _rec, res) =>
+      connectStream(res, [{ exit: { exitCode: 0, execTimeMs: 1 } }]);
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     const result = await sandbox.exec("ls");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", command: "ls" });
+    expect(recorded[0].frames).toEqual([{ command: "ls" }]);
+    // Tokenless: no Authorization header is sent.
+    expect(recorded[0].auth).toBeUndefined();
+  });
+
+  it("maps the terminal exit code 124 to a typed ExecutionDeadlineError", async () => {
+    responder = (_req, _rec, res) =>
+      connectStream(res, [{ exit: { exitCode: 124, execTimeMs: 30000 } }]);
+    const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
+    await expect(sandbox.exec("sleep 999", { timeoutSeconds: 30 })).rejects.toBeInstanceOf(
+      ExecutionDeadlineError,
+    );
   });
 });
 
-describe("Sandbox.files", () => {
-  it("read posts {sandbox, path} and returns content", async () => {
-    responder = (_req, _body, res) =>
-      res.end(JSON.stringify({ content: "file body", size: 9 }));
+describe("Sandbox.files (Connect file RPCs)", () => {
+  it("read concatenates ReadFile chunks and decodes them", async () => {
+    responder = (_req, _rec, res) =>
+      connectStream(res, [{ data: b64("file ") }, { data: b64("body") }]);
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     const out = await sandbox.files.read("/etc/hosts");
     expect(out).toBe("file body");
-    expect(recorded[0].url).toBe("/v1/files/read");
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", path: "/etc/hosts" });
+    expect(recorded[0].url).toBe("/sandbox.v1.Sandbox/ReadFile");
+    expect(recorded[0].frames).toEqual([{ path: "/etc/hosts" }]);
   });
 
-  it("write posts content and an explicit mode", async () => {
-    responder = (_req, _body, res) => res.end(JSON.stringify({ status: "ok" }));
+  it("write streams an open frame and a base64 data frame", async () => {
+    responder = (_req, _rec, res) => connectStream(res, [{ bytesWritten: "4" }]);
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     await sandbox.files.write("/tmp/x", "data", { mode: 0o600 });
-    expect(recorded[0].url).toBe("/v1/files/write");
-    expect(recorded[0].body).toEqual({
-      sandbox: "sbx-1",
-      path: "/tmp/x",
-      content: "data",
-      mode: 0o600,
-    });
+    expect(recorded[0].url).toBe("/sandbox.v1.Sandbox/WriteFile");
+    expect(recorded[0].frames).toEqual([
+      { open: { path: "/tmp/x", mode: 0o600 } },
+      { data: b64("data") },
+    ]);
   });
 
   it("write omits mode when not given", async () => {
-    responder = (_req, _body, res) => res.end(JSON.stringify({ status: "ok" }));
+    responder = (_req, _rec, res) => connectStream(res, [{ bytesWritten: "4" }]);
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     await sandbox.files.write("/tmp/x", "data");
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", path: "/tmp/x", content: "data" });
+    expect(recorded[0].frames).toEqual([
+      { open: { path: "/tmp/x" } },
+      { data: b64("data") },
+    ]);
   });
 
-  it("list posts {sandbox, path} and maps entries to FileInfo", async () => {
-    responder = (_req, _body, res) =>
+  it("list calls the unary List RPC and maps proto-JSON FileInfo entries", async () => {
+    responder = (_req, _rec, res) => {
+      res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify({
           entries: [
-            { name: "a", is_dir: false, size: 3, mode: 420, modified_at: "2026-06-11T00:00:00Z" },
-            { name: "sub", is_dir: true, size: 0 },
+            { name: "a", isDir: false, size: 3, mode: 420, modifiedAtUnix: 1700000000 },
+            { name: "sub", isDir: true, size: 0 },
           ],
+          nextPageToken: "",
         }),
       );
+    };
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     const entries = await sandbox.files.list("/workspace");
-    expect(recorded[0].url).toBe("/v1/files/list");
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", path: "/workspace" });
+    expect(recorded[0].url).toBe("/sandbox.v1.Sandbox/List");
+    expect(recorded[0].contentType).toBe("application/json");
+    expect(recorded[0].json).toEqual({ parent: "/workspace" });
     expect(entries).toEqual([
-      { name: "a", isDir: false, size: 3, mode: 420, modifiedAt: "2026-06-11T00:00:00Z" },
+      { name: "a", isDir: false, size: 3, mode: 420, modifiedAt: "1700000000" },
       { name: "sub", isDir: true, size: 0, mode: 0, modifiedAt: undefined },
     ]);
   });
 
-  it("list defaults the path to /", async () => {
-    responder = (_req, _body, res) => res.end(JSON.stringify({ entries: [] }));
+  it("list defaults the parent to /", async () => {
+    responder = (_req, _rec, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ entries: [] }));
+    };
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     await sandbox.files.list();
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", path: "/" });
+    expect(recorded[0].json).toEqual({ parent: "/" });
   });
 });
 
-describe("Sandbox errors and validation", () => {
+describe("Sandbox Connect errors and validation", () => {
   it("rejects an unsafe sandbox id before any request", () => {
     expect(() => new Sandbox({ id: "../etc", endpoint: baseUrl })).toThrow(AgentRunError);
     expect(() => new Sandbox({ id: "a/b", endpoint: baseUrl })).toThrow(AgentRunError);
@@ -141,11 +196,11 @@ describe("Sandbox errors and validation", () => {
     expect(recorded.length).toBe(0);
   });
 
-  it("surfaces a server error as an AgentRunError without the token", async () => {
+  it("surfaces a non-2xx Connect error envelope as an AgentRunError without the token", async () => {
     const token = "leaky-token-value";
-    responder = (_req, _body, res) => {
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: `failure ${token}` }));
+    responder = (_req, _rec, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ code: "internal", message: `failure ${token}` }));
     };
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl, token });
     let caught: AgentRunError | undefined;
@@ -156,13 +211,32 @@ describe("Sandbox errors and validation", () => {
     }
     expect(caught).toBeInstanceOf(AgentRunError);
     expect(JSON.stringify(caught)).not.toContain(token);
-    expect(caught!.code).toBe("internal_error");
+    expect(caught!.code).toBe("internal");
+  });
+
+  it("raises the typed error carried on a Connect end-stream error frame", async () => {
+    responder = (_req, _rec, res) =>
+      connectStream(
+        res,
+        [{ stdout: b64("partial") }],
+        { code: "not_found", message: "no such sandbox" },
+      );
+    const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
+    let caught: AgentRunError | undefined;
+    try {
+      await sandbox.exec("boom");
+    } catch (e) {
+      caught = e as AgentRunError;
+    }
+    expect(caught).toBeInstanceOf(AgentRunError);
+    expect(caught!.name).toBe("NotFoundError");
+    expect(caught!.code).toBe("not_found");
   });
 });
 
 describe("Sandbox.terminate", () => {
   it("invokes the injected terminator", async () => {
-    responder = (_req, _body, res) => res.end("{}");
+    responder = (_req, _rec, res) => res.end("{}");
     let called = false;
     const sandbox = new Sandbox({
       id: "sbx-1",
@@ -178,7 +252,7 @@ describe("Sandbox.terminate", () => {
 
 describe("Sandbox lifecycle (issue #218)", () => {
   it("setTimeout posts the new TTL and returns the deadline", async () => {
-    responder = (_req, _body, res) => {
+    responder = (_req, _rec, res) => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ status: "ok", deadline_unix: 1700000600, timeout_seconds: 600 }));
     };
@@ -186,18 +260,18 @@ describe("Sandbox lifecycle (issue #218)", () => {
     const deadline = await sandbox.setTimeout(600);
     expect(deadline).toBe(1700000600);
     expect(recorded[0].url).toBe("/v1/set_timeout");
-    expect(recorded[0].body).toEqual({ sandbox: "sbx-1", timeout_seconds: 600 });
+    expect(recorded[0].json).toEqual({ sandbox: "sbx-1", timeout_seconds: 600 });
   });
 
   it("setTimeout rejects an over-ceiling value without a request", async () => {
-    responder = (_req, _body, res) => res.end("{}");
+    responder = (_req, _rec, res) => res.end("{}");
     const sandbox = new Sandbox({ id: "sbx-1", endpoint: baseUrl });
     await expect(sandbox.setTimeout(10 ** 9)).rejects.toThrow();
     expect(recorded.length).toBe(0);
   });
 
   it("pause and resume post to the lifecycle endpoints", async () => {
-    responder = (_req, _body, res) => {
+    responder = (_req, _rec, res) => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ status: "ok" }));
     };

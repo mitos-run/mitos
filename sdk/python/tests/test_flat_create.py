@@ -562,51 +562,87 @@ def test_flat_create_auto_generates_idempotency_key(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _connect_frame(payload: bytes, end: bool = False) -> bytes:
+    """One Connect enveloped frame: 1-byte flag (0x02 on end-stream), 4-byte
+    big-endian length, then the JSON payload."""
+    import struct
+
+    flag = 0b00000010 if end else 0
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
 async def _async_app(scope, receive, send):
+    """ASGI fake speaking the Connect sandbox.v1.Sandbox runtime RPCs
+    (ExecStream, ReadFile, WriteFile, RunCodeStream) plus the REST control-plane
+    routes (templates, fork, sandboxes)."""
     assert scope["type"] == "http"
     path = scope["path"]
+    method_name = path.rsplit("/", 1)[-1]
     body = b""
     while True:
         msg = await receive()
         body += msg.get("body", b"")
         if not msg.get("more_body"):
             break
-    req = json.loads(body or b"{}")
-    method = scope["method"]
 
-    status, payload, ndjson = 200, {}, None
-    if path == "/v1/templates" and method == "POST":
-        payload = {"id": req["id"], "ready": True}
-    elif path == "/v1/fork":
-        payload = {"id": req["id"], "template_id": req["template"],
-                   "endpoint": "http://sb", "fork_time_ms": 0.8}
-    elif path == "/v1/exec":
-        payload = {"exit_code": 0, "stdout": "ok\n", "stderr": "", "exec_time_ms": 1.0}
-    elif path == "/v1/files/write":
-        payload = {"status": "ok"}
-    elif path == "/v1/files/read":
-        payload = {"content": "async-body"}
-    elif path == "/v1/run_code/stream":
-        ndjson = [
-            {"kind": "stdout", "stdout": base64.b64encode(b"r\n").decode()},
-            {"kind": "result", "result": {"text": "2", "data": {"text/plain": "2"}}},
-            {"kind": "exit", "exit_code": 0},
-        ]
-    elif path.startswith("/v1/sandboxes/") and method == "DELETE":
-        payload = {"status": "terminated"}
-    else:
-        status, payload = 404, {"error": {"code": "not_found", "message": "no route"}}
-
-    if ndjson is not None:
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"application/x-ndjson")]})
-        data = b"".join((json.dumps(f) + "\n").encode() for f in ndjson)
+    async def send_json(status: int, payload: dict) -> None:
+        data = json.dumps(payload).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": data})
+
+    async def send_stream(*frames: bytes) -> None:
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/connect+json")]})
+        await send({"type": "http.response.body", "body": b"".join(frames)})
+
+    if path.startswith("/sandbox.v1.Sandbox/"):
+        if method_name == "ExecStream":
+            await send_stream(
+                _connect_frame(json.dumps({"stdout": base64.b64encode(b"ok\n").decode()}).encode()),
+                _connect_frame(json.dumps({"exit": {"exitCode": 0, "execTimeMs": 1.0}}).encode()),
+                _connect_frame(json.dumps({}).encode(), end=True),
+            )
+            return
+        if method_name == "ReadFile":
+            await send_stream(
+                _connect_frame(json.dumps({"data": base64.b64encode(b"async-body").decode(),
+                                           "eof": True}).encode()),
+                _connect_frame(json.dumps({}).encode(), end=True),
+            )
+            return
+        if method_name == "WriteFile":
+            await send_stream(
+                _connect_frame(json.dumps({"bytesWritten": 1}).encode()),
+                _connect_frame(json.dumps({}).encode(), end=True),
+            )
+            return
+        if method_name == "RunCodeStream":
+            await send_stream(
+                _connect_frame(json.dumps({"stdout": base64.b64encode(b"r\n").decode()}).encode()),
+                _connect_frame(json.dumps({"result": {"text": "2", "data": {
+                    "text/plain": base64.b64encode(b"2").decode()}}}).encode()),
+                _connect_frame(json.dumps({"exitCode": 0}).encode()),
+                _connect_frame(json.dumps({}).encode(), end=True),
+            )
+            return
+        await send_json(501, {"code": "unimplemented", "message": method_name})
         return
-    data = json.dumps(payload).encode()
-    await send({"type": "http.response.start", "status": status,
-                "headers": [(b"content-type", b"application/json")]})
-    await send({"type": "http.response.body", "body": data})
+
+    # REST control-plane routes.
+    method = scope["method"]
+    req = json.loads(body or b"{}")
+    if path == "/v1/templates" and method == "POST":
+        await send_json(200, {"id": req["id"], "ready": True})
+        return
+    if path == "/v1/fork":
+        await send_json(200, {"id": req["id"], "template_id": req["template"],
+                              "endpoint": "http://sb", "fork_time_ms": 0.8})
+        return
+    if path.startswith("/v1/sandboxes/") and method == "DELETE":
+        await send_json(200, {"status": "terminated"})
+        return
+    await send_json(404, {"error": {"code": "not_found", "message": "no route"}})
 
 
 def _async_direct():

@@ -3,11 +3,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 
 import { SandboxServer } from "../src/server.js";
+import { b64, decodeFrames, streamBody } from "./connect_helpers.js";
 
 interface Recorded {
   method?: string;
   url?: string;
   body: unknown;
+  frames?: Array<Record<string, unknown>>;
   headers?: Record<string, string | string[] | undefined>;
 }
 
@@ -20,11 +22,24 @@ beforeEach(async () => {
   recorded = [];
   sandboxIds = new Set();
   server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c as Buffer));
     req.on("end", () => {
-      const parsed = body ? JSON.parse(body) : undefined;
-      recorded.push({ method: req.method, url: req.url, body: parsed, headers: req.headers });
+      const raw = Buffer.concat(chunks);
+      const url = req.url ?? "";
+      // A streaming Connect call carries enveloped frames; everything else
+      // (legacy /v1/* routes, unary Connect calls) carries plain JSON.
+      let parsed: unknown;
+      let frames: Array<Record<string, unknown>> | undefined;
+      if (
+        url.startsWith("/sandbox.v1.Sandbox/") &&
+        req.headers["content-type"] === "application/connect+json"
+      ) {
+        frames = decodeFrames(raw);
+      } else if (raw.length > 0) {
+        parsed = JSON.parse(raw.toString("utf-8"));
+      }
+      recorded.push({ method: req.method, url, body: parsed, frames, headers: req.headers });
       route(req, parsed, res);
     });
   });
@@ -79,11 +94,15 @@ function route(req: IncomingMessage, body: any, res: ServerResponse) {
       })),
     );
   }
-  if (req.method === "POST" && url === "/v1/exec") {
-    if (!sandboxIds.has(body.sandbox)) {
-      return json(res, { error: "sandbox not found" }, 404);
+  if (req.method === "POST" && url === "/sandbox.v1.Sandbox/ExecStream") {
+    const id = req.headers["x-sandbox-id"];
+    if (typeof id !== "string" || !sandboxIds.has(id)) {
+      return json(res, { code: "not_found", message: "sandbox not found" }, 404);
     }
-    return json(res, { exit_code: 0, stdout: "2\n", stderr: "", exec_time_ms: 5 });
+    res.writeHead(200, { "content-type": "application/connect+json" });
+    return res.end(
+      streamBody([{ stdout: b64("2\n") }, { exit: { exitCode: 0, execTimeMs: 5 } }]),
+    );
   }
   if (req.method === "DELETE" && url.startsWith("/v1/sandboxes/")) {
     const id = decodeURIComponent(url.slice("/v1/sandboxes/".length));
@@ -134,8 +153,9 @@ describe("SandboxServer", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("2\n");
 
-    const execCall = recorded.find((r) => r.url === "/v1/exec");
-    expect(execCall?.body).toEqual({ sandbox: "sbx-direct", command: "print(1 + 1)" });
+    const execCall = recorded.find((r) => r.url === "/sandbox.v1.Sandbox/ExecStream");
+    expect(execCall?.headers?.["x-sandbox-id"]).toBe("sbx-direct");
+    expect(execCall?.frames).toEqual([{ command: "print(1 + 1)" }]);
   });
 
   it("forks with a generated id when none is given", async () => {

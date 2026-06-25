@@ -32,7 +32,14 @@ export type { AgentRunErrorOptions } from "./errors.js";
 
 export { HttpClient, validSandboxId } from "./http.js";
 
-export { Sandbox, SandboxFiles, toBaseUrl, parseRunCodeStream } from "./sandbox.js";
+export {
+  Sandbox,
+  SandboxFiles,
+  toBaseUrl,
+  parseRunCodeStream,
+  parseRunCodeConnect,
+} from "./sandbox.js";
+export { ConnectClient } from "./connect.js";
 export type {
   SandboxOptions,
   Terminator,
