@@ -138,6 +138,12 @@ func (s *AccountService) memberRole(ctx context.Context, accountID, orgID string
 	return "", fmt.Errorf("member role: account is not a member of org %s: %w", orgID, ErrKeyWrongOrg)
 }
 
+// MemberRole returns the account's role in the org. It is the read accessor the
+// console authz layer uses to resolve a caller's permissions.
+func (s *AccountService) MemberRole(ctx context.Context, accountID, orgID string) (Role, error) {
+	return s.memberRole(ctx, accountID, orgID)
+}
+
 // SetMemberRole changes targetAccountID's role within orgID. The actor must
 // hold a role that can manage members (Owner or Admin); otherwise ErrForbidden
 // is returned. The target must already be a member; otherwise ErrNotFound is

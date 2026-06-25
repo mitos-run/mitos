@@ -234,6 +234,28 @@ func TestUpdateProfile(t *testing.T) {
 	}
 }
 
+// TestMemberRoleReturnsSeededRole asserts that MemberRole returns the correct
+// role for a known member and a non-nil error for a non-member.
+func TestMemberRoleReturnsSeededRole(t *testing.T) {
+	svc, orgID, ownerID, _ := seedOrgWithOwnerAndMember(t)
+	ctx := context.Background()
+
+	// A known owner membership must return RoleOwner.
+	role, err := svc.MemberRole(ctx, ownerID, orgID)
+	if err != nil {
+		t.Fatalf("MemberRole for owner: %v", err)
+	}
+	if role != RoleOwner {
+		t.Errorf("MemberRole for owner = %q, want %q", role, RoleOwner)
+	}
+
+	// A non-member must return a non-nil error.
+	outsider, _, _ := svc.SignUp(ctx, "outsider.memberrole@example.com")
+	if _, err := svc.MemberRole(ctx, outsider.ID, orgID); err == nil {
+		t.Error("MemberRole for non-member: expected non-nil error, got nil")
+	}
+}
+
 // TestListMembersReturnsOrgMembers asserts a member can list its org's members
 // and that another org's members are never included.
 func TestListMembersReturnsOrgMembers(t *testing.T) {
