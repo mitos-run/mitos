@@ -60,8 +60,13 @@ The three things every distro must arrange on a KVM node are identical:
 2. **A writable data dir** at `--data-dir` (default `/var/lib/mitos`), on a real
    block-backed filesystem (a mounted disk or a directory on the real root fs).
 3. **The privileged PSA namespace** for the install/pool namespace
-   (`pod-security.kubernetes.io/enforce=privileged`), since forkd, the husk pods,
-   and the device plugin are privileged with hostPath mounts.
+   (`pod-security.kubernetes.io/enforce=privileged`). forkd is NON-privileged
+   since #352 (an explicit builder capability set with the jailer enabled,
+   `/dev/kvm` from the device plugin; ADR 0008) but still runs as uid 0, holds
+   `CAP_SYS_ADMIN`, and mounts a node-data-dir hostPath; the husk pods and the
+   device plugin carry hostPath mounts too. None of those satisfy PSA
+   `restricted` or `baseline`, so the install/pool namespace must enforce
+   `privileged`.
 
 Run `mitos doctor` after prep to confirm all three plus PKI and the pull secret.
 
@@ -82,15 +87,20 @@ distro-specific; the operator side is identical.
   script / DaemonSet to load modules + label.
 
 The KVM device plugin advertises `mitos.run/kvm` only where `/dev/kvm` exists, so
-forkd and husk pods schedule only on prepared nodes regardless of distro.
+forkd and husk pods schedule only on prepared nodes regardless of distro. Since
+#352 (ADR 0008) forkd ALSO requests the `mitos.run/kvm` device-plugin resource
+(it no longer uses a privileged `/dev/kvm` hostPath), so forkd stays Pending until
+the device plugin advertises `mitos.run/kvm` on the node.
 
 ## Install namespace (PodSecurity)
 
-forkd, the husk pods, and the device plugin are privileged with hostPath mounts,
-so the install namespace MUST carry `pod-security.kubernetes.io/enforce:
-privileged`. Helm cannot create-and-label its own release namespace, so create it
-first (see the chart README Install section). This is distro-neutral: any cluster
-with PodSecurity admission (the default in modern Kubernetes) needs it.
+forkd is non-privileged since #352 (uid 0 + `CAP_SYS_ADMIN` + a node-data-dir
+hostPath; ADR 0008), and the husk pods and the device plugin carry hostPath
+mounts, none of which satisfy PSA `restricted` or `baseline`, so the install
+namespace MUST carry `pod-security.kubernetes.io/enforce: privileged`. Helm cannot
+create-and-label its own release namespace, so create it first (see the chart
+README Install section). This is distro-neutral: any cluster with PodSecurity
+admission (the default in modern Kubernetes) needs it.
 
 ## Secrets backup (Talos and any self-managed control plane)
 

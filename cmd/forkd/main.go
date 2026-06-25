@@ -175,6 +175,19 @@ func main() {
 		}
 		if !jailerCfg.Enabled() {
 			fmt.Fprintln(os.Stderr, "forkd: jailer DISABLED; Firecracker runs unjailed as forkd's user (threat model section 1); supply --jailer for any non-development deployment")
+		} else {
+			// The jailer pivot_roots into a per-VM dir under --chroot-base. Inside a
+			// pod that requires the chroot base to be a PRIVATE MOUNT POINT (a pod's
+			// rootfs is commonly shared, and pivot_root refuses a new root whose
+			// parent mount is shared). Make the base a private self-bind mount once,
+			// here, in forkd's own mount namespace, BEFORE the engine launches any
+			// jailed VM. This is what lets the DaemonSet drop privileged: true for
+			// the explicit jailer capability set (CAP_SYS_ADMIN does the mount(2)).
+			// A no-op on non-linux (mount_other.go).
+			if err := prepareChrootMount(jailerCfg.ChrootBaseDir); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: prepare jailer chroot base mount: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		engineOpts := fork.EngineOpts{
 			CASDir:             casDir,

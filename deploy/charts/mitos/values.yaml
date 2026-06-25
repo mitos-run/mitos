@@ -81,14 +81,19 @@ forkd:
     repository: mitos-forkd
     tag: v0.13.0
     pullPolicy: IfNotPresent
-  # forkd container resource requests and limits.
+  # forkd container resource requests and limits. mitos.run/kvm is the device
+  # plugin resource that injects /dev/kvm and /dev/net/tun; it REPLACES
+  # privileged: true for device access and must stay in both requests and limits
+  # (an extended resource requires request == limit). Do not remove it.
   resources:
     requests:
       memory: "1Gi"
       cpu: "500m"
+      mitos.run/kvm: "1"
     limits:
       memory: "16Gi"
       cpu: "8"
+      mitos.run/kvm: "1"
   # Value for forkd --data-dir and the data hostPath mountPath.
   dataDir: /var/lib/mitos
   # When true, render --enable-networking so forkd bakes the eth0 placeholder
