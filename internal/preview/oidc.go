@@ -120,8 +120,11 @@ func (a *AuthOrigin) ServeStart(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 
-	// Open-redirect defense: rd must resolve to a real route.
-	if _, ok := a.Routes.Lookup(rd); !ok {
+	// Open-redirect defense: rd must resolve to a real route. Use the canonical
+	// label from the route (not the raw rd input) for grant binding, which is
+	// safe against a future label-normalization change.
+	route, ok := a.Routes.Lookup(rd)
+	if !ok {
 		http.Error(w, "unknown destination", http.StatusBadRequest)
 		return
 	}
@@ -130,7 +133,7 @@ func (a *AuthOrigin) ServeStart(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(ssoCookieName); err == nil && c.Value != "" {
 		id, decErr := a.SSO.Decode(c.Value, time.Now())
 		if decErr == nil {
-			a.mintGrantAndRedirect(w, r, id, rd, path)
+			a.mintGrantAndRedirect(w, r, id, route.Label, path)
 			return
 		}
 	}
@@ -215,8 +218,11 @@ func (a *AuthOrigin) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 
-	// Open-redirect re-validation: rd must still resolve to a real route.
-	if _, ok := a.Routes.Lookup(rd); !ok {
+	// Open-redirect re-validation: rd must still resolve to a real route. Use the
+	// canonical label from the route for grant binding (safe against a future
+	// label-normalization change).
+	route, ok := a.Routes.Lookup(rd)
+	if !ok {
 		http.Error(w, "unknown destination", http.StatusBadRequest)
 		return
 	}
@@ -266,27 +272,33 @@ func (a *AuthOrigin) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		// Domain intentionally unset: __Host- prefix requires host-only binding.
 	})
 
-	// Clear the CSRF state cookie.
+	// Clear the CSRF state cookie. A __Host- cookie deletion must carry Secure
+	// (and the matching attributes) to be honored by conformant browsers, else
+	// the used state cookie lingers until its TTL.
 	http.SetCookie(w, &http.Cookie{
-		Name:   ssoStateCookieName,
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     ssoStateCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
 
-	a.mintGrantAndRedirect(w, r, id, rd, path)
+	a.mintGrantAndRedirect(w, r, id, route.Label, path)
 }
 
-// mintGrantAndRedirect mints a short-lived single-use grant bound to rd and
-// 302s the browser to https://<rd>.<domain>/__mitos_auth/cb?grant=...&path=...
+// mintGrantAndRedirect mints a short-lived single-use grant bound to the
+// canonical route label and 302s the browser to
+// https://<label>.<domain>/__mitos_auth/cb?grant=...&path=...
 // Grant value is a bearer credential and must not be logged.
-func (a *AuthOrigin) mintGrantAndRedirect(w http.ResponseWriter, r *http.Request, id Identity, rd, path string) {
-	grant, err := a.Grants.Mint(rd, id, time.Now().Add(grantTTL))
+func (a *AuthOrigin) mintGrantAndRedirect(w http.ResponseWriter, r *http.Request, id Identity, label, path string) {
+	grant, err := a.Grants.Mint(label, id, time.Now().Add(grantTTL))
 	if err != nil {
 		http.Error(w, "grant issuance failed", http.StatusInternalServerError)
 		return
 	}
-	dest := fmt.Sprintf("https://%s.%s/__mitos_auth/cb", rd, a.ExposeDomain)
+	dest := fmt.Sprintf("https://%s.%s/__mitos_auth/cb", label, a.ExposeDomain)
 	q := url.Values{
 		"grant": {grant},
 		"path":  {path},

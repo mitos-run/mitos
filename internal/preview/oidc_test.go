@@ -429,3 +429,39 @@ func TestServeCallback_VerifyError_Fails(t *testing.T) {
 		t.Fatal("should not redirect on verify error; fail closed")
 	}
 }
+
+// TestServeCallback_ExchangeError_Fails verifies that a code-exchange error causes a
+// 502 with NO Location header and NO SSO cookie set (fail closed on the exchange path).
+func TestServeCallback_ExchangeError_Fails(t *testing.T) {
+	ex := fakeOIDCExchanger{authURL: "https://idp.example/auth", err: errors.New("exchange failed")}
+	v := fakeOIDCVerifier{claims: saas.OIDCClaims{Subject: "sub1", Email: "u@example.com", EmailVerified: true}}
+	ao := newTestAuthOrigin(t, v, ex, nil, nil)
+
+	statePl := stateCookiePayload{RD: "openclaw", Path: "/"}
+	stateRaw, _ := json.Marshal(statePl)
+	stateVal, err := ao.StateCodec.Encode(
+		Identity{Sub: string(stateRaw)},
+		time.Now().Add(10*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("encode state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=authcode&state="+url.QueryEscape(stateVal), nil)
+	req.AddCookie(&http.Cookie{Name: ssoStateCookieName, Value: stateVal})
+	w := httptest.NewRecorder()
+	ao.ServeCallback(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (fail closed on exchange error)", resp.StatusCode)
+	}
+	if resp.Header.Get("Location") != "" {
+		t.Error("no Location header should be set on exchange error")
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == ssoCookieName && c.Value != "" {
+			t.Error("SSO cookie must not be set on exchange error")
+		}
+	}
+}
