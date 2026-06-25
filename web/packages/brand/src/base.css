@@ -99,6 +99,8 @@ code, kbd, pre, .mono { font-family: var(--mono); }
 .tbl { width: 100%; border-collapse: collapse; font-size: var(--step--1); }
 .tbl th, .tbl td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--hairline); }
 .tbl th { color: var(--ink-3); font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em; }
+.tbl a { color: var(--cyan); text-decoration: none; }
+.tbl a:hover { text-decoration: underline; }
 
 /* Status dots: color encodes a real entity (alive=green, fork=magenta). */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
@@ -279,5 +281,126 @@ code, kbd, pre, .mono { font-family: var(--mono); }
   .skeleton-row {
     transition: none;
     animation: none;
+  }
+}
+
+/* Instrument cockpit: responsive tile grid. */
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+/* Fork-tree visualization: Division motif node styles. Colors are signal
+   tokens only; no raw hex. The SVG is aria-hidden; the table is the a11y
+   source of truth. */
+.fork-node-root {
+  fill: var(--cyan);
+  stroke: none;
+  /* Additive glow: white-cored via screen blend at the SVG layer. */
+  filter: drop-shadow(0 0 6px var(--cyan));
+}
+
+.fork-node-fork {
+  fill: var(--magenta);
+  stroke: none;
+  filter: drop-shadow(0 0 6px var(--magenta));
+}
+
+/* Hairline CoW edge: inherits from --hairline-strong for readability. */
+.fork-edge {
+  stroke: var(--hairline-strong);
+  stroke-width: 1;
+  fill: none;
+}
+
+/* Mobile: on narrow viewports hide the SVG and let the table be primary.
+   The table already scrolls horizontally via its wrapper. */
+@media (max-width: 768px) {
+  .fork-tree-svg-wrapper {
+    display: none;
+  }
+}
+
+/* Tab bar: flex row of button tabs, hairline bottom border. */
+.tabs {
+  display: flex;
+  flex-direction: row;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: var(--space-4);
+}
+
+.tab {
+  font: inherit;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--space-2) var(--space-3);
+  min-height: 44px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab-active {
+  color: var(--ink);
+  border-bottom: 2px solid var(--magenta);
+}
+
+/* Key-value definition grid: label dim, value mono. */
+.kv {
+  display: grid;
+  gap: var(--space-2) 0;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 30%) 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.kv-row dt {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kv-row dd {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  margin: 0;
+  color: var(--ink);
+}
+
+/* Logs block: monospace, scrollable, raised-field background. */
+.logs {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--space-4);
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre-wrap;
+  color: var(--ink-2);
+}
+
+/* Mobile: tab bar scrolls horizontally; table wrapper degrades. */
+@media (max-width: 768px) {
+  .tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .tbl {
+    min-width: 600px;
   }
 }

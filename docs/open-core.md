@@ -8,8 +8,8 @@ what exists today.
 
 Everything in this repository is open source under the Apache License 2.0 (see
 the `LICENSE` file at the repository root). This includes the controller,
-forkd, the guest agent, sandbox-server, the Python and TypeScript SDKs, the
-CRDs, and all documentation. You can run, modify, and redistribute it under the
+forkd, the guest agent, sandbox-server, the SDKs (Python, TypeScript, Go, Ruby,
+Rust, Java), the CRDs, and all documentation. You can run, modify, and redistribute it under the
 terms of Apache 2.0.
 
 ## Open-core boundary

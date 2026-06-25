@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ROUTES, visibleRoutes, GROUP_ORDER } from './routes'
+import { ROUTES, visibleRoutes, navRoutes, GROUP_ORDER } from './routes'
 import type { Capabilities } from '../api'
 
 const base: Capabilities = {
@@ -13,6 +13,21 @@ const base: Capabilities = {
   proof: true,
   ownership: 'self-hosted',
 }
+
+describe('hidden routes', () => {
+  it('navRoutes excludes hidden routes but visibleRoutes includes them', () => {
+    const nav = navRoutes(base)
+    const all = visibleRoutes(base)
+    // once /sandboxes/$id exists as hidden it must be in the router set, not the nav
+    const detail = all.find((r) => r.path === '/sandboxes/$id')
+    if (detail) {
+      expect(detail.hidden).toBe(true)
+      expect(nav.find((r) => r.path === '/sandboxes/$id')).toBeUndefined()
+    }
+    // every nav route is non-hidden
+    for (const r of nav) expect(r.hidden).not.toBe(true)
+  })
+})
 
 describe('routes config', () => {
   it('every route has a unique path and a known group', () => {

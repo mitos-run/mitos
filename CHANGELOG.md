@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.0](https://github.com/mitos-run/mitos/compare/v1.0.0...v1.1.0) (2026-06-25)
+
+All six SDKs (Python, TypeScript, Go, Ruby, Rust, Java) now have Kubernetes cluster mode (an AgentRun that drives the mitos.run/v1 CRDs through the Kubernetes API), with byte-for-byte identical default-pool naming. The Go, Ruby, Rust, and Java SDKs add a thin Kubernetes REST client built on each language standard library (no heavy client dependency), so direct mode stays unchanged and the dependency-free SDKs stay dependency-free.
+
+
+
+### Features
+
+* **console:** Phase B1 hero views (instrument cockpit + live fork tree) ([#348](https://github.com/mitos-run/mitos/issues/348)) ([602a81b](https://github.com/mitos-run/mitos/commit/602a81ba1a9324cde1dca5920cd01eb9cfa13a02))
+* **sdk-go:** Kubernetes cluster mode (AgentRun) ([#303](https://github.com/mitos-run/mitos/issues/303)) ([39ef093](https://github.com/mitos-run/mitos/commit/39ef09324da03af768eed44995061a64df23ff82))
+* **sdk-go:** Kubernetes cluster mode (AgentRun) ([#303](https://github.com/mitos-run/mitos/issues/303)) ([fdae520](https://github.com/mitos-run/mitos/commit/fdae520673dcfcc29847f48ef97f90ae89397cc7))
+* **sdk-java:** Kubernetes cluster mode (AgentRun) ([#306](https://github.com/mitos-run/mitos/issues/306)) ([5b36419](https://github.com/mitos-run/mitos/commit/5b364199e8022da176175cc27bd326a4bb20b009))
+* **sdk-java:** Kubernetes cluster mode (AgentRun) ([#306](https://github.com/mitos-run/mitos/issues/306)) ([52fd768](https://github.com/mitos-run/mitos/commit/52fd7680954ba6fcd92284f98a88749549727592))
+* **sdk-ruby:** Kubernetes cluster mode (AgentRun) ([#304](https://github.com/mitos-run/mitos/issues/304)) ([4a121ab](https://github.com/mitos-run/mitos/commit/4a121ab7600ef55dac5df7fb7b19e80e8a91cb3b))
+* **sdk-ruby:** Kubernetes cluster mode (AgentRun) ([#304](https://github.com/mitos-run/mitos/issues/304)) ([114ee1d](https://github.com/mitos-run/mitos/commit/114ee1d00e6dc96d47209dd9d1a6fe80806e7e42))
+* **sdk-rust:** Kubernetes cluster mode (AgentRun) ([#305](https://github.com/mitos-run/mitos/issues/305)) ([12cfe82](https://github.com/mitos-run/mitos/commit/12cfe829c843e7dae90225defb5a3ea6dd3cf8bc))
+* **sdk-rust:** Kubernetes cluster mode (AgentRun) ([#305](https://github.com/mitos-run/mitos/issues/305)) ([4682f7d](https://github.com/mitos-run/mitos/commit/4682f7d7880b1793be2b0085626bc3c0ad3c64da))
+
 ## [1.0.0](https://github.com/mitos-run/mitos/compare/v0.14.0...v1.0.0) (2026-06-24)
 
 The Rust guest agent is now the sole guest agent. SP1.5 migrated every host caller to the gRPC contract (AgentGRPCPort 53); the legacy JSON vsock protocol and the Go agent are removed. Measured on bare metal (both agents, same gRPC contract, only /init differs): about 17 to 19 percent faster fork-to-first-response, about 4.7x smaller static binary, with round-trip latency and per-VM RSS within noise and no regression.

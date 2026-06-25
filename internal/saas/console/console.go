@@ -49,6 +49,7 @@ type Deps struct {
 	Logs        LogStreamer
 	Secrets     SecretStore
 	Instruments InstrumentsSource
+	ForkTree    ForkTreeSource
 	Portal      PortalLinker
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
@@ -84,6 +85,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Instruments == nil {
 		deps.Instruments = NewMemInstruments()
+	}
+	if deps.ForkTree == nil {
+		deps.ForkTree = NewMemForkTree()
 	}
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
@@ -138,6 +142,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
 	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
 	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
+	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
 	c.mux = mux
 }
 
@@ -515,6 +520,25 @@ func (c *Console) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		tmpls = []TemplateView{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "templates": tmpls})
+}
+
+// --- Fork tree (over the ForkTreeSource seam, ties to #33 CoW metering) ---
+
+func (c *Console) handleForkTree(w http.ResponseWriter, r *http.Request) {
+	_, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	tree, err := c.deps.ForkTree.Tree(r.Context(), orgID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the fork tree could not be read"))
+		return
+	}
+	if tree.Nodes == nil {
+		tree.Nodes = []ForkNode{}
+	}
+	writeJSON(w, http.StatusOK, tree)
 }
 
 // --- helpers ---

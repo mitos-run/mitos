@@ -38,7 +38,19 @@ export type SandboxView = {
   node: string
   phase: string
   vcpus: number
+  mem_bytes: number
+  created_at: string
 }
+
+export type ForkNode = {
+  id: string
+  parent_id: string
+  phase: string
+  private_dirty_bytes: number
+  shared_bytes: number
+}
+
+export type ForkTree = { org_id: string; nodes: ForkNode[] }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
@@ -68,6 +80,17 @@ export const api = {
     if (!r.ok && r.status !== 204) throw new Error(`delete secret: ${r.status}`)
   },
   sandboxes: () => get<{ sandboxes: SandboxView[] }>('/console/sandboxes').then((r) => r.sandboxes ?? []),
+  sandbox: (id: string) => get<SandboxView>(`/console/sandboxes/${encodeURIComponent(id)}`),
+  terminateSandbox: async (id: string) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' })
+    if (!r.ok && r.status !== 204) throw new Error(`terminate: ${r.status}`)
+  },
+  sandboxLogs: async (id: string) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/logs`, { credentials: 'same-origin' })
+    if (!r.ok) throw new Error(`logs: ${r.status}`)
+    return r.text()
+  },
+  forktree: () => get<ForkTree>('/console/forktree'),
 }
 
 export function fmtBytes(n: number): string {

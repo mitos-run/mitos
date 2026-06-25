@@ -122,16 +122,16 @@ sb.terminate()
 
 ### Languages and modes
 
-Every SDK speaks the same sandbox-server REST API in **direct mode** (standalone or hosted). **Cluster mode** (drive the CRDs) is in Python and TypeScript today; the others are tracked.
+Every SDK speaks the same sandbox-server REST API in **direct mode** (standalone or hosted), and every SDK now also has **cluster mode** (an `AgentRun` that drives the `mitos.run/v1` CRDs through the Kubernetes API). The default-pool naming is byte-for-byte identical across all six.
 
 | Language | Install | Direct mode | Cluster mode | SDK docs |
 |---|---|---|---|---|
 | Python | `pip install mitos-run` | yes (sync + async) | yes (`AgentRun`) | [sdk/python](sdk/python) |
 | TypeScript | `npm i @mitos/sdk` | yes | yes (`AgentRun`) | [sdk/typescript](sdk/typescript/README.md) |
-| Go | `go get github.com/mitos-run/mitos/sdk/go` | yes (typed, `errors.Is`-friendly) | planned | [sdk/go](sdk/go/README.md) |
-| Ruby | gem (stdlib only) | yes | planned | [sdk/ruby](sdk/ruby/README.md) |
-| Rust | crate (blocking) | yes | planned | [sdk/rust](sdk/rust/README.md) |
-| Java | JDK 17 (stdlib only) | yes | planned | [sdk/java](sdk/java/README.md) |
+| Go | `go get github.com/mitos-run/mitos/sdk/go` | yes (typed, `errors.Is`-friendly) | yes (`AgentRun`) | [sdk/go](sdk/go/README.md) |
+| Ruby | gem (stdlib only) | yes | yes (`AgentRun`) | [sdk/ruby](sdk/ruby/README.md) |
+| Rust | crate (blocking) | yes | yes (`AgentRun`) | [sdk/rust](sdk/rust/README.md) |
+| Java | JDK 17 (stdlib only) | yes | yes (`AgentRun`) | [sdk/java](sdk/java/README.md) |
 
 The Go SDK ships in its own nested module (`github.com/mitos-run/mitos/sdk/go`), so importing it never pulls the controller into your build.
 
