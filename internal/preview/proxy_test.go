@@ -231,3 +231,47 @@ func TestProxyRejectsTokenForWrongSandbox(t *testing.T) {
 		t.Fatalf("token for another sandbox must 403, got %d", rec.Code)
 	}
 }
+
+func TestProxyCleansDotSegments(t *testing.T) {
+	// A traversal attempt in the sub-path must be resolved within the expose
+	// prefix and can never escape above it.
+	var gotPath string
+	forkd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer forkd.Close()
+
+	signer, _ := NewSigner([]byte("0123456789abcdef"))
+	routes := NewRouteTable()
+	routes.Upsert(Route{Label: "openclaw", SandboxID: "sbx1", NodeEndpoint: strings.TrimPrefix(forkd.URL, "http://"), Port: 8000, Token: "per-sandbox-bearer", Sharing: "link"})
+	p := NewProxy(Config{Domain: "mitos.run", Signer: signer, Routes: routes})
+
+	tok, _ := signer.Mint("sbx1", 8000, time.Now().Add(time.Minute))
+	req := httptest.NewRequest(http.MethodGet, "https://openclaw.mitos.run/app/../../../etc/passwd?token="+tok, nil)
+	req.Host = "openclaw.mitos.run"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/sandboxes/sbx1/expose/8000/etc/passwd" {
+		t.Fatalf("forkd path=%q, want /v1/sandboxes/sbx1/expose/8000/etc/passwd (traversal must stay within the expose prefix)", gotPath)
+	}
+}
+
+func TestProxyRejectsTokenForWrongPort(t *testing.T) {
+	signer, _ := NewSigner([]byte("0123456789abcdef"))
+	routes := NewRouteTable()
+	routes.Upsert(Route{Label: "openclaw", SandboxID: "sbx1", NodeEndpoint: "127.0.0.1:1", Port: 8000, Token: "t", Sharing: "link"})
+	p := NewProxy(Config{Domain: "mitos.run", Signer: signer, Routes: routes})
+	tok, _ := signer.Mint("sbx1", 9999, time.Now().Add(time.Minute)) // correct sandbox id, wrong port
+	req := httptest.NewRequest(http.MethodGet, "https://openclaw.mitos.run/?token="+tok, nil)
+	req.Host = "openclaw.mitos.run"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("token for the wrong port must 403, got %d", rec.Code)
+	}
+}

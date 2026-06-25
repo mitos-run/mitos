@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -87,9 +88,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	baseDirector := rp.Director
 	rp.Director = func(req *http.Request) {
 		baseDirector(req)
-		// Forkd routes by the path; prepend the slice-1 expose prefix.
-		req.URL.Path = prefix + req.URL.Path
+		// Forkd routes by the path; prepend the slice-1 expose prefix. Clean the
+		// sub-path first so dot-segments cannot escape above the expose prefix, and
+		// zero RawPath so the client re-encodes from the sanitized Path.
+		sub := path.Clean("/" + req.URL.Path)
+		req.URL.Path = prefix + sub
+		req.URL.RawPath = ""
 		req.Host = nodeEndpoint
+		// Defense in depth: drop any client-supplied Authorization before
+		// conditionally setting the per-sandbox bearer, so an empty-Token route
+		// never forwards a client credential to forkd.
+		req.Header.Del("Authorization")
 		if bearer != "" {
 			req.Header.Set("Authorization", "Bearer "+bearer)
 		}
