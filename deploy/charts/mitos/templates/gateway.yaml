@@ -23,6 +23,7 @@ spec:
       labels:
         {{- include "mitos.selectorLabels" (dict "root" . "component" "gateway") | nindent 8 }}
     spec:
+      serviceAccountName: mitos-gateway
       {{- include "mitos.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
