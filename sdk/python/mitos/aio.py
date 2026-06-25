@@ -212,10 +212,13 @@ class AsyncSandbox:
             return {"Authorization": f"Bearer {self._token}"}
         return {}
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
-        base = self._base_url  # http(s)://<endpoint>/v1
-        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        return f"{ws_base}/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+    def pty_url(self) -> str:
+        # The Connect ``sandbox.v1.Sandbox.Exec`` bidi route over a WebSocket,
+        # mounted at the endpoint root (no /v1 suffix). The window size rides the
+        # open ExecRequest frame, not the query.
+        root = self._connect_base  # http(s)://<endpoint>
+        ws_base = root.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
         """Open an interactive PTY over a WebSocket and return an
@@ -224,9 +227,11 @@ class AsyncSandbox:
         from mitos.pty import AsyncPtyHandle
 
         return await AsyncPtyHandle.connect(
-            url=self.pty_url(cols, rows),
+            url=self.pty_url(),
             token=self._token,
             on_data=on_data,
+            cols=cols,
+            rows=rows,
         )
 
     async def set_timeout(self, timeout_seconds: int) -> int:
@@ -644,9 +649,12 @@ class AsyncDirectSandbox:
             on_result,
         )
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
+    def pty_url(self) -> str:
+        # The Connect ``sandbox.v1.Sandbox.Exec`` bidi route over a WebSocket,
+        # mounted at the server root. The window size rides the open ExecRequest
+        # frame, not the query.
         ws_base = self._server_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        return f"{ws_base}/v1/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
         """Open an interactive PTY over a WebSocket and return an
@@ -655,7 +663,11 @@ class AsyncDirectSandbox:
         from mitos.pty import AsyncPtyHandle
 
         return await AsyncPtyHandle.connect(
-            url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data
+            url=self.pty_url(),
+            token=self._api_key,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
         )
 
     async def fork(self, n: int = 1, id: Optional[str] = None) -> list["AsyncDirectSandbox"]:

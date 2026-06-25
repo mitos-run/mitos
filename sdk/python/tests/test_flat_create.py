@@ -444,6 +444,11 @@ def test_pty_url_carries_no_key(fake_server):
     pu = sb.pty_url()
     assert pu.startswith("ws://")
     assert "sk-secret" not in pu
+    # PTY now rides the Connect Exec route over a WebSocket; the window size
+    # rides the open frame, not the query, and /v1/pty is gone.
+    assert "/sandbox.v1.Sandbox/Exec" in pu
+    assert "/v1/pty" not in pu
+    assert "cols=" not in pu and "rows=" not in pu
     sb.terminate()
 
 

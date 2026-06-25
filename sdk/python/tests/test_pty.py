@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import struct
 import threading
 import time
 
@@ -10,10 +11,23 @@ from mitos.pty import PtyHandle
 
 websockets = pytest.importorskip("websockets")
 
+_FLAG_END_STREAM = 0b00000010
+
+
+def _encode_frame(payload: bytes, end_stream: bool = False) -> bytes:
+    flag = _FLAG_END_STREAM if end_stream else 0
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
+def _decode_frame(message: bytes):
+    length = struct.unpack(">I", message[1:5])[0]
+    return message[0], message[5 : 5 + length]
+
 
 class _EchoServer:
-    """A local WS server that echoes input frames as output frames and exits on
-    input 'exit\\n', mimicking the forkd /v1/pty protocol."""
+    """A local ws server speaking the Connect-enveloped Exec protocol: it echoes
+    a stdin frame's bytes back as a stdout ExecResponse and exits on stdin
+    'exit\\n' with a terminal exit frame, mimicking forkd's ws Exec transport."""
 
     def __init__(self):
         self.port = None
@@ -30,21 +44,35 @@ class _EchoServer:
             self._stop = self._loop.create_future()
 
             async def handler(ws):
+                first = True
                 async for raw in ws:
-                    frame = json.loads(raw)
-                    if frame.get("kind") == "input":
-                        data = frame.get("data", "")
+                    _flag, payload = _decode_frame(bytes(raw))
+                    req = json.loads(payload)
+                    if first:
+                        # The first frame is always the open.
+                        assert "open" in req
+                        first = False
+                        continue
+                    if "stdin" in req:
+                        data = req["stdin"]
                         decoded = base64.b64decode(data) if data else b""
                         if decoded == b"exit\n":
-                            await ws.send(json.dumps({"kind": "exit", "exit_code": 0}))
+                            await ws.send(
+                                _encode_frame(
+                                    json.dumps({"exit": {"exitCode": 0}}).encode(),
+                                    end_stream=True,
+                                )
+                            )
                             return
-                        await ws.send(json.dumps({"kind": "output", "data": data}))
+                        await ws.send(
+                            _encode_frame(json.dumps({"stdout": data}).encode())
+                        )
 
             async def main():
-                # Negotiate the same subprotocol forkd's /v1/pty advertises so
-                # the websocket-client handshake matches the real server.
+                # Negotiate the same subprotocol the ws Exec transport advertises
+                # so the websocket-client handshake matches the real server.
                 server = await websockets.serve(
-                    handler, "127.0.0.1", 0, subprotocols=["mitos.pty.v1"]
+                    handler, "127.0.0.1", 0, subprotocols=["connect.sandbox.v1"]
                 )
                 self.port = server.sockets[0].getsockname()[1]
                 ready.set()
@@ -60,15 +88,20 @@ class _EchoServer:
         if self._loop and self._stop and not self._stop.done():
             self._loop.call_soon_threadsafe(self._stop.set_result, None)
 
+    def url(self):
+        return f"ws://127.0.0.1:{self.port}/sandbox.v1.Sandbox/Exec?sandbox=sb1"
+
 
 def test_pty_echo_and_exit():
     srv = _EchoServer()
     srv.start()
     received = []
     handle = PtyHandle(
-        url=f"ws://127.0.0.1:{srv.port}/v1/pty?sandbox=sb1&cols=80&rows=24",
+        url=srv.url(),
         token=None,
         on_data=lambda b: received.append(b),
+        cols=80,
+        rows=24,
     )
     handle.send_input(b"hi-from-test\n")
     deadline = time.time() + 3
@@ -85,9 +118,11 @@ def test_pty_resize_sends_frame():
     srv = _EchoServer()
     srv.start()
     handle = PtyHandle(
-        url=f"ws://127.0.0.1:{srv.port}/v1/pty?sandbox=sb1",
+        url=srv.url(),
         token=None,
         on_data=lambda b: None,
+        cols=80,
+        rows=24,
     )
     # Resize should not raise; the echo server ignores it.
     handle.resize(120, 40)
@@ -104,9 +139,11 @@ async def test_async_pty_echo_and_exit():
     srv.start()
     received = []
     handle = await AsyncPtyHandle.connect(
-        url=f"ws://127.0.0.1:{srv.port}/v1/pty?sandbox=sb1",
+        url=srv.url(),
         token=None,
         on_data=lambda b: received.append(b),
+        cols=80,
+        rows=24,
     )
     await handle.send_input(b"async-hi\n")
     for _ in range(150):
