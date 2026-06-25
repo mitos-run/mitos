@@ -54,7 +54,7 @@ func TestHandlePreviewMintsSignedURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unparseable URL %q: %v", out.URL, err)
 	}
-	if parsed.Host != "sb-1.preview.example.com" {
+	if parsed.Host != "sb-1.example.com" {
 		t.Errorf("host = %q", parsed.Host)
 	}
 	tok := parsed.Query().Get("token")
