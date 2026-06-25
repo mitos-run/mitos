@@ -3,50 +3,76 @@ package main
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+
+	connect "connectrpc.com/connect"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// TestFetchGuestVitals_RealProcesses verifies the ps --processes path consumes
-// the forkd /v1/vitals endpoint and surfaces REAL guest processes (not
-// SandboxFork objects). The endpoint is faked; the bearer token must be sent.
-func TestFetchGuestVitals_RealProcesses(t *testing.T) {
-	var sawAuth, sawSandbox string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawAuth = r.Header.Get("Authorization")
-		body := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(body)
-		sawSandbox = string(body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"claim":"claim-a","pool":"pool-x","workspace":"ws-1","namespace":"team-ns",
-			"vitals":{"steal_fraction":0.1,"mem_total_kb":2048000,"mem_used_kb":1024000,
-			"balloon_reclaimed_kb":512000,
-			"processes":[{"pid":1,"comm":"agent","state":"S","cpu_jiffies":42,"rss_kb":4096},
-			{"pid":99,"comm":"python","state":"R","cpu_jiffies":7,"rss_kb":65536}]}}`))
-	}))
-	defer srv.Close()
+// TestFetchGuestVitals_FirstSampleAndProcesses verifies the ps --processes path
+// builds the snapshot from TWO Connect calls: it takes the FIRST GuestVitals
+// sample (numeric fields) AND the Processes table, mapping both into the local
+// struct. The bearer token and sandbox id must ride on the headers of BOTH calls,
+// and the rendered table must show the real process rows over Connect.
+func TestFetchGuestVitals_FirstSampleAndProcesses(t *testing.T) {
+	svc := &fakeSandboxSvc{
+		vitalsSamples: []*sandboxv1.GuestVitals{
+			{
+				CpuStealPercent: 10, // percent; the local struct holds a [0,1] fraction
+				MemTotalBytes:   2048000 * 1024,
+				MemUsedBytes:    1024000 * 1024,
+				MemBalloonBytes: 512000 * 1024,
+				ProcessCount:    2,
+			},
+			// A second sample must be ignored: only the first is read.
+			{CpuStealPercent: 99},
+		},
+		procList: &sandboxv1.ProcessList{
+			Processes: []*sandboxv1.ProcessInfo{
+				{Pid: 1, Command: "agent", State: "S", RssBytes: 4096 * 1024},
+				{Pid: 99, Command: "python", State: "R", RssBytes: 65536 * 1024},
+			},
+		},
+	}
+	endpoint := newFakeSandboxServer(t, svc)
 
-	endpoint := strings.TrimPrefix(srv.URL, "http://")
-	v, err := fetchGuestVitals(context.Background(), srv.Client(), endpoint, "tok-123", "sb-1")
+	v, err := fetchGuestVitals(context.Background(), nil, endpoint, "tok-123", "sb-1")
 	if err != nil {
 		t.Fatalf("fetchGuestVitals: %v", err)
 	}
-	if sawAuth != "Bearer tok-123" {
-		t.Errorf("auth header = %q, want Bearer tok-123", sawAuth)
+	// Both the Vitals and the Processes call must carry the same auth headers.
+	if svc.gotAuth != "Bearer tok-123" || svc.gotSandboxID != "sb-1" {
+		t.Errorf("vitals headers = (%q,%q), want (Bearer tok-123, sb-1)", svc.gotAuth, svc.gotSandboxID)
 	}
-	if !strings.Contains(sawSandbox, "sb-1") {
-		t.Errorf("request body = %q, want sandbox sb-1", sawSandbox)
+	if svc.procAuth != "Bearer tok-123" || svc.procSandboxID != "sb-1" {
+		t.Errorf("processes headers = (%q,%q), want (Bearer tok-123, sb-1)", svc.procAuth, svc.procSandboxID)
 	}
-	if v.Claim != "claim-a" {
-		t.Errorf("claim = %q, want claim-a", v.Claim)
+	if v.Vitals.StealFraction != 0.1 {
+		t.Errorf("steal fraction = %v, want 0.1", v.Vitals.StealFraction)
 	}
-	if v.Namespace != "team-ns" {
-		t.Errorf("namespace = %q, want team-ns", v.Namespace)
+	if v.Vitals.MemTotalKB != 2048000 || v.Vitals.MemUsedKB != 1024000 {
+		t.Errorf("mem = %d/%d KB, want 1024000/2048000", v.Vitals.MemUsedKB, v.Vitals.MemTotalKB)
 	}
-	if len(v.Vitals.Processes) != 2 || v.Vitals.Processes[1].Comm != "python" {
-		t.Errorf("processes = %+v, want 2 incl python", v.Vitals.Processes)
+	if v.Vitals.BalloonReclaimedKB != 512000 {
+		t.Errorf("balloon = %d KB, want 512000", v.Vitals.BalloonReclaimedKB)
+	}
+	// The process table must be populated from the Processes RPC.
+	if len(v.Vitals.Processes) != 2 {
+		t.Fatalf("processes = %+v, want 2 rows", v.Vitals.Processes)
+	}
+	if v.Vitals.Processes[0].Comm != "agent" || v.Vitals.Processes[0].PID != 1 {
+		t.Errorf("row 0 = %+v, want agent pid 1", v.Vitals.Processes[0])
+	}
+	if v.Vitals.Processes[1].Comm != "python" || v.Vitals.Processes[1].State != "R" || v.Vitals.Processes[1].RSSKB != 65536 {
+		t.Errorf("row 1 = %+v, want python R 65536 KB", v.Vitals.Processes[1])
+	}
+	// The user-visible table must render the real rows over Connect.
+	out := renderGuestProcesses(v)
+	for _, want := range []string{"PID", "COMMAND", "STATE", "agent", "python", "99"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered table missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -56,6 +82,23 @@ func TestFetchGuestVitals_Unreachable(t *testing.T) {
 	_, err := fetchGuestVitals(context.Background(), http.DefaultClient, "127.0.0.1:0", "tok", "sb-1")
 	if err == nil {
 		t.Error("expected error for unreachable endpoint")
+	}
+}
+
+// TestFetchGuestVitals_ProcessesFailureDegrades verifies that when the Vitals
+// call succeeds but the Processes call fails, the whole snapshot errors so the
+// caller falls back to the object listing instead of rendering vitals with an
+// empty table.
+func TestFetchGuestVitals_ProcessesFailureDegrades(t *testing.T) {
+	svc := &fakeSandboxSvc{
+		vitalsSamples: []*sandboxv1.GuestVitals{{CpuStealPercent: 1}},
+		procErr:       connect.NewError(connect.CodeUnavailable, errInline("guest table unavailable")),
+	}
+	endpoint := newFakeSandboxServer(t, svc)
+
+	_, err := fetchGuestVitals(context.Background(), nil, endpoint, "tok", "sb-1")
+	if err == nil {
+		t.Fatal("a Processes failure must error so ps degrades to the object listing")
 	}
 }
 

@@ -1,29 +1,31 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	connect "connectrpc.com/connect"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "mitos.run/mitos/api/v1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// execResult is the decoded sandbox exec response: the exit code and the
-// captured streams. It mirrors the forkd /v1/exec response (vsock.ExecResponse).
+// execResult is the folded sandbox exec result: the exit code and the captured
+// streams. It is the same shape the caller expects; the runtime call now rides
+// the Connect sandbox.v1.Sandbox/ExecStream RPC.
 type execResult struct {
-	ExitCode int    `json:"exit_code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
+	ExitCode int
+	Stdout   string
+	Stderr   string
 }
 
 // runExec resolves the sandbox's endpoint and per-sandbox bearer token, then
@@ -110,47 +112,68 @@ func orUnknownPhase(p v1.SandboxPhase) string {
 	return string(p)
 }
 
-// execSandbox POSTs the command to <endpoint>/v1/exec with the per-sandbox
-// bearer token (the SAME gate the SDK uses; auth is never bypassed) and decodes
-// the result. A 401 means the token was rejected; a non-2xx surfaces the
-// server's message; a transport error is wrapped. The token value never appears
-// in an error.
+// execSandbox runs command in the sandbox over the Connect
+// sandbox.v1.Sandbox/ExecStream RPC (the HTTP/1.1-reachable non-interactive exec,
+// the same RPC the Go SDK uses) and folds the streamed ExecResponse frames into a
+// single execResult: stdout chunks and stderr chunks are accumulated and the
+// terminal exit frame supplies the exit code. The per-sandbox bearer token and
+// sandbox id ride on the Authorization and X-Sandbox-Id headers (the SAME gate
+// the SDK uses; auth is never bypassed). A rejected token (Connect
+// unauthenticated) maps to the same 401 message as before; any other failure is
+// wrapped. The token value never appears in an error.
+//
+// httpc may be nil, in which case http.DefaultClient is used.
 func execSandbox(ctx context.Context, httpc *http.Client, endpoint, token, ref, command string) (execResult, error) {
-	body, err := json.Marshal(map[string]any{
-		"sandbox": ref,
-		"command": command,
-	})
-	if err != nil {
-		return execResult{}, fmt.Errorf("encode exec request: %w", err)
+	if httpc == nil {
+		httpc = http.DefaultClient
 	}
-	url := fmt.Sprintf("http://%s/v1/exec", endpoint)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return execResult{}, fmt.Errorf("build exec request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	cli := sandboxv1connect.NewSandboxClient(httpc, "http://"+endpoint)
 
-	resp, err := httpc.Do(req)
-	if err != nil {
-		return execResult{}, fmt.Errorf("reach sandbox API at %s: %w (is the sandbox running and the endpoint routable?)", endpoint, err)
-	}
-	defer resp.Body.Close()
+	req := connect.NewRequest(&sandboxv1.ExecStreamRequest{Command: command})
+	req.Header().Set("Authorization", "Bearer "+token)
+	req.Header().Set("X-Sandbox-Id", ref)
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return execResult{}, fmt.Errorf("sandbox API rejected the bearer token (401): the token Secret may be stale")
+	stream, err := cli.ExecStream(ctx, req)
+	if err != nil {
+		return execResult{}, execConnectError(endpoint, token, err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		// Redact any echo of the bearer token from the server's body before it
-		// reaches an error string a caller may log.
-		safe := strings.ReplaceAll(strings.TrimSpace(string(msg)), token, "[REDACTED]")
-		return execResult{}, fmt.Errorf("sandbox API returned %d: %s", resp.StatusCode, safe)
-	}
+	defer func() { _ = stream.Close() }()
 
 	var res execResult
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return execResult{}, fmt.Errorf("decode exec response: %w", err)
+	var stdout, stderr strings.Builder
+	for stream.Receive() {
+		msg := stream.Msg()
+		if out := msg.GetStdout(); len(out) > 0 {
+			stdout.Write(out)
+		}
+		if errOut := msg.GetStderr(); len(errOut) > 0 {
+			stderr.Write(errOut)
+		}
+		if exit := msg.GetExit(); exit != nil {
+			res.ExitCode = int(exit.GetExitCode())
+		}
 	}
+	if err := stream.Err(); err != nil {
+		return execResult{}, execConnectError(endpoint, token, err)
+	}
+
+	res.Stdout = stdout.String()
+	res.Stderr = stderr.String()
 	return res, nil
+}
+
+// execConnectError maps a Connect ExecStream failure to the user-facing message,
+// preserving the legacy behavior: an unauthenticated code becomes the 401
+// "rejected the bearer token" message, anything else is wrapped with the
+// endpoint. The token value is redacted from any wrapped cause so it never
+// reaches an error string a caller may log.
+func execConnectError(endpoint, token string, err error) error {
+	if connect.CodeOf(err) == connect.CodeUnauthenticated {
+		return fmt.Errorf("sandbox API rejected the bearer token (401): the token Secret may be stale")
+	}
+	safe := err
+	if token != "" {
+		safe = errors.New(strings.ReplaceAll(err.Error(), token, "[REDACTED]"))
+	}
+	return fmt.Errorf("reach sandbox API at %s: %w (is the sandbox running and the endpoint routable?)", endpoint, safe)
 }
