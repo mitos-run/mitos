@@ -46,19 +46,19 @@
 
 **Files:** a new `internal/usage/source_*.go` (the live `SampleSource`) wired from the controller (it has the NodeRegistry of forkd nodes) or a small collector loop. Reuse the forkd `GET /v1/metering` endpoint + the existing report parsing in `internal/metering`.
 
-- [ ] Implement a `SampleSource` that, for each known forkd node (from the NodeRegistry), pulls `GET /v1/metering` (the per-sandbox report), and yields the samples for `usage.Integrate`. Preserve idempotency: integrate by the existing window/delta logic; a re-scrape of the same data must not double-count. Handle a node being unreachable (skip + log a count, do not fail the whole collection).
-- [ ] Secret hygiene: the report carries ids/bytes/seconds only; assert nothing else is logged.
-- [ ] Write a failing test against a mock forkd metering server (httptest): two scrapes of the same report integrate to the same totals (idempotent); a second window with higher counters integrates the delta; org is attached via the OrgResolver.
-- [ ] Implement; test passes; commit.
+- [x] Implement a `SampleSource` that, for each known forkd node (from the NodeRegistry), pulls `GET /v1/metering` (the per-sandbox report), and yields the samples for `usage.Integrate`. Preserve idempotency: integrate by the existing window/delta logic; a re-scrape of the same data must not double-count. Handle a node being unreachable (skip + log a count, do not fail the whole collection). DONE: `internal/usage/livesource.go` (`NodeRegistrySource`), over the `usage.NodeLister` import-cycle-avoiding seam; the controller wires `RegistryNodeLister` (`internal/controller/usage_scrape.go`).
+- [x] Secret hygiene: the report carries ids/bytes/seconds only; assert nothing else is logged. DONE: only sandbox ids, org ids, bytes, and seconds flow through `Sample`; the skipped-node signal is a count with no node identity or error text.
+- [x] Write a failing test against a mock forkd metering server (httptest): two scrapes of the same report integrate to the same totals (idempotent); a second window with higher counters integrates the delta; org is attached via the OrgResolver. DONE: `internal/usage/livesource_test.go` (healthy node collected + org-tagged, bad node skipped + counted, two identical scrapes Integrate to the same totals).
+- [x] Implement; test passes; commit.
 
 ## Task 0.5: wire the collector loop + a minimal per-org usage Prometheus series
 
 **Files:** the controller or a small collector goroutine that runs the SampleSource on an interval, feeds `usage.Integrate`, and stores the records (the existing store seam or an in-memory store for now). Plus a first per-org Prometheus gauge so the SAME data is observable.
 
-- [ ] Run the collector on an interval (configurable, default e.g. 60s), behind a flag (off by default for self-host that does not want it; on for hosted). Feed the live SampleSource + OrgResolver into `usage.Integrate`; persist to the usage store (or the documented store seam).
-- [ ] Add ONE dual-use Prometheus series: `mitos_usage_vcpu_seconds_total{org}` (and optionally mem/egress) emitted from the same integrated records, so the billing data is immediately visible on the operator dashboard. Org/claim labels only; no secrets.
-- [ ] Write a failing test: after the collector runs against the mock source, the usage store has the expected per-org record AND the Prometheus gauge reflects it.
-- [ ] Implement; test passes; commit.
+- [x] Run the collector on an interval (configurable, default e.g. 60s), behind a flag (off by default for self-host that does not want it; on for hosted). Feed the live SampleSource + OrgResolver into `usage.Integrate`; persist to the usage store (or the documented store seam). DONE: `--usage-collector` (default off) + `--usage-collector-interval` (default 60s) in `cmd/controller/main.go`; `controller.UsageCollectorRunnable` (`internal/controller/usage_collector.go`) ticks the collector; records land in `usage.MemUsageStore` (durable store is a documented follow-up).
+- [x] Add ONE dual-use Prometheus series: `mitos_usage_vcpu_seconds_total{org}` (and optionally mem/egress) emitted from the same integrated records, so the billing data is immediately visible on the operator dashboard. Org/claim labels only; no secrets. DONE: `usage.Metrics` (`internal/usage/usagemetrics.go`) exposes `mitos_usage_vcpu_seconds_total{org}` (plus opt-in mem/egress GaugeVecs), registered on the controller-runtime registry and fed from the same integrated records via `Collector.OnRecords`. Label is org only (no sandbox-id cardinality, no secrets).
+- [x] Write a failing test: after the collector runs against the mock source, the usage store has the expected per-org record AND the Prometheus gauge reflects it. DONE: `internal/usage/usagemetrics_test.go` (uses `prometheus/testutil.GatherAndCompare`).
+- [x] Implement; test passes; commit.
 
 ## Task 0.6: docs + threat-model
 

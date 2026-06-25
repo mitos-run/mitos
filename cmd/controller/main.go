@@ -66,6 +66,8 @@ func main() {
 	var kekFile string
 	var workspaceMemorySnapshots bool
 	var enablePrincipalWebhook bool
+	var usageCollector bool
+	var usageCollectorInterval time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -85,6 +87,8 @@ func main() {
 	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to WRAP each Encrypted template's per-template DEK (envelope encryption). REQUIRED when any reconciled template sets Encrypted: true; without it EnsureEncKey fails closed. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
 	flag.BoolVar(&enablePrincipalWebhook, "enable-principal-webhook", false, "Register the validating admission webhook that requires a Sandbox's creator to be authorized to impersonate the ServiceAccount named in spec.serviceAccount (RBAC verb 'impersonate' on 'serviceaccounts'). spec.serviceAccount is the principal a memory-snapshot resume is bound to, so without this gate it is self-asserted. STRONGLY RECOMMENDED whenever --workspace-memory-snapshots is enabled in a multi-tenant cluster. Requires the webhook server certs and a ValidatingWebhookConfiguration (see the Helm chart admissionWebhook values). Off by default so single-tenant and webhook-less deployments are unaffected.")
 	flag.BoolVar(&workspaceMemorySnapshots, "workspace-memory-snapshots", false, "Bind the workspace memory-snapshot seams (checkpoint-on-terminate, resume-on-activate, principal-bound existence) to the husk live-VM snapshot path so a checkpointed workspace head becomes RESUMABLE: a later claim with the SAME principal resumes the VM memory image paired with the workspace content. A memory image carries secrets-in-RAM and is bound to the capturing claim's ServiceAccount; it is NEVER served across principals (fail-closed refusal). Off by default: a checkpoint-on-terminate then fails loud rather than producing a falsely-resumable revision. The real bare-metal VM-memory image requires a KVM-capable kubelet and is cluster-gated; see docs/workspaces.md.")
+	flag.BoolVar(&usageCollector, "usage-collector", false, "Run the live multi-node metering scraper: on a fixed interval, scrape every forkd node's GET /v1/metering, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, integrate idempotently into per-(org, sandbox, window) usage records, and publish the per-org mitos_usage_*_total Prometheus series. OFF by default so a self-host deployment that does not want metering is unaffected; turn it on for hosted/multi-tenant. The records land in an in-memory store for now (a durable store is a follow-up); the per-org metric is always published on /metrics. The path carries only ids, byte counts, and seconds, never secret values.")
+	flag.DurationVar(&usageCollectorInterval, "usage-collector-interval", 60*time.Second, "Interval between usage metering scrapes when --usage-collector is set. Defaults to the usage window (60s). Only used when --usage-collector is on.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -353,6 +357,26 @@ func main() {
 	}); err != nil {
 		logger.Error(err, "unable to add garbage collector")
 		os.Exit(1)
+	}
+
+	// Live usage metering scraper (issue #164), OFF by default. When enabled it
+	// scrapes every forkd node's GET /v1/metering, attributes each sandbox to its
+	// org via the trusted mitos.run/org husk-pod label, integrates idempotently,
+	// and publishes the per-org mitos_usage_*_total Prometheus series from the same
+	// records. The forkd operational mux serves /v1/metering over http today (the
+	// same access class as /metrics and /healthz), so the scraper uses the http
+	// scheme; an https operational mux is a documented follow-up.
+	if usageCollector {
+		if err := mgr.Add(&controller.UsageCollectorRunnable{
+			Registry:  nodeRegistry,
+			Client:    mgr.GetClient(),
+			Cadence:   usageCollectorInterval,
+			HTTPSchem: "http",
+		}); err != nil {
+			logger.Error(err, "unable to add usage collector")
+			os.Exit(1)
+		}
+		logger.Info("usage collector: enabled", "interval", usageCollectorInterval.String())
 	}
 
 	// Validating admission webhook: bind spec.serviceAccount to authorization so
