@@ -36,6 +36,11 @@ func (s *Service) RunCode(ctx context.Context, stream *connect.BidiStream[sandbo
 	if open == nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("first RunCodeRequest must carry the open oneof (code, language, timeout_seconds), got %T", first.Msg))
 	}
+	// Reject an over-ceiling timeout BEFORE opening the guest stream (issue
+	// #216), never silently reducing it. Mirrors the legacy /v1/run_code gate.
+	if err := s.checkExecTimeout(int(open.GetTimeoutSeconds())); err != nil {
+		return err
+	}
 
 	sandboxID, err := s.resolveID(ctx)
 	if err != nil {
@@ -72,6 +77,11 @@ func (s *Service) RunCodeStream(ctx context.Context, req *connect.Request[sandbo
 	}
 
 	r := req.Msg
+	// Reject an over-ceiling timeout BEFORE opening the guest stream (issue
+	// #216), never silently reducing it. Mirrors the legacy /v1/run_code/stream gate.
+	if err := s.checkExecTimeout(int(r.GetTimeoutSeconds())); err != nil {
+		return err
+	}
 	open := &sandboxv1.RunCodeOpen{
 		Code:           r.GetCode(),
 		Language:       r.GetLanguage(),
