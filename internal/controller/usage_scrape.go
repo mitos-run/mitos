@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,27 +52,54 @@ func (l RegistryNodeLister) ListNodeEndpoints() []usage.NodeEndpoint {
 // SECURITY: the only label that flows to the resolver is the controller's OWN
 // stamped label set, derived from the trusted per-org namespace, never from
 // client input. The resolver reads only mitos.run/org from it.
+//
+// PER-CYCLE SNAPSHOT: it lists husk pods exactly ONCE per scrape cycle and resolves
+// every sandbox from the cached name -> labels map, instead of a cluster-wide List
+// per sandbox (an O(n^2) blow-up at fleet scale). Refresh (called by the live
+// source at the start of each Collect) rebuilds the snapshot; LabelsForSandbox is
+// then a map read.
 type PodLabelLookup struct {
 	Client client.Client
+
+	mu     sync.RWMutex
+	byName map[string]map[string]string
+	primed bool
+}
+
+// Refresh lists the husk pods (carrying mitos.run/husk) ONCE and caches the
+// name -> labels map for the cycle about to run. On a List error it installs an
+// EMPTY snapshot, so every sandbox resolves as unattributed for the cycle rather
+// than from a stale map: a transient miss must never bill a sandbox to the wrong
+// org. It implements usage.RefreshableLookup.
+func (l *PodLabelLookup) Refresh() {
+	byName := map[string]map[string]string{}
+	var pods corev1.PodList
+	if err := l.Client.List(context.Background(), &pods, client.MatchingLabels{huskLabel: "true"}); err == nil {
+		for i := range pods.Items {
+			byName[pods.Items[i].Name] = pods.Items[i].Labels
+		}
+	}
+	l.mu.Lock()
+	l.byName = byName
+	l.primed = true
+	l.mu.Unlock()
 }
 
 // LabelsForSandbox returns the labels on the husk pod backing sandboxID (pod name
-// == sandbox id), and whether the pod was found. It lists husk pods cluster-wide
-// (the husk pods carry mitos.run/husk) and matches by name, so it finds the pod
-// in whichever per-org namespace the tenant's workloads live in. A sandbox whose
-// pod the cache has not observed (just-created or already-gone), or a List error,
-// returns (nil, false), which the resolver treats as unattributed: a transient
-// miss must never bill the sandbox to the wrong org, only leave it unattributed
-// for that cycle.
-func (l PodLabelLookup) LabelsForSandbox(sandboxID string) (map[string]string, bool) {
-	var pods corev1.PodList
-	if err := l.Client.List(context.Background(), &pods, client.MatchingLabels{huskLabel: "true"}); err != nil {
-		return nil, false
+// == sandbox id) from the per-cycle snapshot, and whether the pod was found. If no
+// snapshot has been taken yet (Refresh not called), it primes one so a direct
+// call still works. A sandbox whose pod the snapshot does not hold (just-created,
+// already-gone, or a failed list) returns (nil, false), which the resolver treats
+// as unattributed for the cycle.
+func (l *PodLabelLookup) LabelsForSandbox(sandboxID string) (map[string]string, bool) {
+	l.mu.RLock()
+	primed := l.primed
+	l.mu.RUnlock()
+	if !primed {
+		l.Refresh()
 	}
-	for i := range pods.Items {
-		if pods.Items[i].Name == sandboxID {
-			return pods.Items[i].Labels, true
-		}
-	}
-	return nil, false
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	labels, ok := l.byName[sandboxID]
+	return labels, ok
 }

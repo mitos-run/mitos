@@ -246,6 +246,91 @@ func TestRunCollectorIdempotentReplay(t *testing.T) {
 	}
 }
 
+// TestMemStoreBoundedRecordsCumulativeSurvives is the memory-bound proof for
+// issue #164 IMPORTANT 2: under MANY windows the record map stays bounded to the
+// retention horizon (old windows are evicted) while the per-org cumulative Totals
+// keep growing monotonically and survive that eviction. This is what stops the
+// controller leaking one record per (org, sandbox, window) forever while keeping
+// the billed total correct.
+func TestMemStoreBoundedRecordsCumulativeSurvives(t *testing.T) {
+	ctx := context.Background()
+	const retain = 5
+	store := NewMemUsageStoreWithRetention(retain)
+
+	const windows = 50
+	var prevCum float64
+	for i := 0; i < windows; i++ {
+		w := baseTime.Add(time.Duration(i) * time.Minute) // distinct, window-aligned windows
+		rec := UsageRecord{OrgID: "orgA", SandboxID: "sbx1", Window: w, VCPUSeconds: 10, EgressBytes: 100}
+		if err := store.UpsertRecord(ctx, rec); err != nil {
+			t.Fatalf("upsert window %d: %v", i, err)
+		}
+
+		// The record map must never exceed the retention horizon (one sandbox per
+		// window here, so the record count equals the retained window count).
+		got, err := store.ListRecords(ctx, "orgA", time.Time{}, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) > retain {
+			t.Fatalf("after window %d the record map holds %d records, want <= %d (eviction did not bound it)", i, len(got), retain)
+		}
+
+		// The per-org cumulative must grow monotonically and survive eviction: it is
+		// 10 vcpu-seconds per settled window, never reduced when an old window is
+		// evicted from the record map.
+		cum := store.TotalsByOrg()["orgA"].VCPUSeconds
+		if cum < prevCum {
+			t.Fatalf("after window %d the cumulative went backwards: %v < %v", i, cum, prevCum)
+		}
+		wantCum := float64(10 * (i + 1))
+		if cum != wantCum {
+			t.Fatalf("after window %d cumulative = %v, want %v (eviction must not corrupt the cumulative)", i, cum, wantCum)
+		}
+		prevCum = cum
+	}
+
+	// Final: record map bounded to retain, cumulative reflects ALL windows.
+	got, _ := store.ListRecords(ctx, "orgA", time.Time{}, time.Time{})
+	if len(got) != retain {
+		t.Fatalf("final record count = %d, want %d", len(got), retain)
+	}
+	if cum := store.TotalsByOrg()["orgA"]; cum.VCPUSeconds != float64(10*windows) || cum.EgressBytes != int64(100*windows) {
+		t.Fatalf("final cumulative = %+v, want vcpu %v egress %v", cum, float64(10*windows), int64(100*windows))
+	}
+}
+
+// TestMemStoreCumulativeIdempotentOnReupsert asserts re-upserting the SAME
+// (org, sandbox, window) value does not advance the cumulative (the delta is
+// zero), and a corrected value moves the cumulative by exactly the correction.
+// This keeps the store-fed metric idempotent on a re-scrape, mirroring the record
+// map's replace semantics.
+func TestMemStoreCumulativeIdempotentOnReupsert(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemUsageStore()
+	w := baseTime
+	rec := UsageRecord{OrgID: "orgA", SandboxID: "sbx1", Window: w, VCPUSeconds: 30}
+
+	if err := store.UpsertRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRecord(ctx, rec); err != nil { // identical re-scrape
+		t.Fatal(err)
+	}
+	if cum := store.TotalsByOrg()["orgA"].VCPUSeconds; cum != 30 {
+		t.Fatalf("re-upsert double-counted cumulative: %v, want 30", cum)
+	}
+
+	// A corrected (higher) value for the same key moves the cumulative by the delta.
+	rec.VCPUSeconds = 50
+	if err := store.UpsertRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if cum := store.TotalsByOrg()["orgA"].VCPUSeconds; cum != 50 {
+		t.Fatalf("corrected upsert cumulative = %v, want 50", cum)
+	}
+}
+
 func approx(a, b float64) bool {
 	d := a - b
 	if d < 0 {

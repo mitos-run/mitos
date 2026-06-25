@@ -103,6 +103,12 @@ func NewNodeRegistrySource(
 // or returns a non-200 is skipped and counted; Collect itself only returns an
 // error for a programmer-level fault, never for an unreachable node.
 func (s *NodeRegistrySource) Collect(ctx context.Context) ([]Sample, error) {
+	// Refresh the org resolver's per-cycle snapshot ONCE so the husk pods are listed
+	// a single time for the whole cycle, not once per sandbox (an O(n^2) blow-up at
+	// fleet scale). A non-refreshable resolver (the test static map) is unaffected.
+	if rl, ok := s.orgs.(RefreshableLookup); ok {
+		rl.Refresh()
+	}
 	at := s.now()
 	var out []Sample
 	for _, node := range s.nodes.ListNodeEndpoints() {
@@ -120,16 +126,25 @@ func (s *NodeRegistrySource) Collect(ctx context.Context) ([]Sample, error) {
 	return out, nil
 }
 
+// scrapeTimeout bounds a single node scrape regardless of the injected HTTP
+// client's own Timeout. A custom TLSClient (the controller's mTLS client) carries
+// no http.Client.Timeout, so the per-request context deadline here is what stops a
+// hung node from stalling the whole cycle behind it.
+const scrapeTimeout = 8 * time.Second
+
 // scrape GETs GET /v1/metering from one node and decodes the Report. It returns
 // ok=false (not an error) on any reachability, status, or decode failure so the
 // caller can skip-and-count the node. It carries no secret: the request has no
 // body and the response is the metering Report (ids, template names, byte/second
-// counts only).
+// counts only). It applies a bounded per-request deadline derived from ctx so the
+// timeout holds even when a custom client (no http.Client.Timeout) is injected.
 func (s *NodeRegistrySource) scrape(ctx context.Context, node NodeEndpoint) (metering.Report, bool) {
 	var report metering.Report
 	if node.HTTPEndpoint == "" {
 		return report, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, scrapeTimeout)
+	defer cancel()
 	url := fmt.Sprintf("%s://%s%s", s.scheme, node.HTTPEndpoint, meteringPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

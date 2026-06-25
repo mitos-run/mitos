@@ -368,10 +368,10 @@ func main() {
 	// scheme; an https operational mux is a documented follow-up.
 	if usageCollector {
 		if err := mgr.Add(&controller.UsageCollectorRunnable{
-			Registry:  nodeRegistry,
-			Client:    mgr.GetClient(),
-			Cadence:   usageCollectorInterval,
-			HTTPSchem: "http",
+			Registry:   nodeRegistry,
+			Client:     mgr.GetClient(),
+			Cadence:    usageCollectorInterval,
+			HTTPScheme: "http",
 		}); err != nil {
 			logger.Error(err, "unable to add usage collector")
 			os.Exit(1)

@@ -105,12 +105,13 @@ type Collector struct {
 	store UsageStore
 	cfg   Config
 
-	// OnRecords, when set, is called with the integrated UsageRecords of each
-	// cycle AFTER they are upserted, so a dual-use observer (the per-org
-	// Prometheus series, issue #164) is derived from the SAME records the store
-	// receives. It is purely observational and must not mutate the records. Nil
-	// disables it.
-	OnRecords func([]UsageRecord)
+	// OnTotals, when set, is called AFTER each cycle's records are upserted with
+	// the store's CUMULATIVE per-org Totals (from a store that implements
+	// TotalsProvider), so the per-org Prometheus series (issue #164) is driven from
+	// the same monotonic cumulative the bill rolls up, NOT from this cycle's pruned
+	// sample buffer. It is purely observational. Nil disables it; it is also skipped
+	// if the store does not implement TotalsProvider (no cumulative to read).
+	OnTotals func(map[string]Totals)
 
 	// buf is the rolling sample buffer. A live scrape yields only the CURRENT
 	// instant's level for each sandbox, but the rate units (vCPU-seconds, memory
@@ -156,8 +157,10 @@ func (c *Collector) CollectOnce(ctx context.Context) error {
 			return fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
 		}
 	}
-	if c.OnRecords != nil {
-		c.OnRecords(recs)
+	if c.OnTotals != nil {
+		if tp, ok := c.store.(TotalsProvider); ok {
+			c.OnTotals(tp.TotalsByOrg())
+		}
 	}
 	return nil
 }

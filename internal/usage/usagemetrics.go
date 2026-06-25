@@ -2,11 +2,19 @@ package usage
 
 import "github.com/prometheus/client_golang/prometheus"
 
-// Metrics is the dual-use Prometheus view of the SAME integrated UsageRecords the
-// collector upserts (issue #164): one per-org series so the billing data is
+// Metrics is the Prometheus view of the SAME cumulative per-org usage the billing
+// store rolls up (issue #164): one per-org series so the billing data is
 // immediately visible on the operator dashboard, without standing up a separate
-// metrics pipeline. The collector calls Observe with each cycle's records via its
-// OnRecords hook, so the metric and the store are always the same numbers.
+// metrics pipeline.
+//
+// SYSTEM OF RECORD: the metric is driven from the store's per-org CUMULATIVE
+// Totals (UsageStore TotalsProvider.TotalsByOrg), the same number the bill and the
+// usage API report, NOT from a pruned sample buffer. So each series is monotonic
+// within a process: a Gauge Set to the cumulative store total never goes backwards
+// and never drops a known org just because that org was quiet this cycle. The
+// durable store (follow-up) is the billing system of record; this in-memory
+// cumulative is best-effort across controller restarts, which is why a restart is
+// the only event that can reset a series.
 //
 // CARDINALITY + SECRET HYGIENE: the only label is org (an org id, never a secret,
 // never a sandbox id), so the series count is bounded by the org count, not by the
@@ -23,19 +31,25 @@ type Metrics struct {
 // NewMetrics builds the per-org usage metric vectors. They are unregistered; the
 // wiring (the controller) registers them onto its metrics registry with
 // MustRegister so they appear on the controller's /metrics endpoint.
+//
+// NAMING: the _total suffix is honest because each series is driven from the
+// store's per-org cumulative Totals, which is monotonic within a process and
+// survives record eviction (the bounded record map does NOT bound this
+// cumulative). It is reset only by a controller restart, where the durable store
+// is the billing system of record.
 func NewMetrics() *Metrics {
 	return &Metrics{
 		vcpuSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mitos_usage_vcpu_seconds_total",
-			Help: "Integrated vCPU-seconds of billable sandbox usage, by org, as of the last collector cycle.",
+			Help: "Cumulative vCPU-seconds of billable sandbox usage by org, summed over every settled usage record (the same number the bill rolls up). Monotonic within a controller process; reset only by a restart, where the durable store is the system of record.",
 		}, []string{"org"}),
 		memGiBSecs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mitos_usage_mem_gib_seconds_total",
-			Help: "Integrated memory GiB-seconds of billable sandbox usage (CoW-aware), by org, as of the last collector cycle.",
+			Help: "Cumulative memory GiB-seconds of billable sandbox usage by org (CoW-aware), summed over every settled usage record. Monotonic within a controller process; reset only by a restart.",
 		}, []string{"org"}),
 		egressBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mitos_usage_egress_bytes_total",
-			Help: "Integrated egress bytes of billable sandbox usage, by org, as of the last collector cycle.",
+			Help: "Cumulative egress bytes of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart.",
 		}, []string{"org"}),
 	}
 }
@@ -47,40 +61,24 @@ func (m *Metrics) MustRegister(reg prometheus.Registerer) {
 	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes)
 }
 
-// Observe sets the per-org gauges from one collector cycle's integrated records.
-// It is the Collector.OnRecords hook. It RESETS the vectors first, then sets each
-// org to the SUM of its records' billable units across the cycle, so a re-scrape
-// of the same window lands on the same value (idempotent, never doubled) and an
-// org with no records in this cycle drops to absent rather than holding a stale
-// value. An unattributed record (empty OrgID, the self-host path) is skipped: it
-// is in the physical-footprint totals but carries no org to bill.
-func (m *Metrics) Observe(recs []UsageRecord) {
-	m.vcpuSeconds.Reset()
-	m.memGiBSecs.Reset()
-	m.egressBytes.Reset()
-
-	type agg struct {
-		vcpu   float64
-		mem    float64
-		egress float64
-	}
-	byOrg := map[string]*agg{}
-	for _, r := range recs {
-		if r.OrgID == "" {
+// Observe sets the per-org gauges from the store's CUMULATIVE per-org Totals. It
+// is the cycle hook the collector wiring calls with store.TotalsByOrg() after each
+// upsert. Because the input is the monotonic cumulative (sum of ALL settled
+// records, surviving eviction), Set lands each series on the same number the bill
+// holds, never goes backwards, and never drops a known org that was quiet this
+// cycle. An org with empty id never reaches the store totals (the self-host path
+// carries no org to bill), so no empty-org series is emitted.
+//
+// It does NOT Reset the vectors: a Reset followed by setting only the orgs present
+// this cycle is exactly the bug that dropped quiet orgs. The store's cumulative
+// map is the complete set of known orgs, so every known org is Set every cycle.
+func (m *Metrics) Observe(totals map[string]Totals) {
+	for org, t := range totals {
+		if org == "" {
 			continue
 		}
-		a := byOrg[r.OrgID]
-		if a == nil {
-			a = &agg{}
-			byOrg[r.OrgID] = a
-		}
-		a.vcpu += r.VCPUSeconds
-		a.mem += r.MemGiBSeconds
-		a.egress += float64(r.EgressBytes)
-	}
-	for org, a := range byOrg {
-		m.vcpuSeconds.WithLabelValues(org).Set(a.vcpu)
-		m.memGiBSecs.WithLabelValues(org).Set(a.mem)
-		m.egressBytes.WithLabelValues(org).Set(a.egress)
+		m.vcpuSeconds.WithLabelValues(org).Set(t.VCPUSeconds)
+		m.memGiBSecs.WithLabelValues(org).Set(t.MemGiBSeconds)
+		m.egressBytes.WithLabelValues(org).Set(float64(t.EgressBytes))
 	}
 }

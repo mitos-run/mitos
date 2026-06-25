@@ -17,6 +17,20 @@ type LabelLookup interface {
 	LabelsForSandbox(sandboxID string) (labels map[string]string, ok bool)
 }
 
+// RefreshableLookup is the optional interface a LabelLookup implements when it can
+// snapshot the whole sandbox -> labels map ONCE per scrape cycle. The live source
+// calls Refresh at the start of each Collect so the lookup lists the husk pods a
+// single time and resolves every sandbox from the cached map, instead of a
+// cluster-wide List per sandbox (an O(n^2) blow-up at fleet scale). A lookup that
+// does not implement it (the test fake's fixed map) is resolved as-is.
+type RefreshableLookup interface {
+	// Refresh rebuilds the lookup's sandbox -> labels snapshot for the cycle about
+	// to run. A refresh failure must leave correctness intact: a lookup that could
+	// not refresh returns ok=false for every sandbox (unattributed for the cycle),
+	// never a stale or wrong org.
+	Refresh()
+}
+
 // LabelOrgResolver is the live OrgResolver (issue #164): it attributes a sandbox
 // to its org by reading the TRUSTED tenant.OrgLabelKey (mitos.run/org) label the
 // controller stamped on the sandbox's husk pod from the per-org namespace. It is
@@ -35,6 +49,16 @@ type LabelOrgResolver struct {
 // pod cache / k8s lister seam).
 func NewLabelOrgResolver(lookup LabelLookup) *LabelOrgResolver {
 	return &LabelOrgResolver{lookup: lookup}
+}
+
+// Refresh implements RefreshableLookup by delegating to the underlying lookup when
+// it supports a per-cycle snapshot. The live source calls this once at the start
+// of each Collect so the husk pods are listed a single time per cycle, not once
+// per sandbox. It is a no-op for a non-refreshable lookup (the test fake).
+func (r *LabelOrgResolver) Refresh() {
+	if rl, ok := r.lookup.(RefreshableLookup); ok {
+		rl.Refresh()
+	}
 }
 
 // OrgFor implements OrgResolver. It returns (orgID, true) only when the sandbox's
