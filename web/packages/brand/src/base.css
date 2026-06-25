@@ -204,11 +204,6 @@ a { color: var(--cyan); }
     display: flex;
   }
 
-  /* Offset main content below the fixed top bar. */
-  .app-shell > main {
-    padding-top: calc(64px + var(--space-4));
-  }
-
   /* The primary nav becomes a fixed slide-over drawer. */
   .nav-drawer {
     position: fixed;
@@ -628,18 +623,25 @@ html[data-reduce-motion="1"] * {
    backdrop blur, hairline bottom border. Token-driven; one raw background value
    matches the site rgba(4,5,10,.55) which is already used in .palette-backdrop. */
 
+/* Full-width translucent bar; its inner row is constrained to --maxw and
+   centered so the brand and account align with the page content beneath. */
 .topbar {
   position: sticky;
   top: 0;
   z-index: 100;
+  backdrop-filter: blur(12px);
+  background: rgba(4,5,10,.55);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.topbar-inner {
   height: 64px;
+  max-width: var(--maxw);
+  margin: 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-4);
   padding: 0 var(--space-5);
-  backdrop-filter: blur(12px);
-  background: rgba(4,5,10,.55);
-  border-bottom: 1px solid var(--hairline);
 }
 
 /* Brand wordmark: weight and letterspacing match the site nav .brand-mark. */

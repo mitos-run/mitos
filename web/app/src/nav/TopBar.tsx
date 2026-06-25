@@ -16,28 +16,30 @@ export function TopBar({ onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: 
 }) {
   return (
     <header className="topbar">
-      <button
-        ref={menuButtonRef}
-        className="menu-button"
-        type="button"
-        aria-label="Open navigation menu"
-        aria-expanded={drawerOpen}
-        aria-controls="primary-nav"
-        onClick={onToggleDrawer}
-      >
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false">
-          <rect x="2" y="4" width="16" height="2" rx="1" /><rect x="2" y="9" width="16" height="2" rx="1" /><rect x="2" y="14" width="16" height="2" rx="1" />
-        </svg>
-        <span className="sr-only">Menu</span>
-      </button>
-      <Link to="/" className="topbar-brand" aria-label="Mitos home">
-        <Mark size={22} glow />
-        <strong>Mitos</strong>
-      </Link>
-      <div className="topbar-spacer" />
-      <SearchTrigger onClick={onSearch} />
-      <a className="topbar-help" href="/docs" target="_blank" rel="noreferrer">Help</a>
-      <AccountMenu />
+      <div className="topbar-inner">
+        <button
+          ref={menuButtonRef}
+          className="menu-button"
+          type="button"
+          aria-label="Open navigation menu"
+          aria-expanded={drawerOpen}
+          aria-controls="primary-nav"
+          onClick={onToggleDrawer}
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false">
+            <rect x="2" y="4" width="16" height="2" rx="1" /><rect x="2" y="9" width="16" height="2" rx="1" /><rect x="2" y="14" width="16" height="2" rx="1" />
+          </svg>
+          <span className="sr-only">Menu</span>
+        </button>
+        <Link to="/" className="topbar-brand" aria-label="Mitos home">
+          <Mark size={22} glow />
+          <strong>Mitos</strong>
+        </Link>
+        <div className="topbar-spacer" />
+        <SearchTrigger onClick={onSearch} />
+        <a className="topbar-help" href="/docs" target="_blank" rel="noreferrer">Help</a>
+        <AccountMenu />
+      </div>
     </header>
   )
 }
