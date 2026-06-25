@@ -9,16 +9,14 @@ import (
 	"time"
 )
 
-// AuditEvent is one structured record of an exec or file operation served by
-// the SandboxAPI. It carries only SAFE summaries: command strings (commands are
-// not secret values) and file paths plus byte counts. It NEVER carries file
-// content, env values, secret values, or bearer tokens.
+// AuditEvent is one structured record of an operation served by the SandboxAPI.
+// It carries only SAFE summaries: operation names and (for the interactive PTY
+// exec over WebSocket) a non-content marker. It NEVER carries file content, env
+// values, secret values, or bearer tokens.
 type AuditEvent struct {
 	SandboxID string `json:"sandbox_id"`
 	Op        string `json:"op"`
-	// Detail is a safe human summary. For exec it is the command, truncated to
-	// auditDetailMax with an explicit truncation note. For file ops it is the
-	// path. It never contains file content or secret values.
+	// Detail is a safe human summary, never file content or secret values.
 	Detail string `json:"detail,omitempty"`
 	// Bytes is the size of the file content read or written, in bytes. It is the
 	// COUNT only; the content itself is never recorded.
@@ -42,20 +40,6 @@ type NopAuditor struct{}
 
 // Record discards the event.
 func (NopAuditor) Record(AuditEvent) {}
-
-// auditDetailMax bounds the command string recorded in an exec event's Detail.
-const auditDetailMax = 256
-
-// truncateCommand returns cmd truncated to auditDetailMax runes with an explicit
-// truncation note appended when it was cut. Commands are not secret values, so
-// the command itself is safe to record; the bound only keeps records small.
-func truncateCommand(cmd string) string {
-	r := []rune(cmd)
-	if len(r) <= auditDetailMax {
-		return cmd
-	}
-	return string(r[:auditDetailMax]) + " ...(truncated)"
-}
 
 // JSONAuditor writes one JSON-encoded AuditEvent per line to w. It is safe for
 // concurrent use by multiple handlers (the write is mutex-guarded).

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,6 +14,53 @@ import (
 	"google.golang.org/protobuf/proto"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
+
+// ptyAuth authenticates a Connect-over-WebSocket Exec upgrade. Unlike
+// requireBearer (which peeks a JSON request body), the upgrade is a bodyless GET,
+// so the sandbox id comes from the ?sandbox= query parameter and the token from
+// the Authorization: Bearer header. Semantics match requireBearer exactly:
+//   - no token registered: 401 (fail closed) unless allowTokenless
+//   - missing/malformed Authorization: 401
+//   - mismatch: 401 (constant-time compare)
+//
+// Token values are never logged. Returns the resolved sandbox id on success.
+func (api *SandboxAPI) ptyAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
+	requested := r.URL.Query().Get("sandbox")
+	if requested == "" {
+		writeErr(w, "missing sandbox query parameter", http.StatusBadRequest)
+		return "", false
+	}
+
+	// In single-sandbox mode (husk-stub) the ?sandbox= id is whatever the SDK
+	// sent (the husk pod name); resolve it to the one served sandbox id so the
+	// token lookup hits the single registered token and the returned id routes
+	// the exec to the single VM. In forkd's default multi-sandbox mode this is the
+	// request id unchanged, so the per-id gate is byte-identical.
+	sandbox := api.resolveSandboxID(requested)
+
+	api.mu.RLock()
+	token, hasToken := api.tokens[sandbox]
+	api.mu.RUnlock()
+
+	if !hasToken {
+		if api.allowTokenless {
+			return sandbox, true
+		}
+		writeErr(w, "unauthorized: no token registered for sandbox", http.StatusUnauthorized)
+		return "", false
+	}
+
+	presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		writeErr(w, "unauthorized: bearer token required", http.StatusUnauthorized)
+		return "", false
+	}
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+		writeErr(w, "unauthorized: invalid token", http.StatusUnauthorized)
+		return "", false
+	}
+	return sandbox, true
+}
 
 // execWSPath is the route the Connect-over-WebSocket bidi Exec endpoint is
 // mounted at. It deliberately matches the Connect service's Exec procedure path

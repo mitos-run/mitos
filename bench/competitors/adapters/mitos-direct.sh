@@ -6,9 +6,10 @@
 # WITHOUT a cluster, claim path, or kubeconfig. It drives the standalone
 # sandbox-server in real mode (issue #257), which forks real Firecracker
 # microVMs end to end through the same proven fork engine forkd uses:
-# POST /v1/fork restores a snapshot into a live microVM, POST /v1/exec runs a
-# command in it over the guest agent vsock path. It is the bare-metal companion
-# to adapters/mitos.sh (which needs a cluster + warm SandboxPool).
+# POST /v1/fork restores a snapshot into a live microVM, and the Connect
+# sandbox.v1.Sandbox/ExecStream RPC runs a command in it over the guest agent
+# vsock path. It is the bare-metal companion to adapters/mitos.sh (which needs a
+# cluster + warm SandboxPool).
 #
 # It keeps the SAME run-comparison.sh contract as adapters/template.sh:
 # warm() brings the system to its steady state once; create_exec() forks ONE
@@ -26,7 +27,7 @@
 # What it measures per iteration (the create -> first-exec wall clock):
 #   t0  = now
 #   POST /v1/fork {template, id}      -- restore one fresh microVM
-#   POST /v1/exec {sandbox, command}  -- run one trivial command, require exit 0
+#   ExecStream {command}              -- run one trivial command, require exit 0
 #   t1  = now
 #   sample = (t1 - t0) in ms
 # This is the SAME create-sandbox-to-first-exec metric every other adapter
@@ -210,7 +211,7 @@ warm() {
 
 create_exec() {
   _md_fork_seq=$((_md_fork_seq + 1))
-  local sid t0 t1 fork_http exec_out exit_code
+  local sid t0 t1 fork_http exit_code
   sid="md-$$-$_md_fork_seq"
 
   # Start the create -> first-exec wall clock at the fork request, stop it after
@@ -225,11 +226,75 @@ create_exec() {
     return 1
   fi
 
-  exec_out="$(curl -sS -X POST "$_md_base/v1/exec" \
-    -d "{\"sandbox\":\"$sid\",\"command\":\"true\"}" 2>/dev/null)" || return 1
-  exit_code="$(printf '%s' "$exec_out" | jq -r '.exit_code // empty' 2>/dev/null)"
+  # Exec over the Connect sandbox.v1.Sandbox/ExecStream RPC (the runtime path
+  # forkd and the SDKs use; the legacy /v1/exec route is retired, issue #358).
+  # Connect's streaming wire format is a sequence of "enveloped" frames: each
+  # frame is a 5-byte prefix (byte 0 = flags, bytes 1..4 = big-endian uint32
+  # JSON length) followed by that many bytes of JSON. The request is ONE frame
+  # carrying the ExecStreamRequest; the response is a stream of ExecResponse
+  # frames, and the terminal one carries {"exit":{"exitCode":N}} (camelCase).
+  #
+  # Example framed request for body {"command":"true"} (18 bytes):
+  #   header bytes: 00 00 00 00 12   then the 18 JSON bytes.
+  # The standalone sandbox-server is tokenless by default; only send an
+  # Authorization header when MITOS_TOKEN is set (cluster forkd requires it).
+  local req_json req_len
+  req_json='{"command":"true"}'
+  req_len=${#req_json}
+
+  local -a _md_exec_hdrs=(-H 'Content-Type: application/connect+json')
+  if [ -n "${MITOS_TOKEN:-}" ]; then
+    _md_exec_hdrs+=(-H "Authorization: Bearer ${MITOS_TOKEN}")
+  fi
+
+  # Emit the framed request straight into curl's stdin: the 5-byte envelope
+  # header (flag byte 0x00, then req_len as a big-endian uint32, four raw bytes)
+  # followed by the JSON. The header is piped, NOT captured in a variable,
+  # because its leading NUL bytes would be stripped by command substitution.
+  # Capture the raw streamed response to a file for the same reason: the
+  # response frame headers also carry NUL bytes the frame walk below needs.
+  local resp_file
+  resp_file="$_md_work/exec-resp-$sid.bin"
+  {
+    printf '\x00'
+    # The format string is a fixed sequence of \xNN escapes built from the
+    # length bytes; it is data we deliberately want printf to interpret.
+    # shellcheck disable=SC2059
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+      $(( (req_len >> 24) & 0xff )) \
+      $(( (req_len >> 16) & 0xff )) \
+      $(( (req_len >> 8) & 0xff )) \
+      $(( req_len & 0xff )))"
+    printf '%s' "$req_json"
+  } | curl -sS -X POST \
+    "$_md_base/sandbox.v1.Sandbox/ExecStream" \
+    "${_md_exec_hdrs[@]}" --data-binary @- >"$resp_file" 2>/dev/null || return 1
+
+  # Walk the response frames byte-exactly: at each offset read the 5-byte
+  # envelope header (flag byte + big-endian uint32 length) with od, slice out
+  # that many JSON bytes with dd, hand the JSON to jq, and advance by 5 + length.
+  # This is correct regardless of frame contents (length bytes may collide with
+  # printable ASCII, so a blanket control-byte strip would be unsafe). The exit
+  # code comes from the terminal {"exit":{"exitCode":N}} frame (camelCase).
+  local total off b0 b1 b2 b3 flen frame_json
+  total=$(wc -c <"$resp_file")
+  off=0
+  exit_code=""
+  while [ $((off + 5)) -le "$total" ]; do
+    # Read the 4 length bytes (header bytes 1..4) as decimal via od.
+    read -r b0 b1 b2 b3 <<EOF
+$(od -An -tu1 -j $((off + 1)) -N 4 "$resp_file" | tr -s ' ')
+EOF
+    flen=$(( (b0 << 24) | (b1 << 16) | (b2 << 8) | b3 ))
+    if [ $((off + 5 + flen)) -gt "$total" ]; then break; fi
+    frame_json="$(dd if="$resp_file" bs=1 skip=$((off + 5)) count="$flen" 2>/dev/null)"
+    local this_exit
+    this_exit="$(printf '%s' "$frame_json" | jq -r '.exit.exitCode // empty' 2>/dev/null)"
+    [ -n "$this_exit" ] && exit_code="$this_exit"
+    off=$((off + 5 + flen))
+  done
   if [ "$exit_code" != "0" ]; then
-    echo "mitos-direct: exec did not return exit 0 for $sid: $exec_out" >&2
+    echo "mitos-direct: exec did not return exit 0 for $sid (raw response in $resp_file)" >&2
     return 1
   fi
 

@@ -44,9 +44,13 @@ func newEnvelopeTestAPI(t *testing.T) *SandboxAPI {
 	return api
 }
 
-func TestExecInvalidJSONReturnsEnvelope(t *testing.T) {
+// TestInvalidJSONReturnsEnvelope drives the kept lifecycle route with a malformed
+// body and asserts the LLM-legible {error:{code:invalid_json,...}} envelope. The
+// envelope shape is shared by every JSON route; the legacy /v1/exec wire that
+// once carried this assertion was removed in #358.
+func TestInvalidJSONReturnsEnvelope(t *testing.T) {
 	api := newEnvelopeTestAPI(t)
-	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader([]byte("not json")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/set_timeout", bytes.NewReader([]byte("not json")))
 	rr := httptest.NewRecorder()
 	api.Handler().ServeHTTP(rr, req)
 
@@ -59,17 +63,20 @@ func TestExecInvalidJSONReturnsEnvelope(t *testing.T) {
 	}
 }
 
-func TestExecUnknownSandboxReturnsNotFoundEnvelope(t *testing.T) {
+// TestUnknownSandboxReturnsNotFoundEnvelope drives the interactive Exec ws
+// endpoint against an unregistered sandbox: the registration check runs before
+// the upgrade and answers the not_found envelope (404). This is the kept-route
+// successor of the legacy /v1/exec not-found envelope assertion.
+func TestUnknownSandboxReturnsNotFoundEnvelope(t *testing.T) {
 	api := newEnvelopeTestAPI(t)
-	body, _ := json.Marshal(map[string]any{"sandbox": "sb-missing", "command": "true"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	api.Handler().ServeHTTP(rr, req)
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
 
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rr.Code)
+	resp, body := postExec(t, srv.URL, "sb-missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
-	got := decodeEnvelope(t, rr.Body.Bytes())
+	got := decodeEnvelope(t, []byte(body))
 	if got.Code != "not_found" {
 		t.Fatalf("code = %q, want not_found", got.Code)
 	}

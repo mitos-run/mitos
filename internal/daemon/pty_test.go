@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +12,15 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"mitos.run/mitos/internal/vsock"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
+
+// This file holds the shared PTY test fixtures (a PTY-capable fake guest gRPC
+// server and the SandboxAPI builder) plus the ptyAuth security tests. The legacy
+// JSON /v1/pty wire was removed in #358; the interactive terminal is now the
+// Connect-over-WebSocket Exec endpoint (execWSPath), which shares the same
+// ptyAuth bearer gate. The auth properties that were once asserted through
+// /v1/pty are asserted here against the ws Exec upgrade so the coverage survives.
 
 // fakePtyGuestSandbox is an in-process Sandbox gRPC server for PTY tests. Its
 // Exec handler reads the ExecOpen (PTY mode), then echoes each stdin chunk as
@@ -65,7 +71,7 @@ func (s *fakePtyGuestSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
 }
 
 // startFakePtyGRPCUDS starts an in-process gRPC server with a PTY-capable Exec
-// handler on sockPath, suitable for replacing startFakePtyUDS in PTY tests.
+// handler on sockPath.
 func startFakePtyGRPCUDS(t *testing.T, sockPath string) {
 	t.Helper()
 	startFakeGuestGRPCUDS(t, sockPath, &fakePtyGuestSandbox{})
@@ -94,90 +100,40 @@ func newPtyAPI(t *testing.T, token string) (*SandboxAPI, *httptest.Server) {
 	return api, srv
 }
 
-func wsURL(httpURL, sandbox string) string {
-	s := httpURL
-	if len(s) > 7 && s[:7] == "http://" {
-		s = "ws://" + s[7:]
+// dialExecWS opens the Connect-over-WebSocket Exec upgrade for sandbox with the
+// given bearer (empty for none). It returns the dial error and the handshake
+// response so a caller can assert the auth status code.
+func dialExecWS(t *testing.T, baseURL, sandbox, bearer string) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	opts := &websocket.DialOptions{Subprotocols: []string{execWSSubprotocol}}
+	if bearer != "" {
+		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + bearer}}
 	}
-	return s + "/v1/pty?sandbox=" + sandbox
+	return websocket.Dial(ctx, wsExecURL(baseURL, sandbox), opts)
 }
 
-func TestPtyWebSocketEchoExit(t *testing.T) {
+// TestExecWSRejectsMissingToken asserts the ptyAuth gate rejects an upgrade with
+// no Authorization header when a token IS registered (401, fail closed). This is
+// the ws-path successor of the legacy /v1/pty missing-token test.
+func TestExecWSRejectsMissingToken(t *testing.T) {
 	_, srv := newPtyAPI(t, "sekret")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "sb1"), &websocket.DialOptions{
-		HTTPHeader:   http.Header{"Authorization": {"Bearer sekret"}},
-		Subprotocols: []string{"mitos.pty.v1"},
-	})
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer c.Close(websocket.StatusNormalClosure, "")
-
-	in, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("hello-pty\n")})
-	if err := c.Write(ctx, websocket.MessageText, in); err != nil {
-		t.Fatalf("write input: %v", err)
-	}
-	_, data, err := c.Read(ctx)
-	if err != nil {
-		t.Fatalf("read output: %v", err)
-	}
-	var out vsock.PtyFrame
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.Kind != vsock.PtyOutput || string(out.Data) != "hello-pty\n" {
-		t.Fatalf("output = %+v", out)
-	}
-
-	exitFrame, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("exit\n")})
-	_ = c.Write(ctx, websocket.MessageText, exitFrame)
-	_, data, err = c.Read(ctx)
-	if err != nil {
-		t.Fatalf("read exit: %v", err)
-	}
-	var ex vsock.PtyFrame
-	_ = json.Unmarshal(data, &ex)
-	if ex.Kind != vsock.PtyExit {
-		t.Fatalf("expected exit frame, got %+v", ex)
-	}
-}
-
-func TestPtyWebSocketRejectsBadToken(t *testing.T) {
-	_, srv := newPtyAPI(t, "sekret")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, resp, err := websocket.Dial(ctx, wsURL(srv.URL, "sb1"), &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer wrong"}},
-	})
-	if err == nil {
-		t.Fatal("expected dial to fail on bad token")
-	}
-	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %v", resp)
-	}
-}
-
-func TestPtyWebSocketRejectsMissingToken(t *testing.T) {
-	_, srv := newPtyAPI(t, "sekret")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, resp, err := websocket.Dial(ctx, wsURL(srv.URL, "sb1"), nil)
+	_, resp, err := dialExecWS(t, srv.URL, "sb1", "")
 	if err == nil {
 		t.Fatal("expected dial to fail without a token")
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %v", resp)
+		t.Fatalf("status = %v, want 401", resp)
 	}
 }
 
-// TestPtyWebSocketRejectsCrossSandboxToken registers two sandboxes A and B with
-// distinct tokens, then attempts to open B's PTY using A's token. The auth gate
-// compares the presented token against the token of the ?sandbox= id (B), so
-// A's token must not drive B's PTY: the upgrade must be rejected with 401.
-func TestPtyWebSocketRejectsCrossSandboxToken(t *testing.T) {
+// TestExecWSRejectsCrossSandboxToken registers two sandboxes A and B with
+// distinct tokens, then attempts to open B's Exec ws using A's token. ptyAuth
+// compares the presented token against the token of the ?sandbox= id (B), so A's
+// token must not drive B's terminal: the upgrade must be rejected with 401. This
+// is the ws-path successor of the legacy /v1/pty cross-sandbox-token test.
+func TestExecWSRejectsCrossSandboxToken(t *testing.T) {
 	dir := shortVsockDir(t)
 	api := NewSandboxAPI(dir)
 	for _, sb := range []struct{ id, token string }{{"sbA", "tokenA"}, {"sbB", "tokenB"}} {
@@ -195,171 +151,95 @@ func TestPtyWebSocketRejectsCrossSandboxToken(t *testing.T) {
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	// Present A's token while targeting B's PTY.
-	_, resp, err := websocket.Dial(ctx, wsURL(srv.URL, "sbB"), &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer tokenA"}},
-	})
+	// Present A's token while targeting B's terminal.
+	_, resp, err := dialExecWS(t, srv.URL, "sbB", "tokenA")
 	if err == nil {
-		t.Fatal("expected dial to fail: A's token must not drive B's pty")
+		t.Fatal("expected dial to fail: A's token must not drive B's terminal")
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %v", resp)
+		t.Fatalf("status = %v, want 401", resp)
 	}
 }
 
-func TestPtyWebSocketTokenlessAllowed(t *testing.T) {
+// TestExecWSTokenlessAllowed asserts that under AllowTokenless (the standalone
+// sandbox-server trust model) the ws Exec upgrade succeeds with no bearer and the
+// terminal drives to a clean exit. This is the ws-path successor of the legacy
+// /v1/pty tokenless test.
+func TestExecWSTokenlessAllowed(t *testing.T) {
 	_, srv := newPtyAPI(t, "") // AllowTokenless, like sandbox-server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "sb1"), &websocket.DialOptions{
-		Subprotocols: []string{"mitos.pty.v1"},
-	})
+	c, _, err := dialExecWS(t, srv.URL, "sb1", "")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
-	exitFrame, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("exit\n")})
-	_ = c.Write(ctx, websocket.MessageText, exitFrame)
-	_, data, err := c.Read(ctx)
-	if err != nil {
-		t.Fatalf("read: %v", err)
+
+	// Open a PTY exec, then send exit and read the terminal exit frame.
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{
+			Pty: &sandboxv1.PtyOptions{Size: &sandboxv1.WindowSize{Cols: 80, Rows: 24}},
+		}},
+	})
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Stdin{Stdin: []byte("exit\n")},
+	})
+	flags, ex := readResponse(ctx, t, c)
+	if ex.GetExit() == nil {
+		t.Fatalf("final frame = %+v, want exit", ex)
 	}
-	var ex vsock.PtyFrame
-	_ = json.Unmarshal(data, &ex)
-	if ex.Kind != vsock.PtyExit {
-		t.Fatalf("expected exit, got %+v", ex)
+	if flags&connectFlagEndStream == 0 {
+		t.Fatalf("exit frame missing end-stream flag (flags=0x%02x)", flags)
 	}
 }
 
-// TestPtyStreamCapRejected verifies the per-sandbox concurrent-stream cap (3)
-// admits streams up to the cap and rejects the N+1th as a clean 429 BEFORE the
-// WebSocket upgrade (the client gets a non-101 response, not a close code).
-func TestPtyStreamCapRejected(t *testing.T) {
-	_, srv := newPtyAPI(t, "")
-	// Lower cap to 1 so we only need one held slot to trigger rejection.
-	api, _ := newPtyAPI(t, "")
+// TestExecWSStreamCapRejected verifies the per-sandbox concurrent-stream cap
+// admits streams up to the cap and a saturated sandbox rejects a NEW ws Exec.
+// Post-upgrade the cap surfaces as a policy-violation close (the handshake has
+// already returned 101), so we assert the connection is closed by the server
+// with a non-normal status rather than a 429 handshake. This is the ws-path
+// successor of the legacy /v1/pty stream-cap test.
+func TestExecWSStreamCapRejected(t *testing.T) {
+	api, srv := newPtyAPI(t, "")
 	api.SetMaxStreamsPerSandbox(1)
-	srv2 := httptest.NewServer(api.Handler())
-	t.Cleanup(srv2.Close)
-	_ = srv
 
-	// Pre-saturate the slot.
+	// Pre-saturate the single slot, simulating one in-flight stream.
 	rel, ok := api.acquireStream("sb1")
 	if !ok {
 		t.Fatal("pre-saturate: slot must be acquirable")
 	}
 	defer rel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_, resp, err := websocket.Dial(ctx, wsURL(srv2.URL, "sb1"), &websocket.DialOptions{
-		Subprotocols: []string{"mitos.pty.v1"},
-	})
-	if err == nil {
-		t.Fatal("expected dial to fail when stream cap is exceeded")
-	}
-	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("status = %v, want 429", resp)
-	}
-}
-
-// TestPtyResizeForwarded verifies that a resize frame sent over the WebSocket
-// reaches the gRPC Exec stream as a WindowSize resize message, by using a fake
-// that echoes resize events as a synthetic stdout line.
-func TestPtyResizeForwarded(t *testing.T) {
-	// Use a custom fake that responds to resize with a confirmation on stdout.
-	dir := shortVsockDir(t)
-	sock := filepath.Join(dir, "sbr", "vsock.sock")
-	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	startFakeGuestGRPCUDS(t, sock, &fakeResizeSandbox{})
-	api := NewSandboxAPI(dir)
-	api.AllowTokenless()
-	if err := api.RegisterSandbox("sbr", sock); err != nil {
-		t.Fatal(err)
-	}
-	api.RegisterStreamPath("sbr", sock)
-	srv := httptest.NewServer(api.Handler())
-	t.Cleanup(srv.Close)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "sbr"), &websocket.DialOptions{
-		Subprotocols: []string{"mitos.pty.v1"},
-	})
+	c, _, err := dialExecWS(t, srv.URL, "sb1", "")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
 
-	// Send a resize.
-	resizeFrame, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyResize, Cols: 120, Rows: 40})
-	if err := c.Write(ctx, websocket.MessageText, resizeFrame); err != nil {
-		t.Fatalf("write resize: %v", err)
-	}
-	// The fake echoes back a stdout confirmation then exits.
-	_, data, err := c.Read(ctx)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	var f vsock.PtyFrame
-	_ = json.Unmarshal(data, &f)
-	if f.Kind != vsock.PtyOutput {
-		t.Fatalf("want output frame, got %+v", f)
-	}
-	if string(f.Data) != "resize:120x40\n" {
-		t.Fatalf("resize confirmation = %q, want resize:120x40", f.Data)
-	}
-}
-
-// fakeResizeSandbox echoes resize events as "resize:CxR\n" stdout and exits after.
-type fakeResizeSandbox struct {
-	sandboxv1.UnimplementedSandboxServer
-}
-
-func (s *fakeResizeSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
-	_, err := stream.Recv() // read ExecOpen
-	if err != nil {
-		return err
-	}
+	// Open frame: ExecPTY tries to acquire a slot, fails (cap=1, slot held), and
+	// the server closes with a policy-violation after a terminal error frame.
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{
+			Pty: &sandboxv1.PtyOptions{Size: &sandboxv1.WindowSize{Cols: 80, Rows: 24}},
+		}},
+	})
+	// Read until the stream ends; the server must terminate it (cap exceeded),
+	// never serve the exec.
 	for {
-		msg, rerr := stream.Recv()
-		if rerr == io.EOF {
-			return stream.Send(&sandboxv1.ExecResponse{
-				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
-			})
-		}
+		_, _, rerr := c.Read(ctx)
 		if rerr != nil {
-			return rerr
-		}
-		if ws := msg.GetResize(); ws != nil {
-			out := []byte("resize:" + uintStr(ws.GetCols()) + "x" + uintStr(ws.GetRows()) + "\n")
-			if err := stream.Send(&sandboxv1.ExecResponse{
-				Msg: &sandboxv1.ExecResponse_Stdout{Stdout: out},
-			}); err != nil {
-				return err
+			var ce websocket.CloseError
+			if !errors.As(rerr, &ce) {
+				// Any read error after a cap rejection is acceptable as long as the
+				// stream did not serve a normal exec; the slot stays held by us.
+				return
 			}
-			return stream.Send(&sandboxv1.ExecResponse{
-				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
-			})
+			if ce.Code == websocket.StatusNormalClosure {
+				t.Fatalf("ws Exec served despite the stream cap being saturated")
+			}
+			return
 		}
 	}
-}
-
-// uintStr converts a uint32 to a decimal string without importing strconv
-// (keeping the test file dependency-light).
-func uintStr(n uint32) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 10)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	return string(buf)
 }

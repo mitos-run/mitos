@@ -344,20 +344,16 @@ func main() {
 	// Preview URLs (issue #126): mint a signed, expiring URL for get_host(port).
 	mux.HandleFunc("POST /v1/preview", s.handlePreview)
 
-	// Exec and files go through SandboxAPI → vsock → guest agent
+	// Runtime exec, files, and run_code go through the Connect sandbox.v1.Sandbox
+	// protocol mounted below; the legacy JSON /v1 runtime and /v1/pty routes were
+	// removed once every SDK and kubectl-mitos moved to Connect (#358).
 	apiHandler := s.sandboxAPI.Handler()
-	mux.Handle("POST /v1/exec", apiHandler)
-	mux.Handle("POST /v1/exec/stream", apiHandler)
-	mux.Handle("POST /v1/run_code/stream", apiHandler)
-	mux.Handle("POST /v1/files/", apiHandler)
 	// Live lifecycle controls (issue #218): adjust a running sandbox's TTL, and
-	// pause/resume. These go through the same SandboxAPI handler forkd serves.
+	// pause/resume. These go through the same SandboxAPI handler forkd serves and
+	// have no Connect runtime successor.
 	mux.Handle("POST /v1/set_timeout", apiHandler)
 	mux.Handle("POST /v1/pause", apiHandler)
 	mux.Handle("POST /v1/resume", apiHandler)
-	// The PTY route lives on the SandboxAPI's own outer mux (registered there
-	// outside requireBearer); delegate the WebSocket upgrade GET to it.
-	mux.Handle("GET /v1/pty", apiHandler)
 
 	// Connect runtime protocol (issue #24): route the Sandbox service RPC path
 	// (/sandbox.v1.Sandbox/...) to the SandboxAPI.Handler() handler, which serves
