@@ -257,6 +257,42 @@ spec:
                   - name
                   type: object
                 type: array
+              expose:
+                description: |-
+                  Expose declares that a guest port should be reachable through the Mitos
+                  Expose edge proxy at a per-sandbox subdomain. Optional; absent means the
+                  sandbox is not exposed.
+                properties:
+                  label:
+                    description: |-
+                      Label is the single subdomain label the route is served at (for example
+                      "openclaw" in openclaw.<expose-domain>). Must be a single DNS label.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                    type: string
+                  port:
+                    description: Port is the guest TCP port to expose.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  sharing:
+                    default: private
+                    description: |-
+                      Sharing is the access tier. Slice 2b carries the value through to the
+                      proxy as an opaque string (the proxy enforces "link" today; the full
+                      ladder is slice 4). Defaults to private.
+                    enum:
+                    - private
+                    - link
+                    - org
+                    - authenticated
+                    - public
+                    type: string
+                required:
+                - label
+                - port
+                type: object
               lifetime:
                 description: |-
                   Lifetime carries the wall-clock and idle limits and the terminate-time

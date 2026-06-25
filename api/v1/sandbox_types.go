@@ -105,6 +105,12 @@ type SandboxSpec struct {
 	// +optional
 	Network *SandboxNetwork `json:"network,omitempty"`
 
+	// Expose declares that a guest port should be reachable through the Mitos
+	// Expose edge proxy at a per-sandbox subdomain. Optional; absent means the
+	// sandbox is not exposed.
+	// +optional
+	Expose *SandboxExpose `json:"expose,omitempty"`
+
 	// Budget is the capability budget for runtime self-service: the five maxima
 	// (maxForks, maxCheckpoints, maxCpuSeconds, maxLifetimeExtension,
 	// maxEgressBytes). NEW v2 surface (v2-spec section 3); defaults from the
@@ -168,6 +174,26 @@ type SandboxNetwork struct {
 	// allowlist for this sandbox only. Default empty.
 	// +optional
 	ExtraAllow []string `json:"extraAllow,omitempty"`
+}
+
+// SandboxExpose configures the per-sandbox expose route (Mitos Expose slice 2b).
+type SandboxExpose struct {
+	// Port is the guest TCP port to expose.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+	// Label is the single subdomain label the route is served at (for example
+	// "openclaw" in openclaw.<expose-domain>). Must be a single DNS label.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	Label string `json:"label"`
+	// Sharing is the access tier. Slice 2b carries the value through to the
+	// proxy as an opaque string (the proxy enforces "link" today; the full
+	// ladder is slice 4). Defaults to private.
+	// +kubebuilder:validation:Enum=private;link;org;authenticated;public
+	// +kubebuilder:default=private
+	// +optional
+	Sharing string `json:"sharing,omitempty"`
 }
 
 // SandboxBudget is the capability budget for runtime self-service (v2-spec
