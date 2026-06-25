@@ -178,8 +178,8 @@ result is prefixed with `mitos-default-`. For example `python:3.12` maps to
 | `fork(template, id)` | `POST /v1/fork` | `Sandbox` |
 | `fork(template, id, idempotencyKey)` | `POST /v1/fork` | `Sandbox` |
 | `listSandboxes()` | `GET /v1/sandboxes` | `List<ServerSandbox>` |
-| `Sandbox.exec(command)` | `POST /v1/exec` | `ExecResult` |
-| `Sandbox.exec(command, timeoutSeconds)` | `POST /v1/exec` | `ExecResult` |
+| `Sandbox.exec(command)` | `POST /sandbox.v1.Sandbox/ExecStream` | `ExecResult` |
+| `Sandbox.exec(command, timeoutSeconds)` | `POST /sandbox.v1.Sandbox/ExecStream` | `ExecResult` |
 | `Sandbox.terminate()` | `DELETE /v1/sandboxes/{id}` | `void` |
 
 Either constructor argument may be `null` to fall through the precedence below.

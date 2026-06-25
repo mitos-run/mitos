@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crate::connect::ConnectClient;
 use crate::error::MitosError;
 use crate::types::{ExecResult, ForkWire, ServerSandbox, Template};
 
@@ -320,12 +321,15 @@ impl SandboxServer {
         Ok(())
     }
 
-    /// Runs `command` in the sandbox via `POST /v1/exec`. Used by
-    /// [`Sandbox::exec`].
+    /// Runs `command` in the sandbox over the Connect `sandbox.v1.Sandbox`
+    /// runtime protocol (`POST /sandbox.v1.Sandbox/ExecStream`, issue #358/#24).
+    /// Used by [`Sandbox::exec`]. The server-streaming response is drained into
+    /// an [`ExecResult`] (stdout, stderr, then the exit frame). The sandbox id
+    /// rides the `X-Sandbox-Id` header; the optional bearer token rides
+    /// `Authorization` and is never logged.
     fn exec(&self, id: &str, command: &str, timeout: u32) -> Result<ExecResult, MitosError> {
-        let body = json!({ "sandbox": id, "command": command, "timeout": timeout });
-        let value = self.post("/v1/exec", &body, None)?;
-        serde_json::from_value(value).map_err(decode_err)
+        ConnectClient::new(&self.agent, &self.url, self.token.as_deref())
+            .exec_stream(id, command, timeout)
     }
 
     /// Attaches `Authorization: Bearer <token>` when a token is configured. The
@@ -446,7 +450,8 @@ fn redact_transport(text: &str, token: Option<&str>) -> String {
 }
 
 /// A running sandbox handle returned by [`SandboxServer::fork`]. `exec`
-/// round-trips through the server URL (`POST /v1/exec`) and `terminate` issues
+/// round-trips through the server URL over the Connect runtime protocol
+/// (`POST /sandbox.v1.Sandbox/ExecStream`) and `terminate` issues
 /// `DELETE /v1/sandboxes/{id}`. Holds the [`SandboxServer`] it was forked from
 /// so requests carry the same base URL and optional bearer header.
 pub struct Sandbox {
