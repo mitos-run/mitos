@@ -50,28 +50,41 @@ func IsReservedLabel(label string) bool {
 
 // Route is a single expose backend entry: the opaque subdomain label, the
 // sandbox it serves, the owning forkd node HTTP endpoint (host:port of :9091),
-// the guest port, the per-sandbox bearer the proxy presents to forkd, and the
-// access tier. Token is a secret and is never logged.
+// the guest port, the per-sandbox bearer the proxy presents to forkd, the
+// access tier, the owning org, and the audience/network/forwardAuth policy
+// fields. Token is a secret and is never logged.
 type Route struct {
-	Label        string
-	SandboxID    string
-	NodeEndpoint string // forkd :9091 host:port (Sandbox.Status.Endpoint)
-	Port         int    // guest port
-	Token        string // per-sandbox bearer
-	Sharing      string // access tier; slice 2a routes "link"
+	Label               string
+	SandboxID           string
+	NodeEndpoint        string   // forkd :9091 host:port (Sandbox.Status.Endpoint)
+	Port                int      // guest port
+	Token               string   // per-sandbox bearer
+	Sharing             string   // access tier; slice 2a routes "link"
+	OrgID               string   // org owning this sandbox; empty for non-org namespaces
+	Network             []string // CIDR allowlist; nil/empty means allow all
+	ForwardAuthURL      string   // optional forward-auth subrequest URL
+	AllowedPrincipals   []string // optional email allowlist
+	AllowedEmailDomains []string // optional email-domain allowlist
 }
 
 // ClaimState is the injectable view a route-sync source maps onto. The slice-2b
 // controller reconciler maps a Ready Sandbox (Status.Phase==Ready,
 // Status.Endpoint, the <name>-sandbox-token Secret) onto this shape.
+// IMPORTANT: this struct and controller.ExposeRoute must stay byte-identical
+// (same field names, same order, no json tags). Add fields to both in lockstep.
 type ClaimState struct {
-	Label        string
-	SandboxID    string
-	NodeEndpoint string
-	Port         int
-	Token        string
-	Sharing      string
-	Ready        bool
+	Label               string
+	SandboxID           string
+	NodeEndpoint        string
+	Port                int
+	Token               string
+	Sharing             string
+	OrgID               string
+	Network             []string
+	ForwardAuthURL      string
+	AllowedPrincipals   []string
+	AllowedEmailDomains []string
+	Ready               bool
 }
 
 // RouteTable is the concurrency-safe map of label to backend route the proxy
@@ -127,12 +140,17 @@ func (t *RouteTable) Sync(states []ClaimState) {
 			continue
 		}
 		want[c.Label] = Route{
-			Label:        c.Label,
-			SandboxID:    c.SandboxID,
-			NodeEndpoint: c.NodeEndpoint,
-			Port:         c.Port,
-			Token:        c.Token,
-			Sharing:      c.Sharing,
+			Label:               c.Label,
+			SandboxID:           c.SandboxID,
+			NodeEndpoint:        c.NodeEndpoint,
+			Port:                c.Port,
+			Token:               c.Token,
+			Sharing:             c.Sharing,
+			OrgID:               c.OrgID,
+			Network:             c.Network,
+			ForwardAuthURL:      c.ForwardAuthURL,
+			AllowedPrincipals:   c.AllowedPrincipals,
+			AllowedEmailDomains: c.AllowedEmailDomains,
 		}
 	}
 	t.mu.Lock()

@@ -138,16 +138,19 @@ func TestExposeReconcilerSyncsReadyRoutes(t *testing.T) {
 		t.Fatalf("expected 1 route, got %d: %+v", len(routes), routes)
 	}
 	got := routes[0]
-	want := controller.ExposeRoute{
-		Label:        "openclaw",
-		SandboxID:    "sbx-abc",
-		NodeEndpoint: "10.0.0.7:9091",
-		Port:         8080,
-		Token:        "per-sb-tok",
-		Sharing:      "private",
-		Ready:        true,
-	}
-	if got != want {
+	// Use field-by-field comparison: ExposeRoute now contains slice fields
+	// which are not comparable with ==.
+	if got.Label != "openclaw" || got.SandboxID != "sbx-abc" || got.NodeEndpoint != "10.0.0.7:9091" ||
+		got.Port != 8080 || got.Token != "per-sb-tok" || got.Sharing != "private" || !got.Ready {
+		want := controller.ExposeRoute{
+			Label:        "openclaw",
+			SandboxID:    "sbx-abc",
+			NodeEndpoint: "10.0.0.7:9091",
+			Port:         8080,
+			Token:        "per-sb-tok",
+			Sharing:      "private",
+			Ready:        true,
+		}
 		t.Errorf("route mismatch:\n  got  %+v\n  want %+v", got, want)
 	}
 

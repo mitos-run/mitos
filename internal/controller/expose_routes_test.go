@@ -7,6 +7,77 @@ import (
 	"mitos.run/mitos/internal/controller"
 )
 
+// TestBuildExposeRoutesStampsOrgAndPolicy verifies that a sandbox in a
+// mitos-org-<id> namespace yields a route with OrgID set and the four policy
+// fields (Network, ForwardAuthURL, AllowedPrincipals, AllowedEmailDomains)
+// copied from Spec.Expose.
+func TestBuildExposeRoutesStampsOrgAndPolicy(t *testing.T) {
+	sb := v1.Sandbox{}
+	sb.Name = "sb-acme"
+	sb.Namespace = "mitos-org-acme"
+	sb.Status.Phase = v1.SandboxReady
+	sb.Status.Endpoint = "node1:9091"
+	sb.Status.SandboxID = "sandbox-acme"
+	sb.Spec.Expose = &v1.SandboxExpose{
+		Port:                8080,
+		Label:               "acme-app",
+		Sharing:             "private",
+		Network:             []string{"10.0.0.0/8"},
+		ForwardAuthURL:      "https://auth.acme.com/verify",
+		AllowedPrincipals:   []string{"alice@acme.com"},
+		AllowedEmailDomains: []string{"acme.com"},
+	}
+
+	tokenFor := func(s v1.Sandbox) (string, bool) { return "tok-acme", true }
+	routes := controller.BuildExposeRoutes([]v1.Sandbox{sb}, tokenFor)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	r := routes[0]
+	if r.OrgID != "acme" {
+		t.Errorf("OrgID: got %q, want %q", r.OrgID, "acme")
+	}
+	if len(r.Network) != 1 || r.Network[0] != "10.0.0.0/8" {
+		t.Errorf("Network: got %v, want [10.0.0.0/8]", r.Network)
+	}
+	if r.ForwardAuthURL != "https://auth.acme.com/verify" {
+		t.Errorf("ForwardAuthURL: got %q, want %q", r.ForwardAuthURL, "https://auth.acme.com/verify")
+	}
+	if len(r.AllowedPrincipals) != 1 || r.AllowedPrincipals[0] != "alice@acme.com" {
+		t.Errorf("AllowedPrincipals: got %v, want [alice@acme.com]", r.AllowedPrincipals)
+	}
+	if len(r.AllowedEmailDomains) != 1 || r.AllowedEmailDomains[0] != "acme.com" {
+		t.Errorf("AllowedEmailDomains: got %v, want [acme.com]", r.AllowedEmailDomains)
+	}
+}
+
+// TestBuildExposeRoutesNonOrgNamespace verifies that a sandbox in a non-org
+// namespace gets OrgID="" (empty string).
+func TestBuildExposeRoutesNonOrgNamespace(t *testing.T) {
+	sb := v1.Sandbox{}
+	sb.Name = "sb-selfhost"
+	sb.Namespace = "default"
+	sb.Status.Phase = v1.SandboxReady
+	sb.Status.Endpoint = "node1:9091"
+	sb.Status.SandboxID = "sandbox-selfhost"
+	sb.Spec.Expose = &v1.SandboxExpose{
+		Port:    8080,
+		Label:   "selfhost-app",
+		Sharing: "public",
+	}
+
+	tokenFor := func(s v1.Sandbox) (string, bool) { return "tok-selfhost", true }
+	routes := controller.BuildExposeRoutes([]v1.Sandbox{sb}, tokenFor)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].OrgID != "" {
+		t.Errorf("OrgID: got %q, want empty string for non-org namespace", routes[0].OrgID)
+	}
+}
+
 // TestBuildExposeRoutes exercises the pure route-set builder. It covers the
 // four skip conditions and the happy path, plus the empty-Sharing default.
 func TestBuildExposeRoutes(t *testing.T) {

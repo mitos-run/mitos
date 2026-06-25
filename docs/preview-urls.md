@@ -314,12 +314,125 @@ populated by `POST /internal/routes` from the controller `ExposeRouteReconciler`
 Pass `--http-addr` to also listen on a plaintext port (for health checks behind an
 L4 load balancer that does its own TLS; this is NOT the expose traffic path).
 
-## Sharing ladder
+## Auth ladder (slice 4)
 
-The `Sharing` field on a route carries the access tier (`private`, `org`,
-`audience`). The full sharing ladder with audience selectors and org-scoped access
-is slice 4 and NOT implemented in this slice. All routes in this slice are treated
-as private (the signed token is the sole gate).
+The auth ladder ships in slice 4. Every expose route carries a `Sharing` tier
+plus optional composable layers. Enforcement runs as a strict ordered pipeline
+on every request.
+
+### Access tiers
+
+| Tier | Who can reach it |
+|---|---|
+| `public` | Anyone with the URL. No identity required. |
+| `link` | Anyone with a valid signed expose URL. A first-hit cookie exchange replaces the token in the address bar with a `__Host-` session cookie. |
+| `authenticated` | Any identity that successfully completes the OIDC flow at `auth.<expose-domain>`. |
+| `org` | An authenticated caller whose org IDs (resolved from their verified email) include the sandbox's org. |
+| `private` | Same as `org`. Both `private` and `org` check the sandbox OrgID; `private` signals owner-org intent. |
+
+### Composable layers
+
+Applied after the tier check, in order:
+
+1. **Network**: an optional CIDR allowlist on the route. Evaluated against the
+   caller IP on every request, before identity. A caller outside the list is
+   rejected 403 regardless of their session.
+2. **Audience**: `allowedPrincipals` (exact email match) and
+   `allowedEmailDomains` (registrable domain, case-insensitive, verified email
+   only). Both lists may coexist; a caller must satisfy at least one entry in
+   whichever lists are non-empty. Unverified email is always rejected here.
+3. **forwardAuth**: an optional BYO-IdP subrequest. The proxy calls the
+   operator-configured URL with `X-Forwarded-Method`, `X-Forwarded-Uri`,
+   `X-Forwarded-Host`, `X-Forwarded-For`, and `Cookie`. A non-2xx response is
+   returned to the caller. `X-Auth-Request-*` headers sent by the CLIENT are
+   stripped BEFORE the subrequest and before upstream proxying, so a client
+   cannot inject a forged identity. The network layer is evaluated before the
+   forwardAuth subrequest.
+
+### Central auth origin: `auth.<expose-domain>`
+
+Each `<label>.<expose-domain>` is its own browser origin. To avoid scattering
+the OIDC client secret and multiplying OIDC code flows, a single central origin
+handles authentication.
+
+`auth.<expose-domain>` is a permanently reserved label (in the reserved-name
+blocklist) and is never routed to a tenant sandbox. The proxy handles it as the
+OIDC relying party.
+
+**Flow for a request to a tier that requires identity:**
+
+1. The app subdomain checks for a valid per-app `__Host-` session cookie. If
+   present and unexpired, identity is taken from it.
+2. No valid cookie: 302 to `https://auth.<expose-domain>/start?rd=<label>&path=<path>`.
+3. `auth.<expose-domain>/start` checks its own `__Host-` SSO cookie. If absent,
+   it starts the OIDC Authorization Code flow against the configured issuer,
+   verifies the ID token, extracts `sub`, `email`, `email_verified`, and sets
+   the SSO cookie (scoped to `auth.<expose-domain>` only via `__Host-`).
+4. The proxy resolves the verified email to org IDs (see "Identity resolution"
+   below) and records them in the SSO session.
+5. `auth.<expose-domain>` validates the `rd` redirect target against the live
+   route table (the label must name a real route; prevents open redirect).
+   It issues a short-lived single-use HMAC grant bound to
+   (label, sub, email, email_verified, orgIDs, expiry) and 302s to
+   `https://<label>.<expose-domain>/__mitos_auth/cb?grant=<grant>&path=<path>`.
+6. The app subdomain `/__mitos_auth/cb` handler verifies the grant (HMAC,
+   unexpired, single-use nonce, label matches), enforces the tier and audience
+   layers, sets a per-app `__Host-` session cookie (HMAC over the identity,
+   ~1h TTL, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain`), and
+   302s to the original path.
+7. Subsequent requests validate the local cookie. No round trip to
+   `auth.<expose-domain>` until the cookie expires.
+
+**Cookie isolation**: the `auth.<expose-domain>` SSO cookie is `__Host-` and
+therefore host-only; a tenant app running at `<label>.<expose-domain>` cannot
+read it. Per-app session cookies are also `__Host-` and host-only, isolated to
+their subdomain origin. Cross-subdomain session fixation is not possible.
+
+### Identity resolution
+
+Org membership lives in the Mitos account database, not in the OIDC ID token,
+so the proxy resolves identity via the console service:
+
+```
+POST /internal/identity/resolve
+Authorization: Bearer <shared resolve token>
+Content-Type: application/json
+
+{"email": "<verified email>"}
+```
+
+returns `{"accountId": "...", "orgIds": [...]}`. The resolve token is a shared
+secret between the proxy (`MITOS_EXPOSE_RESOLVE_TOKEN`) and the console
+(`MITOS_IDENTITY_RESOLVE_TOKEN`); both read it from the same Secret key. The
+endpoint is ClusterIP-only and never logged beyond org count. When
+`expose.identityResolve.resolveURL` is empty the resolve hop is disabled and
+the proxy falls back to OIDC claims or forwardAuth-supplied identity.
+
+### Self-host without the SaaS account service
+
+For a self-hosted deployment without the full account service:
+
+- Omit `expose.identityResolve.resolveURL` to disable the resolve hop.
+- Use the `forwardAuth` layer: configure an external IdP (oauth2-proxy,
+  Authelia, Keycloak) to serve an auth subrequest. The proxy treats the
+  `X-Auth-Request-Email`, `X-Auth-Request-User`, and `X-Auth-Request-Groups`
+  headers from the subrequest response as the caller identity (client-supplied
+  values with those names are stripped before the subrequest).
+- The self-host org source today is the forwardAuth path (the proxy reads
+  `X-Auth-Request-Groups` from the subrequest response) or, when OIDC is wired,
+  the SaaS resolve endpoint; deriving orgs directly from an OIDC `groups` claim
+  is a documented follow-up (the `GroupsToOrgs` seam exists in
+  `internal/preview/oidc.go` but is not yet wired from config in
+  `cmd/preview-proxy/main.go`).
+
+### OIDC honest scope
+
+The OIDC code flow (discovery, redirect, callback, ID token verify) is tested
+with a fake token verifier in unit CI. The live-IdP path is
+maintainer-verified. PKCE is a documented follow-up. SAML and SCIM are
+deferred. This surface stays gated behind the external security review (issue
+#194) and the abuse-control envelope (issue #213) before serving untrusted
+tenants.
 
 ## Deploying with the Helm chart
 
@@ -331,6 +444,30 @@ mounts the wildcard cert from `expose.tls.secretName`. The controller
 Service so the `ExposeRouteReconciler` can push routes. An optional Ingress is
 rendered when `expose.ingress.enabled: true`. An optional cert-manager Certificate
 for `*.<expose-domain>` is rendered when `expose.tls.certManager.enabled: true`.
+
+### OIDC and identity-resolve Helm wiring (slice 4)
+
+To enable the auth ladder set `expose.oidc.issuer` and `expose.oidc.clientID`.
+The chart then passes `--oidc-issuer`, `--oidc-client-id`, and `--resolve-url`
+to the proxy and mounts the HMAC secrets (`grant-secret`, `session-secret`,
+`sso-secret`, `state-secret`), the OIDC client secret (`oidc-client-secret`),
+and the shared resolve token (`resolve-token`) from `expose.secretName`.
+
+When `expose.enabled: true` the console Deployment receives
+`MITOS_IDENTITY_RESOLVE_TOKEN` from the same `expose.secretName` Secret key
+(`resolve-token`), activating the `POST /internal/identity/resolve` endpoint.
+The OIDC secret values are NEVER inlined in the chart; all are mounted via
+`secretKeyRef`. Populate the Secret out of band before enabling.
+
+```yaml
+expose:
+  enabled: true
+  domain: mitos.app
+  oidc:
+    issuer: https://dex.example.com
+    clientID: mitos-expose
+  # identityResolve.resolveURL defaults to the in-cluster console Service.
+```
 
 ## Production gate
 

@@ -122,6 +122,18 @@ func main() {
 		mux.Handle("/webhooks/billing", bill.webhook)
 		logger.Info("billing webhook mounted at /webhooks/billing")
 	}
+	// The identity resolve endpoint is an INTERNAL machine-to-machine endpoint,
+	// bearer-gated by a shared secret. It is mounted OUTSIDE the session
+	// middleware (no browser session involved) and OUTSIDE the dev/prod
+	// conditional (the same binary serves both). The token is read from the
+	// environment; if unset, the endpoint is not mounted and a warning is logged.
+	// The token value is never logged.
+	if token := os.Getenv("MITOS_IDENTITY_RESOLVE_TOKEN"); token != "" {
+		mux.Handle("POST /internal/identity/resolve", saas.NewIdentityResolveHandler(accounts, token, logger))
+		logger.Info("identity resolve endpoint mounted")
+	} else {
+		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/identity/resolve not mounted")
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
