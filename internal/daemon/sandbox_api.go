@@ -594,6 +594,11 @@ func (api *SandboxAPI) Handler() http.Handler {
 	// routes (set on the upgrade handshake response).
 	outer.HandleFunc("GET /v1/pty", deprecatedRuntimeNote(api.handlePty))
 	outer.Handle(connectPath, connectHandler)
+	// Authenticated guest HTTP proxy (Mitos Expose slice 1). Mounted OUTSIDE
+	// requireBearer because it proxies arbitrary and streaming HTTP and cannot be
+	// body-peeked; checkBearer enforces the same per-sandbox token gate. The
+	// trailing-slash pattern captures every sub-path under the port.
+	outer.HandleFunc("/v1/sandboxes/{id}/expose/{port}/", api.handleExpose)
 	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
 }
