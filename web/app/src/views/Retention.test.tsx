@@ -126,11 +126,16 @@ describe('Retention view', () => {
     const saveButton = screen.getByRole('button', { name: /save/i })
     fireEvent.click(saveButton)
 
-    // The PUT should be called with legal_hold: true
+    // The PUT should be called with the full body including all four fields.
     await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1))
     const lastCall = calls[calls.length - 1]
     expect(lastCall.url).toContain('/console/retention')
-    expect((lastCall.body as { legal_hold: boolean }).legal_hold).toBe(true)
+    expect(lastCall.body).toEqual({
+      sandbox_metadata_days: retentionPayload.sandbox_metadata_days,
+      logs_days: retentionPayload.logs_days,
+      usage_days: retentionPayload.usage_days,
+      legal_hold: true,
+    })
   })
 
   it('shows a "0 = keep forever" hint on one of the number inputs', async () => {
