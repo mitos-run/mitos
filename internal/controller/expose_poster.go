@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -36,7 +37,9 @@ type ExposePoster struct {
 // empty url returns a poster whose Sync is a no-op; callers need not nil-check.
 func NewExposePoster(url, token string) *ExposePoster {
 	return &ExposePoster{
-		URL:         url,
+		// Trim a trailing slash so URL + "/internal/routes" never yields a
+		// double slash.
+		URL:         strings.TrimRight(url, "/"),
 		Token:       token,
 		Client:      &http.Client{Timeout: exposePosterDefaultTimeout},
 		MaxAttempts: exposePosterDefaultMaxAttempts,
