@@ -85,12 +85,12 @@ await sandbox.terminate();
 | `server.listTemplates()` | `GET /v1/templates` | `Template[]` |
 | `server.fork(template, id?, opts?)` | `POST /v1/fork` | `Sandbox` |
 | `server.listSandboxes()` | `GET /v1/sandboxes` | `ServerSandbox[]` |
-| `sandbox.exec(cmd, opts?)` | `POST /v1/exec` | `ExecResult` |
-| `sandbox.execBackground(cmd, opts?)` | `POST /v1/exec` (stream) | `BackgroundProcess` |
-| `sandbox.runCode(code, opts?)` | `POST /v1/run_code/stream` | `Execution` |
-| `sandbox.files.read(path)` | `POST /v1/files/read` | `string` |
-| `sandbox.files.write(path, content, opts?)` | `POST /v1/files/write` | `void` |
-| `sandbox.files.list(path?)` | `POST /v1/files/list` | `FileInfo[]` |
+| `sandbox.exec(cmd, opts?)` | `sandbox.v1.Sandbox/ExecStream` | `ExecResult` |
+| `sandbox.execBackground(cmd, opts?)` | `sandbox.v1.Sandbox/ExecStream` | `BackgroundProcess` |
+| `sandbox.runCode(code, opts?)` | `sandbox.v1.Sandbox/RunCodeStream` | `Execution` |
+| `sandbox.files.read(path)` | `sandbox.v1.Sandbox/ReadFile` | `string` |
+| `sandbox.files.write(path, content, opts?)` | `sandbox.v1.Sandbox/WriteFile` | `void` |
+| `sandbox.files.list(path?)` | `sandbox.v1.Sandbox/List` | `FileInfo[]` |
 | `sandbox.setTimeout(seconds)` | `POST /v1/set_timeout` | `number` (deadline) |
 | `sandbox.pause()` / `sandbox.resume()` | `POST /v1/pause`, `/v1/resume` | `void` |
 | `sandbox.terminate()` | `DELETE /v1/sandboxes/{id}` | `void` |

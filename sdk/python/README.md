@@ -85,17 +85,22 @@ asyncio.run(main())
 
 `mitos.create` / `Sandbox.create` returns a `DirectSandbox`.
 
-| Method | HTTP | Returns |
+The runtime calls (exec, run_code, files) ride the Connect `sandbox.v1.Sandbox`
+service at `/sandbox.v1.Sandbox/<Method>` (issue #24); the control-plane calls
+(templates, fork, sandboxes) and the interactive PTY keep their `/v1/*`
+transports. The sandbox is addressed by id via the `X-Sandbox-Id` header.
+
+| Method | Wire | Returns |
 | --- | --- | --- |
 | `mitos.create(image, ...)` | `POST /v1/templates`, `POST /v1/fork` | `DirectSandbox` |
-| `sandbox.exec(command, timeout=30)` | `POST /v1/exec` | `ExecResult` |
-| `sandbox.run_code(code, language="python", ...)` | `POST /v1/run_code/stream` | `Execution` |
-| `sandbox.files.read(path)` / `read_bytes(path)` | `POST /v1/files/read` | `str` / `bytes` |
-| `sandbox.files.write(path, content, mode=0o644)` | `POST /v1/files/write` | `None` |
-| `sandbox.files.list(path="/")` | `POST /v1/files/list` | `list[FileInfo]` |
-| `sandbox.files.exists(path)` | `POST /v1/files/list` | `bool` |
-| `sandbox.files.remove(path)` | `POST /v1/files/remove` | `None` |
-| `sandbox.files.mkdir(path)` | `POST /v1/files/mkdir` | `None` |
+| `sandbox.exec(command, timeout=30)` | `ExecStream` (server-stream) | `ExecResult` |
+| `sandbox.run_code(code, language="python", ...)` | `RunCodeStream` (server-stream) | `Execution` |
+| `sandbox.files.read(path)` / `read_bytes(path)` | `ReadFile` (server-stream) | `str` / `bytes` |
+| `sandbox.files.write(path, content, mode=0o644)` | `WriteFile` (client-stream) | `None` |
+| `sandbox.files.list(path="/")` | `List` (unary) | `list[FileInfo]` |
+| `sandbox.files.exists(path)` | `List` (unary) | `bool` |
+| `sandbox.files.remove(path)` | `Remove` (unary) | `None` |
+| `sandbox.files.mkdir(path)` | `Mkdir` (unary) | `None` |
 | `sandbox.pty(on_data, cols=80, rows=24)` | `WS /v1/pty` | `PtyHandle` |
 | `sandbox.set_timeout(timeout_seconds)` | `POST /v1/set_timeout` | `int` (deadline) |
 | `sandbox.pause()` / `sandbox.resume()` | `POST /v1/pause`, `/v1/resume` | `None` |

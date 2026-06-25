@@ -1,5 +1,6 @@
 import base64
 import json
+import struct
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -244,36 +245,95 @@ def _ready_http_sandbox(transport: httpx.MockTransport, token: str | None = TEST
     return sandbox
 
 
-def test_exec_targets_v1_and_sends_sandbox_id():
+def _connect_frame(payload: bytes, end: bool = False) -> bytes:
+    """One Connect enveloped frame: a 1-byte flag (0x02 on end-stream), a 4-byte
+    big-endian length, then the JSON payload."""
+    flag = 0b00000010 if end else 0
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
+def _decode_connect_request(body: bytes) -> list[dict]:
+    """Decode the buffered Connect request body (one enveloped frame per
+    message) back to the proto-JSON messages the SDK sent."""
+    out, i = [], 0
+    while i + 5 <= len(body):
+        length = struct.unpack(">I", body[i + 1 : i + 5])[0]
+        payload = body[i + 5 : i + 5 + length]
+        i += 5 + length
+        if payload:
+            out.append(json.loads(payload))
+    return out
+
+
+def _exec_stream_response(
+    exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"", exec_time_ms: float = 1.0
+) -> httpx.Response:
+    """A Connect ExecStream server-stream reply: optional stdout/stderr chunk
+    frames, the terminal ExecExit, then a clean end-stream frame."""
+    frames = b""
+    if stdout:
+        frames += _connect_frame(
+            json.dumps({"stdout": base64.b64encode(stdout).decode()}).encode()
+        )
+    if stderr:
+        frames += _connect_frame(
+            json.dumps({"stderr": base64.b64encode(stderr).decode()}).encode()
+        )
+    frames += _connect_frame(
+        json.dumps({"exit": {"exitCode": exit_code, "execTimeMs": exec_time_ms}}).encode()
+    )
+    frames += _connect_frame(json.dumps({}).encode(), end=True)
+    return httpx.Response(
+        200, content=frames, headers={"content-type": "application/connect+json"}
+    )
+
+
+def test_exec_targets_connect_and_sends_sandbox_id():
+    """k8s Sandbox.exec drives the Connect ExecStream server-stream
+    (/sandbox.v1.Sandbox/ExecStream), routes by the X-Sandbox-Id header, and
+    sends the proto-JSON ExecStreamRequest (command + timeoutSeconds)."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
-        seen["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"exit_code": 0, "stdout": "hi\n", "stderr": "", "exec_time_ms": 1.0},
-        )
+        seen["sandbox_id"] = request.headers.get("x-sandbox-id")
+        seen["content_type"] = request.headers.get("content-type")
+        seen["msgs"] = _decode_connect_request(request.content)
+        return _exec_stream_response(exit_code=0, stdout=b"hi\n")
 
     result = _ready_http_sandbox(httpx.MockTransport(handler)).exec("echo hi")
 
     assert result.stdout == "hi\n"
-    assert seen["url"] == "http://10.0.3.7:9091/v1/exec"
-    assert seen["json"]["sandbox"] == "sb-claim-1"
+    assert result.exit_code == 0
+    assert seen["url"].endswith("/sandbox.v1.Sandbox/ExecStream")
+    assert seen["sandbox_id"] == "sb-claim-1"
+    assert seen["content_type"] == "application/connect+json"
+    assert seen["msgs"][0]["command"] == "echo hi"
+    assert "timeoutSeconds" in seen["msgs"][0]
 
 
-def test_files_read_targets_v1_and_sends_sandbox_id():
+def test_files_read_targets_connect_and_sends_sandbox_id():
+    """k8s Sandbox.files.read drives the Connect ReadFile server-stream
+    (/sandbox.v1.Sandbox/ReadFile), routes by the X-Sandbox-Id header, and
+    concatenates the base64 Chunk data."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
-        seen["json"] = json.loads(request.content)
-        return httpx.Response(200, json={"content": "data", "size": 4})
+        seen["sandbox_id"] = request.headers.get("x-sandbox-id")
+        seen["content_type"] = request.headers.get("content-type")
+        body = (
+            _connect_frame(json.dumps({"data": base64.b64encode(b"data").decode(), "eof": True}).encode())
+            + _connect_frame(json.dumps({}).encode(), end=True)
+        )
+        return httpx.Response(200, content=body,
+                              headers={"content-type": "application/connect+json"})
 
     content = _ready_http_sandbox(httpx.MockTransport(handler)).files.read("/workspace/x")
     assert content == "data"
-    assert seen["url"].endswith("/v1/files/read")
-    assert seen["json"]["sandbox"] == "sb-claim-1"
+    assert seen["url"].endswith("/sandbox.v1.Sandbox/ReadFile")
+    assert seen["sandbox_id"] == "sb-claim-1"
+    assert seen["content_type"] == "application/connect+json"
 
 
 def test_exec_sends_bearer_token():
@@ -281,10 +341,7 @@ def test_exec_sends_bearer_token():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(
-            200,
-            json={"exit_code": 0, "stdout": "", "stderr": "", "exec_time_ms": 1.0},
-        )
+        return _exec_stream_response()
 
     _ready_http_sandbox(httpx.MockTransport(handler)).exec("true")
 
@@ -292,14 +349,30 @@ def test_exec_sends_bearer_token():
 
 
 def test_all_file_calls_send_bearer_token():
+    """Every Connect file RPC (ReadFile, WriteFile, List, Mkdir, Remove) carries
+    the per-sandbox bearer, whether it is a server-stream, a client-stream, or a
+    unary call."""
     auths = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         auths.append(request.headers.get("authorization"))
-        return httpx.Response(
-            200,
-            json={"content": "", "size": 0, "entries": [], "status": "ok"},
-        )
+        method = str(request.url).rsplit("/", 1)[-1]
+        if method == "ReadFile":
+            body = (
+                _connect_frame(json.dumps({"data": "", "eof": True}).encode())
+                + _connect_frame(json.dumps({}).encode(), end=True)
+            )
+            return httpx.Response(200, content=body,
+                                  headers={"content-type": "application/connect+json"})
+        if method == "WriteFile":
+            body = (
+                _connect_frame(json.dumps({"bytesWritten": 4}).encode())
+                + _connect_frame(json.dumps({}).encode(), end=True)
+            )
+            return httpx.Response(200, content=body,
+                                  headers={"content-type": "application/connect+json"})
+        # List, Mkdir, Remove are unary application/json.
+        return httpx.Response(200, json={"entries": []})
 
     files = _ready_http_sandbox(httpx.MockTransport(handler)).files
     files.read("/x")
@@ -316,10 +389,7 @@ def test_no_token_sends_no_auth_header():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(
-            200,
-            json={"exit_code": 0, "stdout": "", "stderr": "", "exec_time_ms": 1.0},
-        )
+        return _exec_stream_response()
 
     _ready_http_sandbox(httpx.MockTransport(handler), token=None).exec("true")
 
