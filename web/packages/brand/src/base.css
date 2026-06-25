@@ -40,6 +40,10 @@ h1, h2, h3 {
 
 code, kbd, pre, .mono { font-family: var(--mono); }
 
+/* Inline links default to the cyan signal. Styled links (.nav-link, .tbl a)
+   carry their own color via higher-specificity class rules and are unaffected. */
+a { color: var(--cyan); }
+
 /* Surfaces: elevation by the lightness ladder + a single hairline. Never a
    hairline AND a shadow on the same element. */
 .card {
