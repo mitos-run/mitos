@@ -62,11 +62,11 @@ func (d Decision) String() string {
 //     "evilacme.com" does NOT match an entry "acme.com". Empty allowlist entries
 //     are skipped so a stray "" can never match.
 func Authorize(route Route, id *Identity, clientIP net.IP) Decision {
-	// 1. NETWORK check.
-	if len(route.Network) > 0 {
-		if !ipInCIDRs(clientIP, route.Network) {
-			return DenyForbidden
-		}
+	// 1. NETWORK check. The proxy also runs this gate early (before any
+	// forwardAuth subrequest or cookie mint); the check here is idempotent so
+	// Authorize stays self-contained and correct when called in isolation.
+	if !NetworkAllows(route, clientIP) {
+		return DenyForbidden
 	}
 
 	// 2. TIER check.
@@ -131,6 +131,20 @@ func emailDomain(email string) string {
 		return ""
 	}
 	return strings.ToLower(email[idx+1:])
+}
+
+// NetworkAllows reports whether clientIP passes route's network layer: it
+// returns true when route.Network is empty (no restriction) or when clientIP
+// falls within at least one of the listed CIDRs. It fails closed: a nil or
+// out-of-range IP against a non-empty allowlist returns false. The proxy calls
+// this as an EARLY gate (before the forwardAuth subrequest and before any
+// cookie mint) so an out-of-network client is rejected before any outbound
+// side effect; Authorize calls it again (idempotent).
+func NetworkAllows(route Route, clientIP net.IP) bool {
+	if len(route.Network) == 0 {
+		return true
+	}
+	return ipInCIDRs(clientIP, route.Network)
 }
 
 // ipInCIDRs reports whether ip is contained in any of the given CIDR strings.

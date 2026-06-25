@@ -137,6 +137,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Network gate FIRST (spec order: network -> forwardAuth -> tier). An
+	// out-of-network client is rejected before any outbound forwardAuth
+	// subrequest or any cookie issuance, so the network layer cannot be used
+	// for SSRF amplification and a constraint is never outlived by a session.
+	if !NetworkAllows(route, clientIP) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	var id *Identity
 	var forwardAuthHeaders http.Header
 
@@ -229,6 +238,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case DenyUnauthenticated:
 		p.redirectToLogin(w, r, label)
 		return
+	default:
+		// Defense in depth: a future Decision value must never fall through to
+		// Allow. Fail closed.
+		p.log.Info("unexpected authorization decision", "label", label, "decision", decision.String())
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 
 	p.reverseProxy(w, r, route, forwardAuthHeaders)
@@ -256,13 +271,11 @@ func (p *Proxy) serveAuthCallback(w http.ResponseWriter, r *http.Request, label 
 		return
 	}
 
-	// Validate the redirect path: it must begin with "/" and must not begin
-	// with "//" (which would allow a scheme-relative URL to escape to an
-	// attacker host). Default to "/" if absent or invalid.
-	redirectPath := r.URL.Query().Get("path")
-	if !strings.HasPrefix(redirectPath, "/") || strings.HasPrefix(redirectPath, "//") {
-		redirectPath = "/"
-	}
+	// Validate the redirect path as a safe same-origin relative path. This
+	// rejects scheme-relative ("//evil.com"), backslash-authority ("/\evil.com",
+	// which browsers normalize to "//evil.com"), and CRLF header-injection
+	// attempts. Anything unsafe collapses to "/".
+	redirectPath := safeRelPath(r.URL.Query().Get("path"))
 
 	// Set the per-app __Host- session cookie.
 	sessionVal, err := p.sessions.Encode(id, time.Now().Add(time.Hour))
@@ -400,6 +413,20 @@ func parseClientIP(addr string) net.IP {
 		return net.ParseIP(addr)
 	}
 	return net.ParseIP(host)
+}
+
+// safeRelPath returns p if it is a safe same-origin relative path, else "/".
+// It rejects:
+//   - empty or non-slash-leading paths (not a relative path),
+//   - "//..." scheme-relative URLs (resolve to an attacker authority),
+//   - any backslash (browsers normalize "\" to "/" in the authority, so
+//     "/\evil.com" becomes "//evil.com"),
+//   - CR or LF (header-injection / response-splitting).
+func safeRelPath(p string) string {
+	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsAny(p, "\\\r\n") {
+		return "/"
+	}
+	return p
 }
 
 // extractToken returns the preview token from the "token" query parameter or a

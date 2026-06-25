@@ -614,3 +614,94 @@ func TestProxyForwardAuthDeny(t *testing.T) {
 		t.Fatalf("forwardAuth deny: status=%d, want 401", rec.Code)
 	}
 }
+
+// TestProxyAuthCallbackBackslashOpenRedirect: a backslash in the path is a
+// scheme-relative open redirect (browsers normalize \ to / in the authority).
+// Each variant must redirect to "/".
+func TestProxyAuthCallbackBackslashOpenRedirect(t *testing.T) {
+	backend, _, _ := newForkdBackend(t)
+	rt := NewRouteTable()
+	rt.Upsert(privateRoute(strings.TrimPrefix(backend.URL, "http://")))
+	p, gs, _ := newAuthProxy(t, rt)
+
+	id := Identity{Sub: "u1", Email: "alice@acme.com", EmailVerified: true, OrgIDs: []string{"acme"}}
+
+	// rawPath is the percent-encoded value placed directly in the query string,
+	// so the handler's r.URL.Query().Get("path") decodes it once, exactly as a
+	// browser-supplied query would arrive. This exercises the DECODED value the
+	// defense must reject.
+	cases := []struct {
+		name    string
+		rawPath string
+	}{
+		// Backslash authority escape: the decoded "/\evil.com" normalizes to
+		// "//evil.com" in browsers.
+		{"backslash", "%2F%5Cevil.com"},
+		// URL-encoded backslash that decodes to "/\evil.com".
+		{"encoded backslash", "/%5Cevil.com"},
+		// CRLF header injection attempt that decodes to "/app\r\nX:1".
+		{"crlf injection", "/app%0d%0aX:1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			grant, err := gs.Mint("myapp", id, time.Now().Add(30*time.Second))
+			if err != nil {
+				t.Fatalf("Mint grant: %v", err)
+			}
+			rawQuery := "grant=" + url.QueryEscape(grant) + "&path=" + tc.rawPath
+			req := httptest.NewRequest(http.MethodGet, "/__mitos_auth/cb?"+rawQuery, nil)
+			req.Host = "myapp." + testDomain
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusFound {
+				t.Fatalf("cb status=%d, want 302; body=%s", rec.Code, rec.Body.String())
+			}
+			loc := rec.Header().Get("Location")
+			if loc != "/" {
+				t.Fatalf("open redirect defense (%s): got %q, want /", tc.name, loc)
+			}
+		})
+	}
+}
+
+// TestProxyNetworkGateBeforeForwardAuth: an out-of-CIDR client on a forwardAuth
+// route is 403'd before any outbound subrequest. The forwardAuth server must
+// never be called (SSRF amplification defense + spec order network->forwardAuth).
+func TestProxyNetworkGateBeforeForwardAuth(t *testing.T) {
+	backend, _, _ := newForkdBackend(t)
+
+	var authCalls int
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer authServer.Close()
+
+	rt := NewRouteTable()
+	rt.Upsert(Route{
+		Label:          "faapp",
+		SandboxID:      "sbx-fa",
+		NodeEndpoint:   strings.TrimPrefix(backend.URL, "http://"),
+		Port:           8000,
+		Token:          "tok",
+		Sharing:        "authenticated",
+		ForwardAuthURL: authServer.URL,
+		// Allow only an unrelated network; the test client is 192.0.2.1.
+		Network: []string{"10.0.0.0/8"},
+	})
+	p, _, _ := newAuthProxy(t, rt)
+
+	req := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req.Host = "faapp." + testDomain
+	req.RemoteAddr = "192.0.2.1:5555" // outside 10.0.0.0/8
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("out-of-network client: status=%d, want 403", rec.Code)
+	}
+	if authCalls != 0 {
+		t.Fatalf("forwardAuth server was called %d times; out-of-network client must be 403'd before any subrequest", authCalls)
+	}
+}
