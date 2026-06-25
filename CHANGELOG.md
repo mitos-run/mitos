@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.2.0](https://github.com/mitos-run/mitos/compare/v1.1.0...v1.2.0) (2026-06-25)
+
+
+### Features
+
+* **console:** B3d-1 per-verb permission enforcement and custom roles [SECURITY REVIEW REQUIRED] ([#395](https://github.com/mitos-run/mitos/issues/395)) ([c949f55](https://github.com/mitos-run/mitos/commit/c949f55f1f2374501dbeaab77186fd78bad5297a))
+* **console:** Phase B2a Sandboxes (list + detail tabs + fork-tree deep-link) ([#361](https://github.com/mitos-run/mitos/issues/361)) ([b1167ed](https://github.com/mitos-run/mitos/commit/b1167ed87dd8c7e7726ef08fc468ab3ce9e1c0b3))
+* **console:** Phase B2b views (keys, secrets, usage, audit, templates, billing) ([#363](https://github.com/mitos-run/mitos/issues/363)) ([d1cd113](https://github.com/mitos-run/mitos/commit/d1cd1133f689b19b724812f0562152dd4d991a68))
+* **console:** Phase B2c best-practice roles + role management + Projects ([#365](https://github.com/mitos-run/mitos/issues/365)) ([8985664](https://github.com/mitos-run/mitos/commit/89856643c7f0d37c0ce482bf1e08f25313f8b1cf))
+* **console:** Phase B2d account settings (profile, sessions, appearance) ([#368](https://github.com/mitos-run/mitos/issues/368)) ([16e7f3d](https://github.com/mitos-run/mitos/commit/16e7f3d64ab9d2817dd1a9953da6fd7787a14143))
+* **console:** Phase B3a Trust and compliance surface ([#370](https://github.com/mitos-run/mitos/issues/370)) ([2631ad7](https://github.com/mitos-run/mitos/commit/2631ad7da2d3e608671df09b5dfb6b22de282b3c))
+* **console:** Phase B3b audit retention, NDJSON export, and SIEM sinks ([#375](https://github.com/mitos-run/mitos/issues/375)) ([c37a03f](https://github.com/mitos-run/mitos/commit/c37a03f839c6fe346e33b8b5502c7341b89e46e4))
+* **console:** Phase B3c data-retention policies and legal hold ([#378](https://github.com/mitos-run/mitos/issues/378)) ([9563eb4](https://github.com/mitos-run/mitos/commit/9563eb4af5d274cd6336e9f3d779a6a9a01feb74))
+* **console:** shell part 2 (nav regroup, operational Overview home) ([#387](https://github.com/mitos-run/mitos/issues/387)) ([ac83f7e](https://github.com/mitos-run/mitos/commit/ac83f7eb73141fd65241d53ba235474f34837ac2))
+* **console:** shell part 3 (table search toolbar on list views) ([#389](https://github.com/mitos-run/mitos/issues/389)) ([c20db2d](https://github.com/mitos-run/mitos/commit/c20db2d5a5a2fef8530656b93c89385098a8017c))
+* **console:** shell upgrade for website continuity (brand, global top bar, page headers) ([#386](https://github.com/mitos-run/mitos/issues/386)) ([ed77355](https://github.com/mitos-run/mitos/commit/ed77355180cd9d5f97a91a3198de3f3e11e9b4eb))
+* **controller,tenant,usage:** stamp mitos.run/org from the trusted namespace + live OrgResolver ([#164](https://github.com/mitos-run/mitos/issues/164)) ([4747d97](https://github.com/mitos-run/mitos/commit/4747d97aeb6f0475ef7d25414f84c8bb2c53b096))
+* **daemon:** audit + exec timeout ceiling on the Connect runtime path ([#358](https://github.com/mitos-run/mitos/issues/358), [#216](https://github.com/mitos-run/mitos/issues/216)) ([#388](https://github.com/mitos-run/mitos/issues/388)) ([7e45ec0](https://github.com/mitos-run/mitos/commit/7e45ec0f735b814a748d754c642e0f46d400075c))
+* **daemon:** bidi Exec (PTY) over a Connect WebSocket transport ([#358](https://github.com/mitos-run/mitos/issues/358) Task 1) ([#379](https://github.com/mitos-run/mitos/issues/379)) ([3c6227d](https://github.com/mitos-run/mitos/commit/3c6227d790c23d7acca74de74a29639a43b415ff))
+* **daemon:** deprecate the legacy /v1 runtime endpoints in favor of Connect ([#24](https://github.com/mitos-run/mitos/issues/24)) ([de0a161](https://github.com/mitos-run/mitos/commit/de0a161d6546677311cec7bda18d86a713a25f24))
+* **expose:** authenticated SSE-safe guest HTTP proxy (Mitos Expose slice 1) ([#384](https://github.com/mitos-run/mitos/issues/384)) ([175f4e0](https://github.com/mitos-run/mitos/commit/175f4e03fbfdb03a8aab571c9fb793258e321dc0))
+* **expose:** controller route-sync reconciler (slice 2b) ([#394](https://github.com/mitos-run/mitos/issues/394)) ([855bedc](https://github.com/mitos-run/mitos/commit/855bedc831bd423abf3cf4ba4aa2da3be8451055))
+* **expose:** edge proxy single-label subdomains and forkd backend (slice 2a) ([#392](https://github.com/mitos-run/mitos/issues/392)) ([09f117e](https://github.com/mitos-run/mitos/commit/09f117e9997f5da60d9e360224948a091f3f2609))
+* **expose:** wildcard cert, post-quantum TLS guardrail, and deploy the proxy (slice 3) ([#396](https://github.com/mitos-run/mitos/issues/396)) ([9f5856c](https://github.com/mitos-run/mitos/commit/9f5856c0118a7a1437130a47daa314f912e82026))
+* **firecracker:** assert and fail closed on VMM seccomp enforcement ([#353](https://github.com/mitos-run/mitos/issues/353)) ([df139b1](https://github.com/mitos-run/mitos/commit/df139b112ecb4810f33384560e51896c8a52be0c))
+* **forkd:** drop privileged, run the builder under the explicit jailer capability set ([#352](https://github.com/mitos-run/mitos/issues/352)) ([915eb59](https://github.com/mitos-run/mitos/commit/915eb5938757c91128c6c2bf4db33e5439b78b32))
+* **kubectl-mitos:** run exec and guest vitals over Connect, retire /v1 ([#358](https://github.com/mitos-run/mitos/issues/358)) ([#385](https://github.com/mitos-run/mitos/issues/385)) ([dd5d3d6](https://github.com/mitos-run/mitos/commit/dd5d3d690a0d6c28ff7d45ecac82046527b74da9))
+* **mcp:** run the mitos-mcp backend exec/files over Connect ([#358](https://github.com/mitos-run/mitos/issues/358)) ([#393](https://github.com/mitos-run/mitos/issues/393)) ([4a7bcc3](https://github.com/mitos-run/mitos/commit/4a7bcc38a42ca76fbd1307d027c862a8a0bb3362))
+* **observability:** guest Vitals + metering metrics + fork trace tail ([#164](https://github.com/mitos-run/mitos/issues/164) Phase 1) ([#377](https://github.com/mitos-run/mitos/issues/377)) ([4888df1](https://github.com/mitos-run/mitos/commit/4888df1934041734f25a3662005d0ce7c331587b))
+* **sdk/go:** run exec over the Connect runtime protocol, add streaming ExecStream ([#358](https://github.com/mitos-run/mitos/issues/358)) ([2e2ea1f](https://github.com/mitos-run/mitos/commit/2e2ea1f8b81d029b882907b7f061ade44c005e3a))
+* **sdk/python:** run PTY over the Connect WebSocket transport, retire /v1/pty ([#358](https://github.com/mitos-run/mitos/issues/358)) ([#380](https://github.com/mitos-run/mitos/issues/380)) ([b5a2e9e](https://github.com/mitos-run/mitos/commit/b5a2e9ec395c52f513719ac2d8527da3574d8f09))
+* **sdk/typescript:** run PTY over the Connect WebSocket transport, retire /v1/pty ([#358](https://github.com/mitos-run/mitos/issues/358)) ([#381](https://github.com/mitos-run/mitos/issues/381)) ([684342e](https://github.com/mitos-run/mitos/commit/684342e5fcd7a0f5240b6b4b1d0c7ef504d3c3b0))
+* **sdk:** migrate Ruby, Java, Rust exec to the Connect runtime protocol ([#358](https://github.com/mitos-run/mitos/issues/358)) ([6a1541f](https://github.com/mitos-run/mitos/commit/6a1541f76a843bab69f61307a98de1dc8c2a399e))
+* **sdk:** move the Python and TypeScript runtime surface onto Connect ([#358](https://github.com/mitos-run/mitos/issues/358)) ([#376](https://github.com/mitos-run/mitos/issues/376)) ([1a30451](https://github.com/mitos-run/mitos/commit/1a3045186c126d5b3d75b0591091556e0e86b60e))
+* **usage:** live metering scraper + org attribution spine ([#164](https://github.com/mitos-run/mitos/issues/164)) ([fb8603f](https://github.com/mitos-run/mitos/commit/fb8603f8ed31ade8d5292ca5acf02bf67054e9ac))
+* **usage:** live multi-node metering scraper + collector loop + per-org usage metric ([#164](https://github.com/mitos-run/mitos/issues/164)) ([0565f42](https://github.com/mitos-run/mitos/commit/0565f42a1bd1d73b16b5a40fc692deee529a9f5d))
+
+
+### Bug Fixes
+
+* **chart:** emit console OIDC redirect URL and add console.extraEnv ([#403](https://github.com/mitos-run/mitos/issues/403)) ([bd6cb64](https://github.com/mitos-run/mitos/commit/bd6cb64aa68ec0be0211be11606461df7350d3c4)), closes [#398](https://github.com/mitos-run/mitos/issues/398)
+* **ci:** boot a microVM before asserting VMM seccomp ([#353](https://github.com/mitos-run/mitos/issues/353)) ([f20fb42](https://github.com/mitos-run/mitos/commit/f20fb42a8f97ca0cb8e192ddbedbaa751d5c3549))
+* **usage:** store-fed cumulative usage metric + bounded record store + scrape timeout ([#164](https://github.com/mitos-run/mitos/issues/164)) ([e91f9ae](https://github.com/mitos-run/mitos/commit/e91f9aee10de099e51ec8780cd71e113f22b4f9a))
+
 ## [1.1.0](https://github.com/mitos-run/mitos/compare/v1.0.0...v1.1.0) (2026-06-25)
 
 All six SDKs (Python, TypeScript, Go, Ruby, Rust, Java) now have Kubernetes cluster mode (an AgentRun that drives the mitos.run/v1 CRDs through the Kubernetes API), with byte-for-byte identical default-pool naming. The Go, Ruby, Rust, and Java SDKs add a thin Kubernetes REST client built on each language standard library (no heavy client dependency), so direct mode stays unchanged and the dependency-free SDKs stay dependency-free.
