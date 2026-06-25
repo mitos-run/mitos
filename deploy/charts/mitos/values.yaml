@@ -341,13 +341,13 @@ expose:
   # expose or expose.oidc:
   #   signing-secret      (MITOS_PREVIEW_SECRET: at least 16 random bytes)
   #   admin-token         (MITOS_EXPOSE_ADMIN_TOKEN: at least 16 random bytes)
-  #   grant-secret        (MITOS_EXPOSE_GRANT_SECRET: at least 32 random bytes, OIDC only)
-  #   session-secret      (MITOS_EXPOSE_SESSION_SECRET: at least 32 random bytes, OIDC only)
-  #   sso-secret          (MITOS_EXPOSE_SSO_SECRET: at least 32 random bytes, OIDC only)
-  #   state-secret        (MITOS_EXPOSE_STATE_SECRET: at least 32 random bytes, OIDC only)
+  #   grant-secret        (MITOS_EXPOSE_GRANT_SECRET: at least 16 random bytes; 32 recommended, OIDC only)
+  #   session-secret      (MITOS_EXPOSE_SESSION_SECRET: at least 16 random bytes; 32 recommended, OIDC only)
+  #   sso-secret          (MITOS_EXPOSE_SSO_SECRET: at least 16 random bytes; 32 recommended, OIDC only)
+  #   state-secret        (MITOS_EXPOSE_STATE_SECRET: at least 16 random bytes; 32 recommended, OIDC only)
   #   oidc-client-secret  (MITOS_EXPOSE_OIDC_CLIENT_SECRET: from your IdP, OIDC only)
   #   resolve-token       (MITOS_EXPOSE_RESOLVE_TOKEN / MITOS_IDENTITY_RESOLVE_TOKEN:
-  #                        shared between the proxy and the console; at least 32 random bytes)
+  #                        shared between the proxy and the console; at least 16 random bytes; 32 recommended)
   # Secret VALUES are NEVER inlined in the chart; they are always mounted via
   # secretKeyRef. Generate and apply the Secret out of band:
   #   kubectl create secret generic mitos-expose -n mitos \

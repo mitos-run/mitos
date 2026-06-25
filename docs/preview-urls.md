@@ -418,8 +418,12 @@ For a self-hosted deployment without the full account service:
   `X-Auth-Request-Email`, `X-Auth-Request-User`, and `X-Auth-Request-Groups`
   headers from the subrequest response as the caller identity (client-supplied
   values with those names are stripped before the subrequest).
-- The `org` and `private` tiers fall back to the OIDC `groups` claim when no
-  resolve endpoint is configured.
+- The self-host org source today is the forwardAuth path (the proxy reads
+  `X-Auth-Request-Groups` from the subrequest response) or, when OIDC is wired,
+  the SaaS resolve endpoint; deriving orgs directly from an OIDC `groups` claim
+  is a documented follow-up (the `GroupsToOrgs` seam exists in
+  `internal/preview/oidc.go` but is not yet wired from config in
+  `cmd/preview-proxy/main.go`).
 
 ### OIDC honest scope
 

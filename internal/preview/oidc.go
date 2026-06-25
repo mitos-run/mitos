@@ -310,7 +310,18 @@ func (a *AuthOrigin) mintGrantAndRedirect(w http.ResponseWriter, r *http.Request
 // first; on ErrResolveDisabled (or nil Resolver) it falls back to GroupsToOrgs.
 // If GroupsToOrgs is also nil the identity carries empty orgs, which is safe
 // (the enforcement pipeline will reject org/private tier checks without orgs).
+//
+// Verified-email invariant: if the IdP did not verify the email (EmailVerified
+// is false) the caller receives no org memberships. The identity is still
+// "authenticated" (the token verified), but the org/private tiers will 403
+// because OrgIDs is empty. The audience domain selector is also unaffected
+// because Authorize already gate-checks EmailVerified independently.
 func (a *AuthOrigin) resolveOrgs(ctx context.Context, claims saas.OIDCClaims) ([]string, error) {
+	if !claims.EmailVerified {
+		// Unverified email: return empty orgs without an error. The caller is
+		// authenticated but belongs to no org; org/private routes 403 correctly.
+		return nil, nil
+	}
 	if a.Resolver != nil {
 		_, orgIDs, err := a.Resolver.Resolve(ctx, claims.Email)
 		if err == nil {

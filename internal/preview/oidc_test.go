@@ -402,6 +402,76 @@ func TestServeCallback_ResolverDisabled_UsesGroupsToOrgs(t *testing.T) {
 	}
 }
 
+// TestServeCallback_UnverifiedEmail_EmptyOrgIDs verifies that a callback where the
+// IdP emits email_verified=false yields a grant/identity with empty OrgIDs. The
+// request still succeeds (the identity is authenticated), but a subsequent
+// org/private Authorize call would 403 because no org memberships are resolved.
+// This closes the path where an attacker registers a matching email at an IdP
+// that does not enforce ownership before issuing tokens and uses the unverified
+// address to gain org access.
+func TestServeCallback_UnverifiedEmail_EmptyOrgIDs(t *testing.T) {
+	// email_verified=false: the resolver and GroupsToOrgs must both be bypassed.
+	claims := saas.OIDCClaims{Subject: "sub-unverified", Email: "attacker@example.com", EmailVerified: false}
+	ex := fakeOIDCExchanger{authURL: "https://idp.example/auth", rawIDToken: "raw-id-token"}
+	v := fakeOIDCVerifier{claims: claims}
+
+	// Wire both a resolver (which would return orgs) and a GroupsToOrgs fallback
+	// (which would also return orgs). Neither must fire when EmailVerified is false.
+	resolverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"accountId": "acct-attacker",
+			"orgIds":    []string{"org-should-not-be-granted"},
+		})
+	}))
+	defer resolverSrv.Close()
+
+	resolver := NewResolver(resolverSrv.URL, "resolver-token")
+	ao := newTestAuthOrigin(t, v, ex, resolver, func(_ saas.OIDCClaims) []string {
+		return []string{"groups-org-should-not-be-granted"}
+	})
+
+	statePl := stateCookiePayload{RD: "openclaw", Path: "/"}
+	stateRaw, _ := json.Marshal(statePl)
+	stateVal, err := ao.StateCodec.Encode(
+		Identity{Sub: string(stateRaw)},
+		time.Now().Add(10*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("encode state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=authcode&state="+url.QueryEscape(stateVal), nil)
+	req.AddCookie(&http.Cookie{Name: ssoStateCookieName, Value: stateVal})
+	w := httptest.NewRecorder()
+	ao.ServeCallback(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status: got %d want 302; unverified email should still complete the flow (authenticated), body: %s", resp.StatusCode, w.Body.String())
+	}
+
+	u, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	grant := u.Query().Get("grant")
+	gotID, err := ao.Grants.Verify(grant, "openclaw", time.Now())
+	if err != nil {
+		t.Fatalf("Grants.Verify: %v", err)
+	}
+	if len(gotID.OrgIDs) != 0 {
+		t.Errorf("expected empty OrgIDs for unverified email; got %v", gotID.OrgIDs)
+	}
+	// Confirm the identity still carries the correct email and EmailVerified=false.
+	if gotID.Email != claims.Email {
+		t.Errorf("email: got %q want %q", gotID.Email, claims.Email)
+	}
+	if gotID.EmailVerified {
+		t.Error("EmailVerified should be false in the grant identity for an unverified email")
+	}
+}
+
 // TestServeCallback_VerifyError_Fails verifies that a token verifier error causes a
 // non-200 response and no redirect (fail closed).
 func TestServeCallback_VerifyError_Fails(t *testing.T) {
