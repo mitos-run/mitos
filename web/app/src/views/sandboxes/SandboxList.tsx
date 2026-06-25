@@ -2,12 +2,18 @@
 // sandbox with an optimistic terminate action (the row disappears instantly and
 // rolls back if the server rejects). Each sandbox id links to its detail view.
 import { Link } from '@tanstack/react-router'
-import { StatusDot } from '@mitos/brand'
+import { StatusDot, Entity } from '@mitos/brand'
 import { useSandboxes, useTerminateSandbox } from '../../data/sandboxes'
 import { fmtBytes } from '../../api'
 import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
 import { useToast } from '../../ui/Toast'
+
+function phaseEntity(phase: string): Entity {
+  if (phase === 'Running') return 'ready'
+  if (phase === 'Paused') return 'warn'
+  return 'parent'
+}
 
 export function SandboxList() {
   const { data: rows = [], isLoading, isError } = useSandboxes()
@@ -52,7 +58,7 @@ export function SandboxList() {
     <section>
       <h2>Sandboxes</h2>
       <div style={{ overflowX: 'auto' }}>
-        <table className="tbl" aria-label="Sandboxes">
+        <table className="tbl" aria-label="Live sandboxes">
           <thead>
             <tr>
               <th scope="col">ID</th>
@@ -73,7 +79,7 @@ export function SandboxList() {
                 <td>{s.template}</td>
                 <td>{s.node}</td>
                 <td>
-                  <StatusDot entity={s.phase === 'Running' ? 'ready' : 'warn'} />
+                  <StatusDot entity={phaseEntity(s.phase)} />
                   {' '}{s.phase}
                 </td>
                 <td>{s.vcpus}</td>
