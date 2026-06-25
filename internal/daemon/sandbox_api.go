@@ -528,18 +528,25 @@ func (api *SandboxAPI) checkSandboxRegistered(sandboxID string) error {
 // callers are not broken.
 func (api *SandboxAPI) Handler() http.Handler {
 	jsonMux := http.NewServeMux()
-	jsonMux.HandleFunc("POST /v1/exec", api.handleExec)
-	jsonMux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
-	jsonMux.HandleFunc("POST /v1/run_code/stream", api.handleRunCodeStream)
-	jsonMux.HandleFunc("POST /v1/files/read", api.handleReadFile)
-	jsonMux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
-	jsonMux.HandleFunc("POST /v1/files/list", api.handleListDir)
-	jsonMux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
-	jsonMux.HandleFunc("POST /v1/files/remove", api.handleRemove)
+	// Runtime exec/files/run_code/vitals routes are SUPERSEDED by the Connect
+	// sandbox.v1.Sandbox protocol (issue #24); they carry a Deprecation note
+	// (deprecatedRuntimeNote) so callers learn the JSON runtime shape is the
+	// legacy path. They stay active (deprecated-but-working) until every SDK is on
+	// Connect (#358), then they are removed.
+	jsonMux.HandleFunc("POST /v1/exec", deprecatedRuntimeNote(api.handleExec))
+	jsonMux.HandleFunc("POST /v1/exec/stream", deprecatedRuntimeNote(api.handleExecStream))
+	jsonMux.HandleFunc("POST /v1/run_code/stream", deprecatedRuntimeNote(api.handleRunCodeStream))
+	jsonMux.HandleFunc("POST /v1/files/read", deprecatedRuntimeNote(api.handleReadFile))
+	jsonMux.HandleFunc("POST /v1/files/write", deprecatedRuntimeNote(api.handleWriteFile))
+	jsonMux.HandleFunc("POST /v1/files/list", deprecatedRuntimeNote(api.handleListDir))
+	jsonMux.HandleFunc("POST /v1/files/mkdir", deprecatedRuntimeNote(api.handleMkdir))
+	jsonMux.HandleFunc("POST /v1/files/remove", deprecatedRuntimeNote(api.handleRemove))
+	jsonMux.HandleFunc("POST /v1/vitals", deprecatedRuntimeNote(api.handleVitals))
+	// Lifecycle/management routes have NO Connect runtime successor and are NOT
+	// deprecated: they keep working unchanged.
 	jsonMux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
 	jsonMux.HandleFunc("POST /v1/pause", api.handlePause)
 	jsonMux.HandleFunc("POST /v1/resume", api.handleResume)
-	jsonMux.HandleFunc("POST /v1/vitals", api.handleVitals)
 
 	// Connect Sandbox service (issue #24, Task 3.2). The BearerInterceptor
 	// enforces the same per-sandbox bearer-token security as requireBearer, but
@@ -582,10 +589,28 @@ func (api *SandboxAPI) Handler() http.Handler {
 	// outer combines all three auth surfaces. The order of Handle calls matters:
 	// more specific prefixes (Connect, PTY) take precedence over the catch-all "/".
 	outer := http.NewServeMux()
-	outer.HandleFunc("GET /v1/pty", api.handlePty)
+	// The legacy PTY WebSocket is superseded by Connect Exec with PtyOptions
+	// (issue #24), so it carries the same Deprecation note as the other runtime
+	// routes (set on the upgrade handshake response).
+	outer.HandleFunc("GET /v1/pty", deprecatedRuntimeNote(api.handlePty))
 	outer.Handle(connectPath, connectHandler)
 	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
+}
+
+// deprecatedRuntimeNote wraps a legacy JSON /v1 runtime handler so its responses
+// carry the RFC 8594 Deprecation header and a Link to the Connect successor (the
+// sandbox.v1.Sandbox protocol, issue #24). The runtime exec/files/run_code/pty/
+// vitals surface is superseded by the Connect protocol; lifecycle routes
+// (set_timeout, pause, resume) have no Connect successor and are NOT wrapped. The
+// headers are set BEFORE delegating, so a caller is told of the deprecation
+// regardless of the handler's status code (including auth failures and errors).
+func deprecatedRuntimeNote(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Link", `</sandbox.v1.Sandbox>; rel="successor-version"; title="Connect runtime protocol (issue #24)"`)
+		next(w, r)
+	}
 }
 
 // connectLookupToken is the token lookup function passed to BearerInterceptor
