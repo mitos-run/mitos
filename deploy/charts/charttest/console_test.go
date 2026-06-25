@@ -98,6 +98,30 @@ func TestGatewayGatedByEnabled(t *testing.T) {
 	}
 }
 
+// TestConsoleOIDCRedirectURL asserts the chart emits MITOS_CONSOLE_OIDC_REDIRECT_URL
+// when console.oidc.redirectURL is set. The console sends this value as the OAuth
+// redirect_uri; without it the IdP rejects the login, so OIDC is unusable via the
+// chart.
+func TestConsoleOIDCRedirectURL(t *testing.T) {
+	out := render(t, "console.oidc.redirectURL=https://app.mitos.run/auth/callback")
+	mustEnv(t, out, "MITOS_CONSOLE_OIDC_REDIRECT_URL", "https://app.mitos.run/auth/callback")
+}
+
+// TestConsoleOIDCRedirectURLOmittedByDefault asserts the redirect env is absent
+// when redirectURL is unset, so installs that do not use OIDC are unaffected.
+func TestConsoleOIDCRedirectURLOmittedByDefault(t *testing.T) {
+	if strings.Contains(render(t), "MITOS_CONSOLE_OIDC_REDIRECT_URL") {
+		t.Fatal("MITOS_CONSOLE_OIDC_REDIRECT_URL rendered when console.oidc.redirectURL is unset")
+	}
+}
+
+// TestConsoleExtraEnv asserts arbitrary console.extraEnv entries pass through, so
+// operators can inject env the chart does not model.
+func TestConsoleExtraEnv(t *testing.T) {
+	out := render(t, "console.extraEnv[0].name=MITOS_CONSOLE_CUSTOM", "console.extraEnv[0].value=on")
+	mustEnv(t, out, "MITOS_CONSOLE_CUSTOM", "on")
+}
+
 func mustContain(t *testing.T, out, want string) {
 	t.Helper()
 	if !strings.Contains(out, want) {

@@ -250,6 +250,15 @@ console:
     clientID: ""
     # Name of an existing Secret with key "client-secret". Empty omits it.
     clientSecretRef: ""
+    # The OAuth redirect_uri the console sends to the IdP and that the IdP must
+    # have registered. The console mounts its callback at /auth/callback, so this
+    # is normally https://<console-host>/auth/callback. Empty omits the env var
+    # (installs without OIDC are unaffected); when OIDC is configured this MUST be
+    # set or the login flow fails with an empty redirect_uri.
+    redirectURL: ""
+  # Extra env vars appended verbatim to the console container, for env the chart
+  # does not model (mirrors controller.extraEnv).
+  extraEnv: []
   # Secret-store providers advertised in capabilities and wired into the binary.
   secrets:
     kube:
