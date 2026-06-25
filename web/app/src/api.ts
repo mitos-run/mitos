@@ -40,6 +40,7 @@ export type SandboxView = {
   vcpus: number
   mem_bytes: number
   created_at: string
+  project_id?: string
 }
 
 export type ForkNode = {
@@ -148,6 +149,15 @@ export const api = {
   terminateSandbox: async (id: string) => {
     const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' })
     if (!r.ok && r.status !== 204) throw new Error(`terminate: ${r.status}`)
+  },
+  setSandboxProject: async (id: string, projectId: string) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/project`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    })
+    if (!r.ok) throw new Error(`set sandbox project: ${r.status}`)
   },
   sandboxLogs: async (id: string) => {
     const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/logs`, { credentials: 'same-origin' })
