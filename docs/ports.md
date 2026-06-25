@@ -101,3 +101,14 @@ These are explicitly out of scope here:
   `SandboxPool.spec.template` / `Sandbox`).
 - Auth on the forward path (a token gate on the host listener).
 - UDP forwarding (this slice is TCP only).
+
+## Authenticated guest HTTP proxy (Mitos Expose)
+
+`GET|POST /v1/sandboxes/{id}/expose/{port}/<sub-path>` reverse-proxies an HTTP
+request to the guest's `127.0.0.1:<port>` over the vsock PortForward tunnel.
+Unlike the raw `/forward` socket tunnel, this path speaks HTTP, streams the
+response immediately (Server-Sent-Events safe, no buffering), and is gated by
+the per-sandbox bearer token on forkd. On the standalone sandbox-server it
+inherits the loopback tokenless trust model. The guest dial is forced to
+loopback by the guest agent; the host never derives the dial target from request
+input. Each request uses its own tunnel and guest TCP connection.
