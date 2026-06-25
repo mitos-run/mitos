@@ -105,6 +105,56 @@ func newExposeTestAPI(t *testing.T, backendAddr string) *SandboxAPI {
 	return api
 }
 
+// TestHandleExposeStreamsSSEEndToEnd proves the full mounted route streams an SSE
+// response incrementally: an authenticated request to handleExpose must deliver
+// the first event while the backend is still blocked mid-response. The backend
+// blocks on <-proceed after the first flush, so a buffering proxy can never
+// deliver the event before the response is complete. The 2s timeout is only a
+// fail-fast backstop; the discriminator is structural.
+func TestHandleExposeStreamsSSEEndToEnd(t *testing.T) {
+	proceed := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sse" {
+			http.Error(w, "bad path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: ev\n\n")
+		fl.Flush()
+		<-proceed // block: a buffering proxy can never deliver the first event before the response completes
+		_, _ = io.WriteString(w, "data: ev\n\n")
+		fl.Flush()
+	}))
+	defer backend.Close()
+	defer close(proceed) // unblock the backend goroutine on test exit
+
+	api := newExposeTestAPI(t, backend.Listener.Addr().String())
+	api.RegisterToken("sb1", "tok")
+
+	p := portOf(t, backend)
+	r := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/sb1/expose/"+itoa(p)+"/sse", nil)
+	r.SetPathValue("id", "sb1")
+	r.SetPathValue("port", itoa(p))
+	r.Header.Set("Authorization", "Bearer tok")
+	rec := newStreamRecorder()
+	defer rec.Close()
+	go api.handleExpose(rec, r)
+
+	br := bufio.NewReader(rec)
+	got := make(chan string, 1)
+	go func() { line, _ := br.ReadString('\n'); got <- line }()
+	select {
+	case line := <-got:
+		if line != "data: ev\n" {
+			t.Fatalf("first SSE line: got %q", line)
+		}
+		// streaming proven: the first event arrived while the backend is still blocked mid-response
+	case <-time.After(2 * time.Second):
+		t.Fatal("first SSE line did not arrive before the backend continued: proxy is buffering")
+	}
+}
+
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func portOf(t *testing.T, s *httptest.Server) int {
