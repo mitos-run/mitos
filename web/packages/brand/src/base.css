@@ -404,3 +404,102 @@ code, kbd, pre, .mono { font-family: var(--mono); }
     min-width: 600px;
   }
 }
+
+/* Form controls: field-1 background, hairline border, cyan focus ring, 44px
+   min-height to meet touch-target requirements. Radius matches .card tight. */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font: inherit;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--dur) var(--ease), outline-color var(--dur) var(--ease);
+  width: 100%;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-color: transparent;
+}
+
+input:not([type="checkbox"]):not([type="radio"])::placeholder,
+textarea::placeholder {
+  color: var(--ink-3);
+}
+
+/* Form row: label above control with consistent spacing. */
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+}
+
+.form-row label {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Status badge pills: semantic color tokens only. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--r-sm);
+  font-size: var(--step--1);
+  font-family: var(--mono);
+  border: 1px solid var(--hairline);
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
+.badge-ok {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.badge-warn {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* Ledger: reuses .tbl conventions; alias for clarity in billing/usage views. */
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--step--1);
+}
+.ledger th, .ledger td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--hairline);
+}
+.ledger th {
+  color: var(--ink-3);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ledger a { color: var(--cyan); text-decoration: none; }
+.ledger a:hover { text-decoration: underline; }
+
+/* Mobile: forms stack naturally (already column); tables scroll horizontally. */
+@media (max-width: 768px) {
+  .form-row {
+    width: 100%;
+  }
+
+  .ledger {
+    min-width: 600px;
+  }
+}
