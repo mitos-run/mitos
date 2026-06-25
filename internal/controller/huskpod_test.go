@@ -1099,3 +1099,60 @@ func TestBuildHuskPodPlacement(t *testing.T) {
 		t.Errorf("placement toleration mitos.run/tenant=acme not appended: %v", pod.Spec.Tolerations)
 	}
 }
+
+// TestBuildHuskPodStampsOrgFromNamespace is the billing trust boundary (issue
+// #164). The org label on a husk pod is the metering attribution key, so it MUST
+// be derived from the TRUSTED per-org namespace the control plane placed the pool
+// in (mitos-org-<id>), never from client input. The cases prove:
+//   - a pool in mitos-org-acme yields a husk pod labeled mitos.run/org=acme;
+//   - a pool in a non-org namespace (self-host single-tenant) carries NO org
+//     label (it stays unattributed rather than being forced into a bogus org);
+//   - a CLIENT-SET mitos.run/org on the input pool is IGNORED: the controller
+//     overwrites it with the namespace-derived org, so a tenant cannot bill
+//     another org by setting the label.
+func TestBuildHuskPodStampsOrgFromNamespace(t *testing.T) {
+	const orgLabel = "mitos.run/org"
+
+	// A pool builder with no Client: buildHuskPod skips the pool owner ref when
+	// Client is nil, so the org-label stamp is exercised without a live cluster.
+	r := &controller.SandboxPoolReconciler{}
+
+	t.Run("org namespace stamps the namespace-derived org", func(t *testing.T) {
+		pool := &v1.SandboxPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "mitos-org-acme"},
+			Spec:       v1.SandboxPoolSpec{Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"}},
+		}
+		pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
+		if got := pod.Labels[orgLabel]; got != "acme" {
+			t.Errorf("org label = %q, want acme (derived from namespace mitos-org-acme)", got)
+		}
+	})
+
+	t.Run("non-org namespace leaves the pod unattributed", func(t *testing.T) {
+		pool := &v1.SandboxPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+			Spec:       v1.SandboxPoolSpec{Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"}},
+		}
+		pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
+		if got, ok := pod.Labels[orgLabel]; ok {
+			t.Errorf("org label = %q, want NO org label for a self-host non-org namespace", got)
+		}
+	})
+
+	t.Run("client-set org label is ignored (trust boundary)", func(t *testing.T) {
+		// The input pool carries an attacker-controlled org label; the namespace
+		// is mitos-org-acme, so the pod MUST be attributed to acme, not evil.
+		pool := &v1.SandboxPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "p",
+				Namespace: "mitos-org-acme",
+				Labels:    map[string]string{orgLabel: "evil"},
+			},
+			Spec: v1.SandboxPoolSpec{Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"}},
+		}
+		pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
+		if got := pod.Labels[orgLabel]; got != "acme" {
+			t.Errorf("org label = %q, want acme (client-set %q must be ignored)", got, "evil")
+		}
+	})
+}
