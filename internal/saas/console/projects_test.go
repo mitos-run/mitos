@@ -39,4 +39,14 @@ func TestProjectCreate(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create status %d", rr.Code)
 	}
+	var p Project
+	if err := json.NewDecoder(rr.Body).Decode(&p); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if p.OrgID != "orgA" {
+		t.Errorf("created project OrgID = %q, want %q", p.OrgID, "orgA")
+	}
+	if p.Name != "gamma" {
+		t.Errorf("created project Name = %q, want %q", p.Name, "gamma")
+	}
 }
