@@ -70,6 +70,7 @@ func main() {
 	var usageCollectorInterval time.Duration
 	var vitalsSampler bool
 	var vitalsSamplerInterval time.Duration
+	var exposeProxyAdminURL string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,6 +94,7 @@ func main() {
 	flag.DurationVar(&usageCollectorInterval, "usage-collector-interval", 60*time.Second, "Interval between usage metering scrapes when --usage-collector is set. Defaults to the usage window (60s). Only used when --usage-collector is on.")
 	flag.BoolVar(&vitalsSampler, "vitals-sampler", false, "Run the guest vitals sampler: on a fixed interval, scrape every forkd node's GET /v1/vitals/node, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, aggregate per (org, pool), and publish the mitos_guest_cpu_steal_percent, mitos_guest_mem_balloon_bytes, mitos_guest_mem_used_bytes, and mitos_guest_process_count Prometheus gauges. cpu_steal is the MAX across the bucket (the worst-starved sandbox); memory and process_count are SUMs (the fleet footprint). OFF by default so a self-host deployment without guest telemetry is unaffected; turn it on for hosted/multi-tenant. The path carries only ids (for org resolution), pool names, and numeric vitals plus the process-list length, never argv, env, process command lines, pids, or secret values.")
 	flag.DurationVar(&vitalsSamplerInterval, "vitals-sampler-interval", 60*time.Second, "Interval between guest vitals samples when --vitals-sampler is set. Defaults to the usage window (60s). Only used when --vitals-sampler is on.")
+	flag.StringVar(&exposeProxyAdminURL, "expose-proxy-admin-url", "", "Expose proxy admin endpoint base URL for route-sync (POST /internal/routes); empty disables")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -160,6 +162,11 @@ func main() {
 	// distribution by pull (every node builds its own snapshot). A credential:
 	// never logged.
 	peerToken := os.Getenv("FORKD_PEER_TOKEN")
+
+	// The expose proxy admin token used to authenticate route-sync POSTs to
+	// --expose-proxy-admin-url. Sourced from the environment (not a flag) so the
+	// token is never in the process argv and never logged.
+	exposeProxyAdminToken := os.Getenv("EXPOSE_PROXY_ADMIN_TOKEN")
 
 	poolControllerNamespace := os.Getenv("FORKD_NAMESPACE")
 	if poolControllerNamespace == "" {
@@ -297,6 +304,21 @@ func main() {
 	if err := wsReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "Workspace")
 		os.Exit(1)
+	}
+
+	if exposeProxyAdminURL != "" {
+		er := &controller.ExposeRouteReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Poster: controller.NewExposePoster(exposeProxyAdminURL, exposeProxyAdminToken),
+		}
+		if err := er.SetupWithManager(mgr); err != nil {
+			logger.Error(err, "unable to create controller", "controller", "ExposeRoute")
+			os.Exit(1)
+		}
+		logger.Info("expose route-sync enabled", "proxy", exposeProxyAdminURL)
+	} else {
+		logger.Info("expose route-sync disabled (set --expose-proxy-admin-url to enable)")
 	}
 
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
