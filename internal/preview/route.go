@@ -5,34 +5,47 @@ import (
 	"sync"
 )
 
-// previewLabel is the fixed label between the sandbox id and the base domain in
-// a preview hostname: <sandbox-id>.preview.<domain>.
-const previewLabel = "preview"
-
-// ParseHost extracts the sandbox id from a preview hostname of the form
-// <sandbox-id>.preview.<domain>. It strips any ":port", lowercases the host
-// (DNS is case insensitive), and requires the sandbox id to be a single label
-// (no embedded dots) directly left of the preview label. It returns ok=false
-// for any host that does not match, so the proxy can reject unknown vhosts.
-func ParseHost(host, domain string) (sandboxID string, ok bool) {
+// ParseHost extracts the single leftmost label from an expose hostname of the
+// form <label>.<domain>. It strips any ":port", lowercases (DNS is case
+// insensitive), and requires exactly one label to the left of the base domain
+// (no embedded dots), so a multi-label host is rejected. The label is an opaque
+// routing key; the caller resolves it against the route table. ok is false for
+// any host that does not match, so the proxy can reject unknown vhosts.
+func ParseHost(host, domain string) (label string, ok bool) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if host == "" || domain == "" {
 		return "", false
 	}
-	// Drop a trailing :port if present.
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {
 		host = host[:i]
 	}
-	suffix := "." + previewLabel + "." + domain
+	suffix := "." + domain
 	if !strings.HasSuffix(host, suffix) {
 		return "", false
 	}
-	id := host[:len(host)-len(suffix)]
-	if id == "" || strings.Contains(id, ".") {
+	label = host[:len(host)-len(suffix)]
+	if label == "" || strings.Contains(label, ".") {
 		return "", false
 	}
-	return id, true
+	return label, true
+}
+
+// reservedLabels are hostnames a tenant may never take: control-plane and
+// well-known names that would enable phishing or interception if served as an
+// untrusted app. The set is the proxy's defensive backstop; the controller also
+// rejects them at registration time (slice 2b).
+var reservedLabels = map[string]struct{}{
+	"www": {}, "app": {}, "api": {}, "console": {}, "gateway": {},
+	"admin": {}, "auth": {}, "login": {}, "account": {}, "mail": {},
+	"static": {}, "assets": {}, "cdn": {}, "status": {},
+}
+
+// IsReservedLabel reports whether label is reserved and must not route to a
+// tenant app.
+func IsReservedLabel(label string) bool {
+	_, ok := reservedLabels[strings.ToLower(label)]
+	return ok
 }
 
 // Route is a single preview backend entry: the sandbox id, its backend

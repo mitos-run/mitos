@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// MintURL builds the full signed preview URL a caller dials to reach a sandbox
-// port: https://<sandbox-id>.preview.<domain>/?token=<signed>. The token binds
+// MintURL builds the full signed expose URL a caller dials to reach a sandbox
+// port: https://<sandbox-id>.<domain>/?token=<signed>. The token binds
 // the sandbox id, the port, and the expiry; the host vhost selects the route.
 // This is the single mint point the controller / sandbox-server expose so the
 // SDK get_host(port) returns one well-formed signed URL. The returned URL
@@ -22,7 +22,7 @@ func MintURL(s *Signer, domain, sandboxID string, port int, expiresAt time.Time)
 	}
 	u := url.URL{
 		Scheme:   "https",
-		Host:     sandboxID + "." + previewLabel + "." + domain,
+		Host:     sandboxID + "." + domain,
 		Path:     "/",
 		RawQuery: url.Values{"token": {tok}}.Encode(),
 	}

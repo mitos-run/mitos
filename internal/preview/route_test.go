@@ -10,14 +10,14 @@ func TestParseHost(t *testing.T) {
 		wantID string
 		wantOK bool
 	}{
-		{"plain", "sb-abc.preview.example.com", "example.com", "sb-abc", true},
-		{"with port", "sb-abc.preview.example.com:8443", "example.com", "sb-abc", true},
-		{"uppercase host normalized", "SB-ABC.preview.Example.com", "example.com", "sb-abc", true},
-		{"wrong suffix", "sb-abc.preview.other.com", "example.com", "", false},
-		{"missing preview label", "sb-abc.example.com", "example.com", "", false},
-		{"empty sandbox id", ".preview.example.com", "example.com", "", false},
-		{"bare domain", "preview.example.com", "example.com", "", false},
-		{"extra labels in id rejected", "a.b.preview.example.com", "example.com", "", false},
+		{"plain", "sb-abc.example.com", "example.com", "sb-abc", true},
+		{"with port", "sb-abc.example.com:8443", "example.com", "sb-abc", true},
+		{"uppercase host normalized", "SB-ABC.Example.com", "example.com", "sb-abc", true},
+		{"wrong suffix", "sb-abc.other.com", "example.com", "", false},
+		{"extra labels rejected", "a.b.example.com", "example.com", "", false},
+		{"empty sandbox id", ".example.com", "example.com", "", false},
+		{"bare domain", "example.com", "example.com", "", false},
+		{"extra labels in id rejected", "a.b.c.example.com", "example.com", "", false},
 		{"empty host", "", "example.com", "", false},
 	}
 	for _, tc := range cases {
@@ -75,6 +75,42 @@ type fakeSource struct {
 }
 
 func (f fakeSource) ReadyRoutes() []ClaimState { return f.claims }
+
+func TestParseHostSingleLabel(t *testing.T) {
+	cases := []struct {
+		host, domain, want string
+		ok                 bool
+	}{
+		{"openclaw.mitos.run", "mitos.run", "openclaw", true},
+		{"8000-sbx1.mitos.run", "mitos.run", "8000-sbx1", true},
+		{"OpenClaw.Mitos.Run", "mitos.run", "openclaw", true},       // case-insensitive
+		{"openclaw.mitos.run:443", "mitos.run", "openclaw", true},   // strips port
+		{"a.b.mitos.run", "mitos.run", "", false},                   // two labels: reject
+		{"mitos.run", "mitos.run", "", false},                       // apex: no label
+		{"openclaw.evil.com", "mitos.run", "", false},               // wrong domain
+		{"", "mitos.run", "", false},
+		{"openclaw.sandbox.example.com", "sandbox.example.com", "openclaw", true}, // configurable domain
+	}
+	for _, c := range cases {
+		got, ok := ParseHost(c.host, c.domain)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ParseHost(%q,%q)=(%q,%v) want (%q,%v)", c.host, c.domain, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestIsReservedLabel(t *testing.T) {
+	for _, r := range []string{"www", "app", "api", "console", "admin", "auth", "login"} {
+		if !IsReservedLabel(r) {
+			t.Errorf("expected %q reserved", r)
+		}
+	}
+	for _, ok := range []string{"openclaw", "8000-sbx1", "myapp"} {
+		if IsReservedLabel(ok) {
+			t.Errorf("did not expect %q reserved", ok)
+		}
+	}
+}
 
 func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
 	rt := NewRouteTable()

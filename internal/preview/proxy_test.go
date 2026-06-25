@@ -46,7 +46,7 @@ func TestProxyForwardsToBackend(t *testing.T) {
 	p, s := newTestProxy(t, rt)
 
 	req := httptest.NewRequest(http.MethodGet, validURL(t, s, "sb-1", 8080, time.Hour), nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	req.URL.Path = "/app/page"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -81,7 +81,7 @@ func TestProxyRejectsNoRoute(t *testing.T) {
 	rt := NewRouteTable() // empty: no route for sb-1
 	p, s := newTestProxy(t, rt)
 	req := httptest.NewRequest(http.MethodGet, validURL(t, s, "sb-1", 8080, time.Hour), nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -94,7 +94,7 @@ func TestProxyRejectsMissingToken(t *testing.T) {
 	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.1:9091", Token: "t"})
 	p, _ := newTestProxy(t, rt)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -107,7 +107,7 @@ func TestProxyRejectsExpiredToken(t *testing.T) {
 	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.1:9091", Token: "t"})
 	p, s := newTestProxy(t, rt)
 	req := httptest.NewRequest(http.MethodGet, validURL(t, s, "sb-1", 8080, -time.Minute), nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -121,7 +121,7 @@ func TestProxyRejectsWrongSandboxToken(t *testing.T) {
 	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.1:9091", Token: "t"})
 	p, s := newTestProxy(t, rt)
 	req := httptest.NewRequest(http.MethodGet, validURL(t, s, "sb-2", 8080, time.Hour), nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -137,7 +137,7 @@ func TestProxyRejectsTamperedToken(t *testing.T) {
 	parts := strings.SplitN(good, ".", 2)
 	bad := mutate(parts[0]) + "." + parts[1]
 	req := httptest.NewRequest(http.MethodGet, "/?"+url.Values{"token": {bad}}.Encode(), nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -155,7 +155,7 @@ func TestProxyAcceptsBearerHeaderToken(t *testing.T) {
 	p, s := newTestProxy(t, rt)
 	tok, _ := s.Mint("sb-1", 8080, time.Now().Add(time.Hour))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Host = "sb-1.preview.example.com"
+	req.Host = "sb-1.example.com"
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
