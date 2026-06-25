@@ -40,6 +40,7 @@ on:
       # the example's agent + fork engine.
       - 'cmd/sandbox-server/**'
       - 'sdk/python/**'
+      - 'sdk/go/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -808,6 +809,99 @@ jobs:
 
           echo "================================"
           echo "  SDK direct-mode example proven end to end on a real KVM sandbox-server"
+          echo "================================"
+
+      # Go SDK direct-mode example over the Connect runtime protocol (issue #358).
+      # The Go SDK execs over the Connect sandbox.v1.Sandbox/ExecStream RPC (not
+      # the retired /v1/exec); its unit tests drive a faithful fake server, and
+      # THIS phase proves the dependency-free, hand-rolled Connect client works
+      # end to end against the REAL connect-go server with a REAL guest VM,
+      # exactly as the Python phase above proves the Python client. It builds and
+      # runs sdk/go/examples/direct (buffered Exec + streaming ExecStream) against
+      # a real-mode sandbox-server and asserts the success marker.
+      - name: Go SDK direct-mode example (Connect ExecStream) end to end on a real KVM sandbox-server
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          sudo chmod 666 /dev/kvm
+
+          echo "=== build the standalone sandbox-server ==="
+          go build -o /tmp/sandbox-server ./cmd/sandbox-server/
+
+          echo "=== assemble an agent + static-busybox rootfs (agent as /init) ==="
+          WORKDIR=/tmp/mitos-test/sdk-go-example
+          ROOTFS="$WORKDIR/rootfs.ext4"
+          mkdir -p "$WORKDIR"
+          dd if=/dev/zero of="$ROOTFS" bs=1M count=256 status=none
+          mkfs.ext4 -q -F "$ROOTFS"
+          mkdir -p "$WORKDIR/mnt"
+          sudo mount -o loop "$ROOTFS" "$WORKDIR/mnt"
+          sudo mkdir -p "$WORKDIR"/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/mitos-test/agent "$WORKDIR/mnt/init"
+          sudo chmod +x "$WORKDIR/mnt/init"
+          sudo cp /tmp/mitos-test/busybox "$WORKDIR/mnt/bin/busybox" 2>/dev/null || \
+            sudo curl -fsSL -o "$WORKDIR/mnt/bin/busybox" \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x "$WORKDIR/mnt/bin/busybox"
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox "$WORKDIR/mnt/bin/$cmd"
+          done
+          echo "sandbox" | sudo tee "$WORKDIR/mnt/etc/hostname" > /dev/null
+          sudo umount "$WORKDIR/mnt"
+          sudo chmod 666 /dev/kvm
+
+          echo "=== start the real-mode sandbox-server in the background ==="
+          DATA_DIR="${RUNNER_TEMP:-/tmp}/sbx-go-example-data"
+          rm -rf "$DATA_DIR"
+          SERVER_LOG=/tmp/sbx-go-example.log
+          /tmp/sandbox-server \
+            --addr :8080 \
+            --kernel /tmp/mitos-test/vmlinux \
+            --rootfs "$ROOTFS" \
+            --agent-bin /tmp/mitos-test/agent \
+            --data-dir "$DATA_DIR" \
+            > "$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+          cleanup() {
+            local rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "=== sandbox-server log (step failed, rc=$rc) ==="
+              cat "$SERVER_LOG" || true
+            fi
+            kill "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          echo "=== wait for the server to become healthy ==="
+          healthy=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "FAIL: sandbox-server process exited before becoming healthy"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "FAIL: sandbox-server never became healthy on http://localhost:8080/v1/health"
+            exit 1
+          fi
+
+          echo "=== build and run the Go SDK direct-mode example ==="
+          # sdk/go is its own module, so build from within it (a subshell keeps
+          # the phase cwd unchanged).
+          ( cd sdk/go && go build -o /tmp/mitos-go-example ./examples/direct/ )
+          /tmp/mitos-go-example http://localhost:8080 | tee /tmp/go-example.out
+          if ! grep -q "go direct example OK" /tmp/go-example.out; then
+            echo "FAIL: the Go example did not print 'go direct example OK'"
+            exit 1
+          fi
+
+          echo "================================"
+          echo "  Go SDK Connect exec proven end to end on a real KVM sandbox-server"
           echo "================================"
 
       # Workspace hydrate/dehydrate data path proof (W4 slice 2). This phase
