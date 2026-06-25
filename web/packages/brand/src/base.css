@@ -193,36 +193,12 @@ a { color: var(--cyan); }
   outline-offset: 2px;
 }
 
-/* Top bar: visible on mobile only (desktop sidebar already shows the brand). */
-.top-bar {
-  display: none;
-}
+/* Retired: .top-bar mobile-brand rules. TopBar (.topbar) now owns the brand
+   and the hamburger at all breakpoints. The .top-bar class is no longer used. */
 
 /* Mobile drawer: nav slides in from the left as an off-canvas layer. The
    transition moves from -100% to 0 on open; a backdrop dims the content. */
 @media (max-width: 768px) {
-  /* Show the top bar (hamburger + inline brand mark). */
-  .top-bar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 56px;
-    padding: 0 var(--space-4);
-    background: var(--field);
-    border-bottom: 1px solid var(--hairline);
-    z-index: var(--z-overlay, 200);
-  }
-
-  .top-bar-brand {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   /* Reveal the hamburger button. */
   .menu-button {
     display: flex;
@@ -230,7 +206,7 @@ a { color: var(--cyan); }
 
   /* Offset main content below the fixed top bar. */
   .app-shell > main {
-    padding-top: calc(56px + var(--space-4));
+    padding-top: calc(64px + var(--space-4));
   }
 
   /* The primary nav becomes a fixed slide-over drawer. */
@@ -246,7 +222,7 @@ a { color: var(--cyan); }
     overflow-y: auto;
     transform: translateX(-100%);
     transition: transform var(--dur) var(--ease);
-    padding-top: calc(var(--space-5) + 56px);
+    padding-top: calc(var(--space-5) + 64px);
   }
 
   .nav-drawer.nav-drawer-open {
@@ -261,16 +237,15 @@ a { color: var(--cyan); }
     background: rgba(4, 5, 10, 0.6);
   }
 
-  /* Hide the inline nav brand on desktop (the top bar shows it on mobile). */
+  /* Hide the inline nav brand on desktop (TopBar shows it on mobile). */
   .nav-brand {
     display: none;
   }
 }
 
-/* Desktop: persistent sidebar, no top bar, no drawer behavior. */
+/* Desktop: persistent sidebar, no drawer behavior. */
 @media (min-width: 769px) {
   .menu-button { display: none; }
-  .top-bar { display: none; }
   .nav-backdrop { display: none; }
   .nav-drawer { transform: none; transition: none; }
   .nav-brand { display: flex; }
@@ -647,4 +622,199 @@ html[data-reduce-motion="1"] * {
   .audit-form-row select {
     width: 100%;
   }
+}
+
+/* ---- Global top bar: continues the marketing site nav. Translucent 64px bar,
+   backdrop blur, hairline bottom border. Token-driven; one raw background value
+   matches the site rgba(4,5,10,.55) which is already used in .palette-backdrop. */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+  backdrop-filter: blur(12px);
+  background: rgba(4,5,10,.55);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* Brand wordmark: weight and letterspacing match the site nav .brand-mark. */
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  text-decoration: none;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: var(--track-display);
+  white-space: nowrap;
+}
+
+/* Flexible gap that pushes search and account to the right. */
+.topbar-spacer {
+  flex: 1;
+}
+
+/* Help link: muted, no decoration, same size as body text. */
+.topbar-help {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+
+.topbar-help:hover { color: var(--ink-2); }
+
+/* Search trigger: looks like a quiet input field. Hairline border, field fill,
+   dim placeholder text, kbd shortcut in a faint pill. Not a real input. */
+.search-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 var(--space-3);
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  color: var(--ink-3);
+  font: inherit;
+  font-size: var(--step--1);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+  white-space: nowrap;
+}
+
+.search-trigger:hover {
+  border-color: var(--hairline-strong);
+  color: var(--ink-2);
+}
+
+.search-trigger:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.search-trigger-label {
+  color: var(--ink-3);
+}
+
+/* kbd pill: faint background, smaller size, mono font. */
+.search-trigger-kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  background: var(--field-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+/* Account menu container: relative anchor for the popover. */
+.account-menu {
+  position: relative;
+}
+
+/* Avatar button: monogram circle, cyan focus ring, min 44px touch target. */
+.account-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  min-width: 44px;
+  min-height: 44px;
+  background: var(--field-2);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 50%;
+  color: var(--ink);
+  font-size: var(--step--1);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.account-avatar:hover { border-color: var(--cyan); }
+
+.account-avatar:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* Popover: card elevation, right-aligned, layer above the topbar. */
+.account-pop {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 200;
+  min-width: 220px;
+  background: var(--field-1);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-lg);
+  padding: var(--space-2) 0;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* Identity block: display name + email, separated by a hairline. */
+.account-id {
+  padding: var(--space-3) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: var(--space-2);
+}
+
+.account-name {
+  color: var(--ink);
+  font-size: var(--step--1);
+  font-weight: 600;
+  margin-bottom: var(--space-1);
+}
+
+/* Menu items: full-width, text-left, no underline, hover highlight. */
+.account-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-4);
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--step--1);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.account-item:hover {
+  background: var(--field-2);
+  color: var(--ink);
+}
+
+.account-item:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -2px;
+}
+
+/* Sign-out item: amber accent to distinguish a destructive action. */
+.account-signout { color: var(--amber); }
+.account-signout:hover { color: var(--amber); }
+
+/* Mobile: hide the help link and the search label and kbd (keep the glyph).
+   Reveal the hamburger button. */
+@media (max-width: 768px) {
+  .topbar-help { display: none; }
+  .search-trigger-label { display: none; }
+  .search-trigger-kbd { display: none; }
+}
+
+/* Desktop: hamburger is hidden (sidebar nav is always visible). */
+@media (min-width: 769px) {
+  .topbar .menu-button { display: none; }
 }
