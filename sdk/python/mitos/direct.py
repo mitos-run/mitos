@@ -359,14 +359,16 @@ class DirectSandbox:
             on_result,
         )
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
-        """The WebSocket URL for an interactive PTY in this sandbox. The bearer
-        key (when set) is sent in the Authorization header on connect, never on
-        the URL."""
+    def pty_url(self) -> str:
+        """The WebSocket URL for an interactive PTY in this sandbox: the Connect
+        ``sandbox.v1.Sandbox.Exec`` bidi route carried over a WebSocket. The
+        bearer key (when set) is sent in the Authorization header on connect,
+        never on the URL; the window size rides the open ExecRequest frame, not
+        the query."""
         ws_base = self._server_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
         )
-        return f"{ws_base}/v1/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     def pty(self, on_data: Callable[[bytes], None], cols: int = 80, rows: int = 24):
         """Open an interactive PTY (a shell) in the sandbox over a WebSocket.
@@ -377,7 +379,13 @@ class DirectSandbox:
         header, never logged."""
         from mitos.pty import PtyHandle
 
-        return PtyHandle(url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data)
+        return PtyHandle(
+            url=self.pty_url(),
+            token=self._api_key,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
+        )
 
     def set_timeout(self, timeout_seconds: int) -> int:
         """Adjust this RUNNING sandbox's TTL to now + timeout_seconds (issue
