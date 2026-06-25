@@ -11,9 +11,9 @@ same per-sandbox token gate as the sandbox API.
 This document describes the verifiable core that ships today (the routing, the
 signed/expiring URL scheme, the route table and its GC, the reserved-name
 blocklist, the admin route-sync endpoint, the controller route-sync loop that
-pushes routes from Ready Sandboxes, and the SDK `get_host` call) and the parts
-that are deferred to later slices (wildcard and post-quantum TLS are slice 3;
-the full sharing ladder including audience selectors is slice 4).
+pushes routes from Ready Sandboxes, the SDK `get_host` call, and the wildcard
+plus post-quantum TLS that ships in slice 3) and the parts that are deferred to
+later slices (the full sharing ladder including audience selectors is slice 4).
 
 ## What ships in slices 2a and 2b
 
@@ -208,14 +208,76 @@ sequences (`../`, `./`) are resolved to their canonical form and cannot escape t
 
 ## TLS
 
-This slice does not enable TLS. The proxy can be run behind a separate TLS
-terminator. Wildcard certificate provisioning and post-quantum TLS are slice 3.
+TLS terminates at the Go proxy (`cmd/preview-proxy`). The proxy selects a
+certificate provider at startup based on its flags.
+
+### Wildcard certificate (operator-provided or cert-manager ACME DNS-01)
+
+Pass `--tls-cert` and `--tls-key` (both required together) to load an
+operator-provided wildcard `*.<expose-domain>` certificate and key from disk via
+`tls.LoadX509KeyPair` (`WildcardProvider` in `internal/preview/cert.go`). The
+proxy serves the same certificate for every SNI host; the TLS client verifies that
+the wildcard covers the requested hostname. A missing or unparseable file is a
+startup-time fatal error (fails closed, never serves a broken handshake).
+
+In the Helm chart (`deploy/charts/mitos/templates/expose-proxy.yaml`), when
+`expose.enabled: true` the `--tls-cert` and `--tls-key` flags are wired to
+`/tls/tls.crt` and `/tls/tls.key` from the `expose.tls.secretName` Secret. When
+`expose.tls.certManager.enabled: true` the chart also renders a cert-manager
+`Certificate` resource for `*.<expose-domain>` against the named `Issuer` or
+`ClusterIssuer`, so cert-manager can handle ACME DNS-01 issuance and automatic
+rotation. When cert-manager is not in use, the operator mounts the wildcard cert
+Secret directly.
+
+### Self-signed fallback
+
+When `--tls-cert` is not set, the proxy generates a per-SNI self-signed
+certificate at runtime (`SelfSignedProvider`). A self-signed certificate is NOT
+trusted by browsers and is NOT a production substitute. The default Helm chart
+deployment always passes `--tls-cert` and `--tls-key`, so self-signed is the
+local-dev and bare-metal-without-cert fallback only.
+
+### Post-quantum key exchange (hybrid X25519MLKEM768)
+
+`preview.ServerTLSConfig` (the proxy's server TLS config) deliberately leaves
+`CurvePreferences` nil. On Go 1.24 and newer, Go's default key-exchange
+preference list leads with the hybrid post-quantum group X25519MLKEM768 (FIPS 203
+ML-KEM-768 combined with X25519). The negotiated group is post-quantum when the
+client supports it; the server never forces a downgrade.
+
+This protects the confidentiality of sandbox traffic against harvest-now-decrypt-later
+attacks: an attacker who records ciphertext today cannot decrypt it later even with
+a future large-scale quantum computer.
+
+Honest scope: this is post-quantum KEY EXCHANGE for CONFIDENTIALITY only. The
+certificate signature remains classical (ECDSA or RSA): no post-quantum certificate
+authority exists in the public PKI today, so there is no post-quantum authentication
+claim and none is made here. The PQ protection is for the session key, not for
+identity.
+
+A guardrail test (`internal/preview/tls_pq_test.go`,
+`TestServerTLSConfigNegotiatesPostQuantum`) asserts that a PQ-only TLS 1.3 client
+(offering only `X25519MLKEM768`) completes the handshake and that the negotiated
+`CurveID` is `X25519MLKEM768`. It also asserts `cfg.CurvePreferences == nil`,
+because pinning any curve list silently removes X25519MLKEM768 from Go's defaults.
+A future PR that inadvertently sets `CurvePreferences` on the server config will
+break this test, preventing a silent regression.
+
+### On-demand CertMagic ACME (documented seam, not compiled)
+
+`internal/preview/cert.go` documents the adapter shape for CertMagic on-demand
+TLS (`CertMagicProvider`). This code is NOT compiled with a real certmagic
+dependency in this slice: real ACME issuance needs a public domain, a DNS record
+for `*.<expose-domain>`, and a publicly reachable endpoint, none of which exist in
+CI. The adapter is a thin follow-up; the routing and signing core are independent of
+it. The wildcard cert path above is the production and bare-metal path.
 
 ### Bare metal
 
-Bare metal is a first-class target. A maintainer can terminate TLS in front of the
-proxy (Caddy, nginx, or any ACME-capable reverse proxy with a wildcard cert for
-`*.<expose-domain>`) without any change to the proxy binary.
+Bare metal is a first-class target. Pass `--tls-cert` and `--tls-key` pointing at
+an operator-provided wildcard cert (from a self-hosted ACME such as step-ca, or
+from any CA that issues wildcard certificates). The proxy binary has no external
+dependency for TLS; it uses the standard-library `crypto/tls` stack.
 
 ## SDK usage
 
@@ -238,12 +300,19 @@ E2B script's `sandbox.get_host(port)` works unchanged.
 ```bash
 export MITOS_PREVIEW_SECRET=<at least 16 random bytes, kept secret>
 export MITOS_EXPOSE_ADMIN_TOKEN=<at least 16 random bytes, kept secret>
-expose-proxy --domain example.com --addr :8080
+
+# With an operator-provided wildcard cert (production and bare metal):
+expose-proxy --domain example.com --addr :8443 \
+  --tls-cert /path/to/wildcard.crt --tls-key /path/to/wildcard.key
+
+# Without a cert (self-signed, local dev only, not browser-trusted):
+expose-proxy --domain example.com --addr :8443
 ```
 
-The proxy listens on `--addr` (HTTP). Run it behind a TLS terminator for
-production. The route table starts empty and is populated by `POST /internal/routes`
-from the controller `ExposeRouteReconciler`.
+The proxy listens on `--addr` (HTTPS). The route table starts empty and is
+populated by `POST /internal/routes` from the controller `ExposeRouteReconciler`.
+Pass `--http-addr` to also listen on a plaintext port (for health checks behind an
+L4 load balancer that does its own TLS; this is NOT the expose traffic path).
 
 ## Sharing ladder
 
@@ -252,8 +321,20 @@ The `Sharing` field on a route carries the access tier (`private`, `org`,
 is slice 4 and NOT implemented in this slice. All routes in this slice are treated
 as private (the signed token is the sole gate).
 
+## Deploying with the Helm chart
+
+The Helm chart (`deploy/charts/mitos`) deploys the proxy when `expose.enabled:
+true` (default false). When enabled, the chart renders the proxy Deployment and
+Service, mounts the signing secret and admin token from `expose.secretName`, and
+mounts the wildcard cert from `expose.tls.secretName`. The controller
+`--expose-proxy-admin-url` and `EXPOSE_PROXY_ADMIN_TOKEN` are wired to the proxy
+Service so the `ExposeRouteReconciler` can push routes. An optional Ingress is
+rendered when `expose.ingress.enabled: true`. An optional cert-manager Certificate
+for `*.<expose-domain>` is rendered when `expose.tls.certManager.enabled: true`.
+
 ## Production gate
 
 This ingress adds a public attack surface. It is NOT cleared for production
-tenants until the external security review covers it. Edge rate limiting and an
-SNI/connection cap are documented follow-ups. See docs/threat-model.md section 7c.
+tenants until the external security review (issue #194) covers it. Edge rate
+limiting and an SNI/connection cap are documented follow-ups, sequenced with the
+#213 abuse-control envelope. See docs/threat-model.md section 7c.
