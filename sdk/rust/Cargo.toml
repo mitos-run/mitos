@@ -14,10 +14,23 @@ categories = ["api-bindings"]
 
 [dependencies]
 # Blocking HTTP with a small dependency tree; no async runtime is pulled in for
-# this thin client. Pinned to the 2.x line for a stable, lean transport.
+# this thin client. Pinned to the 2.x line for a stable, lean transport. The
+# `tls` feature pulls in (and re-exports) rustls, which cluster mode reuses to
+# trust the cluster CA, so no second TLS stack is added.
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Cryptographically strong bytes for the Idempotency-Key and the generated
 # "sandbox-<hex>" id. Tiny, no_std-friendly crate; avoids pulling in uuid.
 getrandom = "0.2"
+# Cluster mode (the optional Kubernetes AgentRun surface) parses kubeconfig YAML
+# and the in-cluster CA / client certs. serde_yml is the maintained YAML parser;
+# rustls-pemfile turns the PEM CA and client key/cert into the same
+# `rustls::pki_types` the re-exported rustls already uses. Both are small and
+# only compiled into the cluster path; direct mode never touches them.
+serde_yml = "0.0.12"
+rustls-pemfile = "2"
+# Data-only trust roots for the rare public-CA-signed API server (no code, just
+# the CA list). ureq already compiles this in for its default TLS; declaring it
+# directly lets cluster mode name it.
+webpki-roots = "0.26"
