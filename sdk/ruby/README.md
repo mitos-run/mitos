@@ -70,7 +70,7 @@ server = Mitos.server(url: "http://localhost:8080")
 | `SandboxServer#list_templates` | `GET /v1/templates` | `Array<Template>` |
 | `SandboxServer#fork(template, id:, idempotency_key:)` | `POST /v1/fork` | `Sandbox` |
 | `SandboxServer#list_sandboxes` | `GET /v1/sandboxes` | `Array<ServerSandbox>` |
-| `Sandbox#exec(command, timeout:)` | `POST /v1/exec` | `ExecResult` |
+| `Sandbox#exec(command, timeout:)` | `POST /sandbox.v1.Sandbox/ExecStream` (Connect) | `ExecResult` |
 | `Sandbox#terminate` | `DELETE /v1/sandboxes/{id}` | `nil` |
 
 Creating calls (`create_template`, `fork`) send a fresh `Idempotency-Key`, so a
@@ -83,9 +83,11 @@ Value objects:
 - `ExecResult`: `exit_code`, `stdout`, `stderr`, `exec_time_ms` (`success?`).
 - `Sandbox`: `id`, `endpoint`.
 
-`exec` requires a Ready sandbox: the sandbox-server routes exec through the guest
-agent over vsock, so calling exec on a sandbox that is not yet up returns a typed
-`not_found` error.
+`exec` runs over the Connect `sandbox.v1.Sandbox` runtime protocol (the
+`ExecStream` RPC): the server streams stdout and stderr frames followed by an
+exit frame, which the SDK drains into the `ExecResult`. It requires a Ready
+sandbox: the sandbox-server routes exec through the guest agent over vsock, so
+calling exec on a sandbox that is not yet up returns a typed `not_found` error.
 
 ## Cluster mode (Kubernetes)
 

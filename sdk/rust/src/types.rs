@@ -41,8 +41,10 @@ pub struct ServerSandbox {
     pub fork_time_ms: f64,
 }
 
-/// The result of [`crate::Sandbox::exec`], mirroring the `/v1/exec` response
-/// `{exit_code, stdout, stderr, exec_time_ms}`.
+/// The result of [`crate::Sandbox::exec`]: `{exit_code, stdout, stderr,
+/// exec_time_ms}`. The fields are drained from the Connect
+/// `sandbox.v1.Sandbox/ExecStream` response: the stdout and stderr frames plus
+/// the terminal exit frame.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ExecResult {
     /// The command exit code.

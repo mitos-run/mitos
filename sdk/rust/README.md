@@ -85,13 +85,16 @@ let server = SandboxServer::builder()
 | `SandboxServer::fork_as(template, id)` | `POST /v1/fork` | `Sandbox` |
 | `SandboxServer::fork_opts(template, id, idempotency_key)` | `POST /v1/fork` | `Sandbox` |
 | `SandboxServer::list_sandboxes()` | `GET /v1/sandboxes` | `Vec<ServerSandbox>` |
-| `Sandbox::exec(command)` | `POST /v1/exec` | `ExecResult` |
-| `Sandbox::exec_with_timeout(command, timeout)` | `POST /v1/exec` | `ExecResult` |
+| `Sandbox::exec(command)` | `POST /sandbox.v1.Sandbox/ExecStream` | `ExecResult` |
+| `Sandbox::exec_with_timeout(command, timeout)` | `POST /sandbox.v1.Sandbox/ExecStream` | `ExecResult` |
 | `Sandbox::terminate()` | `DELETE /v1/sandboxes/{id}` | `()` |
 
 `fork` defaults `init_wait_seconds` to 5 and generates a `sandbox-<hex>` id; both
 creating calls send a fresh `Idempotency-Key` so a retry is de-duplicated by the
-server. `exec` defaults to a 30 second timeout and needs a Ready sandbox.
+server. `exec` defaults to a 30 second timeout and needs a Ready sandbox; it runs
+over the Connect `sandbox.v1.Sandbox/ExecStream` runtime protocol (the sandbox id
+rides the `X-Sandbox-Id` header) and drains the streamed stdout, stderr, and exit
+frames into an `ExecResult`.
 
 Value types:
 

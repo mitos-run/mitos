@@ -69,6 +69,7 @@
 
 mod client;
 mod cluster;
+mod connect;
 mod error;
 mod k8s;
 mod types;

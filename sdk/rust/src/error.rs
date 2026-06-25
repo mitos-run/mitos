@@ -49,6 +49,26 @@ impl MitosError {
         }
     }
 
+    /// Builds a client-side error carrying an explicit HTTP `status`. Used by
+    /// the Connect codec, whose typed errors map a Connect code onto a status
+    /// the remediation layer keys on even though no legacy REST envelope was
+    /// returned.
+    pub(crate) fn client_with_status(
+        code: &str,
+        message: impl Into<String>,
+        cause: impl Into<String>,
+        remediation: impl Into<String>,
+        status: u16,
+    ) -> Self {
+        MitosError {
+            code: code.to_string(),
+            message: message.into(),
+            cause: cause.into(),
+            remediation: remediation.into(),
+            status,
+        }
+    }
+
     /// Builds a [`MitosError`] from a non-2xx response body. Prefers the
     /// structured server envelope `{error:{code, message, cause, remediation}}`
     /// and falls back to status-derived defaults for an older or non-Mitos

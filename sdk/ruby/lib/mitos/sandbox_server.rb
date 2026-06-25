@@ -5,6 +5,7 @@ require "net/http"
 require "securerandom"
 require "uri"
 
+require "mitos/connect"
 require "mitos/errors"
 require "mitos/sandbox"
 
@@ -98,10 +99,18 @@ module Mitos
       nil
     end
 
-    # Sends a request through the sandbox-server. Exposed for Sandbox#exec, which
-    # posts to /v1/exec on the same server URL.
+    # Sends a request through the sandbox-server. Exposed for the SDK's REST
+    # calls that ride this transport.
     def request_json(method_class, path, body, extra_headers = {})
       request(method_class, path, body, extra_headers)
+    end
+
+    # Builds a ConnectClient for +sandbox_id+ bound to this server's base URL and
+    # bearer token. Used by Sandbox#exec to run over the Connect
+    # sandbox.v1.Sandbox runtime protocol. The token VALUE stays encapsulated
+    # here and is never logged.
+    def connect_client(sandbox_id)
+      ConnectClient.new(base_url: @url, sandbox_id: sandbox_id, token: @api_key)
     end
 
     def valid_sandbox_id?(id)
