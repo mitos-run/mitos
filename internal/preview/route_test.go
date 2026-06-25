@@ -42,12 +42,12 @@ func TestRouteTableLookupMiss(t *testing.T) {
 
 func TestRouteTableAddOnReadyRemoveOnTerminate(t *testing.T) {
 	rt := NewRouteTable()
-	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.5:9091", Token: "tok-1"})
+	rt.Upsert(Route{Label: "sb-1", SandboxID: "sb-1", NodeEndpoint: "10.0.0.5:9091", Token: "tok-1"})
 	r, ok := rt.Lookup("sb-1")
 	if !ok {
 		t.Fatal("expected sb-1 present after Upsert")
 	}
-	if r.Backend != "10.0.0.5:9091" || r.Token != "tok-1" {
+	if r.NodeEndpoint != "10.0.0.5:9091" || r.Token != "tok-1" {
 		t.Errorf("got %+v", r)
 	}
 	rt.Remove("sb-1")
@@ -58,10 +58,10 @@ func TestRouteTableAddOnReadyRemoveOnTerminate(t *testing.T) {
 
 func TestRouteTableUpsertUpdates(t *testing.T) {
 	rt := NewRouteTable()
-	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.5:9091", Token: "a"})
-	rt.Upsert(Route{SandboxID: "sb-1", Backend: "10.0.0.9:9091", Token: "b"})
+	rt.Upsert(Route{Label: "sb-1", SandboxID: "sb-1", NodeEndpoint: "10.0.0.5:9091", Token: "a"})
+	rt.Upsert(Route{Label: "sb-1", SandboxID: "sb-1", NodeEndpoint: "10.0.0.9:9091", Token: "b"})
 	r, _ := rt.Lookup("sb-1")
-	if r.Backend != "10.0.0.9:9091" || r.Token != "b" {
+	if r.NodeEndpoint != "10.0.0.9:9091" || r.Token != "b" {
 		t.Errorf("expected upsert to replace, got %+v", r)
 	}
 	if rt.Len() != 1 {
@@ -121,11 +121,11 @@ func TestIsReservedLabel(t *testing.T) {
 func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
 	rt := NewRouteTable()
 
-	// First sync: two Ready claims become routes.
+	// First sync: two Ready claims become routes keyed by label.
 	src := &fakeSource{claims: []ClaimState{
-		{SandboxID: "sb-1", Backend: "10.0.0.1:9091", Token: "t1", Ready: true},
-		{SandboxID: "sb-2", Backend: "10.0.0.2:9091", Token: "t2", Ready: true},
-		{SandboxID: "sb-3", Backend: "", Token: "t3", Ready: false}, // not ready: skipped
+		{Label: "sb-1", SandboxID: "sb-1", NodeEndpoint: "10.0.0.1:9091", Token: "t1", Ready: true},
+		{Label: "sb-2", SandboxID: "sb-2", NodeEndpoint: "10.0.0.2:9091", Token: "t2", Ready: true},
+		{Label: "sb-3", SandboxID: "sb-3", NodeEndpoint: "", Token: "t3", Ready: false}, // not ready: skipped
 	}}
 	rt.Sync(src.ReadyRoutes())
 	if rt.Len() != 2 {
@@ -137,8 +137,8 @@ func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
 
 	// Second sync: sb-1 terminated (dropped from source), sb-2 stays, sb-4 new.
 	src.claims = []ClaimState{
-		{SandboxID: "sb-2", Backend: "10.0.0.2:9091", Token: "t2", Ready: true},
-		{SandboxID: "sb-4", Backend: "10.0.0.4:9091", Token: "t4", Ready: true},
+		{Label: "sb-2", SandboxID: "sb-2", NodeEndpoint: "10.0.0.2:9091", Token: "t2", Ready: true},
+		{Label: "sb-4", SandboxID: "sb-4", NodeEndpoint: "10.0.0.4:9091", Token: "t4", Ready: true},
 	}
 	rt.Sync(src.ReadyRoutes())
 	if _, ok := rt.Lookup("sb-1"); ok {
@@ -152,5 +152,25 @@ func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
 	}
 	if rt.Len() != 2 {
 		t.Fatalf("after second sync Len=%d want 2", rt.Len())
+	}
+}
+
+func TestRouteTableKeyedByLabel(t *testing.T) {
+	tbl := NewRouteTable()
+	tbl.Sync([]ClaimState{
+		{Label: "8000-sbx1", SandboxID: "sbx1", NodeEndpoint: "10.0.0.7:9091", Port: 8000, Token: "tok", Sharing: "link", Ready: true},
+		{Label: "9000-sbx1", SandboxID: "sbx1", NodeEndpoint: "10.0.0.7:9091", Port: 9000, Token: "tok", Sharing: "link", Ready: true},
+		{Label: "dead", SandboxID: "sbx2", NodeEndpoint: "x", Port: 1, Token: "t", Ready: false}, // not Ready: dropped
+	})
+	if r, ok := tbl.Lookup("8000-sbx1"); !ok || r.Port != 8000 || r.SandboxID != "sbx1" || r.NodeEndpoint != "10.0.0.7:9091" {
+		t.Fatalf("8000-sbx1 route wrong: %+v ok=%v", r, ok)
+	}
+	if _, ok := tbl.Lookup("dead"); ok {
+		t.Fatal("not-Ready claim must not route")
+	}
+	// GC: a label absent from the next Sync is reaped.
+	tbl.Sync([]ClaimState{{Label: "9000-sbx1", SandboxID: "sbx1", NodeEndpoint: "10.0.0.7:9091", Port: 9000, Token: "tok", Ready: true}})
+	if _, ok := tbl.Lookup("8000-sbx1"); ok {
+		t.Fatal("8000-sbx1 should be reaped after Sync without it")
 	}
 }

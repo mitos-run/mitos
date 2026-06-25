@@ -5,11 +5,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
 // Config wires a Proxy: the base preview Domain, the Signer that verifies
-// preview tokens, the RouteTable that maps a sandbox id to its backend, and an
+// preview tokens, the RouteTable that maps a label to its backend, and an
 // optional Logger. Logger is allowed to be nil (the proxy then discards logs).
 type Config struct {
 	Domain string
@@ -19,9 +20,9 @@ type Config struct {
 }
 
 // Proxy is the per-sandbox preview reverse proxy. For each request it parses
-// the <label>.<domain> vhost, verifies the signed expiring token,
-// binds the token to the requested sandbox, looks up the backend, attaches the
-// per-sandbox bearer (the same :9091 gate), and proxies to the backend.
+// the <label>.<domain> vhost, rejects reserved labels, verifies the signed
+// expiring token, binds the token to the requested sandbox and port, looks up
+// the forkd node endpoint, and reverse-proxies to the forkd expose handler.
 type Proxy struct {
 	domain string
 	signer *Signer
@@ -39,50 +40,56 @@ func NewProxy(cfg Config) *Proxy {
 	return &Proxy{domain: cfg.Domain, signer: cfg.Signer, routes: cfg.Routes, log: log}
 }
 
-// ServeHTTP implements the preview request pipeline. Failures are deliberately
+// ServeHTTP implements the expose request pipeline. Failures are deliberately
 // terse so a token value never reaches a response body or log line; the reason
-// is logged with the sandbox id and HTTP status only.
+// is logged with the label and HTTP status only.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	sandboxID, ok := ParseHost(r.Host, p.domain)
-	if !ok {
-		http.Error(w, "unknown preview host", http.StatusNotFound)
+	label, ok := ParseHost(r.Host, p.domain)
+	if !ok || IsReservedLabel(label) {
+		http.Error(w, "unknown expose host", http.StatusNotFound)
 		return
 	}
 
 	token := extractToken(r)
 	if token == "" {
-		http.Error(w, "missing preview token", http.StatusUnauthorized)
+		http.Error(w, "missing expose token", http.StatusUnauthorized)
 		return
 	}
 	claims, err := p.signer.Verify(token)
 	if err != nil {
 		// Do not echo err detail beyond the category; never log the token.
-		p.log.Info("preview token rejected", "sandbox", sandboxID, "status", http.StatusUnauthorized)
-		http.Error(w, "invalid or expired preview token", http.StatusUnauthorized)
-		return
-	}
-	// The token must name the sandbox in the host: a token for another sandbox
-	// is forbidden even though it verifies cryptographically.
-	if claims.SandboxID != sandboxID {
-		p.log.Info("preview token sandbox mismatch", "sandbox", sandboxID, "status", http.StatusForbidden)
-		http.Error(w, "preview token does not authorize this sandbox", http.StatusForbidden)
+		p.log.Info("expose token rejected", "label", label, "status", http.StatusUnauthorized)
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 		return
 	}
 
-	route, ok := p.routes.Lookup(sandboxID)
+	route, ok := p.routes.Lookup(label)
 	if !ok {
-		http.Error(w, "no route for sandbox", http.StatusNotFound)
+		http.Error(w, "no route for label", http.StatusNotFound)
 		return
 	}
 
-	target := &url.URL{Scheme: "http", Host: route.Backend}
+	// The signed link must name the sandbox and port the label resolves to: a
+	// leaked link cannot be replayed against another label.
+	if claims.SandboxID != route.SandboxID || claims.Port != route.Port {
+		p.log.Info("expose token route mismatch", "label", label, "status", http.StatusForbidden)
+		http.Error(w, "token does not authorize this route", http.StatusForbidden)
+		return
+	}
+
+	target := &url.URL{Scheme: "http", Host: route.NodeEndpoint}
 	rp := httputil.NewSingleHostReverseProxy(target)
-	// Capture the per-sandbox token in a local so the closure does not retain
-	// the Route; the token value is never logged.
+	// Capture route fields in locals so the closure does not retain the Route;
+	// token values are never logged.
 	bearer := route.Token
+	prefix := "/v1/sandboxes/" + route.SandboxID + "/expose/" + strconv.Itoa(route.Port)
+	nodeEndpoint := route.NodeEndpoint
 	baseDirector := rp.Director
 	rp.Director = func(req *http.Request) {
 		baseDirector(req)
+		// Forkd routes by the path; prepend the slice-1 expose prefix.
+		req.URL.Path = prefix + req.URL.Path
+		req.Host = nodeEndpoint
 		if bearer != "" {
 			req.Header.Set("Authorization", "Bearer "+bearer)
 		}
@@ -90,9 +97,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// never sees the bearer credential.
 		stripQueryParam(req, "token")
 	}
-	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		p.log.Info("preview backend error", "sandbox", sandboxID, "status", http.StatusBadGateway)
-		http.Error(w, "preview backend unavailable", http.StatusBadGateway)
+	rp.FlushInterval = -1 // SSE-safe
+	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		p.log.Info("expose backend error", "label", label, "status", http.StatusBadGateway)
+		http.Error(w, "expose backend unavailable", http.StatusBadGateway)
 	}
 	rp.ServeHTTP(w, r)
 }
