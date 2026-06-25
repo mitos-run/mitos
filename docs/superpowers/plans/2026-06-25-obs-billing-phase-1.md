@@ -38,10 +38,10 @@
 
 **Files:** the daemon/controller fork path; `internal/observability/tracing.go` (the tracer).
 
-- [ ] Add a `guest-ready` span and a `first-exec` span so the trace is orchestrator to claim to fork to guest-ready to first-exec end to end. Hook the guest-readiness signal (the daemon knows when the guest agent answers) and the first exec on the daemon path; the W3C trace context already propagates controller to forkd, so continue it into these spans (stamp/read the trace id consistent with the existing `mitos.run/trace-id` annotation). Spans cost nothing when tracing is off (the no-op tracer).
-- [ ] SECRET-CLEAN: span attributes carry only ids and durations, never argv/env/secret/output.
-- [ ] TDD: with a recording tracer, a fork produces the guest-ready and first-exec spans as children of the fork span with the right names and a trace id; with tracing off, no cost/panic.
-- [ ] Clean; commit.
+- [x] Add a `guest-ready` span and a `first-exec` span so the trace is orchestrator to claim to fork to guest-ready to first-exec end to end. Hook the guest-readiness signal (the daemon knows when the guest agent answers) and the first exec on the daemon path; the W3C trace context already propagates controller to forkd, so continue it into these spans (stamp/read the trace id consistent with the existing `mitos.run/trace-id` annotation). Spans cost nothing when tracing is off (the no-op tracer).
+- [x] SECRET-CLEAN: span attributes carry only ids and durations, never argv/env/secret/output.
+- [x] TDD: with a recording tracer, a fork produces the guest-ready and first-exec spans as children of the fork span with the right names and a trace id; with tracing off, no cost/panic.
+- [x] Clean; commit.
 
 ## Self-Review
 

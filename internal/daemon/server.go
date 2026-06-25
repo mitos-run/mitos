@@ -267,13 +267,30 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
+	// forkd.guest-ready spans the post-restore readiness wait: it is a child of
+	// forkd.Fork (the propagated ctx carries that span), opened after the engine
+	// fork and ended when the daemon confirms the guest agent answered. The
+	// readiness signal is deliverConfig succeeding: the guest agent connected
+	// (RegisterSandbox) and acknowledged the fork notification (NotifyForked
+	// reseed), which is the same handshake the sandbox must clear before it can
+	// report Ready. On the mock engine deliverConfig returns immediately (no
+	// guest), so the span is a near-instant child, keeping the trace continuous.
+	// Only ids are recorded; no env, secret, or output value is ever an
+	// attribute.
+	_, readySpan := tracer.Start(ctx, "forkd.guest-ready", trace.WithAttributes(
+		attribute.String("snapshot.id", snapshotID),
+		attribute.String("sandbox.id", result.SandboxID),
+	))
 	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork, result.VolumeMounts); err != nil {
+		readySpan.RecordError(err)
+		readySpan.End()
 		// A sandbox that reports Ready without its secrets is a lie; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
 		activeSandboxes.Dec()
 		s.sandboxAPI.UnregisterSandbox(result.SandboxID)
 		return nil, fmt.Errorf("sandbox %s: secret delivery failed: %w", result.SandboxID, err)
 	}
+	readySpan.End()
 
 	s.sandboxAPI.RegisterToken(result.SandboxID, apiToken)
 	// Record the control-plane identity so the sandbox's /v1/vitals snapshot is
