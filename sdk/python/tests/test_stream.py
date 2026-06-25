@@ -238,10 +238,15 @@ def test_kill_before_wait_does_not_crash(slow_server):
     while proc.running() and time.time() < deadline:
         time.sleep(0.02)
     assert not proc.running(), "drain thread should finish after kill()"
-    # The stream was torn down before its exit frame, so wait() surfaces an
-    # error (a truncation RuntimeError or a transport read error). Either is a
-    # clean, non-hanging outcome; the important thing is it does not crash the
-    # interpreter or close the shared client.
-    with pytest.raises(Exception):
+    # The stream was torn down before its exit frame, so wait() either surfaces
+    # an error (a truncation RuntimeError or a transport read error) OR returns
+    # cleanly when the kill drained the stream before wait() ran. Both are the
+    # documented clean, non-hanging outcome; requiring an exception was a race
+    # (a kill that drains cleanly returns without raising). The invariant is
+    # only that wait() does not hang or crash the interpreter and the shared
+    # client stays open.
+    try:
         proc.wait()
+    except Exception:
+        pass
     assert sb._http.is_closed is False
