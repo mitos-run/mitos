@@ -8,6 +8,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 function useSecrets() {
   return useQuery<SecretView[]>({ queryKey: ['secrets'], queryFn: () => api.secrets() })
@@ -34,6 +35,7 @@ export function Secrets() {
   const createSecret = useCreateSecret()
   const deleteSecret = useDeleteSecret()
   const { notify } = useToast()
+  const { query, setQuery, filtered } = useTableFilter(secrets, (s) => `${s.name} ${s.provider ?? ''}`)
 
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
@@ -114,6 +116,7 @@ export function Secrets() {
         />
       ) : (
         <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="secrets" />
           <table className="tbl" aria-label="Secrets">
             <thead>
               <tr>
@@ -126,7 +129,7 @@ export function Secrets() {
               </tr>
             </thead>
             <tbody>
-              {secrets.map((s) => (
+              {filtered.map((s) => (
                 <tr key={s.name}>
                   <td className="mono">{s.name}</td>
                   <td>{s.provider}</td>
