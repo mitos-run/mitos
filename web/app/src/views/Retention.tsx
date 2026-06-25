@@ -176,6 +176,7 @@ export function Retention() {
 
         <button
           type="submit"
+          className="btn btn-primary"
           disabled={setPolicy.isPending}
         >
           {setPolicy.isPending ? 'Saving...' : 'Save'}
