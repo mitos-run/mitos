@@ -503,3 +503,45 @@ textarea::placeholder {
     min-width: 600px;
   }
 }
+
+/* Role-badge pills: semantic token colors per role; hairline border. */
+.role-badge {
+  display: inline-block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--r-sm);
+  font-size: var(--step--1);
+  border: 1px solid var(--hairline);
+  color: var(--ink-2);
+  background: transparent;
+  margin-right: var(--space-2);
+  vertical-align: middle;
+}
+
+.role-owner,
+.role-admin {
+  border-color: var(--magenta);
+  color: var(--magenta);
+}
+
+.role-billing {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.role-member {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.role-viewer {
+  border-color: var(--hairline-strong);
+  color: var(--ink-3);
+}
+
+/* Mobile: members and projects tables scroll horizontally on narrow viewports. */
+@media (max-width: 768px) {
+  .members-table-wrapper,
+  .projects-list {
+    overflow-x: auto;
+  }
+}

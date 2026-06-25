@@ -58,6 +58,44 @@ const (
 	RoleMember Role = "member"
 )
 
+const (
+	// RoleAdmin manages members, projects, secrets, retention, and audit, but
+	// not billing or org deletion.
+	RoleAdmin Role = "admin"
+	// RoleBilling manages billing and views usage; no resource access.
+	RoleBilling Role = "billing"
+	// RoleViewer is read-only across the projects it is added to.
+	RoleViewer Role = "viewer"
+)
+
+// Permission is a coarse capability gate. Roles map to a permission set; the
+// console authorizes verbs against these. Finer per-project and custom roles are
+// a follow-up (B3).
+type Permission string
+
+const (
+	PermManageMembers  Permission = "members.manage"
+	PermManageProjects Permission = "projects.manage"
+	PermManageSecrets  Permission = "secrets.manage"
+	PermManageBilling  Permission = "billing.manage"
+	PermUseResources   Permission = "resources.use"
+	PermReadOnly       Permission = "read"
+)
+
+// rolePerms is the built-in role -> permission map. Every role implies PermReadOnly.
+var rolePerms = map[Role]map[Permission]bool{
+	RoleOwner:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermManageBilling: true, PermUseResources: true, PermReadOnly: true},
+	RoleAdmin:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermUseResources: true, PermReadOnly: true},
+	RoleBilling: {PermManageBilling: true, PermReadOnly: true},
+	RoleMember:  {PermUseResources: true, PermReadOnly: true},
+	RoleViewer:  {PermReadOnly: true},
+}
+
+// Can reports whether the role grants the permission.
+func (r Role) Can(p Permission) bool {
+	return rolePerms[r][p]
+}
+
 // Membership records that an account belongs to an organization with a role. A
 // single account may hold many memberships (one per org it belongs to).
 type Membership struct {
