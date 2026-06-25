@@ -40,7 +40,9 @@ func (c *pfConn) Read(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			if len(frame.Data) > 0 {
-				c.buf = frame.Data
+				// Copy so we never alias the frame's slice; safe even if a
+				// future Recv reuses its buffer.
+				c.buf = append([]byte(nil), frame.Data...)
 				break
 			}
 			// Empty non-close frame: keep reading.
