@@ -48,11 +48,14 @@ func TestPgStoreContract(t *testing.T) {
 	dsn := testDSN(t)
 	storetest.RunContract(t, func(t *testing.T) saas.Store {
 		t.Helper()
-		truncateAll(t, dsn)
+		// Open FIRST so the migrations create the schema (idempotent on every
+		// subsequent call), THEN truncate for a clean slate. Truncating before
+		// the first Open would hit non-existent tables.
 		s, err := pgstore.Open(context.Background(), dsn)
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
+		truncateAll(t, dsn)
 		t.Cleanup(s.Close)
 		var _ saas.Store = s
 		return s
