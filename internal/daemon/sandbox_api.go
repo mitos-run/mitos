@@ -617,11 +617,21 @@ func (api *SandboxAPI) Handler() http.Handler {
 
 // connectLookupToken is the token lookup function passed to BearerInterceptor
 // for the Connect Sandbox handler. It reads the registered token for sandboxID
-// from the same token map as the JSON /v1/* routes. Token values are never
+// from the same token map the legacy JSON gate used. Token values are never
 // logged or placed in error messages.
+//
+// It resolves single-sandbox (husk-stub) mode first, exactly as the JSON gate
+// (requireBearer, ptyAuth via resolveSandboxID) does: in a husk pod the cluster
+// SDK addresses the in-pod API with the claim's sandbox id (the husk pod name),
+// which never equals the stub's fixed local id, so a STRICT per-id lookup would
+// 401 every cluster SDK request (the cluster-e2e bug). resolveSandboxID maps the
+// requested id to the one registered id in single-sandbox mode, and is the
+// identity in forkd's default multi-sandbox mode, so a token for sandbox A still
+// cannot authorize sandbox B there.
 func (api *SandboxAPI) connectLookupToken(sandboxID string) (string, bool) {
+	id := api.resolveSandboxID(sandboxID)
 	api.mu.RLock()
-	token, ok := api.tokens[sandboxID]
+	token, ok := api.tokens[id]
 	api.mu.RUnlock()
 	return token, ok
 }

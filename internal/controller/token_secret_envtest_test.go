@@ -8,18 +8,20 @@ package controller_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	v1 "mitos.run/mitos/api/v1"
 	"net/http"
 	"testing"
 	"time"
 
+	connect "connectrpc.com/connect"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -56,26 +58,38 @@ func waitTokenSecret(t *testing.T, c client.Client, name string) *corev1.Secret 
 	return nil
 }
 
-// execStatus POSTs an exec request to the sandbox API at endpoint and
-// returns the HTTP status plus response body.
-func execStatus(t *testing.T, endpoint, sandboxID, bearer string) (int, string) {
+// execStatus runs an exec against the sandbox API at endpoint over the Connect
+// sandbox.v1.Sandbox/ExecStream RPC (the runtime path forkd and the SDKs use;
+// the legacy /v1/exec JSON route is retired, issue #358). The per-sandbox bearer
+// token and sandbox id ride the Authorization and X-Sandbox-Id headers, the SAME
+// gate the JSON route enforced. It returns the terminal Connect error code and
+// the error string (empty on success). A rejected token surfaces as
+// connect.CodeUnauthenticated, the Connect successor to the legacy 401; an
+// authed exec against a mock-engine sandbox with no reachable guest agent
+// surfaces as connect.CodeUnavailable, the proof that auth passed. The bearer
+// token VALUE is never logged.
+func execStatus(t *testing.T, endpoint, sandboxID, bearer string) (connect.Code, string) {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]string{"sandbox": sandboxID, "command": "true"})
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s/v1/exec", endpoint), bytes.NewReader(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := sandboxv1connect.NewSandboxClient(http.DefaultClient, "http://"+endpoint)
+	req := connect.NewRequest(&sandboxv1.ExecStreamRequest{Command: "true"})
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header().Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header().Set("X-Sandbox-Id", sandboxID)
+
+	stream, err := cli.ExecStream(context.Background(), req)
 	if err != nil {
-		t.Fatal(err)
+		return connect.CodeOf(err), err.Error()
 	}
-	defer resp.Body.Close()
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-	return resp.StatusCode, buf.String()
+	defer func() { _ = stream.Close() }()
+	for stream.Receive() {
+		// Drain any frames; on the mock engine no agent answers, so the stream
+		// terminates with an error below.
+	}
+	if err := stream.Err(); err != nil {
+		return connect.CodeOf(err), err.Error()
+	}
+	return 0, ""
 }
 
 func assertHex64(t *testing.T, token string) {
@@ -144,24 +158,24 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 		}
 	}
 
-	// Round-trip against the fake forkd's real HTTP handler. Without the
-	// bearer: 401. With it: auth passes; on the mock engine the sandbox has no
-	// guest agent so it is legitimately unregistered, and the proof is the
-	// 404 "not found or not registered" error, not a 401.
-	status, body := execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "")
-	if status != 401 {
-		t.Fatalf("exec without token: status = %d, body = %s, want 401", status, body)
+	// Round-trip against the fake forkd's real Connect handler. Without the
+	// bearer: unauthenticated. With it: auth passes; on the mock engine the
+	// sandbox has no reachable guest agent, so the proof that auth passed is a
+	// CodeUnavailable (guest unreachable) rather than a CodeUnauthenticated.
+	code, body := execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "")
+	if code != connect.CodeUnauthenticated {
+		t.Fatalf("exec without token: code = %v, body = %s, want unauthenticated", code, body)
 	}
-	status, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "0000000000000000000000000000000000000000000000000000000000000000")
-	if status != 401 {
-		t.Fatalf("exec with wrong token: status = %d, body = %s, want 401", status, body)
+	code, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "0000000000000000000000000000000000000000000000000000000000000000")
+	if code != connect.CodeUnauthenticated {
+		t.Fatalf("exec with wrong token: code = %v, body = %s, want unauthenticated", code, body)
 	}
-	status, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, token)
-	if status != 404 {
-		t.Fatalf("exec with token: status = %d, body = %s, want 404 (auth passed, sandbox unregistered on mock engine)", status, body)
+	code, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, token)
+	if code == connect.CodeUnauthenticated {
+		t.Fatalf("exec with correct token: code = unauthenticated, body = %s, want auth to pass (a non-auth error on the mock engine)", body)
 	}
-	if !bytes.Contains([]byte(body), []byte("not found or not registered")) {
-		t.Fatalf("want not-registered error after auth, got: %s", body)
+	if code != connect.CodeUnavailable {
+		t.Fatalf("exec with token: code = %v, body = %s, want unavailable (auth passed, no reachable guest on mock engine)", code, body)
 	}
 }
 
@@ -239,16 +253,16 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 		t.Fatalf("secret controller owner = %+v, want Sandbox tokf-fork", owner)
 	}
 
-	// The fork's own token gates its sandbox: 401 without, 404 with.
-	// On the mock engine the sandbox has no guest agent so it is legitimately
-	// unregistered; the 404 "not found or not registered" proves auth passed.
-	status, body := execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, "")
-	if status != 401 {
-		t.Fatalf("fork exec without token: status = %d, body = %s, want 401", status, body)
+	// The fork's own token gates its sandbox: unauthenticated without, auth
+	// passing with. On the mock engine the sandbox has no reachable guest agent,
+	// so the authed exec surfaces CodeUnavailable, proving auth passed.
+	code, body := execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, "")
+	if code != connect.CodeUnauthenticated {
+		t.Fatalf("fork exec without token: code = %v, body = %s, want unauthenticated", code, body)
 	}
-	status, body = execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, token)
-	if status != 404 || !bytes.Contains([]byte(body), []byte("not found or not registered")) {
-		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 not-registered (auth passed, mock engine sandbox unregistered)", status, body)
+	code, body = execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, token)
+	if code == connect.CodeUnauthenticated || code != connect.CodeUnavailable {
+		t.Fatalf("fork exec with token: code = %v, body = %s, want unavailable (auth passed, mock engine has no reachable guest)", code, body)
 	}
 }
 

@@ -334,9 +334,10 @@ set -e
 # older guest agent that predates the vsock PTY (and exec-stream) frame protocol,
 # so the guest answers the host's TypePty request with a frame whose "kind" is
 # empty and the host closes with `pty stream failed: unexpected pty frame kind:
-# ""`. The same stale agent breaks /v1/exec/stream identically (the blocking
-# /v1/exec path the claim-exec stage uses is unaffected, which is why that stage
-# passes). The guest agent SOURCE already implements the PTY exec path
+# ""`. The same stale agent breaks the Connect ExecStream PTY frames identically
+# (the non-interactive Connect ExecStream path the claim-exec stage uses is
+# unaffected, which is why that stage passes). The guest agent SOURCE already
+# implements the PTY exec path
 # (guest/agent-rs/src/service/exec.rs, guest/agent-rs/src/sys/pty.rs); the fix is
 # rebuilding the template snapshot with the current agent,
 # owned by the template/build workstream. Until that lands, a PTY FAIL is

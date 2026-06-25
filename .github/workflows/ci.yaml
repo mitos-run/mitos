@@ -1641,22 +1641,66 @@ jobs:
           pf=$!
           trap 'kill $pf 2>/dev/null || true; dump' ERR
           # Wait for the port-forward to come up by retrying the exec call. The
-          # in-pod sandbox API serves POST /v1/exec; the JSON "sandbox" field is
-          # the husk stub's fixed sandbox id ("husk") and is the token-gate key.
-          out=""
+          # in-pod sandbox API serves the Connect sandbox.v1.Sandbox/ExecStream RPC
+          # (the legacy /v1/exec JSON route is retired, issue #358). The bearer
+          # token and the husk stub's fixed sandbox id ("husk", the token-gate key)
+          # ride the Authorization and X-Sandbox-Id headers. Connect's streaming
+          # wire format is a sequence of enveloped frames: a 5-byte prefix
+          # (flag byte + big-endian uint32 length) then a protojson payload; the
+          # request is ONE frame carrying the ExecStreamRequest and the response is
+          # a stream of ExecResponse frames. protojson base64-encodes the stdout
+          # bytes; the terminal frame carries {"exit":{"exitCode":N}}.
+          req='{"command":"echo husk-e2e-ok","timeoutSeconds":30}'
+          req_len=${#req}
+          got_ok=""
+          exit_code=""
           for i in $(seq 1 20); do
-            out=$(curl -fsS -X POST "http://127.0.0.1:18091/v1/exec" \
+            resp_file=/tmp/husk-exec-resp.bin
+            {
+              printf '\x00'
+              # shellcheck disable=SC2059
+              printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+                $(( (req_len >> 24) & 0xff )) \
+                $(( (req_len >> 16) & 0xff )) \
+                $(( (req_len >> 8) & 0xff )) \
+                $(( req_len & 0xff )))"
+              printf '%s' "$req"
+            } | curl -sS -X POST "http://127.0.0.1:18091/sandbox.v1.Sandbox/ExecStream" \
               -H "Authorization: Bearer ${token}" \
-              -H 'Content-Type: application/json' \
-              -d '{"sandbox":"husk","command":"echo husk-e2e-ok","timeout":30}' 2>/dev/null) && break
+              -H 'X-Sandbox-Id: husk' \
+              -H 'Content-Type: application/connect+json' \
+              --data-binary @- >"$resp_file" 2>/dev/null || { sleep 1; continue; }
+            # Walk the response frames byte-exactly: read the 5-byte header, slice
+            # the protojson payload, and read .stdout (base64) and .exit.exitCode.
+            total=$(wc -c <"$resp_file")
+            off=0
+            stdout_acc=""
+            while [ $((off + 5)) -le "$total" ]; do
+              # Read the 4 length bytes (header bytes 1..4) as decimal via od. The
+              # word-split of od's space-separated output into $1..$4 is deliberate.
+              # shellcheck disable=SC2046
+              set -- $(od -An -tu1 -j $((off + 1)) -N 4 "$resp_file" | tr -s ' ')
+              b0=$1; b1=$2; b2=$3; b3=$4
+              flen=$(( (b0 << 24) | (b1 << 16) | (b2 << 8) | b3 ))
+              if [ $((off + 5 + flen)) -gt "$total" ]; then break; fi
+              frame_json="$(dd if="$resp_file" bs=1 skip=$((off + 5)) count="$flen" 2>/dev/null)"
+              chunk_b64="$(printf '%s' "$frame_json" | jq -r '.stdout // empty' 2>/dev/null)"
+              if [ -n "$chunk_b64" ]; then
+                stdout_acc="${stdout_acc}$(printf '%s' "$chunk_b64" | base64 -d 2>/dev/null)"
+              fi
+              this_exit="$(printf '%s' "$frame_json" | jq -r '.exit.exitCode // empty' 2>/dev/null)"
+              [ -n "$this_exit" ] && exit_code="$this_exit"
+              off=$((off + 5 + flen))
+            done
+            if printf '%s' "$stdout_acc" | grep -q "husk-e2e-ok"; then got_ok="yes"; break; fi
             sleep 1
           done
-          echo "exec response: $out"
+          echo "exec stdout: $stdout_acc (exit ${exit_code:-<none>})"
           kill $pf 2>/dev/null || true
-          echo "$out" | grep -q "husk-e2e-ok" || {
-            echo "HUSK-FAILED: exec over the in-pod sandbox API did not return the expected output"
+          if [ -z "$got_ok" ]; then
+            echo "HUSK-FAILED: exec over the in-pod sandbox API (Connect ExecStream) did not return the expected output"
             exit 1
-          }
+          fi
           echo "PASS: exec works over the husk pod sandbox API (FULL default path proven on kind)"
       - name: Husk e2e diagnostics and cleanup
         if: always()

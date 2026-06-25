@@ -18,9 +18,9 @@ package husk
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -32,11 +32,15 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+	"github.com/coder/websocket"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/vsock"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // huskFakeGuest is a minimal sandbox.v1.SandboxServer that returns a fixed
@@ -209,24 +213,142 @@ func (m *pathVMM) Pause() error                     { return nil }
 func (m *pathVMM) CreateSnapshot(_, _ string) error { return nil }
 func (m *pathVMM) Close() error                     { return nil }
 
-func postHuskExec(t *testing.T, url, sandbox, bearer string) (int, string) {
+// huskExec runs "echo hi" over the Connect sandbox.v1.Sandbox/ExecStream RPC
+// (the runtime path forkd and the SDK use; the legacy /v1/exec JSON route is
+// retired, issue #358). The per-sandbox bearer token and sandbox id ride on the
+// Authorization and X-Sandbox-Id headers, the SAME gate requireBearer enforced.
+// It folds the streamed stdout and returns the terminal Connect error (nil on
+// success). A rejected token surfaces as connect.CodeUnauthenticated, the
+// Connect successor to the legacy 401. The bearer token VALUE is never logged.
+func huskExec(t *testing.T, url, sandbox, bearer string) (stdout string, connErr error) {
 	t.Helper()
-	bodyBytes, _ := json.Marshal(map[string]any{"sandbox": sandbox, "command": "echo hi"})
-	req, err := http.NewRequest(http.MethodPost, url+"/v1/exec", bytes.NewReader(bodyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := sandboxv1connect.NewSandboxClient(http.DefaultClient, url)
+	req := connect.NewRequest(&sandboxv1.ExecStreamRequest{Command: "echo hi"})
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header().Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header().Set("X-Sandbox-Id", sandbox)
+
+	stream, err := cli.ExecStream(context.Background(), req)
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	defer resp.Body.Close()
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-	return resp.StatusCode, buf.String()
+	defer func() { _ = stream.Close() }()
+
+	var out strings.Builder
+	for stream.Receive() {
+		if b := stream.Msg().GetStdout(); len(b) > 0 {
+			out.Write(b)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return out.String(), err
+	}
+	return out.String(), nil
+}
+
+// execWSSubprotocol is the WebSocket subprotocol the Connect Exec transport
+// speaks (matches daemon.execWSSubprotocol). It must be offered on the upgrade.
+const execWSSubprotocol = "connect.sandbox.v1"
+
+// huskExecWS runs "echo hi" over the Connect-over-WebSocket Exec endpoint
+// (/sandbox.v1.Sandbox/Exec), the runtime transport the cluster-mode SDK uses
+// against the in-pod husk API: a thin HTTP/1.1 client that reaches the bidi
+// sandbox.v1.Sandbox.Exec schema over a WebSocket upgrade. This is the husk
+// single-sandbox path: the ?sandbox= id is the SDK-sent pod name, resolved by
+// the single-sandbox gate to the one served VM. The per-sandbox bearer token
+// rides on the Authorization header. A pre-upgrade auth rejection surfaces as
+// the handshake HTTP status (401); a successful upgrade folds the streamed
+// stdout. The bearer token VALUE is never logged.
+//
+// It returns the folded stdout, the pre-upgrade handshake HTTP status (200 once
+// the upgrade succeeds, the real status on a pre-upgrade rejection), and any
+// dial error without a handshake response.
+func huskExecWS(t *testing.T, url, sandbox, bearer string) (stdout string, status int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(url, "http") + "/sandbox.v1.Sandbox/Exec?sandbox=" + sandbox
+	opts := &websocket.DialOptions{Subprotocols: []string{execWSSubprotocol}}
+	if bearer != "" {
+		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + bearer}}
+	}
+	c, resp, err := websocket.Dial(ctx, wsURL, opts)
+	if err != nil {
+		// Pre-upgrade rejection (e.g. 401 auth): the handshake response carries
+		// the status; report it so the caller can assert on it.
+		if resp == nil {
+			t.Fatalf("ws dial failed without a handshake response: %v", err)
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return "", resp.StatusCode
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// One open frame, then drain stdout until the terminal exit frame.
+	open := &sandboxv1.ExecRequest{Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{Command: "echo hi"}}}
+	if err := c.Write(ctx, websocket.MessageBinary, encodeHuskFrame(t, false, open)); err != nil {
+		t.Fatalf("ws write open: %v", err)
+	}
+	var out strings.Builder
+	for {
+		typ, data, rerr := c.Read(ctx)
+		if rerr != nil {
+			var ce websocket.CloseError
+			if errors.As(rerr, &ce) && ce.Code == websocket.StatusNormalClosure {
+				break
+			}
+			break
+		}
+		if typ != websocket.MessageBinary {
+			continue
+		}
+		frame := decodeHuskResponse(t, data)
+		if frame.GetExit() != nil {
+			break
+		}
+		out.Write(frame.GetStdout())
+	}
+	return out.String(), http.StatusOK
+}
+
+// encodeHuskFrame frames one ExecRequest as a Connect enveloped WebSocket frame:
+// a 5-byte header (1 flags byte, big-endian uint32 length) then the protojson
+// payload. It mirrors daemon.encodeConnectFrame on the client side.
+func encodeHuskFrame(t *testing.T, end bool, msg *sandboxv1.ExecRequest) []byte {
+	t.Helper()
+	payload, err := protojson.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal exec frame: %v", err)
+	}
+	out := make([]byte, 5+len(payload))
+	if end {
+		out[0] = 0x02 // end-stream flag
+	}
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+	copy(out[5:], payload)
+	return out
+}
+
+// decodeHuskResponse splits one Connect enveloped WebSocket frame and decodes
+// its payload as an ExecResponse.
+func decodeHuskResponse(t *testing.T, b []byte) *sandboxv1.ExecResponse {
+	t.Helper()
+	if len(b) < 5 {
+		t.Fatalf("short connect frame: %d bytes", len(b))
+	}
+	n := binary.BigEndian.Uint32(b[1:5])
+	if int(n) != len(b)-5 {
+		t.Fatalf("connect frame length %d does not match payload %d", n, len(b)-5)
+	}
+	var resp sandboxv1.ExecResponse
+	if err := protojson.Unmarshal(b[5:], &resp); err != nil {
+		t.Fatalf("decode ExecResponse: %v", err)
+	}
+	return &resp
 }
 
 func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
@@ -284,24 +406,24 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 		}
 
 		// A tokened exec reaches the guest and returns its reply.
-		code, body := postHuskExec(t, ts.URL, sandboxID, token)
-		if code != 200 {
-			t.Fatalf("tokened exec status = %d, body = %s, want 200", code, body)
+		body, err := huskExec(t, ts.URL, sandboxID, token)
+		if err != nil {
+			t.Fatalf("tokened exec failed: %v (body = %s)", err, body)
 		}
 		if !strings.Contains(body, "husk-exec-ok") {
 			t.Fatalf("tokened exec did not reach the guest agent: %s", body)
 		}
 
-		// An untokened exec is rejected.
-		code, _ = postHuskExec(t, ts.URL, sandboxID, "")
-		if code != 401 {
-			t.Fatalf("untokened exec status = %d, want 401", code)
+		// An untokened exec is rejected (Connect unauthenticated, the 401 successor).
+		_, err = huskExec(t, ts.URL, sandboxID, "")
+		if connect.CodeOf(err) != connect.CodeUnauthenticated {
+			t.Fatalf("untokened exec code = %v, want unauthenticated", connect.CodeOf(err))
 		}
 
 		// A wrong-token exec is rejected.
-		code, _ = postHuskExec(t, ts.URL, sandboxID, "wrong-token")
-		if code != 401 {
-			t.Fatalf("wrong-token exec status = %d, want 401", code)
+		_, err = huskExec(t, ts.URL, sandboxID, "wrong-token")
+		if connect.CodeOf(err) != connect.CodeUnauthenticated {
+			t.Fatalf("wrong-token exec code = %v, want unauthenticated", connect.CodeOf(err))
 		}
 	})
 
@@ -370,24 +492,28 @@ func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
 			t.Fatalf("activate not OK: %s", res.Error)
 		}
 
-		// The SDK sends the POD NAME, not the local id; the correct token
-		// authorizes and the exec reaches the single VM's guest agent.
-		code, body := postHuskExec(t, ts.URL, podID, token)
-		if code != 200 {
-			t.Fatalf("exec with pod id + correct token: status = %d, body = %s, want 200", code, body)
+		// The SDK sends the POD NAME, not the local id, over the Connect-over-
+		// WebSocket Exec endpoint (the runtime transport the cluster-mode SDK uses
+		// against the in-pod husk API; single-sandbox resolution maps the pod name
+		// to the one served VM). The correct token authorizes and the exec reaches
+		// the single VM's guest agent.
+		body, status := huskExecWS(t, ts.URL, podID, token)
+		if status != 200 {
+			t.Fatalf("exec with pod id + correct token: handshake status = %d, want 200", status)
 		}
 		if !strings.Contains(body, "husk-exec-ok") {
 			t.Fatalf("exec did not reach the guest agent: %s", body)
 		}
 
-		// Wrong and absent tokens are still rejected, even with the pod id.
-		code, _ = postHuskExec(t, ts.URL, podID, "")
-		if code != 401 {
-			t.Fatalf("exec with pod id + no token: status = %d, want 401", code)
+		// Wrong and absent tokens are still rejected (pre-upgrade 401), even with
+		// the pod id.
+		_, status = huskExecWS(t, ts.URL, podID, "")
+		if status != 401 {
+			t.Fatalf("exec with pod id + no token: handshake status = %d, want 401", status)
 		}
-		code, _ = postHuskExec(t, ts.URL, podID, "wrong-token")
-		if code != 401 {
-			t.Fatalf("exec with pod id + wrong token: status = %d, want 401", code)
+		_, status = huskExecWS(t, ts.URL, podID, "wrong-token")
+		if status != 401 {
+			t.Fatalf("exec with pod id + wrong token: handshake status = %d, want 401", status)
 		}
 	})
 
