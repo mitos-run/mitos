@@ -135,6 +135,54 @@ func TestJailerRequiredCapabilities(t *testing.T) {
 	}
 }
 
+// TestForkdRequiredCapabilities pins the FULL capability set the forkd CONTAINER
+// runs with after dropping privileged: true. It is the jailer set
+// (jailerRequiredCapabilities) PLUS CAP_NET_ADMIN, which the BUILDER needs to
+// create the per-template placeholder tap host-side (internal/fork/engine.go,
+// `ip tuntap add`) when networking is enabled; the jailer itself does not need
+// NET_ADMIN, so the two sets are kept distinct. This list is the authority the
+// DaemonSet securityContext.capabilities.add must agree with
+// (manifest_conformance_test.go). NET_ADMIN is scoped to forkd's own pod netns
+// (forkd is not hostNetwork), exactly as the husk pod's NET_ADMIN is.
+func TestForkdRequiredCapabilities(t *testing.T) {
+	want := []string{
+		"CAP_SYS_ADMIN",
+		"CAP_CHOWN",
+		"CAP_SETUID",
+		"CAP_SETGID",
+		"CAP_MKNOD",
+		"CAP_NET_ADMIN", // build-time placeholder tap (NOT a jailer requirement)
+	}
+	got := forkdRequiredCapabilities()
+	if len(got) != len(want) {
+		t.Fatalf("forkdRequiredCapabilities() = %v (%d caps), want %v (%d caps)", got, len(got), want, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("capability[%d] = %q, want %q (order is part of the contract so the list is diff-stable)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestForkdRequiredCapabilitiesExtendsJailerSet asserts forkd's container set is
+// exactly the jailer set plus NET_ADMIN, so the jailer set stays the minimal
+// authority for the jail and NET_ADMIN is the single, documented builder extra.
+func TestForkdRequiredCapabilitiesExtendsJailerSet(t *testing.T) {
+	jailer := jailerRequiredCapabilities()
+	forkd := forkdRequiredCapabilities()
+	if len(forkd) != len(jailer)+1 {
+		t.Fatalf("forkd set %v should be the jailer set %v plus exactly one capability", forkd, jailer)
+	}
+	for i := range jailer {
+		if forkd[i] != jailer[i] {
+			t.Fatalf("forkd set must start with the jailer set in order: forkd[%d]=%q, jailer[%d]=%q", i, forkd[i], i, jailer[i])
+		}
+	}
+	if forkd[len(forkd)-1] != "CAP_NET_ADMIN" {
+		t.Fatalf("the one builder extra must be CAP_NET_ADMIN, got %q", forkd[len(forkd)-1])
+	}
+}
+
 // TestJailerRequiredCapabilitiesNoExtras asserts the set is MINIMAL: forkd must
 // not silently start claiming a broad capability (the threat-model residual is
 // the builder cap set, so a regression that added CAP_SYS_RAWIO or CAP_NET_ADMIN

@@ -74,7 +74,10 @@ device-plugins dir (to serve and register its socket) and a read-only `/dev` (to
   device-cgroup confinement; a guest that escapes the microVM into the husk
   process would land with full privilege. That is precisely the old raw-forkd
   posture this model replaces (ADR 0005, docs/threat-model.md section 0 surface
-  1). The device plugin removes the privileged REQUIREMENT.
+  1). The device plugin removes the privileged REQUIREMENT. Since #352 forkd ALSO
+  gets `/dev/kvm` and `/dev/net/tun` from this device plugin (`mitos.run/kvm`) and
+  is non-privileged with the jailer enabled (ADR 0008), so the privileged
+  `/dev/kvm` hostPath is gone fleet-wide, not only on the husk path.
 - A `/dev/kvm` hostPath would also waive a PSA control and additionally hand the
   pod a writable host device path; the device plugin scopes the grant to the one
   bind-mounted device via the kubelet `Allocate` path, with the pod requesting it

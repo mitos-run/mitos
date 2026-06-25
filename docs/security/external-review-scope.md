@@ -23,8 +23,11 @@ live findings tracker that drives each finding to closure is
 
 1. **VM escape / Firecracker config** (`internal/firecracker`, `internal/fork`):
    the device model, the jailer configuration, `/dev/kvm` exposure, the snapshot
-   restore path. The forkd DaemonSet currently runs `privileged: true`
-   (jailer-in-pod narrowing is a tracked follow-up); review that blast radius.
+   restore path. The forkd DaemonSet runs NON-privileged with the per-VM jailer
+   ENABLED (#352, ADR 0008): an explicit builder capability set, `/dev/kvm` from
+   the device plugin, every build/raw-forkd VMM under a throwaway jailed uid in a
+   per-VM chroot. The residual is uid 0 + `CAP_SYS_ADMIN` + a node-data-dir
+   hostPath; review that blast radius.
 2. **Guest -> host channels** (`guest/agent-rs`, `internal/vsock`, `internal/daemon`
    :9091): the vsock + HTTP exec/file API the guest and SDK reach. Token gating,
    input handling, path traversal in the file API, the exec request parsing.
@@ -61,8 +64,10 @@ live findings tracker that drives each finding to closure is
   per-node snapshot digest, cross-node failover, no tenant-decoy husk activation.
 
 ## Known residual / explicitly out-of-scope-until-fixed
-- forkd `privileged: true` (jailer-in-pod narrowing pending; documented in the
-  threat model).
+- forkd residual privilege after #352: non-privileged with the jailer enabled, but
+  still uid 0 holding `CAP_SYS_ADMIN` with a node-data-dir hostPath (a hardened
+  minimal builder, not zero-privilege; documented in the threat model and ADR
+  0008).
 - `dedicatedNodes` hard tenant node separation is operator-provided, not yet a
   product feature (#172); without it, tenants share a host kernel.
 - Node-loss / fork-replica edge behaviors (#177 follow-ups, #183) are availability,

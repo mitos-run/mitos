@@ -62,8 +62,9 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     scheduled to Running and `kubectl exec` confirms `/dev/kvm` is present
     inside the container, injected solely by `Allocate`. This is the full
     PSA-restricted device-access path proven in CI. The assertion is adaptive:
-    on a no-KVM runner it asserts Pending (honest scheduler truth). Migrating
-    the forkd DaemonSet off its privileged `/dev/kvm` hostPath is a follow-up.
+    on a no-KVM runner it asserts Pending (honest scheduler truth). The forkd
+    DaemonSet now ALSO gets `/dev/kvm` from this device plugin and runs
+    non-privileged (#352, ADR 0008), so the privileged hostPath is gone fleet-wide.
     See `docs/husk-pods.md` section 5.
   - ✅ Husk pod lifecycle controller (migration slice 1, behind a flag): with
     `--enable-husk-pods` (default off, raw-forkd unchanged) a `SandboxPool`
@@ -94,9 +95,11 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     the fork-per-claim fallback; `--mock` forces it), so each `SandboxPool` builds
     the template snapshot on the KVM nodes AND maintains a warm pool of husk pods
     pinned to the snapshot-holding nodes, and a `SandboxClaim` activates one in
-    place. The build-vs-run split: forkd stays the PRIVILEGED snapshot BUILDER;
-    the husk pod is the UNPRIVILEGED RUNNER (device-plugin `/dev/kvm`, no
-    `privileged`, read-only snapshot mount). The production base (`deploy/`) runs
+    place. The build-vs-run split: forkd is the snapshot BUILDER (non-privileged
+    since #352: an explicit, audited builder capability set with the jailer enabled,
+    still uid 0 + CAP_SYS_ADMIN; ADR 0008); the husk pod is the UNPRIVILEGED RUNNER
+    (device-plugin `/dev/kvm`, no `privileged`, read-only snapshot mount). The
+    production base (`deploy/`) runs
     the controller in husk mode + forkd builder + device plugin with PKI
     bootstrap on; `Dockerfile.husk-stub` is built in CI. The `kind-e2e-husk` job
     proves the full CLUSTER object lifecycle on the KVM-capable runner: stack up,
@@ -141,14 +144,16 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     surface is strictly improved (unprivileged, capability-dropped,
     restricted-minus-two, pod-netns-governed) while the inherent
     `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better, and
-    forkd-the-builder stays a smaller privileged control-plane surface. Residuals
+    forkd-the-builder stays a smaller control-plane surface (non-privileged since
+    #352, ADR 0008; a hardened minimal builder, not zero-privilege). Residuals
     ACCEPTED and TRACKED: the shared read-only snapshot mount (fully pod-native CAS
     delivery is the follow-up), the `/dev/kvm` inherent host-escape surface
     (unchanged from raw-forkd), the in-memory plaintext-DEK window during a
     container open (envelope wrapping is done; the plaintext DEK is zeroized
     immediately after use, and full HSM custody narrows but cannot eliminate this
-    window), and the forkd-builder privilege (a builder redesign is out of
-    scope). The IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
+    window), and the residual forkd-builder privilege after #352 (still uid 0 with
+    CAP_SYS_ADMIN; a builder redesign that removes even that is out of scope). The
+    IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
     survival are proven only on a KVM-capable kubelet, so they need the bare-metal
     reference node (#16).
   - ⬜ Still open (rest of #18): the nested dormant Firecracker VMM coming up
@@ -501,12 +506,19 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - ✅ Live-fork secret policy: a fork of a secret-holding sandbox is rejected
   without `secretInheritance: inherit`, with a `SecretInheritanceDenied`
   condition; envtest-proven in internal/controller/fork_secrets_test.go.
-- 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
-  `privileged: true` for an explicit capability list (implemented; kvm-test
-  jailer-boot phase restores a snapshot under the jailer to prove the
-  chroot/uid mechanics, but the dropped capability set is still unproven since
-  the runner is root; direct-exec dev path behind an empty `--jailer` and
-  sandbox-server remain unjailed; tracked in threat model residuals)
+- ✅ Firecracker under jailer (per-VM UID, chroot, cgroup); forkd is NON-privileged
+  with the jailer ENABLED in the shipped DaemonSet and Helm chart (#352, ADR 0008):
+  `privileged: false`, drop ALL capabilities and add back only the explicit builder
+  set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` plus `NET_ADMIN`), and
+  `/dev/kvm`/`/dev/net/tun` from the device plugin (no privileged hostPath). forkd
+  makes `--chroot-base` a private mount at startup so the jailer's `pivot_root`
+  works in the non-privileged pod. The conformance suite (`cmd/forkd`) keeps the
+  shipped manifest non-privileged with the exact cap set and the jailer flags; the
+  kernel ENFORCING the bounding-set/uid drop is asserted on the KVM runner (the CI
+  host is root and cannot observe it; issue #2 Task 5). Residual: forkd is still
+  uid 0 with CAP_SYS_ADMIN (a hardened minimal builder, not zero-privilege). The
+  direct-exec dev path behind an empty `--jailer` and sandbox-server remain unjailed
+  (tracked in threat model residuals)
 - ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
   (rotation and token expiry pending; tracked in threat model residuals)
 - ✅ Snapshot content addressing (#9): manifest digest in pool status,

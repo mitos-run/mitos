@@ -4,10 +4,30 @@ Status: accepted (2026-06-15)
 Issue: #18 (W1 husk pods, husk-as-default), #30 (residual ADRs). Related:
 docs/threat-model.md section 0 (the build-vs-run split, the per-axis tally),
 section 1 (jailer row), section 2 (shared-rootfs row), section 3 (forkd
-capability-minimization row), section 6 (fork-correctness reseed row); the code is
+capability-minimization row), section 6 (fork-correctness reseed row); ADR 0008
+(forkd is now non-privileged with the jailer enabled, #352); the code is
 `cmd/forkd`, `internal/fork/engine.go`, `deploy/daemon/daemonset.yaml`,
 `internal/controller` (the `--enable-husk-pods` / `--enable-raw-forkd` gating);
 docs/husk-pods.md.
+
+## Update (2026-06-25, #352)
+
+forkd is now NON-privileged with the per-VM jailer ENABLED in the shipped
+DaemonSet and Helm chart (ADR 0008, docs/threat-model.md section 1 jailer row and
+section 3 forkd capability-minimization row): `privileged: false`,
+`allowPrivilegeEscalation: false`, `seccompProfile: RuntimeDefault`,
+`capabilities.drop: [ALL]` adding back only the explicit builder set
+(`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` plus `NET_ADMIN`), `/dev/kvm`
+and `/dev/net/tun` from the device plugin (`mitos.run/kvm`), and the jailer flags
+(`--jailer`/`--chroot-base`/`--uid-range`) on by default. So the
+privileged-container and jailer-disabled reasons recorded in the historical
+Context below are now CLOSED: a VMM escape from a raw-forkd VM lands as a
+throwaway jailed uid in a per-VM chroot inside a non-privileged container, not as
+forkd's root. raw-forkd REMAINS not for untrusted multi-tenant for the remaining
+documented reason, node-flat snapshots (ADR 0004, docs/threat-model.md section 3
+forkd capability-minimization row). The historical decision below, including the
+shared-rootfs and fork-reseed hazards it lists, is preserved as recorded; see
+docs/threat-model.md for the current per-row status of each.
 
 ## Context
 
@@ -16,13 +36,14 @@ Mitos has two per-sandbox execution engines:
 - The HUSK pod (`cmd/husk-stub`): the default. One unprivileged, capability-
   dropped, PSA-restricted-minus-two pod per VM (ADR 0003).
 - raw-forkd (`--enable-raw-forkd`): the older engine, where forkd itself forks a
-  VM per claim. As SHIPPED, forkd is a root DaemonSet pod with `privileged: true`
-  and `/dev/kvm`, and the jailer is DISABLED in the shipped DaemonSet
-  (`deploy/daemon/daemonset.yaml`: the `--jailer`/`--chroot-base`/`--uid-range`
-  flags are commented out). So a guest escape from a raw-forkd VM lands as ROOT in
-  a PRIVILEGED container with `/dev/kvm` and a hostPath to the node data dir:
-  materially full node compromise (docs/threat-model.md section 3, forkd
-  capability-minimization row, status open/high).
+  VM per claim. AS ORIGINALLY SHIPPED (before #352), forkd was a root DaemonSet
+  pod that ran `privileged: true` with `/dev/kvm` as a hostPath and the jailer
+  DISABLED in the shipped DaemonSet, so a guest escape from a raw-forkd VM landed
+  as ROOT in a privileged container with `/dev/kvm` and a hostPath to the node
+  data dir: materially full node compromise. That posture is the one the
+  2026-06-25 update above CLOSED; forkd now runs non-privileged with the jailer
+  enabled (ADR 0008, docs/threat-model.md section 3 forkd capability-minimization
+  row).
 
 The control gating moved: pod-native execution is now the DEFAULT (the controller
 runs `--enable-husk-pods` by default; `--enable-raw-forkd` and `--mock` select
@@ -33,9 +54,10 @@ enable.
 
 raw-forkd carries several hazards the husk path has fixed or does not have:
 
-- It runs `privileged: true` with the jailer disabled as shipped, so a VMM
-  compromise is forkd's root (docs/threat-model.md section 1 jailer row, section
-  3 forkd row).
+- It ORIGINALLY ran `privileged: true` with the jailer disabled as shipped, so a
+  VMM compromise was forkd's root; that reason is now CLOSED (forkd is
+  non-privileged with the jailer enabled, #352, ADR 0008; docs/threat-model.md
+  section 1 jailer row, section 3 forkd row).
 - All forks of one template on a node share a SINGLE writable rootfs inode (a
   cross-fork filesystem read/write channel and corruption vector); the husk path
   fixed this with a per-pod reflink rootfs clone rebound via `PatchDrive`, the
@@ -58,27 +80,31 @@ workloads, and that the husk pod is the engine to use for that case. Concretely:
   not what ships enabled (docs/threat-model.md section 0; docs/husk-pods.md).
 - raw-forkd is documented as the fallback engine for cases that do NOT need the
   untrusted-multi-tenant posture (single-tenant, trusted-workload, or dev/no-KVM
-  use), or as a transitional path. Its known open/critical and open/high hazards
-  (privileged-no-jailer DaemonSet, shared writable rootfs inode, non-fail-closed
-  fork reseed) are exactly why it is excluded from the untrusted-multi-tenant
-  recommendation (docs/threat-model.md section 0 must-fix-first set, sections 1,
-  2, 3, 6).
-- forkd-the-BUILDER stays privileged regardless of engine: building a template
-  snapshot needs `/dev/kvm` and the jailer, so forkd remains the privileged
-  per-node BUILDER even when husk pods are the runner. The build path runs once
-  per node per template, not per sandbox, so the privileged surface is amortized
-  and confined to building, not to executing tenant code (docs/threat-model.md
-  section 0, the per-axis tally). This ADR distinguishes forkd-the-builder (a
-  smaller, amortized control-plane surface that stays) from raw-forkd-the-runner
-  (the per-sandbox engine the husk default replaces).
+  use), or as a transitional path. Its remaining hazards (originally the
+  privileged-no-jailer DaemonSet, since CLOSED by #352, plus the shared writable
+  rootfs inode and non-fail-closed fork reseed where those are not yet closed on
+  raw-forkd) are why it is excluded from the untrusted-multi-tenant recommendation
+  (docs/threat-model.md section 0 must-fix-first set, sections 1, 2, 3, 6).
+- forkd-the-BUILDER remains the per-node BUILDER regardless of engine: building a
+  template snapshot needs `/dev/kvm` and the jailer, so forkd is the per-node
+  builder even when husk pods are the runner. Since #352 forkd is NON-privileged
+  (an explicit, audited builder capability set with the jailer enabled, ADR 0008),
+  a hardened minimal builder rather than a privileged container. The build path
+  runs once per node per template, not per sandbox, so that residual builder
+  surface is amortized and confined to building, not to executing tenant code
+  (docs/threat-model.md section 0, the per-axis tally). This ADR distinguishes
+  forkd-the-builder (a smaller, amortized control-plane surface that stays) from
+  raw-forkd-the-runner (the per-sandbox engine the husk default replaces).
 
 ## Why not keep raw-forkd as a co-equal runner
 
-- On the privilege and capabilities axes the husk model is strictly better: an
-  unprivileged, drop-ALL, no-escalation, PSA-restricted-minus-two pod versus a
-  root privileged container (docs/threat-model.md section 0 per-axis tally).
-  Offering raw-forkd as a co-equal default would re-expose the worse surface as a
-  silent option.
+- On the privilege and capabilities axes the husk model is better: an
+  unprivileged, drop-ALL, no-escalation, PSA-restricted-minus-two pod versus the
+  non-privileged-but-uid-0, CAP_SYS_ADMIN-holding raw-forkd builder/runner
+  (docs/threat-model.md section 0 per-axis tally; raw-forkd dropped
+  `privileged: true` in #352 but still runs uid 0 with the builder capability
+  set). Offering raw-forkd as a co-equal default would re-expose the worse surface
+  as a silent option.
 - raw-forkd's shared-rootfs and non-fail-closed-reseed hazards are
   cross-tenant-affecting (a fork reads/writes a sibling's filesystem; duplicate
   CRNG output across forks). These are not acceptable under an untrusted-multi-
@@ -94,12 +120,15 @@ workloads, and that the husk pod is the engine to use for that case. Concretely:
 - An operator who enables `--enable-raw-forkd` is opting into the documented
   open/critical and open/high hazards above; the gating makes that an explicit
   choice, not a default.
-- Lifting raw-forkd to a safe runner is tracked, not abandoned: enable the jailer
-  in-pod and drop `privileged` (issue #2 Task 5; docs/threat-model.md section 1
-  and section 3), add the per-fork rootfs clone + `PatchDrive` mirroring the husk
-  fix (section 2), and make the fork reseed fail-closed on raw-forkd as it is on
-  husk (section 6). Until all three close, the not-for-untrusted-multi-tenant
-  statement stands.
-- forkd-the-builder's residual privilege is accepted separately and is out of
-  scope for this ADR; a builder redesign that removes its privilege is tracked but
-  not planned here (docs/threat-model.md section 0 accepted-residuals list).
+- Lifting raw-forkd to a safe runner is tracked, not abandoned. The jailer is now
+  enabled in-pod and `privileged: true` is dropped (#352, ADR 0008;
+  docs/threat-model.md section 1 and section 3); what remains is the per-fork
+  rootfs clone + `PatchDrive` mirroring the husk fix (section 2) and the fork
+  reseed fail-closed on raw-forkd as it is on husk (section 6). Until those close,
+  the not-for-untrusted-multi-tenant statement stands on node-flat snapshots
+  (ADR 0004) plus any of those still open on the raw-forkd path.
+- forkd-the-builder's residual is accepted separately and is out of scope for this
+  ADR. Since #352 it is non-privileged with an explicit, audited builder
+  capability set (still uid 0 with CAP_SYS_ADMIN; ADR 0008); a builder redesign
+  that removes even that residual privilege is tracked but not planned here
+  (docs/threat-model.md section 0 accepted-residuals list).

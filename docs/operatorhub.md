@@ -46,7 +46,8 @@ Before this bundle can install and run, every referenced
 image MUST be published and pullable under `ghcr.io/mitos-run`. Confirm this
 first; OLM will report ImagePullBackOff otherwise.
 
-Mitos also requires KVM nodes and a privileged DaemonSet (see the README and
+Mitos also requires KVM nodes and an SCC-gated forkd DaemonSet (non-privileged
+since #352 but still uid 0 + CAP_SYS_ADMIN + hostPath; see the README and
 `docs/redhat-certification.md`). Community OperatorHub does not test against
 your hardware, but reviewers will read the CSV requirements section. Keep it
 honest.

@@ -18,16 +18,23 @@ locked down. Mitos pulls in the opposite direction:
   Virtualization (CNV) addresses VM workloads but is a different model than
   Mitos's host-level Firecracker forking and does not automatically grant Mitos
   what it needs.
-- **Privileged DaemonSet.** `forkd` runs privileged, touches host paths, and
-  needs device access. OpenShift gates this behind Security Context Constraints
-  (SCCs). A privileged SCC binding is an explicit, audited cluster decision; the
-  default `restricted-v2` SCC will reject the workload outright.
+- **Elevated DaemonSet (SCC-gated).** `forkd` is NON-privileged since #352
+  (`privileged: false`, `seccompProfile: RuntimeDefault`, all capabilities dropped
+  except an explicit builder set), but it still runs as uid 0, holds
+  `CAP_SYS_ADMIN`, mounts a node-data-dir hostPath, and takes `/dev/kvm` from the
+  `mitos.run/kvm` device plugin. OpenShift gates exactly that surface behind
+  Security Context Constraints (SCCs): the default `restricted-v2` SCC will reject
+  the workload outright (it forbids `CAP_SYS_ADMIN`, uid 0, and hostPath), so a
+  custom SCC granting those specific allowances is an explicit, audited cluster
+  decision. The non-privileged posture narrows what the SCC must allow but does
+  not remove the SCC requirement.
 - **Bare-metal-style nodes.** The reference platform is bare metal (Hetzner plus
   Talos). OpenShift-on-bare-metal exists, but it is a narrower deployment shape
   than the certified catalog's typical audience.
 
 Net: pursuing certification is only worthwhile once there is real demand for
-Mitos on OpenShift-on-bare-metal with KVM and a privileged SCC available. Until
+Mitos on OpenShift-on-bare-metal with KVM and a custom SCC (granting forkd its
+uid 0 + `CAP_SYS_ADMIN` + hostPath surface) available. Until
 then, prioritize the community OperatorHub path (`docs/operatorhub.md`) and the
 Helm chart. Do not advertise OpenShift support before it is verified on a real
 OpenShift-on-bare-metal cluster with nested virt.
@@ -89,7 +96,7 @@ preflight check container registry.connect.redhat.com/mitos/mitos-controller:0.4
 ```
 
 Operator bundle check (run against a live, KVM-capable OpenShift cluster with
-the privileged SCC available, or it will fail on deployment):
+the custom SCC for forkd available, or it will fail on deployment):
 
 ```bash
 preflight check operator "$BUNDLE_IMG" \
@@ -109,7 +116,8 @@ operator-sdk bundle validate ./deploy/olm/bundle \
 
 Expect preflight to flag the SCC and KVM dependencies as deployment failures on
 a stock OpenShift cluster. That is the fit risk made concrete; resolve it by
-running on OpenShift-on-bare-metal with nested virt and a privileged SCC bound
+running on OpenShift-on-bare-metal with nested virt and a custom SCC (granting
+forkd its uid 0 + `CAP_SYS_ADMIN` + hostPath + `/dev/kvm` device surface) bound
 to the `mitos-controller` and `forkd` service accounts, or do not pursue
 certification.
 
@@ -147,7 +155,8 @@ gates merge on a clean OpenShift deployment.
 ## 5. Recommendation
 
 Gate this entire path on verified OpenShift-on-bare-metal demand with KVM and a
-privileged SCC. The honest default is: ship the Helm chart and the community
-OperatorHub bundle, document the KVM and privileged-DaemonSet requirements
-plainly, and revisit certification only when a customer needs it on OpenShift
-and can provide the cluster shape to verify it on.
+custom SCC for forkd. The honest default is: ship the Helm chart and the community
+OperatorHub bundle, document the KVM and forkd elevated-DaemonSet requirements
+plainly (non-privileged since #352, but still uid 0 + `CAP_SYS_ADMIN` + hostPath),
+and revisit certification only when a customer needs it on OpenShift and can
+provide the cluster shape to verify it on.

@@ -11,9 +11,10 @@ full epic still needs.
 > its template snapshot on the KVM nodes AND maintains a warm pool of
 > pre-scheduled husk pods pinned to the snapshot-holding nodes, and a
 > `Sandbox` with `spec.source.poolRef` activates a dormant husk pod in place. Sandboxes ARE pods by
-> default. The build-vs-run split is the key idea: forkd stays the PRIVILEGED
-> snapshot BUILDER (it needs `/dev/kvm` and the jailer to build a template
-> snapshot), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
+> default. The build-vs-run split is the key idea: forkd is the snapshot BUILDER
+> (it needs `/dev/kvm` and the jailer to build a template snapshot; non-privileged
+> since #352, an explicit builder capability set, still uid 0 + CAP_SYS_ADMIN,
+> ADR 0008), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
 > from the device plugin, no `privileged: true`, and activates the pre-built
 > snapshot read-only). raw-forkd (fork per claim, no husk pods) is the documented
 > fallback behind `--enable-raw-forkd`; `--mock` implies it (the dev/no-KVM path
@@ -267,12 +268,13 @@ the CoW-aware metering, not the first-faulter `memory.current`.
 
 ## 5. Device plugin (/dev/kvm without privileged)
 
-A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device
-the way forkd does today (a `hostPath` to `/dev/kvm` plus a permissive
-capability set) is incompatible with the PSA `restricted` profile husk pods
+A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device as
+a `hostPath` to `/dev/kvm` (the way forkd did before #352) plus a permissive
+capability set is incompatible with the PSA `restricted` profile husk pods
 target. The Kubernetes device-plugin mechanism is the restricted-profile path:
 the pod requests `mitos.run/kvm` like any extended resource and the kubelet,
-not the pod spec, injects the device.
+not the pod spec, injects the device. forkd now uses this same device plugin too
+(#352, ADR 0008), so the privileged `/dev/kvm` hostPath is gone fleet-wide.
 
 `cmd/kvm-device-plugin` (implemented in `internal/deviceplugin`) is that plugin.
 It runs as a DaemonSet on every node and implements the v1beta1 `DevicePlugin`
@@ -296,18 +298,19 @@ gRPC service:
   ResourceName), re-registering on failure so a kubelet restart is recovered.
 
 The DaemonSet (`deploy/device-plugin/daemonset.yaml`) needs only minimal
-privileges, NOT forkd's privileged set: it runs as root because the kubelet
-device-plugins dir is root-owned (it must write its socket there), but it is
-unprivileged with all capabilities dropped, `allowPrivilegeEscalation: false`
-and a read-only root filesystem. Its only host access is the kubelet
-device-plugins dir (to serve and register) and a read-only `/dev` mount (to
-`stat /dev/kvm`); it creates no device nodes and starts no VMs. So a husk pod
-requesting `mitos.run/kvm` is PSA-restricted minus exactly the documented
-device-plugin exception, not a privileged escape.
+privileges, even narrower than forkd's builder capability set: it runs as root
+because the kubelet device-plugins dir is root-owned (it must write its socket
+there), but it is unprivileged with all capabilities dropped,
+`allowPrivilegeEscalation: false` and a read-only root filesystem. Its only host
+access is the kubelet device-plugins dir (to serve and register) and a read-only
+`/dev` mount (to `stat /dev/kvm`); it creates no device nodes and starts no VMs.
+So a husk pod requesting `mitos.run/kvm` is PSA-restricted minus exactly the
+documented device-plugin exception, not a privileged escape.
 
-This is the PSA-restricted alternative to forkd's current privileged
-`/dev/kvm` hostPath. It does NOT remove that hostPath: migrating the forkd
-DaemonSet to request the resource instead of mounting the device is a follow-up.
+This is the PSA-restricted device-access path. forkd ALSO uses it since #352
+(ADR 0008): the forkd DaemonSet requests `mitos.run/kvm` instead of mounting a
+privileged `/dev/kvm` hostPath, so the privileged hostPath is removed fleet-wide,
+not only on the husk path.
 
 ### Proven vs remaining for the device plugin
 
@@ -342,8 +345,9 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
 **Open:**
 
 - Running the husk stub INSIDE a pod that requests this resource (the pod spec
-  wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
-  hostPath to request the resource are follow-ups (see section 6).
+  wiring) is a follow-up (see section 6). Migrating the forkd DaemonSet off its
+  privileged `/dev/kvm` hostPath onto this device plugin is DONE (#352, ADR 0008):
+  forkd now requests `mitos.run/kvm` and runs non-privileged.
 
 ## 6. Controller migration: husk pod lifecycle (slice 1)
 
@@ -546,12 +550,14 @@ Exactly one run path is active: `huskPods == !rawForkd`
 
 The two roles are deliberately separated by privilege:
 
-- **forkd is the privileged BUILDER.** Building a template snapshot means
+- **forkd is the BUILDER.** Building a template snapshot means
   booting a VM from the template image, running its init command in the VM, and
   taking a Firecracker snapshot. That needs `/dev/kvm`, the jailer (per-VM
-  uid/chroot/cgroup), and write access to the node data dir. forkd stays a root
-  DaemonSet with an explicit capability set on the KVM nodes and does this build
-  (and remains the `--enable-raw-forkd` fork-per-claim engine).
+  uid/chroot/cgroup), and write access to the node data dir. forkd is a
+  NON-privileged DaemonSet since #352 (an explicit builder capability set with the
+  jailer enabled, `/dev/kvm` from the device plugin, still uid 0 + CAP_SYS_ADMIN;
+  ADR 0008) on the KVM nodes and does this build (and remains the
+  `--enable-raw-forkd` fork-per-claim engine).
 - **the husk pod is the unprivileged RUNNER.** Running a sandbox means loading a
   PRE-BUILT snapshot read-only and resuming it. The husk pod gets `/dev/kvm`
   from the device plugin (not `privileged: true`), mounts the node's template
@@ -559,8 +565,9 @@ The two roles are deliberately separated by privilege:
   `seccompProfile: RuntimeDefault`, and is not privileged (the one documented
   exception is `runAsNonRoot: false`, section 6).
 
-So a snapshot is BUILT once per node by privileged forkd and RUN many times by
-unprivileged husk pods. The husk pod never builds; it only activates.
+So a snapshot is BUILT once per node by the forkd builder (non-privileged since
+#352) and RUN many times by unprivileged husk pods. The husk pod never builds; it
+only activates.
 
 ### The default flow
 
@@ -624,7 +631,8 @@ boundary with a per-axis tally vs the old privileged forkd, each claim backed by
 a CI-proven mechanism or named as a residual. The
 honest verdict is that the per-sandbox EXECUTION surface is strictly improved
 while the inherent `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better,
-and forkd-the-builder stays a smaller privileged control-plane surface.
+and forkd-the-builder stays a smaller control-plane surface (non-privileged since
+#352, ADR 0008; a hardened minimal builder, not zero-privilege).
 
 ## 6d. Networking reconciliation: which layer governs egress (per mode)
 
@@ -909,7 +917,8 @@ the autoscaler plan Appendix A.
   inside the container (injected by `Allocate`, not by any privilege or hostPath).
   This is the PSA-restricted device-access path proven end to end. The assertion
   is adaptive: on a no-KVM runner it asserts Pending instead. The forkd-DaemonSet
-  migration off its privileged hostPath remains a follow-up.
+  migration off its privileged hostPath onto this device plugin is DONE (#352,
+  ADR 0008): forkd now requests `mitos.run/kvm` and runs non-privileged.
 - Claim activation over the mTLS network control channel (slice 2, section 6b):
   with `--enable-husk-pods` the claim picks a dormant warm husk pod, CLAIMS it
   under an optimistic lock (exactly one claim per pod, no double-assign), and
@@ -934,8 +943,9 @@ the autoscaler plan Appendix A.
 ### Remaining (follow-up work)
 
 Pod-native is now the DEFAULT (slice 3, section 6c): sandboxes are pods by
-default, forkd stays the privileged snapshot builder, and raw-forkd is the
-fallback behind `--enable-raw-forkd`. The full husk-pods epic still needs:
+default, forkd stays the snapshot builder (non-privileged since #352, ADR 0008),
+and raw-forkd is the fallback behind `--enable-raw-forkd`. The full husk-pods epic
+still needs:
 
 - the nested dormant Firecracker VMM coming up reliably INSIDE a kind pod, so the
   full claim -> pod -> exec tail GATES on kind too. Today that tail is best-effort

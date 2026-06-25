@@ -24,7 +24,7 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       # forkd makes no Kubernetes API calls (it imports no client); do not mount
-      # a SA token on this privileged, high-value pod.
+      # a SA token on this high-value pod.
       automountServiceAccountToken: false
       {{- include "mitos.imagePullSecrets" . | nindent 6 }}
       {{- with .Values.forkd.nodeSelector }}
@@ -60,8 +60,15 @@ spec:
             # nftables; without them the build aborts and produces empty snapshots.
             - --enable-networking
             {{- end }}
-            # JAILER FOLLOW-UP: the per-VM jailer is disabled here. forkd runs
-            # privileged: true (below) on the husk path until jailer-in-pod lands.
+            # Every VM (template build and raw-forkd fork) is launched through the
+            # Firecracker jailer: a per-VM uid/gid (uid 0 refused), a per-VM chroot
+            # (pivot_root) under --chroot-base, and a nested cgroup. This is what
+            # lets the securityContext drop privileged: true for the explicit
+            # jailer capability set. --chroot-base lives under --data-dir so the
+            # snapshot/kernel/rootfs hard-link into each chroot on one filesystem.
+            - --jailer=/usr/local/bin/jailer
+            - --chroot-base={{ .Values.forkd.dataDir }}/jailer
+            - --uid-range=64000-64999
           env:
             # forkd authenticates to private registries when pulling OCI template
             # images. DOCKER_CONFIG points at the mounted docker-config secret.
@@ -75,19 +82,37 @@ spec:
             # Dedicated token-gated TLS CAS listener (--cas-listen).
             - name: cas
               containerPort: 9092
-          # PRIVILEGED until jailer-in-pod lands. Without the jailer, forkd needs
-          # unrestricted access to /dev/kvm, /dev/net/tun, cgroups, and chroot to
-          # launch each VM. The honest regression is documented in
-          # docs/threat-model.md.
+          # NOT privileged. forkd is the privileged BUILDER concentrated to the
+          # explicit jailer capability set: drop ALL, add back only the five the
+          # jailer needs (SYS_ADMIN for the chroot-base mount setup + jailer
+          # cgroup/namespace setup; CHOWN to hand the chroot to the jailed uid;
+          # SETUID/SETGID to drop to it; MKNOD for the in-chroot device nodes;
+          # NET_ADMIN for the BUILD-time placeholder tap (`ip tuntap add`,
+          # --enable-networking), scoped to forkd's own pod netns).
+          # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
+          # not a privileged hostPath. allowPrivilegeEscalation: false and
+          # seccompProfile RuntimeDefault complete the hardening. See
+          # docs/threat-model.md and cmd/forkd/jailer.go jailerRequiredCapabilities.
           securityContext:
-            privileged: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SYS_ADMIN
+                - CHOWN
+                - SETUID
+                - SETGID
+                - MKNOD
+                - NET_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.forkd.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.forkd.dataDir }}
-            - name: kvm
-              mountPath: /dev/kvm
             - name: tls
               mountPath: /etc/forkd/tls
               readOnly: true
@@ -114,10 +139,8 @@ spec:
           hostPath:
             path: {{ .Values.forkd.dataDir }}
             type: DirectoryOrCreate
-        - name: kvm
-          hostPath:
-            path: /dev/kvm
-            type: CharDevice
+        # /dev/kvm and /dev/net/tun are injected by the device plugin
+        # (mitos.run/kvm) on Allocate, NOT a privileged hostPath CharDevice.
         # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
         - name: tls
           secret:

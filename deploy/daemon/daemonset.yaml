@@ -25,6 +25,9 @@ spec:
         prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
+      # forkd makes no Kubernetes API calls (it imports no client); do not mount
+      # a SA token on this high-value pod.
+      automountServiceAccountToken: false
       # ghcr-pull so the kubelet can pull ghcr.io/mitos-run/mitos-forkd.
       imagePullSecrets:
         - name: ghcr-pull
@@ -70,11 +73,18 @@ spec:
             # chain are programmed IN the husk pod by the husk-stub (NET_ADMIN in the
             # pod netns), not by forkd.
             - --enable-networking
-            # JAILER FOLLOW-UP: the per-VM jailer (uid/gid, chroot, cgroup) is
-            # disabled here. forkd runs privileged: true (below) on the husk
-            # path until jailer-in-pod lands. Re-add --jailer / --chroot-base /
-            # --uid-range and drop privileged once the jailer runs inside the
-            # forkd pod. Tracked as the jailer-in-pod follow-up.
+            # Every VM (template build and raw-forkd fork) is launched through
+            # the Firecracker jailer: a dedicated per-VM uid/gid from --uid-range
+            # (uid 0 refused), a per-VM chroot (pivot_root) under --chroot-base,
+            # and a cgroup the jailer nests under forkd's own. This is what lets
+            # the securityContext below drop privileged: true for the explicit
+            # jailer capability set. --chroot-base lives UNDER --data-dir so the
+            # snapshot/kernel/rootfs files hard-link into each chroot on one
+            # filesystem (CoW-cheap); forkd makes the base a private mount point
+            # at startup so the jailer can pivot_root inside the pod.
+            - --jailer=/usr/local/bin/jailer
+            - --chroot-base=/var/lib/mitos/jailer
+            - --uid-range=64000-64999
           # FORKD_PEER_TOKEN is the shared bearer credential a peer
           # forkd must present to pull templates from this node's CAS.
           # It is read from the ENVIRONMENT, not a flag, so it is never
@@ -103,26 +113,54 @@ spec:
             # peer template distribution; separate from the sandbox API.
             - name: cas
               containerPort: 9092
-          # PRIVILEGED until jailer-in-pod lands (see the --agent-bin block).
-          # Without the jailer, forkd needs unrestricted access to /dev/kvm,
-          # /dev/net/tun, cgroups, and chroot to launch each VM; the trimmed
-          # capability set only worked WITH the jailer mediating. The honest
-          # regression is documented in docs/threat-model.md. Re-narrow to the
-          # capability list once the jailer runs inside the pod.
+          # NOT privileged. forkd is the privileged BUILDER concentrated to the
+          # explicit builder capability set, not a privileged-and-long-lived
+          # daemon: it drops ALL capabilities and adds back ONLY the six the
+          # builder needs (cmd/forkd/jailer.go forkdRequiredCapabilities, the
+          # single source of truth: the five jailer caps plus NET_ADMIN):
+          #   - SYS_ADMIN: mount(2) for the chroot-base pivot setup, plus the
+          #     jailer's cgroup and namespace setup;
+          #   - CHOWN:     hand the per-VM chroot files to the jailed uid/gid;
+          #   - SETUID / SETGID: drop the jailed Firecracker to the per-VM uid;
+          #   - MKNOD:     create /dev/kvm and /dev/net/tun nodes in each chroot;
+          #   - NET_ADMIN: create the per-template placeholder tap at BUILD time
+          #     (`ip tuntap add`, --enable-networking); scoped to forkd's own pod
+          #     netns (forkd is not hostNetwork), like the husk pod's NET_ADMIN.
+          # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
+          # NOT a privileged hostPath, so the device cgroup is scoped by the
+          # kubelet. allowPrivilegeEscalation: false and seccompProfile
+          # RuntimeDefault complete the hardening (privileged: true had disabled
+          # seccomp). docs/threat-model.md records the reduced blast radius.
           securityContext:
-            privileged: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SYS_ADMIN
+                - CHOWN
+                - SETUID
+                - SETGID
+                - MKNOD
+                - NET_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             requests:
               memory: "1Gi"
               cpu: "500m"
+              # The device plugin injects /dev/kvm and /dev/net/tun on Allocate;
+              # requesting the extended resource is what replaces privileged: true
+              # for device access.
+              mitos.run/kvm: "1"
             limits:
               memory: "16Gi"
               cpu: "8"
+              mitos.run/kvm: "1"
           volumeMounts:
             - name: data
               mountPath: /var/lib/mitos
-            - name: kvm
-              mountPath: /dev/kvm
             - name: tls
               mountPath: /etc/forkd/tls
               readOnly: true
@@ -150,10 +188,8 @@ spec:
           hostPath:
             path: /var/lib/mitos
             type: DirectoryOrCreate
-        - name: kvm
-          hostPath:
-            path: /dev/kvm
-            type: CharDevice
+        # /dev/kvm and /dev/net/tun are injected by the device plugin
+        # (mitos.run/kvm) on Allocate, NOT a privileged hostPath CharDevice.
         # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
         - name: tls
           secret:

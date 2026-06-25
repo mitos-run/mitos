@@ -13,7 +13,7 @@ from Code Owners).
 |---|---|
 | `internal/fork/` | Drives Firecracker snapshot/restore; a fork-correctness or restore bug is a cross-sandbox state leak or a host exposure. |
 | `internal/firecracker/` | The Firecracker API client and VM lifecycle; the guest-to-host boundary lives here. |
-| `internal/daemon/` | forkd: the privileged builder and the host sandbox API (exec and file traffic); the host-side trust boundary. |
+| `internal/daemon/` | forkd: the host builder (non-privileged since #352, but still uid 0 + CAP_SYS_ADMIN) and the host sandbox API (exec and file traffic); the host-side trust boundary. |
 | `internal/vsock/` | The host side of the guest channel; parses untrusted guest output as data. |
 | `guest/` | The guest agent (PID 1 in the VM) and guest-side protocol; untrusted post-exec. |
 | `docs/threat-model.md` | The authoritative isolation claims; a change here moves the stated security surface. |
