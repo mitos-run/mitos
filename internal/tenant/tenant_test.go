@@ -10,7 +10,7 @@ func TestNamespaceForOrg(t *testing.T) {
 	}
 }
 
-// TestOrgLabelStable pins the org label key — the contract the gateway stamps
+// TestOrgLabelStable pins the org label key: the contract the gateway stamps
 // and the console / usage resolver read. Changing it is a breaking change.
 func TestOrgLabelStable(t *testing.T) {
 	if OrgLabelKey != "mitos.run/org" {
