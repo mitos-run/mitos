@@ -121,12 +121,22 @@ to billing `Rates`). Provable cost is a UX feature and a sales asset.
 - Phase 2, Layer 1: deploy Cilium and Hubble; wire the relay to the existing
   resolver; per-sandbox egress flows and drops labeled by claim and org;
   reconcile flow bytes vs nftables egress.
-- Phase 3, Layer 2: deploy OpenCost; wire the existing reconcile; prove
-  dashboard cost equals invoice.
-- Phase 4, UX and packaging: build the console Usage and Cost and Billing rich
-  views; per-org Grafana; the cost-per-fork headline; Helm-package the Cilium,
-  OpenCost, and Prometheus dependencies; the real Stripe SDK and durable stores
-  (hosted gated).
+- Phase 3, Layer 2 (cost): the priced resource-seconds are the source of truth
+  for cost, not an external cost system. They are CoW aware (a shared template
+  page is billed once across forks), which an external cost tool cannot see, so
+  self-tracked cost is both leaner and more accurate. OpenCost is therefore an
+  OPTIONAL operator reconcile, not a dependency: an operator who runs OpenCost
+  can cross-check that the priced resource-seconds match the cluster node cost
+  within a tolerance (the pure reconcile in `internal/observability/opencost.go`
+  already does this), but the system requires no OpenCost deployment to bill.
+- Phase 4, UX and payments: build the console Usage and Cost and Billing rich
+  views; per-org Grafana; the cost-per-fork headline; Helm-package the Cilium and
+  Prometheus dependencies (OpenCost optional). Payments stay behind the NEUTRAL
+  provider seam (`billingprovider.Provider`): the console Billing UI is built
+  against the seam, `FakeStripe` is kept until launch, and no real payment
+  provider is wired now (the provider chosen at launch plugs in without touching
+  the billing core). The durable usage store is the billing system of record
+  when it lands (hosted gated).
 
 ## Operating principles applied
 
