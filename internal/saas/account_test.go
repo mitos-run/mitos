@@ -140,6 +140,87 @@ func TestRevokeOwnKeySucceeds(t *testing.T) {
 // so the test can build a KeyService sharing the same store.
 func svcStore(s *AccountService) Store { return s.store }
 
+// seedOrgWithOwnerAndMember creates a service with one org, an owner account,
+// and a plain member account. It returns the service, org id, owner id, and
+// member id.
+func seedOrgWithOwnerAndMember(t *testing.T) (*AccountService, string, string, string) {
+	t.Helper()
+	svc, store := newAccountFixture(t)
+	ctx := context.Background()
+
+	owner, org, err := svc.SignUp(ctx, "owner.seed@example.com")
+	if err != nil {
+		t.Fatalf("seedOrgWithOwnerAndMember SignUp owner: %v", err)
+	}
+	member, _, err := svc.SignUp(ctx, "member.seed@example.com")
+	if err != nil {
+		t.Fatalf("seedOrgWithOwnerAndMember SignUp member: %v", err)
+	}
+	mem := Membership{AccountID: member.ID, OrgID: org.ID, Role: RoleMember, CreatedAt: org.CreatedAt}
+	if err := store.PutMembership(ctx, mem); err != nil {
+		t.Fatalf("seedOrgWithOwnerAndMember PutMembership: %v", err)
+	}
+	return svc, org.ID, owner.ID, member.ID
+}
+
+// roleOf returns the role of targetID from a membership slice.
+func roleOf(members []Membership, targetID string) Role {
+	for _, m := range members {
+		if m.AccountID == targetID {
+			return m.Role
+		}
+	}
+	return ""
+}
+
+// TestSetMemberRoleAuthorization verifies the permission model for SetMemberRole:
+// owners can change roles, viewers cannot, and the last owner cannot be demoted.
+func TestSetMemberRoleAuthorization(t *testing.T) {
+	svc, orgID, ownerID, memberID := seedOrgWithOwnerAndMember(t)
+	ctx := context.Background()
+
+	// Owner can promote the member to admin.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, memberID, RoleAdmin); err != nil {
+		t.Fatalf("owner SetMemberRole: %v", err)
+	}
+	members, err := svc.ListMembers(ctx, ownerID, orgID)
+	if err != nil {
+		t.Fatalf("ListMembers after promote: %v", err)
+	}
+	if roleOf(members, memberID) != RoleAdmin {
+		t.Fatalf("member role = %s, want admin", roleOf(members, memberID))
+	}
+
+	// Demote back to viewer so memberID has no PermManageMembers.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, memberID, RoleViewer); err != nil {
+		t.Fatalf("demote to viewer: %v", err)
+	}
+
+	// A viewer must not be able to change roles.
+	if err := svc.SetMemberRole(ctx, memberID, orgID, ownerID, RoleMember); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("viewer SetMemberRole err = %v, want ErrForbidden", err)
+	}
+
+	// A non-member actor gets a not-a-member error (ErrKeyWrongOrg).
+	_, otherOrg, _ := svc.SignUp(ctx, "outsider.seed@example.com")
+	outsiderID := otherOrg.ID // use the outsider account's personal org - get the account id instead
+	outsider, _, _ := svc.SignUp(ctx, "outsider2.seed@example.com")
+	if err := svc.SetMemberRole(ctx, outsider.ID, orgID, ownerID, RoleMember); !errors.Is(err, ErrKeyWrongOrg) {
+		t.Fatalf("non-member SetMemberRole err = %v, want ErrKeyWrongOrg", err)
+	}
+	_ = outsiderID
+
+	// The last owner cannot be demoted.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, ownerID, RoleMember); !errors.Is(err, ErrLastOwner) {
+		t.Fatalf("demote last owner err = %v, want ErrLastOwner", err)
+	}
+
+	// SetMemberRole returns ErrNotFound for a target not in the org.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, "no-such-account", RoleMember); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown target SetMemberRole err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestListMembersReturnsOrgMembers asserts a member can list its org's members
 // and that another org's members are never included.
 func TestListMembersReturnsOrgMembers(t *testing.T) {
