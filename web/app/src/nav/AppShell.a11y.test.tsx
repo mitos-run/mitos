@@ -12,6 +12,11 @@ import type { Capabilities } from '../api'
 
 expect.extend(matchers)
 
+vi.mock('../data/account-settings', () => ({
+  useAccount: () => ({ data: { display_name: 'Test User', email: 'test@example.com', memberships: [] } }),
+  useSignOut: () => ({ mutate: vi.fn(), isPending: false }),
+}))
+
 const caps: Capabilities = {
   edition: 'community', billing: false, signup: false, teams: true, idp: 'oidc',
   orgSwitcher: false, secrets: { providers: ['kube'] }, proof: true, ownership: 'self-hosted',
@@ -37,7 +42,7 @@ describe('AppShell accessibility', () => {
   it('has no axe violations with the drawer open', async () => {
     const user = userEvent.setup()
     const { container } = await renderAt('/sandboxes', caps)
-    await user.click(await screen.findByRole('button', { name: /menu/i }))
+    await user.click(await screen.findByRole('button', { name: /open navigation menu/i }))
     expect(await axe(container)).toHaveNoViolations()
   })
 })
