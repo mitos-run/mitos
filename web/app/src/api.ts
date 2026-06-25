@@ -62,6 +62,7 @@ export type BillingView = { org_id: string; status: string; balance_cents: numbe
 export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
 export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
+export type ProjectMembership = { account_id: string; project_id: string; role: Role }
 
 export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
 export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
@@ -272,6 +273,24 @@ export const api = {
     })
     if (!r.ok) throw new Error(`set retention policy: ${r.status}`)
     return (await r.json()) as DataRetentionPolicy
+  },
+  projectMembers: (projectId: string) =>
+    get<{ project_id: string; members: ProjectMembership[] }>(`/console/projects/${encodeURIComponent(projectId)}/members`).then((r) => r.members ?? []),
+  assignProjectMember: async (projectId: string, accountId: string, role: Role) => {
+    const r = await fetch(`/console/projects/${encodeURIComponent(projectId)}/members`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ account_id: accountId, role }),
+    })
+    if (!r.ok) throw new Error(`assign project member: ${r.status}`)
+  },
+  revokeProjectMember: async (projectId: string, accountId: string) => {
+    const r = await fetch(`/console/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(accountId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
   },
 }
 

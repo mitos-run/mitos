@@ -1,6 +1,7 @@
 // Projects view: create form (labelled name + description inputs) and project list.
 // Supports loading, empty, and error states.
 import { useState } from 'react'
+import { Link } from '@tanstack/react-router'
 import { useProjects, useCreateProject } from '../data/org'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
@@ -89,7 +90,9 @@ export function Projects() {
                 border: '1px solid var(--border, #e0e0e0)',
               }}
             >
-              <div style={{ fontWeight: 600 }}>{p.name}</div>
+              <div style={{ fontWeight: 600 }}>
+                <Link to="/projects/$id" params={{ id: p.id }}>{p.name}</Link>
+              </div>
               {p.description && (
                 <div className="t-dim" style={{ fontSize: 'var(--step--1)', marginTop: 'var(--space-1)' }}>
                   {p.description}

@@ -19,6 +19,7 @@ import { Projects } from '../views/Projects'
 import { Settings } from '../views/Settings'
 import { Retention } from '../views/Retention'
 import { Roles } from '../views/Roles'
+import { ProjectDetail } from '../views/projects/ProjectDetail'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing']
@@ -43,6 +44,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/keys', label: 'API keys', group: 'Build', element: () => <Keys /> },
   { path: '/members', label: 'Members', group: 'Govern', element: () => <Members />, when: (c) => c.teams },
   { path: '/projects', label: 'Projects', group: 'Govern', element: () => <Projects />, when: (c) => c.teams },
+  { path: '/projects/$id', label: 'Project', group: 'Govern', element: () => <ProjectDetail />, hidden: true },
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
   { path: '/retention', label: 'Data and retention', group: 'Govern', element: () => <Retention /> },
   { path: '/roles', label: 'Roles', group: 'Govern', element: () => <Roles />, when: (c) => c.teams },
