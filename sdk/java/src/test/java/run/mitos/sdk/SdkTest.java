@@ -36,11 +36,18 @@ public final class SdkTest {
         testForkGeneratesId();
         testInvalidIdThrowsBeforeRequest();
         testExecRoundTrip();
+        testExecSendsSandboxIdAndBearer();
+        testExecErrorEndStream();
         testTerminateIssuesDelete();
         testDefaultBaseUrl();
         testBearerPrecedenceCredentialFile();
         testErrorEnvelopeParsed();
         testTokenNeverInExceptionMessage();
+
+        // Cluster mode (AgentRun) tests run against the same in-process HttpServer
+        // stub, reproducing the Kubernetes custom-resource REST wire shapes. They
+        // share the assert helpers and Stub harness below via package-private hooks.
+        ClusterTest.run();
 
         System.out.println();
         System.out.println("RESULT: " + passed + " passed, " + failed + " failed");
@@ -146,13 +153,21 @@ public final class SdkTest {
         stub.handle("POST", "/v1/fork", ex -> json(ex, 200,
                 "{\"id\":\"sb1\",\"template_id\":\"python\","
                         + "\"endpoint\":\"http://x\",\"fork_time_ms\":1.0}"));
-        stub.handle("POST", "/v1/exec", ex -> {
-            String body = readBody(ex);
-            Map<String, Object> m = Json.parseObject(body);
-            assertEquals("sb1", String.valueOf(m.get("sandbox")), "exec body sandbox id");
-            assertEquals("echo hi", String.valueOf(m.get("command")), "exec body command");
-            json(ex, 200, "{\"exit_code\":0,\"stdout\":\"hi\\n\","
-                    + "\"stderr\":\"\",\"exec_time_ms\":2.0}");
+        // The Connect ExecStream RPC: the server replies with a stream of
+        // enveloped frames (a stdout frame, an exit frame, then a clean
+        // end-stream frame). stdout/stderr are base64 in proto-JSON.
+        stub.handle("POST", "/sandbox.v1.Sandbox/ExecStream", ex -> {
+            // The request rides as ONE opening enveloped frame; the payload is the
+            // proto-JSON ExecStreamRequest. (Read the body exactly once.)
+            Map<String, Object> req = Json.parseObject(firstFramePayload(ex));
+            assertEquals("echo hi", String.valueOf(req.get("command")), "exec command");
+            String b64Hi = java.util.Base64.getEncoder()
+                    .encodeToString("hi\n".getBytes(StandardCharsets.UTF_8));
+            byte[] frames = concat(
+                    frame(0x00, "{\"stdout\":\"" + b64Hi + "\"}"),
+                    frame(0x00, "{\"exit\":{\"exitCode\":0,\"execTimeMs\":2.0}}"),
+                    frame(0x02, "{}"));
+            connectStream(ex, frames);
         });
         try (stub) {
             SandboxServer server = new SandboxServer(stub.url(), null);
@@ -160,9 +175,66 @@ public final class SdkTest {
             ExecResult r = sb.exec("echo hi");
             assertEquals(0, r.exitCode(), "exec exit_code");
             assertEquals("hi\n", r.stdout(), "exec stdout");
+            assertEquals(2.0, r.execTimeMs(), "exec exec_time_ms");
             assertTrue(r.success(), "exec success()");
         }
-        ok("exec round-trips stdout and exit_code");
+        ok("exec round-trips stdout and exit_code over Connect ExecStream");
+    }
+
+    private static void testExecSendsSandboxIdAndBearer() throws Exception {
+        String token = "sk-exec-token-abc";
+        Stub stub = new Stub();
+        stub.handle("POST", "/v1/fork", ex -> json(ex, 200,
+                "{\"id\":\"sb-hdr\",\"template_id\":\"python\","
+                        + "\"endpoint\":\"http://x\",\"fork_time_ms\":1.0}"));
+        stub.handle("POST", "/sandbox.v1.Sandbox/ExecStream", ex -> {
+            byte[] frames = concat(
+                    frame(0x00, "{\"exit\":{\"exitCode\":0,\"execTimeMs\":1.0}}"),
+                    frame(0x02, "{}"));
+            connectStream(ex, frames);
+        });
+        try (stub) {
+            SandboxServer server = new SandboxServer(stub.url(), token);
+            Sandbox sb = server.fork("python", "sb-hdr");
+            sb.exec("true");
+            String sid = stub.lastHeader("/sandbox.v1.Sandbox/ExecStream", "X-Sandbox-Id");
+            assertEquals("sb-hdr", sid, "exec sent X-Sandbox-Id header");
+            String auth = stub.lastHeader("/sandbox.v1.Sandbox/ExecStream", "Authorization");
+            assertEquals("Bearer " + token, auth, "exec sent the bearer header when a token is set");
+            String proto = stub.lastHeader("/sandbox.v1.Sandbox/ExecStream", "Connect-Protocol-Version");
+            assertEquals("1", proto, "exec sent Connect-Protocol-Version: 1");
+        }
+        ok("exec carries X-Sandbox-Id and the bearer header");
+    }
+
+    private static void testExecErrorEndStream() throws Exception {
+        Stub stub = new Stub();
+        stub.handle("POST", "/v1/fork", ex -> json(ex, 200,
+                "{\"id\":\"sb-err\",\"template_id\":\"python\","
+                        + "\"endpoint\":\"http://x\",\"fork_time_ms\":1.0}"));
+        // The terminal end-stream frame carries an error object: the SDK must turn
+        // it into a typed MitosException with the mapped code and status.
+        stub.handle("POST", "/sandbox.v1.Sandbox/ExecStream", ex -> {
+            byte[] frames = frame(0x02,
+                    "{\"error\":{\"code\":\"not_found\",\"message\":\"no such sandbox\"}}");
+            connectStream(ex, frames);
+        });
+        try (stub) {
+            SandboxServer server = new SandboxServer(stub.url(), null);
+            Sandbox sb = server.fork("python", "sb-err");
+            MitosException thrown = null;
+            try {
+                sb.exec("true");
+            } catch (MitosException e) {
+                thrown = e;
+            }
+            assertTrue(thrown != null, "error end-stream throws MitosException");
+            assertEquals("not_found", thrown.getCode(), "error end-stream code");
+            assertEquals(404, thrown.getStatus(), "error end-stream status (mapped from code)");
+            assertTrue(thrown.getMessage().contains("no such sandbox"),
+                    "error end-stream message: " + thrown.getMessage());
+        }
+        ok("an error end-stream frame throws a typed MitosException");
     }
 
     private static void testTerminateIssuesDelete() throws Exception {
@@ -283,17 +355,17 @@ public final class SdkTest {
 
     // ---- tiny assert + stub harness ----
 
-    private static void ok(String name) {
+    static void ok(String name) {
         passed++;
         System.out.println("PASS: " + name);
     }
 
-    private static void fail(String name) {
+    static void fail(String name) {
         failed++;
         System.out.println("FAIL: " + name);
     }
 
-    private static void assertTrue(boolean cond, String name) {
+    static void assertTrue(boolean cond, String name) {
         if (cond) {
             return;
         }
@@ -301,7 +373,7 @@ public final class SdkTest {
         throw new AssertionError(name);
     }
 
-    private static void assertEquals(Object expected, Object actual, String name) {
+    static void assertEquals(Object expected, Object actual, String name) {
         if (expected == null ? actual == null : expected.equals(actual)) {
             return;
         }
@@ -377,7 +449,7 @@ public final class SdkTest {
         }
     }
 
-    private static void json(HttpExchange ex, int status, String body) throws IOException {
+    static void json(HttpExchange ex, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json");
         ex.sendResponseHeaders(status, bytes.length);
@@ -386,8 +458,61 @@ public final class SdkTest {
         }
     }
 
-    private static String readBody(HttpExchange ex) throws IOException {
+    static String readBody(HttpExchange ex) throws IOException {
         return new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    }
+
+    // ---- Connect enveloped-frame helpers (mirror the wire the server speaks) ----
+
+    /** Encodes one Connect enveloped frame: a flag byte, a 4-byte big-endian
+     * length, then the JSON payload. */
+    static byte[] frame(int flag, String json) {
+        byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+        int n = payload.length;
+        byte[] out = new byte[5 + n];
+        out[0] = (byte) flag;
+        out[1] = (byte) ((n >>> 24) & 0xff);
+        out[2] = (byte) ((n >>> 16) & 0xff);
+        out[3] = (byte) ((n >>> 8) & 0xff);
+        out[4] = (byte) (n & 0xff);
+        System.arraycopy(payload, 0, out, 5, n);
+        return out;
+    }
+
+    static byte[] concat(byte[]... parts) {
+        int total = 0;
+        for (byte[] p : parts) {
+            total += p.length;
+        }
+        byte[] out = new byte[total];
+        int off = 0;
+        for (byte[] p : parts) {
+            System.arraycopy(p, 0, out, off, p.length);
+            off += p.length;
+        }
+        return out;
+    }
+
+    /** Writes a Connect server-stream response (HTTP 200, the connect+json
+     * content type, then the enveloped frame bytes). */
+    static void connectStream(HttpExchange ex, byte[] frames) throws IOException {
+        ex.getResponseHeaders().add("Content-Type", "application/connect+json");
+        ex.sendResponseHeaders(200, frames.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(frames);
+        }
+    }
+
+    /** Reads the request body (one or more enveloped frames) and returns the JSON
+     * payload of the FIRST frame as a string. */
+    static String firstFramePayload(HttpExchange ex) throws IOException {
+        byte[] body = ex.getRequestBody().readAllBytes();
+        if (body.length < 5) {
+            return "";
+        }
+        int n = ((body[1] & 0xff) << 24) | ((body[2] & 0xff) << 16)
+                | ((body[3] & 0xff) << 8) | (body[4] & 0xff);
+        return new String(body, 5, n, StandardCharsets.UTF_8);
     }
 
     // runChild launches a fresh JVM running mainClass with MITOS_CONFIG_DIR set to

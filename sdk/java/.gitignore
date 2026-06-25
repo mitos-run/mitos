@@ -4,3 +4,6 @@ target/
 # Ad-hoc javac output used to compile and run the tests without a build tool.
 out/
 *.class
+
+# The source argfile the CI build (and the local javac one-liner) writes.
+sources.txt

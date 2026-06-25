@@ -27,12 +27,12 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: v1alpha2
+    name: v1
     schema:
       openAPIV3Schema:
         description: |-
-          Sandbox is the v1alpha2 consolidated run-axis kind: one running sandbox. It
-          folds the v1alpha1 SandboxClaim and SandboxFork into one kind (ADR 0007). Its
+          Sandbox is the v1 consolidated run-axis kind: one running sandbox. It
+          folds the former SandboxClaim and SandboxFork into one kind (ADR 0007). Its
           source is a required oneof selecting the origin (a pool snapshot, a live
           sandbox to fork, or a workspace revision to resume); replicas carries the
           fork fan-out. A Sandbox with source.poolRef and replicas 1 is the old claim;
@@ -280,42 +280,30 @@ spec:
                           sandbox /workspace into the new WorkspaceRevision. Carried unchanged in
                           shape from SandboxClaim.outputs (path, diff, git).
                         items:
-                          description: |-
-                            OutputSpec is one terminate-with-outputs directive. At most one of Path, Diff,
-                            or Git is meaningful per entry, mirroring the v2 spec onTerminate.outputs
-                            shape (docs/api/v2-spec.md).
+                          description: OutputSpec is one terminate-with-outputs directive.
                           properties:
                             diff:
                               description: |-
-                                Diff requests that the new revision record the content-hash diff (added,
-                                removed, modified paths) against the workspace head revision before it.
+                                Diff requests that the new revision record the content-hash diff against
+                                the workspace head revision before it.
                               type: boolean
                             git:
-                              description: |-
-                                Git pushes the workspace spec.git.paths content to a rendezvous remote on a
-                                per-attempt branch. Git is the merge layer: the engine pushes branches, a
-                                human or CI merges them, the engine never merges working trees.
+                              description: Git pushes the workspace spec.git.paths
+                                content to a rendezvous remote.
                               properties:
                                 branch:
-                                  description: |-
-                                    Branch is the per-attempt branch the push lands on. It is a text/template
-                                    rendered with the claim name as {{.name}}, for example "attempt/{{.name}}".
+                                  description: Branch is the per-attempt branch the
+                                    push lands on.
                                   type: string
                                 remote:
-                                  description: |-
-                                    Remote is the rendezvous git remote the workspace repo paths are pushed to.
-                                    Operator-declared (an external egress; see docs/threat-model.md). The
-                                    pattern restricts the remote to safe transports (https/http/ssh/git/file
-                                    URLs and scp-like git@host:path), so admission rejects flag-shaped values
-                                    (a leading "-") and the dangerous ext::/fd:: transports at the API edge.
+                                  description: Remote is the rendezvous git remote
+                                    the workspace repo paths are pushed to.
                                   pattern: ^(https://|http://|ssh://|git://|file://|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:).+
                                   type: string
                               type: object
                             path:
-                              description: |-
-                                Path narrows the captured revision to this /workspace subtree (a prefix).
-                                When any output sets Path, only the union of those subtrees is captured;
-                                with no Path output the whole workspace is captured.
+                              description: Path narrows the captured revision to this
+                                /workspace subtree.
                               type: string
                           type: object
                         type: array
@@ -398,6 +386,9 @@ spec:
                   Secrets are the secret mounts delivered to the sandbox. Carried unchanged
                   from SandboxClaim.secrets.
                 items:
+                  description: |-
+                    SecretMount delivers a Kubernetes Secret key to the sandbox as an env var
+                    or a mounted file.
                   properties:
                     envVar:
                       type: string
@@ -496,8 +487,12 @@ spec:
                   VolumeOverrides override per-volume fork policies for this sandbox. Carried
                   unchanged from SandboxClaim.volumeOverrides / SandboxFork.volumeOverrides.
                 items:
+                  description: VolumeOverride overrides the fork policy for a named
+                    volume on this sandbox.
                   properties:
                     forkPolicy:
+                      description: ForkPolicy governs how a volume is handled when
+                        a sandbox is forked.
                       type: string
                     name:
                       type: string
@@ -701,17 +696,26 @@ spec:
                   1 Sandbox, carried so the controller-restart correctness holds. Maps from
                   SandboxForkStatus.forkSnapshotTaken.
                 type: boolean
+              node:
+                description: |-
+                  Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
+                  engine placement identity distinct from SandboxID: the GC orphan sweep,
+                  NodeLost detection, and the terminate/idle engine calls key off it on the
+                  raw-forkd path, where it is not derivable from a husk pod.
+                type: string
               phase:
                 description: |-
-                  Phase is the sandbox lifecycle phase. v2 phases: Pending, Hydrating, Ready,
-                  Terminating, NodeLost, Failed. v1 Restoring maps to Hydrating; v1
-                  Terminated is a terminal phase reaped by TTL.
+                  Phase is the sandbox lifecycle phase. The phase-name set is carried from
+                  v1alpha1 (Pending, Restoring, Ready, Terminating, Terminated, Failed);
+                  Terminated is a terminal phase reaped by TTL. The v2 phase rename
+                  (Hydrating, NodeLost) is deferred to a later task.
                 type: string
               pod:
                 description: |-
                   Pod is the husk pod name backing the sandbox (for example
                   "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
-                  OpenCost. NEW explicit v2 field; the node is derivable from the pod.
+                  OpenCost. NEW explicit v2 field. On the husk path the node is derivable
+                  from the pod; on the raw-forkd path the node is carried in Node below.
                 type: string
               readyReplicas:
                 description: |-

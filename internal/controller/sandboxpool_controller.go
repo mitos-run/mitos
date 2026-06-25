@@ -11,7 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/kms"
 	forkdpb "mitos.run/mitos/proto/forkd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -122,7 +122,7 @@ func (r *SandboxPoolReconciler) now() time.Time {
 // the current dormant and in-use counts, reading the shared demand tracker for
 // the last claim arrival so the scale-down cooldown is honored. It is the single
 // place the formula and the cooldown clock meet.
-func (r *SandboxPoolReconciler) desiredWarm(pool *v1alpha1.SandboxPool, dormant, inUse int32) int32 {
+func (r *SandboxPoolReconciler) desiredWarm(pool *v1.SandboxPool, dormant, inUse int32) int32 {
 	var lastClaim *metav1.Time
 	if r.Demand != nil {
 		if t, ok := r.Demand.LastArrival(poolKey(pool)); ok {
@@ -135,7 +135,7 @@ func (r *SandboxPoolReconciler) desiredWarm(pool *v1alpha1.SandboxPool, dormant,
 }
 
 // poolKey is the namespace/name demand-tracker key for a pool.
-func poolKey(pool *v1alpha1.SandboxPool) string {
+func poolKey(pool *v1.SandboxPool) string {
 	return pool.Namespace + "/" + pool.Name
 }
 
@@ -160,7 +160,7 @@ func poolKey(pool *v1alpha1.SandboxPool) string {
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var pool v1alpha1.SandboxPool
+	var pool v1.SandboxPool
 	if err := r.Get(ctx, req.NamespacedName, &pool); err != nil {
 		if apierrors.IsNotFound(err) {
 			// The pool is genuinely deleted (not a transient error): drop its
@@ -179,17 +179,26 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	var template v1alpha1.SandboxTemplate
-	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: pool.Namespace,
-		Name:      pool.Spec.TemplateRef.Name,
-	}, &template); err != nil {
-		logger.Error(err, "template not found", "template", pool.Spec.TemplateRef.Name)
-		return ctrl.Result{}, err
+	// Resolve the effective template: the inline spec.template is the common path
+	// (ADR 0007, the Deployment-embeds-PodSpec pattern); when it is nil the pool
+	// referenced a shared template-shaped SandboxPool by name via spec.templateRef,
+	// and that pool's inline template is reused. A pool with neither is invalid
+	// (validation forbids it); the accessor stays nil-safe.
+	template := poolTemplate(&pool)
+	if pool.Spec.Template == nil && pool.Spec.TemplateRef != nil {
+		var ref v1.SandboxPool
+		if err := r.Get(ctx, client.ObjectKey{
+			Namespace: pool.Namespace,
+			Name:      pool.Spec.TemplateRef.Name,
+		}, &ref); err != nil {
+			logger.Error(err, "templateRef not found", "templateRef", pool.Spec.TemplateRef.Name)
+			return ctrl.Result{}, err
+		}
+		template = poolTemplate(&ref)
 	}
 
-	templateID := pool.Spec.TemplateRef.Name
-	desired := pool.Spec.Replicas
+	templateID := poolTemplateID(&pool)
+	desired := poolReplicas(&pool)
 
 	// dedicatedNodes (#172): resolve the pool's placement node set once so every
 	// snapshot readiness count and the template build below are scoped to the
@@ -247,12 +256,12 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// programs is the guarantee. A failure is logged but does NOT block husk
 		// pod creation, so a CNI without NetworkPolicy support never stalls the
 		// warm pool.
-		npAllow := huskEgressConfig(&template).Allow
+		npAllow := huskEgressConfig(template).Allow
 		if err := r.ensureHuskNetworkPolicy(ctx, &pool, npAllow); err != nil {
 			logger.Error(err, "ensure husk network policy (best effort; in-pod filter is the guarantee)")
 		}
 
-		res, err := r.reconcileHuskPods(ctx, &pool, &template, desiredWarm)
+		res, err := r.reconcileHuskPods(ctx, &pool, template, desiredWarm)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -274,7 +283,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// node that cannot snapshot (the documented nested-VMM boundary on kind)
 		// the build never completes, yet the warm pool above is still maintained
 		// and self-heals.
-		buildErr := r.ensureTemplateBuilt(ctx, &pool, &template, nodeFilter)
+		buildErr := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter)
 		if buildErr != nil {
 			logger.Error(buildErr, "failed to build template snapshot for husk pool (warm pool still maintained)")
 		}
@@ -333,7 +342,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// target nodes and let each claim fork on a holder. No husk pods.
 	if rawReady := r.readySnapshotCountOn(templateID, nodeFilter); rawReady < desired {
 		logger.Info("snapshot deficit", "ready", rawReady, "desired", desired)
-		if err := r.ensureTemplateBuilt(ctx, &pool, &template, nodeFilter); err != nil {
+		if err := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter); err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
@@ -397,7 +406,7 @@ func (r *SandboxPoolReconciler) readySnapshotCountOn(templateID string, nodeFilt
 // placementFilter resolves a pool's dedicatedNodes placement (#172) to the set
 // of node names its snapshots may live on. It returns nil when the pool declares
 // no placement (every node is eligible), so callers treat nil as "unconstrained".
-func (r *SandboxPoolReconciler) placementFilter(ctx context.Context, pool *v1alpha1.SandboxPool) (map[string]bool, error) {
+func (r *SandboxPoolReconciler) placementFilter(ctx context.Context, pool *v1.SandboxPool) (map[string]bool, error) {
 	sel := huskPlacementNodeSelector(pool)
 	if len(sel) == 0 {
 		return nil, nil
@@ -417,7 +426,7 @@ func (r *SandboxPoolReconciler) placementFilter(ctx context.Context, pool *v1alp
 // setCondition carries an unchanged condition's LastTransitionTime forward, so a
 // steady-state reconcile compares equal. apiequality.Semantic compares metav1.Time
 // by value (handling the monotonic-clock and location pitfalls of DeepEqual).
-func poolStatusUnchanged(a, b *v1alpha1.SandboxPoolStatus) bool {
+func poolStatusUnchanged(a, b *v1.SandboxPoolStatus) bool {
 	x, y := a.DeepCopy(), b.DeepCopy()
 	x.LastSnapshotTime, y.LastSnapshotTime = nil, nil
 	return apiequality.Semantic.DeepEqual(x, y)
@@ -431,7 +440,7 @@ func poolStatusUnchanged(a, b *v1alpha1.SandboxPoolStatus) bool {
 // (issue #163, failure/GC status-update rate-limiting). On a no-op it leaves the
 // stored object untouched (no write, no heartbeat bump), so the object's own
 // watch is not re-triggered.
-func (r *SandboxPoolReconciler) writePoolStatusIfChanged(ctx context.Context, pool *v1alpha1.SandboxPool, before *v1alpha1.SandboxPoolStatus, now metav1.Time) error {
+func (r *SandboxPoolReconciler) writePoolStatusIfChanged(ctx context.Context, pool *v1.SandboxPool, before *v1.SandboxPoolStatus, now metav1.Time) error {
 	if poolStatusUnchanged(before, &pool.Status) {
 		// Keep the in-memory heartbeat consistent with what is stored (we did not
 		// write), then skip the API call.
@@ -481,22 +490,25 @@ func (r *SandboxPoolReconciler) huskTemplateDigest(templateID string) string {
 // node, so the snapshot must exist there first. A no-op when the deficit is
 // already met. The encrypted-template key handling matches the raw path: the
 // per-template key Secret is owned here and delivered over mTLS, never logged.
-func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, nodeFilter map[string]bool) error {
-	templateID := pool.Spec.TemplateRef.Name
+func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, nodeFilter map[string]bool) error {
+	templateID := poolTemplateID(pool)
+	desired := poolReplicas(pool)
 	// dedicatedNodes (#172): nodeFilter restricts the snapshot to a placed pool's
 	// placement nodes for BOTH the deficit count and the build targets, so a
 	// snapshot is never built off the dedicated set. nil => unconstrained.
 	readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
-	if readySnapshots >= pool.Spec.Replicas {
+	if readySnapshots >= desired {
 		return nil
 	}
-	deficit := pool.Spec.Replicas - readySnapshots
+	deficit := desired - readySnapshots
 
 	var wrappedDEK []byte
 	var kekID string
-	if template.Spec.Encrypted {
+	if template.Encrypted {
 		var keyErr error
-		wrappedDEK, kekID, keyErr = EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, template)
+		// The pool owns the per-template key Secret now that the template inlines
+		// into it (no standalone SandboxTemplate object to own it).
+		wrappedDEK, kekID, keyErr = EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, pool)
 		if keyErr != nil {
 			// The error names only the Secret and the non-secret KEK id, never key
 			// bytes.
@@ -506,7 +518,7 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	// InitCommands flattens the declarative BuildSteps (issue #220) into the
 	// in-VM init commands, falling back to the legacy Init list when no
 	// BuildSteps are set, so a template authored either way builds identically.
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.InitCommands(), template.Spec.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, deficit, nodeFilter); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil
@@ -538,7 +550,7 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 // healthy node, preserving the unplaced behavior. The pull SOURCE is not
 // constrained: the digest is content-addressed, so pulling from any holder into
 // a dedicated node is safe.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool) (int32, error) {
 	var added int32
 	var errs []error
 
@@ -649,7 +661,7 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// owner-referenced husk PodDisruptionBudget for free via the same ownership
 	// edge for pods; the PDB itself is reconciled on the pool's own events.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.SandboxPool{}).
+		For(&v1.SandboxPool{}).
 		Owns(&corev1.Pod{}).
 		Complete(r)
 }

@@ -1,15 +1,16 @@
 /**
  * Cluster-mode example: Kubernetes CRDs via AgentRun.
  *
- * Requires a running cluster with the mitos controller and forkd, and a
+ * Requires a running cluster with the Mitos controller and forkd, and a
  * kubeconfig that can reach it. Execute with ts-node or compile and run with
  * node. It is kept runnable-shaped (top-level async main) and type-checks
  * under npm run check:examples.
  *
- * The cluster client polls a SandboxClaim until Ready, reads the per-sandbox
- * bearer token from a Secret (never logged, redacted from errors), and hands
- * back a Sandbox bound to the claim endpoint. The claim/fork path is proven
- * in the kind CI smoke; real in-VM exec is proven by the KVM CI of the API.
+ * The cluster client polls a mitos.run/v1 Sandbox until Ready, reads the
+ * per-sandbox bearer token from a Secret (never logged, redacted from errors),
+ * and hands back a Sandbox bound to the sandbox endpoint. The pool/sandbox
+ * path is proven in the kind CI smoke; real in-VM exec is proven by the KVM
+ * CI of the API.
  */
 
 import { AgentRun, KubeConfigApi } from "@mitos/sdk";

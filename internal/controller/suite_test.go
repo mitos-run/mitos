@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	v1 "mitos.run/mitos/api/v1"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,8 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	v1alpha2 "mitos.run/mitos/api/v1alpha2"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
@@ -134,19 +133,19 @@ var (
 	// setHuskWSDelegate to prove the husk reconciler delegates and the controller
 	// still commits the revision + advances the head, without a real husk pod.
 	huskWSDelegateMu sync.Mutex
-	huskWSHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
-	huskWSDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+	huskWSHydrate    func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error
+	huskWSDehydrate  func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error)
 	// huskWSDiff is the optional husk-mode diff fake the suite's
 	// WorkspaceDehydrateDiffDelegate consults when an output requested a diff. nil
 	// records no diff (the node returned none). A test that exercises the husk diff
 	// path installs it via setHuskWSDiff; it stands in for the diff the husk-stub
 	// computes from the two node-CAS manifests.
-	huskWSDiff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error)
+	huskWSDiff func(ctx context.Context, claim *v1.Sandbox, parentManifest, child cas.Digest) (workspace.Diff, error)
 
 	// huskTestCheckpointerMu guards the swappable live-VM checkpointer the
 	// suite's husk reconciler routes a Checkpoint drain policy through.
 	huskTestCheckpointerMu sync.Mutex
-	huskTestCheckpointer   func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)
+	huskTestCheckpointer   func(ctx context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error)
 
 	// forkSnapshotterMu guards the swappable husk fork-snapshot / activator /
 	// remover seams the suite's husk-enabled fork reconciler dials through.
@@ -158,17 +157,17 @@ var (
 	// wsTransferMu guards the swappable workspace hydrate/dehydrate fakes the
 	// suite's raw claim reconciler drives. Tests set them via setWSTransfer.
 	wsTransferMu sync.Mutex
-	wsHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
-	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
-	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
+	wsHydrate    func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error
+	wsDehydrate  func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error)
+	wsDiff       func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error)
 	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error
-	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
+	wsRepoFiles  func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error)
 
 	// memSnapshotMu guards the swappable memory-snapshot pairing fakes (W4 Task
 	// 2). Tests set them via setMemSnapshot before creating their claim/workspace.
 	memSnapshotMu sync.Mutex
-	memCheckpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error)
-	memResume     func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error
+	memCheckpoint func(ctx context.Context, claim *v1.Sandbox) (controller.MemSnapshotResultForTest, error)
+	memResume     func(ctx context.Context, claim *v1.Sandbox, ref string) error
 	memExists     func(ctx context.Context, ref, principal string) (bool, error)
 )
 
@@ -179,8 +178,8 @@ var (
 // a safe default: checkpoint returns nothing captured, resume errors (so a test
 // that expects resume but forgot to install it fails), exists returns false.
 func setMemSnapshot(
-	checkpoint func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error),
-	resume func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error,
+	checkpoint func(ctx context.Context, claim *v1.Sandbox) (controller.MemSnapshotResultForTest, error),
+	resume func(ctx context.Context, claim *v1.Sandbox, ref string) error,
 	exists func(ctx context.Context, ref, principal string) (bool, error),
 ) {
 	memSnapshotMu.Lock()
@@ -190,13 +189,13 @@ func setMemSnapshot(
 	memExists = exists
 }
 
-func currentMemCheckpoint() func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error) {
+func currentMemCheckpoint() func(ctx context.Context, claim *v1.Sandbox) (controller.MemSnapshotResultForTest, error) {
 	memSnapshotMu.Lock()
 	defer memSnapshotMu.Unlock()
 	return memCheckpoint
 }
 
-func currentMemResume() func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+func currentMemResume() func(ctx context.Context, claim *v1.Sandbox, ref string) error {
 	memSnapshotMu.Lock()
 	defer memSnapshotMu.Unlock()
 	return memResume
@@ -212,8 +211,8 @@ func currentMemExists() func(ctx context.Context, ref, principal string) (bool, 
 // default that fails closed so a test that forgot to set them does not silently
 // pass.
 func setWSTransfer(
-	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+	hydrate func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error),
 ) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
@@ -224,7 +223,7 @@ func setWSTransfer(
 // setWSDiff installs the workspace diff fake; nil falls back to a default that
 // returns an empty diff so a test that does not exercise the diff path is
 // unaffected.
-func setWSDiff(diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)) {
+func setWSDiff(diff func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error)) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsDiff = diff
@@ -240,31 +239,31 @@ func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, r
 
 // setWSRepoFiles installs the git repo-paths resolver fake; nil falls back to a
 // default that resolves no files.
-func setWSRepoFiles(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)) {
+func setWSRepoFiles(fn func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error)) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsRepoFiles = fn
 }
 
-func currentWSRepoFiles() func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+func currentWSRepoFiles() func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsRepoFiles
 }
 
-func currentWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+func currentWSHydrate() func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsHydrate
 }
 
-func currentWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+func currentWSDehydrate() func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsDehydrate
 }
 
-func currentWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+func currentWSDiff() func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsDiff
@@ -278,7 +277,7 @@ func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string
 
 // setHuskTestCheckpointer installs the checkpointer the suite reconciler uses
 // for the Checkpoint drain policy; nil falls back to the default.
-func setHuskTestCheckpointer(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)) {
+func setHuskTestCheckpointer(fn func(ctx context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error)) {
 	huskTestCheckpointerMu.Lock()
 	defer huskTestCheckpointerMu.Unlock()
 	huskTestCheckpointer = fn
@@ -286,7 +285,7 @@ func setHuskTestCheckpointer(fn func(ctx context.Context, claim *v1alpha1.Sandbo
 
 // currentHuskTestCheckpointer returns the installed checkpointer, or nil so the
 // reconciler uses its default (re-pend without a captured snapshot).
-func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error) {
+func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error) {
 	huskTestCheckpointerMu.Lock()
 	defer huskTestCheckpointerMu.Unlock()
 	return huskTestCheckpointer
@@ -318,8 +317,8 @@ func currentHuskTestActivator() func(ctx context.Context, addr string, tlsConf *
 // dial-the-husk-pod path (which has no pod in envtest), so a test that exercises
 // the workspace path must install both.
 func setHuskWSDelegate(
-	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+	hydrate func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error),
 ) {
 	huskWSDelegateMu.Lock()
 	defer huskWSDelegateMu.Unlock()
@@ -327,13 +326,13 @@ func setHuskWSDelegate(
 	huskWSDehydrate = dehydrate
 }
 
-func currentHuskWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+func currentHuskWSHydrate() func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 	huskWSDelegateMu.Lock()
 	defer huskWSDelegateMu.Unlock()
 	return huskWSHydrate
 }
 
-func currentHuskWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+func currentHuskWSDehydrate() func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 	huskWSDelegateMu.Lock()
 	defer huskWSDelegateMu.Unlock()
 	return huskWSDehydrate
@@ -343,13 +342,13 @@ func currentHuskWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxC
 // dehydrate+diff delegate consults when an output requested a diff. It stands in
 // for the diff the husk-stub computes from the two node-CAS manifests. nil clears
 // it (no diff returned).
-func setHuskWSDiff(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error)) {
+func setHuskWSDiff(fn func(ctx context.Context, claim *v1.Sandbox, parentManifest, child cas.Digest) (workspace.Diff, error)) {
 	huskWSDelegateMu.Lock()
 	defer huskWSDelegateMu.Unlock()
 	huskWSDiff = fn
 }
 
-func currentHuskWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, parentManifest, child cas.Digest) (workspace.Diff, error) {
+func currentHuskWSDiff() func(ctx context.Context, claim *v1.Sandbox, parentManifest, child cas.Digest) (workspace.Diff, error) {
 	huskWSDelegateMu.Lock()
 	defer huskWSDelegateMu.Unlock()
 	return huskWSDiff
@@ -391,6 +390,15 @@ func currentForkActivator() func(ctx context.Context, addr string, tlsConf *tls.
 		}
 	}
 	return forkActivator
+}
+
+// forkActivatorInstalled reports whether a fork test installed a fork activator,
+// so the shared husk activate seam can route a fork-child activation to it (and a
+// husk-claim activation to the claim activator) on the one merged husk reconciler.
+func forkActivatorInstalled() bool {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	return forkActivator != nil
 }
 
 // setForkSnapshotRemover / currentForkSnapshotRemover swap the remove-fork-snapshot
@@ -440,11 +448,7 @@ func TestMain(m *testing.M) {
 	defer cancel()
 
 	scheme = runtime.NewScheme()
-	_ = v1alpha1.AddToScheme(scheme)
-	// v1alpha2: the consolidated three-noun API (issue #23). The Sandbox
-	// reconciler maps a v1alpha2 Sandbox onto the existing SandboxClaim/SandboxFork
-	// engine; its conformance envtest needs the v2 types in the scheme.
-	_ = v1alpha2.AddToScheme(scheme)
+	_ = v1.AddToScheme(scheme)
 	// core/v1 too: the claim and fork reconcilers create token Secrets.
 	_ = clientgoscheme.AddToScheme(scheme)
 
@@ -506,15 +510,16 @@ func TestMain(m *testing.M) {
 		KMS:            testKMS,
 	}).SetupWithManager(mgr)
 
-	rawClaim := &controller.SandboxClaimReconciler{
+	rawClaim := &controller.SandboxReconciler{
 		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
 		KMS:          testKMS,
 		APIReader:    mgr.GetAPIReader(),
 		NodeRegistry: nodeRegistry,
 	}
-	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
-	// fight the husk reconciler over the same object.
-	rawClaim.SkipLabel(controller.HuskTestClaimLabel)
+	// The raw (forkd) reconciler ignores husk-test and husk-fork-test sandboxes so
+	// it does not fight the husk reconcilers over the same object.
+	rawClaim.SkipLabels(controller.HuskTestClaimLabel, controller.HuskForkTestLabel)
 	// Wire the change feed: the buffered FakeRecorder for the always-on Event
 	// mirror and the recording sink for the CloudEvents egress. A nil clock uses
 	// the wall clock; the feed tests assert the envelope, not an exact time.
@@ -523,13 +528,13 @@ func TestMain(m *testing.M) {
 	// fakes (W4 Task 2). Safe defaults: checkpoint captures nothing, resume
 	// errors (a test that wants resume must install it), exists reports absent.
 	rawClaim.SetMemorySnapshotForTest(
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim) (controller.MemSnapshotResultForTest, error) {
+		func(ctx context.Context, claim *v1.Sandbox) (controller.MemSnapshotResultForTest, error) {
 			if fn := currentMemCheckpoint(); fn != nil {
 				return fn(ctx, claim)
 			}
 			return controller.MemSnapshotResultForTest{}, nil
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+		func(ctx context.Context, claim *v1.Sandbox, ref string) error {
 			if fn := currentMemResume(); fn != nil {
 				return fn(ctx, claim, ref)
 			}
@@ -546,19 +551,19 @@ func TestMain(m *testing.M) {
 	// fakes so the binding lifecycle is driven without a VM. A test that does not
 	// install fakes but uses a workspaceRef gets a fail-closed default.
 	rawClaim.SetWorkspaceTransferForTest(
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+		func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 			if fn := currentWSHydrate(); fn != nil {
 				return fn(ctx, claim, manifest)
 			}
 			return fmt.Errorf("no workspace hydrate fake installed")
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+		func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 			if fn := currentWSDehydrate(); fn != nil {
 				return fn(ctx, claim, excludePaths, capturePaths)
 			}
 			return "", fmt.Errorf("no workspace dehydrate fake installed")
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+		func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error) {
 			if fn := currentWSDiff(); fn != nil {
 				return fn(ctx, claim, parent, child)
 			}
@@ -570,7 +575,7 @@ func TestMain(m *testing.M) {
 			}
 			return nil
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+		func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error) {
 			if fn := currentWSRepoFiles(); fn != nil {
 				return fn(ctx, claim, digest, gitPaths)
 			}
@@ -583,19 +588,40 @@ func TestMain(m *testing.M) {
 
 	// A husk-enabled claim reconciler that handles ONLY husk-test claims. Its
 	// activator is swappable per test via setHuskTestActivator.
-	huskClaim := &controller.SandboxClaimReconciler{
-		Client:         mgr.GetClient(),
-		APIReader:      mgr.GetAPIReader(),
-		NodeRegistry:   nodeRegistry,
-		EnableHuskPods: true,
-		KMS:            testKMS,
-		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; the fake activator ignores it
+	huskClaim := &controller.SandboxReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		APIReader:         mgr.GetAPIReader(),
+		NodeRegistry:      nodeRegistry,
+		EnableHuskPods:    true,
+		KMS:               testKMS,
+		HuskTLS:           &tls.Config{}, //nolint:gosec // test stub; the fake activator ignores it
+		HuskStubImage:     "mitos-husk-stub:test",
+		DataDir:           "/var/lib/mitos",
+		HuskTLSSecretName: controller.HuskTLSSecretName,
+		HuskCASecretName:  controller.CASecretName,
 	}
-	huskClaim.OnlyLabel(controller.HuskTestClaimLabel)
+	// One husk reconciler handles BOTH the husk-claim (husk-test) and husk-fork
+	// (husk-fork-test) sandboxes: the consolidated reconciler owns both engines, so
+	// a husk pod event enqueues the sandbox on exactly one reconciler (no race).
+	huskClaim.OnlyLabels(controller.HuskTestClaimLabel, controller.HuskForkTestLabel)
 	huskClaim.SetActivateForTest(func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+		// The activate seam is shared by the husk-claim path and the husk-fork child
+		// path. A husk-fork test installs currentForkActivator; a husk-claim test
+		// installs currentHuskTestActivator. They are set per-test and never both at
+		// once, so prefer the fork activator when a fork test installed one.
+		if forkActivatorInstalled() {
+			return currentForkActivator()(ctx, addr, tlsConf, req)
+		}
 		return currentHuskTestActivator()(ctx, addr, tlsConf, req)
 	})
-	huskClaim.SetCheckpointForTest(func(c context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error) {
+	huskClaim.SetForkSnapshotForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return currentForkSnapshotter()(c, addr, tlsConf, req)
+	})
+	huskClaim.SetForkSnapshotRemoverForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return currentForkSnapshotRemover()(c, addr, tlsConf, req)
+	})
+	huskClaim.SetCheckpointForTest(func(c context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error) {
 		if fn := currentHuskTestCheckpointer(); fn != nil {
 			return fn(c, claim, pod)
 		}
@@ -607,13 +633,13 @@ func TestMain(m *testing.M) {
 	// without a real husk pod. A test that uses a workspaceRef installs both via
 	// setHuskWSDelegate.
 	huskClaim.SetWorkspaceDelegateForTest(
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+		func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 			if fn := currentHuskWSHydrate(); fn != nil {
 				return fn(ctx, claim, manifest)
 			}
 			return fmt.Errorf("no husk workspace hydrate delegate installed")
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+		func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 			if fn := currentHuskWSDehydrate(); fn != nil {
 				return fn(ctx, claim, excludePaths, capturePaths)
 			}
@@ -627,7 +653,7 @@ func TestMain(m *testing.M) {
 	// fake. This proves the husk terminate path commits a revision WITH a diff
 	// summary without ever touching the in-controller workspaceTransport seam.
 	huskClaim.SetWorkspaceDehydrateDiffDelegateForTest(
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
+		func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
 			dehydrate := currentHuskWSDehydrate()
 			if dehydrate == nil {
 				return "", nil, fmt.Errorf("no husk workspace dehydrate delegate installed")
@@ -654,42 +680,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	// The raw-forkd fork reconciler handles forks WITHOUT the husk-fork label, so
-	// it does not fight the husk fork reconciler over the same object.
-	rawFork := &controller.SandboxForkReconciler{
-		Client:       mgr.GetClient(),
-		NodeRegistry: nodeRegistry,
-	}
-	rawFork.SkipForkLabel(controller.HuskForkTestLabel)
-	if err := rawFork.SetupWithManager(mgr); err != nil {
-		panic(err)
-	}
-
-	// A husk-enabled fork reconciler that handles ONLY husk-fork-test forks, with
-	// swappable fork-snapshot / activate / remove seams.
-	huskFork := &controller.SandboxForkReconciler{
-		Client:            mgr.GetClient(),
-		NodeRegistry:      nodeRegistry,
-		EnableHuskPods:    true,
-		HuskTLS:           &tls.Config{}, //nolint:gosec // test stub; fakes ignore it
-		HuskStubImage:     "mitos-husk-stub:test",
-		DataDir:           "/var/lib/mitos",
-		HuskTLSSecretName: controller.HuskTLSSecretName,
-		HuskCASecretName:  controller.CASecretName,
-	}
-	huskFork.OnlyForkLabel(controller.HuskForkTestLabel)
-	huskFork.SetForkSnapshotForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
-		return currentForkSnapshotter()(c, addr, tlsConf, req)
-	})
-	huskFork.SetActivateForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
-		return currentForkActivator()(c, addr, tlsConf, req)
-	})
-	huskFork.SetForkSnapshotRemoverForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
-		return currentForkSnapshotRemover()(c, addr, tlsConf, req)
-	})
-	if err := huskFork.SetupWithManager(mgr); err != nil {
-		panic(err)
-	}
+	// The consolidated raw reconciler (rawClaim) already owns the raw-forkd fork
+	// engine (source.fromSandbox), so no separate raw fork reconciler is wired: a
+	// raw fork Sandbox carries neither husk label and is handled by rawClaim. The
+	// husk-fork engine is owned by the single huskClaim reconciler above (it has the
+	// fork-snapshot/activate/remove seams wired), so a husk pod event enqueues each
+	// sandbox on exactly one reconciler and the two no longer race.
 
 	// The Workspace reconciler (W4): manages the revision DAG, retention,
 	// lineage, and head/revisions/resumable status. Core, not behind any flag.
@@ -707,17 +703,6 @@ func TestMain(m *testing.M) {
 		return false, nil
 	})
 	if err := wsReconciler.SetupWithManager(mgr); err != nil {
-		panic(err)
-	}
-
-	// The consolidated v1alpha2 Sandbox reconciler (issue #23): maps a Sandbox
-	// onto an owned SandboxClaim (source.poolRef, the claim equivalent) or
-	// SandboxFork (source.fromSandbox, the fork equivalent). It is additive; the
-	// existing claim/fork reconcilers above are untouched and handle the children.
-	if err := (&controller.SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -17,15 +17,18 @@ func TestClusterCreateAndLogWorkspace(t *testing.T) {
 	if err := ws.CreateWorkspace(context.Background(), "proj-x"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	var got v1alpha1.Workspace
+	var got v1.Workspace
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "proj-x"}, &got); err != nil {
 		t.Fatalf("workspace not created: %v", err)
 	}
 
-	rev := &v1alpha1.WorkspaceRevision{
+	rev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "proj-x-1", Namespace: "ns"},
-		Spec:       v1alpha1.WorkspaceRevisionSpec{WorkspaceRef: v1alpha1.LocalObjectReference{Name: "proj-x"}, Source: v1alpha1.RevisionSource{FromClaim: "c1"}},
-		Status:     v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionCommitted},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef: v1.LocalObjectReference{Name: "proj-x"},
+			Source:       v1.RevisionSource{FromClaim: "c1"},
+		},
+		Status: v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionCommitted},
 	}
 	if err := c.Create(context.Background(), rev); err != nil {
 		t.Fatalf("seed revision: %v", err)
@@ -40,12 +43,14 @@ func TestClusterCreateAndLogWorkspace(t *testing.T) {
 }
 
 func TestClusterForkRejectsUncommittedWithRejectionError(t *testing.T) {
-	parent := &v1alpha1.WorkspaceRevision{
+	parent := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "proj-x-1", Namespace: "ns"},
-		Spec:       v1alpha1.WorkspaceRevisionSpec{WorkspaceRef: v1alpha1.LocalObjectReference{Name: "proj-x"}},
-		Status:     v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionPending},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef: v1.LocalObjectReference{Name: "proj-x"},
+		},
+		Status: v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionPending},
 	}
-	dst := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
+	dst := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "branch", Namespace: "ns"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme()).WithObjects(parent, dst).Build()
 	b := NewClusterBackend(c, "ns", nil)
 

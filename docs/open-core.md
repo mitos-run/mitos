@@ -2,14 +2,14 @@
 
 This page states what is open source, the contribution licensing bar, and the
 trademark reservation. It is deliberately minimal and honest: it describes only
-what exists today. Tracked in issue #34.
+what exists today.
 
 ## What is open source
 
 Everything in this repository is open source under the Apache License 2.0 (see
 the `LICENSE` file at the repository root). This includes the controller,
-forkd, the guest agent, sandbox-server, the Python and TypeScript SDKs, the
-CRDs, and all documentation. You can run, modify, and redistribute it under the
+forkd, the guest agent, sandbox-server, the SDKs (Python, TypeScript, Go, Ruby,
+Rust, Java), the CRDs, and all documentation. You can run, modify, and redistribute it under the
 terms of Apache 2.0.
 
 ## Open-core boundary
@@ -39,5 +39,5 @@ entity. Contributions stay under the repository's Apache 2.0 license.
 
 ## Trademark
 
-The "mitos" name and any associated marks are reserved; see TRADEMARKS.md. The
+The "Mitos" name and any associated marks are reserved; see TRADEMARKS.md. The
 open-source code license (Apache 2.0) does not grant trademark rights.

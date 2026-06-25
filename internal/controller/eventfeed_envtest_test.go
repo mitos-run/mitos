@@ -12,12 +12,12 @@ package controller_test
 //   - the dedupe id is the object UID plus a sequence.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
@@ -28,23 +28,23 @@ func TestFeedEmitsRevisionCreatedAndEvent(t *testing.T) {
 	revDigest := cas.Digest(testManifest(0x5a))
 	rec.install(t, revDigest)
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "feed-rev-node", "feed-rev-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "feed-rev-node", "feedrev-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-feed-rev", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-feed-rev", v1.WorkspaceRetention{})
 
-	claim := makeBoundClaim(t, "feedrev", "ws-feed-rev", v1alpha1.SandboxClaimSpec{
+	claim := makeBoundClaim(t, "feedrev", "ws-feed-rev", v1.SandboxSpec{
 		NodeName: "feed-rev-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Lifetime: &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 2 * time.Second}},
 	})
-	waitBoundPhase(t, "feedrev-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "feedrev-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "feedrev-claim", v1.SandboxReady)
+	waitBoundPhase(t, "feedrev-claim", v1.SandboxTerminated)
 
 	// The workspace head advances to the dehydrated revision.
-	ws := waitWorkspace(t, "ws-feed-rev", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, "ws-feed-rev", func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after dehydrate")
 
@@ -94,16 +94,16 @@ func TestFeedEmitsPhaseChanged(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0x6b)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "feed-phase-node", "feed-phase-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "feed-phase-node", "feedphase-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeBoundClaim(t, "feedphase", "", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "feedphase", "", v1.SandboxSpec{
 		NodeName: "feed-phase-node",
 	})
-	waitBoundPhase(t, "feedphase-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "feedphase-claim", v1.SandboxReady)
 
 	// A sandbox.phase.changed CloudEvent naming this claim, ending at Ready, must
 	// have been emitted. The phase strings are the only payload; no secret values.
@@ -112,7 +112,7 @@ func TestFeedEmitsPhaseChanged(t *testing.T) {
 	for time.Now().Before(deadline) {
 		for _, e := range testSink.byType(eventfeed.TypePhaseChanged) {
 			data, ok := e.Data.(eventfeed.PhaseChangedData)
-			if ok && data.Claim == "feedphase-claim" && data.NewPhase == string(v1alpha1.SandboxReady) {
+			if ok && data.Claim == "feedphase-claim" && data.NewPhase == string(v1.SandboxReady) {
 				sawReady = true
 				if !strings.HasSuffix(e.ID, "/Ready") {
 					t.Errorf("phase.changed id = %q, want it to end with /Ready", e.ID)

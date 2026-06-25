@@ -20,13 +20,13 @@ claims. The threshold is environment-tunable.
 
 ## Diagnosis
 
-- `kubectl sandbox ls` to see how many claims are Pending and in which pools.
-- `kubectl sandbox ps` to see per-node occupancy and spot full or absent nodes.
-- `kubectl sandbox top` for node-level capacity headroom.
+- `kubectl mitos ls` to see how many claims are Pending and in which pools.
+- `kubectl mitos ps` to see per-node occupancy and spot full or absent nodes.
+- `kubectl mitos top` for node-level capacity headroom.
 - Metrics to check: `mitos_claim_pending_total` (the rate driving this
   alert), `mitos_pool_ready_snapshots{pool}` (which pools are starved),
   `mitos_active_sandboxes` per node (are nodes saturated?).
-- SandboxClaim `Ready` condition reason: `NoCapacity` / `CapacityExhausted`
+- Sandbox (source.poolRef) `Ready` condition reason: `NoCapacity` / `CapacityExhausted`
   confirms admission pressure; `NoHuskPod` confirms warm-pool starvation. See
   `docs/conditions.md`.
 

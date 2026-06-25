@@ -24,11 +24,11 @@ environment-tunable; set it from the observed baseline.
 ## Diagnosis
 
 - Identify the failing pool and reason from the alert labels.
-- `kubectl sandbox ls` to list claims and their phase; look for claims stuck off
+- `kubectl mitos ls` to list claims and their phase; look for claims stuck off
   Ready in the named pool.
-- `kubectl sandbox ps` for the per-node sandbox view to spot a node whose forks
+- `kubectl mitos ps` for the per-node sandbox view to spot a node whose forks
   fail.
-- Check the SandboxClaim `Ready` condition reason against the catalogue in
+- Check the Sandbox `Ready` condition reason against the catalogue in
   `docs/conditions.md` (for example `ActivateFailed`, `CapacityExhausted`,
   `NoHuskPod`, `SecretInheritanceDenied`).
 - Metrics to corroborate: `mitos_claim_errors_total` (split by reason),

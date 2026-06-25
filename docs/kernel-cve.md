@@ -49,8 +49,8 @@ line as upstream stable releases appear.
    and restores a VM on the new kernel and execs through the guest agent over
    vsock; a green KVM run is the gate that the new kernel works end to end.
 4. The snapshot manifest records the producing kernel (see
-   docs/snapshot-format.md, the snapshot version-compatibility contract,
-   issue #32); kernel is informational in the compatibility check, so a kernel
+   docs/snapshot-format.md, the snapshot version-compatibility contract);
+   kernel is informational in the compatibility check, so a kernel
    bump does not invalidate existing snapshots by itself, but a rebuild of
    pool template snapshots is the clean path after a kernel bump.
 

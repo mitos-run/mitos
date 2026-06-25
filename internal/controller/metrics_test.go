@@ -8,13 +8,13 @@ package controller_test
 // them.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -117,22 +117,18 @@ func TestOrphanSweepMetricIncrements(t *testing.T) {
 func TestClaimPendingMetricIncrements(t *testing.T) {
 	before := counterValue(t, "mitos_claim_pending_total", nil)
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "pend-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pend-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "pend-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "pend-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "pend-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "pend-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +136,6 @@ func TestClaimPendingMetricIncrements(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// With no node registered, selectNode finds nothing and the claim stays
@@ -148,13 +143,13 @@ func TestClaimPendingMetricIncrements(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	pending := false
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "pend-claim", Namespace: "default"}, &got); err == nil {
-			if got.Status.Phase == v1alpha1.SandboxPending {
+			if got.Status.Phase == v1.SandboxPending {
 				pending = true
 				break
 			}
-			if got.Status.Phase == v1alpha1.SandboxFailed {
+			if got.Status.Phase == v1.SandboxFailed {
 				t.Fatalf("claim failed instead of pending: %+v", got.Status)
 			}
 		}

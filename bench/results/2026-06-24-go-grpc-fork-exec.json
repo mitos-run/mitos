@@ -1,0 +1,47 @@
+[
+  {
+    "name": "fork_to_first_grpc_ping",
+    "run": "pass1",
+    "iters": 200,
+    "unit": "ms",
+    "summary": {
+      "count": 200,
+      "min_ns": 73032555,
+      "p50_ns": 115313147,
+      "p90_ns": 134645260,
+      "p99_ns": 146898753,
+      "max_ns": 156592066,
+      "mean_ns": 114083320
+    }
+  },
+  {
+    "name": "fork_to_first_grpc_ping",
+    "run": "pass3",
+    "iters": 100,
+    "unit": "ms",
+    "summary": {
+      "count": 100,
+      "min_ns": 74534547,
+      "p50_ns": 118537750,
+      "p90_ns": 135875275,
+      "p99_ns": 146337126,
+      "max_ns": 169140025,
+      "mean_ns": 116940518
+    }
+  },
+  {
+    "name": "fork_to_first_grpc_ping",
+    "run": "pass4",
+    "iters": 100,
+    "unit": "ms",
+    "summary": {
+      "count": 100,
+      "min_ns": 70372217,
+      "p50_ns": 114379205,
+      "p90_ns": 134637680,
+      "p99_ns": 150898300,
+      "max_ns": 152487668,
+      "mean_ns": 113586186
+    }
+  }
+]

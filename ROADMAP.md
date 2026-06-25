@@ -62,8 +62,9 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     scheduled to Running and `kubectl exec` confirms `/dev/kvm` is present
     inside the container, injected solely by `Allocate`. This is the full
     PSA-restricted device-access path proven in CI. The assertion is adaptive:
-    on a no-KVM runner it asserts Pending (honest scheduler truth). Migrating
-    the forkd DaemonSet off its privileged `/dev/kvm` hostPath is a follow-up.
+    on a no-KVM runner it asserts Pending (honest scheduler truth). The forkd
+    DaemonSet now ALSO gets `/dev/kvm` from this device plugin and runs
+    non-privileged (#352, ADR 0008), so the privileged hostPath is gone fleet-wide.
     See `docs/husk-pods.md` section 5.
   - ✅ Husk pod lifecycle controller (migration slice 1, behind a flag): with
     `--enable-husk-pods` (default off, raw-forkd unchanged) a `SandboxPool`
@@ -94,9 +95,11 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     the fork-per-claim fallback; `--mock` forces it), so each `SandboxPool` builds
     the template snapshot on the KVM nodes AND maintains a warm pool of husk pods
     pinned to the snapshot-holding nodes, and a `SandboxClaim` activates one in
-    place. The build-vs-run split: forkd stays the PRIVILEGED snapshot BUILDER;
-    the husk pod is the UNPRIVILEGED RUNNER (device-plugin `/dev/kvm`, no
-    `privileged`, read-only snapshot mount). The production base (`deploy/`) runs
+    place. The build-vs-run split: forkd is the snapshot BUILDER (non-privileged
+    since #352: an explicit, audited builder capability set with the jailer enabled,
+    still uid 0 + CAP_SYS_ADMIN; ADR 0008); the husk pod is the UNPRIVILEGED RUNNER
+    (device-plugin `/dev/kvm`, no `privileged`, read-only snapshot mount). The
+    production base (`deploy/`) runs
     the controller in husk mode + forkd builder + device plugin with PKI
     bootstrap on; `Dockerfile.husk-stub` is built in CI. The `kind-e2e-husk` job
     proves the full CLUSTER object lifecycle on the KVM-capable runner: stack up,
@@ -141,14 +144,16 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     surface is strictly improved (unprivileged, capability-dropped,
     restricted-minus-two, pod-netns-governed) while the inherent
     `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better, and
-    forkd-the-builder stays a smaller privileged control-plane surface. Residuals
+    forkd-the-builder stays a smaller control-plane surface (non-privileged since
+    #352, ADR 0008; a hardened minimal builder, not zero-privilege). Residuals
     ACCEPTED and TRACKED: the shared read-only snapshot mount (fully pod-native CAS
     delivery is the follow-up), the `/dev/kvm` inherent host-escape surface
     (unchanged from raw-forkd), the in-memory plaintext-DEK window during a
     container open (envelope wrapping is done; the plaintext DEK is zeroized
     immediately after use, and full HSM custody narrows but cannot eliminate this
-    window), and the forkd-builder privilege (a builder redesign is out of
-    scope). The IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
+    window), and the residual forkd-builder privilege after #352 (still uid 0 with
+    CAP_SYS_ADMIN; a builder redesign that removes even that is out of scope). The
+    IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
     survival are proven only on a KVM-capable kubelet, so they need the bare-metal
     reference node (#16).
   - ⬜ Still open (rest of #18): the nested dormant Firecracker VMM coming up
@@ -177,8 +182,8 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   - ✅ FOUNDATION (slice 1, this slice): the facade controller maps an upstream
     `Sandbox` onto our husk-backed run path (`internal/facade` +
     `cmd/facade`, a separate opt-in binary): replicas 1 creates/owns our
-    `SandboxClaim` via the `mitos.run/pool` bridge annotation (or a
-    `--default-pool`), the claim Ready phase mirrors into the Sandbox Ready
+    `Sandbox` via the `mitos.run/pool` bridge annotation (or a
+    `--default-pool`), the sandbox Ready phase mirrors into the upstream Sandbox Ready
     condition + replicas + serviceFQDN, replicas 0 / deletion terminates.
     Proven in envtest (the create -> Ready -> delete lifecycle). The faithful
     path was taken: we vendor their Go types after a verified go 1.24 -> 1.26
@@ -277,7 +282,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   cache via Share policy, flagship reversible sleep-consolidation demo.
   Depends on §3; may land as alpha behind a flag with eager-fetch fallback.
   DONE (the declarative foundation): the `Workspace` and `WorkspaceRevision`
-  CRDs in mitos.run/v1alpha1, and the Workspace controller that manages
+  CRDs in mitos.run/v1, and the Workspace controller that manages
   the revision DAG (head/revisions/resumable status with typed conditions +
   observedGeneration), the Pending -> Committed transition with
   immutability of a committed revision, `fromWorkspaceRevision` lineage
@@ -287,14 +292,14 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   transfer on the guest agent (vsock `TarDir`/`UntarDir`, a workspace
   allowlist + traversal sanitize), the host `internal/workspace`
   Hydrate/Dehydrate helpers over the node content-addressed store, and the
-  sandbox<->workspace binding (`SandboxClaim.spec.workspaceRef`): the head
+  sandbox<->workspace binding (`Sandbox.spec.workspaceRef`): the head
   hydrates into `/workspace` on start, a new committed `WorkspaceRevision`
-  with `fromClaim` lineage dehydrates on terminate (the head advances),
+  with `fromSandbox` lineage dehydrates on terminate (the head advances),
   single-writer-per-workspace, and secrets excluded from revisions. PROVEN on
   KVM (the in-VM tar round trip byte-identical) and in envtest (the binding +
   revision lifecycle behind a transfer seam); see docs/workspaces.md.
   DONE (slice 3, outputs extraction + git rendezvous for fork-and-merge): a
-  claim `spec.outputs` narrows the dehydrate capture to the listed `/workspace`
+  sandbox `spec.lifetime.onTerminate.outputs` narrows the dehydrate capture to the listed `/workspace`
   subtrees (path filter; no path output captures the whole workspace) and a
   `{diff: true}` output records a content-hash diff of the new revision against
   the parent head on `status.diffSummary`; a `{git}` output renders a per-attempt
@@ -338,7 +343,7 @@ framework is `docs/adr/README.md` (ADR 0000 adopts it); the residual ADRs are
 firewall). The reusable claim-language guardrail is `docs/compliance-claims.md`.
 Observability
 acceptance: Hubble-visible per-sandbox flows, OpenCost attribution, a guest
-telemetry bridge + `kubectl sandbox` plugin (`top`/`ps`/`logs`/`exec`), and
+telemetry bridge + `kubectl mitos` plugin (`top`/`ps`/`logs`/`exec`), and
 one trace ID from orchestrator request through exec to workspace revision.
 Family maturity bar before 1.0: Grafana dashboards, PrometheusRule alerts
 with runbooks, `docs/conditions.md` reason-code catalogue, shipped with the
@@ -407,8 +412,8 @@ Format-freeze blockers:
   encryption (#31 follow-up, done for the local provider): the controller
   generates a per-template 256-bit DEK with `crypto/rand`, wraps it with a KMS
   KEK via `kms.Wrapper` (`internal/kms`), zeroizes the plaintext, and stores ONLY
-  the wrapped DEK plus the non-secret KEK id in a `<template>-enc-key` Secret
-  owner-referenced to the `SandboxTemplate` for GC crypto-shred; the plaintext DEK
+  the wrapped DEK plus the non-secret KEK id in a `<pool>-enc-key` Secret
+  owner-referenced to the `SandboxPool` for GC crypto-shred; the plaintext DEK
   never reaches etcd or disk. It delivers the wrapped DEK + KEK id to forkd over
   the mTLS gRPC `CreateTemplate` and `Fork` requests; forkd unwraps via its KEK
   (`--kek-file` local AES-256-GCM provider), uses the plaintext DEK for cryptsetup,
@@ -498,15 +503,22 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - 🔨 Clock resync after restore (NotifyForked steps CLOCK_REALTIME from the
   host wall clock, 500ms tolerance); kvm-test asserts each fork wall clock
   within 2s of the runner (post-snapshot TLS cert validation follow-up)
-- ✅ Live-fork secret policy: a fork of a secret-holding claim is rejected
-  without `allowSecretInheritance: true`, with a `SecretInheritanceDenied`
+- ✅ Live-fork secret policy: a fork of a secret-holding sandbox is rejected
+  without `secretInheritance: inherit`, with a `SecretInheritanceDenied`
   condition; envtest-proven in internal/controller/fork_secrets_test.go.
-- 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
-  `privileged: true` for an explicit capability list (implemented; kvm-test
-  jailer-boot phase restores a snapshot under the jailer to prove the
-  chroot/uid mechanics, but the dropped capability set is still unproven since
-  the runner is root; direct-exec dev path behind an empty `--jailer` and
-  sandbox-server remain unjailed; tracked in threat model residuals)
+- ✅ Firecracker under jailer (per-VM UID, chroot, cgroup); forkd is NON-privileged
+  with the jailer ENABLED in the shipped DaemonSet and Helm chart (#352, ADR 0008):
+  `privileged: false`, drop ALL capabilities and add back only the explicit builder
+  set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` plus `NET_ADMIN`), and
+  `/dev/kvm`/`/dev/net/tun` from the device plugin (no privileged hostPath). forkd
+  makes `--chroot-base` a private mount at startup so the jailer's `pivot_root`
+  works in the non-privileged pod. The conformance suite (`cmd/forkd`) keeps the
+  shipped manifest non-privileged with the exact cap set and the jailer flags; the
+  kernel ENFORCING the bounding-set/uid drop is asserted on the KVM runner (the CI
+  host is root and cannot observe it; issue #2 Task 5). Residual: forkd is still
+  uid 0 with CAP_SYS_ADMIN (a hardened minimal builder, not zero-privilege). The
+  direct-exec dev path behind an empty `--jailer` and sandbox-server remain unjailed
+  (tracked in threat model residuals)
 - ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
   (rotation and token expiry pending; tracked in threat model residuals)
 - ✅ Snapshot content addressing (#9): manifest digest in pool status,
@@ -805,7 +817,7 @@ verified. In rough order of leverage:
   client in standard CI; see docs/mcp.md. Open: workspace tools (#21) and
   capability-budget advertisement (#24).
 - ✅ **mitos CLI + one-command local dev**: `mitos run` and `mitos
-  sandbox create|ls|exec|fork|terminate` drive the `SandboxClaim` path over
+  sandbox create|ls|exec|fork|terminate` drive the `Sandbox` path over
   kubeconfig with token-scoped exec; `mitos dev up|down` brings up a kind
   cluster running a mock control plane (controller `--mock
   --disable-pki-bootstrap`, forkd `--mock`, no KVM) from `deploy/dev/`. PROVEN in
@@ -847,11 +859,11 @@ verified. In rough order of leverage:
 - ⬜ File transfer ergonomics and operator port-forwarding beyond the runtime
   protocol above; the code-interpreter kernel baked into the husk cluster base
   image so `run_code` is live (not `KernelUnavailable`) by default.
-- ✅ `kubectl sandbox` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
+- ✅ `kubectl mitos` plugin: ls (Sandboxes), ps (fork fan-outs), tree (the
   fork/lineage DAG), top (per-sandbox CoW-aware metering from forkd
   `/v1/metering`, honestly labeled, a dash on a missing datum), logs (the husk
   stub pod console plus the guest-console #18 note), and exec (token-scoped
-  operator exec over the sandbox API using the claim's `<claim>-sandbox-token`
+  operator exec over the sandbox API using the sandbox's `<name>-sandbox-token`
   Secret, the same gate the SDK uses) are done (pure formatters + the metering
   match and exec/token resolution unit-tested in CI; live over kubeconfig; the
   kind-e2e smoke proves ls/ps/tree object-level, with exec/top/logs of a running
@@ -873,7 +885,7 @@ verified. In rough order of leverage:
   carries a non-empty code and remediation and never a secret value; both SDKs
   parse it into a structured `AgentRunError`. The Python SDK gains the one-liner
   `AgentRun().sandbox("python")` backed by a lazy admin-disableable default pool
-  (a `SandboxTemplate` plus a `SandboxPool` under a deterministic name),
+  (a `SandboxPool` with an inline template, under a deterministic name),
   `from_name()` reconnect, `wait_until_ready()`, and an `AsyncAgentRun` over
   `httpx.AsyncClient` for the hot paths (exec, files, fork). The TypeScript SDK
   aligns to the same envelope and adds the same `sandbox(image)` and `fromName`,

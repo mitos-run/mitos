@@ -12,7 +12,7 @@ from mitos.workspace import Workspace
 
 
 API_GROUP = "mitos.run"
-API_VERSION = "v1alpha1"
+API_VERSION = "v1"
 
 _DEFAULT_POOL_PREFIX = "mitos-default-"
 _SLUG_RE = re.compile(r"[^a-z0-9.-]+")
@@ -69,10 +69,10 @@ class AgentRun:
         """The one-liner entry point (docs/api/v2-spec.md section 1.2).
 
         Pass image= for the lazy path: the client ensures a default pool named
-        mitos-default-<image-slug> exists (creating it and its SandboxTemplate
-        if absent and allowed), then claims from it. Pass pool= for the explicit
-        path, which never creates anything. Exactly one of image or pool is
-        required.
+        mitos-default-<image-slug> exists (creating it with an inline template
+        if absent and allowed), then starts a Sandbox from it. Pass pool= for
+        the explicit path, which never creates anything. Exactly one of image or
+        pool is required.
 
         With ready=True the call blocks until the sandbox is Ready (or raises),
         so the caller stops sleeping-and-hoping; with ready=False (default) the
@@ -108,12 +108,8 @@ class AgentRun:
     def _ensure_default_pool(self, image: str) -> str:
         """get-or-create the default SandboxPool for an image. Returns the pool
         name. A pre-existing pool is reused untouched; a missing one is created
-        along with a SandboxTemplate (spec.image) it references via templateRef.
-
-        The CRD splits image from pool: SandboxPoolSpec carries templateRef +
-        replicas (api/v1alpha1/types.go), and SandboxTemplateSpec carries the
-        image, so the default path materializes both objects under the same
-        deterministic name."""
+        as a single SandboxPool with inline spec.template (v1: SandboxTemplate
+        is gone; the image lives in SandboxPool.spec.template.image)."""
         name = default_pool_name(image)
         try:
             existing = self._api.get_namespaced_custom_object(
@@ -129,20 +125,12 @@ class AgentRun:
             if exc.status != 404:
                 raise
 
-        template = {
-            "apiVersion": f"{API_GROUP}/{API_VERSION}",
-            "kind": "SandboxTemplate",
-            "metadata": {"name": name, "namespace": self._namespace},
-            "spec": {"image": image},
-        }
-        self._create_or_reuse(template, "sandboxtemplates")
-
         pool = {
             "apiVersion": f"{API_GROUP}/{API_VERSION}",
             "kind": "SandboxPool",
             "metadata": {"name": name, "namespace": self._namespace},
             "spec": {
-                "templateRef": {"name": name},
+                "template": {"image": image},
                 "replicas": 1,
             },
         }
@@ -153,30 +141,21 @@ class AgentRun:
         """Guards the default-pool reuse path against a slug collision serving
         the wrong image. The slug normalizes ":"/"/" and other characters to
         "-", so two distinct images can map to one default pool (for example
-        "python:3.11" and "python-3.11"). Reading the referenced
-        SandboxTemplate's spec.image and comparing it to the requested image
-        ensures a reused pool actually runs the requested image; a mismatch
-        raises rather than silently running the first caller's image."""
-        template_ref = (pool.get("spec") or {}).get("templateRef") or {}
-        template_name = template_ref.get("name") or name
-        try:
-            template = self._api.get_namespaced_custom_object(
-                group=API_GROUP,
-                version=API_VERSION,
-                namespace=self._namespace,
-                plural="sandboxtemplates",
-                name=template_name,
-            )
-        except k8s().ApiException as exc:
-            # Pool with no resolvable template: cannot prove the image, so fail
-            # closed rather than risk the wrong image.
+        "python:3.11" and "python-3.11"). Reading the inline spec.template.image
+        and comparing it to the requested image ensures a reused pool actually
+        runs the requested image; a mismatch raises rather than silently running
+        the first caller's image. In v1 the image lives inline in the pool's
+        spec.template; there is no separate SandboxTemplate object."""
+        existing_image = ((pool.get("spec") or {}).get("template") or {}).get("image")
+        if not existing_image:
+            # Pool with no resolvable inline image: cannot prove the image
+            # matches, so fail closed rather than risk the wrong image.
             raise AgentRunError(
-                f"default pool {name} references template {template_name} that could not be read",
+                f"default pool {name} has no readable inline template image",
                 code="pool_image_mismatch",
-                cause=f"reading SandboxTemplate {template_name} failed with status {exc.status}",
+                cause=f"pool {name} spec.template.image is absent or unreadable",
                 remediation=f'Pass pool="{name}" explicitly to reuse this pool, or use a distinct image that maps to a different default pool.',
-            ) from exc
-        existing_image = (template.get("spec") or {}).get("image")
+            )
         if existing_image != image:
             raise AgentRunError(
                 f"default pool {name} already exists for a different image",
@@ -232,25 +211,25 @@ class AgentRun:
         if name is None:
             name = f"sandbox-{uuid.uuid4().hex[:8]}"
 
-        claim = {
+        sandbox_body = {
             "apiVersion": f"{API_GROUP}/{API_VERSION}",
-            "kind": "SandboxClaim",
+            "kind": "Sandbox",
             "metadata": {
                 "name": name,
                 "namespace": self._namespace,
             },
             "spec": {
-                "poolRef": {"name": pool},
+                "source": {"poolRef": {"name": pool}},
             },
         }
 
         if env:
-            claim["spec"]["env"] = [
+            sandbox_body["spec"]["env"] = [
                 {"name": k, "value": v} for k, v in env.items()
             ]
 
         if secrets:
-            claim["spec"]["secrets"] = [
+            sandbox_body["spec"]["secrets"] = [
                 {
                     "name": env_var,
                     "secretRef": {"name": secret_name, "key": secret_key},
@@ -260,17 +239,17 @@ class AgentRun:
             ]
 
         if timeout:
-            claim["spec"]["timeout"] = timeout
+            sandbox_body["spec"].setdefault("lifetime", {})["ttl"] = timeout
 
         if workspace:
-            claim["spec"]["workspaceRef"] = {"name": workspace}
+            sandbox_body["spec"]["workspaceRef"] = {"name": workspace}
 
         self._api.create_namespaced_custom_object(
             group=API_GROUP,
             version=API_VERSION,
             namespace=self._namespace,
-            plural="sandboxclaims",
-            body=claim,
+            plural="sandboxes",
+            body=sandbox_body,
         )
 
         return Sandbox(
@@ -287,11 +266,11 @@ class AgentRun:
             group=API_GROUP,
             version=API_VERSION,
             namespace=self._namespace,
-            plural="sandboxclaims",
+            plural="sandboxes",
             name=name,
         )
         status = obj.get("status", {})
-        pool = obj.get("spec", {}).get("poolRef", {}).get("name", "")
+        pool = obj.get("spec", {}).get("source", {}).get("poolRef", {}).get("name", "")
 
         sandbox = Sandbox(
             name=name,
@@ -312,12 +291,12 @@ class AgentRun:
             group=API_GROUP,
             version=API_VERSION,
             namespace=self._namespace,
-            plural="sandboxclaims",
+            plural="sandboxes",
         )
 
         sandboxes = []
         for obj in objs.get("items", []):
-            obj_pool = obj.get("spec", {}).get("poolRef", {}).get("name", "")
+            obj_pool = obj.get("spec", {}).get("source", {}).get("poolRef", {}).get("name", "")
             if pool and obj_pool != pool:
                 continue
             status = obj.get("status", {})

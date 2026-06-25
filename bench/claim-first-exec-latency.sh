@@ -7,7 +7,7 @@
 # engine data path that cmd/bench measures: it creates a real SandboxClaim, waits
 # for the controller to drive it Ready, and runs the first exec over the sandbox
 # HTTP API (the same endpoint + per-sandbox bearer token the SDK and
-# kubectl-sandbox use).
+# kubectl-mitos use).
 #
 # What it measures: for each of N sequential claims, the wall clock from claim
 # create to the first successful exec result. Summarized as nearest-rank
@@ -19,7 +19,7 @@
 # it fails at client construction with a clear message and produces NO number
 # (CLAUDE.md operating principle 1: no unverified claims).
 #
-# Requirements: a running mitos cluster with the controller deployed and a warm
+# Requirements: a running Mitos cluster with the controller deployed and a warm
 # SandboxPool, plus Go (to build the harness) and a KUBECONFIG that can create
 # SandboxClaims and read the per-claim token Secret in the namespace.
 #

@@ -137,7 +137,7 @@ The script creates N sequential `SandboxClaim`s against a warm pool, waits for
 each to reach Ready, parses the activate latency out of the Ready condition
 message, releases the claim between iterations so each is an independent warm
 activation, and prints min / P50 / P95 / max (nearest-rank) plus the raw sample
-list. It requires a running mitos cluster with the husk-pods path enabled and a
+list. It requires a running Mitos cluster with the husk-pods path enabled and a
 warm pool with dormant pods available.
 
 ### Cluster setup used for this run

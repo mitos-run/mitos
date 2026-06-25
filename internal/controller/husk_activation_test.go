@@ -18,6 +18,7 @@ package controller_test
 import (
 	"context"
 	"crypto/tls"
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -101,7 +101,7 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 	// When the pool object exists, use its real UID; otherwise stamp a
 	// pool-named reference with a placeholder UID (used by decoy-style fixtures
 	// for pools that are never reconciled).
-	var pool v1alpha1.SandboxPool
+	var pool v1.SandboxPool
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: poolName, Namespace: "default"}, &pool); err == nil {
 		if err := controllerutil.SetControllerReference(&pool, pod, k8sClient.Scheme()); err != nil {
 			t.Fatalf("set husk pod owner reference: %v", err)
@@ -109,7 +109,7 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 	} else {
 		yes := true
 		pod.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion:         v1alpha1.GroupVersion.String(),
+			APIVersion:         v1.GroupVersion.String(),
 			Kind:               "SandboxPool",
 			Name:               poolName,
 			UID:                types.UID("placeholder-" + poolName),
@@ -133,32 +133,25 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 	return pod
 }
 
-// makeHuskClaim creates a template, pool, and a husk-test-labeled claim and
-// returns the claim.
-func makeHuskClaim(t *testing.T, prefix string, spec v1alpha1.SandboxClaimSpec) *v1alpha1.SandboxClaim {
+// makeHuskClaim creates a pool (inline template) and a husk-test-labeled claim
+// and returns the claim.
+func makeHuskClaim(t *testing.T, prefix string, spec v1.SandboxSpec) *v1.Sandbox {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: prefix + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	spec.PoolRef = v1alpha1.LocalObjectReference{Name: prefix + "-pool"}
-	claim := &v1alpha1.SandboxClaim{
+	spec.Source.PoolRef = &v1.LocalObjectReference{Name: prefix + "-pool"}
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      prefix + "-claim",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
 		},
 		Spec: spec,
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
@@ -169,17 +162,16 @@ func makeHuskClaim(t *testing.T, prefix string, spec v1alpha1.SandboxClaimSpec) 
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 	return claim
 }
 
 // waitClaimPhase polls until the named claim reaches one of the wanted phases.
-func waitClaimPhase(t *testing.T, name string, want func(*v1alpha1.SandboxClaim) bool) *v1alpha1.SandboxClaim {
+func waitClaimPhase(t *testing.T, name string, want func(*v1.Sandbox) bool) *v1.Sandbox {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err == nil {
 			if want(&got) {
 				return &got
@@ -209,9 +201,9 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 
 	logStart := len(logBuf.Bytes())
 
-	claim := makeHuskClaim(t, "husk-a", v1alpha1.SandboxClaimSpec{
+	claim := makeHuskClaim(t, "husk-a", v1.SandboxSpec{
 		Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
-		Secrets: []v1alpha1.SecretMount{{
+		Secrets: []v1.SecretMount{{
 			Name: "API_TOKEN",
 			SecretRef: corev1.SecretKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "husk-a-secret"},
@@ -220,8 +212,8 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 		}},
 	})
 
-	got := waitClaimPhase(t, claim.Name, func(c *v1alpha1.SandboxClaim) bool {
-		return c.Status.Phase == v1alpha1.SandboxReady
+	got := waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxReady
 	})
 
 	if got.Status.Endpoint != "10.1.2.3:9091" {
@@ -276,15 +268,21 @@ func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 	// (kvm-node-1, per makeDormantHuskPod), NOT a cluster-wide pick. Register a
 	// DECOY node with a different digest FIRST so a cluster-wide lookup would
 	// resolve the wrong one; the pod's node carries wantDigest (#177).
+	//
+	// The template id the digest is keyed by is poolTemplateID(pool). In v1 the
+	// pool carries an INLINE template (no separate SandboxTemplate object), so
+	// poolTemplateID returns the POOL NAME (husk-d-pool), not a referenced
+	// template name. Register the per-node digests under the pool name so the
+	// lookup in the activation path resolves.
 	testRegistry.Register(&controller.NodeInfo{
 		Name:            "other-node",
-		TemplateIDs:     []string{"husk-d-tmpl"},
-		TemplateDigests: map[string]string{"husk-d-tmpl": otherDigest},
+		TemplateIDs:     []string{"husk-d-pool"},
+		TemplateDigests: map[string]string{"husk-d-pool": otherDigest},
 	})
 	testRegistry.Register(&controller.NodeInfo{
 		Name:            "kvm-node-1",
-		TemplateIDs:     []string{"husk-d-tmpl"},
-		TemplateDigests: map[string]string{"husk-d-tmpl": wantDigest},
+		TemplateIDs:     []string{"husk-d-pool"},
+		TemplateDigests: map[string]string{"husk-d-pool": wantDigest},
 	})
 	t.Cleanup(func() { testRegistry.Unregister("other-node"); testRegistry.Unregister("kvm-node-1") })
 
@@ -295,10 +293,10 @@ func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	claim := makeHuskClaim(t, "husk-d", v1alpha1.SandboxClaimSpec{})
+	claim := makeHuskClaim(t, "husk-d", v1.SandboxSpec{})
 
-	waitClaimPhase(t, claim.Name, func(c *v1alpha1.SandboxClaim) bool {
-		return c.Status.Phase == v1alpha1.SandboxReady
+	waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxReady
 	})
 
 	req, ok := act.lastReq()
@@ -322,27 +320,19 @@ func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 // Without the optimistic lock (a plain MergeFrom carries no resourceVersion),
 // both claims could claim+activate the SAME pod, putting two tenants on one VM.
 func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
-	// One pool + template, one dormant pod, two claims on that pool.
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "husk-race-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	// One pool (inline template), one dormant pod, two claims on that pool.
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "husk-race-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "husk-race-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	pod := makeDormantHuskPod(t, "husk-race-pool", "10.9.9.9")
@@ -351,14 +341,14 @@ func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	newClaim := func(name string) *v1alpha1.SandboxClaim {
-		c := &v1alpha1.SandboxClaim{
+	newClaim := func(name string) *v1.Sandbox {
+		c := &v1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: "default",
 				Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
 			},
-			Spec: v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "husk-race-pool"}},
+			Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "husk-race-pool"}}},
 		}
 		if err := k8sClient.Create(ctx, c); err != nil {
 			t.Fatal(err)
@@ -371,9 +361,9 @@ func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
 
 	// Wait until both claims have settled: one Ready, the other not Ready.
 	deadline := time.Now().Add(20 * time.Second)
-	var ready, other *v1alpha1.SandboxClaim
+	var ready, other *v1.Sandbox
 	for time.Now().Before(deadline) {
-		var g1, g2 v1alpha1.SandboxClaim
+		var g1, g2 v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: c1.Name, Namespace: "default"}, &g1); err != nil {
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -382,8 +372,8 @@ func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		r1 := g1.Status.Phase == v1alpha1.SandboxReady
-		r2 := g2.Status.Phase == v1alpha1.SandboxReady
+		r1 := g1.Status.Phase == v1.SandboxReady
+		r2 := g2.Status.Phase == v1.SandboxReady
 		// Exactly one Ready and the other pending (not Ready).
 		if r1 != r2 && g1.Status.Phase != "" && g2.Status.Phase != "" {
 			if r1 {
@@ -398,17 +388,17 @@ func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
 	if ready == nil {
 		t.Fatal("the two racing claims never settled to exactly one Ready and one not-Ready")
 	}
-	if other.Status.Phase == v1alpha1.SandboxReady {
+	if other.Status.Phase == v1.SandboxReady {
 		t.Fatalf("both claims went Ready on a single dormant pod (double assignment): %s and %s", ready.Name, other.Name)
 	}
 
 	// Give the loser a moment; it must never flip to Ready on this same pod.
 	time.Sleep(500 * time.Millisecond)
-	var loser v1alpha1.SandboxClaim
+	var loser v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: other.Name, Namespace: "default"}, &loser); err != nil {
 		t.Fatal(err)
 	}
-	if loser.Status.Phase == v1alpha1.SandboxReady {
+	if loser.Status.Phase == v1.SandboxReady {
 		t.Fatalf("the losing claim %s eventually went Ready on the already-claimed pod (double assignment)", other.Name)
 	}
 
@@ -434,12 +424,12 @@ func TestHuskClaimNoDormantPodPends(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	claim := makeHuskClaim(t, "husk-b", v1alpha1.SandboxClaimSpec{})
+	claim := makeHuskClaim(t, "husk-b", v1.SandboxSpec{})
 
-	got := waitClaimPhase(t, claim.Name, func(c *v1alpha1.SandboxClaim) bool {
-		return c.Status.Phase == v1alpha1.SandboxPending
+	got := waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxPending
 	})
-	if got.Status.Phase != v1alpha1.SandboxPending {
+	if got.Status.Phase != v1.SandboxPending {
 		t.Errorf("phase = %q, want Pending", got.Status.Phase)
 	}
 	if _, ok := act.lastReq(); ok {
@@ -454,23 +444,23 @@ func TestHuskClaimActivateFailureNotReady(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	claim := makeHuskClaim(t, "husk-c", v1alpha1.SandboxClaimSpec{})
+	claim := makeHuskClaim(t, "husk-c", v1.SandboxSpec{})
 
 	// It should settle into Pending (fail closed, retryable) and never Ready.
-	got := waitClaimPhase(t, claim.Name, func(c *v1alpha1.SandboxClaim) bool {
-		return c.Status.Phase == v1alpha1.SandboxPending || c.Status.Phase == v1alpha1.SandboxFailed
+	got := waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxPending || c.Status.Phase == v1.SandboxFailed
 	})
-	if got.Status.Phase == v1alpha1.SandboxReady {
+	if got.Status.Phase == v1.SandboxReady {
 		t.Errorf("claim went Ready despite an activate failure: %+v", got.Status)
 	}
 
 	// Give the controller a moment; it must not flip to Ready.
 	time.Sleep(500 * time.Millisecond)
-	var again v1alpha1.SandboxClaim
+	var again v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: "default"}, &again); err != nil {
 		t.Fatal(err)
 	}
-	if again.Status.Phase == v1alpha1.SandboxReady {
+	if again.Status.Phase == v1.SandboxReady {
 		t.Errorf("claim eventually went Ready despite repeated activate failures: %+v", again.Status)
 	}
 }

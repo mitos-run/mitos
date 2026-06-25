@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/husk"
 	"mitos.run/mitos/internal/workspace"
@@ -31,7 +31,7 @@ import (
 // guest agent and calls workspace.Hydrate; envtest injects a fake that records
 // the manifest it was asked to hydrate. A nil manifest digest (an empty
 // workspace with no head yet) is a no-op.
-type hydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
+type hydrateFunc func(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error
 
 // dehydrateFunc is the seam the claim reconciler captures a claim's sandbox
 // /workspace into a content-addressed revision through. The production value
@@ -40,14 +40,14 @@ type hydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifes
 // scripted digest and records the excludes and captures. capturePaths is the
 // union of the claim's spec.outputs Path subtrees (nil captures the whole
 // workspace). The returned digest is the new revision's ContentManifest.
-type dehydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+type dehydrateFunc func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error)
 
 // diffFunc is the seam the claim reconciler computes a revision's content-hash
 // diff against the workspace head before it through. The production value reads
 // both manifests from the CAS store and calls workspace.DiffManifests; envtest
 // injects a fake that returns a scripted diff. A diff against an empty parent
 // (the first revision) is the whole child as additions.
-type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
+type diffFunc func(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error)
 
 // huskDehydrateDiffFunc is the husk-mode terminate seam that captures the
 // sandbox /workspace into the node CAS AND, when wantDiff is set, computes the
@@ -57,7 +57,7 @@ type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, ch
 // cannot read either node-CAS manifest, so the husk path never touches the
 // in-controller workspaceTransport seam for the diff. The production value dials
 // the claim's husk pod (defaultHuskDehydrateWithDiff); envtest injects a fake.
-type huskDehydrateDiffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error)
+type huskDehydrateDiffFunc func(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error)
 
 // rendezvousFunc is the seam the claim reconciler pushes the workspace repo
 // paths to a git rendezvous remote through. The production value calls
@@ -85,7 +85,7 @@ type memSnapshotResult struct {
 // returned ref pairs with the new revision (memorySnapshotRef) and the principal
 // binds it (memorySnapshotPrincipal). A real VM-memory image is the bare-metal
 // tail; the pairing decision and the request are what this seam proves.
-type checkpointMemoryFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim) (memSnapshotResult, error)
+type checkpointMemoryFunc func(ctx context.Context, claim *v1.Sandbox) (memSnapshotResult, error)
 
 // memorySnapshotExistsFunc is the seam the controller verifies a paired memory
 // snapshot still exists through (for the resumable status and the resume
@@ -101,14 +101,14 @@ type memorySnapshotExistsFunc func(ctx context.Context, ref, principal string) (
 // injects a fake that records the ref it was asked to restore. The real
 // VM-memory restore is the KVM/bare-metal tail; the pairing decision and the
 // request are envtest-proven via this seam.
-type resumeMemoryFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error
+type resumeMemoryFunc func(ctx context.Context, claim *v1.Sandbox, ref string) error
 
 // repoFilesFunc is the seam that resolves the workspace spec.git.paths content
 // from a just-dehydrated revision manifest into a name -> content map. The
 // production value reads the files under the gitPaths prefixes from the CAS
 // store; envtest injects a fake. The resolved names are workspace-relative so a
 // "/workspace/repo" git path materializes as "repo/...".
-type repoFilesFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
+type repoFilesFunc func(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error)
 
 // workspaceHydratedAnnotation marks a claim whose workspace head was already
 // hydrated into its sandbox, so a requeue of a Ready claim does not hydrate
@@ -159,7 +159,7 @@ var WorkspaceSecretExcludePaths = []string{
 }
 
 // hydrate returns the configured hydrate seam or the default real path.
-func (r *SandboxClaimReconciler) hydrate() hydrateFunc {
+func (r *SandboxReconciler) hydrate() hydrateFunc {
 	if r.HydrateWorkspace != nil {
 		return r.HydrateWorkspace
 	}
@@ -167,7 +167,7 @@ func (r *SandboxClaimReconciler) hydrate() hydrateFunc {
 }
 
 // dehydrate returns the configured dehydrate seam or the default real path.
-func (r *SandboxClaimReconciler) dehydrate() dehydrateFunc {
+func (r *SandboxReconciler) dehydrate() dehydrateFunc {
 	if r.DehydrateWorkspace != nil {
 		return r.DehydrateWorkspace
 	}
@@ -175,7 +175,7 @@ func (r *SandboxClaimReconciler) dehydrate() dehydrateFunc {
 }
 
 // diff returns the configured diff seam or the default real path.
-func (r *SandboxClaimReconciler) diff() diffFunc {
+func (r *SandboxReconciler) diff() diffFunc {
 	if r.DiffWorkspace != nil {
 		return r.DiffWorkspace
 	}
@@ -184,7 +184,7 @@ func (r *SandboxClaimReconciler) diff() diffFunc {
 
 // rendezvous returns the configured git rendezvous seam or the default real path
 // (workspace.Rendezvous via the git CLI).
-func (r *SandboxClaimReconciler) rendezvous() rendezvousFunc {
+func (r *SandboxReconciler) rendezvous() rendezvousFunc {
 	if r.RendezvousGit != nil {
 		return r.RendezvousGit
 	}
@@ -195,7 +195,7 @@ func (r *SandboxClaimReconciler) rendezvous() rendezvousFunc {
 
 // repoFiles returns the configured repo-paths resolver seam or the default real
 // path that reads the git-path files from the CAS store.
-func (r *SandboxClaimReconciler) repoFiles() repoFilesFunc {
+func (r *SandboxReconciler) repoFiles() repoFilesFunc {
 	if r.RepoFilesForGit != nil {
 		return r.RepoFilesForGit
 	}
@@ -207,11 +207,11 @@ func (r *SandboxClaimReconciler) repoFiles() repoFilesFunc {
 // silently skipping the snapshot, so a checkpoint-on-terminate on a controller
 // without the node-side memory-snapshot wiring fails loud instead of producing a
 // revision falsely marked resumable.
-func (r *SandboxClaimReconciler) checkpointMemory() checkpointMemoryFunc {
+func (r *SandboxReconciler) checkpointMemory() checkpointMemoryFunc {
 	if r.CheckpointMemory != nil {
 		return r.CheckpointMemory
 	}
-	return func(_ context.Context, claim *v1alpha1.SandboxClaim) (memSnapshotResult, error) {
+	return func(_ context.Context, claim *v1.Sandbox) (memSnapshotResult, error) {
 		return memSnapshotResult{}, fmt.Errorf(
 			"memory-snapshot checkpoint-on-terminate is not wired on this controller: bind CheckpointMemory (the husk Checkpoint / engine CreateSnapshot path) before setting spec.checkpointOnTerminate on claim %s",
 			claim.Name,
@@ -221,11 +221,11 @@ func (r *SandboxClaimReconciler) checkpointMemory() checkpointMemoryFunc {
 
 // resumeMemory returns the configured memory-restore seam or a fail-closed
 // default (see checkpointMemory for the wiring requirement).
-func (r *SandboxClaimReconciler) resumeMemory() resumeMemoryFunc {
+func (r *SandboxReconciler) resumeMemory() resumeMemoryFunc {
 	if r.ResumeMemory != nil {
 		return r.ResumeMemory
 	}
-	return func(_ context.Context, claim *v1alpha1.SandboxClaim, _ string) error {
+	return func(_ context.Context, claim *v1.Sandbox, _ string) error {
 		return fmt.Errorf(
 			"memory-snapshot resume is not wired on this controller: bind ResumeMemory (the husk activation memory-restore path) before resuming a resumable head on claim %s",
 			claim.Name,
@@ -236,7 +236,7 @@ func (r *SandboxClaimReconciler) resumeMemory() resumeMemoryFunc {
 // memorySnapshotExists returns the configured existence-check seam or a
 // fail-closed default that reports the snapshot is absent, so an unwired
 // controller never marks a head resumable it cannot verify.
-func (r *SandboxClaimReconciler) memorySnapshotExists() memorySnapshotExistsFunc {
+func (r *SandboxReconciler) memorySnapshotExists() memorySnapshotExistsFunc {
 	if r.MemorySnapshotExists != nil {
 		return r.MemorySnapshotExists
 	}
@@ -253,7 +253,7 @@ func (r *SandboxClaimReconciler) memorySnapshotExists() memorySnapshotExistsFunc
 // op; nil defaults to dialing the husk pod (defaultHuskHydrate). The raw-forkd
 // path has no in-controller transport, so it falls back to the documented
 // not-wired seam (workspaceTransport) rather than silently skipping the hydrate.
-func (r *SandboxClaimReconciler) defaultHydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+func (r *SandboxReconciler) defaultHydrate(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 	if r.EnableHuskPods {
 		return r.huskHydrate()(ctx, claim, manifest)
 	}
@@ -270,7 +270,7 @@ func (r *SandboxClaimReconciler) defaultHydrate(ctx context.Context, claim *v1al
 // stores it into the node CAS, then returns the manifest digest. The controller
 // still owns the WorkspaceRevision commit + head advance once the digest comes
 // back.
-func (r *SandboxClaimReconciler) defaultDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+func (r *SandboxReconciler) defaultDehydrate(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 	if r.EnableHuskPods {
 		return r.huskDehydrate()(ctx, claim, excludePaths, capturePaths)
 	}
@@ -283,7 +283,7 @@ func (r *SandboxClaimReconciler) defaultDehydrate(ctx context.Context, claim *v1
 
 // huskHydrate returns the configured husk hydrate delegate or the default real
 // path that dials the claim's husk pod control op.
-func (r *SandboxClaimReconciler) huskHydrate() hydrateFunc {
+func (r *SandboxReconciler) huskHydrate() hydrateFunc {
 	if r.WorkspaceHydrateDelegate != nil {
 		return r.WorkspaceHydrateDelegate
 	}
@@ -292,7 +292,7 @@ func (r *SandboxClaimReconciler) huskHydrate() hydrateFunc {
 
 // huskDehydrate returns the configured husk dehydrate delegate or the default
 // real path that dials the claim's husk pod control op.
-func (r *SandboxClaimReconciler) huskDehydrate() dehydrateFunc {
+func (r *SandboxReconciler) huskDehydrate() dehydrateFunc {
 	if r.WorkspaceDehydrateDelegate != nil {
 		return r.WorkspaceDehydrateDelegate
 	}
@@ -302,7 +302,7 @@ func (r *SandboxClaimReconciler) huskDehydrate() dehydrateFunc {
 // huskDehydrateDiff returns the configured husk dehydrate+diff delegate or the
 // default real path that dials the claim's husk pod control op and asks it to
 // capture the workspace and (when wanted) compute the diff in one node-CAS-side op.
-func (r *SandboxClaimReconciler) huskDehydrateDiff() huskDehydrateDiffFunc {
+func (r *SandboxReconciler) huskDehydrateDiff() huskDehydrateDiffFunc {
 	if r.WorkspaceDehydrateDiffDelegate != nil {
 		return r.WorkspaceDehydrateDiffDelegate
 	}
@@ -323,7 +323,7 @@ const huskWorkspaceTransferTimeout = 120 * time.Second
 // vsock and the node CAS. It fails closed: an unreachable pod or a not-OK result
 // is an error, so the terminate retries rather than committing a revision the
 // node never produced.
-func (r *SandboxClaimReconciler) defaultHuskDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+func (r *SandboxReconciler) defaultHuskDehydrate(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 	addr, err := r.huskPodControlAddr(ctx, claim)
 	if err != nil {
 		return "", err
@@ -364,7 +364,7 @@ func (r *SandboxClaimReconciler) defaultHuskDehydrate(ctx context.Context, claim
 // wantDiff is false). It fails closed: an unreachable pod or a not-OK result is an
 // error, so the terminate retries rather than committing a revision the node never
 // produced or a diff it could not compute.
-func (r *SandboxClaimReconciler) defaultHuskDehydrateWithDiff(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
+func (r *SandboxReconciler) defaultHuskDehydrateWithDiff(ctx context.Context, claim *v1.Sandbox, excludePaths, capturePaths []string, parentManifest cas.Digest, wantDiff bool) (cas.Digest, *workspace.Diff, error) {
 	addr, err := r.huskPodControlAddr(ctx, claim)
 	if err != nil {
 		return "", nil, err
@@ -408,7 +408,7 @@ func (r *SandboxClaimReconciler) defaultHuskDehydrateWithDiff(ctx context.Contex
 // given node-CAS manifest into the guest /workspace. It fails closed: an
 // unreachable pod or a not-OK result is an error, so the activate retries rather
 // than starting a sandbox with an empty workspace.
-func (r *SandboxClaimReconciler) defaultHuskHydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+func (r *SandboxReconciler) defaultHuskHydrate(ctx context.Context, claim *v1.Sandbox, manifest cas.Digest) error {
 	if err := manifest.Validate(); err != nil {
 		return fmt.Errorf("husk hydrate manifest digest: %w", err)
 	}
@@ -439,7 +439,7 @@ func (r *SandboxClaimReconciler) defaultHuskHydrate(ctx context.Context, claim *
 // IP is read live so a rescheduled pod resolves. A missing pod, an unscheduled
 // pod (no IP), or a claim with no SandboxID is an error so the caller retries
 // rather than dialing a stale address.
-func (r *SandboxClaimReconciler) huskPodControlAddr(ctx context.Context, claim *v1alpha1.SandboxClaim) (string, error) {
+func (r *SandboxReconciler) huskPodControlAddr(ctx context.Context, claim *v1.Sandbox) (string, error) {
 	if claim.Status.SandboxID == "" {
 		return "", fmt.Errorf("claim %s has no husk pod yet (empty SandboxID); cannot run the workspace transfer", claim.Name)
 	}
@@ -461,7 +461,7 @@ func (r *SandboxClaimReconciler) huskPodControlAddr(ctx context.Context, claim *
 // store and computes the content-hash diff. An empty parent digest (the first
 // revision in a workspace) diffs against an empty manifest, so the whole child
 // is recorded as additions. See defaultHydrate for the transport requirement.
-func (r *SandboxClaimReconciler) defaultDiff(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+func (r *SandboxReconciler) defaultDiff(ctx context.Context, claim *v1.Sandbox, parent, child cas.Digest) (workspace.Diff, error) {
 	_, store, err := r.workspaceTransport(claim)
 	if err != nil {
 		return workspace.Diff{}, err
@@ -497,7 +497,7 @@ func (r *SandboxClaimReconciler) defaultDiff(ctx context.Context, claim *v1alpha
 // the controller, never the pod) is tracked in
 // docs/superpowers/plans/2026-06-14-w4-workspace-prodgrade.md. The raw-forkd path
 // keeps the documented in-controller seam below.
-func (r *SandboxClaimReconciler) defaultRepoFiles(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+func (r *SandboxReconciler) defaultRepoFiles(ctx context.Context, claim *v1.Sandbox, digest cas.Digest, gitPaths []string) (map[string]string, error) {
 	if r.EnableHuskPods {
 		log.FromContext(ctx).Info(
 			"husk mode: git rendezvous repo-paths read from the node CAS is not yet wired; skipping the {git} push (best-effort) so the workspace commit is not blocked",
@@ -544,10 +544,10 @@ func (r *SandboxClaimReconciler) defaultRepoFiles(ctx context.Context, claim *v1
 // gitPathsAsOutputs adapts spec.git.paths into OutputSpec Path entries so the
 // CapturePaths normalizer (the same /workspace-relative prefix logic) can be
 // reused for the git-path filter.
-func gitPathsAsOutputs(gitPaths []string) []v1alpha1.OutputSpec {
-	out := make([]v1alpha1.OutputSpec, 0, len(gitPaths))
+func gitPathsAsOutputs(gitPaths []string) []v1.OutputSpec {
+	out := make([]v1.OutputSpec, 0, len(gitPaths))
 	for _, p := range gitPaths {
-		out = append(out, v1alpha1.OutputSpec{Path: p})
+		out = append(out, v1.OutputSpec{Path: p})
 	}
 	return out
 }
@@ -573,7 +573,7 @@ func nameUnderAnyPrefix(name string, prefixes []string) bool {
 // guest vsock) is a follow-up; this slice proves the transfer on KVM and the
 // binding lifecycle in envtest behind the seam, so the default reports a clear,
 // actionable error when invoked without that wiring.
-func (r *SandboxClaimReconciler) workspaceTransport(claim *v1alpha1.SandboxClaim) (workspace.VsockTransport, *cas.Store, error) {
+func (r *SandboxReconciler) workspaceTransport(claim *v1.Sandbox) (workspace.VsockTransport, *cas.Store, error) {
 	return nil, nil, fmt.Errorf(
 		"workspace hydrate/dehydrate transport is not wired on this controller: bind WorkspaceTransport (the node-side guest agent path) before using spec.workspaceRef on claim %s, or run the bulk transfer via the node integration (the KVM-proven internal/workspace helpers)",
 		claim.Name,
@@ -586,15 +586,15 @@ func (r *SandboxClaimReconciler) workspaceTransport(claim *v1alpha1.SandboxClaim
 // treats as nothing to hydrate. A missing Workspace is an error. The head
 // revision is returned too (nil when ok is false) so the caller can read its
 // memory-snapshot pairing.
-func (r *SandboxClaimReconciler) resolveWorkspaceHead(ctx context.Context, claim *v1alpha1.SandboxClaim) (manifest cas.Digest, head *v1alpha1.WorkspaceRevision, ok bool, err error) {
-	var ws v1alpha1.Workspace
+func (r *SandboxReconciler) resolveWorkspaceHead(ctx context.Context, claim *v1.Sandbox) (manifest cas.Digest, head *v1.WorkspaceRevision, ok bool, err error) {
+	var ws v1.Workspace
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); err != nil {
 		return "", nil, false, fmt.Errorf("resolve workspace %s: %w", claim.Spec.WorkspaceRef.Name, err)
 	}
 	if ws.Status.Head == "" {
 		return "", nil, false, nil
 	}
-	var headRev v1alpha1.WorkspaceRevision
+	var headRev v1.WorkspaceRevision
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: ws.Status.Head}, &headRev); err != nil {
 		return "", nil, false, fmt.Errorf("resolve workspace %s head revision %s: %w", ws.Name, ws.Status.Head, err)
 	}
@@ -616,7 +616,7 @@ func (r *SandboxClaimReconciler) resolveWorkspaceHead(ctx context.Context, claim
 // label (not the claim name) so a stale revision left by a prior, same-named
 // claim instance is never mistaken for this instance's: the UID is unique per
 // instance, name is not.
-func (r *SandboxClaimReconciler) existingClaimRevision(ctx context.Context, claim *v1alpha1.SandboxClaim) (*v1alpha1.WorkspaceRevision, error) {
+func (r *SandboxReconciler) existingClaimRevision(ctx context.Context, claim *v1.Sandbox) (*v1.WorkspaceRevision, error) {
 	if claim.UID == "" {
 		// No UID (a bare unit-test struct never persisted): the probe cannot scope to
 		// an instance, so report none and let the caller create a revision. The
@@ -631,7 +631,7 @@ func (r *SandboxClaimReconciler) existingClaimRevision(ctx context.Context, clai
 	if reader == nil {
 		reader = r.Client
 	}
-	var revs v1alpha1.WorkspaceRevisionList
+	var revs v1.WorkspaceRevisionList
 	if err := reader.List(ctx, &revs,
 		client.InNamespace(claim.Namespace),
 		client.MatchingLabels{FromClaimUIDLabel: string(claim.UID)},
@@ -651,8 +651,8 @@ func (r *SandboxClaimReconciler) existingClaimRevision(ctx context.Context, clai
 // terminate finalizer and is not in a terminal phase) other than the given claim
 // that binds the same workspace, or "" if none. It is the single-writer gate: a
 // Workspace may be bound to at most one active claim at a time.
-func (r *SandboxClaimReconciler) workspaceBusyClaim(ctx context.Context, claim *v1alpha1.SandboxClaim) (string, error) {
-	var claims v1alpha1.SandboxClaimList
+func (r *SandboxReconciler) workspaceBusyClaim(ctx context.Context, claim *v1.Sandbox) (string, error) {
+	var claims v1.SandboxList
 	if err := r.List(ctx, &claims, client.InNamespace(claim.Namespace)); err != nil {
 		return "", fmt.Errorf("list claims for workspace single-writer check: %w", err)
 	}
@@ -665,7 +665,7 @@ func (r *SandboxClaimReconciler) workspaceBusyClaim(ctx context.Context, claim *
 			continue
 		}
 		// A terminal claim no longer holds the workspace.
-		if other.Status.Phase == v1alpha1.SandboxTerminated || other.Status.Phase == v1alpha1.SandboxFailed {
+		if other.Status.Phase == v1.SandboxTerminated || other.Status.Phase == v1.SandboxFailed {
 			continue
 		}
 		// A claim under deletion is releasing the workspace; do not count it as a
@@ -686,7 +686,7 @@ func (r *SandboxClaimReconciler) workspaceBusyClaim(ctx context.Context, claim *
 // surfaced to the caller, which requeues; the sandbox stays Ready (the workspace
 // simply is not populated yet) rather than failing the claim, so a transient
 // transport error recovers.
-func (r *SandboxClaimReconciler) hydrateOnActivate(ctx context.Context, claim *v1alpha1.SandboxClaim) error {
+func (r *SandboxReconciler) hydrateOnActivate(ctx context.Context, claim *v1.Sandbox) error {
 	if claim.Spec.WorkspaceRef == nil {
 		return nil
 	}
@@ -736,7 +736,7 @@ func (r *SandboxClaimReconciler) hydrateOnActivate(ctx context.Context, claim *v
 // no-op: the caller hydrates content only. A cross-principal head is REFUSED
 // (an error), never silently downgraded, so an attempt to resume another
 // principal's secrets-in-RAM is loud, not quiet.
-func (r *SandboxClaimReconciler) maybeResumeMemory(ctx context.Context, claim *v1alpha1.SandboxClaim, head *v1alpha1.WorkspaceRevision) error {
+func (r *SandboxReconciler) maybeResumeMemory(ctx context.Context, claim *v1.Sandbox, head *v1.WorkspaceRevision) error {
 	if head.Spec.MemorySnapshotRef == nil {
 		return nil
 	}
@@ -781,7 +781,7 @@ func (r *SandboxClaimReconciler) maybeResumeMemory(ctx context.Context, claim *v
 // one already dehydrated, is a no-op. Secret paths are excluded so the revision
 // carries content only. A dehydrate or create error is returned to the caller so
 // the terminate is retried rather than losing the work silently.
-func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim *v1alpha1.SandboxClaim) error {
+func (r *SandboxReconciler) dehydrateOnTerminate(ctx context.Context, claim *v1.Sandbox) error {
 	if claim.Spec.WorkspaceRef == nil {
 		return nil
 	}
@@ -813,7 +813,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	// is dropped and the claim is garbage-collected, rather than retrying the
 	// dehydrate forever (the finalizer hot-loop: a NotFound workspace returned as
 	// a retryable error wedges the claim and starves the reconcile queue).
-	var ws v1alpha1.Workspace
+	var ws v1.Workspace
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); apierrors.IsNotFound(err) {
 		logger.Info("bound workspace already deleted; skipping dehydrate on terminate",
 			"claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name)
@@ -856,11 +856,11 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 
 	// Outputs narrow the capture to the listed /workspace subtrees; no Path output
 	// captures the whole workspace (the slice-2 default).
-	capturePaths := workspace.CapturePaths(claim.Spec.Outputs)
+	capturePaths := workspace.CapturePaths(sandboxOutputs(claim))
 
 	span.SetAttributes(attribute.Int("captured.path.count", len(capturePaths)))
 
-	wantDiff := outputsWantDiff(claim.Spec.Outputs)
+	wantDiff := outputsWantDiff(sandboxOutputs(claim))
 
 	// Capture the sandbox /workspace into a content-addressed revision and, when a
 	// {diff: true} output requested it, compute the content-hash diff against the
@@ -902,9 +902,9 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 
 	// A {diff: true} output records the content-hash diff of this revision against
 	// the parent head, so an indexer or a human can see what changed.
-	var diffSummary *v1alpha1.RevisionDiffSummary
+	var diffSummary *v1.RevisionDiffSummary
 	if wantDiff && diff != nil {
-		diffSummary = &v1alpha1.RevisionDiffSummary{
+		diffSummary = &v1.RevisionDiffSummary{
 			ParentRevision: parentRev,
 			Added:          diff.Added,
 			Removed:        diff.Removed,
@@ -923,7 +923,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	// non-resumable revision). A checkpoint error aborts the terminate (the work
 	// is captured on retry) rather than silently producing a content-only revision.
 	var memSnapshotRef, memSnapshotPrincipal *string
-	if claim.Spec.CheckpointOnTerminate {
+	if sandboxCheckpointOnTerminate(claim) {
 		snap, cerr := r.checkpointMemory()(ctx, claim)
 		if cerr != nil {
 			return finish(fmt.Errorf("checkpoint memory snapshot for claim %s: %w", claim.Name, cerr))
@@ -946,7 +946,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	// a fake id. A trace id is an opaque correlation id, never a secret.
 	annotations := traceIDAnnotations(ctx)
 
-	rev := &v1alpha1.WorkspaceRevision{
+	rev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: claim.Spec.WorkspaceRef.Name + "-",
 			Namespace:    claim.Namespace,
@@ -956,14 +956,14 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 			},
 			Annotations: annotations,
 		},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:            v1alpha1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
-			Source:                  v1alpha1.RevisionSource{FromClaim: claim.Name},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:            v1.LocalObjectReference{Name: claim.Spec.WorkspaceRef.Name},
+			Source:                  v1.RevisionSource{FromClaim: claim.Name},
 			ContentManifest:         string(digest),
 			MemorySnapshotRef:       memSnapshotRef,
 			MemorySnapshotPrincipal: memSnapshotPrincipal,
 		},
-		Status: v1alpha1.WorkspaceRevisionStatus{Phase: v1alpha1.WorkspaceRevisionPending},
+		Status: v1.WorkspaceRevisionStatus{Phase: v1.WorkspaceRevisionPending},
 	}
 	if err := r.Create(ctx, rev); err != nil {
 		return finish(fmt.Errorf("create workspace revision for claim %s: %w", claim.Name, err))
@@ -1004,7 +1004,7 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 			reader = r.Client
 		}
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			var latest v1alpha1.WorkspaceRevision
+			var latest v1.WorkspaceRevision
 			if err := reader.Get(ctx, types.NamespacedName{Namespace: rev.Namespace, Name: revName}, &latest); err != nil {
 				return err
 			}
@@ -1031,13 +1031,13 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 // other paths (phase/status) concurrently, and a lost annotation write would
 // leave the dehydrate non-idempotent (the duplicate-child hazard). The annotation
 // value is a generated revision name, never a secret.
-func (r *SandboxClaimReconciler) markDehydrated(ctx context.Context, claim *v1alpha1.SandboxClaim, revName string) error {
+func (r *SandboxReconciler) markDehydrated(ctx context.Context, claim *v1.Sandbox, revName string) error {
 	var reader client.Reader = r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var latest v1alpha1.SandboxClaim
+		var latest v1.Sandbox
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, &latest); err != nil {
 			return err
 		}
@@ -1069,14 +1069,14 @@ func (r *SandboxClaimReconciler) markDehydrated(ctx context.Context, claim *v1al
 // push. A push failure is returned (not swallowed) so the caller surfaces it on
 // the claim/revision condition. Git is the merge layer: this pushes a per-attempt
 // branch, the engine never merges working trees.
-func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest) ([]v1alpha1.GitPushRecord, error) {
-	gitOutputs := gitOutputsOf(claim.Spec.Outputs)
+func (r *SandboxReconciler) rendezvousOnTerminate(ctx context.Context, claim *v1.Sandbox, digest cas.Digest) ([]v1.GitPushRecord, error) {
+	gitOutputs := gitOutputsOf(sandboxOutputs(claim))
 	if len(gitOutputs) == 0 {
 		return nil, nil
 	}
 	logger := log.FromContext(ctx)
 
-	var ws v1alpha1.Workspace
+	var ws v1.Workspace
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); err != nil {
 		return nil, fmt.Errorf("resolve workspace %s for git rendezvous: %w", claim.Spec.WorkspaceRef.Name, err)
 	}
@@ -1106,7 +1106,7 @@ func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, clai
 		return nil, err
 	}
 
-	var pushes []v1alpha1.GitPushRecord
+	var pushes []v1.GitPushRecord
 	for _, g := range gitOutputs {
 		branch, berr := workspace.RenderBranch(g.Branch, claim.Name)
 		if berr != nil {
@@ -1117,7 +1117,7 @@ func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, clai
 			return pushes, fmt.Errorf("git rendezvous push for claim %s to %s on %s: %w", claim.Name, g.Remote, branch, perr)
 		}
 		logger.Info("git rendezvous pushed workspace repo paths", "claim", claim.Name, "remote", g.Remote, "branch", branch)
-		pushes = append(pushes, v1alpha1.GitPushRecord{Remote: g.Remote, Branch: branch})
+		pushes = append(pushes, v1.GitPushRecord{Remote: g.Remote, Branch: branch})
 	}
 	return pushes, nil
 }
@@ -1126,7 +1126,7 @@ func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, clai
 // into a workspace.Credentials. The token is a secret VALUE: this function never
 // logs it, and any error it returns names only the Secret and key (non-secret
 // identifiers), never the value. A nil result means an unauthenticated push.
-func (r *SandboxClaimReconciler) resolveGitCredentials(ctx context.Context, namespace string, git v1alpha1.WorkspaceGit) (*workspace.Credentials, error) {
+func (r *SandboxReconciler) resolveGitCredentials(ctx context.Context, namespace string, git v1.WorkspaceGit) (*workspace.Credentials, error) {
 	if git.CredentialsSecretRef == nil {
 		return nil, nil
 	}
@@ -1149,8 +1149,8 @@ func (r *SandboxClaimReconciler) resolveGitCredentials(ctx context.Context, name
 }
 
 // gitOutputsOf returns the {git} outputs from a claim's spec.outputs.
-func gitOutputsOf(outputs []v1alpha1.OutputSpec) []*v1alpha1.GitOutput {
-	var gits []*v1alpha1.GitOutput
+func gitOutputsOf(outputs []v1.OutputSpec) []*v1.GitOutput {
+	var gits []*v1.GitOutput
 	for i := range outputs {
 		if outputs[i].Git != nil {
 			gits = append(gits, outputs[i].Git)
@@ -1160,7 +1160,7 @@ func gitOutputsOf(outputs []v1alpha1.OutputSpec) []*v1alpha1.GitOutput {
 }
 
 // outputsWantDiff reports whether any output requested a content-hash diff.
-func outputsWantDiff(outputs []v1alpha1.OutputSpec) bool {
+func outputsWantDiff(outputs []v1.OutputSpec) bool {
 	for _, o := range outputs {
 		if o.Diff {
 			return true

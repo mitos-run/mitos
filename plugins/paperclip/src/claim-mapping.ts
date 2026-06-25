@@ -1,27 +1,28 @@
 // Pure mapping logic from the Paperclip pluggable sandbox-provider contract
-// onto the mitos SandboxClaim wire shape (mitos.run/v1alpha1). This module has
-// NO external dependencies on purpose: it encodes only the contract mapping
-// (lease lifecycle -> claim TTL/idle; teardown -> claim deletion with
-// workspace-artifact extraction first; callback-bridge egress -> claim-time
-// allowlist entry; secrets -> claim-time SecretMounts; per-adapter install
-// assertion), so it is unit testable with no cluster and no Paperclip SDK.
+// onto the mitos Sandbox wire shape (mitos.run/v1). This module has NO
+// external dependencies on purpose: it encodes only the contract mapping
+// (lease lifecycle -> sandbox lifetime TTL/idle; teardown -> sandbox deletion
+// with workspace-artifact extraction first; callback-bridge egress -> sandbox-
+// time allowlist entry; secrets -> sandbox-time SecretMounts; per-adapter
+// install assertion), so it is unit testable with no cluster and no Paperclip
+// SDK.
 //
 // References:
-//   - SandboxClaimSpec: api/v1alpha1/types.go (poolRef, env, secrets, timeout,
-//     idleTimeout, workspaceRef, outputs).
-//   - NetworkPolicy egress model (#219): api/v1alpha1/types.go (egress "deny" |
-//     "allow", allow host:port allowlist, default-deny otherwise).
-//   - Terminate-with-outputs: SandboxClaimSpec.Outputs (OutputSpec) and the TS
+//   - SandboxSpec: api/v1/types.go (source.poolRef, env, secrets, lifetime,
+//     network, workspaceRef, outputs).
+//   - Network egress model (#219): api/v1/types.go (egress "deny" | "allow",
+//     allow host:port allowlist, default-deny otherwise).
+//   - Terminate-with-outputs: SandboxSpec.Outputs (OutputSpec) and the TS
 //     SDK terminator (sdk/typescript/src/client.ts makeTerminator), which
-//     dehydrates the workspace BEFORE the claim is deleted.
+//     dehydrates the workspace BEFORE the sandbox is deleted.
 //   - Secret-inheritance policy: docs/fork-correctness.md. Secret values are
-//     injected at claim time and never baked into a pool snapshot.
+//     injected at sandbox create time and never baked into a pool snapshot.
 
 const API_GROUP = "mitos.run";
-const API_VERSION = "v1alpha1";
+const API_VERSION = "v1";
 
 /**
- * A reference to a Kubernetes Secret key, as a SandboxClaim consumes it. The
+ * A reference to a Kubernetes Secret key, as a Sandbox consumes it. The
  * controller resolves this server-side; the plaintext value never travels
  * through the plugin and is never logged.
  */
@@ -34,14 +35,14 @@ export interface SecretKeyRef {
   secretKey: string;
 }
 
-/** A SandboxClaim spec.secrets entry (api/v1alpha1 SecretMount). */
+/** A Sandbox spec.secrets entry (api/v1 SecretMount). */
 export interface SecretMount {
   name: string;
   secretRef: { name: string; key: string };
   envVar: string;
 }
 
-/** The mitos NetworkPolicy shape this plugin emits (a subset of #219). */
+/** The Mitos NetworkPolicy shape this plugin emits (a subset of #219). */
 export interface NetworkPolicy {
   /** Default verdict for traffic matching no allow rule. */
   egress: "deny" | "allow";
@@ -49,37 +50,41 @@ export interface NetworkPolicy {
   allow: string[];
 }
 
-/** A SandboxClaim spec.outputs entry (api/v1alpha1 OutputSpec). */
+/** A Sandbox spec.outputs entry (api/v1 OutputSpec). */
 export interface OutputSpec {
   path?: string;
   diff?: boolean;
 }
 
-/** The SandboxClaim object the plugin hands to a mitos cluster client. */
-export interface SandboxClaim {
+/** The Sandbox object the plugin hands to a Mitos cluster client. */
+export interface MitosSandbox {
   apiVersion: string;
-  kind: "SandboxClaim";
+  kind: "Sandbox";
   metadata: { name: string; namespace?: string };
   spec: {
-    poolRef: { name: string };
+    source: {
+      poolRef: { name: string };
+    };
     env?: Array<{ name: string; value: string }>;
     secrets?: SecretMount[];
-    timeout?: string;
-    idleTimeout?: string;
-    networkPolicy?: NetworkPolicy;
+    lifetime?: {
+      ttl?: string;
+      idleTimeout?: string;
+    };
+    network?: NetworkPolicy;
     workspaceRef?: { name: string };
   };
 }
 
 /**
- * The Paperclip lease lifecycle knobs that map onto claim lifetime. Both are
- * optional: an absent value leaves the corresponding claim field unset, which
+ * The Paperclip lease lifecycle knobs that map onto sandbox lifetime. Both are
+ * optional: an absent value leaves the corresponding sandbox field unset, which
  * the controller reads as "no limit".
  */
 export interface LeaseLifetime {
-  /** Wall-clock max lifetime in minutes (maps to spec.timeout). */
+  /** Wall-clock max lifetime in minutes (maps to spec.lifetime.ttl). */
   maxLifetimeMin?: number;
-  /** Idle-reap window in minutes (maps to spec.idleTimeout). */
+  /** Idle-reap window in minutes (maps to spec.lifetime.idleTimeout). */
   idleTimeoutMin?: number;
 }
 
@@ -101,7 +106,7 @@ export function minutesToDuration(min: number | undefined): string | undefined {
 }
 
 /**
- * Derives the claim-time egress allowlist entry for the Paperclip
+ * Derives the sandbox-time egress allowlist entry for the Paperclip
  * callback-bridge endpoint. The bridge is the ONLY egress a conforming run
  * needs: the instance bridge endpoint becomes a single allow entry over an
  * otherwise default-deny posture (#219 model). Returns a NetworkPolicy with
@@ -185,10 +190,10 @@ function defaultPortForScheme(protocol: string): string | undefined {
 }
 
 /**
- * Maps the run's claim-time secrets (git creds, API keys, bridge token) onto
- * SandboxClaim spec.secrets entries. The plugin only ever moves Secret
- * REFERENCES (name + key); the controller resolves the plaintext server-side.
- * This is the secret-inheritance guard: values are injected at claim time and
+ * Maps the run's sandbox-time secrets (git creds, API keys, bridge token) onto
+ * Sandbox spec.secrets entries. The plugin only ever moves Secret REFERENCES
+ * (name + key); the controller resolves the plaintext server-side. This is the
+ * secret-inheritance guard: values are injected at sandbox create time and
  * never live in a pool snapshot.
  */
 export function secretsToClaimMounts(refs: SecretKeyRef[]): SecretMount[] {
@@ -210,13 +215,13 @@ export function secretsToClaimMounts(refs: SecretKeyRef[]): SecretMount[] {
 }
 
 /**
- * The teardown ordering contract: teardown maps to claim deletion, but the
+ * The teardown ordering contract: teardown maps to sandbox deletion, but the
  * workspace artifacts must be extracted FIRST. This returns the
  * terminate-with-outputs directives that the controller dehydrates into a
- * committed WorkspaceRevision BEFORE the claim is deleted. When extractPaths is
- * empty, the whole /workspace is captured (a single diff-bearing output);
+ * committed WorkspaceRevision BEFORE the sandbox is deleted. When extractPaths
+ * is empty, the whole /workspace is captured (a single diff-bearing output);
  * otherwise each path becomes a narrowing output. The caller is responsible for
- * patching these onto the claim, then deleting it (never the reverse).
+ * patching these onto the sandbox, then deleting it (never the reverse).
  */
 export function terminateToOutputs(extractPaths: string[]): OutputSpec[] {
   if (extractPaths.length === 0) {
@@ -231,7 +236,7 @@ export interface InstalledProbe {
   present: string[];
 }
 
-/** The outcome of asserting the required adapter installs at claim time. */
+/** The outcome of asserting the required adapter installs at sandbox create time. */
 export interface InstallAssertion {
   ok: boolean;
   /** Required binaries that the probe did not find. */
@@ -240,11 +245,11 @@ export interface InstallAssertion {
 
 /**
  * Asserts that the adapter binaries a run requires were BAKED into the pool's
- * snapshot at build time and are present at claim time. Per the contract,
- * adapter installs are never performed per run: this is a claim-time assertion,
- * not an install step. Returns ok=false with the missing binaries when the
- * snapshot lacks a required adapter, so the caller fails the claim with an
- * actionable error rather than silently degrading.
+ * snapshot at build time and are present at sandbox create time. Per the
+ * contract, adapter installs are never performed per run: this is a create-time
+ * assertion, not an install step. Returns ok=false with the missing binaries
+ * when the snapshot lacks a required adapter, so the caller fails the sandbox
+ * with an actionable error rather than silently degrading.
  */
 export function assertAdapterInstalls(
   required: string[],
@@ -257,10 +262,10 @@ export function assertAdapterInstalls(
 
 /**
  * The full create-environment mapping: turns a Paperclip acquire-lease request
- * into a SandboxClaim object, threading pool, lease lifetime (timeout +
- * idleTimeout), claim-time secrets, the bridge-derived default-deny egress
- * policy, and an optional durable workspace binding. This is the heart of
- * workstream A: the provider contract realized as a claim.
+ * into a Sandbox object, threading pool, lease lifetime (ttl + idleTimeout),
+ * sandbox-time secrets, the bridge-derived default-deny egress policy, and an
+ * optional durable workspace binding. This is the heart of workstream A: the
+ * provider contract realized as a Sandbox.
  */
 export interface ClaimMappingInput {
   name: string;
@@ -277,7 +282,7 @@ export interface ClaimMappingInput {
   workspace?: string;
 }
 
-export function leaseToClaim(input: ClaimMappingInput): SandboxClaim {
+export function leaseToClaim(input: ClaimMappingInput): MitosSandbox {
   if (input.name.trim() === "") {
     throw new Error("claim name is required");
   }
@@ -285,8 +290,8 @@ export function leaseToClaim(input: ClaimMappingInput): SandboxClaim {
     throw new Error("pool is required");
   }
 
-  const spec: SandboxClaim["spec"] = {
-    poolRef: { name: input.pool },
+  const spec: MitosSandbox["spec"] = {
+    source: { poolRef: { name: input.pool } },
   };
 
   if (input.env && Object.keys(input.env).length > 0) {
@@ -297,13 +302,16 @@ export function leaseToClaim(input: ClaimMappingInput): SandboxClaim {
     spec.secrets = secretsToClaimMounts(input.secrets);
   }
 
-  const timeout = minutesToDuration(input.lease?.maxLifetimeMin);
-  if (timeout) {
-    spec.timeout = timeout;
-  }
+  const ttl = minutesToDuration(input.lease?.maxLifetimeMin);
   const idle = minutesToDuration(input.lease?.idleTimeoutMin);
-  if (idle) {
-    spec.idleTimeout = idle;
+  if (ttl || idle) {
+    spec.lifetime = {};
+    if (ttl) {
+      spec.lifetime.ttl = ttl;
+    }
+    if (idle) {
+      spec.lifetime.idleTimeout = idle;
+    }
   }
 
   if (input.bridgeEndpoint) {
@@ -311,7 +319,7 @@ export function leaseToClaim(input: ClaimMappingInput): SandboxClaim {
     if (input.extraEgress && input.extraEgress.length > 0) {
       policy = withExtraEgress(policy, input.extraEgress);
     }
-    spec.networkPolicy = policy;
+    spec.network = policy;
   }
 
   if (input.workspace) {
@@ -320,7 +328,7 @@ export function leaseToClaim(input: ClaimMappingInput): SandboxClaim {
 
   return {
     apiVersion: `${API_GROUP}/${API_VERSION}`,
-    kind: "SandboxClaim",
+    kind: "Sandbox",
     metadata: { name: input.name, namespace: input.namespace },
     spec,
   };

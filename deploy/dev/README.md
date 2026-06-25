@@ -4,9 +4,8 @@ This directory is the local-dev control plane that `mitos dev up` applies to a
 kind cluster. It runs a MOCK-mode control plane so the full claim path completes
 without KVM:
 
-- **controller** Deployment with `--mock --disable-pki-bootstrap`. `--mock` is a
-  no-op on the controller today (mock mode lives in forkd), but it documents the
-  intent; `--disable-pki-bootstrap` skips the control plane CA and TLS Secrets so
+- **controller** Deployment with `--mock --disable-pki-bootstrap`.
+  `--disable-pki-bootstrap` skips the control plane CA and TLS Secrets so
   the controller dials forkd over insecure gRPC.
 - **forkd** DaemonSet with `--mock` and no TLS flags. forkd fails closed without
   mTLS by default, so the dev manifest passes `--allow-insecure-grpc` to opt in to
@@ -17,10 +16,10 @@ without KVM:
   controller discovers it by the `app.kubernetes.io/component: forkd` pod label,
   builds the pool snapshot over insecure gRPC, and claims fork via the mock engine
   and reach Ready.
-- a default `SandboxTemplate` + `SandboxPool` (`dev-default`) in the `default`
+- a default `SandboxPool` (`dev-default`, with an inline template) in the `default`
   namespace so `mitos sandbox create --pool dev-default` has a pool to claim
-  from. Pools, templates, and claims are namespaced and looked up in the claim's
-  namespace; the CLI creates claims in `default`, so the dev pool lives there too.
+  from. Pools and sandboxes are namespaced and looked up in the sandbox's
+  namespace; the CLI creates sandboxes in `default`, so the dev pool lives there too.
   The control plane itself runs in the `mitos` namespace (the forkd discovery
   default).
 

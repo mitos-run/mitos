@@ -1,6 +1,6 @@
 name: krew
 
-# On a published GitHub Release, cross-compile the kubectl-sandbox plugin for
+# On a published GitHub Release, cross-compile the kubectl-mitos plugin for
 # the five krew-supported platforms, package each archive to match the URLs in
 # .krew.yaml, upload them as release assets, then run krew-release-bot to open
 # (or update) the PR against kubernetes-sigs/krew-index. Also runnable manually
@@ -62,15 +62,15 @@ jobs:
           os="${{ matrix.goos }}"
           arch="${{ matrix.goarch }}"
           ext="${{ matrix.ext }}"
-          bin="kubectl-sandbox"
+          bin="kubectl-mitos"
           if [ "$os" = "windows" ]; then
-            bin="kubectl-sandbox.exe"
+            bin="kubectl-mitos.exe"
           fi
           stage="$(mktemp -d)"
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -ldflags "-s -w" -o "$stage/$bin" ./cmd/kubectl-sandbox/
+            go build -ldflags "-s -w" -o "$stage/$bin" ./cmd/kubectl-mitos/
           cp LICENSE "$stage/LICENSE"
-          archive="kubectl-sandbox_${TAG}_${os}_${arch}.${ext}"
+          archive="kubectl-mitos_${TAG}_${os}_${arch}.${ext}"
           if [ "$ext" = "zip" ]; then
             (cd "$stage" && zip -q -X "$OLDPWD/$archive" "$bin" LICENSE)
           else

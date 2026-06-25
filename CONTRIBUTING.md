@@ -87,6 +87,6 @@ No em or en dashes anywhere; see the Coding Conventions section of [CLAUDE.md](C
 This repository is open source under the Apache License 2.0 (see `LICENSE`).
 Contributions are accepted under the DCO and stay under that license. There is
 no hosted or commercial offering today; the open-core boundary is described in
-[docs/open-core.md](docs/open-core.md). The "mitos" name and marks are reserved;
+[docs/open-core.md](docs/open-core.md). The "Mitos" name and marks are reserved;
 see [TRADEMARKS.md](TRADEMARKS.md). The code license does not grant trademark
 rights.

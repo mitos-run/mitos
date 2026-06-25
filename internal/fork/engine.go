@@ -15,10 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
@@ -190,6 +191,14 @@ type Engine struct {
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
 	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
+
+	// captureGuestReady waits for the guest agent gRPC Control service to answer
+	// Ping and returns the ready client. It is the seam used by
+	// CaptureTemplateHotPages so that path can be unit-tested without KVM or a
+	// real vsock. The production seam uses guestgrpc.WaitReady (vsock, port 53).
+	// Nil uses the production seam. The timeout mirrors connectVsockRetry's 50
+	// attempts at 20 ms each (1 second).
+	captureGuestReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
 
 	// maxSandboxes is the per-node host-DoS ceiling (production-blocker #2): the
 	// maximum number of live sandboxes this engine admits. Fork refuses with
@@ -447,7 +456,7 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 	if len(skipped) > 0 && !dnsOn {
 		fmt.Fprintf(os.Stderr, "forkd: WARNING egress allowlist for %s has %d name-based entries that are NOT enforced (DNS egress disabled): %v\n", sandboxID, len(skipped), skipped)
 	}
-	policy := v1alpha1.EgressPolicy(opts.Network.EgressPolicy)
+	policy := v1.EgressPolicy(opts.Network.EgressPolicy)
 
 	id, err := e.netAlloc.Acquire(sandboxID)
 	if err != nil {
@@ -469,7 +478,7 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		Allow:        allow,
 		AllowCIDRs:   opts.Network.AllowCIDRs,
 		BlockNetwork: opts.Network.BlockNetwork,
-		Inbound:      v1alpha1.InboundPolicy(opts.Network.Inbound),
+		Inbound:      v1.InboundPolicy(opts.Network.Inbound),
 		InboundCIDRs: opts.Network.InboundCIDRs,
 		// Always wire the per-sandbox egress counter so the metering pipeline
 		// (#211) can read this sandbox's egress bytes by name. It is a passive
@@ -644,7 +653,6 @@ type Sandbox struct {
 	MemoryUnique int64
 	MemoryShared int64
 	fcClient     *firecracker.Client
-	agentClient  *vsock.Client
 	VsockPath    string
 	// rootfsPath is the host path of the drive backing file embedded in
 	// the snapshot this sandbox was restored from; live-forks inherit it
@@ -869,6 +877,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
 		return err
 	}
+	e.captureGuestReady = guestgrpc.WaitReady
 	// Crash recovery (issue #12): before serving, read the on-disk journal and
 	// either re-adopt still-running pre-crash VMs into the live map (so
 	// ListSandboxes reports them and the controller GC can reconcile them) or
@@ -1596,9 +1605,6 @@ func (e *Engine) Terminate(sandboxID string) error {
 	// later forks (issue #168). No-op when the fork was never pinned.
 	e.forgetPin(sandboxID)
 
-	if sandbox.agentClient != nil {
-		sandbox.agentClient.Close()
-	}
 	if sandbox.fcClient != nil {
 		_ = sandbox.fcClient.Kill()
 	} else if sandbox.adopted {
@@ -1966,9 +1972,9 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 	if len(initCommands) == 0 {
 		return
 	}
-	steps := make([]v1alpha1.BuildStep, len(initCommands))
+	steps := make([]v1.BuildStep, len(initCommands))
 	for i, c := range initCommands {
-		steps[i] = v1alpha1.BuildStep{Type: v1alpha1.BuildStepRun, Run: c}
+		steps[i] = v1.BuildStep{Type: v1.BuildStepRun, Run: c}
 	}
 	plan := templatebuild.Plan(image, steps, cache)
 	cached := 0
@@ -2051,7 +2057,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 			HostIP:   placeholderHostIP,
 			GuestIP:  placeholderGuestIP,
 		}
-		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil); err != nil {
+		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
 		defer func() {

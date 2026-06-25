@@ -202,16 +202,16 @@ Still absent on purpose: `Delete` of *other* sandboxes, pool mutation, workspace
 
 ---
 
-## 5. The declarative layer (three nouns, `mitos.run/v1alpha1`)
+## 5. The declarative layer (three nouns, `mitos.run/v1`)
 
-The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** (v1's `SandboxTemplate` is inlined into the pool with an optional `templateRef` for reuse, the Deployment-embeds-PodSpec pattern; v1's `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.)
+The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** The former `SandboxTemplate` is inlined into the pool via `spec.template` (with an optional `spec.templateRef` for reuse, the Deployment-embeds-PodSpec pattern); the former `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.
 
-The consolidation decision (four v1alpha1 kinds to three v2 nouns), the coordination with ADR 0001's deferred rename so there is exactly one breaking `mitos.run` rename before 1.0, and the migration path are recorded in docs/adr/0007-api-v2-three-noun-consolidation.md. The field-by-field v1alpha1 to v2 conversion contract is docs/api/v2-migration.md. As of this writing the four v1alpha1 kinds remain in force and unchanged; section 5 below is the target shape, not yet the served API.
+The consolidation decision (four v1alpha1 kinds to three v1 nouns), the coordination with ADR 0001's deferred rename so there is exactly one breaking `mitos.run` rename before 1.0, and the migration path are recorded in docs/adr/0007-api-v2-three-noun-consolidation.md. The field-by-field v1alpha1 to v2 conversion contract is docs/api/v2-migration.md. The consolidation has LANDED: `mitos.run/v1` is the only served group-version; `v1alpha1` and `v1alpha2` are removed.
 
 ### SandboxPool
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata: { name: python-agent }
 spec:
@@ -233,7 +233,7 @@ status:
 ### Sandbox
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: Sandbox
 metadata: { name: heartbeat-7f3a }
 spec:
@@ -271,7 +271,7 @@ status:
 ### Workspace
 
 ```yaml
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: Workspace
 metadata: { name: proj-x }
 spec:
@@ -293,7 +293,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 - **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `mitos.run/pool` only.
 - **Paperclip provider** (`@mitos-run/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
-- **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
+- **kubectl plugin** (operator persona): `kubectl mitos ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
 - **Eventing**: CloudEvents (`dev.mitos.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
 
 ---

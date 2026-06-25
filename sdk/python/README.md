@@ -1,63 +1,66 @@
-# mitos Python SDK
+# Mitos Python SDK
 
-Python client for [mitos-run/mitos](https://github.com/mitos-run/mitos):
-snapshot-fork sandboxes for AI agents on Kubernetes.
+Mitos gives AI agents isolated, forkable sandboxes: Firecracker microVMs that
+restore from snapshots and fork into parallel attempts, so an agent can branch a
+warm environment instead of rebuilding it. Run it fully hosted at
+[https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
+cluster.
 
-Two modes:
+This is the Python client. It covers both modes: the direct sandbox API (hosted
+or standalone, no Kubernetes) and cluster mode driving the Kubernetes CRDs, plus
+an async client and framework adapters.
 
-- `mitos.create` (flat one-liner): API key plus base URL, returns a Ready
-  sandbox handle against the hosted control plane or a standalone
-  `sandbox-server`. No Kubernetes required. The canonical entry point.
-- `mitos.AgentRun` / `Sandbox`: drives the Kubernetes CRDs
-  (`SandboxClaim`, `SandboxFork`, `SandboxPool`, `SandboxTemplate`) and execs
-  through the forkd sandbox API. For operators who run the mitos cluster.
+## Install
 
-## The flat one-liner
+```bash
+pip install mitos-run
+```
+
+The PyPI distribution is named `mitos-run`; the import package is `mitos`. You
+`pip install mitos-run` and `import mitos`. Optional extras keep the same import
+name, for example `pip install "mitos-run[k8s]"` for cluster mode.
+
+## Quickstart (hosted)
+
+Get an API key from [https://mitos.run](https://mitos.run) and set it in the
+environment. The base URL defaults to the hosted endpoint, so create, exec, and
+terminate work with no further configuration.
 
 ```python
 import mitos
 
-# MITOS_API_KEY and MITOS_BASE_URL from the environment (explicit args override).
+# MITOS_API_KEY from the environment; base URL defaults to https://mitos.run.
 sb = mitos.create("python")
 print(sb.exec("echo hello").stdout)              # hello
 sb.terminate()
 ```
 
-`mitos.create(image, api_key=..., base_url=...)` resolves the API key (argument,
-else `MITOS_API_KEY`, else the CLI login credential file written by
-`mitos auth login`, so one login authenticates the SDK too) and base URL
-(argument, else `MITOS_BASE_URL`) and returns a `DirectSandbox` exposing `exec`,
-`run_code`, `files`, `pty`, `fork`, and `terminate`. `Sandbox.create(...)` is an
-alias for the same call.
+Fork is the differentiator: branch a warm sandbox into independent siblings and
+run parallel attempts against the same starting state.
 
 ```python
 import mitos
 
-sb = mitos.create("python", api_key="sk-...", base_url="http://localhost:8080")
-
+sb = mitos.create("python")
 sb.files.write("/workspace/plan.txt", "draft")
-print(sb.files.read("/workspace/plan.txt"))      # draft
+
+fork_a, fork_b = sb.fork(2)                       # two independent siblings
+fork_a.exec("echo a > /workspace/a.txt")
+fork_b.exec("echo b > /workspace/b.txt")          # b does not see a's write
 
 ex = sb.run_code("import math; math.sqrt(144)")
-print(ex.text)                                   # 12.0
-
-fork_a, fork_b = sb.fork(2)                       # independent sibling sandboxes
-fork_a.exec("echo a > /workspace/a.txt")
-fork_b.exec("echo b > /workspace/b.txt")
+print(ex.text)                                    # 12.0
 
 sb.terminate()
 ```
 
-Auth: the API key rides on `Authorization: Bearer <key>` on every request. The
-standalone `sandbox-server` runs tokenless and ignores it; the hosted control
-plane verifies the same header server-side ([#210], not yet built) without an SDK
-change. The key value is never logged and never placed in an error message. A
-missing base URL raises a typed `AgentRunError(code="missing_base_url")` whose
-remediation names the argument and the env var but no key value.
+`mitos.create(image, api_key=..., base_url=...)` resolves auth (see precedence
+below), gets-or-creates the template for `image`, forks it, and returns a READY
+`DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`,
+`set_timeout`, `pause`, `resume`, `get_host`, and `terminate`.
+`Sandbox.create(...)` is an alias for the same call.
 
-[#210]: https://github.com/mitos-run/mitos/issues/210
-
-### Async flat path
+### Async direct path
 
 ```python
 import asyncio
@@ -78,7 +81,46 @@ async def main():
 asyncio.run(main())
 ```
 
-## Cluster mode: the one-liner
+## Direct-mode surface
+
+`mitos.create` / `Sandbox.create` returns a `DirectSandbox`.
+
+| Method | HTTP | Returns |
+| --- | --- | --- |
+| `mitos.create(image, ...)` | `POST /v1/templates`, `POST /v1/fork` | `DirectSandbox` |
+| `sandbox.exec(command, timeout=30)` | `POST /v1/exec` | `ExecResult` |
+| `sandbox.run_code(code, language="python", ...)` | `POST /v1/run_code/stream` | `Execution` |
+| `sandbox.files.read(path)` / `read_bytes(path)` | `POST /v1/files/read` | `str` / `bytes` |
+| `sandbox.files.write(path, content, mode=0o644)` | `POST /v1/files/write` | `None` |
+| `sandbox.files.list(path="/")` | `POST /v1/files/list` | `list[FileInfo]` |
+| `sandbox.files.exists(path)` | `POST /v1/files/list` | `bool` |
+| `sandbox.files.remove(path)` | `POST /v1/files/remove` | `None` |
+| `sandbox.files.mkdir(path)` | `POST /v1/files/mkdir` | `None` |
+| `sandbox.pty(on_data, cols=80, rows=24)` | `WS /v1/pty` | `PtyHandle` |
+| `sandbox.set_timeout(timeout_seconds)` | `POST /v1/set_timeout` | `int` (deadline) |
+| `sandbox.pause()` / `sandbox.resume()` | `POST /v1/pause`, `/v1/resume` | `None` |
+| `sandbox.get_host(port=80)` | `POST /v1/preview` | `str` (signed URL) |
+| `sandbox.fork(n=1)` | `POST /v1/fork` | `list[DirectSandbox]` |
+| `sandbox.terminate()` | `DELETE /v1/sandboxes/{id}` | `None` |
+
+The lower-level `SandboxServer` exposes the same endpoints when you want to drive
+templates and forks explicitly:
+
+```python
+from mitos.direct import SandboxServer
+
+server = SandboxServer("http://localhost:8080")
+server.create_template("python")
+sandbox = server.fork("python")
+print(sandbox.exec("python -c 'print(1 + 1)'").stdout)
+sandbox.terminate()
+```
+
+## Cluster mode: AgentRun
+
+Cluster mode drives the Kubernetes CRDs (`SandboxPool`, `Sandbox`, `Workspace`)
+in API group `mitos.run/v1` and execs through the forkd sandbox API. It is for
+operators who run the Mitos cluster themselves.
 
 ```python
 from mitos import AgentRun
@@ -93,8 +135,8 @@ sb.terminate()
 ```
 
 `c.sandbox("python")` ensures a deterministic default pool
-`mitos-default-python` (a `SandboxTemplate` carrying the image plus a
-`SandboxPool` that references it), creating both if absent. It is
+`mitos-default-python` (a `SandboxPool` carrying the image in its inline
+`spec.template`), creating it if absent. It is
 admin-disableable with `AgentRun(allow_default_pool=False)`, which makes the
 image path raise instead of creating anything.
 
@@ -140,24 +182,7 @@ bg = sb.exec_background("npm run dev")
 bg.kill()
 ```
 
-### Structured errors
-
-```python
-from mitos import AgentRunError
-
-try:
-    sb.exec("false")
-    sb.files.read("/does/not/exist")
-except AgentRunError as e:
-    print(e.code)         # e.g. file_failed, not_found
-    print(e.remediation)  # an actionable next step
-```
-
-`AgentRunError` is parsed from the server envelope
-`{error:{code, message, cause, remediation}}`. Any bearer token a misconfigured
-server reflects into a body is redacted before it becomes the error cause.
-
-### Async client (hot paths)
+### Async cluster client
 
 ```python
 import asyncio
@@ -179,27 +204,55 @@ asyncio.run(main())
 
 `AsyncAgentRun` / `AsyncSandbox` cover the hot paths (exec blocking and
 streaming, files, fork, terminate, wait_until_ready, from_name,
-sandbox(image)). Pool and workspace administration are sync-only. If your build
-includes the code interpreter (#102), `sb.run_code(...)` returns an `Execution`;
-the async client does not yet wrap `run_code`.
+sandbox(image)). Pool and workspace administration are sync-only.
 
-## Direct mode (no Kubernetes)
+## Auth and base URL precedence
+
+Resolution order, highest precedence first:
+
+- API key: the `api_key` argument, then `MITOS_API_KEY`, then the bearer token in
+  the credential file written by `mitos auth login`
+  (`~/.config/mitos/credentials.json`, honoring `MITOS_CONFIG_DIR`), then
+  tokenless.
+- Base URL: the `base_url` argument, then `MITOS_BASE_URL`, then the hosted
+  default `https://mitos.run`.
+
+The key rides on `Authorization: Bearer <key>` on every request. A standalone
+`sandbox-server` runs tokenless and ignores it; the hosted endpoint verifies it.
+The key value is never logged and never placed in an error message. A missing
+base URL raises a typed `AgentRunError(code="missing_base_url")` whose
+remediation names the argument and the env var, never a key value.
+
+## Errors
+
+Failures raise `AgentRunError`, parsed from the server envelope
+`{error:{code, message, cause, remediation}}`. Branch on `code`, never on the
+message text.
 
 ```python
-from mitos.direct import SandboxServer
+from mitos import AgentRunError
 
-server = SandboxServer("http://localhost:8080")
-server.create_template("python")
-sandbox = server.fork("python")
-print(sandbox.exec("print(1 + 1)").stdout)
-sandbox.terminate()
+try:
+    sb.files.read("/does/not/exist")
+except AgentRunError as e:
+    print(e.code)         # e.g. file_failed, not_found
+    print(e.remediation)  # an actionable next step
 ```
+
+Any bearer token a misconfigured server reflects into a body is redacted before
+it becomes the error cause.
+
+## Sandbox ids
+
+Sandbox ids must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. The SDK validates the
+id (the explicit one or the generated `sandbox-<hex>`) and raises
+`invalid_sandbox_id` before sending any request.
 
 ## Templates as code
 
-Author a custom environment from code with the fluent `Template` builder, in the
-shape E2B and Daytona use. It emits a `SandboxTemplate` spec; no server or KVM is
-needed to build the spec.
+Author a custom environment from code with the fluent `Template` builder. It
+emits a pool template spec (the inline `spec.template` of a `SandboxPool`); no
+server or KVM is needed to build the spec.
 
 ```python
 from mitos import Template
@@ -219,8 +272,8 @@ obj = Template().from_image("node:24").run("npm ci").to_template("web")
 
 The ordered steps (copy / run / env / workdir) map onto the CRD
 `spec.buildSteps` and feed a content-addressed, chained build cache so unchanged
-steps are reused. See docs/templates.md for the CLI (`mitos template build` /
-`push`) and the cache semantics.
+steps are reused. See the [docs](https://mitos.run) for the CLI
+(`mitos template build` / `push`) and the cache semantics.
 
 ## Integrations
 
@@ -230,117 +283,96 @@ so you change the backend and keep your agent code. The framework is an OPTIONAL
 dependency: the adapter modules import mitos always and the framework lazily, so
 the base SDK installs and tests without it.
 
-### LangChain / deepagents quickstart
+### LangChain / deepagents
 
 LangChain and deepagents let you pick a pluggable sandbox backend (they ship
-`E2BSandbox` and `DaytonaSandbox`). `MitosSandbox` is the mitos backend: change
+`E2BSandbox` and `DaytonaSandbox`). `MitosSandbox` is the Mitos backend: change
 the backend, keep your agent code.
 
 ```python
 from mitos.integrations.langchain import MitosSandbox
 
-# Standalone sandbox-server / hosted control plane, no Kubernetes:
 sb = MitosSandbox.create("python", base_url="http://localhost:8080")
 
-# Shell command -> normalized result dict (stdout, stderr, exit_code).
 out = sb.execute("echo hi")          # alias: sb.run("echo hi")
-
-# Filesystem ops.
 sb.write_file("/workspace/a.txt", "hello")
 print(sb.read_file("/workspace/a.txt"))
 print(sb.list_files("/workspace"))
 
-# Code execution with rich MIME results (image/png, text/html, ...).
 ex = sb.run_code("import math; math.sqrt(144)")
 print(ex.text, ex.results)
 
-sb.close()                           # alias: sb.stop(); lifecycle close
-```
-
-Install the optional extra only if you use the integration:
-`pip install "mitos[langchain]"`. `MitosSandbox` does not subclass any langchain
-type and is fully usable without langchain installed.
-
-Fork is a mitos superpower the LangChain sandbox-backend interface does not
-expose, so it is NOT forced onto that interface. Reach branching / parallel runs
-through the adapter's native `fork`, which returns sibling `MitosSandbox`
-backends:
-
-```python
-children = sb.fork(2)                # two independent forked sandboxes
+children = sb.fork(2)                # fork stays reachable as a native op
 for c in children:
-    print(c.execute("echo from-fork")["stdout"])
     c.close()
+
+sb.close()                           # alias: sb.stop()
 ```
 
-The wire-op mapping is factored into `mitos.integrations._mapping` so the other
-adapters (OpenAI / Claude, the E2B-compat shim) reuse one translation layer.
+Install the extra only if you use the integration:
+`pip install "mitos-run[langchain]"`. `MitosSandbox` does not subclass any
+langchain type and is fully usable without langchain installed. Fork is a Mitos
+op the LangChain backend interface does not expose, so it is reached through the
+adapter's native `fork`, which returns sibling `MitosSandbox` backends.
 
-### OpenAI Agents SDK quickstart
+### OpenAI Agents SDK
 
-The OpenAI Agents SDK exposes tools as function tools. `MitosSandboxTools` binds
-`run_command` / `read_file` / `write_file` / `run_code` to a mitos sandbox: give
-the tools to your agent and its tool calls run inside the sandbox.
+`MitosSandboxTools` binds `run_command` / `read_file` / `write_file` /
+`run_code` to a Mitos sandbox: give the tools to your agent and its tool calls
+run inside the sandbox.
 
 ```python
 from mitos.integrations.openai_agents import MitosSandboxTools
 
-# Standalone sandbox-server / hosted control plane, no Kubernetes:
 tools = MitosSandboxTools.create("python", base_url="http://localhost:8080")
 
-# Use the thin wrappers directly:
 print(tools.run_command("echo hi")["stdout"])
 tools.write_file("/workspace/a.txt", "hello")
 print(tools.read_file("/workspace/a.txt"))
 print(tools.run_code("import math; math.sqrt(144)")["text"])
 
-# Or hand real function tools to an Agent (needs the SDK installed):
 from agents import Agent
 agent = Agent(name="coder", tools=tools.as_function_tools())
 
 tools.close()
 ```
 
-Install the optional extra only if you use the integration:
-`pip install "mitos[openai-agents]"`. The adapter is fully usable and testable
-without `openai-agents`; only `as_function_tools()` needs it and it raises a
-clear error naming the extra when absent.
+Install the extra only if you use the integration:
+`pip install "mitos-run[openai-agents]"`. The adapter is fully usable and
+testable without `openai-agents`; only `as_function_tools()` needs it and it
+raises a clear error naming the extra when absent.
 
-### Claude Agent SDK quickstart
+### Claude Agent SDK
 
 The Claude Agent SDK takes custom tools as an in-process MCP server.
-`MitosSandboxTools` binds the same four tools to a mitos sandbox and wraps them
+`MitosSandboxTools` binds the same four tools to a Mitos sandbox and wraps them
 as an MCP server you pass to the agent.
 
 ```python
 from mitos.integrations.claude_agent import MitosSandboxTools
 
-# Standalone sandbox-server / hosted control plane, no Kubernetes:
 tools = MitosSandboxTools.create("python", base_url="http://localhost:8080")
 
-# The handlers return MCP tool results (a content list of text blocks):
 res = tools.run_command({"command": "echo hi"})
 print(res["content"][0]["text"])
 tools.write_file({"path": "/workspace/a.txt", "content": "hello"})
 print(tools.read_file({"path": "/workspace/a.txt"})["content"][0]["text"])
 
-# Or build a real in-process MCP server (needs the SDK installed):
 server = tools.as_mcp_server(name="mitos-sandbox")  # pass via mcp_servers
 
 tools.close()
 ```
 
-Install the optional extra only if you use the integration:
-`pip install "mitos[claude-agent]"`. The adapter is fully usable and testable
-without `claude-agent-sdk`; only `as_mcp_server()` needs it and it raises a clear
-error naming the extra when absent.
+Install the extra only if you use the integration:
+`pip install "mitos-run[claude-agent]"`. The adapter is fully usable and
+testable without `claude-agent-sdk`; only `as_mcp_server()` needs it and it
+raises a clear error naming the extra when absent.
 
-### Use mitos via VibeKit
+### VibeKit
 
-VibeKit is a provider aggregator over sandbox backends ("E2B today; Daytona,
-Modal, Fly.io coming soon"). `MitosVibeKitProvider` is the mitos provider against
-VibeKit's provider shape: a named provider that creates sandboxes exposing
-command execution, a filesystem, and a lifecycle.
+`MitosVibeKitProvider` is the Mitos provider against VibeKit's provider shape: a
+named provider that creates sandboxes exposing command execution, a filesystem,
+and a lifecycle.
 
 ```python
 from mitos.integrations.vibekit import MitosVibeKitProvider
@@ -355,16 +387,14 @@ ex = sandbox.run_code("1 + 1")           # rich Execution with MIME results
 sandbox.kill()                            # alias: sandbox.close()
 ```
 
-Install the optional extra only if you use the integration:
-`pip install "mitos[vibekit]"`. The provider does not subclass any VibeKit type
-and is fully usable and testable without VibeKit installed. Fork stays reachable
-as a mitos-native op via `sandbox.fork(n)`, which VibeKit's provider interface
-does not expose.
+Install the extra only if you use the integration:
+`pip install "mitos-run[vibekit]"`. The provider does not subclass any VibeKit
+type and is fully usable without VibeKit installed. Fork stays reachable as a
+mitos-native op via `sandbox.fork(n)`.
 
-### Use mitos via ZenML
+### ZenML
 
-ZenML treats a sandbox as a pluggable stack component selected by a flavor.
-`MitosSandboxComponent` is the framework-neutral mitos backend (config, flavor
+`MitosSandboxComponent` is the framework-neutral Mitos backend (config, flavor
 name, and the provision / run_command / files / run_code / deprovision logic the
 flavor wraps).
 
@@ -381,44 +411,38 @@ ex = comp.run_code("1 + 1")              # rich Execution; comp.run_code_dict(..
 comp.deprovision()
 ```
 
-Install the optional extra only if you use the integration:
-`pip install "mitos[zenml]"`. The component backend is fully usable and testable
-without ZenML; only `MitosSandboxComponent.flavor()` needs it and raises a clear
-error naming the extra when absent.
+Install the extra only if you use the integration:
+`pip install "mitos-run[zenml]"`. The component backend is fully usable and
+testable without ZenML; only `MitosSandboxComponent.flavor()` needs it and
+raises a clear error naming the extra when absent.
 
-### Registering mitos with VibeKit / ZenML (maintainer step)
+Listing Mitos as a selectable provider inside VibeKit or ZenML is a contribution
+to those projects' own repositories, not something installing this SDK does. The
+adapters above implement the backend each aggregator expects; you use them
+directly today, and the module docstrings spell out the contract each upstream
+contribution would conform to.
 
-The adapters above implement the mitos backend each aggregator expects, but
-LISTING mitos as a selectable option inside VibeKit or ZenML is a contribution to
-THOSE projects' own repositories and is NOT done by installing this SDK. It is a
-maintainer step:
+## The Mitos SDK family
 
-- **VibeKit:** open a PR to VibeKit adding a provider entry that constructs
-  `MitosVibeKitProvider` and wires its create / command / filesystem methods to
-  VibeKit's provider interface, following VibeKit's contribution process.
-- **ZenML:** open a PR (or ship a plugin) that subclasses ZenML's sandbox
-  stack-component base with `MitosSandboxConfig` and `FLAVOR = "mitos"`, delegates
-  its hooks to `MitosSandboxComponent`, and registers the flavor through ZenML's
-  flavor API, following ZenML's integration contribution process.
+Mitos ships native clients in six languages. All of them share the same
+direct-mode surface (create a template, fork, exec, terminate), so the API maps
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) is Python and
+TypeScript only.
 
-Until those external PRs merge, mitos is usable through the adapters directly (as
-shown above); it is not yet selectable by name inside VibeKit's or ZenML's own
-provider lists. See the module docstrings in `mitos/integrations/vibekit.py` and
-`mitos/integrations/zenml.py` for the targeted contract each PR conforms to.
+| Language | Install | Covers |
+| --- | --- | --- |
+| Python | `pip install mitos-run` | direct + cluster + async |
+| TypeScript | `npm install @mitos/sdk` | direct + cluster |
+| Ruby | `gem install mitos` | direct |
+| Rust | `cargo add mitos` | direct |
+| Go | `go get github.com/mitos-run/mitos/sdk/go` | direct |
+| Java | build from source | direct |
 
-## What is proven where
+Project home: [https://mitos.run](https://mitos.run). Source and all six SDKs:
+[github.com/mitos-run/mitos](https://github.com/mitos-run/mitos).
 
-The cluster examples (lazy default-pool creation, fork, from_name reconnect,
-readiness, async hot paths) run against the real Firecracker engine in the KVM
-CI job. The structured-error parsing and the wire shapes are unit-tested with
-no cluster. No latency or throughput number is claimed in this README.
+## License
 
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest tests/ -v
-```
-
-See the [repository README](https://github.com/mitos-run/mitos#readme)
-for project status; this SDK is pre-alpha and its API may change.
+Apache-2.0.
+</content>
+</invoke>

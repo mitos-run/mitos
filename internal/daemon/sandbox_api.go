@@ -9,25 +9,32 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
+	"google.golang.org/grpc"
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/sandboxrpc"
 	"mitos.run/mitos/internal/vsock"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // SandboxAPI exposes HTTP endpoints for exec/files on sandboxes managed by this forkd.
 // The SDK and sandbox-server talk to this API to interact with running sandboxes.
+// All guest communication uses gRPC on vsock.AgentGRPCPort (53); the legacy
+// JSON-lines port 52 is no longer opened here.
 type SandboxAPI struct {
 	mu       sync.RWMutex
-	agents   map[string]*vsock.Client // sandbox ID → agent connection
-	tokens   map[string]string        // sandbox ID → bearer token; values never logged
-	vsockDir string                   // directory containing vsock UDS files
-	// streamPaths maps sandbox ID to the vsock UDS path used to open a DEDICATED
-	// connection per streaming exec (so a long stream never interleaves with the
-	// shared agents[id] connection). Guarded by mu.
+	tokens   map[string]string // sandbox ID → bearer token; values never logged
+	vsockDir string            // directory containing vsock UDS files
+	// streamPaths maps sandbox ID to the vsock UDS path for dialing per-call
+	// gRPC connections to the guest agent on AgentGRPCPort (53). Guarded by mu.
 	streamPaths map[string]string
 	// lastActivity records the time of the most recent exec or file call per
 	// sandbox, guarded by mu. Absent until the first touch; used by the GC
@@ -36,8 +43,9 @@ type SandboxAPI struct {
 	// now is the clock used to stamp lastActivity. Defaults to time.Now;
 	// tests override it for determinism.
 	now func() time.Time
-	// unixFallback allows RegisterSandbox to fall back to the agent's fixed
-	// local unix socket. Opt-in: see EnableUnixFallback.
+	// unixFallback allows dialGuestGRPC to fall back
+	// to the agent's fixed local unix socket when the vsock UDS path does not
+	// exist. Opt-in: see EnableUnixFallback.
 	unixFallback bool
 	// allowTokenless permits requests for sandboxes that have NO registered
 	// token. Opt-in: see AllowTokenless.
@@ -129,7 +137,6 @@ const defaultMaxExecTimeoutSeconds = 86400
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	return &SandboxAPI{
-		agents:         make(map[string]*vsock.Client),
 		tokens:         make(map[string]string),
 		vsockDir:       vsockDir,
 		streamPaths:    make(map[string]string),
@@ -315,10 +322,10 @@ func (api *SandboxAPI) RegisterToken(sandboxID, token string) {
 	api.mu.Unlock()
 }
 
-// EnableUnixFallback lets RegisterSandbox fall back to the guest agent's
-// fixed local unix socket (/tmp/sandbox-agent-<port>.sock) when the vsock
-// UDS path does not exist. This supports the standalone sandbox-server's
-// local-testing workflow (agent running on the host, no Firecracker).
+// EnableUnixFallback lets dialGuestGRPC fall back to the guest agent's fixed
+// local unix socket (/tmp/sandbox-agent-<port>.sock) when the vsock UDS path
+// does not exist. This supports the standalone sandbox-server's local-testing
+// workflow (agent running on the host, no Firecracker).
 //
 // forkd deliberately does NOT enable this: its vsock paths come from the
 // fork engine, and a fallback to a global socket could deliver claim-time
@@ -329,33 +336,21 @@ func (api *SandboxAPI) EnableUnixFallback() {
 	api.unixFallback = true
 }
 
-// RegisterSandbox connects to a sandbox's guest agent.
+// RegisterSandbox records the vsock UDS path for sandboxID and registers the
+// sandbox as active. All subsequent guest communication uses gRPC on
+// vsock.AgentGRPCPort (53) dialed on demand; there is no persistent shared
+// connection. callers should call RegisterStreamPath separately only when the
+// path differs from vsockPath; RegisterSandbox already records vsockPath as the
+// stream path. For forkd both calls use the same path, so calling
+// RegisterSandbox is sufficient.
 func (api *SandboxAPI) RegisterSandbox(sandboxID, vsockPath string) error {
-	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
-	if err != nil {
-		// Fallback to the agent's local unix socket only when explicitly
-		// enabled (standalone sandbox-server) AND the vsock UDS path does not
-		// exist (no Firecracker VM behind it). Never on other dial failures:
-		// a half-up VM must surface as an error, not silently connect to a
-		// stray local agent.
-		if !api.unixFallback || !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("connect to agent for sandbox %s: %w", sandboxID, err)
-		}
-		sockPath := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
-		client, err = vsock.ConnectUnix(sockPath)
-		if err != nil {
-			return fmt.Errorf("connect to agent for sandbox %s: %w", sandboxID, err)
-		}
-	}
-
 	api.mu.Lock()
-	api.agents[sandboxID] = client
+	api.streamPaths[sandboxID] = vsockPath
 	api.mu.Unlock()
 	return nil
 }
 
-// UnregisterSandbox closes the agent connection and clears the sandbox's
-// bearer token.
+// UnregisterSandbox clears the sandbox's path and bearer token.
 func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	// Close any live host-side port forwards first (issue #228): each holds a
 	// host TCP listener and tunnel goroutines that must not outlive the sandbox.
@@ -363,115 +358,270 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	api.CloseForwards(sandboxID)
 
 	api.mu.Lock()
-	if client, ok := api.agents[sandboxID]; ok {
-		client.Close()
-		delete(api.agents, sandboxID)
-	}
+	delete(api.streamPaths, sandboxID)
 	delete(api.tokens, sandboxID)
 	delete(api.lastActivity, sandboxID)
-	delete(api.streamPaths, sandboxID)
 	delete(api.deadlines, sandboxID)
 	delete(api.paused, sandboxID)
 	delete(api.vitalsLabels, sandboxID)
 	api.mu.Unlock()
 }
 
-// RegisterStreamPath records the vsock UDS path for opening per-stream
-// dedicated connections to a sandbox's guest agent. forkd calls this with the
-// same path it passed to RegisterSandbox; the standalone server uses the unix
-// fallback path. Without a recorded path, /v1/exec/stream falls back to the
-// shared connection's aggregated Exec (no incremental output).
+// RegisterStreamPath records the vsock UDS path for opening per-call gRPC
+// connections to a sandbox's guest agent. RegisterSandbox already records this
+// path; call RegisterStreamPath only when the path must be updated after
+// initial registration.
 func (api *SandboxAPI) RegisterStreamPath(sandboxID, vsockPath string) {
 	api.mu.Lock()
 	api.streamPaths[sandboxID] = vsockPath
 	api.mu.Unlock()
 }
 
-// dialStream opens a dedicated streaming connection for sandboxID, honoring the
-// unix fallback the standalone server enables.
-func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
+// dialGuestGRPC opens a RAW net.Conn to the sandbox's guest gRPC server on
+// vsock.AgentGRPCPort, performing the Firecracker UDS CONNECT preamble. It uses
+// the per-sandbox vsock UDS path stored in streamPaths (registered by
+// RegisterStreamPath or RegisterSandbox). The returned conn is handed to
+// vsock.DialGRPCOverConn to build the gRPC client.
+//
+// When the standalone unix fallback is enabled and the Firecracker UDS is
+// absent, it dials the guest's plain gRPC unix socket (no preamble).
+func (api *SandboxAPI) dialGuestGRPC(sandboxID string) (net.Conn, error) {
 	api.mu.RLock()
 	path, ok := api.streamPaths[sandboxID]
 	api.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("sandbox %s has no stream path", sandboxID)
 	}
-	sc, err := vsock.DialStream(path, vsock.AgentPort)
+	conn, err := vsock.DialGRPCConn(path, vsock.AgentGRPCPort)
 	if err == nil {
-		return sc, nil
+		return conn, nil
 	}
 	if api.unixFallback && errors.Is(err, fs.ErrNotExist) {
-		return vsock.DialStreamUnix(fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort))
+		return vsock.DialGRPCConnUnix(fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentGRPCPort))
 	}
 	return nil, err
 }
 
-// Configure delivers claim-time env and secrets to a sandbox's guest agent.
-// Values are never logged.
+// Configure delivers claim-time env and secrets to a sandbox's guest agent
+// over gRPC. Values are never logged.
 func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]string) error {
-	agent, err := api.getAgent(sandboxID)
+	cc, ctrl, err := api.dialControl(sandboxID)
 	if err != nil {
-		return err
+		return fmt.Errorf("configure sandbox %s: %w", sandboxID, err)
 	}
-	return agent.Configure(env, secrets)
+	defer cc.Close() //nolint:errcheck // best-effort cleanup
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, cerr := ctrl.Configure(ctx, &internalv1.ConfigureRequest{
+		Env:     env,
+		Secrets: secrets,
+	})
+	if cerr != nil {
+		return fmt.Errorf("configure sandbox %s: %w", sandboxID, cerr)
+	}
+	return nil
 }
 
 // NotifyForked tells a sandbox's guest agent a restore just happened so it can
-// reseed the kernel CRNG, step the wall clock, and signal userspace. When
-// guestNet is non-nil it also carries this fork's distinct eth0 address +
-// gateway so the guest re-addresses its NIC (every fork restores the same
-// snapshot-baked guest IP). When volumes is non-empty it carries the per-fork
-// volume mount table (device, mount path, read-only) the guest mounts after the
-// host rebound the drives. Entropy is sensitive seed material and is never
-// logged; the network addresses, device nodes, and paths are safe to log.
+// reseed the kernel CRNG, step the wall clock, and signal userspace, over gRPC.
+// When guestNet is non-nil it also carries this fork's distinct eth0 address +
+// gateway so the guest re-addresses its NIC. When volumes is non-empty it
+// carries the per-fork volume mount table the guest mounts after the host
+// rebound the drives. Entropy is sensitive seed material and is never logged;
+// the network addresses, device nodes, and paths are safe to log.
 //
 // It RETURNS the guest's NotifyForkedResponse so the caller can enforce the
 // fork-correctness gate (ReseededRNG): a transport success alone does not mean
 // the guest reseeded its CRNG. The response carries booleans and counts only,
 // never entropy bytes.
 func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) (*vsock.NotifyForkedResponse, error) {
-	agent, err := api.getAgent(sandboxID)
+	cc, ctrl, err := api.dialControl(sandboxID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("notify-forked sandbox %s: %w", sandboxID, err)
 	}
-	return agent.NotifyForkedWithConfig(generation, entropy, guestNet, volumes)
+	defer cc.Close() //nolint:errcheck // best-effort cleanup
+	req := &internalv1.NotifyForkedRequest{
+		Generation:         generation,
+		HostWallClockNanos: time.Now().UnixNano(),
+		Entropy:            entropy,
+	}
+	if guestNet != nil {
+		req.Network = &internalv1.NotifyForkedNetwork{
+			GuestIp:    guestNet.GuestIP,
+			GatewayIp:  guestNet.GatewayIP,
+			PrefixLen:  int32(guestNet.PrefixLen),
+			GuestMac:   guestNet.GuestMAC,
+			ResolverIp: guestNet.ResolverIP,
+		}
+	}
+	for _, v := range volumes {
+		req.Volumes = append(req.Volumes, &internalv1.VolumeMountEntry{
+			Device:    v.Device,
+			MountPath: v.MountPath,
+			ReadOnly:  v.ReadOnly,
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, nerr := ctrl.NotifyForked(ctx, req)
+	if nerr != nil {
+		return nil, fmt.Errorf("notify-forked sandbox %s: %w", sandboxID, nerr)
+	}
+	return &vsock.NotifyForkedResponse{
+		AppliedClockStepNanos: resp.GetAppliedClockStepNanos(),
+		ReseededRNG:           resp.GetReseededRng(),
+		SignaledProcesses:     int(resp.GetSignaledProcesses()),
+	}, nil
 }
 
-func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {
+// dialControl dials a fresh gRPC connection to the sandbox's guest Control
+// service on vsock.AgentGRPCPort (53) and returns the connection and a typed
+// ControlClient. The caller owns the connection and must Close it.
+func (api *SandboxAPI) dialControl(sandboxID string) (*grpc.ClientConn, internalv1.ControlClient, error) {
+	conn, err := api.dialGuestGRPC(sandboxID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial control for sandbox %s: %w", sandboxID, err)
+	}
+	cc, werr := vsock.DialGRPCOverConn(func() (net.Conn, error) {
+		c := conn
+		conn = nil
+		if c == nil {
+			return nil, fmt.Errorf("control dialer: reconnect not supported")
+		}
+		return c, nil
+	})
+	if werr != nil {
+		conn.Close() //nolint:errcheck // error already returned
+		return nil, nil, fmt.Errorf("wrap grpc conn for sandbox %s: %w", sandboxID, werr)
+	}
+	return cc, internalv1.NewControlClient(cc), nil
+}
+
+// checkSandboxRegistered returns nil when sandboxID has a registered vsock path,
+// or an error describing the missing registration. It replaces the old getAgent
+// liveness check: all actual guest RPCs now dial gRPC on demand, so no
+// persistent connection is held.
+func (api *SandboxAPI) checkSandboxRegistered(sandboxID string) error {
 	api.mu.RLock()
-	client, ok := api.agents[sandboxID]
+	_, ok := api.streamPaths[sandboxID]
 	api.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("sandbox %s not found or agent not connected", sandboxID)
+		return fmt.Errorf("sandbox %s not found or not registered", sandboxID)
 	}
-	return client, nil
+	return nil
 }
 
-// Handler returns an http.Handler for the sandbox exec/files API. Every
-// route is wrapped in the per-sandbox bearer-token middleware.
+// Handler returns an http.Handler for the sandbox exec/files API. The handler
+// combines three distinct auth surfaces on a single mux:
+//
+//  1. Legacy JSON /v1/* routes: wrapped in requireBearer (body-peeking HTTP
+//     middleware that reads the "sandbox" field from the JSON body).
+//  2. Connect Sandbox service (issue #24, Task 3.2): mounted on the outer mux
+//     WITHOUT the body-peeking wrapper, because Connect auth is handled at the
+//     interceptor level via the "Authorization: Bearer <token>" and
+//     "X-Sandbox-Id" HTTP headers. BearerInterceptor enforces the same
+//     per-sandbox token security as requireBearer.
+//  3. PTY WebSocket: similarly outside requireBearer (bodyless GET); auth is
+//     handled by ptyAuth (?sandbox= + Authorization: Bearer query/header).
+//
+// The legacy JSON routes stay active (deprecated-but-working) so existing SDK
+// callers are not broken.
 func (api *SandboxAPI) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/exec", api.handleExec)
-	mux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
-	mux.HandleFunc("POST /v1/run_code/stream", api.handleRunCodeStream)
-	mux.HandleFunc("POST /v1/files/read", api.handleReadFile)
-	mux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
-	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
-	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
-	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
-	mux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
-	mux.HandleFunc("POST /v1/pause", api.handlePause)
-	mux.HandleFunc("POST /v1/resume", api.handleResume)
-	mux.HandleFunc("POST /v1/vitals", api.handleVitals)
+	jsonMux := http.NewServeMux()
+	// Runtime exec/files/run_code/vitals routes are SUPERSEDED by the Connect
+	// sandbox.v1.Sandbox protocol (issue #24); they carry a Deprecation note
+	// (deprecatedRuntimeNote) so callers learn the JSON runtime shape is the
+	// legacy path. They stay active (deprecated-but-working) until every SDK is on
+	// Connect (#358), then they are removed.
+	jsonMux.HandleFunc("POST /v1/exec", deprecatedRuntimeNote(api.handleExec))
+	jsonMux.HandleFunc("POST /v1/exec/stream", deprecatedRuntimeNote(api.handleExecStream))
+	jsonMux.HandleFunc("POST /v1/run_code/stream", deprecatedRuntimeNote(api.handleRunCodeStream))
+	jsonMux.HandleFunc("POST /v1/files/read", deprecatedRuntimeNote(api.handleReadFile))
+	jsonMux.HandleFunc("POST /v1/files/write", deprecatedRuntimeNote(api.handleWriteFile))
+	jsonMux.HandleFunc("POST /v1/files/list", deprecatedRuntimeNote(api.handleListDir))
+	jsonMux.HandleFunc("POST /v1/files/mkdir", deprecatedRuntimeNote(api.handleMkdir))
+	jsonMux.HandleFunc("POST /v1/files/remove", deprecatedRuntimeNote(api.handleRemove))
+	jsonMux.HandleFunc("POST /v1/vitals", deprecatedRuntimeNote(api.handleVitals))
+	// Lifecycle/management routes have NO Connect runtime successor and are NOT
+	// deprecated: they keep working unchanged.
+	jsonMux.HandleFunc("POST /v1/set_timeout", api.handleSetTimeout)
+	jsonMux.HandleFunc("POST /v1/pause", api.handlePause)
+	jsonMux.HandleFunc("POST /v1/resume", api.handleResume)
 
-	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
-	// body-peeking requireBearer middleware; it authenticates itself in
-	// handlePty (ptyAuth: ?sandbox= + Authorization: Bearer). It is mounted on
-	// a separate outer mux that is NOT wrapped.
+	// Connect Sandbox service (issue #24, Task 3.2). The BearerInterceptor
+	// enforces the same per-sandbox bearer-token security as requireBearer, but
+	// operates on HTTP headers (not the JSON body), so the Connect handler is
+	// mounted on the outer mux OUTSIDE the body-peeking requireBearer wrapper.
+	// When allowTokenless is true (standalone sandbox-server only),
+	// AllowTokenlessInterceptor is used. The interceptor injects the authenticated
+	// sandbox id into the request context; the resolver reads it back.
+	var authIC connect.Interceptor
+	if api.allowTokenless {
+		authIC = sandboxrpc.AllowTokenlessInterceptor()
+	} else {
+		authIC = sandboxrpc.BearerInterceptor(api.connectLookupToken)
+	}
+	// ExecBackend is never called when Guest is set; pass nil. The Guest factory
+	// below is always set, so the ExecBackend code path in sandboxrpc.Service.Exec
+	// is unreachable.
+	svc := sandboxrpc.NewService(
+		nil,
+		nil,
+		sandboxrpc.WithSandboxResolver(func(ctx context.Context) (string, error) {
+			id, ok := sandboxrpc.SandboxIDFromContext(ctx)
+			if !ok {
+				// allowTokenless path or AllowTokenlessInterceptor: the interceptor
+				// did not inject an id. Fall back to empty (single-sandbox mode).
+				return "", nil
+			}
+			return api.resolveSandboxID(id), nil
+		}),
+	)
+	// Wire the GuestConn factory: returns a vsockGuestConn for the given sandbox
+	// id so EVERY Connect RPC delegates through the guest agent's gRPC server
+	// over vsock (vsock.AgentGRPCPort). This is the sole guest transport; the
+	// legacy JSON port 52 is no longer used anywhere in this package.
+	svc.Guest = func(sandboxID string) (sandboxrpc.GuestConn, error) {
+		return newVsockGuestConn(api, sandboxID), nil
+	}
+	connectPath, connectHandler := sandboxv1connect.NewSandboxHandler(svc, connect.WithInterceptors(authIC))
+
+	// outer combines all three auth surfaces. The order of Handle calls matters:
+	// more specific prefixes (Connect, PTY) take precedence over the catch-all "/".
 	outer := http.NewServeMux()
-	outer.HandleFunc("GET /v1/pty", api.handlePty)
-	outer.Handle("/", api.requireBearer(mux))
+	// The legacy PTY WebSocket is superseded by Connect Exec with PtyOptions
+	// (issue #24), so it carries the same Deprecation note as the other runtime
+	// routes (set on the upgrade handshake response).
+	outer.HandleFunc("GET /v1/pty", deprecatedRuntimeNote(api.handlePty))
+	outer.Handle(connectPath, connectHandler)
+	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
+}
+
+// deprecatedRuntimeNote wraps a legacy JSON /v1 runtime handler so its responses
+// carry the RFC 8594 Deprecation header and a Link to the Connect successor (the
+// sandbox.v1.Sandbox protocol, issue #24). The runtime exec/files/run_code/pty/
+// vitals surface is superseded by the Connect protocol; lifecycle routes
+// (set_timeout, pause, resume) have no Connect successor and are NOT wrapped. The
+// headers are set BEFORE delegating, so a caller is told of the deprecation
+// regardless of the handler's status code (including auth failures and errors).
+func deprecatedRuntimeNote(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Link", `</sandbox.v1.Sandbox>; rel="successor-version"; title="Connect runtime protocol (issue #24)"`)
+		next(w, r)
+	}
+}
+
+// connectLookupToken is the token lookup function passed to BearerInterceptor
+// for the Connect Sandbox handler. It reads the registered token for sandboxID
+// from the same token map as the JSON /v1/* routes. Token values are never
+// logged or placed in error messages.
+func (api *SandboxAPI) connectLookupToken(sandboxID string) (string, bool) {
+	api.mu.RLock()
+	token, ok := api.tokens[sandboxID]
+	api.mu.RUnlock()
+	return token, ok
 }
 
 // maxAuthBodyBytes bounds how much request body the auth middleware buffers.
@@ -607,7 +757,7 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	if _, err := api.getAgent(req.Sandbox); err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
@@ -685,60 +835,54 @@ func execTimeoutSeconds(requested int) int {
 	return requested
 }
 
+// runExecStream drives one exec via gRPC, invoking onChunk per output chunk
+// and returning the terminal frame. It opens a fresh gRPC connection per call.
 func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChunk vsock.ChunkFunc) (*vsock.ExecStreamFrame, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = defaultExecTimeoutSeconds
 	}
-	sc, err := api.dialStream(req.Sandbox)
+	g := newVsockGuestConn(api, req.Sandbox).(*vsockGuestConn)
+	open := &sandboxv1.ExecOpen{
+		Command:        req.Command,
+		Cwd:            req.WorkingDir,
+		TimeoutSeconds: int32(timeout),
+	}
+	for k, v := range req.Env {
+		open.Env = append(open.Env, &sandboxv1.EnvVar{Key: k, Value: v})
+	}
+	stream, err := g.Exec(ctx, open)
 	if err != nil {
-		// Fallback: aggregate via the shared connection (no incremental output).
-		agent, gerr := api.getAgent(req.Sandbox)
-		if gerr != nil {
-			return nil, gerr
+		return nil, fmt.Errorf("exec guest gRPC: %w", err)
+	}
+	defer stream.Close()
+	var exitCode int
+	var execTimeMs float64
+	for {
+		frame, ferr := stream.Recv()
+		if ferr == io.EOF {
+			break
 		}
-		resp, eerr := agent.Exec(req.Command, req.WorkingDir, req.Env, timeout)
-		if eerr != nil {
-			return nil, eerr
+		if ferr != nil {
+			return nil, ferr
 		}
-		_ = onChunk(vsock.StreamStdout, []byte(resp.Stdout))
-		_ = onChunk(vsock.StreamStderr, []byte(resp.Stderr))
-		return &vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: resp.ExitCode, ExecTimeMs: resp.ExecTimeMs}, nil
+		if frame.Done {
+			exitCode = int(frame.ExitCode)
+			execTimeMs = frame.ExecTimeMs
+			break
+		}
+		if len(frame.Stdout) > 0 {
+			if cerr := onChunk(vsock.StreamStdout, frame.Stdout); cerr != nil {
+				return nil, cerr
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			if cerr := onChunk(vsock.StreamStderr, frame.Stderr); cerr != nil {
+				return nil, cerr
+			}
+		}
 	}
-	defer sc.Close()
-	return sc.ExecStream(ctx, &vsock.ExecRequest{
-		Command:    req.Command,
-		WorkingDir: req.WorkingDir,
-		Env:        req.Env,
-		Timeout:    timeout,
-	}, onChunk)
-}
-
-// RunExecStream is the exported bridge the Connect Sandbox service (issue #24,
-// internal/sandboxrpc) drives so its streaming Exec reuses the SAME exec path
-// the HTTP /v1/exec/stream route uses: a dedicated vsock connection to the guest
-// agent, with each output chunk delivered incrementally through onChunk, then
-// the terminal exit code and execution time. It does not reimplement vsock; it
-// adapts runExecStream to a transport-neutral signature (string stream name,
-// plain return values) so the Connect handler need not import the vsock types.
-// onChunk's first argument is "stdout" or "stderr". A returned error is a spawn
-// or transport failure; the caller maps it to the protocol's terminal error.
-func (api *SandboxAPI) RunExecStream(ctx context.Context, sandboxID, command, workingDir string, env map[string]string, timeoutSeconds int, onChunk func(stream string, data []byte) error) (exitCode int, execTimeMs float64, err error) {
-	api.touch(sandboxID)
-	req := execRequest{
-		Sandbox:    sandboxID,
-		Command:    command,
-		WorkingDir: workingDir,
-		Env:        env,
-		Timeout:    timeoutSeconds,
-	}
-	frame, err := api.runExecStream(ctx, req, func(stream vsock.StreamName, data []byte) error {
-		return onChunk(string(stream), data)
-	})
-	if err != nil {
-		return 0, 0, err
-	}
-	return frame.ExitCode, frame.ExecTimeMs, nil
+	return &vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: exitCode, ExecTimeMs: execTimeMs}, nil
 }
 
 func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) {
@@ -755,22 +899,42 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 	}
 	api.touch(req.Sandbox)
 
-	if _, err := api.getAgent(req.Sandbox); err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): reject a
-	// NEW stream when the sandbox is already at the cap, BEFORE writing the 200
-	// header or dialing the dedicated vsock connection. Existing streams are
-	// never touched. Checked at OPEN, off the activate path.
-	release, ok := api.acquireStream(req.Sandbox)
-	if !ok {
-		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
-			WithContext(map[string]any{"sandbox": req.Sandbox}))
+	// Open the exec stream BEFORE writing the 200 header so a cap rejection
+	// (vsockGuestConn.Exec is the single point of slot acquisition) surfaces as
+	// a clean 429 envelope rather than a terminal frame inside a 200 body.
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = defaultExecTimeoutSeconds
+	}
+	g := newVsockGuestConn(api, req.Sandbox).(*vsockGuestConn)
+	open := &sandboxv1.ExecOpen{
+		Command:        req.Command,
+		Cwd:            req.WorkingDir,
+		TimeoutSeconds: int32(timeout),
+	}
+	for k, v := range req.Env {
+		open.Env = append(open.Env, &sandboxv1.EnvVar{Key: k, Value: v})
+	}
+	stream, err := g.Exec(r.Context(), open)
+	if err != nil {
+		// vsockGuestConn.Exec returns a recognisable "concurrent exec-stream limit"
+		// message when the per-sandbox slot cap is full; map that to the typed 429
+		// so callers can branch. Any other open failure (dial, vsock) maps to 503.
+		if strings.Contains(err.Error(), "concurrent exec-stream limit") {
+			writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
+				WithContext(map[string]any{"sandbox": req.Sandbox}))
+		} else {
+			writeAPIErr(w, apierr.Get(apierr.CodeExecFailed).WithCause(fmt.Sprintf("exec failed: %v", err)).
+				WithContext(map[string]any{"sandbox": req.Sandbox}))
+		}
 		return
 	}
-	defer release()
+	defer stream.Close()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
@@ -784,22 +948,49 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		return rc.Flush()
 	}
 
-	exit, err := api.runExecStream(r.Context(), req, func(stream vsock.StreamName, data []byte) error {
-		return writeLine(map[string]any{"stream": string(stream), "data": data})
-	})
-	if err != nil {
+	var exitCode int
+	var execTimeMs float64
+	var streamErr error
+	for {
+		frame, ferr := stream.Recv()
+		if ferr == io.EOF {
+			break
+		}
+		if ferr != nil {
+			streamErr = ferr
+			break
+		}
+		if frame.Done {
+			exitCode = int(frame.ExitCode)
+			execTimeMs = frame.ExecTimeMs
+			break
+		}
+		if len(frame.Stdout) > 0 {
+			if werr := writeLine(map[string]any{"stream": string(vsock.StreamStdout), "data": frame.Stdout}); werr != nil {
+				streamErr = werr
+				break
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			if werr := writeLine(map[string]any{"stream": string(vsock.StreamStderr), "data": frame.Stderr}); werr != nil {
+				streamErr = werr
+				break
+			}
+		}
+	}
+	if streamErr != nil {
 		// The stream has already started; emit a terminal error frame rather
 		// than an HTTP status (status was sent 200 with the first byte). The
 		// message carries actionable text and never echoes secrets.
-		_ = writeLine(map[string]any{"exit_code": 1, "error": fmt.Sprintf("exec stream failed: %v", err)})
+		_ = writeLine(map[string]any{"exit_code": 1, "error": fmt.Sprintf("exec stream failed: %v", streamErr)})
 		return
 	}
-	_ = writeLine(map[string]any{"exit_code": exit.ExitCode, "exec_time_ms": exit.ExecTimeMs, "error": exit.Error})
+	_ = writeLine(map[string]any{"exit_code": exitCode, "exec_time_ms": execTimeMs})
 
 	api.auditor.Record(AuditEvent{
 		SandboxID: req.Sandbox,
 		Op:        "exec_stream",
-		Detail:    fmt.Sprintf("exit=%d cmd=%s", exit.ExitCode, truncateCommand(req.Command)),
+		Detail:    fmt.Sprintf("exit=%d cmd=%s", exitCode, truncateCommand(req.Command)),
 		OK:        true,
 	})
 }
@@ -811,25 +1002,62 @@ type runCodeRequest struct {
 	Timeout  int    `json:"timeout,omitempty"`
 }
 
-// runRunCodeStream opens a dedicated stream connection and drives one run_code
-// against the guest kernel, invoking onFrame per ExecStreamFrame. Unlike exec,
-// there is no aggregated fallback: run_code requires the streaming path (a
-// registered stream UDS), since the kernel reply is a frame stream.
+// runRunCodeStream drives one run_code against the guest kernel via gRPC,
+// invoking onFrame per RunCodeFrame. It opens a fresh gRPC connection per call.
 func (api *SandboxAPI) runRunCodeStream(ctx context.Context, req runCodeRequest, onFrame func(vsock.ExecStreamFrame)) error {
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = 60
 	}
-	sc, err := api.dialStream(req.Sandbox)
+	g := newVsockGuestConn(api, req.Sandbox).(*vsockGuestConn)
+	stream, err := g.RunCode(ctx, &sandboxv1.RunCodeOpen{
+		Code:           req.Code,
+		Language:       req.Language,
+		TimeoutSeconds: int64(timeout),
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("run_code guest gRPC: %w", err)
 	}
-	defer sc.Close()
-	return sc.RunCode(ctx, &vsock.RunCodeRequest{
-		Code:     req.Code,
-		Language: req.Language,
-		Timeout:  timeout,
-	}, onFrame)
+	defer stream.Close()
+	for {
+		frame, ferr := stream.Recv()
+		if ferr == io.EOF {
+			break
+		}
+		if ferr != nil {
+			return ferr
+		}
+		switch frame.Kind {
+		case sandboxrpc.RunCodeFrameStdout:
+			onFrame(vsock.ExecStreamFrame{Kind: vsock.FrameChunk, Stream: vsock.StreamStdout, Data: frame.Stdout})
+		case sandboxrpc.RunCodeFrameStderr:
+			onFrame(vsock.ExecStreamFrame{Kind: vsock.FrameChunk, Stream: vsock.StreamStderr, Data: frame.Stderr})
+		case sandboxrpc.RunCodeFrameResult:
+			rf := &vsock.ResultFrame{}
+			if frame.Result != nil {
+				rf.Text = frame.Result.Text
+				if len(frame.Result.Data) > 0 {
+					rf.Data = make(map[string]string, len(frame.Result.Data))
+					for mime, payload := range frame.Result.Data {
+						// []byte encodes as base64 in JSON, matching vsock.ResultFrame.Data.
+						rf.Data[mime] = string(payload)
+					}
+				}
+			}
+			onFrame(vsock.ExecStreamFrame{Kind: vsock.FrameResult, Result: rf})
+		case sandboxrpc.RunCodeFrameError:
+			ef := &vsock.ErrorFrame{}
+			if frame.Error != nil {
+				ef.Name = frame.Error.Name
+				ef.Value = frame.Error.Value
+				ef.Traceback = frame.Error.Traceback
+			}
+			onFrame(vsock.ExecStreamFrame{Kind: vsock.FrameError, ErrorInfo: ef})
+		case sandboxrpc.RunCodeFrameExit:
+			onFrame(vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: int(frame.ExitCode)})
+		}
+	}
+	return nil
 }
 
 // handleRunCodeStream streams a run_code execution back as chunked NDJSON. Each
@@ -852,15 +1080,15 @@ func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Reques
 	}
 	api.touch(req.Sandbox)
 
-	if _, err := api.getAgent(req.Sandbox); err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
 	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): a run_code
-	// stream holds a dedicated vsock connection for the command lifetime, so it
-	// counts against the same per-sandbox ceiling. Reject a NEW one over the cap
-	// before writing the 200 header; existing streams are never touched.
+	// stream holds a gRPC connection for the command lifetime, so it counts against
+	// the same per-sandbox ceiling. Reject a NEW one over the cap before writing
+	// the 200 header; existing streams are never touched.
 	release, ok := api.acquireStream(req.Sandbox)
 	if !ok {
 		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", req.Sandbox)).
@@ -937,17 +1165,23 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	content, err := agent.ReadFile(req.Path)
+	g := newVsockGuestConn(api, req.Sandbox)
+	chunks, err := g.ReadFile(r.Context(), req.Path, 0, 0)
 	if err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
 			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
+	}
+	var size int
+	var buf []byte
+	for _, c := range chunks {
+		buf = append(buf, c...)
+		size += len(c)
 	}
 
 	// Record the path and byte count only; the content is never audited.
@@ -955,11 +1189,11 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		SandboxID: req.Sandbox,
 		Op:        "read",
 		Detail:    req.Path,
-		Bytes:     len(content),
+		Bytes:     size,
 		OK:        true,
 	})
 
-	writeJSON(w, map[string]any{"content": string(content), "size": len(content)})
+	writeJSON(w, map[string]any{"content": string(buf), "size": size})
 }
 
 func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
@@ -970,18 +1204,19 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
 	mode := req.Mode
 	if mode == 0 {
-		mode = 0644
+		mode = 0o644
 	}
 
-	if err := agent.WriteFile(req.Path, []byte(req.Content), mode); err != nil {
+	g := newVsockGuestConn(api, req.Sandbox)
+	data := []byte(req.Content)
+	if _, err := g.WriteFile(r.Context(), req.Path, mode, [][]byte{data}); err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
 			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
@@ -1007,13 +1242,13 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	entries, err := agent.ListDir(req.Path)
+	g := newVsockGuestConn(api, req.Sandbox)
+	result, err := g.List(r.Context(), req.Path, 0, "", "")
 	if err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
 			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
@@ -1027,6 +1262,26 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 		OK:        true,
 	})
 
+	// Map gRPC FileInfo entries to the legacy vsock.FileEntry shape so existing
+	// SDK callers see the same JSON structure, including mode and modified_at
+	// which the gRPC FileInfo carries and the legacy JSON entry always exposed.
+	type legacyEntry struct {
+		Name       string `json:"name"`
+		IsDir      bool   `json:"is_dir"`
+		Size       int64  `json:"size"`
+		Mode       uint32 `json:"mode"`
+		ModifiedAt int64  `json:"modified_at"`
+	}
+	entries := make([]legacyEntry, 0, len(result.Entries))
+	for _, e := range result.Entries {
+		entries = append(entries, legacyEntry{
+			Name:       e.Name,
+			IsDir:      e.IsDir,
+			Size:       e.Size,
+			Mode:       e.Mode,
+			ModifiedAt: e.ModifiedAtUnix,
+		})
+	}
 	writeJSON(w, map[string]any{"entries": entries})
 }
 
@@ -1038,13 +1293,13 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	if err := agent.Mkdir(req.Path); err != nil {
+	g := newVsockGuestConn(api, req.Sandbox)
+	if err := g.Mkdir(r.Context(), req.Path, true); err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
 			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return
@@ -1068,13 +1323,13 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if err := api.checkSandboxRegistered(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	if err := agent.Remove(req.Path); err != nil {
+	g := newVsockGuestConn(api, req.Sandbox)
+	if err := g.Remove(r.Context(), req.Path, true); err != nil {
 		writeAPIErr(w, apierr.Get(apierr.CodeFileFailed).WithCause(err.Error()).
 			WithContext(map[string]any{"sandbox": req.Sandbox, "path": req.Path}))
 		return

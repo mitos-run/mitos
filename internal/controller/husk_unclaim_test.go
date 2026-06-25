@@ -7,7 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
 )
@@ -35,7 +35,7 @@ func TestHuskActivationFailureReleasesClaimLabel(t *testing.T) {
 	setHuskTestActivator(act.activate)
 	t.Cleanup(func() { setHuskTestActivator(nil) })
 
-	_ = makeHuskClaim(t, "huskfail", v1alpha1.SandboxClaimSpec{})
+	_ = makeHuskClaim(t, "huskfail", v1.SandboxSpec{})
 
 	// The claim cannot go Ready. The pod must be released back to dormant: poll
 	// for the claim label to be cleared (the fix releases it after each failed

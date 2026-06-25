@@ -8,8 +8,8 @@ import {
 import type { MitosClaimClient } from "../src/claim-client.js";
 import type {
   InstalledProbe,
+  MitosSandbox,
   OutputSpec,
-  SandboxClaim,
 } from "../src/claim-mapping.js";
 import { leaseToClaim } from "../src/claim-mapping.js";
 
@@ -24,7 +24,7 @@ class FakeClient implements MitosClaimClient {
   deleted: string[] = [];
   constructor(private readonly probeResult: InstalledProbe) {}
 
-  async createClaim(claim: SandboxClaim): Promise<{ endpoint: string }> {
+  async createClaim(claim: MitosSandbox): Promise<{ endpoint: string }> {
     this.calls.push(`create:${claim.metadata.name}`);
     return { endpoint: "https://node-1:9091" };
   }
@@ -42,10 +42,10 @@ class FakeClient implements MitosClaimClient {
   }
 }
 
-const baseClaim = (): SandboxClaim =>
+const baseClaim = (): MitosSandbox =>
   leaseToClaim({ name: "run-1", pool: "p", bridgeEndpoint: "bridge:8443" });
 
-describe("acquireWithAssertion (install assertion is claim-time, not per-run)", () => {
+describe("acquireWithAssertion (install assertion is sandbox-create-time, not per-run)", () => {
   it("creates then probes, and returns the endpoint when adapters are present", async () => {
     const client = new FakeClient({ present: ["node", "git"] });
     const ready = await acquireWithAssertion(client, baseClaim(), ["node", "git"]);
@@ -81,7 +81,7 @@ describe("acquireWithAssertion (install assertion is claim-time, not per-run)", 
 });
 
 describe("teardownWithExtract (extract-then-delete ordering)", () => {
-  it("patches outputs BEFORE deleting the claim", async () => {
+  it("patches outputs BEFORE deleting the sandbox", async () => {
     const client = new FakeClient({ present: [] });
     await teardownWithExtract(client, "run-1", ["/workspace/out"]);
     expect(client.calls).toEqual(["patch:run-1", "delete:run-1"]);

@@ -9,7 +9,7 @@
 #
 # Stages (each prints a PASS/FAIL line):
 #   1. pool warms      a SandboxPool brings up dormant husk pods
-#   2. claim activates a SandboxClaim reaches Ready and exec returns expected stdout
+#   2. claim activates a Sandbox reaches Ready and exec returns expected stdout
 #   3. fork(2)         a fork produces independent sandboxes
 #   4. run_code        a code-interpreter run returns a result OR a clean
 #                      KernelUnavailable (the husk OCI base may lack the kernel;
@@ -73,10 +73,10 @@ k() { kubectl -n "$NAMESPACE" "$@"; }
 
 diagnostics() {
   echo "=== diagnostics (namespace ${NAMESPACE}) ===" >&2
-  k get sandboxpools,sandboxclaims,sandboxforks -o wide >&2 2>&1 || true
+  k get sandboxpools,sandboxes -o wide >&2 2>&1 || true
   k get pods -o wide >&2 2>&1 || true
-  echo "--- claim describe ---" >&2
-  k describe sandboxclaim "$CLAIM" >&2 2>&1 || true
+  echo "--- sandbox describe ---" >&2
+  k describe sandbox "$CLAIM" >&2 2>&1 || true
   echo "--- recent husk pod logs ---" >&2
   for p in $(k get pods -l 'mitos.run/husk=true' -o name 2>/dev/null | head -3); do
     echo "--- logs $p ---" >&2
@@ -87,14 +87,12 @@ diagnostics() {
 cleanup() {
   rc=$?
   echo "=== teardown ==="
-  # Delete the claim/fork first (releases pods), then the pool, then the
-  # template. Best effort; never let teardown mask the real exit code.
-  k delete sandboxforks --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxclaim "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Delete the sandbox first (releases pods), then the pool. Best effort;
+  # never let teardown mask the real exit code.
+  k delete sandbox "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "$POOL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "$TEMPLATE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  # Sweep any residual claims/forks this run created.
-  k delete sandboxclaims -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Sweep any residual sandboxes this run created.
+  k delete sandboxes -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   echo "teardown done"
   exit "$rc"
 }
@@ -114,32 +112,55 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Stage 0b: forkd is NON-privileged (issue #352). This is the live-cluster proof
+# that the privileged-TCB reduction holds in the deployed DaemonSet, not just in
+# the manifest (the manifest itself is guarded by cmd/forkd TestShippedDaemonSet*
+# in the go-test job). The whole husk lifecycle below ALSO depends on it: forkd
+# builds the template snapshot through the jailer in this non-privileged pod, so a
+# Ready claim in stage 2 is itself end-to-end proof the non-privileged jailed
+# build path works. Self-skips if no forkd DaemonSet is found (e.g. a raw-forkd-
+# less or differently-named deploy).
+# ---------------------------------------------------------------------------
+forkd_priv="$(kubectl -n mitos get daemonset mitos-forkd \
+  -o jsonpath='{.spec.template.spec.containers[0].securityContext.privileged}' 2>/dev/null || true)"
+if kubectl -n mitos get daemonset mitos-forkd >/dev/null 2>&1; then
+  if [ "$forkd_priv" = "true" ]; then
+    fail "forkd DaemonSet runs privileged: true; issue #352 requires the explicit jailer capability set"
+    diagnostics
+    exit 1
+  fi
+  forkd_caps="$(kubectl -n mitos get daemonset mitos-forkd \
+    -o jsonpath='{.spec.template.spec.containers[0].securityContext.capabilities.add}' 2>/dev/null || true)"
+  if echo "$forkd_caps" | grep -q "SYS_ADMIN"; then
+    pass "forkd DaemonSet is non-privileged with the explicit jailer capability set (caps: ${forkd_caps})"
+  else
+    fail "forkd DaemonSet is non-privileged but missing the expected jailer capabilities (got: ${forkd_caps:-none})"
+    diagnostics
+    exit 1
+  fi
+else
+  info "no mitos-forkd DaemonSet found in namespace mitos; skipping the forkd-non-privileged assertion"
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 1: a pool warms dormant husk pods.
 # ---------------------------------------------------------------------------
 echo "--- stage 1: pool warms dormant husk pods ---"
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: ${TEMPLATE}
-  labels:
-    mitos.run/e2e-run: "${RUN_ID}"
-spec:
-  image: ${E2E_IMAGE}
-  resources:
-    cpu: "250m"
-    memory: "512Mi"
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: ${POOL}
   labels:
     mitos.run/e2e-run: "${RUN_ID}"
 spec:
-  templateRef:
-    name: ${TEMPLATE}
-  replicas: 2
+  template:
+    image: ${E2E_IMAGE}
+    resources:
+      cpu: "250m"
+      memory: "512Mi"
+  snapshots:
+    replicasPerNode: 2
 EOF
 
 # Wait for at least one dormant warm pod: husk=true, Running, no claim label.
@@ -315,8 +336,9 @@ set -e
 # empty and the host closes with `pty stream failed: unexpected pty frame kind:
 # ""`. The same stale agent breaks /v1/exec/stream identically (the blocking
 # /v1/exec path the claim-exec stage uses is unaffected, which is why that stage
-# passes). The guest agent SOURCE already implements TypePty (guest/agent/pty.go,
-# main.go); the fix is rebuilding the template snapshot with the current agent,
+# passes). The guest agent SOURCE already implements the PTY exec path
+# (guest/agent-rs/src/service/exec.rs, guest/agent-rs/src/sys/pty.rs); the fix is
+# rebuilding the template snapshot with the current agent,
 # owned by the template/build workstream. Until that lands, a PTY FAIL is
 # recorded as a non-fatal note so the suite stays green on the proven core + fork
 # while the snapshot-agent gap is tracked separately.
@@ -371,7 +393,7 @@ self_heal_probe() {
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   saw_repend=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    ready="$(k get sandboxclaim "$CLAIM" \
+    ready="$(k get sandbox "$CLAIM" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
     if [ "$ready" != "True" ]; then saw_repend="yes"; break; fi
     sleep "$POLL_INTERVAL"

@@ -3,7 +3,7 @@ IMG_FORKD ?= ghcr.io/mitos-run/mitos-forkd:latest
 
 .PHONY: all build test test-linux test-netlink generate manifests proto docker-build docker-push install deploy
 
-# Linux container used to exercise //go:build linux packages (guest agent,
+# Linux container used to exercise //go:build linux packages (guest networking
 # netlink) from a darwin dev host. Override with a local mirror if Docker Hub
 # rate-limits.
 GO_LINUX_IMG ?= golang:1.26
@@ -19,10 +19,11 @@ test-unit:
 
 # Run the linux-only test packages locally in a throwaway container. These never
 # compile on darwin (all //go:build linux), so this is the fast pre-CI loop for
-# the guest agent and guest networking: seconds, versus a cluster e2e cycle.
+# guest networking: seconds, versus a cluster e2e cycle. The guest agent is the
+# Rust agent (guest/agent-rs); run its tests with `cd guest/agent-rs && cargo test`.
 test-linux:
 	docker run --rm -v "$(PWD)":/src -v "$(HOME)/go/pkg/mod":/go/pkg/mod -w /src $(GO_LINUX_IMG) \
-		go test ./guest/agent/... ./internal/guestnet/...
+		go test ./internal/guestnet/...
 
 # Drive the real rtnetlink datapath against a live kernel (CAP_NET_ADMIN), so a
 # guest-networking change is verified end to end without a KVM run. Gated behind
@@ -59,6 +60,11 @@ proto:
 		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
 		--connect-go_out=. --connect-go_opt=module=mitos.run/mitos \
 		proto/sandbox/v1/sandbox.proto
+	protoc \
+		--go_out=. --go_opt=module=mitos.run/mitos \
+		--go-grpc_out=. --go-grpc_opt=module=mitos.run/mitos \
+		--connect-go_out=. --connect-go_opt=module=mitos.run/mitos \
+		proto/sandbox/controlv1/internal.proto
 
 docker-build:
 	docker build -f Dockerfile.controller -t $(IMG_CONTROLLER) .
@@ -81,3 +87,15 @@ lint:
 
 clean:
 	rm -rf bin/
+
+# Render the README terminal demo (docs/assets/demo.gif) from the VHS tape.
+# Needs vhs (brew install vhs). The tape records against a local SDK stub via
+# MITOS_DEMO_PYTHONPATH (no cluster or key needed); set MITOS_API_KEY +
+# MITOS_BASE_URL instead to record against a live endpoint. Re-run when the SDK
+# surface changes and commit the refreshed docs/assets/demo.gif.
+.PHONY: demo
+demo:
+	@command -v vhs >/dev/null 2>&1 || { echo "install vhs first: brew install vhs"; exit 1; }
+	@test -f "$$HOME/.mitos_api_key" || { echo "put your key in ~/.mitos_api_key"; exit 1; }
+	MITOS_API_KEY="$$(cat "$$HOME/.mitos_api_key")" vhs docs/assets/demo.tape
+	@echo ">> rendered docs/assets/demo.gif"

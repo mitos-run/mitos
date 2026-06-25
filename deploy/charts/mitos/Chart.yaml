@@ -5,7 +5,7 @@ name: mitos
 # lifecycle through the mitos.run CRDs.
 description: Snapshot-fork sandboxes for AI agents on Kubernetes.
 type: application
-version: 0.4.0
+version: 0.4.1
 appVersion: "v0.13.0"
 kubeVersion: ">=1.29.0-0"
 keywords:
@@ -56,47 +56,34 @@ annotations:
     - name: gateway
       image: ghcr.io/mitos-run/mitos-gateway:v0.13.0
   artifacthub.io/crds: |
-    - kind: SandboxTemplate
-      version: v1alpha1
-      name: sandboxtemplates.mitos.run
-      displayName: Sandbox Template
-      description: Base image, resources, volumes, and network policy a sandbox boots from.
     - kind: SandboxPool
-      version: v1alpha1
+      version: v1
       name: sandboxpools.mitos.run
       displayName: Sandbox Pool
-      description: Warm pool of pre-snapshotted sandboxes a template fans out into.
-    - kind: SandboxClaim
-      version: v1alpha1
-      name: sandboxclaims.mitos.run
-      displayName: Sandbox Claim
-      description: A request for one running sandbox from a pool or template.
-    - kind: SandboxFork
-      version: v1alpha1
-      name: sandboxforks.mitos.run
-      displayName: Sandbox Fork
-      description: A copy-on-write fork of a running sandbox into a parallel attempt.
+      description: Warm pool of pre-snapshotted sandboxes with an inline template (Pools prepare).
     - kind: Sandbox
-      version: v1alpha2
+      version: v1
       name: sandboxes.mitos.run
       displayName: Sandbox
-      description: A single running microVM sandbox instance.
+      description: A single running microVM sandbox instance, sourced from a pool, live fork, or revision (Sandboxes run).
     - kind: Workspace
-      version: v1alpha1
+      version: v1
       name: workspaces.mitos.run
       displayName: Workspace
-      description: A durable, versioned filesystem a sandbox persists into.
+      description: A durable, versioned filesystem a sandbox persists into (Workspaces persist).
     - kind: WorkspaceRevision
-      version: v1alpha1
+      version: v1
       name: workspacerevisions.mitos.run
       displayName: Workspace Revision
-      description: One immutable snapshot in a workspace history.
+      description: One immutable snapshot in a workspace revision DAG.
   artifacthub.io/crdsExamples: |
-    - apiVersion: mitos.run/v1alpha1
-      kind: SandboxClaim
+    - apiVersion: mitos.run/v1
+      kind: Sandbox
       metadata:
         name: agent-session-1
       spec:
-        poolRef:
-          name: python-agent-pool
-        timeout: 30m
+        source:
+          poolRef:
+            name: python-agent-pool
+        lifetime:
+          timeout: 30m

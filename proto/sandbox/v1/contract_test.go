@@ -19,6 +19,8 @@ func TestSandboxServiceContractExists(t *testing.T) {
 
 	want := map[string]bool{
 		"Exec":           false,
+		"ExecStream":     false,
+		"RunCodeStream":  false,
 		"ReadFile":       false,
 		"WriteFile":      false,
 		"List":           false,
@@ -33,21 +35,38 @@ func TestSandboxServiceContractExists(t *testing.T) {
 		"ExtendLifetime": false,
 		"Budget":         false,
 		"Vitals":         false,
+		"RunCode":        false,
+		"Mkdir":          false,
+		"Remove":         false,
+		"Upload":         false,
+	}
+
+	// forbidden are the host-trusted control methods (sandbox.internal.v1.Control):
+	// they carry secrets and the fork-correctness handshake and must NEVER appear
+	// on the public Sandbox service (the secret-delivery trust boundary, #24).
+	forbidden := map[string]bool{
+		"Configure":    true,
+		"NotifyForked": true,
+		"Ping":         true,
 	}
 
 	sd := Sandbox_ServiceDesc
 	if sd.ServiceName != "sandbox.v1.Sandbox" {
 		t.Fatalf("service name = %q, want sandbox.v1.Sandbox", sd.ServiceName)
 	}
-	for _, m := range sd.Methods {
-		if _, ok := want[m.MethodName]; ok {
-			want[m.MethodName] = true
+	mark := func(name string) {
+		if _, ok := want[name]; ok {
+			want[name] = true
+		}
+		if forbidden[name] {
+			t.Errorf("control method %q is exposed on the public Sandbox service; it must stay on sandbox.internal.v1.Control only", name)
 		}
 	}
+	for _, m := range sd.Methods {
+		mark(m.MethodName)
+	}
 	for _, s := range sd.Streams {
-		if _, ok := want[s.StreamName]; ok {
-			want[s.StreamName] = true
-		}
+		mark(s.StreamName)
 	}
 	for name, seen := range want {
 		if !seen {

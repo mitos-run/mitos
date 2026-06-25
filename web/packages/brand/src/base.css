@@ -40,6 +40,10 @@ h1, h2, h3 {
 
 code, kbd, pre, .mono { font-family: var(--mono); }
 
+/* Inline links default to the cyan signal. Styled links (.nav-link, .tbl a)
+   carry their own color via higher-specificity class rules and are unaffected. */
+a { color: var(--cyan); }
+
 /* Surfaces: elevation by the lightness ladder + a single hairline. Never a
    hairline AND a shadow on the same element. */
 .card {
@@ -99,6 +103,8 @@ code, kbd, pre, .mono { font-family: var(--mono); }
 .tbl { width: 100%; border-collapse: collapse; font-size: var(--step--1); }
 .tbl th, .tbl td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--hairline); }
 .tbl th { color: var(--ink-3); font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em; }
+.tbl a { color: var(--cyan); text-decoration: none; }
+.tbl a:hover { text-decoration: underline; }
 
 /* Status dots: color encodes a real entity (alive=green, fork=magenta). */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
@@ -106,3 +112,539 @@ code, kbd, pre, .mono { font-family: var(--mono); }
 .dot-fork { background: var(--magenta); }
 .dot-parent { background: var(--cyan); }
 .dot-warn { background: var(--amber); }
+
+/* Console shell: nav, command palette, toasts, skeletons. Token-driven. */
+.nav-link {
+  color: var(--ink-2);
+  text-decoration: none;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.nav-link:hover { color: var(--ink); background: var(--field-1); }
+.nav-link-active { color: var(--ink); background: var(--field-2); }
+
+.palette-backdrop {
+  position: fixed; inset: 0; background: rgba(4, 5, 10, 0.6);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh;
+}
+.palette {
+  width: min(560px, 92vw); background: var(--field-1);
+  border: 1px solid var(--hairline-strong); border-radius: var(--r-lg); overflow: hidden;
+}
+.palette input {
+  width: 100%; padding: var(--space-4); background: transparent; border: 0;
+  color: var(--ink); font: inherit; border-bottom: 1px solid var(--hairline);
+}
+.palette ul { list-style: none; margin: 0; padding: var(--space-2); max-height: 40vh; overflow: auto; }
+.palette li button {
+  width: 100%; text-align: left; padding: var(--space-2) var(--space-3);
+  background: transparent; border: 0; color: var(--ink); border-radius: var(--r-sm); cursor: pointer;
+}
+.palette li button:hover { background: var(--field-2); }
+
+.toast-stack { display: flex; flex-direction: column; gap: var(--space-2); }
+.toast {
+  padding: var(--space-2) var(--space-4); border-radius: var(--r-md);
+  border: 1px solid var(--hairline-strong); background: var(--field-1); color: var(--ink);
+}
+.toast-ok { border-color: var(--green); }
+.toast-error { border-color: var(--magenta); }
+
+.skeleton-row { animation: pulse 1.2s var(--ease) infinite; }
+@keyframes pulse { 50% { opacity: 0.5; } }
+
+/* Screen-reader only: visually hidden but accessible to assistive technology. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Minimum touch targets: nav links and the menu button must be >= 44x44 px. */
+.nav-link {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.menu-button {
+  min-width: 44px;
+  min-height: 44px;
+  display: none; /* hidden on desktop; shown by the mobile media query below */
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: var(--space-2);
+  transition: background var(--dur) var(--ease);
+}
+
+.menu-button:hover { background: var(--field-1); }
+.menu-button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* Top bar: visible on mobile only (desktop sidebar already shows the brand). */
+.top-bar {
+  display: none;
+}
+
+/* Mobile drawer: nav slides in from the left as an off-canvas layer. The
+   transition moves from -100% to 0 on open; a backdrop dims the content. */
+@media (max-width: 768px) {
+  /* Show the top bar (hamburger + inline brand mark). */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    padding: 0 var(--space-4);
+    background: var(--field);
+    border-bottom: 1px solid var(--hairline);
+    z-index: var(--z-overlay, 200);
+  }
+
+  .top-bar-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Reveal the hamburger button. */
+  .menu-button {
+    display: flex;
+  }
+
+  /* Offset main content below the fixed top bar. */
+  .app-shell > main {
+    padding-top: calc(56px + var(--space-4));
+  }
+
+  /* The primary nav becomes a fixed slide-over drawer. */
+  .nav-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: var(--z-drawer, 300);
+    width: 280px;
+    background: var(--field);
+    border-right: 1px solid var(--hairline);
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform var(--dur) var(--ease);
+    padding-top: calc(var(--space-5) + 56px);
+  }
+
+  .nav-drawer.nav-drawer-open {
+    transform: translateX(0);
+  }
+
+  /* Dimmed scrim behind the open drawer; closes on click (wired in React). */
+  .nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-backdrop, 250);
+    background: rgba(4, 5, 10, 0.6);
+  }
+
+  /* Hide the inline nav brand on desktop (the top bar shows it on mobile). */
+  .nav-brand {
+    display: none;
+  }
+}
+
+/* Desktop: persistent sidebar, no top bar, no drawer behavior. */
+@media (min-width: 769px) {
+  .menu-button { display: none; }
+  .top-bar { display: none; }
+  .nav-backdrop { display: none; }
+  .nav-drawer { transform: none; transition: none; }
+  .nav-brand { display: flex; }
+}
+
+/* Respect reduced-motion: disable all transitions and animations. */
+@media (prefers-reduced-motion: reduce) {
+  .nav-drawer,
+  .menu-button,
+  .nav-link,
+  .btn,
+  .skeleton-row {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* Instrument cockpit: responsive tile grid. */
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+/* Fork-tree visualization: Division motif node styles. Colors are signal
+   tokens only; no raw hex. The SVG is aria-hidden; the table is the a11y
+   source of truth. */
+.fork-node-root {
+  fill: var(--cyan);
+  stroke: none;
+  /* Additive glow: white-cored via screen blend at the SVG layer. */
+  filter: drop-shadow(0 0 6px var(--cyan));
+}
+
+.fork-node-fork {
+  fill: var(--magenta);
+  stroke: none;
+  filter: drop-shadow(0 0 6px var(--magenta));
+}
+
+/* Hairline CoW edge: inherits from --hairline-strong for readability. */
+.fork-edge {
+  stroke: var(--hairline-strong);
+  stroke-width: 1;
+  fill: none;
+}
+
+/* Mobile: on narrow viewports hide the SVG and let the table be primary.
+   The table already scrolls horizontally via its wrapper. */
+@media (max-width: 768px) {
+  .fork-tree-svg-wrapper {
+    display: none;
+  }
+}
+
+/* Tab bar: flex row of button tabs, hairline bottom border. */
+.tabs {
+  display: flex;
+  flex-direction: row;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: var(--space-4);
+}
+
+.tab {
+  font: inherit;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--space-2) var(--space-3);
+  min-height: 44px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab-active {
+  color: var(--ink);
+  border-bottom: 2px solid var(--magenta);
+}
+
+/* Key-value definition grid: label dim, value mono. */
+.kv {
+  display: grid;
+  gap: var(--space-2) 0;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 30%) 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.kv-row dt {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kv-row dd {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  margin: 0;
+  color: var(--ink);
+}
+
+/* Logs block: monospace, scrollable, raised-field background. */
+.logs {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--space-4);
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre-wrap;
+  color: var(--ink-2);
+}
+
+/* Mobile: tab bar scrolls horizontally; table wrapper degrades. */
+@media (max-width: 768px) {
+  .tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .tbl {
+    min-width: 600px;
+  }
+}
+
+/* Form controls: field-1 background, hairline border, cyan focus ring, 44px
+   min-height to meet touch-target requirements. Radius matches .card tight. */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font: inherit;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--dur) var(--ease), outline-color var(--dur) var(--ease);
+  width: 100%;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-color: transparent;
+}
+
+input:not([type="checkbox"]):not([type="radio"])::placeholder,
+textarea::placeholder {
+  color: var(--ink-3);
+}
+
+/* Form row: label above control with consistent spacing. */
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+}
+
+.form-row label {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Status badge pills: semantic color tokens only. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--r-sm);
+  font-size: var(--step--1);
+  font-family: var(--mono);
+  border: 1px solid var(--hairline);
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
+.badge-ok {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.badge-warn {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* Ledger: reuses .tbl conventions; alias for clarity in billing/usage views. */
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--step--1);
+}
+.ledger th, .ledger td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--hairline);
+}
+.ledger th {
+  color: var(--ink-3);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ledger a { color: var(--cyan); text-decoration: none; }
+.ledger a:hover { text-decoration: underline; }
+
+/* Mobile: forms stack naturally (already column); tables scroll horizontally. */
+@media (max-width: 768px) {
+  .form-row {
+    width: 100%;
+  }
+
+  .ledger {
+    min-width: 600px;
+  }
+}
+
+/* Role-badge pills: semantic token colors per role; hairline border. */
+.role-badge {
+  display: inline-block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--r-sm);
+  font-size: var(--step--1);
+  border: 1px solid var(--hairline);
+  color: var(--ink-2);
+  background: transparent;
+  margin-right: var(--space-2);
+  vertical-align: middle;
+}
+
+.role-owner,
+.role-admin {
+  border-color: var(--magenta);
+  color: var(--magenta);
+}
+
+.role-billing {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.role-member {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.role-viewer {
+  border-color: var(--hairline-strong);
+  color: var(--ink-3);
+}
+
+/* Mobile: members and projects tables scroll horizontally on narrow viewports. */
+@media (max-width: 768px) {
+  .members-table-wrapper,
+  .projects-list {
+    overflow-x: auto;
+  }
+}
+
+/* Settings layout: vertical rhythm for settings sections. */
+.settings-section {
+  margin-bottom: var(--space-7);
+}
+
+.settings-section h3 {
+  margin-bottom: var(--space-4);
+}
+
+/* Density override: compact tightens table cell padding. */
+html[data-density="compact"] .tbl th,
+html[data-density="compact"] .tbl td {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* Reduced-motion override: JS-controlled complement to prefers-reduced-motion. */
+html[data-reduce-motion="1"] * {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* Mobile: settings form fills viewport width. */
+@media (max-width: 768px) {
+  .settings-section form {
+    max-width: 100%;
+  }
+}
+
+/* Trust view: honest security posture banner (amber-accented) and posture
+   section layout. Colors are signal tokens only; no raw hex. */
+.trust-banner {
+  border: 1px solid var(--amber);
+  border-left: 4px solid var(--amber);
+  border-radius: var(--r-md);
+  padding: var(--space-5);
+  margin-bottom: var(--space-7);
+  background: color-mix(in srgb, var(--amber) 8%, var(--field-1));
+}
+
+.trust-banner-links {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-top: var(--space-4);
+}
+
+/* Posture section: vertically-spaced data residency or compliance block. */
+.trust-section {
+  margin-bottom: var(--space-7);
+}
+
+/* Mobile: trust banner padding tightens on narrow viewports. */
+@media (max-width: 768px) {
+  .trust-banner {
+    padding: var(--space-4);
+  }
+}
+
+/* Audit view: retention/export panel and sinks panel layout. Panels are .card
+   instances; this section adds the audit-specific form row arrangement and the
+   add-sink row that wraps on narrow viewports. No raw hex; token-driven only. */
+.audit-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.audit-form-row label {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.audit-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.audit-hint {
+  color: var(--ink-3);
+  font-size: var(--step--2);
+}
+
+/* Mobile: audit form rows stack vertically; inputs expand to full width. */
+@media (max-width: 768px) {
+  .audit-form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .audit-form-row input,
+  .audit-form-row select {
+    width: 100%;
+  }
+}

@@ -58,7 +58,6 @@ E2E_IMAGE="${E2E_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 WORKSPACE_MEMORY="${WORKSPACE_MEMORY:-0}"
 
 RUN_ID="$(date +%s)-$$"
-TEMPLATE="ws-tmpl-${RUN_ID}"
 POOL="ws-pool-${RUN_ID}"
 WS="ws-src-${RUN_ID}"
 BRANCH="ws-branch-${RUN_ID}"
@@ -82,26 +81,25 @@ k() { kubectl -n "$NAMESPACE" "$@"; }
 
 diagnostics() {
   echo "=== diagnostics (namespace ${NAMESPACE}) ===" >&2
-  k get workspaces,workspacerevisions,sandboxpools,sandboxclaims -o wide >&2 2>&1 || true
+  k get workspaces,workspacerevisions,sandboxpools,sandboxes -o wide >&2 2>&1 || true
   k get pods -o wide >&2 2>&1 || true
   echo "--- workspace describe ---" >&2
   k describe workspace "$WS" >&2 2>&1 || true
   k describe workspace "$BRANCH" >&2 2>&1 || true
-  echo "--- claim describe ---" >&2
-  k describe sandboxclaim "$CLAIM" >&2 2>&1 || true
+  echo "--- sandbox describe ---" >&2
+  k describe sandbox "$CLAIM" >&2 2>&1 || true
 }
 
 cleanup() {
   rc=$?
   echo "=== teardown ==="
-  k delete sandboxclaim "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxclaim "$BRANCH_CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete sandbox "$CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete sandbox "$BRANCH_CLAIM" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   # Deleting a workspace garbage-collects its revisions via owner refs.
   k delete workspace "$WS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete workspace "$BRANCH" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "$POOL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "$TEMPLATE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete workspaces,sandboxclaims -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete workspaces,sandboxes -l "mitos.run/e2e-run=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   echo "teardown done"
   exit "$rc"
 }
@@ -124,30 +122,22 @@ fi
 # ---------------------------------------------------------------------------
 # Bring up a template + warm pool so the bind stages have a sandbox to claim.
 # ---------------------------------------------------------------------------
-echo "--- bringing up template ${TEMPLATE} and pool ${POOL} ---"
+echo "--- bringing up pool ${POOL} ---"
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: ${TEMPLATE}
-  labels:
-    mitos.run/e2e-run: "${RUN_ID}"
-spec:
-  image: ${E2E_IMAGE}
-  resources:
-    cpu: "250m"
-    memory: "512Mi"
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata:
   name: ${POOL}
   labels:
     mitos.run/e2e-run: "${RUN_ID}"
 spec:
-  templateRef:
-    name: ${TEMPLATE}
-  replicas: 2
+  template:
+    image: ${E2E_IMAGE}
+    resources:
+      cpu: "250m"
+      memory: "512Mi"
+  snapshots:
+    replicasPerNode: 2
 EOF
 
 warm_deadline=$(( $(date +%s) + READY_TIMEOUT ))
@@ -212,7 +202,7 @@ def result(stage, ok, detail=""):
 run = AgentRun(namespace=NS, in_cluster=INCLUSTER)
 
 API_GROUP = "mitos.run"
-API_VERSION = "v1alpha1"
+API_VERSION = "v1"
 
 
 def get_revision(name):

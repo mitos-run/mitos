@@ -9,7 +9,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/templatebuild"
 )
 
@@ -35,13 +35,13 @@ func cmdTemplate(ctx context.Context, args []string, backend TemplateBackend, ou
 }
 
 // cmdTemplateBuild parses a Dockerfile or a declarative spec file into a
-// SandboxTemplateSpec, prints the content-addressed build plan (which steps a
+// PoolTemplateSpec, prints the content-addressed build plan (which steps a
 // cached build would reuse), and dispatches the build. A backend build error is
 // surfaced with its remediation so the failing step is named.
 func cmdTemplateBuild(ctx context.Context, args []string, backend TemplateBackend, out, errw io.Writer) int {
 	fs := newFlagSet("template build", errw)
 	dockerfile := fs.String("dockerfile", "", "build from a Dockerfile")
-	specFile := fs.String("spec", "", "build from a declarative SandboxTemplate spec (YAML or JSON)")
+	specFile := fs.String("spec", "", "build from a declarative PoolTemplateSpec spec (YAML or JSON)")
 	name := fs.String("name", "", "template name")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(errw, usage)
@@ -97,21 +97,21 @@ func cmdTemplatePush(ctx context.Context, args []string, backend TemplateBackend
 
 // loadSpec reads a spec from a Dockerfile or a declarative spec file. Exactly
 // one of dockerfile or specFile is set (the caller enforces this).
-func loadSpec(dockerfile, specFile string) (v1alpha1.SandboxTemplateSpec, error) {
+func loadSpec(dockerfile, specFile string) (v1.PoolTemplateSpec, error) {
 	if dockerfile != "" {
 		b, err := os.ReadFile(dockerfile) //nolint:gosec // operator-supplied path
 		if err != nil {
-			return v1alpha1.SandboxTemplateSpec{}, fmt.Errorf("read dockerfile: %w", err)
+			return v1.PoolTemplateSpec{}, fmt.Errorf("read dockerfile: %w", err)
 		}
 		return templatebuild.ParseDockerfile(string(b))
 	}
 	b, err := os.ReadFile(specFile) //nolint:gosec // operator-supplied path
 	if err != nil {
-		return v1alpha1.SandboxTemplateSpec{}, fmt.Errorf("read spec: %w", err)
+		return v1.PoolTemplateSpec{}, fmt.Errorf("read spec: %w", err)
 	}
-	var spec v1alpha1.SandboxTemplateSpec
+	var spec v1.PoolTemplateSpec
 	if err := yaml.Unmarshal(b, &spec); err != nil {
-		return v1alpha1.SandboxTemplateSpec{}, fmt.Errorf("parse spec: %w", err)
+		return v1.PoolTemplateSpec{}, fmt.Errorf("parse spec: %w", err)
 	}
 	if spec.Image == "" {
 		return spec, errors.New("spec has no image")

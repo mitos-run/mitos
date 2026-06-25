@@ -23,6 +23,7 @@ on:
       - 'cmd/mem-smoke/**'
       - 'cmd/crash-reap-smoke/**'
       - 'cmd/net-fork-smoke/**'
+      - 'cmd/grpc-exec-smoke/**'
       - 'internal/guestnet/**'
       - 'internal/husk/**'
       - 'internal/volume/**'
@@ -39,6 +40,7 @@ on:
       # the example's agent + fork engine.
       - 'cmd/sandbox-server/**'
       - 'sdk/python/**'
+      - 'sdk/go/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -354,7 +356,16 @@ jobs:
 
       - name: Build guest agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/mitos-test/agent ./guest/agent/
+          # Phase E (#310): the Rust agent is the SOLE production agent.
+          # Build a static musl binary and place it at /tmp/mitos-test/agent so
+          # every downstream phase (tmpl-smoke, inject-and-exec, gRPC proof,
+          # SDK example, ws-smoke, fork-correctness, etc.) boots the Rust agent
+          # as /init. All host callers speak gRPC on vsock port 53.
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
+          cd guest/agent-rs
+          cargo build --release --target x86_64-unknown-linux-musl --features vsock
+          cp target/x86_64-unknown-linux-musl/release/sandbox-agent /tmp/mitos-test/agent
           ls -lh /tmp/mitos-test/agent
 
       # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
@@ -502,7 +513,7 @@ jobs:
           echo "Checking vsock UDS exists..."
           ls -la $VSOCK_UDS || echo "WARNING: vsock UDS not found"
 
-          echo "Testing vsock connection to guest agent on port 52..."
+          echo "Testing vsock connection to guest agent (gRPC, port 53)..."
           go build -o /tmp/test-agent ./cmd/test-agent/
           timeout 30 /tmp/test-agent "$VSOCK_UDS" || {
             echo "=== FAILURE: serial log ==="
@@ -511,6 +522,147 @@ jobs:
           }
 
           kill $FC_PID 2>/dev/null || true
+
+      # gRPC runtime protocol proof (issue #24 stage 5, Task 5.4). This phase
+      # proves the new sandbox.v1.Sandbox gRPC service works against a REAL guest
+      # VM over the vsock transport. It is the acceptance gate for the guest
+      # rewrite and validates two properties:
+      #
+      #   1. STREAMING EXEC: run a shell loop that prints four lines with 200ms
+      #      sleeps between them, collect stdout as it arrives, and assert the
+      #      FIRST chunk arrives at least 100ms before the final exit message.
+      #      This distinguishes streaming (incremental) from buffered delivery:
+      #      a buffered transport would deliver all output at exit and the
+      #      first-chunk-to-exit delta would be ~0.
+      #
+      #   2. INTERACTIVE PTY: open an ExecOpen with PtyOptions set (80x24 window),
+      #      send "echo grpc-pty-ok" as stdin, send a window-resize (120x40), then
+      #      send stdin_close (ctrl-d). Assert "grpc-pty-ok" appears in the PTY
+      #      output and the exit code is 0. This proves the PTY-in-Exec path on
+      #      a real TTY over vsock gRPC.
+      #
+      # cmd/grpc-exec-smoke drives vsock.DialGRPCConn (the Firecracker UDS
+      # CONNECT preamble dialer) -> vsock.DialGRPCOverConn -> sandboxv1.NewSandboxClient
+      # -> the guest gRPC server (vsock port 53). This is the SAME transport
+      # path forkd uses in production (internal/daemon/vsock_guestconn.go).
+      #
+      # The rootfs is built the same way the "Inject agent into rootfs" phase
+      # above does it: the same agent binary, same busybox tools (sh, echo, sleep
+      # for the streaming test). The vsock UDS uses an absolute path (not the
+      # relative "vsock.sock" used for fork-correctness, which relies on Firecracker
+      # cwd resolution): this phase boots a fresh single VM, not a forked restore.
+      #
+      # NON-BLOCKING (continue-on-error) for now: the Rust agent is the
+      # production default (Phase D, #310) and test-agent gates the gRPC exec
+      # path above; grpc-exec-smoke additionally proves STREAMING and PTY
+      # semantics via a separate driver over the same vsock gRPC transport.
+      # Kept non-blocking until this phase has been green on KVM CI for one
+      # full run (tracked as a follow-up of issue #24). Remove continue-on-error
+      # once the transport is consistently proven end to end here.
+      - name: gRPC runtime protocol proof, streaming Exec and interactive PTY over vsock gRPC
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          set -e
+          WORKDIR=/tmp/mitos-test/grpc-exec
+          mkdir -p $WORKDIR
+
+          # Build a fresh ext4 rootfs with the agent as /init plus busybox tools.
+          # The streaming test needs sh, echo, and sleep; the PTY test needs sh.
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/busybox $WORKDIR/mnt/bin/busybox 2>/dev/null || \
+            sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr sleep; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+
+          echo "Rootfs built with agent + busybox (including sleep for streaming test)"
+          ls -lh $WORKDIR/rootfs.ext4
+
+          sudo chmod 666 /dev/kvm
+
+          # Boot a Firecracker VM with both vsock and the agent rootfs.
+          # Absolute UDS path: this is a single fresh VM, not a forked restore,
+          # so we do not need the relative-path baking the fork-correctness phase
+          # uses. An absolute path is simpler and avoids the cwd dependency.
+          SOCK=$WORKDIR/firecracker.sock
+          VSOCK_UDS=$WORKDIR/vsock.sock
+          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/serial.log 2>&1 &
+          FC_PID=$!
+          sleep 1
+
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"$VSOCK_UDS\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "VM booted with guest agent; waiting for both vsock ports to be ready..."
+          sleep 8
+
+          echo "=== Serial console output ==="
+          cat $WORKDIR/serial.log || true
+          echo "=== End serial output ==="
+
+          # Verify the vsock UDS appeared (agent came up).
+          ls -la $VSOCK_UDS || {
+            echo "FAIL: vsock UDS not present; agent did not start"
+            exit 1
+          }
+
+          # Build the gRPC smoke driver.
+          go build -o /tmp/grpc-exec-smoke ./cmd/grpc-exec-smoke/
+
+          # --- Phase 1: STREAMING EXEC ---
+          # Run a command that emits output incrementally (4 lines, 200ms apart).
+          # grpc-exec-smoke asserts the first chunk arrives at least 100ms before
+          # the exit message, proving streaming delivery over vsock gRPC.
+          echo "=== Phase 1: gRPC streaming Exec ==="
+          timeout 60 /tmp/grpc-exec-smoke streaming "$VSOCK_UDS" || {
+            echo "=== FAILURE (streaming): serial log ==="
+            cat $WORKDIR/serial.log || true
+            kill $FC_PID 2>/dev/null || true
+            exit 1
+          }
+
+          # --- Phase 2: INTERACTIVE PTY ---
+          # Open an ExecOpen with PtyOptions (80x24 window, /bin/sh), send
+          # "echo grpc-pty-ok" + resize (120x40) + stdin_close, and assert:
+          #   (a) "grpc-pty-ok" appears in the merged PTY stdout stream;
+          #   (b) exit code is 0;
+          #   (c) the resize frame did not produce an error.
+          echo "=== Phase 2: gRPC interactive PTY ==="
+          timeout 60 /tmp/grpc-exec-smoke pty "$VSOCK_UDS" || {
+            echo "=== FAILURE (pty): serial log ==="
+            cat $WORKDIR/serial.log || true
+            kill $FC_PID 2>/dev/null || true
+            exit 1
+          }
+
+          kill $FC_PID 2>/dev/null || true
+          echo "================================"
+          echo "  gRPC runtime protocol proven: streaming Exec + interactive PTY over vsock"
+          echo "================================"
 
       # SDK example executed end to end against a REAL KVM sandbox-server (issue
       # #11, the #22 item "every README/SDK example executed in CI"). The
@@ -657,6 +809,99 @@ jobs:
 
           echo "================================"
           echo "  SDK direct-mode example proven end to end on a real KVM sandbox-server"
+          echo "================================"
+
+      # Go SDK direct-mode example over the Connect runtime protocol (issue #358).
+      # The Go SDK execs over the Connect sandbox.v1.Sandbox/ExecStream RPC (not
+      # the retired /v1/exec); its unit tests drive a faithful fake server, and
+      # THIS phase proves the dependency-free, hand-rolled Connect client works
+      # end to end against the REAL connect-go server with a REAL guest VM,
+      # exactly as the Python phase above proves the Python client. It builds and
+      # runs sdk/go/examples/direct (buffered Exec + streaming ExecStream) against
+      # a real-mode sandbox-server and asserts the success marker.
+      - name: Go SDK direct-mode example (Connect ExecStream) end to end on a real KVM sandbox-server
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          sudo chmod 666 /dev/kvm
+
+          echo "=== build the standalone sandbox-server ==="
+          go build -o /tmp/sandbox-server ./cmd/sandbox-server/
+
+          echo "=== assemble an agent + static-busybox rootfs (agent as /init) ==="
+          WORKDIR=/tmp/mitos-test/sdk-go-example
+          ROOTFS="$WORKDIR/rootfs.ext4"
+          mkdir -p "$WORKDIR"
+          dd if=/dev/zero of="$ROOTFS" bs=1M count=256 status=none
+          mkfs.ext4 -q -F "$ROOTFS"
+          mkdir -p "$WORKDIR/mnt"
+          sudo mount -o loop "$ROOTFS" "$WORKDIR/mnt"
+          sudo mkdir -p "$WORKDIR"/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/mitos-test/agent "$WORKDIR/mnt/init"
+          sudo chmod +x "$WORKDIR/mnt/init"
+          sudo cp /tmp/mitos-test/busybox "$WORKDIR/mnt/bin/busybox" 2>/dev/null || \
+            sudo curl -fsSL -o "$WORKDIR/mnt/bin/busybox" \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x "$WORKDIR/mnt/bin/busybox"
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox "$WORKDIR/mnt/bin/$cmd"
+          done
+          echo "sandbox" | sudo tee "$WORKDIR/mnt/etc/hostname" > /dev/null
+          sudo umount "$WORKDIR/mnt"
+          sudo chmod 666 /dev/kvm
+
+          echo "=== start the real-mode sandbox-server in the background ==="
+          DATA_DIR="${RUNNER_TEMP:-/tmp}/sbx-go-example-data"
+          rm -rf "$DATA_DIR"
+          SERVER_LOG=/tmp/sbx-go-example.log
+          /tmp/sandbox-server \
+            --addr :8080 \
+            --kernel /tmp/mitos-test/vmlinux \
+            --rootfs "$ROOTFS" \
+            --agent-bin /tmp/mitos-test/agent \
+            --data-dir "$DATA_DIR" \
+            > "$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+          cleanup() {
+            local rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "=== sandbox-server log (step failed, rc=$rc) ==="
+              cat "$SERVER_LOG" || true
+            fi
+            kill "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          echo "=== wait for the server to become healthy ==="
+          healthy=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "FAIL: sandbox-server process exited before becoming healthy"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "FAIL: sandbox-server never became healthy on http://localhost:8080/v1/health"
+            exit 1
+          fi
+
+          echo "=== build and run the Go SDK direct-mode example ==="
+          # sdk/go is its own module, so build from within it (a subshell keeps
+          # the phase cwd unchanged).
+          ( cd sdk/go && go build -o /tmp/mitos-go-example ./examples/direct/ )
+          /tmp/mitos-go-example http://localhost:8080 | tee /tmp/go-example.out
+          if ! grep -q "go direct example OK" /tmp/go-example.out; then
+            echo "FAIL: the Go example did not print 'go direct example OK'"
+            exit 1
+          fi
+
+          echo "================================"
+          echo "  Go SDK Connect exec proven end to end on a real KVM sandbox-server"
           echo "================================"
 
       # Workspace hydrate/dehydrate data path proof (W4 slice 2). This phase
@@ -3224,3 +3469,116 @@ jobs:
           echo "================================"
           echo "  Jailer-boot proof passed"
           echo "================================"
+
+      # Seccomp enforcement proof (issue #353): the VMM is the host-facing edge
+      # of the isolation boundary, and Firecracker's built-in BPF filter is the
+      # second wall behind KVM. This is the defense-in-depth analog of the husk
+      # PSA admission test: it proves, on a REAL Firecracker on KVM, that the
+      # running VMM is under a seccomp FILTER (SECCOMP_MODE_FILTER, /proc
+      # Seccomp: 2) so a disallowed syscall is blocked, and that the filter is
+      # absent ONLY when explicitly disabled with --no-seccomp (the negative
+      # control). Mitos never passes --no-seccomp and fails closed if asked to
+      # (internal/firecracker assertSeccompEnforced), so production always gets
+      # the filter.
+      #
+      # Firecracker installs its per-thread seccomp filters at VM START (when the
+      # vCPUs are launched), NOT at API-server start, so this BOOTS a microVM and
+      # then checks the VMM's threads. It reuses the kernel + rootfs the
+      # fork-correctness phase already staged. Load-bearing (no continue-on-error).
+      - name: Seccomp filter enforced on the Firecracker VMM (issue #353)
+        timeout-minutes: 4
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          KERNEL=/tmp/mitos-test/vmlinux
+          ROOTFS=/tmp/mitos-test/fork-correctness/rootfs.ext4
+          [ -f "$KERNEL" ] || { echo "FAIL: kernel $KERNEL is missing (fork-correctness phase did not stage it)"; exit 1; }
+          [ -f "$ROOTFS" ] || { echo "FAIL: rootfs $ROOTFS is missing (fork-correctness phase did not stage it)"; exit 1; }
+
+          # Echo 2 if ANY thread of the process runs under a seccomp FILTER. After
+          # boot the vCPU/VMM threads carry the filter; scanning the task threads
+          # (not just the leader) is robust to which thread installs it.
+          any_thread_filter() {
+            local pid=$1 m
+            for st in "/proc/$pid/status" /proc/"$pid"/task/*/status; do
+              m=$(grep -E '^Seccomp:' "$st" 2>/dev/null | awk '{print $2}')
+              [ "$m" = "2" ] && { echo 2; return; }
+            done
+            echo 0
+          }
+
+          dump_threads() {
+            local pid=$1
+            for st in "/proc/$pid/status" /proc/"$pid"/task/*/status; do
+              [ -r "$st" ] || continue
+              echo "    $st -> $(grep -E '^Seccomp:' "$st" 2>/dev/null | tr -d '\t' | tr '\n' ' ')"
+            done
+          }
+
+          # Boot a microVM and set BOOT_PID to its pid. Firecracker resolves the
+          # absolute device paths directly (no jailer here). It is launched in the
+          # MAIN shell (not a command substitution) to avoid the backgrounded-
+          # process-in-$()-holds-the-fd hang.
+          BOOT_PID=
+          boot_vm() {
+            local extra="$1" sock="$2" log="$3"
+            rm -f "$sock"
+            # shellcheck disable=SC2086
+            /usr/local/bin/firecracker $extra --api-sock "$sock" </dev/null > "$log" 2>&1 &
+            BOOT_PID=$!
+            for _ in $(seq 1 20); do [ -S "$sock" ] && break; sleep 0.5; done
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/boot-source \
+              -H 'Content-Type: application/json' \
+              -d "{\"kernel_image_path\": \"$KERNEL\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off\"}" >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/drives/rootfs \
+              -H 'Content-Type: application/json' \
+              -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$ROOTFS\", \"is_root_device\": true, \"is_read_only\": true}" >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/machine-config \
+              -H 'Content-Type: application/json' \
+              -d '{"vcpu_count": 1, "mem_size_mib": 128}' >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/actions \
+              -H 'Content-Type: application/json' \
+              -d '{"action_type": "InstanceStart"}' >/dev/null
+          }
+
+          # Default boot: the built-in production filter MUST be installed once the
+          # vCPUs run.
+          boot_vm "" /tmp/fc-seccomp.sock /tmp/fc-seccomp.log
+          FC_PID=$BOOT_PID
+          GOT=0
+          for _ in $(seq 1 10); do
+            GOT=$(any_thread_filter "$FC_PID")
+            [ "$GOT" = "2" ] && break
+            sleep 0.5
+          done
+          echo "default boot: VMM under a seccomp filter = ${GOT} (2 = SECCOMP_MODE_FILTER); threads:"
+          dump_threads "$FC_PID"
+          sudo kill "$FC_PID" 2>/dev/null || true
+          if [ "$GOT" != "2" ]; then
+            echo "FAIL: the running Firecracker VMM has NO thread under a seccomp filter; expected mode 2"
+            cat /tmp/fc-seccomp.log || true
+            exit 1
+          fi
+
+          # Negative control: --no-seccomp boot leaves every thread unfiltered
+          # (mode 0). This proves the assertion above distinguishes enforced from
+          # absent, so a green check is meaningful and not vacuous.
+          boot_vm "--no-seccomp" /tmp/fc-noseccomp.sock /tmp/fc-noseccomp.log
+          FC_PID2=$BOOT_PID
+          sleep 2
+          GOT2=$(any_thread_filter "$FC_PID2")
+          echo "--no-seccomp boot: VMM under a seccomp filter = ${GOT2} (expect 0); threads:"
+          dump_threads "$FC_PID2"
+          sudo kill "$FC_PID2" 2>/dev/null || true
+          if [ "$GOT2" != "0" ]; then
+            echo "FAIL: negative control still shows a seccomp filter (mode '${GOT2}'); the mode-2 assertion would be vacuous"
+            cat /tmp/fc-noseccomp.log || true
+            exit 1
+          fi
+
+          echo "==============================================="
+          echo "  Running VMM is under a seccomp filter (mode 2);"
+          echo "  absent only with --no-seccomp (mode 0)."
+          echo "  The VMM filter holds; a disallowed syscall is blocked."
+          echo "==============================================="

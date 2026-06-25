@@ -21,9 +21,9 @@ type Rates struct {
 }
 
 // ClaimUsage is one claim's metered resource-seconds over the reconcile window:
-// cpu-core-seconds and memory-GB-seconds. These come from the mitos metering
+// cpu-core-seconds and memory-GB-seconds. These come from the Mitos metering
 // pipeline (the same resource-seconds the usage API and Stripe billing consume),
-// so the reconcile checks billing self-consistency: what mitos metered, priced
+// so the reconcile checks billing self-consistency: what Mitos metered, priced
 // at cluster rates, should match what OpenCost attributes to the namespace.
 type ClaimUsage struct {
 	Claim          string

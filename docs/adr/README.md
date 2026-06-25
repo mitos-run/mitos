@@ -66,9 +66,10 @@ docs/facade-conformance.md. See ADR 0000 for the full numbering note.
 | [0002](0002-workspace-not-csi.md) | The Workspace is a content-addressed artifact, not a CSI PersistentVolume | accepted | Modeling the Workspace as a content-addressed, versioned revision DAG over `internal/cas`, not a CSI PV. |
 | [0003](0003-kvm-device-plugin-psa-exception.md) | The /dev/kvm device-plugin PSA exception | accepted | Why the unprivileged husk pod takes exactly two documented PSA-restricted exceptions to reach `/dev/kvm` via the device plugin. |
 | [0004](0004-node-flat-snapshot-trust-domain.md) | Node-flat snapshot trust domain | accepted | Snapshots are content-addressed and node-shared; treat the whole cluster as one trust domain until per-tenant snapshot isolation lands. |
-| [0005](0005-raw-forkd-not-multitenant.md) | raw-forkd is not for untrusted multi-tenant | accepted | The husk pod is the default tenant runner; raw-forkd is the opt-in privileged fallback, gated off by default. |
+| [0005](0005-raw-forkd-not-multitenant.md) | raw-forkd is not for untrusted multi-tenant | accepted | The husk pod is the default tenant runner; raw-forkd is the opt-in fallback, gated off by default. Updated for #352: forkd is now non-privileged with the jailer enabled (ADR 0008), so the not-multi-tenant reason narrows to node-flat snapshots. |
 | [0006](0006-husk-netadmin-egress-firewall.md) | The husk-pod NET_ADMIN capability for in-pod egress firewalling | proposed | One scoped `NET_ADMIN` capability, in the pod's own netns, as the minimal control for default-deny husk egress plus a metadata block. |
 | [0007](0007-api-v2-three-noun-consolidation.md) | API v2 consolidates four kinds to three nouns (Pool, Sandbox, Workspace) | accepted | Folding `SandboxTemplate` into the pool and `SandboxFork`+`SandboxClaim` into `Sandbox`; the v1alpha1 to v2 conversion contract; discharging ADR 0001's deferred rename as one breaking migration. |
+| [0008](0008-forkd-non-privileged-jailer.md) | forkd runs non-privileged with the jailer enabled | accepted | Dropping forkd's `privileged: true` for an explicit, audited builder capability set with the per-VM jailer ENABLED and `/dev/kvm` from the device plugin (#352); the residual is uid 0 + CAP_SYS_ADMIN, not a privileged container. |
 
 ## Residual ADRs and the compliance claim-language rule
 
@@ -76,6 +77,6 @@ The compliance & observability addendum (ROADMAP.md) requires that residuals shi
 as ADRs in this directory. ADRs 0003 through 0006 are the first application: each
 records a RESIDUAL design decision grounded in docs/threat-model.md. The
 companion guardrail in [docs/compliance-claims.md](../compliance-claims.md)
-codifies the honest-claim rule that these residuals back: mitos never claims to be
+codifies the honest-claim rule that these residuals back: Mitos never claims to be
 "fully Kubernetes conformant", permitted claim language is bounded to what a CI
 job proves, and anything beyond that ships as a residual ADR here.

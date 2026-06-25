@@ -1,6 +1,6 @@
 # External security review: scope & package (G4, #194)
 
-mitos runs untrusted AI-agent code in Firecracker microVMs on shared Kubernetes
+Mitos runs untrusted AI-agent code in Firecracker microVMs on shared Kubernetes
 nodes. Before any 1.0 / production-tenant claim, an independent security review is
 a gating requirement (ROADMAP G4, issue #194). This page is the package to hand a
 reviewer: the trust model, the surfaces to examine, the threat model, and the
@@ -11,7 +11,7 @@ live findings tracker that drives each finding to closure is
 ## Trust model (what is and is not trusted)
 
 - **Untrusted:** code running inside a sandbox VM (the agent workload); a tenant
-  with `create` on SandboxClaim/SandboxFork in their namespace; anything reachable
+  with `create` on Sandbox in their namespace; anything reachable
   from inside the guest.
 - **Trusted:** the controller, forkd, the host kernel, the node, the control-plane
   PKI CA. The husk stub is trusted host-side but serves an untrusted guest.
@@ -23,9 +23,12 @@ live findings tracker that drives each finding to closure is
 
 1. **VM escape / Firecracker config** (`internal/firecracker`, `internal/fork`):
    the device model, the jailer configuration, `/dev/kvm` exposure, the snapshot
-   restore path. The forkd DaemonSet currently runs `privileged: true`
-   (jailer-in-pod narrowing is a tracked follow-up); review that blast radius.
-2. **Guest -> host channels** (`guest/agent`, `internal/vsock`, `internal/daemon`
+   restore path. The forkd DaemonSet runs NON-privileged with the per-VM jailer
+   ENABLED (#352, ADR 0008): an explicit builder capability set, `/dev/kvm` from
+   the device plugin, every build/raw-forkd VMM under a throwaway jailed uid in a
+   per-VM chroot. The residual is uid 0 + `CAP_SYS_ADMIN` + a node-data-dir
+   hostPath; review that blast radius.
+2. **Guest -> host channels** (`guest/agent-rs`, `internal/vsock`, `internal/daemon`
    :9091): the vsock + HTTP exec/file API the guest and SDK reach. Token gating,
    input handling, path traversal in the file API, the exec request parsing.
 3. **Snapshot integrity** (`internal/fork`, `internal/husk`): the CAS
@@ -42,7 +45,7 @@ live findings tracker that drives each finding to closure is
    husk pods (the tenant-decoy-pod gate in `selectDormantHuskPod`).
 6. **Secret handling**: secret VALUES must never be logged / in conditions / on
    host paths (the project rule). Forks duplicate guest memory incl. secrets and
-   are default-denied without `allowSecretInheritance` (#fork-correctness §3).
+   are default-denied without `spec.secretInheritance: inherit` (#fork-correctness §3).
 7. **Fork correctness** (`docs/fork-correctness.md`): RNG reseed (credited
    entropy), clock resync, secret inheritance across CoW forks.
 
@@ -61,8 +64,10 @@ live findings tracker that drives each finding to closure is
   per-node snapshot digest, cross-node failover, no tenant-decoy husk activation.
 
 ## Known residual / explicitly out-of-scope-until-fixed
-- forkd `privileged: true` (jailer-in-pod narrowing pending; documented in the
-  threat model).
+- forkd residual privilege after #352: non-privileged with the jailer enabled, but
+  still uid 0 holding `CAP_SYS_ADMIN` with a node-data-dir hostPath (a hardened
+  minimal builder, not zero-privilege; documented in the threat model and ADR
+  0008).
 - `dedicatedNodes` hard tenant node separation is operator-provided, not yet a
   product feature (#172); without it, tenants share a host kernel.
 - Node-loss / fork-replica edge behaviors (#177 follow-ups, #183) are availability,

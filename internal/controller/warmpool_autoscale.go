@@ -5,7 +5,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // defaultScaleDownCooldown is used when ScaleDownCooldownSeconds is 0 (unset).
@@ -14,38 +14,37 @@ const defaultScaleDownCooldown = 300 * time.Second
 // computeDesiredWarm returns the desired DORMANT husk pod count for a pool and
 // whether the decision is a scale-DOWN from the current dormant level.
 //
-// When pool.Spec.Autoscale is nil the warm pool keeps the legacy fixed behavior:
-// desired == Replicas, and a reduction from a too-large dormant set is reported
-// as a scale-down so the metric/status are honest.
+// When the pool has no autoscaler ceiling (spec.warm is nil, or warm.max is 0,
+// the fixed back-compat shape) the warm pool keeps the legacy fixed behavior:
+// desired == warm.min (which carries the v1alpha1 spec.replicas), and a reduction
+// from a too-large dormant set is reported as a scale-down so the metric/status
+// are honest.
 //
-// When autoscaling is enabled the target is:
+// When autoscaling is enabled (warm.max > 0) the target is:
 //
-//	target = clamp(inUse + targetSpare, effectiveMin, maxWarm)
+//	target = clamp(inUse + targetPending, effectiveMin, max)
 //
-// where effectiveMin = min(minWarm, maxWarm) so a misconfigured MinWarm above
-// MaxWarm cannot force the pool above its ceiling. Scale UP (target > dormant)
-// always applies immediately. Scale DOWN (target < dormant) only applies once
-// the cooldown has elapsed since the last claim arrival; inside the cooldown the
-// pool HOLDS its current dormant level (hysteresis) to avoid thrash. The
-// returned bool is true only when the applied desired is strictly below the
-// current dormant count.
-func computeDesiredWarm(pool *v1alpha1.SandboxPool, dormant, inUse int32, lastClaim *metav1.Time, now time.Time) (int32, bool) {
-	as := pool.Spec.Autoscale
-	if as == nil {
-		desired := pool.Spec.Replicas
+// where effectiveMin = min(warm.min, warm.max) so a misconfigured Min above Max
+// cannot force the pool above its ceiling. Scale UP (target > dormant) always
+// applies immediately. Scale DOWN (target < dormant) only applies once the
+// cooldown has elapsed since the last claim arrival; inside the cooldown the pool
+// HOLDS its current dormant level (hysteresis) to avoid thrash. The returned bool
+// is true only when the applied desired is strictly below the current dormant
+// count.
+func computeDesiredWarm(pool *v1.SandboxPool, dormant, inUse int32, lastClaim *metav1.Time, now time.Time) (int32, bool) {
+	warm := pool.Spec.Warm
+	if warm == nil || warm.Max <= 0 {
+		desired := poolWarmMin(pool)
 		return desired, desired < dormant
 	}
 
-	maxWarm := as.MaxWarm
-	if maxWarm < 0 {
-		maxWarm = 0
-	}
-	effectiveMin := as.MinWarm
+	maxWarm := warm.Max
+	effectiveMin := warm.Min
 	if effectiveMin > maxWarm {
 		effectiveMin = maxWarm
 	}
 
-	target := inUse + as.TargetSpare
+	target := inUse + warm.TargetPending
 	if target < effectiveMin {
 		target = effectiveMin
 	}
@@ -61,8 +60,8 @@ func computeDesiredWarm(pool *v1alpha1.SandboxPool, dormant, inUse int32, lastCl
 	// Scale down requested: only apply after the cooldown has elapsed since the
 	// last claim arrival. Inside the cooldown, hold the current dormant level.
 	cooldown := defaultScaleDownCooldown
-	if as.ScaleDownCooldownSeconds > 0 {
-		cooldown = time.Duration(as.ScaleDownCooldownSeconds) * time.Second
+	if warm.CooldownSeconds > 0 {
+		cooldown = time.Duration(warm.CooldownSeconds) * time.Second
 	}
 	var last time.Time
 	if lastClaim != nil {

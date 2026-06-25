@@ -3,7 +3,7 @@ package templatebuild
 import (
 	"fmt"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
 )
 
@@ -19,12 +19,12 @@ import (
 // position and kind only.
 type StepError struct {
 	Index    int
-	StepKind v1alpha1.BuildStepType
+	StepKind v1.BuildStepType
 	cause    error
 }
 
 // NewStepError builds a StepError for the step at index that failed with cause.
-func NewStepError(index int, step v1alpha1.BuildStep, cause error) *StepError {
+func NewStepError(index int, step v1.BuildStep, cause error) *StepError {
 	return &StepError{Index: index, StepKind: step.Type, cause: cause}
 }
 

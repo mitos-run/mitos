@@ -1,4 +1,4 @@
-// Errors for the mitos TypeScript SDK. AgentRunError carries an
+// Errors for the Mitos TypeScript SDK. AgentRunError carries an
 // LLM-legible code, cause, and remediation so a failure can be acted on
 // programmatically. fromResponse builds one from a non-2xx HTTP response and
 // redacts any echo of the bearer token from the body first, so a token a

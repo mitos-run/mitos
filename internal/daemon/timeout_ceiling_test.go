@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-
-	"mitos.run/mitos/internal/vsock"
 )
 
 // TestExecTimeoutExit124SurfacesExecTimeoutEnvelope asserts the blocking
@@ -19,9 +17,13 @@ func TestExecTimeoutExit124SurfacesExecTimeoutEnvelope(t *testing.T) {
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sbT", "vsock.sock")
 	// The guest reports exit 124 for a command killed at its deadline.
-	startFakeStreamUDS(t, sock, []vsock.ExecStreamFrame{
-		{Kind: vsock.FrameExit, ExitCode: execTimeoutExitCode, ExecTimeMs: 5.0},
-	})
+	// Set execStdout to a non-empty string so the fakeGuestSandbox Exec handler
+	// does not override execExit with the default 7.
+	fake := &fakeGuestSandbox{
+		execStdout: "timeout",
+		execExit:   int32(execTimeoutExitCode),
+	}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
 	if err := api.RegisterSandbox("sbT", sock); err != nil {

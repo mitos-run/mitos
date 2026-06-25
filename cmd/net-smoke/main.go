@@ -42,7 +42,7 @@ import (
 	"strings"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
@@ -113,10 +113,10 @@ func runValidate() error {
 		_ = mgr.Teardown(context.Background(), idB)
 	}()
 
-	if err := mgr.Setup(ctx, idA, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allowA}, nil); err != nil {
+	if err := mgr.Setup(ctx, idA, netconf.SandboxPolicy{Egress: v1.EgressDeny, Allow: allowA}, nil); err != nil {
 		return fmt.Errorf("setup sandbox A (real nft rejected the ruleset?): %w", err)
 	}
-	if err := mgr.Setup(ctx, idB, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allowB}, nil); err != nil {
+	if err := mgr.Setup(ctx, idB, netconf.SandboxPolicy{Egress: v1.EgressDeny, Allow: allowB}, nil); err != nil {
 		return fmt.Errorf("setup sandbox B (second-sandbox install disturbed the first?): %w", err)
 	}
 
@@ -201,13 +201,13 @@ func runValidatePolicy() error {
 	}()
 
 	if err := mgr.Setup(ctx, idBlock, netconf.SandboxPolicy{
-		Egress: v1alpha1.EgressAllow, BlockNetwork: true, Counter: true,
+		Egress: v1.EgressAllow, BlockNetwork: true, Counter: true,
 		Allow: []netconf.HostPort{{IP: net.ParseIP("10.201.250.10"), Port: 443}},
 	}, nil); err != nil {
 		return fmt.Errorf("setup block_network sandbox (real nft rejected the ruleset?): %w", err)
 	}
 	if err := mgr.Setup(ctx, idCidr, netconf.SandboxPolicy{
-		Egress: v1alpha1.EgressDeny, AllowCIDRs: []string{"203.0.113.0/24"}, Counter: true,
+		Egress: v1.EgressDeny, AllowCIDRs: []string{"203.0.113.0/24"}, Counter: true,
 	}, nil); err != nil {
 		return fmt.Errorf("setup cidr-allow sandbox: %w", err)
 	}
@@ -292,7 +292,7 @@ func runSetupOne(args []string) error {
 	mgr := network.NewManager(network.Options{EnableForwarding: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: []netconf.HostPort{hp}}, nil); err != nil {
+	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1.EgressDeny, Allow: []netconf.HostPort{hp}}, nil); err != nil {
 		return fmt.Errorf("setup single identity: %w", err)
 	}
 	fmt.Printf("net-smoke: setup-one tap=%s host=%s guest=%s allow=%s:%d\n",
@@ -392,7 +392,7 @@ func runSetupNameEgress(args []string) error {
 	mgr := network.NewManager(network.Options{EnableForwarding: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, resolverIP); err != nil {
+	if err := mgr.Setup(ctx, id, netconf.SandboxPolicy{Egress: v1.EgressDeny}, resolverIP); err != nil {
 		return fmt.Errorf("setup name-egress identity: %w", err)
 	}
 	fmt.Printf("net-smoke: setup-name-egress tap=%s host=%s guest=%s resolver=%s name-allow=%s upstream=%s\n",

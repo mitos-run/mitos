@@ -21,11 +21,11 @@ count or a low-water mark.
 
 ## Diagnosis
 
-- `kubectl sandbox ls` and inspect the SandboxPool object: compare
+- `kubectl mitos ls` and inspect the SandboxPool object: compare
   `status.readySnapshots` to the desired count.
 - Pool `Ready` condition reason: `SnapshotsReady`, `HuskPodsReady` (healthy) vs a
   pending/failed reason. See `docs/conditions.md`.
-- `kubectl sandbox ps` / `kubectl sandbox top` to see whether holder nodes are
+- `kubectl mitos ps` / `kubectl mitos top` to see whether holder nodes are
   present and have headroom.
 - Metrics: `mitos_pool_ready_snapshots{pool}` (the gauge driving this alert),
   `mitos_claim_pending_total` (are claims pending as a result?),

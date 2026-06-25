@@ -5,9 +5,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
 )
 
@@ -20,34 +19,28 @@ import (
 func TestHuskPodsUsePerNodeDigest(t *testing.T) {
 	c := k8sClient
 	const (
-		tmpl     = "pernode-tmpl"
+		// The inline template's snapshot ID is the POOL NAME (poolTemplateID).
 		poolName = "pernode-pool"
+		tmpl     = poolName
 		digestA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		digestB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: tmpl},
-			Replicas:    2,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 2},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
-		if err := c.Create(ctx, obj); err != nil {
-			t.Fatal(err)
-		}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		for _, p := range listHuskPods(t, c, poolName) {
 			_ = c.Delete(ctx, &p)
 		}
 		_ = c.Delete(ctx, pool)
-		_ = c.Delete(ctx, template)
 	})
 
 	// Two healthy holders of the SAME template with DIFFERENT recorded digests.
@@ -70,7 +63,7 @@ func TestHuskPodsUsePerNodeDigest(t *testing.T) {
 		HuskStubImage:   "mitos-husk-stub:test",
 		KVMResourceName: "mitos.run/kvm",
 	}
-	if _, err := r.ReconcileHuskPodsForTest(ctx, pool, template); err != nil {
+	if _, err := r.ReconcileHuskPodsForTest(ctx, pool, pool.Spec.Template); err != nil {
 		t.Fatalf("reconcileHuskPods: %v", err)
 	}
 

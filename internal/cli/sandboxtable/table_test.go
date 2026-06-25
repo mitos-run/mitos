@@ -6,20 +6,22 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
-func mkClaim(name, ns, pool string, phase v1alpha1.SandboxPhase, node, endpoint string, age time.Duration, now time.Time) v1alpha1.SandboxClaim {
-	return v1alpha1.SandboxClaim{
+func mkSandbox(name, ns, pool string, phase v1.SandboxPhase, node, endpoint string, age time.Duration, now time.Time) v1.Sandbox {
+	return v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         ns,
 			CreationTimestamp: metav1.NewTime(now.Add(-age)),
 		},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: pool},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{
+				PoolRef: &v1.LocalObjectReference{Name: pool},
+			},
 		},
-		Status: v1alpha1.SandboxClaimStatus{
+		Status: v1.SandboxStatus{
 			Phase:    phase,
 			Node:     node,
 			Endpoint: endpoint,
@@ -27,13 +29,13 @@ func mkClaim(name, ns, pool string, phase v1alpha1.SandboxPhase, node, endpoint 
 	}
 }
 
-func TestFormatClaimsColumnsAndValues(t *testing.T) {
+func TestFormatSandboxesColumnsAndValues(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
-	claims := []v1alpha1.SandboxClaim{
-		mkClaim("alpha", "default", "web", v1alpha1.SandboxReady, "node-1", "10.0.0.5:9091", 2*time.Minute, now),
-		mkClaim("beta", "default", "batch", v1alpha1.SandboxPending, "", "", 3*time.Hour, now),
+	sandboxes := []v1.Sandbox{
+		mkSandbox("alpha", "default", "web", v1.SandboxReady, "node-1", "10.0.0.5:9091", 2*time.Minute, now),
+		mkSandbox("beta", "default", "batch", v1.SandboxPending, "", "", 3*time.Hour, now),
 	}
-	out := FormatClaims(claims, now)
+	out := FormatSandboxes(sandboxes, now)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("expected header + 2 rows, got %d lines:\n%s", len(lines), out)
@@ -65,14 +67,14 @@ func TestFormatClaimsColumnsAndValues(t *testing.T) {
 	}
 }
 
-func TestFormatClaimsEmpty(t *testing.T) {
-	out := FormatClaims(nil, time.Now())
+func TestFormatSandboxesEmpty(t *testing.T) {
+	out := FormatSandboxes(nil, time.Now())
 	if !strings.Contains(out, "No sandboxes found") {
-		t.Errorf("empty claims should report no sandboxes, got %q", out)
+		t.Errorf("empty sandboxes should report no sandboxes, got %q", out)
 	}
 }
 
-func TestFormatClaimsAgeUnits(t *testing.T) {
+func TestFormatSandboxesAgeUnits(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		age  time.Duration
@@ -85,8 +87,8 @@ func TestFormatClaimsAgeUnits(t *testing.T) {
 		{0, "0s"},
 	}
 	for _, c := range cases {
-		claims := []v1alpha1.SandboxClaim{mkClaim("x", "default", "p", v1alpha1.SandboxReady, "n", "e", c.age, now)}
-		out := FormatClaims(claims, now)
+		sandboxes := []v1.Sandbox{mkSandbox("x", "default", "p", v1.SandboxReady, "n", "e", c.age, now)}
+		out := FormatSandboxes(sandboxes, now)
 		if !strings.Contains(out, c.want) {
 			t.Errorf("age %v: want %q in output, got %q", c.age, c.want, out)
 		}
@@ -95,24 +97,25 @@ func TestFormatClaimsAgeUnits(t *testing.T) {
 
 func TestFormatForksColumnsAndValues(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
-	forks := []v1alpha1.SandboxFork{
+	sandboxes := []v1.Sandbox{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "fork-a",
 				Namespace:         "default",
 				CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
 			},
-			Spec: v1alpha1.SandboxForkSpec{
-				SourceRef: v1alpha1.LocalObjectReference{Name: "claim-x"},
-				Replicas:  3,
+			Spec: v1.SandboxSpec{
+				Source: v1.SandboxSource{
+					FromSandbox: &v1.FromSandboxSource{Name: "claim-x"},
+				},
+				Replicas: 3,
 			},
-			Status: v1alpha1.SandboxForkStatus{
-				ReadyForks: 2,
-				TotalForks: 3,
+			Status: v1.SandboxStatus{
+				ReadyReplicas: 2,
 			},
 		},
 	}
-	out := FormatForks(forks, now)
+	out := FormatForks(sandboxes, now)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected header + 1 row, got %d:\n%s", len(lines), out)
@@ -140,13 +143,13 @@ func TestFormatForksEmpty(t *testing.T) {
 
 func TestFormatForksMissingSource(t *testing.T) {
 	now := time.Now()
-	forks := []v1alpha1.SandboxFork{
+	sandboxes := []v1.Sandbox{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "f", CreationTimestamp: metav1.NewTime(now)},
-			Spec:       v1alpha1.SandboxForkSpec{Replicas: 1},
+			Spec:       v1.SandboxSpec{Replicas: 1},
 		},
 	}
-	out := FormatForks(forks, now)
+	out := FormatForks(sandboxes, now)
 	row := strings.Fields(strings.Split(strings.TrimRight(out, "\n"), "\n")[1])
 	if row[1] != "-" {
 		t.Errorf("missing source should be dash, got %q", row[1])

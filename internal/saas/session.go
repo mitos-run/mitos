@@ -6,40 +6,78 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"sort"
 	"sync"
+	"time"
 )
 
 // ErrSessionInvalid is returned when a session token does not resolve to an
 // account. It never reveals whether the token was malformed or simply unknown.
 var ErrSessionInvalid = errors.New("saas: session token is invalid")
 
+// Session is the non-secret record the store keeps per issued session. It
+// carries no token value and no token hash; it is safe to return to the
+// session owner.
+type Session struct {
+	ID        string
+	AccountID string
+	CreatedAt time.Time
+	Label     string
+}
+
 // SessionStore maps an opaque session token to the account behind it. Like API
 // keys, session tokens are stored hashed, never in the clear, and resolved in
 // constant time. This is the seam the browser OAuth login flow (a documented
-// follow-up) plugs into; the token-based CLI login in this slice issues a session
-// token directly. The in-memory implementation is the tested default.
+// follow-up) plugs into; the token-based CLI login in this slice issues a
+// session token directly. The in-memory implementation is the tested default.
 type SessionStore struct {
-	mu     sync.RWMutex
-	byHash map[string]string // session-token hash -> account id
+	mu       sync.RWMutex
+	byHash   map[string]string  // session-token hash -> account id
+	records  map[string]Session // session id -> Session record
+	hashByID map[string]string  // session id -> token hash
+	nextID   uint64             // counter for deterministic, test-safe session ids
 }
 
 // NewSessionStore returns an empty in-memory session store.
 func NewSessionStore() *SessionStore {
-	return &SessionStore{byHash: map[string]string{}}
+	return &SessionStore{
+		byHash:   map[string]string{},
+		records:  map[string]Session{},
+		hashByID: map[string]string{},
+	}
 }
 
-// Issue records that token authenticates accountID. The raw token is hashed; the
-// store never holds it in the clear. The caller is responsible for delivering the
-// raw token to the user over a secure channel exactly once.
-func (s *SessionStore) Issue(accountID, token string) {
+// IssueSession records that token authenticates accountID and attaches a
+// human-readable label (e.g. "browser", "cli"). The raw token is hashed; the
+// store never holds it in the clear. Returns the opaque session id.
+func (s *SessionStore) IssueSession(accountID, token, label string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.byHash[hashSession(token)] = accountID
+	s.nextID++
+	id := fmt.Sprintf("sess-%d", s.nextID)
+	h := hashSession(token)
+	s.byHash[h] = accountID
+	s.records[id] = Session{
+		ID:        id,
+		AccountID: accountID,
+		CreatedAt: time.Now(),
+		Label:     label,
+	}
+	s.hashByID[id] = h
+	return id
 }
 
-// Resolve returns the account id for a session token, or ErrSessionInvalid. The
-// lookup is by exact hash, so a forged token simply fails to resolve; the
-// constant-time compare guards the hash equality.
+// Issue records that token authenticates accountID. This is a backward-
+// compatible wrapper around IssueSession with a default label so existing
+// callers (e.g. oidc.go LoginManager) compile unchanged.
+func (s *SessionStore) Issue(accountID, token string) {
+	s.IssueSession(accountID, token, "session")
+}
+
+// Resolve returns the account id for a session token, or ErrSessionInvalid.
+// The lookup is by exact hash, so a forged or revoked token simply fails to
+// resolve; the constant-time compare guards the hash equality.
 func (s *SessionStore) Resolve(token string) (string, error) {
 	h := hashSession(token)
 	s.mu.RLock()
@@ -56,6 +94,57 @@ func (s *SessionStore) Resolve(token string) (string, error) {
 	return id, nil
 }
 
+// ListByAccount returns all sessions for accountID, most-recent-first. It
+// never returns sessions belonging to any other account.
+func (s *SessionStore) ListByAccount(accountID string) []Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Session
+	for _, rec := range s.records {
+		if rec.AccountID == accountID {
+			out = append(out, rec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out
+}
+
+// Revoke removes the session identified by sessionID from accountID's session
+// set and deletes its token hash so Resolve of that token now returns
+// ErrSessionInvalid. If sessionID does not exist or belongs to a different
+// account, ErrNotFound is returned; in that case no state is modified.
+func (s *SessionStore) Revoke(accountID, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[sessionID]
+	if !ok || rec.AccountID != accountID {
+		return ErrNotFound
+	}
+	h := s.hashByID[sessionID]
+	delete(s.byHash, h)
+	delete(s.hashByID, sessionID)
+	delete(s.records, sessionID)
+	return nil
+}
+
+// RevokeAll removes every session belonging to accountID and invalidates their
+// tokens. Sessions belonging to other accounts are not affected.
+func (s *SessionStore) RevokeAll(accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, rec := range s.records {
+		if rec.AccountID != accountID {
+			continue
+		}
+		h := s.hashByID[id]
+		delete(s.byHash, h)
+		delete(s.hashByID, id)
+		delete(s.records, id)
+	}
+}
+
 // hashSession hashes a session token for at-rest storage. Sessions are not
 // salted with the key pepper because they are short-lived and store-local; the
 // sha256 is sufficient to avoid holding the raw token.
@@ -64,10 +153,10 @@ func hashSession(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SessionService ties a SessionStore to an AccountService so a session token can
-// be resolved to its account and that account's organizations. It is the object
-// the CLI bridge (cmd/mitos) and the future web console (issue #214) use to back
-// the token-based auth surface.
+// SessionService ties a SessionStore to an AccountService so a session token
+// can be resolved to its account and that account's organizations. It is the
+// object the CLI bridge (cmd/mitos) and the future web console (issue #214)
+// use to back the token-based auth surface.
 type SessionService struct {
 	sessions *SessionStore
 	accounts *AccountService

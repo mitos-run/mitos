@@ -1,7 +1,7 @@
 # Competitor comparison harness (scaffold + methodology)
 
 This directory is the **scaffold** and **methodology** for the head-to-head
-competitor comparison issue #15 item 5 asks for: mitos vs E2B (self-hosted),
+competitor comparison issue #15 item 5 asks for: Mitos vs E2B (self-hosted),
 Daytona (OSS), Agent Sandbox + Kata, and similar self-hostable sandbox systems,
 on identical hardware, regenerated from in-repo scripts so a third party can
 reproduce or refute the result.
@@ -22,7 +22,7 @@ checked into a `make test` path. What this directory provides:
 
 Per CLAUDE.md operating principle 1 (no unverified claims) and issue #15:
 
-- We publish a mitos number ONLY from our own harness in this repo
+- We publish a Mitos number ONLY from our own harness in this repo
   (`bench/claim-first-exec-latency.sh` and `cmd/bench`), on documented hardware.
 - We do NOT invent competitor numbers. Any competitor figure that this repo's
   scripts did not measure on the same hardware is labeled **vendor-published**
@@ -38,7 +38,7 @@ The single comparable metric is **create-sandbox -> first-exec** wall clock:
 from the API call that asks the system for a fresh sandbox to the first
 successful command execution inside it. This is the metric `cmd/bench`
 (`fork_to_first_exec`) and `bench/claim-first-exec-latency.sh`
-(`claim_to_first_exec`) already measure for mitos, so the comparison is
+(`claim_to_first_exec`) already measure for Mitos, so the comparison is
 apples-to-apples.
 
 For each system, on the SAME hardware:
@@ -63,8 +63,8 @@ reference implementation (which simply calls this repo's own harness).
 
 | system | what a reproducer must deploy | "warm" state | source of any quoted number until measured |
 | --- | --- | --- | --- |
-| mitos (this repo) | a mitos cluster + warm SandboxPool, or a KVM host for `cmd/bench` | warm pool / loaded template snapshot | OUR harness (`bench/claim-first-exec-latency.sh`, `cmd/bench`) |
-| mitos (bare metal, no cluster) | a KVM host with firecracker + a guest `vmlinux` + a reflink-capable data dir | running `sandbox-server` with a pre-built template snapshot | OUR harness (`adapters/mitos-direct.sh`); MEASURED on bare-metal KVM, see `results/2026-06-22-matched-hardware.md` |
+| Mitos (this repo) | a Mitos cluster + warm SandboxPool, or a KVM host for `cmd/bench` | warm pool / loaded template snapshot | OUR harness (`bench/claim-first-exec-latency.sh`, `cmd/bench`) |
+| Mitos (bare metal, no cluster) | a KVM host with firecracker + a guest `vmlinux` + a reflink-capable data dir | running `sandbox-server` with a pre-built template snapshot | OUR harness (`adapters/mitos-direct.sh`); MEASURED on bare-metal KVM, see `results/2026-06-22-matched-hardware.md` |
 | E2B (self-hosted) | the open-source E2B infra stack on the same hardware | pre-built E2B template, warm sandbox pool if configured | vendor-published until a maintainer runs `adapters/e2b.sh` here (out of timebox as of 2026-06-22, heavy multi-service stack) |
 | Daytona (OSS) | a self-hosted Daytona instance (`docker compose`) + a dashboard-minted API key | pre-pulled snapshot image, runner healthy | DEPLOYED 2026-06-22 (14/14 services up) but create -> first-exec blocked at headless auth; no number. See `results/2026-06-22-matched-hardware.md` and `adapters/daytona.sh` |
 | Agent Sandbox + Kata | the upstream Agent Sandbox controller with the Kata runtime class | pre-pulled image, Kata runtime ready | vendor-published until a maintainer runs `adapters/agent-sandbox-kata.sh` here |
@@ -73,14 +73,14 @@ reference implementation (which simply calls this repo's own harness).
 
 The first matched-method, matched-hardware comparison was run on 2026-06-22 on
 two identical Hetzner bare-metal KVM boxes (Intel i7-6700, 4c/8t, 62 GiB, host
-kernel 6.1.0-49, firecracker v1.15.0). The mitos column is OUR measurement; the
+kernel 6.1.0-49, firecracker v1.15.0). The Mitos column is OUR measurement; the
 competitor column is recorded honestly (deployed, but blocked at headless auth,
 no fabricated number). Full record, raw samples, and reproduction steps:
 [`results/2026-06-22-matched-hardware.md`](results/2026-06-22-matched-hardware.md).
 
 | system | create -> first-exec | source |
 | --- | --- | --- |
-| mitos (mitos-direct, bare-metal KVM) | min 164 / P50 180 / P90 202 / P99 204 / max 204 ms (N=20) | OUR measurement (`adapters/mitos-direct.sh`) |
+| Mitos (mitos-direct, bare-metal KVM) | min 164 / P50 180 / P90 202 / P99 204 / max 204 ms (N=20) | OUR measurement (`adapters/mitos-direct.sh`) |
 | Daytona OSS (self-hosted) | blocked: Dex OIDC, no password grant, no headless API key in timebox | deployed, no number (`adapters/daytona.sh`) |
 | E2B (self-hosted) | not measured (out of timebox) | vendor-published until `adapters/e2b.sh` is run here |
 
@@ -93,8 +93,8 @@ bare-metal, no-cluster `sandbox-server` path measured on 2026-06-22).
 
 ## What ships in-repo vs what is a reproducer step
 
-- In-repo and runnable now: the mitos cluster side (`adapters/mitos.sh` -> this
-  repo's harness), the mitos bare-metal side (`adapters/mitos-direct.sh` -> this
+- In-repo and runnable now: the Mitos cluster side (`adapters/mitos.sh` -> this
+  repo's harness), the Mitos bare-metal side (`adapters/mitos-direct.sh` -> this
   repo's `sandbox-server`, needs only a KVM host, no cluster), and the driver
   (`run-comparison.sh`).
 - Reproducer step (not in-repo, by design): standing up each competitor and
@@ -106,7 +106,7 @@ bare-metal, no-cluster `sandbox-server` path measured on 2026-06-22).
 
 The create -> first-exec metric above compares a single sandbox. Issue #207 adds
 the **contested-claim** comparison: the 1-to-N live fork fan-out shape, where ONE
-warmed base is fanned into N children. This is where mitos's defensible claim
+warmed base is fanned into N children. This is where Mitos's defensible claim
 lives (sub-second 1-to-N copy-on-write fan-out, self-hostable, per-fork network
 isolation), and benchmarking only against E2B would overstate the edge, so we
 measure the SAME fan-out shape on the systems that actually contest it.
@@ -122,7 +122,7 @@ fork-fanout`).
 
 | system | fan-out adapter | what its "fan-out" is | reproduction prerequisite | source until measured |
 | --- | --- | --- | --- | --- |
-| mitos (this repo) | `adapters/mitos-fanout.sh` | live COW fork of one warmed snapshot into N children | KVM host + a pre-built, verified WARMED template snapshot (repo + deps baked in) | OUR harness (`cmd/bench --mode fork-fanout`) |
+| Mitos (this repo) | `adapters/mitos-fanout.sh` | live COW fork of one warmed snapshot into N children | KVM host + a pre-built, verified WARMED template snapshot (repo + deps baked in) | OUR harness (`cmd/bench --mode fork-fanout`) |
 | Modal Sandboxes | `adapters/modal-fanout.sh` | branch/fork one snapshot into N (the headline competitor) | a Modal account + a warmed Modal snapshot; NOT self-hostable, so run against Modal's hosted service | vendor-published until a maintainer runs the adapter |
 | Daytona (OSS) | `adapters/daytona-fanout.sh` | N independent creates from one warmed image (cold-start baseline) | self-hosted Daytona on the reference node | vendor-published until a maintainer runs the adapter |
 | E2B (self-hosted) | `adapters/e2b-fanout.sh` | N creates from one warmed template (cold-start baseline) | self-hosted E2B on the reference node | vendor-published until a maintainer runs the adapter |
@@ -130,17 +130,17 @@ fork-fanout`).
 ### The honesty asymmetry to record (Modal)
 
 Modal is not self-hostable, so a Modal fan-out number necessarily comes from
-Modal's hosted service, not the same reference hardware as the mitos run. That is
+Modal's hosted service, not the same reference hardware as the Mitos run. That is
 NOT an apples-to-apples hardware comparison and must be recorded as such with any
-Modal figure: the Modal number measures hosted fan-out, the mitos number measures
+Modal figure: the Modal number measures hosted fan-out, the Mitos number measures
 self-hosted fan-out on the reference node. Until `adapters/modal-fanout.sh` is
 filled in and run, any Modal fan-out figure is **vendor-published**, not our
 measurement.
 
 ### What this comparison will plainly record (no conclusion pre-written)
 
-The fan-out comparison will record whether mitos fork actually beats Modal
-branching on wall-clock-to-N-ready and per-child time-to-ready. **If mitos wins,
+The fan-out comparison will record whether Mitos fork actually beats Modal
+branching on wall-clock-to-N-ready and per-child time-to-ready. **If Mitos wins,
 the wedge includes raw fan-out speed. If it does NOT win on raw speed, the wedge
 is self-hosting plus per-fork network isolation, not speed.** No conclusion and no
 number is written here in advance: the result is OPEN, to be filled on the #16

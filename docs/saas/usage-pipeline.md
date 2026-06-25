@@ -1,6 +1,6 @@
 # Billing-grade usage metering pipeline
 
-This document describes how mitos turns per-node CoW-aware operational metering
+This document describes how Mitos turns per-node CoW-aware operational metering
 (`internal/metering`, the forkd `GET /v1/metering` endpoint, docs/metering.md)
 into per-organization, time-integrated, auditable usage records, and the
 org-scoped public usage API on top of them. The implementation is
@@ -26,11 +26,11 @@ billable units, integrated over the record's window:
 - **storage GiB-hours** (`StorageGiBHours`): the sandbox's CoW-aware backing
   storage (in GiB) integrated over the window's hours.
 - **egress bytes** (`EgressBytes`): network egress attributed to the sandbox in
-  the window, from the per-sandbox nftables egress counter (issue #219). This is
+  the window, from the per-sandbox nftables egress counter. This is
   a monotonic cumulative counter on the source, so the window's egress is the
   delta of the counter across the window, never a re-integration.
 - **GPU-seconds** (`GPUSeconds`): the sandbox's billable GPU-seconds in the
-  window (issue #221). Like egress this is a monotonic cumulative counter on the
+  window. Like egress this is a monotonic cumulative counter on the
   source (`Sample.GPUSeconds` is already wall-seconds times GPU count), so the
   window value is the counter delta.
 
@@ -99,7 +99,7 @@ the same or overlapping samples recomputes the same record value, so:
   windows already persisted are untouched, and re-scraping overlapping windows
   re-derives the same records.
 
-The store is the pluggable seam (`UsageStore`), mirroring the #210 `Store`
+The store is the pluggable seam (`UsageStore`), mirroring the accounts `Store`
 pattern. `MemUsageStore` is the tested in-memory default. A durable Postgres
 store is a documented follow-up; the upsert-by-key contract is the seam it
 implements (the natural primary key is `(org_id, sandbox_id, window_start)`).
@@ -126,25 +126,33 @@ difference is the audit-visible CoW saving.
 ## Collection seam and the org mapping
 
 The collector (`Collector`) scrapes each node on a fixed cadence and tags every
-sample with org, sandbox, node, and timestamp. The actual multi-node HTTP scrape
-needs a live cluster, so the collector takes an injectable `SampleSource`: the
-aggregation and integration are fully unit-tested against a mock source, and the
-real HTTP scrape of `GET /v1/metering` across nodes is a documented follow-up
-that implements `SampleSource`.
+sample with org, sandbox, node, and timestamp through an injectable
+`SampleSource`. The live multi-node scrape is now wired (issue #164, Phase 0):
+`NodeRegistrySource` (`internal/usage/livesource.go`) lists the forkd nodes from
+the controller NodeRegistry, HTTP GETs `GET /v1/metering` per node with a bounded
+per-request timeout, parses the metering report, and converts each per-sandbox
+row to an org-tagged `Sample`. A node that is unreachable or errors is skipped and
+counted, never failing the whole cycle. The collector runs behind the
+`--usage-collector` controller flag, which is OFF by default so a self-host
+deployment that does not want metering is unaffected; it is turned on for hosted
+multi-tenant. See `docs/design/observability-and-billing-spine.md`.
 
-The **org tag** comes from the sandbox -> owning-org mapping. A sandbox is
-created through a SandboxClaim; the claim is created by a gateway request that
-carries the verified org (issue #210, the org is taken solely from the verified
-API key). So the owning org of a sandbox is the org of the claim that created
-it. The mapping is the `OrgResolver` seam: `OrgFor(sandboxID) -> orgID`. The
-tested default is a static map; the real resolver reads the claim -> org label
-the gateway stamps on the SandboxClaim (a documented follow-up, the controller
-wiring).
+The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
+trust boundary: the org is derived solely from control-plane identity, never from
+client input. A sandbox is created in the org's hard-isolation namespace
+`mitos-org-<id>`; the controller stamps the trusted `mitos.run/org` label on the
+sandbox's husk pod, derived from that namespace via `tenant.OrgFromNamespace` (a
+client-set `mitos.run/org` on the input is ignored). The `OrgResolver` seam
+(`OrgFor(sandboxID) -> orgID`) is implemented live by `LabelOrgResolver`
+(`internal/usage/k8sresolver.go`), which reads that controller-stamped label off
+the husk pod. A self-host sandbox in a non-org namespace carries no org label and
+is left unattributed (kept in node-reconciliation totals, dropped from billable),
+never misbilled to a default org.
 
 ## Public usage API (org-scoped)
 
 `UsageHandler` is an HTTP handler that serves an org's current and historical
-usage and cost. It sits BEHIND the #210 gateway front door: the gateway verifies
+usage and cost. It sits BEHIND the gateway front door: the gateway verifies
 the customer key, resolves the org, and forwards with the org attached, so the
 handler reads the org from the request context (`OrgFromContext`), never from a
 query parameter. A request can therefore only ever read its OWN org's usage; the
@@ -157,9 +165,9 @@ unit, and a cost estimate computed from a `PriceList` (a simple per-unit rate
 table). Both E2B and Daytona lack a real usage API; this org-scoped, per-unit,
 auditable endpoint is a deliberate differentiator.
 
-## Stripe seam (#212)
+## Stripe seam
 
-The usage records are the input to Stripe metered billing (issue #212), which is
+The usage records are the input to Stripe metered billing, which is
 now implemented in `internal/saas/billing` (see docs/saas/pricing.md):
 `billing.Service.PushUsage` reads finalized `UsageRecord`s and pushes one metered
 usage event per non-zero meter to Stripe. The idempotency key for the Stripe push
@@ -173,7 +181,7 @@ This usage pipeline produces the auditable records the push consumes.
 - Real multi-node HTTP scrape of `GET /v1/metering` (implements `SampleSource`).
 - Durable Postgres `UsageStore` (implements the upsert-by-key contract).
 - Real `OrgResolver` reading the claim -> org label.
-- Stripe metered-billing push (issue #212).
+- Stripe metered-billing push.
 
 These are seams with tested in-memory or static defaults so the integration,
 idempotency, CoW reconciliation, and org-scoping are fully verifiable on darwin

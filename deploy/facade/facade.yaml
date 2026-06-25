@@ -71,13 +71,13 @@ rules:
       - get
       - patch
       - update
-  # Our run-path objects the facade creates, owns, and terminates: the claim it
-  # bridges plus the template and pool the extension reconcilers map.
+  # Our run-path objects the facade creates, owns, and terminates: the Sandbox
+  # it bridges plus the pool the extension reconcilers map (the template folds
+  # into the pool's inline spec.template, so it has no standalone resource).
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxclaims
-      - sandboxtemplates
+      - sandboxes
       - sandboxpools
     verbs:
       - create
@@ -90,6 +90,7 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
+      - sandboxes/status
       - sandboxpools/status
     verbs:
       - get

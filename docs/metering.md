@@ -145,8 +145,8 @@ consumed.
 The per-account, time-integrated, auditable usage pipeline that AGGREGATES these
 node reports into billable usage records (vCPU-seconds, GiB-seconds, storage
 GiB-hours, egress bytes, GPU-seconds) and serves the org-scoped public usage API
-is documented in [`saas/usage-pipeline.md`](saas/usage-pipeline.md)
-([#211](https://github.com/mitos-run/mitos/issues/211)). It reconciles the
+is documented in [`saas/usage-pipeline.md`](saas/usage-pipeline.md). It
+reconciles the
 billable memory level back to this report's CoW-aware total so the shared
 template region is billed once, not once per fork.
 
@@ -161,11 +161,9 @@ template region is billed once, not once per fork.
   recognized within a template group; kernel same-page merging across templates
   is not accounted.
 - **Per-tenant / per-workspace rollups**: aggregate the node report by tenant,
-  tied to Workspace ([#21](https://github.com/mitos-run/mitos/issues/21)).
+  tied to Workspace.
 - **Billing export / OpenCost integration** and **historical time series**:
-  the metrics feed Prometheus today; dashboards and export are follow-ups
-  ([#29](https://github.com/mitos-run/mitos/issues/29),
-  [#18](https://github.com/mitos-run/mitos/issues/18)).
+  the metrics feed Prometheus today; dashboards and export are follow-ups.
 
 The CoW density datapoint and its CI proof are in
 [`../BENCHMARKS.md`](../BENCHMARKS.md) (the metering CI phase forks 4 sandboxes

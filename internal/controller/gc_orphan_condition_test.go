@@ -9,39 +9,35 @@ package controller_test
 // it so an operator/SDK can see the GC, not a graceful terminate, removed the VM.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestGCStampsOrphanReapedConditionOnTerminalClaim(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "orphancond-node-1", "orphancond-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "orphancond-node-1", "orphancond-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "orphancond-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "orphancond-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "orphancond-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "orphancond-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "orphancond-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "orphancond-pool"}}},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -49,7 +45,6 @@ func TestGCStampsOrphanReapedConditionOnTerminalClaim(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	ready := waitClaimReady(t, "orphancond-claim")
@@ -63,7 +58,7 @@ func TestGCStampsOrphanReapedConditionOnTerminalClaim(t *testing.T) {
 	// liveID net, so its VM is a sweep candidate; the sweep must reap it AND
 	// stamp the condition on the still-present claim.
 	finished := metav1.NewTime(time.Now().Add(-30 * time.Minute))
-	ready.Status.Phase = v1alpha1.SandboxFailed
+	ready.Status.Phase = v1.SandboxFailed
 	ready.Status.FinishedAt = &finished
 	if err := k8sClient.Status().Update(ctx, ready); err != nil {
 		t.Fatal(err)
@@ -94,7 +89,7 @@ func TestGCStampsOrphanReapedConditionOnTerminalClaim(t *testing.T) {
 	}
 
 	// The still-present terminal claim carries the typed OrphanReaped condition.
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "orphancond-claim", Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}

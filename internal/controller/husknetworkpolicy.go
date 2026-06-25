@@ -10,7 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/netconf"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -34,7 +34,7 @@ func huskNetworkPolicyName(pool string) string { return pool + "-husk-egress" }
 // Name entries in the allowlist are NOT expressible as NetworkPolicy egress
 // peers (NetworkPolicy has no name-based egress), so only IP:port allows are
 // added here; name-based egress is enforced solely by the in-pod DNS proxy.
-func buildHuskNetworkPolicy(pool *v1alpha1.SandboxPool, allow []string) *networkingv1.NetworkPolicy {
+func buildHuskNetworkPolicy(pool *v1.SandboxPool, allow []string) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP
 	dnsPort := intstr.FromInt(53)
@@ -94,7 +94,7 @@ func hostMask(ip net.IP) string {
 // owner-referenced to the pool for GC. Best effort: a failure is returned so the
 // reconcile retries, but the CALLER does NOT block husk pod creation on it,
 // because the in-pod nftables filter (not this object) is the egress guarantee.
-func (r *SandboxPoolReconciler) ensureHuskNetworkPolicy(ctx context.Context, pool *v1alpha1.SandboxPool, allow []string) error {
+func (r *SandboxPoolReconciler) ensureHuskNetworkPolicy(ctx context.Context, pool *v1.SandboxPool, allow []string) error {
 	desired := buildHuskNetworkPolicy(pool, allow)
 
 	np := &networkingv1.NetworkPolicy{

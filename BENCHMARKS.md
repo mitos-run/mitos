@@ -111,7 +111,7 @@ NOT bare-metal figures.
 ## Husk-stub activation latency datapoint
 
 A separate datapoint measures the claim-time cost of the husk-pods prepare/
-activate split (issue #18; see [`docs/husk-pods.md`](docs/husk-pods.md)). In that
+activate split (see [`docs/husk-pods.md`](docs/husk-pods.md)). In that
 model the Firecracker VMM is pre-started DORMANT before a claim arrives
 (prepare), so the only cost paid at claim time is activating it: loading the
 template snapshot in place, resuming, and waiting for the guest agent to answer
@@ -187,9 +187,9 @@ is stated.
 bench/husk-activate-latency.sh <kubeconfig> <pool> [namespace] [iterations]
 ```
 
-The script creates N sequential `SandboxClaim`s against a warm pool, waits for
+The script creates N sequential `Sandbox`es against a warm pool, waits for
 Ready, parses the activate latency out of the Ready condition message, releases
-each claim between iterations, and prints min / P50 / P95 / max plus the raw
+each sandbox between iterations, and prints min / P50 / P95 / max plus the raw
 samples. The full node spec, sample set, restore samples, CoW basis, and cluster
 setup are in
 [`bench/results/2026-06-13-bare-metal-husk.md`](bench/results/2026-06-13-bare-metal-husk.md).
@@ -304,7 +304,7 @@ activation latency is not stated.
 ## Facade vs upstream reference: resume latency
 
 This section frames the resume-latency comparison between our `agents.x-k8s.io`
-facade (issue #19) and the upstream reference controller, for the upstream
+facade and the upstream reference controller, for the upstream
 pause/resume contract (the Sandbox `spec.replicas` 0<->1 toggle; upstream v0.4.6
 has no stateful hibernate field, so pause/resume IS that toggle). The harness is
 `bench/facade/` (see [`bench/facade/README.md`](bench/facade/README.md)).
@@ -313,7 +313,7 @@ has no stateful hibernate field, so pause/resume IS that toggle). The harness is
 
 | system | resume = replicas 0 -> 1 does | dominant cost |
 | --- | --- | --- |
-| our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `SandboxClaim`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
+| our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `Sandbox`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
 | upstream reference (v0.4.6) | COLD-CREATES a pod: delete the pod on 0, create a fresh one on 1 | pod schedule + admission + image + container start + app boot, on the order of seconds |
 
 The facade resume re-activates a warm dormant VM; the upstream resume cold-creates
@@ -357,9 +357,9 @@ construction with a clear message and prints no number.
 - **Claim to first-exec end to end through the controller** (#15 item 1):
   `bench/claim-first-exec-latency.sh <kubeconfig> <pool> [ns] [iters]`, the
   `claim-exec` mode of the `bench/claim` Go harness. For each sequential claim it
-  creates a `SandboxClaim`, waits for the controller to drive it Ready, and runs
+  creates a `Sandbox`, waits for the controller to drive it Ready, and runs
   the FIRST exec over the sandbox HTTP API (the same endpoint + per-sandbox
-  bearer token kubectl-sandbox and the SDK use), measuring claim-create ->
+  bearer token kubectl-mitos and the SDK use), measuring sandbox-create ->
   first-exec P50/P90/P99. This is the full controller + scheduler + pool path, NOT
   the engine data path `cmd/bench` measures. **Status: harness runnable on a
   cluster; numbers OPEN, pending the #16 reference node.**
@@ -380,7 +380,7 @@ construction with a clear message and prints no number.
 
 ## 1-to-N live fork fan-out (issue #207)
 
-The defensible mitos claim is sub-second 1-to-N live copy-on-write fan-out:
+The defensible Mitos claim is sub-second 1-to-N live copy-on-write fan-out:
 forking ONE warmed base (the template snapshot, built with the repo loaded and
 deps installed) into N children cheaply, with each child a private COW fork of
 the same restored page set. This is a different shape from the single
@@ -426,12 +426,12 @@ unverifiable claim this harness exists to eliminate.**
 ## 1-to-N fan-out competitor comparison (issue #207)
 
 This is the contested-claim comparison. Benchmarking only against E2B would
-overstate the mitos edge (Daytona advertises 27-90 ms creates and Modal markets a
+overstate the Mitos edge (Daytona advertises 27-90 ms creates and Modal markets a
 sandbox snapshot/branch capability), so the honest comparison measures the SAME
 1-to-N fan-out shape on each system:
 
 - **Modal Sandboxes (snapshot/fork)** is the headline competitor: it is the
-  closest analogue to mitos's live COW fan-out (branch one snapshot into many).
+  closest analogue to Mitos's live COW fan-out (branch one snapshot into many).
   Modal is NOT self-hostable, so its number necessarily comes from Modal's hosted
   service, not the reference node; that asymmetry is recorded with any Modal
   figure.
@@ -449,9 +449,9 @@ honesty rule is the same as the create -> first-exec comparison: any competitor
 figure not measured here on the documented hardware is labeled
 **vendor-published** (with a citation), NOT our measurement.
 
-**What this comparison will plainly record.** It will record whether mitos fork
+**What this comparison will plainly record.** It will record whether Mitos fork
 actually beats Modal branching on wall-clock-to-N-ready and per-child
-time-to-ready. If mitos wins, the wedge includes raw fan-out speed. **If it does
+time-to-ready. If Mitos wins, the wedge includes raw fan-out speed. **If it does
 NOT win on raw speed, the wedge is self-hosting plus per-fork network isolation,
 not speed**, and this section will say so. No conclusion and no number is
 pre-written here: the result is OPEN, pending the #16 reference node and a
@@ -469,7 +469,7 @@ first-exec method, a reference adapter (`adapters/mitos.sh`) wired to this repo'
 own harness, and placeholder adapters for each competitor that a reproducer fills
 in (they exit non-zero until then, so a run can never emit a fabricated competitor
 number). The honesty rule is explicit in `bench/competitors/README.md`: we
-publish a mitos number only from our own harness on documented hardware, and any
+publish a Mitos number only from our own harness on documented hardware, and any
 competitor figure not measured here on the same hardware is labeled
 **vendor-published** (with a citation), NOT our measurement. **Status: scaffold +
 methodology in-repo; head-to-head numbers OPEN, pending the #16 reference node and

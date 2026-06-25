@@ -13,14 +13,13 @@ package controller_test
 // condition.
 
 import (
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
-	v1alpha2 "mitos.run/mitos/api/v1alpha2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,7 +27,7 @@ import (
 // condition, or "" when the Sandbox or its condition is absent.
 func sandboxReadyConditionReason(t *testing.T, name string) string {
 	t.Helper()
-	var sb v1alpha2.Sandbox
+	var sb v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &sb); err != nil {
 		return ""
 	}
@@ -46,12 +45,12 @@ func sandboxReadyConditionReason(t *testing.T, name string) string {
 func TestSandboxForkBudgetAdmitsUpToMaxAndRejectsBeyond(t *testing.T) {
 	maxForks := int32(2)
 
-	parent := &v1alpha2.Sandbox{
+	parent := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "budget-parent", Namespace: "default"},
-		Spec: v1alpha2.SandboxSpec{
-			Source:   v1alpha2.SandboxSource{PoolRef: &v1alpha1.LocalObjectReference{Name: "budget-pool"}},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "budget-pool"}},
 			Replicas: 1,
-			Budget:   &v1alpha2.SandboxBudget{MaxForks: &maxForks},
+			Budget:   &v1.SandboxBudget{MaxForks: &maxForks},
 		},
 	}
 	if err := k8sClient.Create(ctx, parent); err != nil {
@@ -64,10 +63,10 @@ func TestSandboxForkBudgetAdmitsUpToMaxAndRejectsBeyond(t *testing.T) {
 	// settles any tie at second granularity).
 	names := []string{"budget-child-0", "budget-child-1", "budget-child-2"}
 	for _, n := range names {
-		child := &v1alpha2.Sandbox{
+		child := &v1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: "default"},
-			Spec: v1alpha2.SandboxSpec{
-				Source:   v1alpha2.SandboxSource{FromSandbox: &v1alpha2.FromSandboxSource{Name: "budget-parent"}},
+			Spec: v1.SandboxSpec{
+				Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "budget-parent"}},
 				Replicas: 1,
 			},
 		}
@@ -95,11 +94,11 @@ func TestSandboxForkBudgetAdmitsUpToMaxAndRejectsBeyond(t *testing.T) {
 		t.Fatalf("budget-child-2 Ready reason = %q, want BudgetExhausted", rejectedReason)
 	}
 
-	var rejected v1alpha2.Sandbox
+	var rejected v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "budget-child-2", Namespace: "default"}, &rejected); err != nil {
 		t.Fatal(err)
 	}
-	if rejected.Status.Phase != v1alpha1.SandboxFailed {
+	if rejected.Status.Phase != v1.SandboxFailed {
 		t.Fatalf("budget-child-2 phase = %q, want Failed", rejected.Status.Phase)
 	}
 	if c := apimeta.FindStatusCondition(rejected.Status.Conditions, "Ready"); c == nil || c.Status != metav1.ConditionFalse {
@@ -117,7 +116,7 @@ func TestSandboxForkBudgetAdmitsUpToMaxAndRejectsBeyond(t *testing.T) {
 	deadline = time.Now().Add(20 * time.Second)
 	var spend int32 = -1
 	for time.Now().Before(deadline) {
-		var p v1alpha2.Sandbox
+		var p v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "budget-parent", Namespace: "default"}, &p); err == nil {
 			if p.Status.BudgetSpend != nil {
 				spend = p.Status.BudgetSpend.Forks
@@ -134,4 +133,4 @@ func TestSandboxForkBudgetAdmitsUpToMaxAndRejectsBeyond(t *testing.T) {
 }
 
 // ensure client import stays used even if the rest of the file changes shape.
-var _ client.Object = (*v1alpha2.Sandbox)(nil)
+var _ client.Object = (*v1.Sandbox)(nil)

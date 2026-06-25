@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# mitos cluster CHAOS e2e (issue #163, ROADMAP G2 failure/GC semantics).
+# Mitos cluster CHAOS e2e (issue #163, ROADMAP G2 failure/GC semantics).
 #
 # Asserts the husk warm-pool's BORING FAILURE BEHAVIOR on real KVM:
 #   1. pool warms        a SandboxPool brings up dormant husk pods
-#   2. claim activates   a SandboxClaim reaches Ready
+#   2. claim activates   a Sandbox reaches Ready
 #   3. pod-loss recovery DELETE the claim's backing husk pod -> the claim
 #                        re-pends and recovers to Ready (rependOnHuskPodLost +
 #                        re-activate on a dormant slot), verified by an exec
@@ -40,7 +40,6 @@ E2E_IMAGE="${E2E_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 READY_TIMEOUT="${READY_TIMEOUT:-240}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 RUN_ID="$(date +%s)-$$"
-TEMPLATE="chaos-tmpl-${RUN_ID}"
 POOL="chaos-pool-${RUN_ID}"
 CLAIM="chaos-claim-${RUN_ID}"
 
@@ -55,23 +54,22 @@ k() { kubectl -n "$NAMESPACE" "$@"; }
 
 diagnostics() {
   echo "=== chaos diagnostics (ns ${NAMESPACE}) ===" >&2
-  k get sandboxpool,sandboxclaim -l "mitos.run/e2e-run=${RUN_ID}" 2>&1 | head >&2 || true
+  k get sandboxpool,sandbox -l "mitos.run/e2e-run=${RUN_ID}" 2>&1 | head >&2 || true
   k get pods -l "mitos.run/husk=true" -o wide 2>&1 | head >&2 || true
 }
 cleanup() {
-  k delete sandboxclaim "${CLAIM}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  # Sweep any storm claims the kill -9 stage created (by run label).
-  k delete sandboxclaims -l "mitos.run/chaos-storm=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k delete sandbox "${CLAIM}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Sweep any storm sandboxes the kill -9 stage created (by run label).
+  k delete sandboxes -l "mitos.run/chaos-storm=${RUN_ID}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   k delete sandboxpool "${POOL}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k delete sandboxtemplate "${TEMPLATE}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 echo "=== mitos chaos e2e: ns=${NAMESPACE} image=${E2E_IMAGE} run=${RUN_ID} ==="
 
-claim_ready() { [ "$(k get sandboxclaim "${CLAIM}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = "True" ]; }
-claim_pod() { k get sandboxclaim "${CLAIM}" -o jsonpath='{.status.sandboxID}' 2>/dev/null; }
-claim_node() { k get sandboxclaim "${CLAIM}" -o jsonpath='{.status.node}' 2>/dev/null; }
+claim_ready() { [ "$(k get sandbox "${CLAIM}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = "True" ]; }
+claim_pod() { k get sandbox "${CLAIM}" -o jsonpath='{.status.sandboxID}' 2>/dev/null; }
+claim_node() { k get sandbox "${CLAIM}" -o jsonpath='{.status.node}' 2>/dev/null; }
 wait_until() { # wait_until <timeout> <cmd...>
   local deadline=$(( $(date +%s) + $1 )); shift
   while [ "$(date +%s)" -lt "$deadline" ]; do "$@" && return 0; sleep "$POLL_INTERVAL"; done
@@ -87,20 +85,23 @@ fi
 
 # Stage 1+2: pool warms + claim activates.
 k apply -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxTemplate
-metadata: {name: ${TEMPLATE}, labels: {mitos.run/e2e-run: "${RUN_ID}"}}
-spec: {image: ${E2E_IMAGE}, resources: {cpu: "250m", memory: "512Mi"}}
----
-apiVersion: mitos.run/v1alpha1
+apiVersion: mitos.run/v1
 kind: SandboxPool
 metadata: {name: ${POOL}, labels: {mitos.run/e2e-run: "${RUN_ID}"}}
-spec: {templateRef: {name: ${TEMPLATE}}, replicas: 2}
+spec:
+  template:
+    image: ${E2E_IMAGE}
+    resources: {cpu: "250m", memory: "512Mi"}
+  snapshots:
+    replicasPerNode: 2
 ---
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata: {name: ${CLAIM}, labels: {mitos.run/e2e-run: "${RUN_ID}"}}
-spec: {poolRef: {name: ${POOL}}}
+spec:
+  source:
+    poolRef:
+      name: ${POOL}
 EOF
 
 if wait_until "$READY_TIMEOUT" claim_ready; then
@@ -114,7 +115,7 @@ victim="$(claim_pod)"
 info "deleting active backing pod ${victim} (pod-loss)"
 k delete pod "${victim}" --wait=false >/dev/null 2>&1 || true
 # It recovers when Ready again on a DIFFERENT pod than the deleted one.
-if wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${CLAIM} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}')\" = True ] && [ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${CLAIM} -o jsonpath='{.status.sandboxID}')\" != \"${victim}\" ]"; then
+if wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandbox ${CLAIM} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}')\" = True ] && [ \"\$(kubectl -n ${NAMESPACE} get sandbox ${CLAIM} -o jsonpath='{.status.sandboxID}')\" != \"${victim}\" ]"; then
   pass "claim recovered from pod-loss onto a new pod $(claim_pod) (was ${victim})"
 else
   fail "claim did not recover from pod-loss within ${READY_TIMEOUT}s"; diagnostics; exit 1
@@ -147,7 +148,7 @@ else
   for p in $(k get pods -l "mitos.run/pool=${POOL},mitos.run/husk=true" -o wide --no-headers 2>/dev/null | awk -v n="$cn" '$7==n{print $1}'); do
     k delete pod "$p" --wait=false >/dev/null 2>&1 || true
   done
-  if wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${CLAIM} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}')\" = True ] && [ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${CLAIM} -o jsonpath='{.status.node}')\" != \"${cn}\" ]"; then
+  if wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandbox ${CLAIM} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}')\" = True ] && [ \"\$(kubectl -n ${NAMESPACE} get sandbox ${CLAIM} -o jsonpath='{.status.node}')\" != \"${cn}\" ]"; then
     pass "cross-node failover: claim recovered on $(claim_node) (was ${cn})"
   else
     fail "claim did not fail over off the cordoned node within ${READY_TIMEOUT}s"; diagnostics
@@ -171,10 +172,13 @@ else
   info "launching a 3-claim storm, then SIGKILLing the controller + forkd mid-activation"
   for i in 1 2 3; do
     k apply -f - >/dev/null 2>&1 <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata: {name: ${storm}-${i}, labels: {mitos.run/e2e-run: "${RUN_ID}", mitos.run/chaos-storm: "${RUN_ID}"}}
-spec: {poolRef: {name: ${POOL}}}
+spec:
+  source:
+    poolRef:
+      name: ${POOL}
 EOF
   done
   # Immediate SIGKILL (no SIGTERM grace) of the controller (Deployment recreates)
@@ -185,7 +189,7 @@ EOF
 
   storm_ok=yes
   for i in 1 2 3; do
-    if ! wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandboxclaim ${storm}-${i} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null)\" = True ]"; then
+    if ! wait_until "$READY_TIMEOUT" sh -c "[ \"\$(kubectl -n ${NAMESPACE} get sandbox ${storm}-${i} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null)\" = True ]"; then
       storm_ok=""; info "storm claim ${storm}-${i} did not reach Ready"
     fi
   done
@@ -215,7 +219,7 @@ EOF
   # that none regressed into a stuck Pending/Restoring.
   stuck=0
   for i in 1 2 3; do
-    ph="$(k get sandboxclaim "${storm}-${i}" -o jsonpath='{.status.phase}' 2>/dev/null)"
+    ph="$(k get sandbox "${storm}-${i}" -o jsonpath='{.status.phase}' 2>/dev/null)"
     case "$ph" in
       Ready|Terminated|Failed) ;;
       *) stuck=$((stuck + 1)); info "storm claim ${storm}-${i} is in non-terminal phase '${ph}'" ;;
@@ -233,7 +237,7 @@ EOF
   # the husk pods that backed the storm claims are gone: no VM is stranded with no
   # backing object. The pre-existing claim's pod is excluded by name.
   preexisting_pod="$(claim_pod)"
-  for i in 1 2 3; do k delete sandboxclaim "${storm}-${i}" --ignore-not-found --wait=false >/dev/null 2>&1 || true; done
+  for i in 1 2 3; do k delete sandbox "${storm}-${i}" --ignore-not-found --wait=false >/dev/null 2>&1 || true; done
   if wait_until "$READY_TIMEOUT" sh -c "
     leftover=\$(kubectl -n ${NAMESPACE} get pods -l 'mitos.run/pool=${POOL},mitos.run/husk=true,mitos.run/claim' -o jsonpath='{range .items[*]}{.metadata.name}{\"\n\"}{end}' 2>/dev/null | grep -v '^${preexisting_pod}\$' | grep -c . || true)
     [ \"\${leftover:-0}\" -eq 0 ]

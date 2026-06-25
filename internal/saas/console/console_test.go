@@ -14,6 +14,78 @@ import (
 	"mitos.run/mitos/internal/usage"
 )
 
+// roleFixture builds a minimal console wired with an AccountService whose store
+// is also accessible for seeding multi-member orgs. It is used by the
+// role-change tests, which need an owner + a non-owner in the same org.
+type roleFixture struct {
+	con        *Console
+	accounts   *saas.AccountService
+	store      *saas.MemStore
+	ownerAcct  string
+	memberAcct string
+	targetAcct string
+	orgID      string
+}
+
+func newRoleFixture(t *testing.T) *roleFixture {
+	t.Helper()
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	ctx := context.Background()
+
+	// owner is Alice, who owns the org.
+	owner, org, err := accounts.SignUp(ctx, "role-alice@example.com")
+	if err != nil {
+		t.Fatalf("SignUp owner: %v", err)
+	}
+
+	// carol signs up into her personal org, then is seeded into alice's org as a
+	// member (no AddMember helper exists yet; PutMembership is the seam).
+	carol, _, err := accounts.SignUp(ctx, "role-carol@example.com")
+	if err != nil {
+		t.Fatalf("SignUp carol: %v", err)
+	}
+	if err := store.PutMembership(ctx, saas.Membership{
+		AccountID: carol.ID,
+		OrgID:     org.ID,
+		Role:      saas.RoleMember,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed carol membership: %v", err)
+	}
+
+	// dave signs up and is seeded as a viewer into alice's org; dave will be
+	// used as an actor who lacks PermManageMembers.
+	dave, _, err := accounts.SignUp(ctx, "role-dave@example.com")
+	if err != nil {
+		t.Fatalf("SignUp dave: %v", err)
+	}
+	if err := store.PutMembership(ctx, saas.Membership{
+		AccountID: dave.ID,
+		OrgID:     org.ID,
+		Role:      saas.RoleViewer,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed dave membership: %v", err)
+	}
+
+	con := New(Deps{
+		Accounts: accounts,
+		Audit:    NewMemAuditLog(),
+		Now:      time.Now,
+	})
+	return &roleFixture{
+		con:        con,
+		accounts:   accounts,
+		store:      store,
+		ownerAcct:  owner.ID,
+		memberAcct: dave.ID,
+		targetAcct: carol.ID,
+		orgID:      org.ID,
+	}
+}
+
 // fixture is two orgs (alice and bob) wired through the console BFF, with each
 // service seeded with one org's data, so every test can assert that a request
 // authenticated as alice sees ONLY alice's data and never bob's.
@@ -422,7 +494,18 @@ func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
 		{"DELETE", "/console/sandboxes/x"},
 		{"GET", "/console/members"},
 		{"GET", "/console/audit"},
+		{"GET", "/console/audit/export"},
+		{"GET", "/console/audit/retention"},
+		{"PUT", "/console/audit/retention"},
 		{"GET", "/console/templates"},
+		{"GET", "/console/projects"},
+		{"POST", "/console/projects"},
+		{"POST", "/console/members/someacct/role"},
+		{"GET", "/console/account"},
+		{"PATCH", "/console/account"},
+		{"GET", "/console/account/sessions"},
+		{"DELETE", "/console/account/sessions/x"},
+		{"DELETE", "/console/account/sessions"},
 	}
 	for _, ep := range endpoints {
 		// No WithCaller: the request carries no org context.
@@ -432,5 +515,45 @@ func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s without org context = %d, want 401", ep.method, ep.target, w.Code)
 		}
+	}
+}
+
+// --- Role change ---
+
+func TestSetMemberRoleAuthorized(t *testing.T) {
+	rf := newRoleFixture(t)
+	body := `{"role":"viewer"}`
+	r := httptest.NewRequest("POST", "/console/members/"+rf.targetAcct+"/role", strings.NewReader(body))
+	r = r.WithContext(WithCaller(r.Context(), rf.ownerAcct, rf.orgID))
+	w := httptest.NewRecorder()
+	rf.con.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized role change status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSetMemberRoleForbidden(t *testing.T) {
+	rf := newRoleFixture(t)
+	body := `{"role":"admin"}`
+	// dave is a viewer; viewers cannot manage members.
+	r := httptest.NewRequest("POST", "/console/members/"+rf.targetAcct+"/role", strings.NewReader(body))
+	r = r.WithContext(WithCaller(r.Context(), rf.memberAcct, rf.orgID))
+	w := httptest.NewRecorder()
+	rf.con.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("forbidden role change status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSetMemberRoleTargetNotFound(t *testing.T) {
+	rf := newRoleFixture(t)
+	body := `{"role":"viewer"}`
+	// "nobody" is not a member of the org.
+	r := httptest.NewRequest("POST", "/console/members/nobody/role", strings.NewReader(body))
+	r = r.WithContext(WithCaller(r.Context(), rf.ownerAcct, rf.orgID))
+	w := httptest.NewRecorder()
+	rf.con.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("not-found role change status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
 }

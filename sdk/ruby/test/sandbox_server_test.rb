@@ -3,6 +3,7 @@
 require "minitest/autorun"
 require "webrick"
 require "json"
+require "base64"
 require "socket"
 require "stringio"
 
@@ -129,22 +130,59 @@ class StubServer
       end
     end
 
-    mount_any("/v1/exec") do |req, res|
-      body = record(req)
-      if @sandbox_ids.include?(body["sandbox"])
-        json(res, { "exit_code" => 0, "stdout" => "2\n", "stderr" => "", "exec_time_ms" => 5 })
+    # The Connect ExecStream RPC. The request is ONE enveloped frame whose JSON
+    # payload is the proto-JSON ExecStreamRequest ({command, timeoutSeconds?}).
+    # The id rides on the X-Sandbox-Id header, not the body. A known sandbox gets
+    # a stdout data frame, an exit data frame, then a clean end-stream frame; an
+    # unknown sandbox gets an end-stream frame carrying a Connect error object.
+    mount_any("/sandbox.v1.Sandbox/ExecStream") do |req, res|
+      record_connect(req)
+      sandbox_id = req["X-Sandbox-Id"]
+      res.status = 200
+      res["Content-Type"] = "application/connect+json"
+      if @sandbox_ids.include?(sandbox_id)
+        out = +""
+        out << connect_frame({ "stdout" => Base64.strict_encode64("2\n") })
+        out << connect_frame({ "exit" => { "exitCode" => 0, "execTimeMs" => 5 } })
+        out << connect_frame({}, end_stream: true)
+        res.body = out
       else
-        json(res, {
-               "error" => {
-                 "code" => "not_found",
-                 "message" => "sandbox not found",
-                 "cause" => "no sandbox registered",
-                 "remediation" => "Confirm the sandbox id exists and is Ready before calling."
-               }
-             }, 404)
+        res.body = connect_frame(
+          {
+            "error" => {
+              "code" => "not_found",
+              "message" => "sandbox not found"
+            }
+          },
+          end_stream: true
+        )
       end
     end
 
+  end
+
+  # connect_frame wraps a proto-JSON message in the Connect 5-byte envelope
+  # (1 flag byte + 4-byte big-endian length + JSON payload). end_stream sets the
+  # 0x02 flag on the terminal frame.
+  def connect_frame(message, end_stream: false)
+    payload = JSON.generate(message).b
+    flag = end_stream ? 0x02 : 0x00
+    [flag].pack("C") + [payload.bytesize].pack("N") + payload
+  end
+
+  # record_connect records an ExecStream call: it unwraps the single request
+  # frame to capture the proto-JSON ExecStreamRequest as the body, and records
+  # the headers (so tests can assert X-Sandbox-Id and Authorization).
+  def record_connect(req)
+    raw = (req.body || "").b
+    body = nil
+    if raw.bytesize >= 5
+      length = raw.byteslice(1, 4).unpack1("N")
+      body = JSON.parse(raw.byteslice(5, length)) if raw.bytesize >= 5 + length
+    end
+    headers = {}
+    req.each { |k, v| headers[k.downcase] = v }
+    @recorded << Recorded.new(method: req.request_method, path: req.path, body: body, headers: headers)
   end
 end
 
@@ -214,11 +252,30 @@ class SandboxServerTest < Minitest::Test
     result = sandbox.exec("print(1 + 1)")
     assert_equal 0, result.exit_code
     assert_equal "2\n", result.stdout
+    assert_equal 5, result.exec_time_ms
     assert result.success?
 
-    call = @stub.recorded.find { |r| r.path == "/v1/exec" }
-    assert_equal "sbx-exec", call.body["sandbox"]
+    call = @stub.recorded.find { |r| r.path == "/sandbox.v1.Sandbox/ExecStream" }
+    refute_nil call
+    # The id rides on the X-Sandbox-Id header, the command on the proto-JSON body.
+    assert_equal "sbx-exec", call.headers["x-sandbox-id"]
     assert_equal "print(1 + 1)", call.body["command"]
+    assert_equal 30, call.body["timeoutSeconds"]
+  end
+
+  def test_exec_passes_explicit_timeout_seconds
+    sandbox = server.fork("python", id: "sbx-timeout")
+    sandbox.exec("sleep 1", timeout: 7)
+    call = @stub.recorded.find { |r| r.path == "/sandbox.v1.Sandbox/ExecStream" }
+    assert_equal 7, call.body["timeoutSeconds"]
+  end
+
+  def test_exec_sends_bearer_header_when_api_key_present
+    keyed = server(api_key: "sk-exec-secret")
+    sandbox = keyed.fork("python", id: "sbx-auth")
+    sandbox.exec("echo hi")
+    call = @stub.recorded.find { |r| r.path == "/sandbox.v1.Sandbox/ExecStream" }
+    assert_equal "Bearer sk-exec-secret", call.headers["authorization"]
   end
 
   def test_exec_on_unknown_sandbox_raises_typed_error
@@ -280,14 +337,17 @@ class SandboxServerTest < Minitest::Test
     end
   end
 
-  def test_non_2xx_envelope_raises_mitos_error_with_parsed_code
-    # Forking an unknown template id path is not modeled by the stub; instead
-    # drive a 404 through exec on a never-forked sandbox via a hand-built handle.
+  def test_error_end_stream_frame_raises_typed_mitos_error
+    # An unknown sandbox makes the stub emit an end-stream frame carrying a
+    # Connect {"error":{code,message}} object; the SDK maps it to a typed error.
     sandbox = Mitos::Sandbox.new(id: "never-forked", endpoint: @stub.base_url, server: server)
     err = assert_raises(Mitos::MitosError) { sandbox.exec("echo hi") }
     assert_equal "not_found", err.code
     assert_equal 404, err.status
-    assert_match(/Ready/, err.remediation)
+    assert_match(/sandbox\.v1\.Sandbox/, err.remediation)
+    # The token is never echoed: there is no token here, but the cause carries
+    # only the server message, not any secret.
+    assert_equal "sandbox not found", err.cause_detail
   end
 
   def test_bearer_header_sent_when_api_key_present

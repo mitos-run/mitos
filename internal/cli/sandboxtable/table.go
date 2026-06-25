@@ -1,7 +1,7 @@
-// Package sandboxtable renders SandboxClaim and SandboxFork lists as aligned
+// Package sandboxtable renders Sandbox and SandboxPool lists as aligned
 // kubectl-style tables. The formatting functions are pure (no cluster access),
-// so they carry the kubectl-sandbox plugin's test coverage; the live listing in
-// cmd/kubectl-sandbox is a thin wrapper around them.
+// so they carry the kubectl-mitos plugin's test coverage; the live listing in
+// cmd/kubectl-mitos is a thin wrapper around them.
 package sandboxtable
 
 import (
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // dash is the placeholder for an empty cell (missing node, endpoint, or source).
@@ -75,50 +75,69 @@ func renderTable(header []string, rows [][]string) string {
 	return b.String()
 }
 
-// FormatClaims renders SandboxClaims as a table with columns NAME, POOL, PHASE,
+// sandboxPoolName returns the pool name for a Sandbox: the PoolRef name when
+// the source is poolRef, otherwise a dash. Forks (source.fromSandbox) have no
+// pool reference.
+func sandboxPoolName(s *v1.Sandbox) string {
+	if s.Spec.Source.PoolRef != nil {
+		return s.Spec.Source.PoolRef.Name
+	}
+	return dash
+}
+
+// FormatSandboxes renders Sandboxes as a table with columns NAME, POOL, PHASE,
 // NODE, ENDPOINT, AGE. now anchors the age column. An empty list returns a
 // "No sandboxes found" message.
-func FormatClaims(claims []v1alpha1.SandboxClaim, now time.Time) string {
-	if len(claims) == 0 {
+func FormatSandboxes(sandboxes []v1.Sandbox, now time.Time) string {
+	if len(sandboxes) == 0 {
 		return "No sandboxes found.\n"
 	}
 	header := []string{"NAME", "POOL", "PHASE", "NODE", "ENDPOINT", "AGE"}
-	rows := make([][]string, 0, len(claims))
-	for i := range claims {
-		c := &claims[i]
+	rows := make([][]string, 0, len(sandboxes))
+	for i := range sandboxes {
+		s := &sandboxes[i]
 		rows = append(rows, []string{
-			c.Name,
-			orDash(c.Spec.PoolRef.Name),
-			orDash(string(c.Status.Phase)),
-			orDash(c.Status.Node),
-			orDash(c.Status.Endpoint),
-			formatAge(now.Sub(c.CreationTimestamp.Time)),
+			s.Name,
+			sandboxPoolName(s),
+			orDash(string(s.Status.Phase)),
+			orDash(s.Status.Node),
+			orDash(s.Status.Endpoint),
+			formatAge(now.Sub(s.CreationTimestamp.Time)),
 		})
 	}
 	return renderTable(header, rows)
 }
 
-// FormatForks renders SandboxForks as a table with columns NAME, SOURCE, READY,
-// AGE. READY is "<readyForks>/<totalForks>", falling back to the spec replica
-// count when the status total is unset. An empty list returns a
-// "No forks found" message.
-func FormatForks(forks []v1alpha1.SandboxFork, now time.Time) string {
-	if len(forks) == 0 {
+// sandboxSourceName returns the source sandbox name for a fork Sandbox
+// (source.fromSandbox), or a dash when not set.
+func sandboxSourceName(s *v1.Sandbox) string {
+	if s.Spec.Source.FromSandbox != nil {
+		return s.Spec.Source.FromSandbox.Name
+	}
+	return dash
+}
+
+// FormatForks renders fan-out Sandboxes (source.fromSandbox with replicas > 1)
+// as a table with columns NAME, SOURCE, READY, AGE. READY is
+// "<readyReplicas>/<replicas>", falling back to the spec replica count when the
+// status total is unset. An empty list returns a "No forks found" message.
+func FormatForks(sandboxes []v1.Sandbox, now time.Time) string {
+	if len(sandboxes) == 0 {
 		return "No forks found.\n"
 	}
 	header := []string{"NAME", "SOURCE", "READY", "AGE"}
-	rows := make([][]string, 0, len(forks))
-	for i := range forks {
-		f := &forks[i]
-		total := f.Status.TotalForks
+	rows := make([][]string, 0, len(sandboxes))
+	for i := range sandboxes {
+		s := &sandboxes[i]
+		total := s.Spec.Replicas
 		if total == 0 {
-			total = f.Spec.Replicas
+			total = 1
 		}
 		rows = append(rows, []string{
-			f.Name,
-			orDash(f.Spec.SourceRef.Name),
-			fmt.Sprintf("%d/%d", f.Status.ReadyForks, total),
-			formatAge(now.Sub(f.CreationTimestamp.Time)),
+			s.Name,
+			sandboxSourceName(s),
+			fmt.Sprintf("%d/%d", s.Status.ReadyReplicas, total),
+			formatAge(now.Sub(s.CreationTimestamp.Time)),
 		})
 	}
 	return renderTable(header, rows)

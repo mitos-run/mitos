@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
 )
 
@@ -43,9 +43,9 @@ func newSandbox(name string, annotations map[string]string, replicas *int32) *ag
 	}
 }
 
-func getClaim(t *testing.T, name string) (*runv1alpha1.SandboxClaim, bool) {
+func getClaim(t *testing.T, name string) (*runv1.Sandbox, bool) {
 	t.Helper()
-	var claim runv1alpha1.SandboxClaim
+	var claim runv1.Sandbox
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, &claim)
 	if apierrors.IsNotFound(err) {
 		return nil, false
@@ -75,15 +75,15 @@ func TestFacadeCreatesClaimWithBridgeAnnotation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "facade creates the SandboxClaim", func() bool {
 		c, ok := getClaim(t, "facade-annotated")
 		claim = c
 		return ok
 	})
 
-	if claim.Spec.PoolRef.Name != "my-pool" {
-		t.Fatalf("claim poolRef = %q, want my-pool", claim.Spec.PoolRef.Name)
+	if claim.Spec.Source.PoolRef.Name != "my-pool" {
+		t.Fatalf("claim poolRef = %q, want my-pool", claim.Spec.Source.PoolRef.Name)
 	}
 	if claim.Annotations[facade.PoolAnnotation] != "my-pool" {
 		t.Fatalf("claim bridge annotation = %q, want my-pool", claim.Annotations[facade.PoolAnnotation])
@@ -107,14 +107,14 @@ func TestFacadeUsesDefaultPoolWhenUnannotated(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "facade creates the SandboxClaim with the default pool", func() bool {
 		c, ok := getClaim(t, "facade-default")
 		claim = c
-		return ok && c.Spec.PoolRef.Name == "default-pool"
+		return ok && c.Spec.Source.PoolRef.Name == "default-pool"
 	})
-	if claim.Spec.PoolRef.Name != "default-pool" {
-		t.Fatalf("claim poolRef = %q, want default-pool", claim.Spec.PoolRef.Name)
+	if claim.Spec.Source.PoolRef.Name != "default-pool" {
+		t.Fatalf("claim poolRef = %q, want default-pool", claim.Spec.Source.PoolRef.Name)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
-	var claim *runv1alpha1.SandboxClaim
+	var claim *runv1.Sandbox
 	eventually(t, "facade creates the SandboxClaim", func() bool {
 		c, ok := getClaim(t, "facade-ready")
 		claim = c
@@ -138,7 +138,7 @@ func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
 	// Drive our claim Ready via the status subresource (the test seam: the real
 	// husk activation path sets this phase).
 	statusUpdateWithRetry(t, types.NamespacedName{Name: "facade-ready", Namespace: "default"}, claim, func() {
-		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Phase = runv1.SandboxReady
 		claim.Status.Endpoint = "10.0.0.5:9091"
 	})
 
@@ -193,9 +193,9 @@ func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
 // Sandbox status.
 func driveClaimReady(t *testing.T, name string) {
 	t.Helper()
-	var claim runv1alpha1.SandboxClaim
+	var claim runv1.Sandbox
 	statusUpdateWithRetry(t, types.NamespacedName{Name: name, Namespace: "default"}, &claim, func() {
-		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Phase = runv1.SandboxReady
 		claim.Status.Endpoint = "10.0.0.5:9091"
 	})
 	eventually(t, "facade mirrors Ready + endpoint for "+name, func() bool {
@@ -383,7 +383,7 @@ func TestFacadeDeleteTerminatesClaim(t *testing.T) {
 	_ = k8sClient.Delete(testCtx, claim, &client.DeleteOptions{})
 }
 
-func hasControllerOwner(claim *runv1alpha1.SandboxClaim, sandboxName string) bool {
+func hasControllerOwner(claim *runv1.Sandbox, sandboxName string) bool {
 	for _, o := range claim.OwnerReferences {
 		if o.Kind == "Sandbox" && o.Name == sandboxName && o.Controller != nil && *o.Controller {
 			return true

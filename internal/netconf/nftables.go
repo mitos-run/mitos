@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // HostPort is a destination IP and TCP port from an egress allowlist.
@@ -416,7 +416,7 @@ func RenderSandboxInputChain(tap string, guestIP net.IP, resolverIP net.IP) stri
 		Tap:        tap,
 		GuestIP:    guestIP,
 		ResolverIP: resolverIP,
-		Inbound:    v1alpha1.InboundDeny,
+		Inbound:    v1.InboundDeny,
 	})
 }
 
@@ -434,7 +434,7 @@ func RenderSandboxInputChain(tap string, guestIP net.IP, resolverIP net.IP) stri
 // Because the drop/accept verdict is reached only through the per-tap jump, it
 // applies to this sandbox's packets alone and cannot terminate another
 // sandbox's allowed traffic. The output is deterministic for the same inputs.
-func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy, allow []HostPort, resolverIP net.IP) string {
+func RenderSandboxChain(tap string, guestIP net.IP, policy v1.EgressPolicy, allow []HostPort, resolverIP net.IP) string {
 	return RenderSandboxChainSpec(ChainSpec{
 		Tap:        tap,
 		GuestIP:    guestIP,

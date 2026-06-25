@@ -2,7 +2,7 @@
 
 This document describes the three observability signals the control plane
 exports today (distributed traces, a structured audit log, and Prometheus
-metrics) and the `kubectl sandbox` plugin for operators. Each section marks what
+metrics) and the `kubectl mitos` plugin for operators. Each section marks what
 is PROVEN in CI versus what remains OPEN.
 
 The governing rule is the secret-safety rule from CLAUDE.md: no signal ever
@@ -23,7 +23,7 @@ controller.reconcileClaim         (controller)
       engine.fork                  (forkd, KVM snapshot restore)
 ```
 
-- `controller.reconcileClaim` opens when the SandboxClaim reconciler runs.
+- `controller.reconcileClaim` opens when the Sandbox reconciler runs.
   Attributes: `claim.name`, `claim.namespace`, and `pool` (the pool the claim
   resolves to).
 - `controller.forkOnNode` covers node selection plus the gRPC call to the chosen
@@ -112,11 +112,11 @@ field carries a secret value, env value, file content, or token.
 
 - The guest-side first-exec and guest-ready spans (the in-VM telemetry bridge
   over vsock: cpu steal, balloon pressure, in-guest process table) are the
-  bare-metal tail and are not yet wired; see issue #29.
+  bare-metal tail and are not yet wired.
 - A single trace id stamped across Hubble network flows needs the Cilium/Hubble
   integration.
 - Grafana dashboards and PrometheusRule alerts that pivot on the trace id are a
-  1.0 maturity item (#29).
+  1.0 maturity item.
 
 ## Audit log
 
@@ -236,7 +236,7 @@ pending-requeue, orphan-sweep, claim-error, and pool-reconcile paths).
   the pull site, and alerted on (`SnapshotDistributionLagHigh`). Its VALUE is
   populated only on the multi-node distribution path; a single-node cluster
   leaves the series empty by design (#3).
-- OpenCost and Hubble layers ride on husk pods (#18); the per-sandbox resolution
+- OpenCost and Hubble layers ride on husk pods; the per-sandbox resolution
   and reconcile logic is implemented and unit-tested (see "Layers 1-3" below),
   with the live integrations cluster-gated.
 
@@ -244,22 +244,22 @@ The Grafana dashboard, PrometheusRule alerts with runbook URLs, and the
 conditions/reason-code catalogue that ride on these metrics are shipped; see
 "Dashboards, alerts, runbooks" below.
 
-## `kubectl sandbox` plugin
+## `kubectl mitos` plugin
 
-The `kubectl-sandbox` binary is a kubectl plugin that lists mitos.run sandbox
+The `kubectl-mitos` binary is a kubectl plugin that lists mitos.run sandbox
 objects. It resolves the cluster connection from the standard kubeconfig
 resolution (`KUBECONFIG`, `--kubeconfig`, or in-cluster).
 
 ### Subcommands
 
 ```
-kubectl sandbox ls [-n namespace] [-A]          list SandboxClaims
-kubectl sandbox ps [name] [-n namespace] [-A]   list SandboxForks, or one claim's forks
+kubectl mitos ls [-n namespace] [-A]          list Sandboxes
+kubectl mitos ps [name] [-n namespace] [-A]   list fork Sandboxes, or one sandbox's forks
 ```
 
-- `ls` prints SandboxClaims with columns NAME, POOL, PHASE, NODE, ENDPOINT, AGE.
-- `ps` prints SandboxForks with columns NAME, SOURCE, READY, AGE. Given a claim
-  name, it filters to forks whose source is that claim.
+- `ls` prints Sandboxes with columns NAME, POOL, PHASE, NODE, ENDPOINT, AGE.
+- `ps` prints fork Sandboxes with columns NAME, SOURCE, READY, AGE. Given a sandbox
+  name, it filters to forks whose source is that sandbox.
 - `-n` scopes to a namespace (default `default`); `-A` lists all namespaces.
 
 Ages render kubectl-style (`30s`, `2m`, `3h`, `5d`); missing node, endpoint, or
@@ -268,12 +268,12 @@ source cells render as `-`.
 ### Installing it
 
 kubectl discovers plugins named `kubectl-<name>` on PATH. Build the binary and
-put it on PATH as `kubectl-sandbox`:
+put it on PATH as `kubectl-mitos`:
 
 ```
-go build -o kubectl-sandbox ./cmd/kubectl-sandbox/
-mv kubectl-sandbox /usr/local/bin/        # any directory on PATH
-kubectl sandbox ls
+go build -o kubectl-mitos ./cmd/kubectl-mitos/
+mv kubectl-mitos /usr/local/bin/        # any directory on PATH
+kubectl mitos ls
 ```
 
 ### PROVEN
@@ -284,7 +284,7 @@ strings, empty-list messages, and missing-cell dashes
 
 ### OPEN
 
-`kubectl sandbox top/tree/exec/logs` are documented follow-ups (#29); invoking
+`kubectl mitos top/tree/exec/logs` are documented follow-ups; invoking
 them prints a "not yet implemented" notice.
 
 ## Dashboards, alerts, runbooks
@@ -309,7 +309,7 @@ kubectl apply -k deploy/monitoring/
   disk, claims pending, claim error rate by pool/reason, pool ready snapshots,
   orphan sweeps), wrapped in a ConfigMap.
 - `docs/runbooks/*.md`: one runbook per alert (signal, likely causes, diagnosis
-  with `kubectl sandbox ls/ps/top` and the metrics to check, remediation,
+  with `kubectl mitos ls/ps/top` and the metrics to check, remediation,
   escalation).
 - `docs/conditions.md`: the normative reason-code catalogue the runbooks cite.
 
@@ -346,7 +346,7 @@ busy or virtualized node does not page on the target itself.
 
 - Per-cluster threshold tuning is left to the operator (the runbooks say to tune).
 - Hubble flow panels and OpenCost cost-attribution dashboards need the live
-  Cilium/OpenCost integrations (#18); the resolution and reconcile logic is
+  Cilium/OpenCost integrations; the resolution and reconcile logic is
   implemented and unit-tested (see "Layers 1-3" below).
 
 The dashboard and the PrometheusRule alerts are packaged BOTH as the
@@ -355,7 +355,7 @@ The dashboard and the PrometheusRule alerts are packaged BOTH as the
 `SnapshotDistributionLagHigh` alert ships in both layers; its metric is
 populated only on the multi-node distribution path.
 
-## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge (#164)
+## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge
 
 The observability stack is structured in layers. Layers 1 and 2 attribute
 network flows and cost to a sandbox; Layer 3 reaches inside the guest. The
@@ -365,7 +365,7 @@ unit-tested without a cluster or KVM; the LIVE integrations are gated as noted.
 ### Layer 1: Cilium Hubble flow logs
 
 Hubble identifies an endpoint by its pod namespace, pod name, and pod labels.
-mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
+Mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
 `mitos.run/pool` labels, so `internal/observability.ResolveSandbox` maps a Hubble
 flow endpoint onto the claim it belongs to, and `ClassifyEgress` turns a flow
 into a per-sandbox egress event with a `Denied` flag (a `DROPPED` verdict is a
@@ -380,16 +380,16 @@ itself is unit-tested (`internal/observability/hubble_test.go`).
 
 ### Layer 2: OpenCost cost attribution
 
-OpenCost reports allocation cost per namespace. mitos meters each claim's
+OpenCost reports allocation cost per namespace. Mitos meters each claim's
 resource-seconds (cpu-core-seconds, memory-GB-seconds). `ReconcileNamespaceCost`
 prices the metered resource-seconds at the cluster rates and compares the sum
 against the OpenCost-reported namespace spend, flagging relative drift beyond a
-tolerance. This checks billing self-consistency: what mitos metered, priced at
+tolerance. This checks billing self-consistency: what Mitos metered, priced at
 cluster rates, should match what OpenCost attributes to the namespace.
 
 Enabling it (cluster-gated): install OpenCost, read the cluster pricing rates and
 the per-namespace allocation from its API, and feed the namespace spend plus the
-per-claim resource-seconds (from the mitos metering pipeline) into
+per-claim resource-seconds (from the Mitos metering pipeline) into
 `ReconcileNamespaceCost`. The namespace-spend-reconciles-within-tolerance
 acceptance test needs a live OpenCost cluster and is gated; the pricing and
 tolerance arithmetic is unit-tested (`internal/observability/opencost_test.go`).
@@ -401,9 +401,9 @@ The guest agent samples CPU steal (`/proc/stat` steal field), memory vs balloon
 reports them over the existing vsock protocol on a `vitals` request. forkd
 consumes the snapshot, labels it with the sandbox's claim/pool/workspace/namespace,
 and serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
-exec). `kubectl sandbox ps <name> --processes` consumes the REAL in-guest process
+exec). `kubectl mitos ps <name> --processes` consumes the REAL in-guest process
 table; when the guest is unreachable (claim not running, no KVM behind it) it
-falls back to the SandboxFork object listing, so it never renders a fabricated
+falls back to the fork Sandbox listing, so it never renders a fabricated
 table.
 
 The labeling is end to end. The controller knows the claim, its pool, its bound
@@ -424,8 +424,8 @@ claim-to-Fork-to-vitals label plumbing, and the `ps` consumer are unit-tested on
 darwin against fixtures (`internal/guestvitals`, `internal/vsock`,
 `internal/daemon/vitals_api_test.go`,
 `internal/controller/forkd_client_test.go`,
-`cmd/kubectl-sandbox/ps_guest_test.go`).
+`cmd/kubectl-mitos/ps_guest_test.go`).
 
 GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest
-collector reads real `/proc` and is exercised by a linux-tagged fixture test
-(`guest/agent/vitals_test.go`) so the next KVM run drives it end to end.
+collector reads real `/proc` and is exercised by the fixture tests in
+`guest/agent-rs/src/service/vitals.rs` so the next KVM run drives it end to end.

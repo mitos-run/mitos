@@ -29,8 +29,8 @@ baseline, not from the bare-metal target.
 
 ## Diagnosis
 
-- `kubectl sandbox top` for forkd node CPU / memory / IO pressure.
-- `kubectl sandbox ps` to see fork volume per node (is one node hot?).
+- `kubectl mitos top` for forkd node CPU / memory / IO pressure.
+- `kubectl mitos ps` to see fork volume per node (is one node hot?).
 - Metrics: `mitos_fork_duration_seconds_bucket` (the histogram; inspect p50
   vs p99 to see whether it is a tail or a shift), `mitos_active_sandboxes`
   (load correlation), `mitos_memory_shared_bytes` /

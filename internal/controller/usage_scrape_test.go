@@ -1,0 +1,114 @@
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+// TestRegistryNodeListerExposesHTTPEndpoints asserts the NodeLister adapter yields
+// each registered node's name and HTTP endpoint (the forkd /v1/metering target),
+// and skips a node with no HTTP endpoint. It exposes only the name and HTTP
+// endpoint, never the gRPC/CAS endpoints or capacity, so the usage package sees
+// the minimal surface and there is no import cycle.
+func TestRegistryNodeListerExposesHTTPEndpoints(t *testing.T) {
+	reg := NewNodeRegistry()
+	reg.Register(&NodeInfo{Name: "n1", Endpoint: "10.0.0.1:9090", HTTPEndpoint: "10.0.0.1:9091", LastHeartbeat: time.Now()})
+	reg.Register(&NodeInfo{Name: "n2", Endpoint: "10.0.0.2:9090", HTTPEndpoint: "10.0.0.2:9091", LastHeartbeat: time.Now()})
+	// A node with no HTTP endpoint must be skipped (nothing to scrape).
+	reg.Register(&NodeInfo{Name: "n3", Endpoint: "10.0.0.3:9090", LastHeartbeat: time.Now()})
+
+	lister := RegistryNodeLister{Registry: reg}
+	got := lister.ListNodeEndpoints()
+
+	byName := map[string]string{}
+	for _, e := range got {
+		byName[e.Name] = e.HTTPEndpoint
+	}
+	if len(byName) != 2 {
+		t.Fatalf("want 2 endpoints (n3 has no HTTP endpoint), got %d: %v", len(byName), byName)
+	}
+	if byName["n1"] != "10.0.0.1:9091" {
+		t.Errorf("n1 endpoint = %q, want 10.0.0.1:9091", byName["n1"])
+	}
+	if byName["n2"] != "10.0.0.2:9091" {
+		t.Errorf("n2 endpoint = %q, want 10.0.0.2:9091", byName["n2"])
+	}
+	if _, ok := byName["n3"]; ok {
+		t.Errorf("n3 (no HTTP endpoint) must be skipped, got %q", byName["n3"])
+	}
+}
+
+// listCountingClient wraps a client.Client and counts List calls so a test can
+// prove the husk pods are listed ONCE per cycle, not once per sandbox.
+type listCountingClient struct {
+	client.Client
+	lists int
+}
+
+func (c *listCountingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	c.lists++
+	return c.Client.List(ctx, list, opts...)
+}
+
+// huskPod builds a husk pod object with the given name, org label, and namespace.
+func huskPod(name, org, ns string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    map[string]string{huskLabel: "true", "mitos.run/org": org},
+		},
+	}
+}
+
+// TestPodLabelLookupListsOncePerCycle is the MINOR-2 fix proof: Refresh lists the
+// husk pods exactly ONCE and every LabelsForSandbox resolves from the cached
+// name -> labels snapshot, instead of a cluster-wide List per sandbox (the O(n^2)
+// blow-up at fleet scale). Correctness is preserved: the trusted org label resolves
+// for each sandbox, and an unknown sandbox is unattributed.
+func TestPodLabelLookupListsOncePerCycle(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	base := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			huskPod("sb-acme", "acme", "mitos-org-acme"),
+			huskPod("sb-globex", "globex", "mitos-org-globex"),
+		).
+		Build()
+	cc := &listCountingClient{Client: base}
+	lookup := &PodLabelLookup{Client: cc}
+
+	// One cycle: refresh once, then resolve every sandbox from the snapshot.
+	lookup.Refresh()
+	for _, sb := range []string{"sb-acme", "sb-globex", "sb-acme", "sb-globex", "sb-unknown"} {
+		ls, ok := lookup.LabelsForSandbox(sb)
+		switch sb {
+		case "sb-acme":
+			if !ok || ls["mitos.run/org"] != "acme" {
+				t.Errorf("LabelsForSandbox(%s) = (%v, %t), want acme", sb, ls, ok)
+			}
+		case "sb-globex":
+			if !ok || ls["mitos.run/org"] != "globex" {
+				t.Errorf("LabelsForSandbox(%s) = (%v, %t), want globex", sb, ls, ok)
+			}
+		case "sb-unknown":
+			if ok {
+				t.Errorf("LabelsForSandbox(%s) should be absent, got %v", sb, ls)
+			}
+		}
+	}
+
+	if cc.lists != 1 {
+		t.Fatalf("husk pods listed %d times for one cycle, want exactly 1 (the O(n^2) per-sandbox list is the bug)", cc.lists)
+	}
+}

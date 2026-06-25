@@ -153,7 +153,7 @@ describe("assertAdapterInstalls (per-adapter install assertion)", () => {
   });
 });
 
-describe("leaseToClaim (full provider-contract -> SandboxClaim)", () => {
+describe("leaseToClaim (full provider-contract -> Sandbox)", () => {
   it("threads pool, lease lifetime, secrets, bridge egress and workspace", () => {
     const claim = leaseToClaim({
       name: "paperclip-run-1",
@@ -168,10 +168,10 @@ describe("leaseToClaim (full provider-contract -> SandboxClaim)", () => {
       workspace: "ws-1",
     });
 
-    expect(claim.apiVersion).toBe("mitos.run/v1alpha1");
-    expect(claim.kind).toBe("SandboxClaim");
+    expect(claim.apiVersion).toBe("mitos.run/v1");
+    expect(claim.kind).toBe("Sandbox");
     expect(claim.metadata).toEqual({ name: "paperclip-run-1", namespace: "agents" });
-    expect(claim.spec.poolRef).toEqual({ name: "claude-pool" });
+    expect(claim.spec.source.poolRef).toEqual({ name: "claude-pool" });
     expect(claim.spec.env).toEqual([{ name: "RUN_ID", value: "abc" }]);
     expect(claim.spec.secrets).toEqual([
       {
@@ -180,9 +180,9 @@ describe("leaseToClaim (full provider-contract -> SandboxClaim)", () => {
         envVar: "GIT_TOKEN",
       },
     ]);
-    expect(claim.spec.timeout).toBe("30m");
-    expect(claim.spec.idleTimeout).toBe("5m");
-    expect(claim.spec.networkPolicy).toEqual({
+    expect(claim.spec.lifetime?.ttl).toBe("30m");
+    expect(claim.spec.lifetime?.idleTimeout).toBe("5m");
+    expect(claim.spec.network).toEqual({
       egress: "deny",
       allow: ["bridge.internal:8443"],
     });
@@ -191,10 +191,9 @@ describe("leaseToClaim (full provider-contract -> SandboxClaim)", () => {
 
   it("omits optional fields when not provided (no limits, no egress widening)", () => {
     const claim = leaseToClaim({ name: "run", pool: "p" });
-    expect(claim.spec).toEqual({ poolRef: { name: "p" } });
-    expect(claim.spec.timeout).toBeUndefined();
-    expect(claim.spec.idleTimeout).toBeUndefined();
-    expect(claim.spec.networkPolicy).toBeUndefined();
+    expect(claim.spec).toEqual({ source: { poolRef: { name: "p" } } });
+    expect(claim.spec.lifetime).toBeUndefined();
+    expect(claim.spec.network).toBeUndefined();
     expect(claim.spec.secrets).toBeUndefined();
   });
 

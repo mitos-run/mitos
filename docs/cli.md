@@ -59,7 +59,7 @@ overrides the file. The token VALUE is never logged or echoed in an error.
 
 ### Preflight: `mitos doctor`
 
-`mitos doctor` runs an install/node preflight (issue #174) and prints a report
+`mitos doctor` runs an install/node preflight and prints a report
 with an actionable, LLM-legible remediation per failing check. It is meant to run
 on a KVM worker node, or as an in-cluster Job, and exits non-zero if any check
 fails so it composes in an install pipeline.
@@ -124,19 +124,20 @@ For every `run` and `sandbox` verb, `mitos` resolves a Kubernetes connection
 from the standard kubeconfig (`KUBECONFIG`, `--kubeconfig`, or in-cluster). It
 then:
 
-- `sandbox create` creates a `SandboxClaim` referencing the pool and waits for it
-  to reach the `Ready` phase, then prints the claim name as the sandbox id.
-- `sandbox exec` / file IO reads the per-sandbox bearer token from the claim's
-  Secret at request time and calls the claim's HTTP sandbox API. The token value
+- `sandbox create` creates a `Sandbox` with `spec.source.poolRef` referencing the
+  pool and waits for it to reach the `Ready` phase, then prints the sandbox name
+  as the sandbox id.
+- `sandbox exec` / file IO reads the per-sandbox bearer token from the sandbox's
+  Secret at request time and calls the sandbox's HTTP API. The token value
   is held in memory only for the request and is never logged; it is redacted from
   any error string.
-- `sandbox fork` creates a `SandboxFork` and waits for the requested number of
-  forks to be `Ready`.
-- `sandbox ls` lists `SandboxClaim`s (a namespace with `-n`, all namespaces with
+- `sandbox fork` creates a `Sandbox` with `spec.source.fromSandbox` and waits for
+  the requested number of forks to be `Ready`.
+- `sandbox ls` lists `Sandbox`es (a namespace with `-n`, all namespaces with
   `-A`, or the backend default otherwise).
-- `sandbox terminate` deletes the `SandboxClaim`, which the controller reaps.
+- `sandbox terminate` deletes the `Sandbox`, which the controller reaps.
 
-This is the same `SandboxClaim` path the controller and forkd implement; the CLI
+This is the same `Sandbox` path the controller and forkd implement; the CLI
 is a thin client over the CRDs plus the token-scoped HTTP exec.
 
 ### Dev mock-mode local cluster
@@ -156,8 +157,8 @@ The dev overlay (`deploy/dev/`) runs:
 - a **forkd** DaemonSet with `--mock` and no TLS flags, using the no-KVM mock fork
   engine. It mounts no `/dev/kvm` and carries no `mitos.run/kvm` nodeSelector,
   so it schedules on the plain kind node.
-- a default `SandboxTemplate` + `SandboxPool` named `dev-default` in the `default`
-  namespace.
+- a default `SandboxPool` named `dev-default` with `spec.template` inline in the
+  `default` namespace.
 
 The controller discovers the mock forkd by its `app.kubernetes.io/component:
 forkd` pod label, builds the `dev-default` pool snapshot over insecure gRPC, and a
@@ -195,7 +196,7 @@ a node with `/dev/kvm` and the production manifests (`deploy/controller/` +
 PROVEN in CI:
 
 - command dispatch for `run` and every `sandbox` verb;
-- the cluster `SandboxClaim` claim path with token-scoped exec;
+- the cluster `Sandbox` claim path with token-scoped exec;
 - `mitos dev up` orchestration (CRDs + mock controller + mock forkd + pool);
 - `sandbox ls` over the control plane;
 - on the dev mock cluster on kind: `sandbox create` reaches `Ready`, `sandbox ls`
@@ -204,33 +205,34 @@ PROVEN in CI:
 The mock-engine exec limitation above is the one gap: real in-VM `exec` is proven
 by the KVM CI of the API, not by the kind dev smoke.
 
-## kubectl-sandbox operator plugin
+## kubectl-mitos operator plugin
 
-`kubectl-sandbox` is a separate kubectl plugin for the OPERATOR persona: a
+`kubectl-mitos` is a separate kubectl plugin for the OPERATOR persona: a
 cluster admin who inspects and operates the sandbox objects already in the
-cluster. Installed as `kubectl-sandbox` on `PATH`, it is invoked as
-`kubectl sandbox <verb>` and reads the cluster connection from the standard
+cluster. Installed as `kubectl-mitos` on `PATH`, it is invoked as
+`kubectl mitos <verb>` and reads the cluster connection from the standard
 kubeconfig resolution.
 
 ```bash
-go build -o /usr/local/bin/kubectl-sandbox ./cmd/kubectl-sandbox/
+go build -o /usr/local/bin/kubectl-mitos ./cmd/kubectl-mitos/
 ```
 
 ```
-kubectl sandbox ls   [-n ns] [-A]            list SandboxClaims
-kubectl sandbox ps   [name] [-n ns] [-A]     list SandboxForks (or one claim's forks)
-kubectl sandbox tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
-kubectl sandbox top  [-n ns] [-A]            per-sandbox CoW-aware metering
-kubectl sandbox logs <sandbox> [-n ns]       husk stub pod console for a claim
-kubectl sandbox exec <sandbox> [-n ns] -- cmd run a command in a sandbox
+kubectl mitos ls   [-n ns] [-A]            list Sandboxes
+kubectl mitos ps   [name] [-n ns] [-A]     list fork Sandboxes (or one sandbox's forks)
+kubectl mitos tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
+kubectl mitos top  [-n ns] [-A]            per-sandbox CoW-aware metering
+kubectl mitos logs <sandbox> [-n ns]       husk stub pod console for a claim
+kubectl mitos exec <sandbox> [-n ns] -- cmd run a command in a sandbox
 ```
 
 ### tree
 
-`tree` walks the lineage DAG: each `SandboxClaim` is a root, and a `SandboxFork`
-nests under whatever object its `spec.sourceRef` names (a claim OR another fork,
-so a multi-level fork chain nests). Siblings sort by name; an orphan fork whose
-source is out of scope is surfaced as its own root rather than dropped.
+`tree` walks the lineage DAG: each `Sandbox` with `spec.source.poolRef` is a root,
+and a `Sandbox` with `spec.source.fromSandbox` nests under whatever sandbox its
+`spec.source.fromSandbox` names (a pool-ref sandbox OR another fork sandbox,
+so a multi-level fork chain nests). Siblings sort by name; an orphan fork sandbox
+whose source is out of scope is surfaced as its own root rather than dropped.
 `--pool <name>` scopes to one pool via a transitive walk over the source refs.
 
 ### top
@@ -257,8 +259,7 @@ fabricated value.
 pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
 plane (kind) there is no husk pod or no live guest, so the stub console is
 reported absent and the guest console states it needs a running sandbox: the
-guest serial/vsock console streams only from a live VMM (the
-[#18](https://github.com/mitos-run/mitos/issues/18) boundary), not from this
+guest serial/vsock console streams only from a live VMM, not from this
 read-only operator path.
 
 ### exec
@@ -274,16 +275,12 @@ shell pipelines.
 
 On kind the mock engine has no guest VM, so `exec`/`top`/`logs` of a REAL running
 sandbox are the KVM/bare-metal tail; the kind-e2e smoke proves `ls`/`ps`/`tree`
-at the object level. `cp` and `port-forward` for operators remain the documented
-ergonomics longtail.
+at the object level. `cp` and `port-forward` for operators are not yet available.
 
 ## Follow-ups
 
-- workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace
-  ([#21](https://github.com/mitos-run/mitos/issues/21));
+- workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace;
 - `mitos pool create|refresh` beyond what `dev up` needs;
-- streaming exec / PTY (`exec_stream`) pending the Connect protocol
-  ([#23](https://github.com/mitos-run/mitos/issues/23));
-- a `curl | sh` installer and `get.mitos.run` distribution
-  ([#37](https://github.com/mitos-run/mitos/issues/37));
+- streaming exec / PTY (`exec_stream`) pending the Connect protocol;
+- a `curl | sh` installer and `get.mitos.run` distribution;
 - shell completions and a code-interpreter-compatible API shim.

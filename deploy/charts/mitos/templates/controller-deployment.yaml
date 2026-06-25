@@ -44,16 +44,22 @@ spec:
             {{- if .Values.admissionWebhook.enabled }}
             - --enable-principal-webhook
             {{- end }}
+            {{- /* apiV2.poolConversionWebhook is a no-op: mitos.run/v1 is the only served version. */}}
             {{- if .Values.apiV2.poolConversionWebhook.enabled }}
-            # SandboxPool conversion webhook (issue #23, ADR 0007). Served on the
-            # same webhook server as the principal webhook; v1alpha1 stays the
-            # storage version. NOT coupled to --enable-v2-sandbox: serving
-            # v1alpha2 SandboxPool via conversion is independent of the v2
-            # Sandbox reconciler, so enabling the conversion webhook alone never
-            # silently turns on the v2 Sandbox surface.
             - --enable-pool-conversion-webhook
             {{- end }}
             {{- with .Values.controller.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # Run the control plane (PKI bootstrap, forkd discovery) in the
+            # namespace the controller is deployed into, so an install into any
+            # namespace works without crash-looping on a missing "mitos" default.
+            - name: FORKD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:

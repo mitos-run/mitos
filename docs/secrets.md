@@ -1,6 +1,6 @@
 # Secrets management (multi-tenant)
 
-This is the consolidated, operator-facing page for how mitos handles tenant
+This is the consolidated, operator-facing page for how Mitos handles tenant
 secrets, especially in a multi-tenant cluster. It pulls together what was
 scattered across `docs/threat-model.md`, `docs/encryption.md`, and
 `docs/fork-correctness.md`, and is explicit about what is implemented versus
@@ -37,10 +37,10 @@ A tenant declares secrets as references to existing Kubernetes Secrets, not as
 inline values. In the Python SDK, `create(secrets=...)` takes a map of env-var
 name to a `(secret_name, secret_key)` tuple
 (`sdk/python/mitos/client.py:216`, `sdk/python/mitos/client.py:226`), which the
-SDK renders into the `SandboxClaim.spec.secrets` list as `secretRef` entries
+SDK renders into the `Sandbox.spec.secrets` list as `secretRef` entries
 (`sdk/python/mitos/client.py:252-260`). The CRD field is `SecretMount`, carrying
 a `SecretRef` (a `corev1.SecretKeySelector`) and the target `EnvVar`
-(`api/v1alpha1/types.go:731-736`).
+(`api/v1/types.go`).
 
 ### Resolved
 
@@ -74,17 +74,19 @@ wire only in flag-less dev deployments, where forkd warns loudly
 ### Used
 
 Inside the guest, the agent stores the delivered env and secrets in a single
-in-memory map, `configuredEnv`, guarded by a mutex; the values are never logged
-(`guest/agent/main.go:32-44`, `guest/agent/main.go:254-269`). Each `exec` copies
-that map into the child process environment (`guest/agent/main.go:289-294`). The
-map lives in the guest process memory only: it is never persisted to the guest
-filesystem, and specifically never written under `/workspace`
-(`guest/agent/tardir.go:18-24`).
+in-memory map (`ConfiguredEnv`), guarded by an `RwLock`; the values are never
+logged, only key counts (`guest/agent-rs/src/env.rs`). The map is populated by
+the host-trusted Configure RPC (`guest/agent-rs/src/service/control.rs`). Each
+`exec` copies that map into the child process environment
+(`guest/agent-rs/src/service/exec.rs`). The map lives in the guest process
+memory only: it is never persisted to the guest filesystem, and specifically
+never written under `/workspace` (the archive transfer is confined to the
+`/workspace` allowlist, `guest/agent-rs/src/service/archive.rs`).
 
 ### Destroyed
 
 A secret's lifetime is the VM's lifetime. The guest holds it only in process
-memory (`guest/agent/main.go:32-33`), so VM teardown (the sandbox being reaped or
+memory (`guest/agent-rs/src/env.rs`), so VM teardown (the sandbox being reaped or
 its claim TTL expiring) discards it with the VM's memory. The sandbox-API bearer
 token is held in a controller-owned Secret that is owner-referenced to the claim
 or fork, so Kubernetes garbage-collects it when the owner is deleted
@@ -124,13 +126,13 @@ reaching another, with its citation.
 - **Secret-inheritance default-deny gate.** Because a live fork duplicates guest
   memory (and therefore any delivered secret VALUES), a fork of a
   secret-holding source is REJECTED by default with a typed `Rejected`/`SecretInheritanceDenied`
-  condition; proceeding requires `spec.allowSecretInheritance: true`, and the
+  condition; proceeding requires `spec.secretInheritance: inherit`, and the
   opt-in is recorded as an audit condition
   (`internal/controller/sandboxfork_controller.go:151-183`). The CRD field and its
   default-deny semantics are documented on the type
-  (`api/v1alpha1/types.go:801-806`).
+  (`api/v1/types.go`).
 
-- **Workspace credential-path exclusion.** When a bound claim's `/workspace` is
+- **Workspace credential-path exclusion.** When a bound sandbox's `/workspace` is
   persisted into a committed revision, the dehydrate strips conventional
   credential paths so a captured revision never carries credential material:
   `.netrc`, `.git-credentials`, `.ssh`, `.aws`, `.config/gh`, and `.npmrc`
@@ -140,16 +142,17 @@ reaching another, with its citation.
   (`internal/controller/workspace_binding.go:147-151`). The guest tar transfer is
   itself confined to `/workspace` and refuses any path outside it, so the bulk
   transfer can never reach the guest's in-memory secret state
-  (`guest/agent/tardir.go:18-24`, `guest/agent/tardir.go:28-37`).
+  (`guest/agent-rs/src/service/archive.rs`, the workspace allowlist and the
+  `safe_join` traversal barrier).
 
 ## 4. The in-guest self-service socket carries names, never values
 
 The in-VM workload (and the `mitos.guest` SDK) can read its own identity and
 budget from a unix socket advertised via `MITOS_SOCKET`, with no network egress
-(`guest/agent/selfservice.go:13-23`). The handler reads from the same
-`configuredEnv` map that holds the claim-time env and secrets, but it whitelists
-the keys it surfaces: it only returns the non-secret `MITOS_` identity and budget
-keys, never a secret VALUE (`guest/agent/selfservice.go:45-58`). The socket env
+(`internal/guestsock/protocol.go`, `internal/guestsock/server.go`). The handler
+reads identity and budget through an env-lookup seam, but it surfaces only the
+non-secret `MITOS_` identity and budget keys, never a secret VALUE
+(`internal/guestsock/server.go`, the `TypeInfo` handler). The socket env
 variables forkd advertises are a NAME and a path, never a secret value
 (`internal/daemon/server.go:305-312`, `internal/daemon/server.go:323-335`).
 
@@ -211,8 +214,8 @@ Stated honestly so operators do not over-trust the current posture:
   credential (the bearer token) is reissued per fork, but revoke-and-reissue of
   TENANT secret VALUES over vsock (so a fork could safely inherit FRESH secrets
   instead of being rejected) is a documented residual: static Kubernetes Secret
-  values have no upstream to revoke, so this is tracked as issue #7, and
-  capability-token per-fork attenuation lands with the issue #25 runtime wiring
+  values have no upstream to revoke, and
+  capability-token per-fork attenuation lands with the runtime wiring
   (`docs/fork-correctness.md:16`, `docs/fork-correctness.md:270-286`). The
   default-deny gate (section 3) is what closes the hazard today.
 - **In-memory key exposure to a node-root attacker.** While an encrypted
@@ -262,7 +265,7 @@ Stated honestly so operators do not over-trust the current posture:
   `<sandbox>-sandbox-token` Secrets owner-referenced to the claim or fork
   (`docs/encryption.md:135-152`, `internal/controller/token_secret.go:16-18`,
   `internal/controller/token_secret.go:62-79`).
-- **Rotation.** Deleting a `SandboxTemplate` GC's its key Secret, crypto-shredding
+- **Rotation.** Deleting a `SandboxPool` GC's its key Secret, crypto-shredding
   the at-rest key (`docs/encryption.md:198-211`). Per-sandbox tokens rotate with
   the sandbox lifecycle (GC'd with the owner,
   `internal/controller/token_secret.go:62-79`). KEK rotation with DEK re-wrap, and
@@ -273,8 +276,8 @@ Stated honestly so operators do not over-trust the current posture:
   removed and the controller reaches Secrets only in the controller namespace and
   adopted pool namespaces (`docs/threat-model.md` Controller RBAC for Secrets
   row).
-- **Restrict the secret-holding fork path.** Leave `allowSecretInheritance`
-  unset (the default) so forks of secret-holding sandboxes are rejected rather
+- **Restrict the secret-holding fork path.** Leave `spec.secretInheritance` at
+  its `reissue` default so forks of secret-holding sandboxes are rejected rather
   than silently duplicating tenant secrets into a child
   (`internal/controller/sandboxfork_controller.go:151-168`,
-  `api/v1alpha1/types.go:801-806`).
+  `api/v1/types.go`).

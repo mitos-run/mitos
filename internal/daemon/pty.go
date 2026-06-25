@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket"
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // ptySubprotocol is the WebSocket subprotocol the PTY endpoint speaks. Clients
@@ -65,12 +66,13 @@ func (api *SandboxAPI) ptyAuth(w http.ResponseWriter, r *http.Request) (string, 
 	return sandbox, true
 }
 
-// handlePty upgrades to a WebSocket and bridges it to a dedicated vsock PTY
-// stream: client text frames (input/resize) are written to the guest, guest
-// output/exit frames are forwarded to the client. A PTY is a live interactive
-// shell into the VM, so the upgrade is gated by the per-sandbox bearer token
-// (ptyAuth). The endpoint is registered OUTSIDE requireBearer because the
-// upgrade carries no JSON body for that middleware to peek.
+// handlePty upgrades to a WebSocket and bridges it to the guest Exec gRPC PTY
+// stream (ExecOpen with Pty set). Client text frames carry input bytes and
+// resize events (same vsock.PtyFrame JSON wire shape as before); guest stdout
+// chunks and the terminal exit frame are forwarded to the WebSocket. Auth is
+// the per-sandbox bearer token (ptyAuth). The concurrent-stream slot is
+// acquired via the gRPC Exec call BEFORE the WebSocket upgrade so a cap
+// rejection is a clean 429 rather than a post-upgrade close.
 func (api *SandboxAPI) handlePty(w http.ResponseWriter, r *http.Request) {
 	sandbox, ok := api.ptyAuth(w, r)
 	if !ok {
@@ -78,99 +80,143 @@ func (api *SandboxAPI) handlePty(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(sandbox)
 
-	if _, err := api.getAgent(sandbox); err != nil {
+	if err := api.checkSandboxRegistered(sandbox); err != nil {
 		writeErr(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
-	// Per-sandbox concurrent-stream cap (production-blocker #2, cap 3): a PTY
-	// holds a dedicated vsock connection for the session lifetime, so it counts
-	// against the same per-sandbox ceiling as streaming exec and run_code. Check
-	// the cap BEFORE the WebSocket upgrade so a rejection is a clean 429 envelope
-	// rather than a post-upgrade close; existing streams are never touched.
-	release, ok := api.acquireStream(sandbox)
-	if !ok {
-		writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", sandbox)).
-			WithContext(map[string]any{"sandbox": sandbox}))
+	// Parse cols/rows from the query (bounded smallints). Command is
+	// intentionally NOT taken from the client: the guest defaults to /bin/sh.
+	cols := atoiDefault(r.URL.Query().Get("cols"), 80)
+	rows := atoiDefault(r.URL.Query().Get("rows"), 24)
+
+	// Open the guest gRPC PTY Exec stream BEFORE the WebSocket upgrade. This
+	// acquires the per-sandbox concurrent-stream slot (cap 3, production-blocker
+	// #2) inside vsockGuestConn.Exec, so a cap rejection surfaces as a clean 429
+	// envelope rather than a post-upgrade close code. The gRPC context is the
+	// request context here; the WebSocket upgrade hijacks the connection and the
+	// long-lived bridge runs on the handler goroutine after upgrade using the
+	// same context.
+	g := newVsockGuestConn(api, sandbox).(*vsockGuestConn)
+	execOpen := &sandboxv1.ExecOpen{
+		Pty: &sandboxv1.PtyOptions{
+			Size: &sandboxv1.WindowSize{
+				Cols: uint32(cols),
+				Rows: uint32(rows),
+			},
+		},
+	}
+	// ExecPTY acquires the per-sandbox concurrent-stream slot (cap 3) and opens
+	// the gRPC Exec stream WITHOUT closing the send direction, so the bridge can
+	// send stdin and resize frames for the session lifetime.
+	grpcPTY, err := g.ExecPTY(r.Context(), execOpen)
+	if err != nil {
+		// ExecPTY returns a recognisable "concurrent exec-stream limit" message
+		// when the per-sandbox slot cap is full; map that to a clean 429.
+		if strings.Contains(err.Error(), "concurrent exec-stream limit") {
+			writeAPIErr(w, apierr.Get(apierr.CodeTooManyStreams).
+				WithCause(fmt.Sprintf("sandbox %s is at its concurrent-stream limit", sandbox)).
+				WithContext(map[string]any{"sandbox": sandbox}))
+		} else {
+			writeErr(w, fmt.Sprintf("pty backend unavailable: %v", err), http.StatusInternalServerError)
+		}
 		return
 	}
-	defer release()
+	// grpcPTY.Close() releases the stream slot and the gRPC conn; always
+	// called on every exit path below (deferred after WebSocket upgrade).
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	c, wsErr := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols: []string{ptySubprotocol},
 	})
-	if err != nil {
-		return // Accept already wrote the failure status.
+	if wsErr != nil {
+		// websocket.Accept already wrote the failure status; clean up the
+		// gRPC stream (which holds a stream slot) before returning.
+		_ = grpcPTY.Close()
+		return
 	}
 	ctx := r.Context()
 	defer c.Close(websocket.StatusNormalClosure, "")
+	defer grpcPTY.Close()
 
-	sc, err := api.dialStream(sandbox)
-	if err != nil {
-		c.Close(websocket.StatusInternalError, "pty backend unavailable")
-		return
-	}
-	defer sc.Close()
-
-	// Parse the open request from the query (cols/rows). Command is
-	// intentionally NOT taken from the client to avoid letting a client spawn an
-	// arbitrary first process; the guest defaults to /bin/sh. cols/rows are
-	// bounded smallints.
-	openReq := &vsock.PtyRequest{
-		Cols: atoiDefault(r.URL.Query().Get("cols"), 80),
-		Rows: atoiDefault(r.URL.Query().Get("rows"), 24),
-	}
-
-	// Reader pump: WebSocket -> guest. Decodes the client's input/resize frames
-	// and forwards them on the vsock stream via SendInput/Resize.
 	go func() {
 		for {
-			typ, data, err := c.Read(ctx)
-			if err != nil {
-				sc.Close() // dropping the vsock conn makes the guest kill the shell
+			typ, data, rerr := c.Read(ctx)
+			if rerr != nil {
+				// WebSocket closed or context cancelled; cancel the gRPC stream
+				// by closing the gRPC connection so the writer pump below unblocks.
+				grpcPTY.cc.Close()
 				return
 			}
 			if typ != websocket.MessageText {
 				continue
 			}
 			var f vsock.PtyFrame
-			if err := json.Unmarshal(data, &f); err != nil {
+			if jsonErr := json.Unmarshal(data, &f); jsonErr != nil {
 				continue
 			}
 			switch f.Kind {
 			case vsock.PtyInput:
-				_ = sc.SendInput(f.Data)
+				// Forward input bytes as ExecRequest stdin.
+				_ = grpcPTY.stream.Send(&sandboxv1.ExecRequest{
+					Msg: &sandboxv1.ExecRequest_Stdin{Stdin: f.Data},
+				})
 			case vsock.PtyResize:
-				_ = sc.Resize(f.Cols, f.Rows)
+				// Forward resize as ExecRequest resize.
+				_ = grpcPTY.stream.Send(&sandboxv1.ExecRequest{
+					Msg: &sandboxv1.ExecRequest_Resize{
+						Resize: &sandboxv1.WindowSize{
+							Cols: uint32(f.Cols),
+							Rows: uint32(f.Rows),
+						},
+					},
+				})
 			}
 		}
 	}()
 
-	// Writer pump runs on this goroutine: guest output frames -> WebSocket. The
-	// terminal exit frame is forwarded then the loop returns.
-	exit, perr := sc.Pty(ctx, openReq, func(out []byte) error {
-		fb, mErr := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyOutput, Data: out})
-		if mErr != nil {
-			return mErr
+	// Writer pump: guest gRPC output frames -> WebSocket.
+	// Uses grpcExecStream.Recv to get properly mapped frames.
+	for {
+		frame, recvErr := grpcPTY.Recv()
+		if recvErr != nil {
+			if errors.Is(recvErr, context.Canceled) {
+				return
+			}
+			eb, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: fmt.Sprintf("pty stream failed: %v", recvErr)})
+			_ = c.Write(ctx, websocket.MessageText, eb)
+			return
 		}
-		return c.Write(ctx, websocket.MessageText, fb)
-	})
-	if perr != nil && !errors.Is(perr, context.Canceled) {
-		// The stream failed mid-session; emit a terminal exit frame with the
-		// actionable cause (never a secret) and close.
-		eb, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: fmt.Sprintf("pty stream failed: %v", perr)})
-		_ = c.Write(ctx, websocket.MessageText, eb)
-		return
-	}
-	if exit != nil {
-		eb, _ := json.Marshal(*exit)
-		_ = c.Write(ctx, websocket.MessageText, eb)
+		if frame.Done {
+			eb, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: int(frame.ExitCode)})
+			_ = c.Write(ctx, websocket.MessageText, eb)
+			break
+		}
+		// For a PTY exec, guest merges stdout+stderr on the terminal stream;
+		// forward both as output frames.
+		if len(frame.Stdout) > 0 {
+			fb, mErr := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyOutput, Data: frame.Stdout})
+			if mErr != nil {
+				return
+			}
+			if wErr := c.Write(ctx, websocket.MessageText, fb); wErr != nil {
+				return
+			}
+		}
+		if len(frame.Stderr) > 0 {
+			fb, mErr := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyOutput, Data: frame.Stderr})
+			if mErr != nil {
+				return
+			}
+			if wErr := c.Write(ctx, websocket.MessageText, fb); wErr != nil {
+				return
+			}
+		}
 	}
 
 	api.auditor.Record(AuditEvent{
 		SandboxID: sandbox,
 		Op:        "pty",
-		Detail:    fmt.Sprintf("cols=%d rows=%d", openReq.Cols, openReq.Rows),
+		Detail:    fmt.Sprintf("cols=%d rows=%d", cols, rows),
 		OK:        true,
 	})
 }

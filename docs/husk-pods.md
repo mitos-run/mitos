@@ -1,19 +1,20 @@
 # Husk pods
 
-This document covers the husk-pods execution model (issue #18, workstream W1),
+This document covers the husk-pods execution model,
 the load-bearing memory-sharing claim the model rests on, the cgroup v2 memory
 charging behavior that makes that claim hold, the measured CI proof, the honest
 first-faulter accounting nuance, and what this work proves today versus what the
 full epic still needs.
 
-> Status, stated up front: pod-native is now the DEFAULT (issue #18, slice 3).
+> Status, stated up front: pod-native is now the DEFAULT.
 > The controller runs `--enable-husk-pods` by default: each `SandboxPool` builds
 > its template snapshot on the KVM nodes AND maintains a warm pool of
 > pre-scheduled husk pods pinned to the snapshot-holding nodes, and a
-> `SandboxClaim` activates a dormant husk pod in place. Sandboxes ARE pods by
-> default. The build-vs-run split is the key idea: forkd stays the PRIVILEGED
-> snapshot BUILDER (it needs `/dev/kvm` and the jailer to build a template
-> snapshot), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
+> `Sandbox` with `spec.source.poolRef` activates a dormant husk pod in place. Sandboxes ARE pods by
+> default. The build-vs-run split is the key idea: forkd is the snapshot BUILDER
+> (it needs `/dev/kvm` and the jailer to build a template snapshot; non-privileged
+> since #352, an explicit builder capability set, still uid 0 + CAP_SYS_ADMIN,
+> ADR 0008), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
 > from the device plugin, no `privileged: true`, and activates the pre-built
 > snapshot read-only). raw-forkd (fork per claim, no husk pods) is the documented
 > fallback behind `--enable-raw-forkd`; `--mock` implies it (the dev/no-KVM path
@@ -24,7 +25,7 @@ full epic still needs.
 > of their slice; section 6c and the closing "Proven vs remaining" reflect the
 > landed default.
 
-## 1. The husk-pods architecture (issue #18)
+## 1. The husk-pods architecture
 
 Today a sandbox VM is a Firecracker process forkd launches and tracks directly.
 The husk-pods model moves every sandbox VM inside a Kubernetes pod so the VM
@@ -201,7 +202,7 @@ reply. The phase publishes nearest-rank P50/P99 of the stub-measured
 These are SHARED-CI-CLASS numbers: `ubuntu-latest` is a noisy, oversubscribed,
 often nested-virt runner, so the absolute values are reproducible per run but
 are NOT bare-metal figures. The **<= 10ms warm activation figure is the
-bare-metal reference-node TARGET (#18/#15), not a shared-CI claim**; the CI
+bare-metal reference-node TARGET, not a shared-CI claim**; the CI
 phase does not assert it and it must not be quoted as achieved. The honest claim
 this phase supports is narrow: the prepare/activate split works, an in-place
 snapshot load activates a usable VM, and the claim-time cost is the activation
@@ -234,7 +235,7 @@ value is absent from every host-side stub/client log. See
 [docs/fork-correctness.md](fork-correctness.md).
 
 This PR proves the stub CAN apply claim-time config and reseed per activation.
-The remaining #18 work is the controller migration, which includes sourcing the
+The remaining work is the controller migration, which includes sourcing the
 claim-time secrets and env from the controller (today the stub's `--activate`
 client carries them over the local control socket); see "Remaining" below.
 
@@ -254,7 +255,7 @@ smaps-derived split, not raw `memory.current`, is the source of truth for the
 report.
 
 Fair per-tenant memory accounting therefore does NOT use raw `memory.current`.
-It uses the CoW-aware metering (issue #33, the shared-once model): the shared
+It uses the CoW-aware metering (the shared-once model): the shared
 restored page set is counted once and attributed as shared, and each tenant is
 billed its own unique (private-dirty) set plus a share of the common set, rather
 than whichever tenant happened to fault the page first. See
@@ -267,12 +268,13 @@ the CoW-aware metering, not the first-faulter `memory.current`.
 
 ## 5. Device plugin (/dev/kvm without privileged)
 
-A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device
-the way forkd does today (a `hostPath` to `/dev/kvm` plus a permissive
-capability set) is incompatible with the PSA `restricted` profile husk pods
+A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device as
+a `hostPath` to `/dev/kvm` (the way forkd did before #352) plus a permissive
+capability set is incompatible with the PSA `restricted` profile husk pods
 target. The Kubernetes device-plugin mechanism is the restricted-profile path:
 the pod requests `mitos.run/kvm` like any extended resource and the kubelet,
-not the pod spec, injects the device.
+not the pod spec, injects the device. forkd now uses this same device plugin too
+(#352, ADR 0008), so the privileged `/dev/kvm` hostPath is gone fleet-wide.
 
 `cmd/kvm-device-plugin` (implemented in `internal/deviceplugin`) is that plugin.
 It runs as a DaemonSet on every node and implements the v1beta1 `DevicePlugin`
@@ -296,18 +298,19 @@ gRPC service:
   ResourceName), re-registering on failure so a kubelet restart is recovered.
 
 The DaemonSet (`deploy/device-plugin/daemonset.yaml`) needs only minimal
-privileges, NOT forkd's privileged set: it runs as root because the kubelet
-device-plugins dir is root-owned (it must write its socket there), but it is
-unprivileged with all capabilities dropped, `allowPrivilegeEscalation: false`
-and a read-only root filesystem. Its only host access is the kubelet
-device-plugins dir (to serve and register) and a read-only `/dev` mount (to
-`stat /dev/kvm`); it creates no device nodes and starts no VMs. So a husk pod
-requesting `mitos.run/kvm` is PSA-restricted minus exactly the documented
-device-plugin exception, not a privileged escape.
+privileges, even narrower than forkd's builder capability set: it runs as root
+because the kubelet device-plugins dir is root-owned (it must write its socket
+there), but it is unprivileged with all capabilities dropped,
+`allowPrivilegeEscalation: false` and a read-only root filesystem. Its only host
+access is the kubelet device-plugins dir (to serve and register) and a read-only
+`/dev` mount (to `stat /dev/kvm`); it creates no device nodes and starts no VMs.
+So a husk pod requesting `mitos.run/kvm` is PSA-restricted minus exactly the
+documented device-plugin exception, not a privileged escape.
 
-This is the PSA-restricted alternative to forkd's current privileged
-`/dev/kvm` hostPath. It does NOT remove that hostPath: migrating the forkd
-DaemonSet to request the resource instead of mounting the device is a follow-up.
+This is the PSA-restricted device-access path. forkd ALSO uses it since #352
+(ADR 0008): the forkd DaemonSet requests `mitos.run/kvm` instead of mounting a
+privileged `/dev/kvm` hostPath, so the privileged hostPath is removed fleet-wide,
+not only on the husk path.
 
 ### Proven vs remaining for the device plugin
 
@@ -342,8 +345,9 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
 **Open:**
 
 - Running the husk stub INSIDE a pod that requests this resource (the pod spec
-  wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
-  hostPath to request the resource are follow-ups (see section 6).
+  wiring) is a follow-up (see section 6). Migrating the forkd DaemonSet off its
+  privileged `/dev/kvm` hostPath onto this device plugin is DONE (#352, ADR 0008):
+  forkd now requests `mitos.run/kvm` and runs non-privileged.
 
 ## 6. Controller migration: husk pod lifecycle (slice 1)
 
@@ -429,7 +433,7 @@ The default is still raw-forkd (flag off). The pod-native default is slice 3.
 ## 6b. Claim activation (slice 2)
 
 Slice 1 (section 6) builds the warm pool of pre-scheduled DORMANT husk pod
-objects. Slice 2 is the claim side: when a `SandboxClaim` binds to a pool with
+objects. Slice 2 is the claim side: when a `Sandbox` with `spec.source.poolRef` binds to a pool with
 `--enable-husk-pods`, the controller picks a dormant warm husk pod and ACTIVATES
 it in place over the husk pod's mTLS control channel, instead of asking forkd to
 fork a node-local VM. The activated VM runs inside the Kubernetes pod; the
@@ -546,12 +550,14 @@ Exactly one run path is active: `huskPods == !rawForkd`
 
 The two roles are deliberately separated by privilege:
 
-- **forkd is the privileged BUILDER.** Building a template snapshot means
+- **forkd is the BUILDER.** Building a template snapshot means
   booting a VM from the template image, running its init command in the VM, and
   taking a Firecracker snapshot. That needs `/dev/kvm`, the jailer (per-VM
-  uid/chroot/cgroup), and write access to the node data dir. forkd stays a root
-  DaemonSet with an explicit capability set on the KVM nodes and does this build
-  (and remains the `--enable-raw-forkd` fork-per-claim engine).
+  uid/chroot/cgroup), and write access to the node data dir. forkd is a
+  NON-privileged DaemonSet since #352 (an explicit builder capability set with the
+  jailer enabled, `/dev/kvm` from the device plugin, still uid 0 + CAP_SYS_ADMIN;
+  ADR 0008) on the KVM nodes and does this build (and remains the
+  `--enable-raw-forkd` fork-per-claim engine).
 - **the husk pod is the unprivileged RUNNER.** Running a sandbox means loading a
   PRE-BUILT snapshot read-only and resuming it. The husk pod gets `/dev/kvm`
   from the device plugin (not `privileged: true`), mounts the node's template
@@ -559,8 +565,9 @@ The two roles are deliberately separated by privilege:
   `seccompProfile: RuntimeDefault`, and is not privileged (the one documented
   exception is `runAsNonRoot: false`, section 6).
 
-So a snapshot is BUILT once per node by privileged forkd and RUN many times by
-unprivileged husk pods. The husk pod never builds; it only activates.
+So a snapshot is BUILT once per node by the forkd builder (non-privileged since
+#352) and RUN many times by unprivileged husk pods. The husk pod never builds; it
+only activates.
 
 ### The default flow
 
@@ -569,7 +576,7 @@ unprivileged husk pods. The husk pod never builds; it only activates.
    pinned, via a `kubernetes.io/hostname` nodeAffinity, to exactly the
    snapshot-holding nodes, so each husk pod's read-only snapshot hostPath
    resolves (`internal/controller/huskpod.go`).
-2. A `SandboxClaim` selects a dormant Running+Ready husk pod, claims it under an
+2. A `Sandbox` with `spec.source.poolRef` selects a dormant Running+Ready husk pod, claims it under an
    optimistic lock (no double-assign), and activates it over the mTLS control
    channel (slice 2, section 6b), delivering the claim-time env/secrets and the
    per-sandbox bearer token; `Status.Endpoint` becomes `podIP:sandboxPort`.
@@ -619,12 +626,13 @@ unprivileged husk pods. The husk pod never builds; it only activates.
 
 The threat model for the unprivileged-stub escape surface is RE-DERIVED in
 [docs/threat-model.md](threat-model.md) section 0 ("Unprivileged-stub escape
-surface (issue #18 re-derivation)"): the surface is re-derived boundary by
+surface"): the surface is re-derived boundary by
 boundary with a per-axis tally vs the old privileged forkd, each claim backed by
-a CI-proven mechanism (slices 2/4/4b, #9/#31/#32) or named as a residual. The
+a CI-proven mechanism or named as a residual. The
 honest verdict is that the per-sandbox EXECUTION surface is strictly improved
 while the inherent `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better,
-and forkd-the-builder stays a smaller privileged control-plane surface.
+and forkd-the-builder stays a smaller control-plane surface (non-privileged since
+#352, ADR 0008; a hardened minimal builder, not zero-privilege).
 
 ## 6d. Networking reconciliation: which layer governs egress (per mode)
 
@@ -644,7 +652,7 @@ proof, is in [docs/networking.md](networking.md).)
 - **Raw-forkd mode (`--enable-raw-forkd`, `--mock`): the bespoke host-nftables
   engine governs.** There is no pod; the VM's tap lives on the HOST (forkd's
   netns), where a `NetworkPolicy` cannot see it. The bespoke default-deny per-tap
-  nftables allowlist (`internal/network` + `internal/netconf`, issues #47/#48)
+  nftables allowlist (`internal/network` + `internal/netconf`)
   plus the controlled DNS proxy (`internal/dnsproxy`) ARE the enforcement
   mechanism.
 
@@ -881,7 +889,7 @@ the autoscaler plan Appendix A.
 - CoW page sharing survives cgroup v2 memory-controller boundaries: forks of one
   snapshot in separate per-pod memcgs share the clean snapshot set physically
   (counted once, not once per memcg) while each fork's private dirty is charged
-  to its own memcg. This is the precondition issue #18 demanded be verified
+  to its own memcg. This is the precondition that had to be verified
   FIRST, measured by a real KVM probe in CI and gated on `CoWSurvives`.
 - The prepare/activate split: the dormant-VMM stub (`internal/husk`,
   `cmd/husk-stub`) and its line-delimited JSON control protocol pre-start a
@@ -909,7 +917,8 @@ the autoscaler plan Appendix A.
   inside the container (injected by `Allocate`, not by any privilege or hostPath).
   This is the PSA-restricted device-access path proven end to end. The assertion
   is adaptive: on a no-KVM runner it asserts Pending instead. The forkd-DaemonSet
-  migration off its privileged hostPath remains a follow-up.
+  migration off its privileged hostPath onto this device plugin is DONE (#352,
+  ADR 0008): forkd now requests `mitos.run/kvm` and runs non-privileged.
 - Claim activation over the mTLS network control channel (slice 2, section 6b):
   with `--enable-husk-pods` the claim picks a dormant warm husk pod, CLAIMS it
   under an optimistic lock (exactly one claim per pod, no double-assign), and
@@ -931,11 +940,12 @@ the autoscaler plan Appendix A.
   node (a placement requirement). The DEFAULT is still raw-forkd; the default
   flip is slice 3.
 
-### Remaining (the rest of issue #18, follow-up PRs)
+### Remaining (follow-up work)
 
 Pod-native is now the DEFAULT (slice 3, section 6c): sandboxes are pods by
-default, forkd stays the privileged snapshot builder, and raw-forkd is the
-fallback behind `--enable-raw-forkd`. The full husk-pods epic still needs:
+default, forkd stays the snapshot builder (non-privileged since #352, ADR 0008),
+and raw-forkd is the fallback behind `--enable-raw-forkd`. The full husk-pods epic
+still needs:
 
 - the nested dormant Firecracker VMM coming up reliably INSIDE a kind pod, so the
   full claim -> pod -> exec tail GATES on kind too. Today that tail is best-effort
@@ -982,6 +992,6 @@ comparison, the two shared-CI datapoints (raw-forkd `fork_to_first_exec` from th
 bench phase, pod-native husk activation from the husk-stub phase), and the honest
 accounting of the warm-pool-fill cost.
 
-The bare-metal target is **<= 10ms warm-pool claim-to-first-exec** (issue #18 / #16
-reference node). This is NOT a shared-CI claim and has not been measured; it is the
+The bare-metal target is **<= 10ms warm-pool claim-to-first-exec** on the
+reference node. This is NOT a shared-CI claim and has not been measured; it is the
 directive target for when the pinned reference node exists.

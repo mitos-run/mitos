@@ -7,8 +7,8 @@ tracking epic.
 
 Two control loops cooperate:
 
-- the SandboxClaim reconciler (`internal/controller/sandboxclaim_controller.go`),
-  event-driven per claim, owns the finalizer reap and the lifetime/idle reap;
+- the Sandbox reconciler (`internal/controller/sandboxclaim_controller.go`),
+  event-driven per sandbox, owns the finalizer reap and the lifetime/idle reap;
 - the GarbageCollector (`internal/controller/gc.go`), a periodic Runnable that
   runs every `Interval` (default 30s), owns NodeLost, the VM orphan sweep, the
   volume orphan sweep, and TTL.
@@ -62,7 +62,7 @@ forkd for the decision.
 
 A Ready claim with `spec.idleTimeout` set is reaped once it has been idle past
 the timeout, measured from the later of `StartedAt` and last activity. Idle is
-WORK-AWARE (issue #218): activity comes from forkd via the `ListSandboxes`
+WORK-AWARE: activity comes from forkd via the `ListSandboxes`
 primitive, which reports each sandbox's last exec or file activity AND the
 work-aware signals: the count of OPEN streams (a running background job) and the
 paused flag. A sandbox with a live background process, or one that is paused, is
@@ -204,14 +204,14 @@ controller run mode to make this decision (`gc.go:42`).
 - Bound: raw mode fails within one `Interval` of the node going unhealthy or
   leaving the registry; husk mode re-pends on the pod event (or the claim's own
   requeue).
-- Husk hard-node-loss latency is cluster-dependent, not a mitos GC interval. Husk
+- Husk hard-node-loss latency is cluster-dependent, not a Mitos GC interval. Husk
   node-loss recovery fires immediately on a pod delete or `DeletionTimestamp`
   event. But a HARD host loss where the pod object lingers `Running` with no
   `DeletionTimestamp` is bounded by the cluster's own unreachable-pod eviction
   setting (the `node.kubernetes.io/unreachable` taint toleration husk pods carry,
   `huskpod.go:1194`), since no pod event fires until the cluster evicts the pod.
   Operators wanting faster husk node-loss recovery should tune the unreachable
-  toleration or the pod-eviction timeout; mitos cannot shorten it.
+  toleration or the pod-eviction timeout; Mitos cannot shorten it.
 - Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
   `TestGCInHuskModeDoesNotFailNodeLostClaim`.
 
@@ -252,7 +252,7 @@ Shipped (was open, now in main):
   uid). The PID-recycle guard (`verifyPID`/`procfsVerifier`, `reconcile.go:22`,
   `reconcile.go:42`) adopts a journaled pid ONLY when it is genuinely our live
   Firecracker, so a recycled, unrelated pid is reaped/dropped rather than adopted
-  or wrongly killed (issue #12, the crash-reap PR).
+  or wrongly killed.
 - saturation behavior: the node enforces a per-node MaxSandboxes ceiling, an
   atomic slot reservation that closes the check/grab TOCTOU and fail-closes with
   `ErrAtCapacity` (`engine.go:39`, the reservation at `engine.go:196`-`207`),
@@ -265,7 +265,7 @@ Shipped (was open, now in main):
   re-pends through `reconcileNoCapacity` (`sandboxclaim_controller.go:580`)
   rather than hard-failing.
 
-Shipped since (now in main, all from issue #163):
+Shipped since (now in main):
 
 - volume orphan GC: see the Volume orphan sweep guarantee above. A per-sandbox
   volume backing whose claim object is gone is reclaimed past `OrphanGrace`,
@@ -288,7 +288,7 @@ Shipped since (now in main, all from issue #163):
 
 ### Not yet built (known gaps)
 
-The following are NOT yet built and are tracked in epic #12. Each is verified
+The following are NOT yet built. Each is verified
 against the code below so the gap is honest, not assumed:
 
 - raw-forkd CLAIM auto-replacement after node loss: in the husk default the warm
@@ -303,14 +303,14 @@ against the code below so the gap is honest, not assumed:
   snapshot-holder, which the snapshot rebuild above guarantees exists).
 - status-update rate-limiting and batching: the SandboxPool reconcile elides a
   no-op status write (`writePoolStatusIfChanged`, `sandboxpool_controller.go:434`
-  / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the SandboxClaim
+  / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the Sandbox
   reconcile now does the same on its steady-state pend re-asserts
   (`writeClaimStatusIfChanged`, called from `sandboxclaim_controller.go:484`,
   `:568`, `:772` for the no-node, snapshot-not-yet, NoCapacity, husk-raced, and
   activate-failed paths), so a stuck claim re-reconciling every 1-5s no longer
   churns etcd or re-triggers its own watch (proven by
   `TestWriteClaimStatusIfChangedElidesNoOp`, `claim_status_elision_test.go`).
-  Still open: the SandboxFork reconciler, and true coalescing/rate-limiting of
+  Still open: the fork-path Sandbox reconcile (`source.fromSandbox`), and true coalescing/rate-limiting of
   genuine transitions (today only exact no-op writes are elided, not a bounded
   update interval).
 - chaos CI suite: `test/cluster-e2e/chaos-e2e.sh` runs on the multi-node

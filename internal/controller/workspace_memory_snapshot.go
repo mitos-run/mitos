@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // WorkspaceMemorySnapshotAdapter binds the workspace memory-snapshot seams
@@ -35,12 +35,12 @@ type WorkspaceMemorySnapshotAdapter struct {
 	// the memory bytes). Nil means the live-VM image is not wired on this build:
 	// Checkpoint then fails loud (no fabricated snapshot). It is the bare-metal
 	// tail.
-	CheckpointLiveVM func(ctx context.Context, claim *v1alpha1.SandboxClaim) (ref string, err error)
+	CheckpointLiveVM func(ctx context.Context, claim *v1.Sandbox) (ref string, err error)
 
 	// RestoreLiveVM loads a previously captured memory image (named by ref) into
 	// the claim's sandbox VM. Nil means the live-VM restore is not wired: Resume
 	// fails loud. Bare-metal tail.
-	RestoreLiveVM func(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error
+	RestoreLiveVM func(ctx context.Context, claim *v1.Sandbox, ref string) error
 
 	// SnapshotPresent reports whether the snapshot store still holds ref. Nil
 	// means the store check is not wired: Exists reports absent (fail closed), so
@@ -65,7 +65,7 @@ type WorkspaceMemorySnapshotAdapter struct {
 // WorkspaceRevision (MemorySnapshotPrincipal) so a later resume is principal
 // gated. A nil CheckpointLiveVM (the live-VM image not wired on this build) fails
 // loud rather than producing a revision falsely marked resumable.
-func (a *WorkspaceMemorySnapshotAdapter) Checkpoint(ctx context.Context, claim *v1alpha1.SandboxClaim) (memSnapshotResult, error) {
+func (a *WorkspaceMemorySnapshotAdapter) Checkpoint(ctx context.Context, claim *v1.Sandbox) (memSnapshotResult, error) {
 	if a.CheckpointLiveVM == nil {
 		return memSnapshotResult{}, fmt.Errorf(
 			"workspace memory-snapshot checkpoint is enabled (--workspace-memory-snapshots) but the live-VM image is not available on this node for claim %s: the bare-metal live-VM snapshot path must be present (a KVM-capable kubelet); refusing to fabricate a resumable revision",
@@ -94,7 +94,7 @@ func (a *WorkspaceMemorySnapshotAdapter) Checkpoint(ctx context.Context, claim *
 // binding map) to a different principal than the activating claim. This is the
 // second line behind the upstream maybeResumeMemory refusal; a memory image is
 // never served across principals.
-func (a *WorkspaceMemorySnapshotAdapter) Resume(ctx context.Context, claim *v1alpha1.SandboxClaim, ref string) error {
+func (a *WorkspaceMemorySnapshotAdapter) Resume(ctx context.Context, claim *v1.Sandbox, ref string) error {
 	if a.RestoreLiveVM == nil {
 		return fmt.Errorf(
 			"workspace memory-snapshot resume is enabled (--workspace-memory-snapshots) but the live-VM restore is not available on this node for claim %s: the bare-metal live-VM restore path must be present (a KVM-capable kubelet)",

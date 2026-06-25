@@ -1,14 +1,16 @@
 # Quickstart
 
 Signup to a first successful `run_code` in minutes, no card on the free tier,
-one SDK package, one snippet that works first try. This is the canonical
-quickstart; the README headline points here.
+one SDK package, one snippet that works first try.
 
 ## One package, one snippet
 
 ```bash
-pip install mitos
+pip install mitos-run
 ```
+
+The PyPI distribution is named `mitos-run`, but the import package stays
+`mitos`: you `pip install mitos-run` and `import mitos`.
 
 ```python
 import mitos
@@ -20,7 +22,7 @@ print(sb.run_code("print(1 + 1)").text)     # 2
 sb.terminate()
 ```
 
-That is the whole thing: one `pip install mitos`, one import, one `create`, code
+That is the whole thing: one `pip install mitos-run`, one import, one `create`, code
 execution, no second SDK to install. `mitos.create(image, api_key=..., base_url=...)`
 resolves the API key (argument, else `MITOS_API_KEY`) and the base URL (argument,
 else `MITOS_BASE_URL`, else the hosted endpoint `https://mitos.run`), then returns
@@ -71,8 +73,8 @@ returns an async handle with the same `exec` / `run_code` / `files` / `fork` /
 The hosted endpoint is the default, so the headline quickstart needs only an API
 key. The standalone `sandbox-server` runs tokenless and ignores the key, so the
 local variant above works against a local server with no signup at all. The
-hosted control plane verifies the same `Authorization: Bearer` header server-side
-([#210](https://github.com/mitos-run/mitos/issues/210)), and you get a key from
+hosted control plane verifies the same `Authorization: Bearer` header
+server-side, and you get a key from
 the self-serve onboarding funnel: sign up with an email, click the verification
 link, and your Personal organization, free-tier signup credit, and first API key
 are provisioned automatically. See [docs/saas/onboarding.md](saas/onboarding.md)

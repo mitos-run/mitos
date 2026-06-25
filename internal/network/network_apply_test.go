@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -47,7 +47,7 @@ func TestSetupCommandOrder(t *testing.T) {
 	resolver := net.ParseIP("10.200.0.1")
 
 	err := setup(context.Background(), rr.run, func() error { return nil },
-		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allow}, resolver, applyOptions{})
+		id, netconf.SandboxPolicy{Egress: v1.EgressDeny, Allow: allow}, resolver, applyOptions{})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestSetupCommandOrder(t *testing.T) {
 		t.Errorf("shared-table stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[3].stdin, netconf.RenderSharedTable())
 	}
 	// The second nft apply installs this sandbox's chain + dispatch element.
-	wantChain := netconf.RenderSandboxChain(id.TapName, id.GuestIP, v1alpha1.EgressDeny, allow, resolver)
+	wantChain := netconf.RenderSandboxChain(id.TapName, id.GuestIP, v1.EgressDeny, allow, resolver)
 	if rr.calls[4].stdin != wantChain {
 		t.Errorf("sandbox-chain stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[4].stdin, wantChain)
 	}
@@ -91,7 +91,7 @@ func TestSetupWithForwardingAndMasquerade(t *testing.T) {
 	forwardCalled := false
 
 	err := setup(context.Background(), rr.run, func() error { forwardCalled = true; return nil },
-		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil,
+		id, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil,
 		applyOptions{subnetCIDR: "10.200.0.0/16", uplink: "eth0", enableForwarding: true})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
@@ -114,7 +114,7 @@ func TestSetupStopsOnError(t *testing.T) {
 	rr := &recordingRunner{failOn: "addr add", failErr: errors.New("boom")}
 	id := testIdentity()
 	err := setup(context.Background(), rr.run, func() error { return nil },
-		id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{})
+		id, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil, applyOptions{})
 	if err == nil {
 		t.Fatal("expected error from addr add")
 	}
@@ -204,12 +204,12 @@ func TestSecondSandboxSetupIsIdempotent(t *testing.T) {
 
 	rrA := &recordingRunner{}
 	if err := setup(context.Background(), rrA.run, func() error { return nil },
-		idA, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{}); err != nil {
+		idA, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil, applyOptions{}); err != nil {
 		t.Fatalf("setup A: %v", err)
 	}
 	rrB := &recordingRunner{}
 	if err := setup(context.Background(), rrB.run, func() error { return nil },
-		idB, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny}, nil, applyOptions{}); err != nil {
+		idB, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil, applyOptions{}); err != nil {
 		t.Fatalf("setup B: %v", err)
 	}
 
@@ -248,13 +248,13 @@ func TestFakeManagerRecords(t *testing.T) {
 	fm := &FakeManager{}
 	id := testIdentity()
 	allow := []netconf.HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}
-	if err := fm.Setup(context.Background(), id, netconf.SandboxPolicy{Egress: v1alpha1.EgressDeny, Allow: allow}, net.ParseIP("10.200.0.1")); err != nil {
+	if err := fm.Setup(context.Background(), id, netconf.SandboxPolicy{Egress: v1.EgressDeny, Allow: allow}, net.ParseIP("10.200.0.1")); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if err := fm.Teardown(context.Background(), id); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if len(fm.SetupLog) != 1 || fm.SetupLog[0].Policy.Egress != v1alpha1.EgressDeny {
+	if len(fm.SetupLog) != 1 || fm.SetupLog[0].Policy.Egress != v1.EgressDeny {
 		t.Errorf("SetupLog not recorded: %+v", fm.SetupLog)
 	}
 	if len(fm.Teardowns) != 1 || fm.Teardowns[0].TapName != "sbtap0" {

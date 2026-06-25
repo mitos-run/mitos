@@ -1,19 +1,19 @@
 # SaaS accounts, organizations, and the customer API gateway
 
-Status: foundational slice (issue #210). This is the customer-facing FRONT DOOR
+Status: foundational. This is the customer-facing FRONT DOOR
 for the hosted offering. It is layered ABOVE the internal mTLS and per-sandbox
-token plane (#4, `internal/admission/claim_principal.go`); it does not replace
-it. It is the ROOT dependency for the SaaS epic (#208): billing (#212), quota
-and abuse controls (#213), usage metering (#211), the web console (#214), and
-onboarding (#215) all sit on the account, org, and key model defined here.
+token plane (`internal/admission/claim_principal.go`); it does not replace
+it. It is the ROOT dependency for the hosted SaaS offering: billing, quota
+and abuse controls, usage metering, the web console, and
+onboarding all sit on the account, org, and key model defined here.
 
 PRODUCTION GATE: this front door adds a new public attack surface (an
 internet-facing listener, customer-presented credentials, cross-tenant
 isolation). It is NOT cleared for production tenants until the external security
-review (#194) covers it. See `docs/threat-model.md` (the "Customer front door"
+review covers it. See `docs/threat-model.md` (the "Customer front door"
 section).
 
-## What this slice ships
+## What this layer ships
 
 A real, fully unit-tested core:
 
@@ -87,7 +87,7 @@ and op only.
 
 The gateway reuses the LLM-legible envelope (`internal/apierr`,
 `docs/api/errors.md`). Two codes were added for the front door and kept in sync
-with the doc, the JSON Schema, and `llms.txt` (the #28 sync tests stay green):
+with the doc, the JSON Schema, and `llms.txt` (the error-catalogue sync tests stay green):
 
 - `forbidden` (403): the key is valid but not permitted, a missing scope or a
   cross-org resource. Distinct from `unauthorized` (no valid credential).
@@ -97,23 +97,23 @@ with the doc, the JSON Schema, and `llms.txt` (the #28 sync tests stay green):
 A missing, malformed, unknown, expired, or revoked key all collapse to
 `unauthorized` so a probe cannot distinguish them.
 
-## Seams for the rest of the epic
+## Seams for the rest of the offering
 
-- Store seam (`Store`): #211 (usage) and the Postgres migration follow-up.
-- Quota seam (`QuotaEnforcer`, default `AllowAllQuota`): #213 implements the real
-  enforcer; the gateway already calls `Check` after authn and org-resolution and
+- Store seam (`Store`): usage and the Postgres migration follow-up.
+- Quota seam (`QuotaEnforcer`, default `AllowAllQuota`): the real
+  enforcer is a follow-up; the gateway already calls `Check` after authn and org-resolution and
   before forwarding.
 - Control-plane forward seam (`ControlPlane`): the real target forwards over the
-  internal mTLS plane to the controller; this slice ships an injectable interface
+  internal mTLS plane to the controller; this layer ships an injectable interface
   and a stub binary target.
-- Session seam (`SessionStore`): the browser OAuth login flow (#215) plugs in
-  here; this slice is token-based.
-- Billing (#212) reads the org and usage model; metered events key off the org.
+- Session seam (`SessionStore`): the browser OAuth login flow plugs in
+  here; this layer is token-based.
+- Billing reads the org and usage model; metered events key off the org.
 
-## Documented follow-ups (NOT in this slice)
+## Documented follow-ups
 
 - Postgres store implementation and migrations.
 - The real control-plane forward target (mTLS to the controller).
 - Browser-based OAuth login (`mitos auth login` without `--token`).
 - The hosted deployment, TLS termination, and rate-limiting at the edge.
-- The external security review (#194) that gates production.
+- The external security review that gates production.

@@ -12,7 +12,7 @@ from e2b_code_interpreter import Sandbox
 from mitos.e2b import Sandbox
 ```
 
-The shim presents E2B's `Sandbox` surface over the standalone mitos
+The shim presents E2B's `Sandbox` surface over the standalone Mitos
 sandbox-server REST API (no Kubernetes required). It is an adapter over the
 native `DirectSandbox` surface, not a re-implementation, and it has no
 dependency on the `e2b` package. E2B's per-operation vocabulary is roughly 70%
@@ -78,7 +78,7 @@ for info in Sandbox.list(base_url="http://localhost:8080"):
 Every E2B method the shim exposes, what it maps to, and whether it works today
 against the standalone sandbox-server.
 
-| E2B method | mitos op | Status |
+| E2B method | Mitos op | Status |
 |---|---|---|
 | `Sandbox.create(template, ...)` | `mitos.create` / `DirectSandbox` | Supported |
 | `Sandbox.connect(id)` | `SandboxServer.list_sandboxes` lookup | Supported |
@@ -92,9 +92,9 @@ against the standalone sandbox-server.
 | `sandbox.files.remove(path)` | `DirectSandbox.files.remove` | Supported (needs a guest agent) |
 | `sandbox.files.make_dir(path)` | `DirectSandbox.files.mkdir` (rename) | Supported (needs a guest agent) |
 | `sandbox.run_code(code)` | `DirectSandbox.run_code` (rich MIME `Result`) | Supported (needs a guest agent) |
-| `sandbox.set_timeout(seconds)` | `DirectSandbox.set_timeout` (issue #218) | Supported |
+| `sandbox.set_timeout(seconds)` | `DirectSandbox.set_timeout` | Supported |
 | `sandbox.kill()` | `DirectSandbox.terminate` | Supported |
-| `sandbox.get_host(port)` | preview URLs (issue [#126](https://github.com/mitos-run/mitos/issues/126)) | Supported (needs the preview proxy deployed) |
+| `sandbox.get_host(port)` | preview URLs | Supported (needs the preview proxy deployed) |
 
 "needs a guest agent" means the op runs end-to-end only against a real guest
 over vsock (a KVM deployment, or `mitos dev up` with the engine). The bare
@@ -105,15 +105,14 @@ KVM CI job.
 
 ## The one vocabulary rename
 
-E2B's `files.make_dir(path)` maps to mitos `files.mkdir(path)`. The shim
+E2B's `files.make_dir(path)` maps to Mitos `files.mkdir(path)`. The shim
 exposes `make_dir` so your E2B script does not change; under the hood it calls
 `mkdir`.
 
 ## get_host returns a signed preview URL
 
 `sandbox.get_host(port)` returns a signed, expiring preview URL for a sandbox
-port, served by the per-sandbox preview reverse proxy (issue
-[#126](https://github.com/mitos-run/mitos/issues/126)):
+port, served by the per-sandbox preview reverse proxy:
 
 ```python
 url = sandbox.get_host(3000)   # https://<sandbox-id>.preview.<domain>/?token=...
@@ -128,7 +127,7 @@ that would not resolve.
 
 ## What you gain beyond E2B parity
 
-The underlying `DirectSandbox` (reachable via `sandbox.sandbox`) exposes mitos
+The underlying `DirectSandbox` (reachable via `sandbox.sandbox`) exposes Mitos
 superpowers E2B does not: `fork(n)` for branching / parallel runs at fork(2)
 speeds, `pause` / `resume`, and an interactive `pty`. The shim keeps your E2B
 script working; reach for the native handle when you want those.

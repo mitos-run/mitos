@@ -33,6 +33,18 @@ final class HttpTransport {
         return token;
     }
 
+    /** The resolved base URL (trailing slashes stripped). Package-private so the
+     * Connect runtime client targets the same server as the REST transport. */
+    String baseUrl() {
+        return baseUrl;
+    }
+
+    /** The shared HttpClient. Package-private so the Connect runtime client
+     * reuses one client (and its connection pool) for the whole SDK. */
+    HttpClient client() {
+        return client;
+    }
+
     /** GETs path and returns the parsed JSON tree (Map / List / scalar), or null
      * on an empty body. Throws MitosException on a non-2xx status. */
     Object get(String path) {

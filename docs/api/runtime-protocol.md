@@ -1,6 +1,7 @@
 # Sandbox runtime protocol
 
-Status: contract landed, wire migration scoped as follow-ups (issue #24).
+Status: the proto contract is defined and compiles; the wire migration is not yet
+active (see section 7).
 
 This document is the normative companion to the `sandbox.v1.Sandbox` proto
 (`proto/sandbox/v1/sandbox.proto`). It specifies the API v2 runtime protocol:
@@ -9,10 +10,10 @@ cross-references docs/api/v2-spec.md section 4 (the runtime protocol chapter) an
 ADR 0007 (the three-noun consolidation that fixes the surrounding object model).
 
 The proto contract and its generated Go stubs are landed and compile
-(`proto/sandbox/v1/`). NOTHING is wired into a server in this slice: the current
+(`proto/sandbox/v1/`). The proto is not yet wired into any server: the current
 JSON-over-HTTP sandbox API (forkd :9091) and the JSON-lines vsock protocol to the
 guest agent remain the live transports and are unchanged. This doc fixes the
-target so the wire migration is a set of well-scoped follow-up slices.
+target the wire migration moves toward.
 
 ## 1. Why one protocol
 
@@ -25,23 +26,23 @@ Today the runtime surface is two ad-hoc protocols:
   newline-delimited JSON `Request`/`Response`, with dedicated connections
   carrying NDJSON frames for streaming exec, run_code, and PTY.
 
-These work (ROADMAP section 7: streaming exec, PTY, files, run_code are live on
+These work (streaming exec, PTY, files, and run_code are live on
 raw-forkd). But they are two hand-rolled framings, two error shapes, and no
 schema. v2 replaces both with ONE schema-first protocol, expressed once as the
 `sandbox.v1.Sandbox` gRPC service, so a single contract serves every transport
 and every SDK is generated from it.
 
-## 2. Connect vs plain gRPC in this slice
+## 2. Connect vs plain gRPC
 
 The v2 spec names the runtime protocol "Connect" because the END STATE wants
 Connect's HTTP semantics so a browser can stream exec output with no proxy tier
-(docs/api/v2-spec.md section 4). The mitos repo does NOT currently depend on
+(docs/api/v2-spec.md section 4). The Mitos repo does NOT currently depend on
 connect-go: go.mod has `google.golang.org/grpc` and `google.golang.org/protobuf`
 and the `make proto` target runs plain `protoc` with `protoc-gen-go` and
 `protoc-gen-go-grpc` (no buf, no `connectrpc.com/connect`). The existing
 `proto/forkd.proto` is generated the same way.
 
-Therefore this slice generates PLAIN gRPC stubs (`sandbox.pb.go`,
+Therefore the generated stubs are PLAIN gRPC (`sandbox.pb.go`,
 `sandbox_grpc.pb.go`) to match the repo's existing toolchain exactly (same
 plugin versions as the forkd stubs: protoc-gen-go v1.36.11, protoc-gen-go-grpc
 v1.6.2). The Connect transport binding is a deliberate follow-up: Connect speaks
@@ -57,21 +58,30 @@ definition is transport-agnostic; only the dialing and the credential differ.
 
 | Transport | Path | Who dials | Credential | Status |
 | --- | --- | --- | --- | --- |
-| vsock (in-guest) | host forkd <-> guest agent over vsock (CID 3, port 52) | forkd | none (vsock is the in-VM trust boundary) | the guest agent JSON-lines protocol is live; the gRPC binding is a follow-up |
-| cluster-internal | SDK / controller <-> forkd :9091 | in-cluster client | per-sandbox bearer token (today), attenuated capability token (issue #25) | the HTTP sandbox API is live; the gRPC/Connect binding is a follow-up |
+| vsock (in-guest) | host forkd <-> guest agent over vsock (CID 3, port 53) | forkd | none (vsock is the in-VM trust boundary) | gRPC on vsock port 53 is the SOLE runtime protocol; the legacy JSON-lines protocol and the Go agent were removed (#310) |
+| cluster-internal | SDK / controller <-> forkd :9091 | in-cluster client | per-sandbox bearer token (today), attenuated capability token (planned) | the HTTP sandbox API is live; the gRPC/Connect binding is a follow-up |
 | browser | Paperclip UI <-> forkd edge | browser | scoped token | Connect HTTP semantics, follow-up; no current equivalent |
 
 forkd is the bridge: it terminates the cluster-internal and browser transports at
-its edge and relays to the guest agent over vsock. In the end state all three hops
-speak the one `Sandbox` service; in this slice they speak the existing two
-protocols and forkd already performs the bridge in those terms
-(`internal/daemon/sandbox_api.go` relays HTTP to vsock today).
+its edge and relays to the guest agent over vsock. The vsock hop already speaks
+the one `Sandbox` service end to end: forkd relays to the Rust guest agent's gRPC
+server on vsock port 53 (`internal/daemon/sandbox_api.go`), and the
+cluster-internal and browser bindings are the remaining follow-ups.
 
 ## 4. Endpoint mapping (current surface -> v2 RPC)
 
 Every current runtime endpoint maps onto one `sandbox.v1.Sandbox` RPC. This table
 is the migration's normative correspondence; each row is a unit the follow-up
 slices port.
+
+The runtime routes below (exec, exec/stream, run_code/stream, files/*, pty,
+vitals) are DEPRECATED in favor of the Connect protocol: each response carries an
+RFC 8594 `Deprecation: true` header and a `Link: </sandbox.v1.Sandbox>;
+rel="successor-version"` header (`deprecatedRuntimeNote`, `internal/daemon/sandbox_api.go`).
+They stay active (deprecated-but-working) so existing SDK callers are not broken,
+and are removed once every SDK execs over Connect (#358). The lifecycle routes
+(`set_timeout`, `pause`, `resume`) have no Connect runtime successor and are NOT
+deprecated.
 
 ### HTTP sandbox API (forkd :9091)
 
@@ -113,21 +123,21 @@ specified in the proto now and implemented in follow-up slices. `Signal` to pid 
 is how `me.exit()` is modeled (docs/api/v2-spec.md section 4: "me.exit()
 terminates only the caller").
 
-## 5. Budget-gated self-service (documented, not implemented here)
+## 5. Budget-gated self-service (documented, not yet implemented)
 
 `Fork`, `Checkpoint`, `ExtendLifetime`, and `Budget` are the self-service RPCs a
 sandbox runs on its OWN lineage (docs/api/v2-spec.md section 3). They reference
-the capability-budget shapes of issue #25. The runtime accepts the call, debits a
+the capability-budget shapes. The runtime accepts the call, debits a
 capability budget, and MATERIALIZES a declarative object the controller
 reconciles; the RPC returns a handle (`Operation`, `Revision`, `Lease`), not a
 finished result. This preserves the one v2 rule: anything that creates,
 multiplies, or destroys infrastructure still becomes a declarative object the
 controller owns; the agent gets agency, the ledger stays complete.
 
-In THIS slice these RPCs are contract-only. The proto defines their requests,
+These RPCs are contract-only today. The proto defines their requests,
 their handle responses, and the `BudgetStatus`/`Allowance` shapes; the
 controller-materializes-objects behavior is documented here and implemented when
-issue #25 lands the capability budgets and attenuated tokens.
+the capability budgets and attenuated tokens land.
 
 ## 6. Versioning policy
 
@@ -145,12 +155,12 @@ becomes `sandbox.v2` served alongside `sandbox.v1`.
 - The forkd control-plane proto can move on its own cadence; the two are not
   coupled.
 
-## 7. Migration plan (follow-up slices)
+## 7. Migration plan
 
-This slice lands the contract, the generated stubs, and this design. The wire
-migration is the following follow-up slices, each independently shippable and
-each gated by the sequencing rule (fork-correctness and failure/GC suites green
-in CI before integration ships to production tenants, per CLAUDE.md):
+The contract, the generated stubs, and this design are in place. The wire
+migration proceeds in the following stages, each gated by the sequencing rule
+(fork-correctness and failure/GC suites green in CI before integration ships to
+production tenants):
 
 1. Guest agent gRPC server: the guest agent serves `sandbox.v1.Sandbox` over
    vsock alongside (then instead of) the JSON-lines protocol. Resolve the
@@ -163,19 +173,19 @@ in CI before integration ships to production tenants, per CLAUDE.md):
    from the same `sandbox.proto` so the Paperclip UI streams Exec/Vitals with no
    proxy tier (section 2, section 3).
 4. Budget-gated RPCs: wire `Fork`/`Checkpoint`/`ExtendLifetime`/`Budget` to the
-   capability-budget ledger and controller materialization (issue #25).
+   capability-budget ledger and controller materialization.
 5. KVM e2e: real Firecracker exec/PTY/files over the new protocol on the KVM
    runners (kvm-test.yaml), proving the vsock gRPC path end to end.
 
-Each slice keeps the prior transport live until its consumers cut over; nothing
-in this slice removes or changes the existing HTTP/vsock surface.
+Each stage keeps the prior transport live until its consumers cut over; nothing
+removes or changes the existing HTTP/vsock surface yet.
 
 ## 8. Security surface
 
-The runtime protocol does not move the threat surface in this slice: no server is
+The runtime protocol does not move the threat surface today: no server is
 wired, no new port is opened, no credential path changes. When the follow-up
-slices bind a transport, each updates docs/threat-model.md in the same PR (the
+stages bind a transport, each updates docs/threat-model.md in the same PR (the
 forkd edge already gates the runtime surface with the per-sandbox bearer token;
-issue #25 replaces it with attenuated capability tokens). Secret-carrying fields
+attenuated capability tokens replace it). Secret-carrying fields
 in the proto (`ExecOpen.env` values, `ConfigureRequest`-equivalent control-plane
 paths) keep the existing rule: values are never logged, only keys and counts.

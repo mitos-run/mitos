@@ -25,42 +25,37 @@ package controller_test
 
 import (
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
-	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "chaos-storm-node-1", "chaos-storm-tmpl")
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "chaos-storm-node-1", "chaos-storm-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "chaos-storm-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "chaos-storm-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "chaos-storm-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	for _, obj := range []client.Object{template, pool} {
+	for _, obj := range []client.Object{pool} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// Launch a storm of claims and drive every one to Ready (the suite's raw-forkd
@@ -71,9 +66,9 @@ func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
 	for i := 0; i < stormSize; i++ {
 		name := fmt.Sprintf("chaos-storm-claim-%d", i)
 		names = append(names, name)
-		claim := &v1alpha1.SandboxClaim{
+		claim := &v1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-			Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "chaos-storm-pool"}},
+			Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "chaos-storm-pool"}}},
 		}
 		if err := k8sClient.Create(ctx, claim); err != nil {
 			t.Fatal(err)
@@ -81,7 +76,7 @@ func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, name := range names {
-			c := &v1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			c := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 			_ = k8sClient.Delete(ctx, c)
 		}
 	})
@@ -117,11 +112,11 @@ func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
 	}
 	// Every storm claim is still Ready: none was stranded.
 	for _, name := range names {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Status.Phase != v1alpha1.SandboxReady {
+		if got.Status.Phase != v1.SandboxReady {
 			t.Fatalf("storm claim %s no longer Ready after the restart GC pass: phase=%q (stuck claim)", name, got.Status.Phase)
 		}
 	}
@@ -132,7 +127,7 @@ func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
 	// ZERO orphans regardless of whether the finalizer already reaped them: any
 	// VM whose claim object is now gone, past the (zero) grace, is swept.
 	for _, name := range names {
-		c := &v1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+		c := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 		if err := k8sClient.Delete(ctx, c); err != nil && client.IgnoreNotFound(err) != nil {
 			t.Fatal(err)
 		}
@@ -142,7 +137,7 @@ func TestGCChaosStormNoOrphansNoStuckClaims(t *testing.T) {
 	for {
 		var remaining int
 		for _, name := range names {
-			var got v1alpha1.SandboxClaim
+			var got v1.Sandbox
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err == nil {
 				remaining++
 			}

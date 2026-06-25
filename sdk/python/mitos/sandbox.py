@@ -101,7 +101,7 @@ def _parse_run_code_stream(
 
 
 API_GROUP = "mitos.run"
-API_VERSION = "v1alpha1"
+API_VERSION = "v1"
 POLL_INTERVAL = 0.05
 
 # The exec/run_code timeout ceiling (seconds). Mirrors the server default
@@ -362,7 +362,7 @@ class Sandbox:
                 group=API_GROUP,
                 version=API_VERSION,
                 namespace=self.namespace,
-                plural="sandboxclaims",
+                plural="sandboxes",
                 name=self.name,
             )
             status = obj.get("status", {})
@@ -377,8 +377,8 @@ class Sandbox:
                 raise AgentRunError(
                     f"sandbox {self.name} failed",
                     code="sandbox_failed",
-                    cause=f"claim {self.name} reached the Failed phase",
-                    remediation="Inspect the SandboxClaim status conditions and the pool capacity.",
+                    cause=f"sandbox {self.name} reached the Failed phase",
+                    remediation="Inspect the Sandbox status conditions and the pool capacity.",
                 )
 
             time.sleep(POLL_INTERVAL)
@@ -386,7 +386,7 @@ class Sandbox:
         raise AgentRunError(
             f"sandbox {self.name} not ready after {timeout}s",
             code="ready_timeout",
-            cause=f"claim {self.name} did not reach Ready within {timeout}s",
+            cause=f"sandbox {self.name} did not reach Ready within {timeout}s",
             remediation="Raise the timeout, or check the controller is reconciling and the pool has capacity.",
         )
 
@@ -698,15 +698,14 @@ class Sandbox:
 
         fork_obj = {
             "apiVersion": f"{API_GROUP}/{API_VERSION}",
-            "kind": "SandboxFork",
+            "kind": "Sandbox",
             "metadata": {
                 "name": fork_name,
                 "namespace": self.namespace,
             },
             "spec": {
-                "sourceRef": {"name": self.name},
+                "source": {"fromSandbox": {"name": self.name, "pauseSource": pause_source}},
                 "replicas": n,
-                "pauseSource": pause_source,
             },
         }
 
@@ -714,7 +713,7 @@ class Sandbox:
             group=API_GROUP,
             version=API_VERSION,
             namespace=self.namespace,
-            plural="sandboxforks",
+            plural="sandboxes",
             body=fork_obj,
         )
 
@@ -727,11 +726,11 @@ class Sandbox:
                 group=API_GROUP,
                 version=API_VERSION,
                 namespace=self.namespace,
-                plural="sandboxforks",
+                plural="sandboxes",
                 name=fork_name,
             )
             status = obj.get("status", {})
-            forks = status.get("forks", [])
+            forks = status.get("children", [])
 
             ready = [f for f in forks if f.get("phase") == "Ready"]
             if len(ready) >= expected:
@@ -768,7 +767,7 @@ class Sandbox:
             group=API_GROUP,
             version=API_VERSION,
             namespace=self.namespace,
-            plural="sandboxclaims",
+            plural="sandboxes",
             name=self.name,
         )
         status = obj.get("status", {})
@@ -778,7 +777,7 @@ class Sandbox:
             endpoint=status.get("endpoint", ""),
             node=status.get("node", ""),
             sandbox_id=status.get("sandboxID", ""),
-            fork_time_ms=status.get("forkTimeMs", 0),
+            fork_time_ms=status.get("startupLatencyMs", 0),
             pool=self.pool,
         )
 
@@ -803,26 +802,29 @@ class Sandbox:
                     cause=f"output {o!r} is neither a path string nor a dict",
                     remediation="Pass a '/workspace/...' path string or a {'diff': True}/{'git': {...}} dict.",
                 )
-        patch = {"spec": {}}
+        patch: dict = {"spec": {}}
+        on_terminate: dict = {}
         if spec_outputs:
-            patch["spec"]["outputs"] = spec_outputs
+            on_terminate["outputs"] = spec_outputs
         if checkpoint:
-            patch["spec"]["checkpointOnTerminate"] = True
+            on_terminate["snapshot"] = True
+        if on_terminate:
+            patch["spec"]["lifetime"] = {"onTerminate": on_terminate}
         if patch["spec"]:
             self._api.patch_namespaced_custom_object(
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-                plural="sandboxclaims", name=self.name, body=patch,
+                plural="sandboxes", name=self.name, body=patch,
             )
         obj = self._api.get_namespaced_custom_object(
             group=API_GROUP, version=API_VERSION, namespace=self.namespace,
-            plural="sandboxclaims", name=self.name,
+            plural="sandboxes", name=self.name,
         )
         ws_ref = obj.get("spec", {}).get("workspaceRef", {}).get("name")
         self._api.delete_namespaced_custom_object(
             group=API_GROUP,
             version=API_VERSION,
             namespace=self.namespace,
-            plural="sandboxclaims",
+            plural="sandboxes",
             name=self.name,
         )
         self._phase = SandboxPhase.TERMINATING

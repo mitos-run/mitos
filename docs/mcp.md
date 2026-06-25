@@ -1,6 +1,6 @@
 # MCP server (`mitos-mcp`)
 
-`mitos-mcp` exposes the mitos sandbox lifecycle as [Model Context
+`mitos-mcp` exposes the Mitos sandbox lifecycle as [Model Context
 Protocol](https://modelcontextprotocol.io) tools. Any MCP-speaking agent
 (Claude Desktop, an MCP client library, an agent framework with MCP support)
 can create sandboxes, run commands, read and write files, fork, and terminate,
@@ -30,13 +30,13 @@ observe.
 `pool` maps to a sandbox-server template id in the HTTP backend (see below).
 
 Tool failures are returned as LLM-legible tool results, not bare codes: each
-carries a `code`, a one-sentence `cause`, and an actionable `remediation`
-(the API v2 error rule, issue #28), with `isError` set so the client can
+carries a `code`, a one-sentence `cause`, and an actionable `remediation`,
+with `isError` set so the client can
 distinguish a tool failure from a transport error.
 
 Workspace tools (`workspace_create`, `workspace_list`, `workspace_attach`,
 `workspace_delete`) are advertised only when `--enable-workspace-tools` is set
-and are not yet dispatched (issue #21).
+and are not yet dispatched.
 
 ## Launching it
 
@@ -104,7 +104,7 @@ sandbox-server process, plain HTTP, one token.
 - `sandbox_fork` issues one `POST /v1/fork` per replica. The sandbox-server
   fork endpoint has no replicas parameter and its `template` field is a
   template lookup, so the source id must resolve there. True
-  fork-of-a-running-sandbox is the k8s `SandboxFork` path and is a follow-up.
+  fork-of-a-running-sandbox is the k8s `Sandbox` with `spec.source.fromSandbox` path and is a follow-up.
 - `sandbox_exec` and the file tools require the bearer token on the
   sandbox-server (its exec/files routes are token-guarded); `fork` does not.
 
@@ -148,12 +148,11 @@ Proven:
 
 Open:
 
-- Workspace tools (log/diff/revert/attach) pending Workspace (issue #21);
+- Workspace tools (log/diff/revert/attach) pending Workspace;
   advertised but not dispatched.
-- The Kubernetes claim backend (create a `SandboxClaim`, read its token
+- The Kubernetes claim backend (create a `Sandbox`, read its token
   Secret, exec via forkd); the HTTP backend is the v1 path.
-- Capability-budget advertisement pending issue #24.
-- Streaming exec and PTY over MCP pending the Connect runtime protocol
-  (issue #23).
+- Capability-budget advertisement pending.
+- Streaming exec and PTY over MCP pending the Connect runtime protocol.
 - Transport: stdio only in v1; no SSE or HTTP MCP transport yet.
 - MCP primitives: tools only in v1; no resources or prompts yet.

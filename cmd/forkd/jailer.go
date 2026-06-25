@@ -38,6 +38,22 @@ func jailerRequiredCapabilities() []string {
 	}
 }
 
+// forkdRequiredCapabilities is the EXACT capability set the forkd CONTAINER runs
+// with after dropping privileged: true. It is the jailer set
+// (jailerRequiredCapabilities) plus CAP_NET_ADMIN: the privileged BUILDER also
+// creates a per-template placeholder tap host-side with `ip tuntap add`
+// (internal/fork/engine.go, when --enable-networking is set, as the shipped
+// DaemonSet does), which needs CAP_NET_ADMIN. The jailer itself does NOT need
+// NET_ADMIN, so the jailer list stays the minimal authority for the jail and
+// NET_ADMIN is the single, documented builder extra. NET_ADMIN is scoped to
+// forkd's own pod netns (forkd is not hostNetwork), exactly like the husk pod's
+// NET_ADMIN; it cannot reach the host netns. This is the single source of truth
+// the DaemonSet securityContext.capabilities.add must match
+// (cmd/forkd/manifest_conformance_test.go). Widening it is a threat-model change.
+func forkdRequiredCapabilities() []string {
+	return append(jailerRequiredCapabilities(), "CAP_NET_ADMIN")
+}
+
 // parseUIDRange parses the --uid-range flag, "low-high" inclusive.
 // uid 0 is refused: jailed VMs must never run as root.
 func parseUIDRange(s string) (uint32, uint32, error) {

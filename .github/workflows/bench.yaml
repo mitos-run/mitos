@@ -28,7 +28,7 @@ on:
       - 'cmd/bench/**'
       - 'internal/fork/**'
       - 'internal/benchstat/**'
-      - 'guest/agent/**'
+      - 'guest/agent-rs/**'
       - 'bench/**'
       - '.github/workflows/bench.yaml'
 
@@ -108,8 +108,14 @@ jobs:
       - name: Build guest agent
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
-            -o "$RUN_DIR/agent" ./guest/agent/
+          # The Rust guest agent (guest/agent-rs), built static (musl) so it runs
+          # as PID 1 (/init) in the minimal bench rootfs. Same recipe as
+          # Dockerfile.forkd.
+          rustup target add x86_64-unknown-linux-musl
+          ( cd guest/agent-rs && \
+            cargo build --release --target x86_64-unknown-linux-musl --features vsock )
+          cp guest/agent-rs/target/x86_64-unknown-linux-musl/release/sandbox-agent \
+            "$RUN_DIR/agent"
           ls -lh "$RUN_DIR/agent"
 
       # Build the bench template snapshot using the EXACT recipe proven by the

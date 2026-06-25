@@ -13,6 +13,7 @@ package controller_test
 import (
 	"context"
 	"crypto/tls"
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,7 +22,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,18 +66,18 @@ func waitUntilForkReady(t *testing.T, d time.Duration, cond func() bool) {
 	t.Fatalf("condition not met within %s", d)
 }
 
-// makeForkSourceClaim creates a Ready husk-backed source claim pointing at srcPod.
-func makeForkSourceClaim(t *testing.T, name, poolName string, srcPod *corev1.Pod) *v1alpha1.SandboxClaim {
+// makeForkSourceClaim creates a Ready husk-backed source sandbox pointing at srcPod.
+func makeForkSourceClaim(t *testing.T, name, poolName string, srcPod *corev1.Pod) *v1.Sandbox {
 	t.Helper()
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: poolName}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: poolName}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatalf("create claim: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, claim) })
-	claim.Status.Phase = v1alpha1.SandboxReady
+	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Node = srcPod.Spec.NodeName
 	claim.Status.SandboxID = srcPod.Name
 	if err := k8sClient.Status().Update(ctx, claim); err != nil {
@@ -101,13 +101,13 @@ func TestHuskForkProducesReadyChildren(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hf-1",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim"}, Replicas: 2},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-claim"}}, Replicas: 2},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -120,11 +120,11 @@ func TestHuskForkProducesReadyChildren(t *testing.T) {
 		for i := range pods.Items {
 			forceHuskPodReady(t, &pods.Items[i])
 		}
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hf-1", Namespace: "default"}, &got); err != nil {
 			return false
 		}
-		return got.Status.ReadyForks == 2
+		return got.Status.ReadyReplicas == 2
 	})
 
 	if snapCalls < 1 {
@@ -156,13 +156,13 @@ func TestHuskForkSnapshotTakenExactlyOnce(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hf-once",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-once"}, Replicas: 2},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-claim-once"}}, Replicas: 2},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -193,11 +193,11 @@ func TestHuskForkSnapshotTakenExactlyOnce(t *testing.T) {
 		for i := range pods.Items {
 			forceHuskPodReady(t, &pods.Items[i])
 		}
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hf-once", Namespace: "default"}, &got); err != nil {
 			return false
 		}
-		return got.Status.ReadyForks == 2
+		return got.Status.ReadyReplicas == 2
 	})
 
 	if got := atomic.LoadInt32(&snapCalls); got != 1 {
@@ -228,13 +228,13 @@ func TestHuskForkNeverOverCreatesChildren(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "noover-1",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-noover"}, Replicas: 2},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-claim-noover"}}, Replicas: 2},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -271,11 +271,11 @@ func TestHuskForkNeverOverCreatesChildren(t *testing.T) {
 		for i := range p.Items {
 			forceHuskPodReady(t, &p.Items[i])
 		}
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "noover-1", Namespace: "default"}, &got); err != nil {
 			return false
 		}
-		return got.Status.ReadyForks == 2
+		return got.Status.ReadyReplicas == 2
 	})
 
 	var after corev1.PodList
@@ -310,13 +310,13 @@ func TestHuskForkRemovesSnapshotOnDelete(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkSnapshotRemover(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hd-1",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-d"}, Replicas: 1},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-claim-d"}}, Replicas: 1},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -328,9 +328,9 @@ func TestHuskForkRemovesSnapshotOnDelete(t *testing.T) {
 		for i := range pods.Items {
 			forceHuskPodReady(t, &pods.Items[i])
 		}
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		_ = k8sClient.Get(ctx, types.NamespacedName{Name: "hd-1", Namespace: "default"}, &got)
-		return got.Status.ReadyForks == 1
+		return got.Status.ReadyReplicas == 1
 	})
 
 	if err := k8sClient.Delete(ctx, fork); err != nil {
@@ -376,13 +376,13 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      forkName,
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: srcClaimName}, Replicas: 1},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -538,13 +538,13 @@ func TestHuskForkAdoptsAlreadyActiveChild(t *testing.T) {
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
 
-	fork := &v1alpha1.SandboxFork{
+	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hfaa-1",
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-aa"}, Replicas: 2},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-claim-aa"}}, Replicas: 2},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -557,10 +557,10 @@ func TestHuskForkAdoptsAlreadyActiveChild(t *testing.T) {
 		for i := range pods.Items {
 			forceHuskPodReady(t, &pods.Items[i])
 		}
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hfaa-1", Namespace: "default"}, &got); err != nil {
 			return false
 		}
-		return got.Status.ReadyForks == 2
+		return got.Status.ReadyReplicas == 2
 	})
 }

@@ -19,7 +19,7 @@
 package quota
 
 import (
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/netconf"
 )
 
@@ -188,15 +188,15 @@ func (e EgressTier) Policy() netconf.SandboxPolicy {
 	p := netconf.SandboxPolicy{
 		// Inbound is deny-by-default for every tier: an untrusted sandbox is never
 		// dialable from outside regardless of egress posture.
-		Inbound: v1alpha1.InboundDeny,
+		Inbound: v1.InboundDeny,
 	}
 	switch {
 	case e.BlockNetwork:
 		p.BlockNetwork = true
 	case e.Open:
-		p.Egress = v1alpha1.EgressAllow
+		p.Egress = v1.EgressAllow
 	default:
-		p.Egress = v1alpha1.EgressDeny
+		p.Egress = v1.EgressDeny
 		p.AllowCIDRs = append([]string(nil), e.AllowCIDRs...)
 	}
 	return p

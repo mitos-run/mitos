@@ -13,7 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 )
 
 // Cache reports whether a step output for a given cache key is already
@@ -29,15 +29,15 @@ type Cache interface {
 // so a change to any of them changes the fingerprint and therefore the key. The
 // leading type tag keeps a run "x" distinct from an env step that happens to
 // stringify to "x".
-func stepFingerprint(s v1alpha1.BuildStep) string {
+func stepFingerprint(s v1.BuildStep) string {
 	switch s.Type {
-	case v1alpha1.BuildStepRun:
+	case v1.BuildStepRun:
 		return "run\x00" + s.Run
-	case v1alpha1.BuildStepEnv:
+	case v1.BuildStepEnv:
 		return "env\x00" + s.EnvName + "\x00" + s.EnvValue
-	case v1alpha1.BuildStepWorkdir:
+	case v1.BuildStepWorkdir:
 		return "workdir\x00" + s.Workdir
-	case v1alpha1.BuildStepCopy:
+	case v1.BuildStepCopy:
 		// Copy contributes its declared source and destination. The content of
 		// the source files is folded in by the engine at build time (it hashes
 		// the staged bytes and combines them with this key); the pure key chains
@@ -54,7 +54,7 @@ func stepFingerprint(s v1alpha1.BuildStep) string {
 // Changing step N changes key[N] and, through the chain, every key after it,
 // but leaves key[0..N-1] untouched. That is the property that lets a real build
 // reuse the unchanged prefix and rebuild only from the first changed step.
-func CacheKeys(baseImage string, steps []v1alpha1.BuildStep) []string {
+func CacheKeys(baseImage string, steps []v1.BuildStep) []string {
 	keys := make([]string, len(steps))
 	// Seed the chain with the base image so two recipes with identical steps on
 	// different base images never collide.
@@ -79,7 +79,7 @@ func CacheKeys(baseImage string, steps []v1alpha1.BuildStep) []string {
 type StepPlan struct {
 	Index  int
 	Key    string
-	Step   v1alpha1.BuildStep
+	Step   v1.BuildStep
 	Cached bool
 }
 
@@ -89,7 +89,7 @@ type StepPlan struct {
 // invalidates the inputs of everything downstream even if a later key happens
 // to be present (a stale or partial entry). This is the headline E2B-style
 // fast-cached-build behavior, made deterministic and testable on the host.
-func Plan(baseImage string, steps []v1alpha1.BuildStep, cache Cache) []StepPlan {
+func Plan(baseImage string, steps []v1.BuildStep, cache Cache) []StepPlan {
 	keys := CacheKeys(baseImage, steps)
 	plan := make([]StepPlan, len(steps))
 	missed := false
@@ -134,15 +134,15 @@ func Summary(plan []StepPlan) string {
 	return out
 }
 
-func stepLabel(s v1alpha1.BuildStep) string {
+func stepLabel(s v1.BuildStep) string {
 	switch s.Type {
-	case v1alpha1.BuildStepRun:
+	case v1.BuildStepRun:
 		return s.Run
-	case v1alpha1.BuildStepEnv:
+	case v1.BuildStepEnv:
 		return s.EnvName + "=" + s.EnvValue
-	case v1alpha1.BuildStepWorkdir:
+	case v1.BuildStepWorkdir:
 		return s.Workdir
-	case v1alpha1.BuildStepCopy:
+	case v1.BuildStepCopy:
 		return s.Source + " -> " + s.Dest
 	default:
 		return ""

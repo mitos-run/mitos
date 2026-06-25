@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds a minimal rootfs ext4 image with the guest agent baked in.
+# Builds a minimal rootfs ext4 image with the Rust guest agent baked in.
 # Must run on Linux as root (needs mount, chroot, debootstrap).
 #
 # Usage:
 #   ./guest/rootfs/build.sh [output_path] [size_mb]
 #
+# The Rust agent (guest/agent-rs) is the SOLE guest agent since Phase E (#310).
+# It serves gRPC only on vsock port 53 (AgentGRPCPort). The Go agent and the
+# legacy JSON protocol (port 52) are removed.
+#
 # Produces: rootfs.ext4 with:
-#   /init              → guest agent binary (PID 1)
-#   /bin/sh            → busybox or bash
-#   /usr/bin/python3   → Python 3 + ipykernel/jupyter_client (FULL_ROOTFS=1)
-#   /opt/mitos/kernel_driver.py → run_code kernel driver (FULL_ROOTFS=1)
-#   /workspace/        → agent working directory
+#   /init              -> Rust guest agent binary (PID 1)
+#   /bin/sh            -> busybox or bash
+#   /usr/bin/python3   -> Python 3 + ipykernel/jupyter_client (FULL_ROOTFS=1)
+#   /opt/mitos/kernel_driver.py -> run_code kernel driver (FULL_ROOTFS=1)
+#   /workspace/        -> agent working directory
 
 OUTPUT="${1:-/tmp/mitos-rootfs.ext4}"
 # The full rootfs bakes ipykernel + matplotlib + pandas for run_code, which need
@@ -29,9 +33,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Building guest agent (static binary)"
-cd "$PROJECT_ROOT"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "${WORK_DIR}/agent" ./guest/agent/
+echo "==> Building Rust guest agent (sole production agent, static musl binary, gRPC-only, vsock port 53)"
+cd "$PROJECT_ROOT/guest/agent-rs"
+cargo build --release --target x86_64-unknown-linux-musl --features vsock
+cp "$PROJECT_ROOT/guest/agent-rs/target/x86_64-unknown-linux-musl/release/sandbox-agent" "${WORK_DIR}/agent"
 
 echo "==> Creating ext4 image (${SIZE_MB}MB)"
 dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" status=none

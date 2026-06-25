@@ -1,12 +1,12 @@
-# Guest port forwarding (issue #228)
+# Guest port forwarding
 
-This document describes the FOUNDATION slice of issue #228: making a TCP port
+This document describes guest port forwarding: making a TCP port
 inside a running sandbox reachable from the host, through the standalone
 sandbox-server, by tunneling raw bytes over the existing vsock channel.
 
-It is the standalone-only, first slice. The Kubernetes Service/Ingress routing
-and the CRD template/claim port-declaration fields are EXPLICIT follow-ups of
-issue #228 and are NOT built here (see "Follow-ups" below). For the
+It is the standalone-only path. The Kubernetes Service/Ingress routing
+and the CRD template/claim port-declaration fields are explicit follow-ups
+and are NOT built here (see "Follow-ups" below). For the
 internet-facing, signed-URL, per-sandbox reverse-proxy exposure (the E2B
 `get_host(port)` equivalent), see `docs/preview-urls.md`; that is a separate
 mechanism. This document is about a plain host TCP socket bridged to a guest
@@ -21,16 +21,16 @@ sandbox-server:
 host TCP client ──▶ host listener (127.0.0.1:N) ──▶ vsock tunnel ──▶ guest agent ──▶ guest 127.0.0.1:<port>
 ```
 
-- `vsock.TypeTunnel` (`internal/vsock`): a streaming frame that, like
-  `exec_stream`, uses a DEDICATED vsock connection. The host sends one
-  `TunnelRequest{port}`; the guest agent dials `127.0.0.1:<port>` inside the VM,
-  replies with one `TunnelAck`, and on success the connection becomes a raw
-  bidirectional byte pipe to the guest TCP socket until either side closes. One
-  tunnel carries exactly one TCP connection (no multiplexing).
-- Guest agent tunnel handler (`guest/agent/tunnel.go`): dials LOOPBACK only,
-  refuses a non-loopback or out-of-range port and a port with no listener with a
-  clean ack error (never a hang), and `io.Copy`s both directions with full
-  teardown on either close.
+- gRPC `PortForward` stream (`internal/sandboxrpc/portforward.go`): a
+  bidirectional gRPC stream over the guest vsock gRPC channel (vsock port 53).
+  The host opens one stream per accepted connection and sends the target port;
+  the guest dials `127.0.0.1:<port>` inside the VM and, on success, the stream
+  becomes a raw bidirectional byte splice to the guest TCP socket until either
+  side closes. One stream carries exactly one TCP connection (no multiplexing).
+- Guest agent port-forward handler (`guest/agent-rs/src/service/portforward.rs`):
+  dials LOOPBACK only, refuses a non-loopback or out-of-range port and a port
+  with no listener with a clean error (never a hang), and splices both directions
+  with full teardown on either close.
 - Host proxy (`internal/daemon` `SandboxAPI.ForwardPort` /
   `forward.go`): opens a host TCP listener on `127.0.0.1:0` and bridges every
   accepted connection over a fresh vsock tunnel to the guest port. Listeners and
@@ -85,19 +85,19 @@ These are recorded as a row in `docs/threat-model.md` (section 3); the summary:
   forward and all its tunnels are closed on terminate.
 - **No auth on the host listener.** This is the SAME tokenless trust model as the
   rest of the standalone sandbox-server (a single-tenant local server that runs
-  with `AllowTokenless`), not a new weakening. Auth on the forward path is a
-  follow-up; do not expose the standalone server's forward listeners to an
+  with `AllowTokenless`), not a new weakening. Auth on the forward path is not
+  yet available; do not expose the standalone server's forward listeners to an
   untrusted network.
 - **No secret logging.** The tunnel bytes are application traffic and are never
   logged; only the sandbox id, host address, and guest port are logged.
 
 ## Follow-ups (NOT in this slice)
 
-These are tracked under issue #228 and are explicitly out of scope here:
+These are explicitly out of scope here:
 
 - Kubernetes Service/Ingress routing for the forkd path (this slice is the
   standalone sandbox-server only).
-- CRD template/claim port-declaration fields (declaring exposed ports on
-  `SandboxTemplate` / `SandboxClaim`).
+- CRD template/sandbox port-declaration fields (declaring exposed ports on
+  `SandboxPool.spec.template` / `Sandbox`).
 - Auth on the forward path (a token gate on the host listener).
 - UDP forwarding (this slice is TCP only).

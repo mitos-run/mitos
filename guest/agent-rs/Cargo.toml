@@ -1,0 +1,90 @@
+[package]
+name = "sandbox-agent"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "sandbox_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandbox-agent"
+path = "src/main.rs"
+
+[dependencies]
+# gRPC stack: tonic for the service layer, prost for generated types.
+tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost", "router", "channel"] }
+prost = "0.13"
+
+# Typed errors with Display derivation. Used by error.rs.
+thiserror = "2"
+
+# Async runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "fs"] }
+
+# vsock transport (Linux only; stub on non-Linux via feature flag).
+tokio-vsock = { version = "0.6", optional = true }
+
+# libc for PID-1 init (mount, sethostname) and fork-correctness syscalls.
+libc = "0.2"
+
+# Structured logging. tracing macros are used in init/ and service/ startup paths.
+tracing = "0.1"
+# Subscriber for test and binary: fmt layer + RUST_LOG env filter.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Stream utilities: UnixListenerStream used by the conformance test harness;
+# sync feature provides ReceiverStream used by the Exec conformance test.
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+
+# CancellationToken for prompt client-disconnect kill signalling in exec.rs.
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Legacy JSON serde kept alive during the wire migration; removed once Task 0.x
+# stubs are the last callers (deferred per task-0.1 brief).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tar archive creation and extraction (Archive + Upload RPCs, Task 2.3).
+# Extraction uses a manual entry loop with safe_join as the sole path-traversal
+# barrier (NOT tar::Archive::unpack, which is not used). Only Regular and
+# Directory entry types are materialized; symlinks, hard links, and all other
+# types are rejected so a restored symlink cannot re-introduce an escape.
+tar = "0.4"
+
+# Directory walker for tar creation (skips symlinks by default configuration).
+walkdir = "2"
+
+# Filesystem event watching: inotify on Linux (used by the Watch RPC).
+# v6 is the stable API; notify uses its own thread and delivers events via a
+# channel, which we bridge into the tonic server stream via tokio::sync::mpsc.
+notify = "6"
+
+[dev-dependencies]
+# For temp file creation in sys/crng tests (RNDADDENTROPY on plain file).
+tempfile = "3"
+# Used in archive/upload conformance tests to construct test tars.
+tar = "0.4"
+# tower::service_fn is used in the conformance test to connect to a unix socket.
+tower = "0.5"
+# TokioIo wrapper: required by tonic 0.13 connect_with_connector (hyper's IO traits
+# differ from tokio's AsyncRead/AsyncWrite; TokioIo bridges them).
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+[build-dependencies]
+# tonic-build compiles proto/sandbox/v1/sandbox.proto at build time.
+tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
+# Vendored protoc so the build needs no system protoc (box1 has none).
+protoc-bin-vendored = "3"
+
+[features]
+# vsock feature gate mirrors the Linux-only tokio-vsock dependency.
+vsock = ["dep:tokio-vsock"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -15,13 +15,13 @@ package controller_test
 import (
 	"context"
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -54,12 +54,12 @@ func testManifest(seed byte) string {
 	return fmt.Sprintf("%x", b)
 }
 
-func makeWorkspace(t *testing.T, name string, retention v1alpha1.WorkspaceRetention) *v1alpha1.Workspace {
+func makeWorkspace(t *testing.T, name string, retention v1.WorkspaceRetention) *v1.Workspace {
 	t.Helper()
-	ws := &v1alpha1.Workspace{
+	ws := &v1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: v1alpha1.WorkspaceSpec{
-			Store:     v1alpha1.WorkspaceStore{ObjectStorageRef: "default"},
+		Spec: v1.WorkspaceSpec{
+			Store:     v1.WorkspaceStore{ObjectStorageRef: "default"},
 			Retention: retention,
 		},
 	}
@@ -70,15 +70,15 @@ func makeWorkspace(t *testing.T, name string, retention v1alpha1.WorkspaceRetent
 	return ws
 }
 
-func makeRevision(t *testing.T, name, wsName, manifest string, snapshot *string, parent *v1alpha1.WorkspaceRevisionRef) *v1alpha1.WorkspaceRevision {
+func makeRevision(t *testing.T, name, wsName, manifest string, snapshot *string, parent *v1.WorkspaceRevisionRef) *v1.WorkspaceRevision {
 	t.Helper()
-	rev := &v1alpha1.WorkspaceRevision{
+	rev := &v1.WorkspaceRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: v1alpha1.WorkspaceRevisionSpec{
-			WorkspaceRef:      v1alpha1.LocalObjectReference{Name: wsName},
+		Spec: v1.WorkspaceRevisionSpec{
+			WorkspaceRef:      v1.LocalObjectReference{Name: wsName},
 			ContentManifest:   manifest,
 			MemorySnapshotRef: snapshot,
-			Source:            v1alpha1.RevisionSource{FromWorkspaceRevision: parent},
+			Source:            v1.RevisionSource{FromWorkspaceRevision: parent},
 		},
 	}
 	if err := k8sClient.Create(ctx, rev); err != nil {
@@ -88,10 +88,10 @@ func makeRevision(t *testing.T, name, wsName, manifest string, snapshot *string,
 	return rev
 }
 
-func waitWorkspace(t *testing.T, name string, cond func(*v1alpha1.Workspace) bool, what string) *v1alpha1.Workspace {
+func waitWorkspace(t *testing.T, name string, cond func(*v1.Workspace) bool, what string) *v1.Workspace {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
-	var ws v1alpha1.Workspace
+	var ws v1.Workspace
 	for time.Now().Before(deadline) {
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &ws); err == nil {
 			if cond(&ws) {
@@ -105,7 +105,7 @@ func waitWorkspace(t *testing.T, name string, cond func(*v1alpha1.Workspace) boo
 	return nil
 }
 
-func readyCondition(ws *v1alpha1.Workspace) *metav1.Condition {
+func readyCondition(ws *v1.Workspace) *metav1.Condition {
 	for i := range ws.Status.Conditions {
 		if ws.Status.Conditions[i].Type == "Ready" {
 			return &ws.Status.Conditions[i]
@@ -115,9 +115,9 @@ func readyCondition(ws *v1alpha1.Workspace) *metav1.Condition {
 }
 
 func TestWorkspaceReconcilesToPendingWhenEmpty(t *testing.T) {
-	makeWorkspace(t, "ws-empty", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-empty", v1.WorkspaceRetention{})
 
-	ws := waitWorkspace(t, "ws-empty", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, "ws-empty", func(ws *v1.Workspace) bool {
 		c := readyCondition(ws)
 		return c != nil && c.Reason == controller.ReasonWorkspacePending && ws.Status.ObservedGeneration == ws.Generation
 	}, "Pending with observedGeneration")
@@ -129,7 +129,7 @@ func TestWorkspaceReconcilesToPendingWhenEmpty(t *testing.T) {
 }
 
 func TestWorkspaceHeadAndCountFromCommittedRevisions(t *testing.T) {
-	makeWorkspace(t, "ws-head", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-head", v1.WorkspaceRetention{})
 
 	// Two committed revisions; the second is created later, so it is the head
 	// (ordering is by creationTimestamp then name).
@@ -137,7 +137,7 @@ func TestWorkspaceHeadAndCountFromCommittedRevisions(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond) // distinct creationTimestamp (1s resolution)
 	makeRevision(t, "ws-head-r2", "ws-head", testManifest(0x22), nil, nil)
 
-	ws := waitWorkspace(t, "ws-head", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, "ws-head", func(ws *v1.Workspace) bool {
 		return ws.Status.Revisions == 2 && ws.Status.Head == "ws-head-r2"
 	}, "head ws-head-r2 with 2 revisions")
 
@@ -150,11 +150,11 @@ func TestWorkspaceHeadAndCountFromCommittedRevisions(t *testing.T) {
 	}
 
 	// The revisions themselves transitioned to Committed.
-	var r1 v1alpha1.WorkspaceRevision
+	var r1 v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-head-r1"}, &r1); err != nil {
 		t.Fatal(err)
 	}
-	if r1.Status.Phase != v1alpha1.WorkspaceRevisionCommitted {
+	if r1.Status.Phase != v1.WorkspaceRevisionCommitted {
 		t.Fatalf("revision r1 should be Committed, got %q", r1.Status.Phase)
 	}
 }
@@ -171,17 +171,17 @@ func TestWorkspaceResumableWhenHeadHasMemorySnapshot(t *testing.T) {
 	})
 	t.Cleanup(func() { setMemSnapshot(nil, nil, nil) })
 
-	makeWorkspace(t, "ws-resume", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-resume", v1.WorkspaceRetention{})
 	makeRevision(t, "ws-resume-r1", "ws-resume", testManifest(0x33), &snap, nil)
 
-	waitWorkspace(t, "ws-resume", func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, "ws-resume", func(ws *v1.Workspace) bool {
 		return ws.Status.Head == "ws-resume-r1" && ws.Status.Resumable
 	}, "resumable head")
 }
 
 func TestWorkspaceRetentionPrunesOldRevisionsProtectingHeadLineage(t *testing.T) {
 	// keep 2, minAge 0 so every over-count revision is immediately eligible.
-	makeWorkspace(t, "ws-retain", v1alpha1.WorkspaceRetention{
+	makeWorkspace(t, "ws-retain", v1.WorkspaceRetention{
 		Revisions: 2,
 		MinAge:    &metav1.Duration{Duration: 0},
 	})
@@ -196,34 +196,34 @@ func TestWorkspaceRetentionPrunesOldRevisionsProtectingHeadLineage(t *testing.T)
 	makeRevision(t, "ws-retain-r1", "ws-retain", testManifest(0x02), nil, nil)
 	time.Sleep(1100 * time.Millisecond)
 	makeRevision(t, "ws-retain-r2", "ws-retain", testManifest(0x03), nil,
-		&v1alpha1.WorkspaceRevisionRef{Workspace: "ws-retain", Revision: "ws-retain-r1"})
+		&v1.WorkspaceRevisionRef{Workspace: "ws-retain", Revision: "ws-retain-r1"})
 	time.Sleep(1100 * time.Millisecond)
 	makeRevision(t, "ws-retain-r3", "ws-retain", testManifest(0x04), nil,
-		&v1alpha1.WorkspaceRevisionRef{Workspace: "ws-retain", Revision: "ws-retain-r2"})
+		&v1.WorkspaceRevisionRef{Workspace: "ws-retain", Revision: "ws-retain-r2"})
 
 	// Head is r3 (latest). Its lineage is r3 -> r2 -> r1, all protected. r0 is
 	// the oldest non-ancestor; with keep=2 and 4 committed, the eligible old
 	// non-protected revision (r0) is pruned.
-	waitWorkspace(t, "ws-retain", func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, "ws-retain", func(ws *v1.Workspace) bool {
 		return ws.Status.Head == "ws-retain-r3"
 	}, "head r3")
 
 	// r0 must be pruned; r1, r2, r3 (the head lineage) must survive.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var r0 v1alpha1.WorkspaceRevision
+		var r0 v1.WorkspaceRevision
 		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-retain-r0"}, &r0)
 		if apierrors.IsNotFound(err) {
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	var r0 v1alpha1.WorkspaceRevision
+	var r0 v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-retain-r0"}, &r0); !apierrors.IsNotFound(err) {
 		t.Fatalf("r0 (oldest non-ancestor) should be pruned, but it is still present (err=%v)", err)
 	}
 	for _, keep := range []string{"ws-retain-r1", "ws-retain-r2", "ws-retain-r3"} {
-		var rev v1alpha1.WorkspaceRevision
+		var rev v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: keep}, &rev); err != nil {
 			t.Fatalf("head-lineage revision %s must NOT be pruned, but Get failed: %v", keep, err)
 		}
@@ -233,7 +233,7 @@ func TestWorkspaceRetentionPrunesOldRevisionsProtectingHeadLineage(t *testing.T)
 func TestWorkspaceRetentionRespectsMinAge(t *testing.T) {
 	// keep 1 but minAge is large: no revision is old enough to prune, so nothing
 	// is pruned even though the count is over.
-	makeWorkspace(t, "ws-minage", v1alpha1.WorkspaceRetention{
+	makeWorkspace(t, "ws-minage", v1.WorkspaceRetention{
 		Revisions: 1,
 		MinAge:    &metav1.Duration{Duration: time.Hour},
 	})
@@ -241,14 +241,14 @@ func TestWorkspaceRetentionRespectsMinAge(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	makeRevision(t, "ws-minage-r2", "ws-minage", testManifest(0x06), nil, nil)
 
-	waitWorkspace(t, "ws-minage", func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, "ws-minage", func(ws *v1.Workspace) bool {
 		return ws.Status.Revisions == 2
 	}, "2 revisions")
 
 	// Give the reconciler time to (not) prune, then assert both survive.
 	time.Sleep(2 * time.Second)
 	for _, name := range []string{"ws-minage-r1", "ws-minage-r2"} {
-		var rev v1alpha1.WorkspaceRevision
+		var rev v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &rev); err != nil {
 			t.Fatalf("minAge should protect %s from pruning, but Get failed: %v", name, err)
 		}
@@ -256,23 +256,23 @@ func TestWorkspaceRetentionRespectsMinAge(t *testing.T) {
 }
 
 func TestWorkspaceRevisionLineageValidation(t *testing.T) {
-	makeWorkspace(t, "ws-lineage", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-lineage", v1.WorkspaceRetention{})
 
 	// A revision whose FromWorkspaceRevision points at a nonexistent parent must
 	// NOT commit, and the workspace goes Degraded.
 	makeRevision(t, "ws-lineage-bad", "ws-lineage", testManifest(0x07), nil,
-		&v1alpha1.WorkspaceRevisionRef{Workspace: "ws-lineage", Revision: "does-not-exist"})
+		&v1.WorkspaceRevisionRef{Workspace: "ws-lineage", Revision: "does-not-exist"})
 
-	waitWorkspace(t, "ws-lineage", func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, "ws-lineage", func(ws *v1.Workspace) bool {
 		c := readyCondition(ws)
 		return c != nil && c.Reason == controller.ReasonWorkspaceDegraded
 	}, "Degraded on broken lineage")
 
-	var bad v1alpha1.WorkspaceRevision
+	var bad v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-lineage-bad"}, &bad); err != nil {
 		t.Fatal(err)
 	}
-	if bad.Status.Phase == v1alpha1.WorkspaceRevisionCommitted {
+	if bad.Status.Phase == v1.WorkspaceRevisionCommitted {
 		t.Fatalf("a revision with a broken lineage edge must not commit")
 	}
 }
@@ -283,13 +283,13 @@ func TestWorkspaceRevisionOwnerReferencedForGC(t *testing.T) {
 	// controller owner ref. envtest does NOT run that GC controller, so this test
 	// asserts the invariant that ENABLES the cascade (a controller owner ref to
 	// the workspace, with blockOwnerDeletion), rather than the cascade itself.
-	ws := makeWorkspace(t, "ws-gc", v1alpha1.WorkspaceRetention{})
+	ws := makeWorkspace(t, "ws-gc", v1.WorkspaceRetention{})
 	makeRevision(t, "ws-gc-r1", "ws-gc", testManifest(0x08), nil, nil)
 
 	deadline := time.Now().Add(15 * time.Second)
 	var owner *metav1.OwnerReference
 	for time.Now().Before(deadline) {
-		var rev v1alpha1.WorkspaceRevision
+		var rev v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-gc-r1"}, &rev); err == nil {
 			for i := range rev.OwnerReferences {
 				o := &rev.OwnerReferences[i]
@@ -315,7 +315,7 @@ func TestWorkspaceRevisionOwnerReferencedForGC(t *testing.T) {
 }
 
 func TestWorkspaceRevisionContentManifestImmutable(t *testing.T) {
-	makeWorkspace(t, "ws-immut", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-immut", v1.WorkspaceRetention{})
 	original := testManifest(0x09)
 	makeRevision(t, "ws-immut-r1", "ws-immut", original, nil, nil)
 
@@ -323,9 +323,9 @@ func TestWorkspaceRevisionContentManifestImmutable(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	committed := false
 	for time.Now().Before(deadline) {
-		var rev v1alpha1.WorkspaceRevision
+		var rev v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-immut-r1"}, &rev); err == nil {
-			if rev.Status.Phase == v1alpha1.WorkspaceRevisionCommitted {
+			if rev.Status.Phase == v1.WorkspaceRevisionCommitted {
 				committed = true
 				break
 			}
@@ -339,7 +339,7 @@ func TestWorkspaceRevisionContentManifestImmutable(t *testing.T) {
 	// Mutate the spec ContentManifest to a different valid digest. The reconciler
 	// must keep the phase Committed (the guard rejects the manifest change at the
 	// status level; the revision stays committed and does not flip to Pending).
-	var rev v1alpha1.WorkspaceRevision
+	var rev v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-immut-r1"}, &rev); err != nil {
 		t.Fatal(err)
 	}
@@ -351,11 +351,11 @@ func TestWorkspaceRevisionContentManifestImmutable(t *testing.T) {
 	// The phase must remain Committed across reconciles (it never flips to
 	// Pending on a changed manifest).
 	time.Sleep(3 * time.Second)
-	var after v1alpha1.WorkspaceRevision
+	var after v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ws-immut-r1"}, &after); err != nil {
 		t.Fatal(err)
 	}
-	if after.Status.Phase != v1alpha1.WorkspaceRevisionCommitted {
+	if after.Status.Phase != v1.WorkspaceRevisionCommitted {
 		t.Fatalf("a committed revision must stay Committed (immutable), got %q", after.Status.Phase)
 	}
 }

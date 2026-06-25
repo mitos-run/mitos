@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	v1 "mitos.run/mitos/api/v1"
 	"net/http"
 	"testing"
 	"time"
@@ -18,21 +19,20 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func waitClaimReady(t *testing.T, name string) *v1alpha1.SandboxClaim {
+func waitClaimReady(t *testing.T, name string) *v1.Sandbox {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err == nil {
-			if got.Status.Phase == v1alpha1.SandboxReady {
+			if got.Status.Phase == v1.SandboxReady {
 				return &got
 			}
-			if got.Status.Phase == v1alpha1.SandboxFailed {
+			if got.Status.Phase == v1.SandboxFailed {
 				t.Fatalf("claim failed: %+v", got.Status)
 			}
 		}
@@ -89,30 +89,26 @@ func assertHex64(t *testing.T, token string) {
 }
 
 func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "tok-node-1", "tok-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "tok-node-1", "tok-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tok-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "tok-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "tok-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "tok-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "tok-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "tok-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +116,6 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	got := waitClaimReady(t, "tok-claim")
@@ -138,8 +133,8 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	}
 
 	owner := metav1.GetControllerOf(secret)
-	if owner == nil || owner.Kind != "SandboxClaim" || owner.Name != "tok-claim" {
-		t.Fatalf("secret controller owner = %+v, want SandboxClaim tok-claim", owner)
+	if owner == nil || owner.Kind != "Sandbox" || owner.Name != "tok-claim" {
+		t.Fatalf("secret controller owner = %+v, want Sandbox tok-claim", owner)
 	}
 
 	// Token never in status or conditions.
@@ -150,8 +145,9 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	}
 
 	// Round-trip against the fake forkd's real HTTP handler. Without the
-	// bearer: 401. With it: auth passes; the fake has no guest agent, so
-	// the proof is the 404 agent-missing error, not a 401.
+	// bearer: 401. With it: auth passes; on the mock engine the sandbox has no
+	// guest agent so it is legitimately unregistered, and the proof is the
+	// 404 "not found or not registered" error, not a 401.
 	status, body := execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "")
 	if status != 401 {
 		t.Fatalf("exec without token: status = %d, body = %s, want 401", status, body)
@@ -162,38 +158,34 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	}
 	status, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, token)
 	if status != 404 {
-		t.Fatalf("exec with token: status = %d, body = %s, want 404 (auth passed, no agent)", status, body)
+		t.Fatalf("exec with token: status = %d, body = %s, want 404 (auth passed, sandbox unregistered on mock engine)", status, body)
 	}
-	if !bytes.Contains([]byte(body), []byte("not found or agent not connected")) {
-		t.Fatalf("want agent-missing error after auth, got: %s", body)
+	if !bytes.Contains([]byte(body), []byte("not found or not registered")) {
+		t.Fatalf("want not-registered error after auth, got: %s", body)
 	}
 }
 
 func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "tokf-node-1", "tokf-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "tokf-node-1", "tokf-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tokf-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "tokf-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "tokf-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "tokf-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "tokf-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "tokf-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -201,16 +193,15 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	waitClaimReady(t, "tokf-claim")
 
-	forkObj := &v1alpha1.SandboxFork{
+	forkObj := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "tokf-fork", Namespace: "default"},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef: v1alpha1.LocalObjectReference{Name: "tokf-claim"},
-			Replicas:  1,
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "tokf-claim"}},
+			Replicas: 1,
 		},
 	}
 	if err := k8sClient.Create(ctx, forkObj); err != nil {
@@ -218,13 +209,13 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, forkObj) })
 
-	var forkInfo *v1alpha1.ForkInfo
+	var forkInfo *v1.SandboxChild
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "tokf-fork", Namespace: "default"}, &got); err == nil {
-			if got.Status.ReadyForks >= 1 && len(got.Status.Forks) >= 1 {
-				forkInfo = &got.Status.Forks[0]
+			if got.Status.ReadyReplicas >= 1 && len(got.Status.Children) >= 1 {
+				forkInfo = &got.Status.Children[0]
 				break
 			}
 		}
@@ -244,19 +235,20 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 	}
 
 	owner := metav1.GetControllerOf(secret)
-	if owner == nil || owner.Kind != "SandboxFork" || owner.Name != "tokf-fork" {
-		t.Fatalf("secret controller owner = %+v, want SandboxFork tokf-fork", owner)
+	if owner == nil || owner.Kind != "Sandbox" || owner.Name != "tokf-fork" {
+		t.Fatalf("secret controller owner = %+v, want Sandbox tokf-fork", owner)
 	}
 
-	// The fork's own token gates its sandbox: 401 without, agent-missing
-	// 404 with.
+	// The fork's own token gates its sandbox: 401 without, 404 with.
+	// On the mock engine the sandbox has no guest agent so it is legitimately
+	// unregistered; the 404 "not found or not registered" proves auth passed.
 	status, body := execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, "")
 	if status != 401 {
 		t.Fatalf("fork exec without token: status = %d, body = %s, want 401", status, body)
 	}
 	status, body = execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, token)
-	if status != 404 || !bytes.Contains([]byte(body), []byte("not found or agent not connected")) {
-		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 agent-missing", status, body)
+	if status != 404 || !bytes.Contains([]byte(body), []byte("not found or not registered")) {
+		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 not-registered (auth passed, mock engine sandbox unregistered)", status, body)
 	}
 }
 
@@ -268,30 +260,26 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 // values are a different class governed by the default-deny inheritance gate;
 // see TestLiveForkOfSecretHolderIsRejectedByDefault.)
 func TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent(t *testing.T) {
-	stop, err := controller.StartFakeForkdNode(testRegistry, "reissue-node-1", "reissue-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "reissue-node-1", "reissue-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "reissue-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "reissue-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "reissue-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "reissue-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxClaimSpec{
-			PoolRef: v1alpha1.LocalObjectReference{Name: "reissue-pool"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "reissue-pool"}},
 		},
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +287,6 @@ func TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	waitClaimReady(t, "reissue-claim")
@@ -310,11 +297,11 @@ func TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent(t *testing.T) {
 	parentToken := string(parentSecret.Data["token"])
 	assertHex64(t, parentToken)
 
-	forkObj := &v1alpha1.SandboxFork{
+	forkObj := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "reissue-fork", Namespace: "default"},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef: v1alpha1.LocalObjectReference{Name: "reissue-claim"},
-			Replicas:  1,
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "reissue-claim"}},
+			Replicas: 1,
 		},
 	}
 	if err := k8sClient.Create(ctx, forkObj); err != nil {
@@ -322,13 +309,13 @@ func TestForkBearerTokenIsFreshlyReissuedNotInheritedFromParent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, forkObj) })
 
-	var forkInfo *v1alpha1.ForkInfo
+	var forkInfo *v1.SandboxChild
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var got v1alpha1.SandboxFork
+		var got v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "reissue-fork", Namespace: "default"}, &got); err == nil {
-			if got.Status.ReadyForks >= 1 && len(got.Status.Forks) >= 1 {
-				forkInfo = &got.Status.Forks[0]
+			if got.Status.ReadyReplicas >= 1 && len(got.Status.Children) >= 1 {
+				forkInfo = &got.Status.Children[0]
 				break
 			}
 		}

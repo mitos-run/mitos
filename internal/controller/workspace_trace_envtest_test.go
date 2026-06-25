@@ -15,6 +15,7 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
@@ -23,7 +24,6 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/observability"
@@ -43,27 +43,27 @@ func TestDehydrateStampsTraceIDOnRevision(t *testing.T) {
 	revDigest := cas.Digest(testManifest(0xce))
 	rec.install(t, revDigest)
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-trace-node", "wst-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-trace-node", "wst-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-bind-trace", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-bind-trace", v1.WorkspaceRetention{})
 
-	makeBoundClaim(t, "wst", "ws-bind-trace", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "wst", "ws-bind-trace", v1.SandboxSpec{
 		NodeName: "ws-trace-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Lifetime: &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 2 * time.Second}},
 	})
-	waitBoundPhase(t, "wst-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wst-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wst-claim", v1.SandboxReady)
+	waitBoundPhase(t, "wst-claim", v1.SandboxTerminated)
 
 	// The workspace head advanced to the new revision; read it back.
-	ws := waitWorkspace(t, "ws-bind-trace", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, "ws-bind-trace", func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after dehydrate")
 
-	var head v1alpha1.WorkspaceRevision
+	var head v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err != nil {
 		t.Fatalf("get head revision: %v", err)
 	}

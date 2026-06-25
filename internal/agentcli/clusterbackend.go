@@ -14,32 +14,31 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/mcp"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// tokenSecretSuffix is appended to a claim or fork name to form the name of the
+// tokenSecretSuffix is appended to a sandbox name to form the name of the
 // Secret holding its sandbox API bearer token. It mirrors the controller's
 // constant (internal/controller/token_secret.go).
 const tokenSecretSuffix = "-sandbox-token"
 
-// Scheme is the runtime scheme with the mitos v1alpha1 and core types
-// registered, for building a controller-runtime client against a real cluster.
+// Scheme is the runtime scheme with the mitos v1 and core types registered,
+// for building a controller-runtime client against a real cluster.
 func Scheme() *runtime.Scheme {
 	s := runtime.NewScheme()
-	utilruntime.Must(v1alpha1.AddToScheme(s))
+	utilruntime.Must(v1.AddToScheme(s))
 	utilruntime.Must(corev1.AddToScheme(s))
 	return s
 }
 
 // ClusterBackend implements Backend over a Kubernetes cluster: it creates
-// SandboxClaims and SandboxForks, reads the per-sandbox token Secret, and drives
-// exec and file IO over the claim's HTTP endpoint with the bearer token. The
-// token value is read into memory only for the duration of a request and is
-// never logged; the underlying mcp.HTTPBackend redacts any echo of it from error
-// strings.
+// Sandboxes, reads the per-sandbox token Secret, and drives exec and file IO
+// over the sandbox's HTTP endpoint with the bearer token. The token value is
+// read into memory only for the duration of a request and is never logged; the
+// underlying mcp.HTTPBackend redacts any echo of it from error strings.
 type ClusterBackend struct {
 	client     client.Client
 	namespace  string
@@ -50,7 +49,7 @@ type ClusterBackend struct {
 	pollTimeout  time.Duration
 
 	// readyHook / forkReadyHook are test seams: when set, they are invoked once
-	// right after the claim or fork is created, simulating the controller
+	// right after the sandbox or fork is created, simulating the controller
 	// reconciling it to Ready. In production they are nil and the poll observes
 	// the real controller.
 	readyHook     func(ctx context.Context, name string)
@@ -76,8 +75,8 @@ func NewClusterBackend(c client.Client, namespace string, httpClient *http.Clien
 	}
 }
 
-// randName returns a short random suffix so generated claim and fork names do
-// not collide across concurrent callers.
+// randName returns a short random suffix so generated sandbox names do not
+// collide across concurrent callers.
 func randName(prefix string) string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -86,45 +85,49 @@ func randName(prefix string) string {
 	return prefix + "-" + hex.EncodeToString(b[:])
 }
 
-// Create creates a SandboxClaim referencing pool, waits for it to reach the
-// Ready phase (bounded by pollTimeout), and returns the claim name as the
-// sandbox id.
+// Create creates a Sandbox referencing pool via source.poolRef, waits for it
+// to reach the Ready phase (bounded by pollTimeout), and returns the sandbox
+// name as the sandbox id.
 func (b *ClusterBackend) Create(ctx context.Context, pool string) (string, error) {
 	if pool == "" {
 		return "", fmt.Errorf("create: a pool is required")
 	}
 	name := randName("sbx")
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: pool}},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{
+				PoolRef: &v1.LocalObjectReference{Name: pool},
+			},
+		},
 	}
-	if err := b.client.Create(ctx, claim); err != nil {
-		return "", fmt.Errorf("create claim: %w", err)
+	if err := b.client.Create(ctx, sandbox); err != nil {
+		return "", fmt.Errorf("create sandbox: %w", err)
 	}
 	if b.readyHook != nil {
 		b.readyHook(ctx, name)
 	}
-	if err := b.waitClaimReady(ctx, name); err != nil {
+	if err := b.waitSandboxReady(ctx, name); err != nil {
 		return "", err
 	}
 	return name, nil
 }
 
-// waitClaimReady polls the claim until its phase is Ready (success), Failed
-// (error), or the timeout elapses.
-func (b *ClusterBackend) waitClaimReady(ctx context.Context, name string) error {
+// waitSandboxReady polls the sandbox until its phase is Ready (success),
+// Failed (error), or the timeout elapses.
+func (b *ClusterBackend) waitSandboxReady(ctx context.Context, name string) error {
 	deadline := b.now().Add(b.pollTimeout)
 	for {
-		var claim v1alpha1.SandboxClaim
-		if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &claim); err != nil {
-			return fmt.Errorf("get claim %s: %w", name, err)
+		var sandbox v1.Sandbox
+		if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &sandbox); err != nil {
+			return fmt.Errorf("get sandbox %s: %w", name, err)
 		}
-		switch claim.Status.Phase {
-		case v1alpha1.SandboxReady:
-			if claim.Status.Endpoint != "" {
+		switch sandbox.Status.Phase {
+		case v1.SandboxReady:
+			if sandbox.Status.Endpoint != "" {
 				return nil
 			}
-		case v1alpha1.SandboxFailed:
+		case v1.SandboxFailed:
 			return fmt.Errorf("sandbox %s failed", name)
 		}
 		if b.now().After(deadline) {
@@ -138,16 +141,16 @@ func (b *ClusterBackend) waitClaimReady(ctx context.Context, name string) error 
 	}
 }
 
-// sandboxHTTP builds an mcp.HTTPBackend for the named claim by reading its
+// sandboxHTTP builds an mcp.HTTPBackend for the named sandbox by reading its
 // endpoint and token Secret. The token is held only for the lifetime of the
 // returned backend's request; the redaction in mcp.HTTPBackend keeps it out of
 // any error string.
 func (b *ClusterBackend) sandboxHTTP(ctx context.Context, name string) (*mcp.HTTPBackend, error) {
-	var claim v1alpha1.SandboxClaim
-	if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &claim); err != nil {
-		return nil, fmt.Errorf("get claim %s: %w", name, err)
+	var sandbox v1.Sandbox
+	if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &sandbox); err != nil {
+		return nil, fmt.Errorf("get sandbox %s: %w", name, err)
 	}
-	endpoint := claim.Status.Endpoint
+	endpoint := sandbox.Status.Endpoint
 
 	var secret corev1.Secret
 	token := ""
@@ -197,43 +200,46 @@ func (b *ClusterBackend) WriteFile(ctx context.Context, sandboxID, path, content
 	return hb.WriteFile(ctx, sandboxID, path, content)
 }
 
-// Fork creates a SandboxFork sourced at sandboxID with n replicas, waits for the
-// forks to be Ready (bounded), and returns the fork sandbox names.
+// Fork creates a Sandbox with source.fromSandbox set to sandboxID and
+// spec.replicas set to n, waits for the children to be Ready (bounded), and
+// returns the child sandbox names.
 func (b *ClusterBackend) Fork(ctx context.Context, sandboxID string, n int) ([]string, error) {
 	if n < 1 {
 		n = 1
 	}
 	name := randName(sandboxID + "-fork")
-	fork := &v1alpha1.SandboxFork{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace},
-		Spec: v1alpha1.SandboxForkSpec{
-			SourceRef: v1alpha1.LocalObjectReference{Name: sandboxID},
-			Replicas:  int32(n),
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{
+				FromSandbox: &v1.FromSandboxSource{Name: sandboxID},
+			},
+			Replicas: int32(n),
 		},
 	}
-	if err := b.client.Create(ctx, fork); err != nil {
+	if err := b.client.Create(ctx, sandbox); err != nil {
 		return nil, fmt.Errorf("create fork: %w", err)
 	}
 	if b.forkReadyHook != nil {
 		b.forkReadyHook(ctx, name, n)
 	}
-	return b.waitForksReady(ctx, name, n)
+	return b.waitChildrenReady(ctx, name, n)
 }
 
-// waitForksReady polls the SandboxFork until at least n forks are Ready, then
-// returns their names.
-func (b *ClusterBackend) waitForksReady(ctx context.Context, name string, n int) ([]string, error) {
+// waitChildrenReady polls the Sandbox until at least n children are Ready,
+// then returns their names. Children are reported in Status.Children.
+func (b *ClusterBackend) waitChildrenReady(ctx context.Context, name string, n int) ([]string, error) {
 	deadline := b.now().Add(b.pollTimeout)
 	for {
-		var fork v1alpha1.SandboxFork
-		if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &fork); err != nil {
-			return nil, fmt.Errorf("get fork %s: %w", name, err)
+		var sandbox v1.Sandbox
+		if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &sandbox); err != nil {
+			return nil, fmt.Errorf("get sandbox %s: %w", name, err)
 		}
 		ready := make([]string, 0, n)
-		for i := range fork.Status.Forks {
-			fi := &fork.Status.Forks[i]
-			if fi.Phase == v1alpha1.SandboxReady {
-				ready = append(ready, fi.Name)
+		for i := range sandbox.Status.Children {
+			child := &sandbox.Status.Children[i]
+			if child.Phase == v1.SandboxReady {
+				ready = append(ready, child.Name)
 			}
 		}
 		if len(ready) >= n {
@@ -250,39 +256,43 @@ func (b *ClusterBackend) waitForksReady(ctx context.Context, name string, n int)
 	}
 }
 
-// Terminate deletes the SandboxClaim, which the controller reaps.
+// Terminate deletes the Sandbox, which the controller reaps.
 func (b *ClusterBackend) Terminate(ctx context.Context, sandboxID string) error {
-	claim := &v1alpha1.SandboxClaim{
+	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: sandboxID, Namespace: b.namespace},
 	}
-	if err := b.client.Delete(ctx, claim); err != nil {
-		return fmt.Errorf("delete claim %s: %w", sandboxID, err)
+	if err := b.client.Delete(ctx, sandbox); err != nil {
+		return fmt.Errorf("delete sandbox %s: %w", sandboxID, err)
 	}
 	return nil
 }
 
-// List returns the SandboxClaims in namespace mapped to SandboxInfo. An empty
+// List returns the Sandboxes in namespace mapped to SandboxInfo. An empty
 // namespace lists across all namespaces.
 func (b *ClusterBackend) List(ctx context.Context, namespace string) ([]SandboxInfo, error) {
 	var opts []client.ListOption
 	if namespace != "" {
 		opts = append(opts, client.InNamespace(namespace))
 	}
-	var claims v1alpha1.SandboxClaimList
-	if err := b.client.List(ctx, &claims, opts...); err != nil {
-		return nil, fmt.Errorf("list claims: %w", err)
+	var sandboxes v1.SandboxList
+	if err := b.client.List(ctx, &sandboxes, opts...); err != nil {
+		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
 	now := b.now()
-	infos := make([]SandboxInfo, 0, len(claims.Items))
-	for i := range claims.Items {
-		c := &claims.Items[i]
+	infos := make([]SandboxInfo, 0, len(sandboxes.Items))
+	for i := range sandboxes.Items {
+		s := &sandboxes.Items[i]
+		pool := ""
+		if s.Spec.Source.PoolRef != nil {
+			pool = s.Spec.Source.PoolRef.Name
+		}
 		infos = append(infos, SandboxInfo{
-			Name:     c.Name,
-			Pool:     c.Spec.PoolRef.Name,
-			Phase:    string(c.Status.Phase),
-			Node:     c.Status.Node,
-			Endpoint: c.Status.Endpoint,
-			Age:      now.Sub(c.CreationTimestamp.Time),
+			Name:     s.Name,
+			Pool:     pool,
+			Phase:    string(s.Status.Phase),
+			Node:     s.Status.Node,
+			Endpoint: s.Status.Endpoint,
+			Age:      now.Sub(s.CreationTimestamp.Time),
 		})
 	}
 	return infos, nil
@@ -294,57 +304,57 @@ func (b *ClusterBackend) Workspace() WorkspaceBackend {
 	return &ClusterWorkspaceBackend{client: b.client, namespace: b.namespace, now: b.now}
 }
 
-// Template returns the template authoring surface over the cluster: it applies a
-// SandboxTemplate object so a SandboxPool referencing it triggers the node-side
-// snapshot build (KVM gated). Push is a publish marker for now.
+// Template returns the template authoring surface over the cluster: it applies
+// a SandboxPool with an inline template so the node-side snapshot build is
+// triggered (KVM gated). Push is a publish marker for now.
 func (b *ClusterBackend) Template() TemplateBackend {
 	return &ClusterTemplateBackend{client: b.client, namespace: b.namespace}
 }
 
-// ClusterTemplateBackend creates or updates SandboxTemplate objects. The real
-// snapshot build runs on a KVM node via forkd once a pool references the
-// template; this backend just authors the declarative object from the builder
-// or a Dockerfile.
+// ClusterTemplateBackend creates or updates SandboxPool objects with an inline
+// PoolTemplateSpec. The real snapshot build runs on a KVM node via forkd once
+// the pool exists; this backend just authors the declarative object from the
+// builder or a Dockerfile.
 type ClusterTemplateBackend struct {
 	client    client.Client
 	namespace string
 }
 
-// Build creates or updates the named SandboxTemplate with spec.
-func (t *ClusterTemplateBackend) Build(ctx context.Context, name string, spec v1alpha1.SandboxTemplateSpec) error {
-	tmpl := &v1alpha1.SandboxTemplate{
+// Build creates or updates the named SandboxPool with an inline template spec.
+func (t *ClusterTemplateBackend) Build(ctx context.Context, name string, spec v1.PoolTemplateSpec) error {
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: t.namespace},
-		Spec:       spec,
+		Spec:       v1.SandboxPoolSpec{Template: &spec},
 	}
-	existing := &v1alpha1.SandboxTemplate{}
+	existing := &v1.SandboxPool{}
 	err := t.client.Get(ctx, client.ObjectKey{Name: name, Namespace: t.namespace}, existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		if err := t.client.Create(ctx, tmpl); err != nil {
-			return fmt.Errorf("create template %s: %w", name, err)
+		if err := t.client.Create(ctx, pool); err != nil {
+			return fmt.Errorf("create pool %s: %w", name, err)
 		}
 	case err != nil:
-		return fmt.Errorf("get template %s: %w", name, err)
+		return fmt.Errorf("get pool %s: %w", name, err)
 	default:
-		existing.Spec = spec
+		existing.Spec = v1.SandboxPoolSpec{Template: &spec}
 		if err := t.client.Update(ctx, existing); err != nil {
-			return fmt.Errorf("update template %s: %w", name, err)
+			return fmt.Errorf("update pool %s: %w", name, err)
 		}
 	}
 	return nil
 }
 
-// Push is a no-op publish marker on the cluster backend: a template applied to
-// the cluster is already discoverable. It exists for CLI and Daytona parity and
-// is a seam for a future registry push.
+// Push is a no-op publish marker on the cluster backend: a pool applied to the
+// cluster is already discoverable. It exists for CLI and Daytona parity and is
+// a seam for a future registry push.
 func (t *ClusterTemplateBackend) Push(_ context.Context, _ string) error {
 	return nil
 }
 
 // ClusterWorkspaceBackend drives the workspace verbs over the cluster: it
 // creates Workspace and WorkspaceRevision objects and reads their status. It
-// reuses WorkspaceVerbs (the controller-side fork/revert helpers) so the lineage
-// and rejection rules are shared with the controller.
+// reuses WorkspaceVerbs (the controller-side fork/revert helpers) so the
+// lineage and rejection rules are shared with the controller.
 type ClusterWorkspaceBackend struct {
 	client    client.Client
 	namespace string
@@ -357,7 +367,7 @@ func (w *ClusterWorkspaceBackend) verbs() *controller.WorkspaceVerbs {
 
 // CreateWorkspace creates an empty Workspace object.
 func (w *ClusterWorkspaceBackend) CreateWorkspace(ctx context.Context, name string) error {
-	ws := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
+	ws := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
 	if err := w.client.Create(ctx, ws); err != nil {
 		return fmt.Errorf("create workspace %s: %w", name, err)
 	}
@@ -373,7 +383,7 @@ func (w *ClusterWorkspaceBackend) ListWorkspaces(ctx context.Context, namespace 
 	} else {
 		opts = append(opts, client.InNamespace(w.namespace))
 	}
-	var list v1alpha1.WorkspaceList
+	var list v1.WorkspaceList
 	if err := w.client.List(ctx, &list, opts...); err != nil {
 		return nil, fmt.Errorf("list workspaces: %w", err)
 	}
@@ -391,7 +401,7 @@ func (w *ClusterWorkspaceBackend) ListWorkspaces(ctx context.Context, namespace 
 
 // Log lists the revisions belonging to workspace, newest first.
 func (w *ClusterWorkspaceBackend) Log(ctx context.Context, workspace string) ([]RevisionInfo, error) {
-	var list v1alpha1.WorkspaceRevisionList
+	var list v1.WorkspaceRevisionList
 	if err := w.client.List(ctx, &list, client.InNamespace(w.namespace)); err != nil {
 		return nil, fmt.Errorf("list revisions: %w", err)
 	}
@@ -415,7 +425,7 @@ func (w *ClusterWorkspaceBackend) Log(ctx context.Context, workspace string) ([]
 // Diff returns the recorded content-hash diff of a revision against its parent
 // head, if the revision captured one (via a terminate {diff: true} output).
 func (w *ClusterWorkspaceBackend) Diff(ctx context.Context, workspace, revision string) (DiffInfo, error) {
-	var rev v1alpha1.WorkspaceRevision
+	var rev v1.WorkspaceRevision
 	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: revision}, &rev); err != nil {
 		return DiffInfo{}, fmt.Errorf("get revision %s: %w", revision, err)
 	}
@@ -426,9 +436,9 @@ func (w *ClusterWorkspaceBackend) Diff(ctx context.Context, workspace, revision 
 	return DiffInfo{Parent: d.ParentRevision, Added: d.Added, Removed: d.Removed, Modified: d.Modified}, nil
 }
 
-// Fork branches a committed revision of src into dst, returning the new revision
-// name. It delegates to the shared controller-side verb so the lineage and
-// rejection rules match the controller.
+// Fork branches a committed revision of src into dst, returning the new
+// revision name. It delegates to the shared controller-side verb so the
+// lineage and rejection rules match the controller.
 func (w *ClusterWorkspaceBackend) Fork(ctx context.Context, src, rev, dst string) (string, error) {
 	r, err := w.verbs().Fork(ctx, w.namespace, src, rev, dst)
 	if err != nil {
@@ -450,33 +460,33 @@ func (w *ClusterWorkspaceBackend) Revert(ctx context.Context, workspace, rev str
 // RemoveWorkspace deletes a workspace; its revisions are garbage-collected by
 // owner reference.
 func (w *ClusterWorkspaceBackend) RemoveWorkspace(ctx context.Context, name string) error {
-	ws := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
+	ws := &v1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
 	if err := w.client.Delete(ctx, ws); err != nil {
 		return fmt.Errorf("delete workspace %s: %w", name, err)
 	}
 	return nil
 }
 
-// Bind binds a running sandbox claim to a workspace. A sandbox binds one
-// workspace for its lifetime: re-binding to a different workspace is refused.
+// Bind binds a running sandbox to a workspace. A sandbox binds one workspace
+// for its lifetime: re-binding to a different workspace is refused.
 func (w *ClusterWorkspaceBackend) Bind(ctx context.Context, sandboxID, workspace string) error {
-	var claim v1alpha1.SandboxClaim
-	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: sandboxID}, &claim); err != nil {
+	var sandbox v1.Sandbox
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: sandboxID}, &sandbox); err != nil {
 		return fmt.Errorf("get sandbox %s: %w", sandboxID, err)
 	}
-	if claim.Spec.WorkspaceRef != nil && claim.Spec.WorkspaceRef.Name != workspace {
-		return fmt.Errorf("sandbox %s is already bound to workspace %s; a sandbox binds one workspace for its lifetime", sandboxID, claim.Spec.WorkspaceRef.Name)
+	if sandbox.Spec.WorkspaceRef != nil && sandbox.Spec.WorkspaceRef.Name != workspace {
+		return fmt.Errorf("sandbox %s is already bound to workspace %s; a sandbox binds one workspace for its lifetime", sandboxID, sandbox.Spec.WorkspaceRef.Name)
 	}
-	patch := client.MergeFrom(claim.DeepCopy())
-	claim.Spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: workspace}
-	if err := w.client.Patch(ctx, &claim, patch); err != nil {
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	sandbox.Spec.WorkspaceRef = &v1.LocalObjectReference{Name: workspace}
+	if err := w.client.Patch(ctx, &sandbox, patch); err != nil {
 		return fmt.Errorf("bind sandbox %s to workspace %s: %w", sandboxID, workspace, err)
 	}
 	return nil
 }
 
 // revisionLineageStr renders the human-legible lineage of a revision.
-func revisionLineageStr(r *v1alpha1.WorkspaceRevision) string {
+func revisionLineageStr(r *v1.WorkspaceRevision) string {
 	if r.Spec.Source.FromClaim != "" {
 		return "fromClaim:" + r.Spec.Source.FromClaim
 	}

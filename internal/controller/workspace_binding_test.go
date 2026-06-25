@@ -1,6 +1,6 @@
 package controller_test
 
-// Envtest coverage for binding a SandboxClaim to a Workspace (W4 slice 2).
+// Envtest coverage for binding a Sandbox to a Workspace (W4 slice 2).
 //
 // The suite's raw claim reconciler routes the workspace hydrate/dehydrate seams
 // through per-test swappable fakes (setWSTransfer). These tests assert:
@@ -14,6 +14,7 @@ package controller_test
 
 import (
 	"context"
+	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/workspace"
@@ -46,14 +46,14 @@ type wsRecorder struct {
 func (r *wsRecorder) install(t *testing.T, dehydrateDigest cas.Digest) {
 	r.dehydrateDigest = dehydrateDigest
 	setWSTransfer(
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+		func(_ context.Context, _ *v1.Sandbox, manifest cas.Digest) error {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.hydrateCalls++
 			r.hydratedDigest = manifest
 			return nil
 		},
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+		func(_ context.Context, _ *v1.Sandbox, excludePaths, capturePaths []string) (cas.Digest, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.dehydrateCalls++
@@ -77,29 +77,27 @@ func (r *wsRecorder) captures() []string {
 	return append([]string(nil), r.capturesPassed...)
 }
 
-// makeBoundClaim creates a template, pool, and claim bound to wsName.
-func makeBoundClaim(t *testing.T, prefix, wsName string, spec v1alpha1.SandboxClaimSpec) *v1alpha1.SandboxClaim {
+// makeBoundClaim creates an inline-template pool and a Sandbox bound to wsName.
+// The pool name (prefix + "-pool") is the inline-template snapshot id the caller
+// must register on the fake forkd node.
+func makeBoundClaim(t *testing.T, prefix, wsName string, spec v1.SandboxSpec) *v1.Sandbox {
 	t.Helper()
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: prefix + "-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
-	spec.PoolRef = v1alpha1.LocalObjectReference{Name: prefix + "-pool"}
+	spec.Source = v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: prefix + "-pool"}}
 	if wsName != "" {
-		spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: wsName}
+		spec.WorkspaceRef = &v1.LocalObjectReference{Name: wsName}
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: prefix + "-claim", Namespace: "default"},
 		Spec:       spec,
 	}
-	for _, obj := range []client.Object{template, pool, claim} {
+	for _, obj := range []client.Object{pool, claim} {
 		if err := k8sClient.Create(ctx, obj); err != nil {
 			t.Fatal(err)
 		}
@@ -107,23 +105,22 @@ func makeBoundClaim(t *testing.T, prefix, wsName string, spec v1alpha1.SandboxCl
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 	return claim
 }
 
 // waitBoundPhase waits until the named claim reaches the given phase, reusing the
 // shared predicate-based waitClaimPhase helper.
-func waitBoundPhase(t *testing.T, name string, phase v1alpha1.SandboxPhase) *v1alpha1.SandboxClaim {
+func waitBoundPhase(t *testing.T, name string, phase v1.SandboxPhase) *v1.Sandbox {
 	t.Helper()
-	return waitClaimPhase(t, name, func(c *v1alpha1.SandboxClaim) bool {
+	return waitClaimPhase(t, name, func(c *v1.Sandbox) bool {
 		return c.Status.Phase == phase
 	})
 }
 
-func claimReadyReason(t *testing.T, name string) (phase v1alpha1.SandboxPhase, reason string) {
+func claimReadyReason(t *testing.T, name string) (phase v1.SandboxPhase, reason string) {
 	t.Helper()
-	var got v1alpha1.SandboxClaim
+	var got v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -139,22 +136,22 @@ func TestClaimWorkspaceHydrateOnActivate(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0xaa)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-hydrate-node", "wsh-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-hydrate-node", "wsh-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
 	headManifest := testManifest(0xbe)
-	makeWorkspace(t, "ws-bind-hydrate", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-bind-hydrate", v1.WorkspaceRetention{})
 	makeRevision(t, "ws-bind-hydrate-r1", "ws-bind-hydrate", headManifest, nil, nil)
 	// Wait for the workspace head to converge to the committed revision.
-	waitWorkspace(t, "ws-bind-hydrate", func(ws *v1alpha1.Workspace) bool {
+	waitWorkspace(t, "ws-bind-hydrate", func(ws *v1.Workspace) bool {
 		return ws.Status.Head == "ws-bind-hydrate-r1"
 	}, "head committed")
 
-	makeBoundClaim(t, "wsh", "ws-bind-hydrate", v1alpha1.SandboxClaimSpec{NodeName: "ws-hydrate-node"})
-	waitBoundPhase(t, "wsh-claim", v1alpha1.SandboxReady)
+	makeBoundClaim(t, "wsh", "ws-bind-hydrate", v1.SandboxSpec{NodeName: "ws-hydrate-node"})
+	waitBoundPhase(t, "wsh-claim", v1.SandboxReady)
 
 	// The hydrate seam must have been invoked with the head's manifest.
 	deadline := time.Now().Add(10 * time.Second)
@@ -176,24 +173,24 @@ func TestClaimWorkspaceDehydrateOnTerminate(t *testing.T) {
 	revDigest := cas.Digest(testManifest(0xcd))
 	rec.install(t, revDigest)
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-dehydrate-node", "wsd-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-dehydrate-node", "wsd-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-bind-dehydrate", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-bind-dehydrate", v1.WorkspaceRetention{})
 	// No head yet: the claim starts empty, then dehydrate creates the first
 	// committed revision on terminate.
 
-	claim := makeBoundClaim(t, "wsd", "ws-bind-dehydrate", v1alpha1.SandboxClaimSpec{
+	claim := makeBoundClaim(t, "wsd", "ws-bind-dehydrate", v1.SandboxSpec{
 		NodeName: "ws-dehydrate-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Lifetime: &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 2 * time.Second}},
 	})
-	waitBoundPhase(t, "wsd-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsd-claim", v1.SandboxReady)
 
 	// Lifetime expiry terminates the claim, which dehydrates first.
-	waitBoundPhase(t, "wsd-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wsd-claim", v1.SandboxTerminated)
 
 	// A dehydrate must have run with the secret exclude list.
 	deadline := time.Now().Add(10 * time.Second)
@@ -215,11 +212,11 @@ func TestClaimWorkspaceDehydrateOnTerminate(t *testing.T) {
 
 	// A new committed WorkspaceRevision with fromClaim lineage must exist and the
 	// workspace head must advance to it.
-	ws := waitWorkspace(t, "ws-bind-dehydrate", func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, "ws-bind-dehydrate", func(ws *v1.Workspace) bool {
 		return ws.Status.Head != "" && ws.Status.Revisions >= 1
 	}, "head advanced after dehydrate")
 
-	var head v1alpha1.WorkspaceRevision
+	var head v1.WorkspaceRevision
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err != nil {
 		t.Fatalf("get head revision: %v", err)
 	}
@@ -240,23 +237,23 @@ func TestClaimDeletionTerminatesWhenBoundWorkspaceGone(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0x5a)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-ghost-node", "wsg-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-ghost-node", "wsg-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-bind-ghost", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-bind-ghost", v1.WorkspaceRetention{})
 
-	claim := makeBoundClaim(t, "wsg", "ws-bind-ghost", v1alpha1.SandboxClaimSpec{
+	claim := makeBoundClaim(t, "wsg", "ws-bind-ghost", v1.SandboxSpec{
 		NodeName: "ws-ghost-node",
 	})
-	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsg-claim", v1.SandboxReady)
 
 	// Delete the bound workspace out from under the still-active claim and wait
 	// until it is truly gone (Workspace carries no finalizer, so Get returns
 	// NotFound). This is the state that triggered the hot-loop.
-	var ws v1alpha1.Workspace
+	var ws v1.Workspace
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "ws-bind-ghost"}, &ws); err != nil {
 		t.Fatalf("get workspace before delete: %v", err)
 	}
@@ -283,27 +280,27 @@ func TestClaimWorkspaceSingleWriterBusy(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0xef)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-busy-node", "wsb-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-busy-node", "wsb1-pool", "wsb2-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-busy", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-busy", v1.WorkspaceRetention{})
 
 	// First claim binds and goes Ready.
-	makeBoundClaim(t, "wsb1", "ws-busy", v1alpha1.SandboxClaimSpec{NodeName: "ws-busy-node"})
-	waitBoundPhase(t, "wsb1-claim", v1alpha1.SandboxReady)
+	makeBoundClaim(t, "wsb1", "ws-busy", v1.SandboxSpec{NodeName: "ws-busy-node"})
+	waitBoundPhase(t, "wsb1-claim", v1.SandboxReady)
 
 	// Second claim on the same workspace must pend with WorkspaceBusy.
-	makeBoundClaim(t, "wsb2", "ws-busy", v1alpha1.SandboxClaimSpec{NodeName: "ws-busy-node"})
+	makeBoundClaim(t, "wsb2", "ws-busy", v1.SandboxSpec{NodeName: "ws-busy-node"})
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		phase, reason := claimReadyReason(t, "wsb2-claim")
-		if phase == v1alpha1.SandboxPending && reason == "WorkspaceBusy" {
+		if phase == v1.SandboxPending && reason == "WorkspaceBusy" {
 			return
 		}
-		if phase == v1alpha1.SandboxReady {
+		if phase == v1.SandboxReady {
 			t.Fatal("second claim on a busy workspace went Ready; single-writer not enforced")
 		}
 		time.Sleep(150 * time.Millisecond)
@@ -315,18 +312,18 @@ func TestClaimWithoutWorkspaceRefUnaffected(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0x11)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-none-node", "wsn-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-none-node", "wsn-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeBoundClaim(t, "wsn", "", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "wsn", "", v1.SandboxSpec{
 		NodeName: "ws-none-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Lifetime: &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: 2 * time.Second}},
 	})
-	waitBoundPhase(t, "wsn-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wsn-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wsn-claim", v1.SandboxReady)
+	waitBoundPhase(t, "wsn-claim", v1.SandboxTerminated)
 
 	// Neither hydrate nor dehydrate may have been invoked for an unbound claim.
 	hcalls, _, dcalls, _ := rec.snapshot()
@@ -342,21 +339,23 @@ func TestClaimWorkspaceOutputsCapturePaths(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0x21)))
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-out-node", "wso-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-out-node", "wso-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	makeWorkspace(t, "ws-outputs", v1alpha1.WorkspaceRetention{})
+	makeWorkspace(t, "ws-outputs", v1.WorkspaceRetention{})
 
-	makeBoundClaim(t, "wso", "ws-outputs", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "wso", "ws-outputs", v1.SandboxSpec{
 		NodeName: "ws-out-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
-		Outputs:  []v1alpha1.OutputSpec{{Path: "/workspace/dist"}},
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Outputs: []v1.OutputSpec{{Path: "/workspace/dist"}}},
+		},
 	})
-	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wso-claim", v1.SandboxReady)
+	waitBoundPhase(t, "wso-claim", v1.SandboxTerminated)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -380,39 +379,44 @@ func TestClaimWorkspaceOutputsDiffRecorded(t *testing.T) {
 	rec.install(t, cas.Digest(testManifest(0x33)))
 
 	// Scripted diff: the diff seam reports one added and one modified path.
-	setWSDiff(func(_ context.Context, _ *v1alpha1.SandboxClaim, _, _ cas.Digest) (workspace.Diff, error) {
+	setWSDiff(func(_ context.Context, _ *v1.Sandbox, _, _ cas.Digest) (workspace.Diff, error) {
 		return workspace.Diff{Added: []string{"new.txt"}, Modified: []string{"main.go"}}, nil
 	})
 	t.Cleanup(func() { setWSDiff(nil) })
-
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-diff-node", "wsdf-tmpl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
 
 	// Unique names per run: the shared envtest apiserver has no GC controller, so
 	// a prior run's terminate-created child revision survives and would be adopted
 	// as this workspace's head if the name were reused.
 	wsName := uniqueName("ws-diff")
 	claimPrefix := uniqueName("wsdf")
-	makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
 
-	makeBoundClaim(t, claimPrefix, wsName, v1alpha1.SandboxClaimSpec{
+	// The fake node holds the pool's inline-template snapshot, keyed by the pool
+	// name (claimPrefix + "-pool").
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-diff-node", claimPrefix+"-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, wsName, v1.WorkspaceRetention{})
+
+	makeBoundClaim(t, claimPrefix, wsName, v1.SandboxSpec{
 		NodeName: "ws-diff-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
-		Outputs:  []v1alpha1.OutputSpec{{Diff: true}},
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Outputs: []v1.OutputSpec{{Diff: true}}},
+		},
 	})
-	waitBoundPhase(t, claimPrefix+"-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, claimPrefix+"-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claimPrefix+"-claim", v1.SandboxReady)
+	waitBoundPhase(t, claimPrefix+"-claim", v1.SandboxTerminated)
 
-	ws := waitWorkspace(t, wsName, func(ws *v1alpha1.Workspace) bool {
+	ws := waitWorkspace(t, wsName, func(ws *v1.Workspace) bool {
 		return ws.Status.Head != ""
 	}, "head advanced after dehydrate")
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var head v1alpha1.WorkspaceRevision
+		var head v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
 			if head.Status.DiffSummary != nil {
 				ds := head.Status.DiffSummary
@@ -437,7 +441,7 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 	rec.install(t, cas.Digest(testManifest(0x44)))
 
 	// The repo-paths resolver returns one file under the git path.
-	setWSRepoFiles(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ cas.Digest, gitPaths []string) (map[string]string, error) {
+	setWSRepoFiles(func(_ context.Context, _ *v1.Sandbox, _ cas.Digest, gitPaths []string) (map[string]string, error) {
 		return map[string]string{"repo/main.go": "package main\n"}, nil
 	})
 	t.Cleanup(func() { setWSRepoFiles(nil) })
@@ -458,13 +462,13 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 	})
 	t.Cleanup(func() { setWSRendezvous(nil) })
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-git-node", "wsg-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-git-node", "wsg-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	ws := makeWorkspace(t, "ws-git", v1alpha1.WorkspaceRetention{})
+	ws := makeWorkspace(t, "ws-git", v1.WorkspaceRetention{})
 	// Re-Get inside RetryOnConflict so each attempt carries a fresh
 	// resourceVersion: the WorkspaceReconciler updates the workspace status
 	// concurrently, so a plain Update here loses an optimistic-lock race
@@ -473,19 +477,21 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.Name, Namespace: ws.Namespace}, ws); err != nil {
 			return err
 		}
-		ws.Spec.Git = v1alpha1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
+		ws.Spec.Git = v1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
 		return k8sClient.Update(ctx, ws)
 	}); err != nil {
 		t.Fatalf("set workspace git paths: %v", err)
 	}
 
-	makeBoundClaim(t, "wsg", "ws-git", v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, "wsg", "ws-git", v1.SandboxSpec{
 		NodeName: "ws-git-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
-		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "file:///srv/git/rendezvous.git", Branch: "attempt/{{.name}}"}}},
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Outputs: []v1.OutputSpec{{Git: &v1.GitOutput{Remote: "file:///srv/git/rendezvous.git", Branch: "attempt/{{.name}}"}}}},
+		},
 	})
-	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
-	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, "wsg-claim", v1.SandboxReady)
+	waitBoundPhase(t, "wsg-claim", v1.SandboxTerminated)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -511,9 +517,9 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 	}
 
 	// The push must be recorded on the new revision status.
-	wsHead := waitWorkspace(t, "ws-git", func(w *v1alpha1.Workspace) bool { return w.Status.Head != "" }, "head advanced")
+	wsHead := waitWorkspace(t, "ws-git", func(w *v1.Workspace) bool { return w.Status.Head != "" }, "head advanced")
 	for time.Now().Before(deadline) {
-		var head v1alpha1.WorkspaceRevision
+		var head v1.WorkspaceRevision
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: wsHead.Status.Head}, &head); err == nil {
 			if len(head.Status.GitPushes) == 1 &&
 				head.Status.GitPushes[0].Branch == "attempt/wsg-claim" &&
@@ -535,7 +541,7 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 	rec := &wsRecorder{}
 	rec.install(t, cas.Digest(testManifest(0x45)))
 
-	setWSRepoFiles(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ cas.Digest, _ []string) (map[string]string, error) {
+	setWSRepoFiles(func(_ context.Context, _ *v1.Sandbox, _ cas.Digest, _ []string) (map[string]string, error) {
 		return map[string]string{"repo/main.go": "package main\n"}, nil
 	})
 	t.Cleanup(func() { setWSRepoFiles(nil) })
@@ -573,18 +579,18 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, secret) })
 
-	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-cred-node", "wsc-tmpl")
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-cred-node", claimPrefix+"-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	ws := makeWorkspace(t, wsName, v1alpha1.WorkspaceRetention{})
+	ws := makeWorkspace(t, wsName, v1.WorkspaceRetention{})
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.Name, Namespace: ws.Namespace}, ws); err != nil {
 			return err
 		}
-		ws.Spec.Git = v1alpha1.WorkspaceGit{
+		ws.Spec.Git = v1.WorkspaceGit{
 			Paths:                []string{"/workspace/repo"},
 			CredentialsUsername:  "bot",
 			CredentialsSecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: secretName}, Key: "token"},
@@ -594,13 +600,15 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 		t.Fatalf("set workspace git creds: %v", err)
 	}
 
-	makeBoundClaim(t, claimPrefix, wsName, v1alpha1.SandboxClaimSpec{
+	makeBoundClaim(t, claimPrefix, wsName, v1.SandboxSpec{
 		NodeName: "ws-cred-node",
-		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
-		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "https://example.test/rendezvous.git", Branch: "attempt/{{.name}}"}}},
+		Lifetime: &v1.SandboxLifetime{
+			TTL:         &metav1.Duration{Duration: 2 * time.Second},
+			OnTerminate: &v1.OnTerminate{Outputs: []v1.OutputSpec{{Git: &v1.GitOutput{Remote: "https://example.test/rendezvous.git", Branch: "attempt/{{.name}}"}}}},
+		},
 	})
-	waitBoundPhase(t, claimName, v1alpha1.SandboxReady)
-	waitBoundPhase(t, claimName, v1alpha1.SandboxTerminated)
+	waitBoundPhase(t, claimName, v1.SandboxReady)
+	waitBoundPhase(t, claimName, v1.SandboxTerminated)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -626,7 +634,7 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 	}
 
 	// The token VALUE must never appear in any claim condition.
-	var claim v1alpha1.SandboxClaim
+	var claim v1.Sandbox
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: claimName}, &claim); err != nil {
 		t.Fatalf("get claim: %v", err)
 	}
@@ -636,7 +644,7 @@ func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
 		}
 	}
 	// And never in any revision condition or field.
-	var revs v1alpha1.WorkspaceRevisionList
+	var revs v1.WorkspaceRevisionList
 	if err := k8sClient.List(ctx, &revs, client.InNamespace("default")); err != nil {
 		t.Fatalf("list revisions: %v", err)
 	}

@@ -123,6 +123,37 @@ func (s *AccountService) isMember(ctx context.Context, accountID, orgID string) 
 	return false
 }
 
+// memberRole returns the role that accountID holds in orgID. It returns a
+// wrapped ErrKeyWrongOrg if the account is not a member of the org.
+func (s *AccountService) memberRole(ctx context.Context, accountID, orgID string) (Role, error) {
+	memberships, err := s.store.ListMemberships(ctx, accountID)
+	if err != nil {
+		return "", fmt.Errorf("member role: list memberships: %w", err)
+	}
+	for _, m := range memberships {
+		if m.OrgID == orgID {
+			return m.Role, nil
+		}
+	}
+	return "", fmt.Errorf("member role: account is not a member of org %s: %w", orgID, ErrKeyWrongOrg)
+}
+
+// SetMemberRole changes targetAccountID's role within orgID. The actor must
+// hold a role that can manage members (Owner or Admin); otherwise ErrForbidden
+// is returned. The target must already be a member; otherwise ErrNotFound is
+// returned. The last owner of an org cannot be demoted; ErrLastOwner is
+// returned in that case.
+func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targetAccountID string, role Role) error {
+	actorRole, err := s.memberRole(ctx, actorID, orgID)
+	if err != nil {
+		return err
+	}
+	if !actorRole.Can(PermManageMembers) {
+		return ErrForbidden
+	}
+	return s.store.SetMembershipRole(ctx, orgID, targetAccountID, role)
+}
+
 // CreateKey mints a scoped key for an org on behalf of accountID, enforcing that
 // the account is a member of the org. The raw key is returned exactly once.
 func (s *AccountService) CreateKey(ctx context.Context, accountID string, req CreateKeyRequest) (CreatedKey, error) {
@@ -162,6 +193,53 @@ func (s *AccountService) ListMembers(ctx context.Context, accountID, orgID strin
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].AccountID < members[j].AccountID })
 	return members, nil
+}
+
+// ProfileUpdate carries the fields a caller may change on an account. Only
+// non-empty fields are applied; an empty field leaves the stored value
+// unchanged.
+type ProfileUpdate struct {
+	DisplayName string
+	Timezone    string
+	Locale      string
+}
+
+// Profile returns the account and its memberships for accountID. It is the
+// read side of the profile surface: the console profile page calls this to
+// populate the form.
+func (s *AccountService) Profile(ctx context.Context, accountID string) (Account, []Membership, error) {
+	acct, err := s.store.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("profile: %w", err)
+	}
+	mems, err := s.store.ListMemberships(ctx, accountID)
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("profile: list memberships: %w", err)
+	}
+	return acct, mems, nil
+}
+
+// UpdateProfile applies non-empty fields from u to the account identified by
+// accountID, persists the result, and returns the updated account. If the
+// account does not exist, ErrNotFound is returned.
+func (s *AccountService) UpdateProfile(ctx context.Context, accountID string, u ProfileUpdate) (Account, error) {
+	acct, err := s.store.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, fmt.Errorf("update profile: %w", err)
+	}
+	if u.DisplayName != "" {
+		acct.DisplayName = u.DisplayName
+	}
+	if u.Timezone != "" {
+		acct.Timezone = u.Timezone
+	}
+	if u.Locale != "" {
+		acct.Locale = u.Locale
+	}
+	if err := s.store.PutAccount(ctx, acct); err != nil {
+		return Account{}, fmt.Errorf("update profile: store account: %w", err)
+	}
+	return acct, nil
 }
 
 // RevokeKey revokes a key by id on behalf of accountID, enforcing that the key

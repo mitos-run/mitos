@@ -20,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	runv1alpha1 "mitos.run/mitos/api/v1alpha1"
+	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
 )
 
@@ -35,8 +35,9 @@ var (
 
 // TestMain stands up an envtest apiserver with BOTH the upstream
 // agents.x-k8s.io Sandbox CRD (vendored under third_party/agent-sandbox) and
-// our mitos.run CRDs installed, then runs the facade reconciler against it.
-// This proves the Sandbox -> husk run-path lifecycle end to end.
+// our mitos.run/v1 CRDs installed, then runs the facade reconciler against it.
+// This proves the upstream Sandbox -> husk run-path lifecycle end to end, where
+// the run-path object is the consolidated v1 Sandbox (source.poolRef).
 func TestMain(m *testing.M) {
 	testCtx, cancel = context.WithCancel(context.Background())
 	defer cancel()
@@ -51,13 +52,13 @@ func TestMain(m *testing.M) {
 	if err := extv1alpha1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
-	if err := runv1alpha1.AddToScheme(scheme); err != nil {
+	if err := runv1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
-			// Our mitos.run CRDs (the SandboxClaim the facade creates).
+			// Our mitos.run/v1 CRDs (the Sandbox and SandboxPool the facade creates).
 			filepath.Join("..", "..", "deploy", "crds"),
 			// The vendored upstream agents.x-k8s.io Sandbox CRD.
 			filepath.Join("..", "..", "third_party", "agent-sandbox", "crds"),

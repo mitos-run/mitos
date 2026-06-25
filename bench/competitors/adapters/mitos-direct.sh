@@ -110,15 +110,19 @@ warm() {
   local repo_root agent_bin server_bin rootfs busybox
   repo_root="${MITOS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 
-  # 1) Guest agent (PID 1 at /init): static so it runs as the only userspace in
-  #    a minimal rootfs. Reuse a prebuilt one if supplied, else cross-build it
-  #    static from the repo (CGO off), the same way the KVM smoke tools build it.
+  # 1) Guest agent (PID 1 at /init): the Rust agent (guest/agent-rs), built as a
+  #    static musl binary so it runs as the only userspace in a minimal rootfs.
+  #    Reuse a prebuilt one if supplied, else build it the same way the KVM smoke
+  #    tools and Dockerfile.forkd do.
   if [ -n "${MITOS_AGENT_BIN:-}" ] && [ -f "$MITOS_AGENT_BIN" ]; then
     agent_bin="$MITOS_AGENT_BIN"
   else
-    command -v go >/dev/null 2>&1 || { echo "mitos-direct: go required to build the agent (or set MITOS_AGENT_BIN)" >&2; return 1; }
+    command -v cargo >/dev/null 2>&1 || { echo "mitos-direct: cargo required to build the agent (or set MITOS_AGENT_BIN)" >&2; return 1; }
     agent_bin="$_md_work/agent"
-    ( cd "$repo_root" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$agent_bin" ./guest/agent/ ) \
+    ( cd "$repo_root/guest/agent-rs" \
+        && rustup target add x86_64-unknown-linux-musl 2>/dev/null \
+        && cargo build --release --target x86_64-unknown-linux-musl --features vsock \
+        && cp target/x86_64-unknown-linux-musl/release/sandbox-agent "$agent_bin" ) \
       || { echo "mitos-direct: agent build failed" >&2; return 1; }
   fi
 

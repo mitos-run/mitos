@@ -19,7 +19,7 @@ def test_from_name_reconnects_ready_sandbox():
     # _load_token stays tokenless rather than base64-decoding a MagicMock.
     c._core_api.read_namespaced_secret.return_value = mock.MagicMock(data={})
     c._api.get_namespaced_custom_object.return_value = {
-        "spec": {"poolRef": {"name": "p"}},
+        "spec": {"source": {"poolRef": {"name": "p"}}},
         "status": {"phase": "Ready", "endpoint": "10.0.0.2:8443", "sandboxID": "sb-x"},
     }
     sb = c.from_name("agent-session-1")

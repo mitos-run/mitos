@@ -1,8 +1,13 @@
-apiVersion: mitos.run/v1alpha1
-kind: SandboxFork
+# Fan-out fork: three sibling sandboxes created from one live source sandbox.
+# This is the v1 equivalent of the former SandboxFork: source.fromSandbox names
+# the live sandbox to checkpoint and replicate; replicas sets the fan-out count.
+# secretInheritance defaults to reissue (each fork gets fresh credentials).
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: parallel-attempt
 spec:
-  sourceRef:
-    name: agent-session-1
+  source:
+    fromSandbox:
+      name: agent-session-1
   replicas: 3

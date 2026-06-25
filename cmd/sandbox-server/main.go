@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -14,15 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mitos.run/mitos/api/v1alpha1"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/preview"
-	"mitos.run/mitos/internal/sandboxrpc"
-	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // sandbox-server is a standalone REST API. No Kubernetes required.
@@ -233,7 +230,7 @@ type sandboxInfo struct {
 	// template (issue #219), echoed so a caller can confirm what governs the
 	// sandbox's traffic. On a real forkd this same policy drives the host
 	// nftables datapath; the standalone mock path records it for visibility.
-	Network *v1alpha1.NetworkPolicy `json:"network,omitempty"`
+	Network *v1.NetworkPolicy `json:"network,omitempty"`
 }
 
 func main() {
@@ -357,14 +354,14 @@ func main() {
 	// outside requireBearer); delegate the WebSocket upgrade GET to it.
 	mux.Handle("GET /v1/pty", apiHandler)
 
-	// Connect runtime protocol (issue #24): mount the Sandbox service under its
-	// own RPC path (/sandbox.v1.Sandbox/...), which does not overlap the /v1/*
-	// REST routes above, so the existing HTTP API and the mock-mode tests are
-	// untouched. This foundation slice serves a real streaming Exec (bridged to
-	// the SAME SandboxAPI -> vsock -> guest agent exec path) and a real unary
-	// Budget; every other RPC is an honest #24 follow-up. The handler is reached
-	// over Connect HTTP, including the gRPC and gRPC-Web protocols.
-	s.mountConnect(mux)
+	// Connect runtime protocol (issue #24): route the Sandbox service RPC path
+	// (/sandbox.v1.Sandbox/...) to the SandboxAPI.Handler() handler, which serves
+	// the FULL Guest-wired Connect service (every RPC delegates through the guest
+	// agent's gRPC server over vsock via vsockGuestConn), tokenless on the
+	// standalone server (AllowTokenlessInterceptor). The path does not overlap the
+	// /v1/* REST routes above. The handler is reached over Connect HTTP, including
+	// the gRPC and gRPC-Web protocols.
+	mux.Handle("/sandbox.v1.Sandbox/", apiHandler)
 
 	// Unencrypted HTTP/2 lets Connect bidi streams (Exec) work without TLS, while
 	// plain HTTP/1.1 requests to the /v1/* REST routes pass through unchanged: the
@@ -378,56 +375,6 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-// connectSandboxHeader is the request header the Connect Sandbox handler reads
-// to resolve which sandbox a call targets, in the standalone server's
-// foundation slice. Under issue #25 this is replaced by an attenuated capability
-// token that implicitly scopes the call; until then the standalone edge is
-// tokenless (it already AllowTokenless()es the SandboxAPI), so the caller names
-// its sandbox explicitly via this header.
-const connectSandboxHeader = "Mitos-Sandbox"
-
-// sandboxIDContextKey carries the resolved sandbox id from the per-request
-// middleware to the Connect handler's resolver.
-type sandboxIDContextKey struct{}
-
-// mountConnect builds the Connect Sandbox handler over the SandboxAPI exec path
-// and mounts it on mux. The exec backend bridges to SandboxAPI.RunExecStream
-// (the same vsock streaming path /v1/exec/stream uses); the sandbox id is read
-// from the Mitos-Sandbox request header by a thin middleware so the handler's
-// resolver stays transport-neutral.
-func (s *server) mountConnect(mux *http.ServeMux) {
-	svc := sandboxrpc.NewService(
-		execBackend{api: s.sandboxAPI},
-		nil, // Budget provider is a follow-up; Budget reports an honest #24 Unimplemented until wired.
-		sandboxrpc.WithSandboxResolver(func(ctx context.Context) (string, error) {
-			id, _ := ctx.Value(sandboxIDContextKey{}).(string)
-			if id == "" {
-				return "", fmt.Errorf("no target sandbox: set the %s request header to the sandbox id", connectSandboxHeader)
-			}
-			return id, nil
-		}),
-	)
-	path, handler := sandboxv1connect.NewSandboxHandler(svc)
-	withSandbox := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if id := r.Header.Get(connectSandboxHeader); id != "" {
-			r = r.WithContext(context.WithValue(r.Context(), sandboxIDContextKey{}, id))
-		}
-		handler.ServeHTTP(w, r)
-	})
-	mux.Handle(path, withSandbox)
-}
-
-// execBackend adapts the daemon SandboxAPI to the sandboxrpc.ExecBackend seam so
-// the Connect Exec handler reuses the existing vsock exec streaming path without
-// reimplementing it.
-type execBackend struct {
-	api *daemon.SandboxAPI
-}
-
-func (b execBackend) RunExecStream(ctx context.Context, sandboxID string, p sandboxrpc.ExecParams, onChunk func(stream string, data []byte) error) (int, float64, error) {
-	return b.api.RunExecStream(ctx, sandboxID, p.Command, p.WorkingDir, p.Env, p.TimeoutSeconds, onChunk)
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -558,20 +505,20 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 func resolveNetworkConfig(in *networkConfig) (*networkConfig, error) {
 	if in == nil {
 		// Secure default: deny egress, deny-by-default inbound.
-		return &networkConfig{Egress: string(v1alpha1.EgressDeny), Inbound: string(v1alpha1.InboundDeny)}, nil
+		return &networkConfig{Egress: string(v1.EgressDeny), Inbound: string(v1.InboundDeny)}, nil
 	}
 	out := *in
 	if out.Egress == "" {
-		out.Egress = string(v1alpha1.EgressDeny)
+		out.Egress = string(v1.EgressDeny)
 	}
-	if out.Egress != string(v1alpha1.EgressDeny) && out.Egress != string(v1alpha1.EgressAllow) {
-		return nil, fmt.Errorf("egress must be %q or %q, got %q", v1alpha1.EgressDeny, v1alpha1.EgressAllow, out.Egress)
+	if out.Egress != string(v1.EgressDeny) && out.Egress != string(v1.EgressAllow) {
+		return nil, fmt.Errorf("egress must be %q or %q, got %q", v1.EgressDeny, v1.EgressAllow, out.Egress)
 	}
 	if out.Inbound == "" {
-		out.Inbound = string(v1alpha1.InboundDeny)
+		out.Inbound = string(v1.InboundDeny)
 	}
-	if out.Inbound != string(v1alpha1.InboundDeny) && out.Inbound != string(v1alpha1.InboundAllow) {
-		return nil, fmt.Errorf("inbound must be %q or %q, got %q", v1alpha1.InboundDeny, v1alpha1.InboundAllow, out.Inbound)
+	if out.Inbound != string(v1.InboundDeny) && out.Inbound != string(v1.InboundAllow) {
+		return nil, fmt.Errorf("inbound must be %q or %q, got %q", v1.InboundDeny, v1.InboundAllow, out.Inbound)
 	}
 	if _, _, err := netconf.ParseCIDRList(out.AllowCIDRs); err != nil {
 		return nil, fmt.Errorf("allow_cidrs: %w", err)
@@ -587,20 +534,20 @@ func resolveNetworkConfig(in *networkConfig) (*networkConfig, error) {
 // path drive the SAME datapath from the SAME policy model. The domain and CIDR
 // allowlists both flow through (domains via the controlled resolver, CIDRs via
 // the static chain rules). A nil input yields the fail-closed default policy.
-func toNetworkPolicy(in *networkConfig) *v1alpha1.NetworkPolicy {
+func toNetworkPolicy(in *networkConfig) *v1.NetworkPolicy {
 	if in == nil {
-		return &v1alpha1.NetworkPolicy{Egress: v1alpha1.EgressDeny}
+		return &v1.NetworkPolicy{Egress: v1.EgressDeny}
 	}
-	egress := v1alpha1.EgressPolicy(in.Egress)
+	egress := v1.EgressPolicy(in.Egress)
 	if egress == "" {
-		egress = v1alpha1.EgressDeny
+		egress = v1.EgressDeny
 	}
-	return &v1alpha1.NetworkPolicy{
+	return &v1.NetworkPolicy{
 		Egress:       egress,
 		Allow:        in.AllowDomains,
 		BlockNetwork: in.Block,
 		AllowCIDRs:   in.AllowCIDRs,
-		Inbound:      v1alpha1.InboundPolicy(in.Inbound),
+		Inbound:      v1.InboundPolicy(in.Inbound),
 		InboundCIDRs: in.InboundCIDRs,
 	}
 }

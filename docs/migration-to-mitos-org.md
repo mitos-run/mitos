@@ -1,4 +1,4 @@
-# Migration runbook: move mitos to a dedicated GitHub org
+# Migration runbook: move Mitos to a dedicated GitHub org
 
 Status: prepared, not executed. This runbook moves the engine repo from
 `github.com/mitos-run/mitos` to a dedicated GitHub org, stands up the OSS

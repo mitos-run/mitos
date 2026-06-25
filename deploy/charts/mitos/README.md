@@ -1,4 +1,4 @@
-# mitos Helm chart
+# Mitos Helm chart
 
 Snapshot-fork sandboxes for AI agents on Kubernetes. This chart installs the
 mitos.run operator: the controller Deployment, the privileged forkd DaemonSet,
@@ -90,7 +90,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every mitos image. |
+| `image.registry` | `ghcr.io/mitos-run` | Registry hosting every Mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
 | `controller.image.tag` | `v0.13.0` | Controller image tag. |
@@ -121,7 +121,7 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `kernelProvisioner.enabled` | `true` | Render the kernel-stage DaemonSet. |
 | `kernelProvisioner.kernelUrl` | Firecracker CI x86_64 5.10 vmlinux | Guest kernel download URL. |
 | `kernelProvisioner.kernelSha256` | `""` | Expected SHA256 of the kernel. When set, the staged kernel is verified and the init container fails closed on mismatch. Strongly recommended; compute with `curl -fsSL <kernelUrl> \| sha256sum`. |
-| `admissionWebhook.enabled` | `false` | Render the validating webhook that requires a SandboxClaim creator to be authorized to impersonate `spec.serviceAccount`. Strongly recommended with `controller.workspaceMemorySnapshots` in a multi-tenant cluster. Self-signed cert by default; prefer cert-manager for production rotation. |
+| `admissionWebhook.enabled` | `false` | Render the validating webhook that requires a Sandbox creator to be authorized to impersonate `spec.serviceAccount`. Strongly recommended with `controller.workspaceMemorySnapshots` in a multi-tenant cluster. Self-signed cert by default; prefer cert-manager for production rotation. |
 | `admissionWebhook.failurePolicy` | `Fail` | Webhook failure policy. `Fail` rejects claims if the webhook is unreachable (fail closed); set `Ignore` only if availability outranks the principal guarantee. |
 | `facade.enabled` | `false` | Render the agents.x-k8s.io facade. |
 | `facade.image.repository` | `mitos-facade` | Facade image repository. |
@@ -146,8 +146,8 @@ The chart reproduces the security-critical fields of the source manifests
 verbatim and does not expose them as knobs:
 
 - forkd runs `privileged: true` with hostPath mounts for `/var/lib/mitos` and the
-  `/dev/kvm` char device. It is the privileged snapshot builder; the jailer-in-pod
-  follow-up will narrow this. See `docs/threat-model.md`.
+  `/dev/kvm` char device. It is the privileged snapshot builder. See
+  `docs/threat-model.md`.
 - The controller, facade, and device plugin run unprivileged with
   `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, all
   capabilities dropped, and the controller and facade pods set

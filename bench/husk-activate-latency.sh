@@ -2,21 +2,21 @@
 #
 # husk-activate-latency.sh
 #
-# Reproducible source for the warm-claim activate latency number mitos
+# Reproducible source for the warm-claim activate latency number Mitos
 # publishes (the "~27 ms P50" bare-metal reference figure, issue #16 / #18).
 #
-# What it measures: the time the controller reports for a warm-claim activation
+# What it measures: the time the controller reports for a warm-sandbox activation
 # against an already-prepared (dormant) husk pod. For each of N sequential
-# claims it creates a SandboxClaim against a running pool, waits for the claim
+# sandboxes it creates a Sandbox against a running pool, waits for the sandbox
 # to reach the Ready condition, and parses the activate latency out of the
 # Ready condition message the controller writes:
 #
 #     activated husk pod <pod> on node <node> in <X>ms
-#       (internal/controller/sandboxclaim_controller.go, reason "HuskActivated")
+#       (internal/controller/sandbox_controller.go, reason "HuskActivated")
 #
 # That X is the husk-stub-reported time to load the snapshot in place, run the
 # fork-correctness handshake, and reach guest-ready. It is NOT the end-to-end
-# claim->Ready wall clock (that includes the Kubernetes reconcile round-trip and
+# sandbox->Ready wall clock (that includes the Kubernetes reconcile round-trip and
 # warm-pool refill, which are control-loop bound, not engine bound). This script
 # isolates the engine activate the controller records.
 #
@@ -24,9 +24,9 @@
 # sample list, so the published number is reproducible per the repo's
 # no-unverified-claims rule.
 #
-# Requirements: a running mitos cluster with the husk-pods path enabled and a
+# Requirements: a running Mitos cluster with the husk-pods path enabled and a
 # warm pool with dormant pods available, plus kubectl and a KUBECONFIG that can
-# create SandboxClaims in the target namespace.
+# create Sandboxes in the target namespace.
 #
 # Usage:
 #   bench/husk-activate-latency.sh <kubeconfig> <pool> [namespace] [iterations]
@@ -68,20 +68,20 @@ RUN_ID="$(date +%s)-$$"
 samples=()
 
 cleanup() {
-  # best-effort: remove the claims we created so the run leaves no residue.
+  # best-effort: remove the sandboxes we created so the run leaves no residue.
   for i in $(seq 1 "$ITERATIONS"); do
-    kubectl delete sandboxclaim "bench-activate-${RUN_ID}-${i}" \
+    kubectl delete sandbox "bench-activate-${RUN_ID}-${i}" \
       -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
 }
 trap cleanup EXIT
 
 # parse the activate latency (milliseconds) out of the Ready condition message
-# of a claim. Emits the bare number on stdout, or nothing if not found.
+# of a sandbox. Emits the bare number on stdout, or nothing if not found.
 parse_latency() {
   local claim="$1"
   local msg
-  msg="$(kubectl get sandboxclaim "$claim" -n "$NAMESPACE" \
+  msg="$(kubectl get sandbox "$claim" -n "$NAMESPACE" \
     -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
   # message: "activated husk pod <pod> on node <node> in <X>ms"
   printf '%s\n' "$msg" | sed -n 's/.* in \([0-9][0-9.]*\)ms$/\1/p'
@@ -106,20 +106,21 @@ for i in $(seq 1 "$ITERATIONS"); do
   done
 
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
-apiVersion: mitos.run/v1alpha1
-kind: SandboxClaim
+apiVersion: mitos.run/v1
+kind: Sandbox
 metadata:
   name: ${claim}
 spec:
-  poolRef:
-    name: ${POOL}
+  source:
+    poolRef:
+      name: ${POOL}
 EOF
 
   # wait for the Ready condition to flip true, then read the latency.
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   latency=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    ready="$(kubectl get sandboxclaim "$claim" -n "$NAMESPACE" \
+    ready="$(kubectl get sandbox "$claim" -n "$NAMESPACE" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
     if [ "$ready" = "True" ]; then
       latency="$(parse_latency "$claim")"
@@ -135,9 +136,9 @@ EOF
     samples+=("$latency")
   fi
 
-  # release the claim before the next iteration so the warm pool can refill and
-  # each measured claim is an independent warm activation.
-  kubectl delete sandboxclaim "$claim" -n "$NAMESPACE" \
+  # release the sandbox before the next iteration so the warm pool can refill and
+  # each measured sandbox is an independent warm activation.
+  kubectl delete sandbox "$claim" -n "$NAMESPACE" \
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
 done
 

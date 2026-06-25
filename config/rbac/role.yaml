@@ -11,8 +11,7 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxclaims
-      - sandboxforks
+      - sandboxes
       - sandboxpools
       - workspacerevisions
       - workspaces
@@ -27,23 +26,14 @@ rules:
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxtemplates
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - mitos.run
-    resources:
-      - sandboxclaims/finalizers
-      - sandboxforks/finalizers
+      - sandboxes/finalizers
+      - sandboxpools/finalizers
     verbs:
       - update
   - apiGroups:
       - mitos.run
     resources:
-      - sandboxclaims/status
-      - sandboxforks/status
+      - sandboxes/status
       - sandboxpools/status
       - workspacerevisions/status
       - workspaces/status

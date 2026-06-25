@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"bytes"
+	v1 "mitos.run/mitos/api/v1"
 	"testing"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	v1alpha1 "mitos.run/mitos/api/v1alpha1"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/kms"
 )
@@ -41,18 +41,11 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "enc-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
@@ -60,14 +53,13 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// The key Secret is created holding ONLY the wrapped DEK plus the KEK id, and
 	// NOT a raw plaintext key (the old "key" data key must be absent).
 	var keySecret corev1.Secret
 	ok := waitFor(15*time.Second, func() bool {
-		return k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("enc-tmpl"), Namespace: "default"}, &keySecret) == nil
+		return k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("enc-pool"), Namespace: "default"}, &keySecret) == nil
 	})
 	if !ok {
 		t.Fatal("enc-key Secret was not created for the encrypted template")
@@ -89,9 +81,10 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 	if len(dek) != 32 {
 		t.Fatalf("unwrapped DEK length = %d, want 32", len(dek))
 	}
-	// Owner-referenced to the template so k8s GC crypto-shreds it on delete.
-	if len(keySecret.OwnerReferences) == 0 || keySecret.OwnerReferences[0].Kind != "SandboxTemplate" {
-		t.Fatalf("enc-key Secret is not owner-referenced to the template: %+v", keySecret.OwnerReferences)
+	// Owner-referenced to the pool (which carries the inline template) so k8s GC
+	// crypto-shreds it on delete.
+	if len(keySecret.OwnerReferences) == 0 || keySecret.OwnerReferences[0].Kind != "SandboxPool" {
+		t.Fatalf("enc-key Secret is not owner-referenced to the pool: %+v", keySecret.OwnerReferences)
 	}
 
 	// forkd's CreateTemplate received the WRAPPED DEK (non-empty) and the KEK id.
@@ -123,32 +116,25 @@ func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
 	// The key delivery guard requires an mTLS node, so this happy-path test runs
 	// the fake forkd over mTLS.
 	serverTLS, clientTLS := newTestMTLSPair(t)
-	stop, rec, err := controller.StartFakeForkdNodeEncRecordingTLS(testRegistry, "enc-node-2", serverTLS, clientTLS, "enc-tmpl-claim")
+	stop, rec, err := controller.StartFakeForkdNodeEncRecordingTLS(testRegistry, "enc-node-2", serverTLS, clientTLS, "enc-pool-claim")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "enc-tmpl-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-pool-claim", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-tmpl-claim"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "enc-pool-claim"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "enc-pool-claim"}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
@@ -156,7 +142,6 @@ func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	if !waitFor(20*time.Second, func() bool {
@@ -184,18 +169,11 @@ func TestEncryptedPoolRefusesKeyOverInsecureNode(t *testing.T) {
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
@@ -203,7 +181,6 @@ func TestEncryptedPoolRefusesKeyOverInsecureNode(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// Give the pool reconciler ample time to run and be refused, then assert the
@@ -219,32 +196,25 @@ func TestEncryptedPoolRefusesKeyOverInsecureNode(t *testing.T) {
 // insecure fails and the Fork RPC never carries the key. The node is seeded
 // with the snapshot so the claim reaches the fork call, where the guard refuses.
 func TestEncryptedClaimRefusesKeyOverInsecureNode(t *testing.T) {
-	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-insecure-node-2", "enc-insecure-claim-tmpl")
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-insecure-node-2", "enc-insecure-claim-pool")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-claim-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	claim := &v1alpha1.SandboxClaim{
+	claim := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim", Namespace: "default"},
-		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-claim-pool"}},
+		Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "enc-insecure-claim-pool"}}},
 	}
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
@@ -252,17 +222,16 @@ func TestEncryptedClaimRefusesKeyOverInsecureNode(t *testing.T) {
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, claim)
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// The claim must fail (the fork is refused over the insecure channel), and the
 	// Fork RPC must never have carried the key.
 	if !waitFor(15*time.Second, func() bool {
-		var got v1alpha1.SandboxClaim
+		var got v1.Sandbox
 		if k8sClient.Get(ctx, types.NamespacedName{Name: "enc-insecure-claim", Namespace: "default"}, &got) != nil {
 			return false
 		}
-		return got.Status.Phase == v1alpha1.SandboxFailed
+		return got.Status.Phase == v1.SandboxFailed
 	}) {
 		t.Fatal("encrypted claim against an insecure node did not fail; the fork-path guard must refuse to deliver the key")
 	}
@@ -280,18 +249,11 @@ func TestPlaintextPoolCreatesNoKeySecret(t *testing.T) {
 	}
 	defer stop()
 
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "plain-tmpl", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
-	}
-	if err := k8sClient.Create(ctx, template); err != nil {
-		t.Fatal(err)
-	}
-	pool := &v1alpha1.SandboxPool{
+	pool := &v1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "plain-pool", Namespace: "default"},
-		Spec: v1alpha1.SandboxPoolSpec{
-			TemplateRef: v1alpha1.LocalObjectReference{Name: "plain-tmpl"},
-			Replicas:    1,
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
 		},
 	}
 	if err := k8sClient.Create(ctx, pool); err != nil {
@@ -299,7 +261,6 @@ func TestPlaintextPoolCreatesNoKeySecret(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, pool)
-		_ = k8sClient.Delete(ctx, template)
 	})
 
 	// Wait for the template to be built on the node (no key).
@@ -312,7 +273,7 @@ func TestPlaintextPoolCreatesNoKeySecret(t *testing.T) {
 	}
 	// No key Secret was created.
 	var keySecret corev1.Secret
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("plain-tmpl"), Namespace: "default"}, &keySecret)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("plain-pool"), Namespace: "default"}, &keySecret)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected no enc-key Secret for a plaintext template, got err=%v", err)
 	}

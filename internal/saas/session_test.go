@@ -52,3 +52,39 @@ func TestSessionStoresTokenHashedNotInClear(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionListAndRevoke verifies per-account session listing and revocation,
+// including cross-account isolation and token invalidation on revoke.
+func TestSessionListAndRevoke(t *testing.T) {
+	store := NewSessionStore()
+	id1 := store.IssueSession("acctA", "tokA1", "browser")
+	_ = store.IssueSession("acctA", "tokA2", "cli")
+	store.IssueSession("acctB", "tokB1", "browser")
+
+	a := store.ListByAccount("acctA")
+	if len(a) != 2 {
+		t.Fatalf("acctA sessions = %d, want 2", len(a))
+	}
+	// acctA never sees acctB.
+	for _, s := range a {
+		if s.AccountID != "acctA" {
+			t.Fatalf("leaked session for %s", s.AccountID)
+		}
+	}
+	// Revoking a session invalidates its token.
+	if err := store.Revoke("acctA", id1); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, err := store.Resolve("tokA1"); err == nil {
+		t.Fatalf("revoked token must not resolve")
+	}
+	// The other session still resolves.
+	if _, err := store.Resolve("tokA2"); err != nil {
+		t.Fatalf("tokA2 should still resolve: %v", err)
+	}
+	// acctA cannot revoke acctB's session.
+	bsel := store.ListByAccount("acctB")
+	if err := store.Revoke("acctA", bsel[0].ID); err == nil {
+		t.Fatalf("cross-account revoke must fail")
+	}
+}

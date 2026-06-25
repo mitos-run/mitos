@@ -163,6 +163,6 @@ snapshot/fork, the headline competitor), `adapters/daytona-fanout.sh`, and
 `adapters/e2b-fanout.sh` (cold-start baseline) are placeholders that exit
 non-zero until filled in. Modal is not self-hostable, so a Modal number comes
 from its hosted service, not the reference node; that asymmetry is recorded with
-any Modal figure. The fan-out comparison will plainly record whether mitos fork
+any Modal figure. The fan-out comparison will plainly record whether Mitos fork
 beats Modal branching, and if it does not, that the wedge is self-hosting plus
 per-fork network isolation rather than raw speed; no conclusion is pre-written.

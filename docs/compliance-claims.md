@@ -13,7 +13,7 @@ conformant'. Residuals ship as ADRs in `docs/adr/`."
 
 ## The rule
 
-> mitos NEVER claims to be "fully Kubernetes conformant". Permitted compliance
+> Mitos NEVER claims to be "fully Kubernetes conformant". Permitted compliance
 > claim language is bounded to exactly what a CI job proves. Anything beyond that
 > ships as a residual ADR in `docs/adr/`, not as a claim.
 
@@ -94,10 +94,15 @@ docs/threat-model.md. The current residual ADRs:
 - ADR 0004: node-flat snapshot trust domain (why namespaces are not a snapshot
   isolation boundary; treat the cluster as one trust domain).
 - ADR 0005: raw-forkd is not for untrusted multi-tenant (the husk pod is the
-  default tenant runner; raw-forkd is an opt-in privileged fallback).
+  default tenant runner; raw-forkd is an opt-in fallback). Since #352 forkd is
+  non-privileged with the jailer enabled (ADR 0008), so the not-multi-tenant
+  reason narrows to node-flat snapshots (ADR 0004).
 - ADR 0006: the husk-pod `NET_ADMIN` egress firewall (the planned default-deny
   husk egress control; `proposed` until it ships, with the metadata-reachable gap
   stated open in the meantime).
+- ADR 0008: forkd runs non-privileged with the jailer enabled (#352); the residual
+  is that forkd is still uid 0 with CAP_SYS_ADMIN and a node-data-dir hostPath, a
+  hardened minimal builder, not zero-privilege.
 
 The framework that governs ADRs is ADR 0000 and docs/adr/README.md.
 
