@@ -18,7 +18,8 @@ export function StatTile({ label, value, unit, hint, reproduce }: StatTileProps)
   const [open, setOpen] = useState(false)
   return (
     <Card style={{ padding: 'var(--space-5)' }}>
-      <div className="t-dim" style={{ fontSize: 'var(--step--1)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</div>
+      {/* Mixed case, not uppercase: forcing caps mangles acronyms like CoW into COW. */}
+      <div className="t-dim" style={{ fontSize: 'var(--step--1)', letterSpacing: '0.01em' }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
         <span style={{ fontSize: 'var(--step-4)', fontFamily: 'var(--mono)', color: 'var(--cyan)' }}>{value}</span>
         {unit && <span className="t-dim">{unit}</span>}

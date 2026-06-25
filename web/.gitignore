@@ -8,3 +8,5 @@ packages/*/dist/
 # Playwright e2e artifacts.
 app/test-results/
 app/playwright-report/
+shots.mjs
+app/shots.mjs
