@@ -105,6 +105,71 @@ func TestForkRecordsVitalsLabels(t *testing.T) {
 	}
 }
 
+// TestHandleNodeVitals_Batch drives the node-level vitals batch endpoint the
+// control-plane sampler scrapes (issue #164 Phase 1.a): it returns one
+// LabeledVitals per guest-reachable sandbox on this forkd, and a sandbox whose
+// guest is unreachable is skipped+counted, never failing the report.
+func TestHandleNodeVitals_Batch(t *testing.T) {
+	dir := t.TempDir()
+	api := NewSandboxAPI(dir)
+
+	// sb-a: reachable guest with vitals + a 2-process table.
+	fakeA := &fakeGuestSandbox{
+		vitalsResponse: &sandboxv1.GuestVitals{
+			CpuStealPercent: 20.0,
+			MemTotalBytes:   2048000 * 1024,
+			MemUsedBytes:    1024000 * 1024,
+			MemBalloonBytes: 512000 * 1024,
+		},
+		processesResponse: &sandboxv1.ProcessList{
+			Processes: []*sandboxv1.ProcessInfo{
+				{Pid: 1, Command: "agent", State: "S"},
+				{Pid: 99, Command: "python", State: "R"},
+			},
+		},
+	}
+	sockA := filepath.Join(dir, "a.sock")
+	startFakeGuestGRPCUDS(t, sockA, fakeA)
+	if err := api.RegisterSandbox("sb-a", sockA); err != nil {
+		t.Fatal(err)
+	}
+	api.RegisterStreamPath("sb-a", sockA)
+	api.SetVitalsLabels("sb-a", VitalsLabels{Claim: "claim-a", Pool: "pool-x", Namespace: "team-ns"})
+
+	// sb-down: registered but the guest socket never accepts, so its snapshot
+	// errors and it must be skipped+counted, not fail the whole report.
+	api.RegisterStreamPath("sb-down", filepath.Join(dir, "missing.sock"))
+	api.SetVitalsLabels("sb-down", VitalsLabels{Claim: "claim-d", Pool: "pool-x"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/vitals/node", nil)
+	rec := httptest.NewRecorder()
+	api.handleNodeVitals(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got NodeVitals
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Sandboxes) != 1 {
+		t.Fatalf("want 1 reachable sandbox, got %d (%+v)", len(got.Sandboxes), got.Sandboxes)
+	}
+	if got.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (sb-down)", got.Skipped)
+	}
+	e := got.Sandboxes[0]
+	if e.Pool != "pool-x" || e.Claim != "claim-a" {
+		t.Errorf("labels not carried: %+v", e.VitalsLabels)
+	}
+	if e.Vitals.StealFraction != 0.2 || e.Vitals.BalloonReclaimedKB != 512000 {
+		t.Errorf("vitals not carried: %+v", e.Vitals)
+	}
+	if len(e.Vitals.Processes) != 2 {
+		t.Errorf("process count = %d, want 2", len(e.Vitals.Processes))
+	}
+}
+
 func TestHandleVitals_RequiresBearer(t *testing.T) {
 	api := NewSandboxAPI(t.TempDir())
 	api.RegisterToken("sb-1", "tok")

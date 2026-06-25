@@ -20,12 +20,14 @@ import "github.com/prometheus/client_golang/prometheus"
 // never a sandbox id), so the series count is bounded by the org count, not by the
 // sandbox count. No argv, env, file bytes, node identity, or sandbox id ever
 // enters a label or value. Disk/storage are intentionally NOT exported here: the
-// one keystone series is vCPU-seconds (the primary billable rate unit), with
-// memory and egress as opt-in companions.
+// keystone series is vCPU-seconds (the primary billable rate unit), with memory
+// GiB-seconds, egress bytes, and GPU-seconds as the companion billable
+// dimensions (issue #164 Phase 1.b).
 type Metrics struct {
 	vcpuSeconds *prometheus.GaugeVec
 	memGiBSecs  *prometheus.GaugeVec
 	egressBytes *prometheus.GaugeVec
+	gpuSeconds  *prometheus.GaugeVec
 }
 
 // NewMetrics builds the per-org usage metric vectors. They are unregistered; the
@@ -51,6 +53,16 @@ func NewMetrics() *Metrics {
 			Name: "mitos_usage_egress_bytes_total",
 			Help: "Cumulative egress bytes of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart.",
 		}, []string{"org"}),
+		// GPU-seconds is the fourth billable metering dimension already carried in the
+		// store's per-org cumulative Totals (issue #164 Phase 1.b). It is published from
+		// the SAME OnTotals path as the others, so it is monotonic and identical to the
+		// billed figure. The label set is org only; pool is NOT in Totals today (the
+		// store keys records on (org, sandbox, window)), so a pool label is a documented
+		// follow-up that requires the metering report to carry the husk pod's pool.
+		gpuSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mitos_usage_gpu_seconds_total",
+			Help: "Cumulative GPU-seconds of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart, where the durable store is the system of record.",
+		}, []string{"org"}),
 	}
 }
 
@@ -58,7 +70,7 @@ func NewMetrics() *Metrics {
 // metrics registry). It panics on a duplicate registration, the standard
 // fail-fast for a misconfigured wiring.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes)
+	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes, m.gpuSeconds)
 }
 
 // Observe sets the per-org gauges from the store's CUMULATIVE per-org Totals. It
@@ -80,5 +92,6 @@ func (m *Metrics) Observe(totals map[string]Totals) {
 		m.vcpuSeconds.WithLabelValues(org).Set(t.VCPUSeconds)
 		m.memGiBSecs.WithLabelValues(org).Set(t.MemGiBSeconds)
 		m.egressBytes.WithLabelValues(org).Set(float64(t.EgressBytes))
+		m.gpuSeconds.WithLabelValues(org).Set(float64(t.GPUSeconds))
 	}
 }

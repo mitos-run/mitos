@@ -82,6 +82,57 @@ mitos_usage_vcpu_seconds_total{org="acme"} 60
 	}
 }
 
+// TestMetricsObserveAllDimensions is the 1.b proof: Observe publishes every
+// metering dimension already in the store's cumulative per-org Totals (egress
+// bytes, GPU seconds, memory GiB-seconds) as an org-labeled gauge, fed from the
+// SAME store-fed cumulative the bill rolls up. The label set is exactly {org},
+// never a sandbox id, argv, or secret (pool is not in Totals yet, a documented
+// follow-up).
+func TestMetricsObserveAllDimensions(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics()
+	m.MustRegister(reg)
+
+	m.Observe(map[string]Totals{
+		"acme": {VCPUSeconds: 12, MemGiBSeconds: 7, EgressBytes: 4096, GPUSeconds: 9},
+		// An empty-org row never bills and must not emit a series.
+		"": {VCPUSeconds: 99, EgressBytes: 99, GPUSeconds: 99},
+	})
+
+	for name, want := range map[string]string{
+		"mitos_usage_egress_bytes_total": `
+# HELP mitos_usage_egress_bytes_total Cumulative egress bytes of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart.
+# TYPE mitos_usage_egress_bytes_total gauge
+mitos_usage_egress_bytes_total{org="acme"} 4096
+`,
+		"mitos_usage_gpu_seconds_total": `
+# HELP mitos_usage_gpu_seconds_total Cumulative GPU-seconds of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart, where the durable store is the system of record.
+# TYPE mitos_usage_gpu_seconds_total gauge
+mitos_usage_gpu_seconds_total{org="acme"} 9
+`,
+	} {
+		if err := testutil.GatherAndCompare(reg, strings.NewReader(want), name); err != nil {
+			t.Errorf("%s mismatch: %v", name, err)
+		}
+	}
+
+	// The label set on every usage series is exactly {org}: no sandbox id, no
+	// argv/command/env, no secret. Assert by inspecting the gathered families.
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		for _, met := range mf.GetMetric() {
+			for _, lp := range met.GetLabel() {
+				if lp.GetName() != "org" {
+					t.Errorf("%s carries forbidden label %q (only org is allowed)", mf.GetName(), lp.GetName())
+				}
+			}
+		}
+	}
+}
+
 // batchSource is a SampleSource that returns a fresh batch of samples on each
 // Collect, so a multi-cycle, multi-window test can settle several windows in
 // order.

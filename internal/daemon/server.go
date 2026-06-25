@@ -167,6 +167,15 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI, casCfg *C
 	// registered before the catch-all /v1/ handler so it takes precedence.
 	mux.Handle("GET /v1/metering", meteringHandler(engine))
 
+	// Node-level guest vitals for the control-plane vitals sampler (issue #164
+	// Phase 1.a). Like /v1/metering this is node-scoped operator telemetry, not
+	// per-sandbox traffic, so it is mounted here on the operational mux WITHOUT the
+	// per-sandbox bearer middleware (the controller holds no per-sandbox token). It
+	// returns only the control-plane labels and numeric guest vitals plus the
+	// program-name process table, never a secret value. Registered before the
+	// catch-all /v1/ handler so it takes precedence.
+	mux.HandleFunc("GET /v1/vitals/node", sandboxAPI.handleNodeVitals)
+
 	// Sandbox exec/files API: this is what the SDK talks to. The /cas/ surface
 	// is deliberately NOT mounted on this mux: it lives on the separate CAS
 	// listener (see ServeCAS) so the sandbox API scheme is never forced to TLS.

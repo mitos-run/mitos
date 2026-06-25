@@ -21,18 +21,18 @@
 
 **Files:** a new sampler (e.g. `internal/controller/vitals_sampler.go` or wired alongside the usage collector) + a metrics file mirroring `internal/usage/usagemetrics.go`.
 
-- [ ] A sampler, behind a default-off flag (e.g. `--vitals-sampler`), that on an interval, for active sandboxes, fetches the labeled `/v1/vitals` snapshot (`LabeledVitals`: claim, pool, workspace, namespace, plus org via the trusted `mitos.run/org` label) and publishes Prometheus gauges: `mitos_guest_cpu_steal_percent`, `mitos_guest_mem_balloon_bytes`, `mitos_guest_mem_used_bytes`, `mitos_guest_process_count`. Labels: org, pool (bounded). Reuse the Phase 0 NodeRegistry + the trusted OrgResolver for identity. A sandbox whose guest is unreachable is skipped (counted), never failing the cycle.
-- [ ] SECRET-CLEAN: only the numeric fields are exported; the process table is reduced to a count, never per-process command lines. Assert no free-form string reaches a label.
-- [ ] TDD: a test against a mock `/v1/vitals` server asserting the four gauges reflect the snapshot, labeled by org/pool, with no secret/command label; a sandbox with no org is handled.
-- [ ] `go test`, build, vet, gofmt, lint clean; commit.
+- [x] A sampler, behind a default-off flag (`--vitals-sampler`), that on an interval scrapes the new node-scoped `GET /v1/vitals/node` operational endpoint (added on the forkd operational mux next to `/v1/metering`, so the controller needs no per-sandbox bearer token), resolves org via the trusted `mitos.run/org` label, aggregates per (org, pool), and publishes Prometheus gauges: `mitos_guest_cpu_steal_percent`, `mitos_guest_mem_balloon_bytes`, `mitos_guest_mem_used_bytes`, `mitos_guest_process_count`. Labels: org, pool (bounded). cpu_steal is the per-bucket MAX (worst-starved sandbox); memory and process_count are SUMs (fleet footprint); documented in each gauge's Help text. Reuses the Phase 0 NodeRegistry + the trusted `LabelOrgResolver`. A sandbox whose guest is unreachable is skipped (counted), never failing the cycle; a node down is skipped (counted).
+- [x] SECRET-CLEAN: only the numeric fields are exported; the process table is reduced to its length (`process_count`), never per-process command lines, argv, pids, or env. Test asserts the label set is exactly {org, pool}.
+- [x] TDD: tests against a mock `/v1/vitals/node` server (`scrape`) plus the pure `aggregateVitals` and the metric `observe`, asserting the four gauges reflect the snapshot labeled by org/pool with no secret/command label, and a sandbox with no org is skipped+counted. Daemon-side `TestHandleNodeVitals_Batch` asserts the node endpoint skips+counts an unreachable guest.
+- [x] `go test`, build, vet, gofmt, lint (darwin + linux) clean; committed.
 
 ## Task 1.b: per-sandbox metering rows to labeled gauges
 
 **Files:** extend the Phase 0 usage metrics (`internal/usage/usagemetrics.go`) or a sibling, fed from the same collector records.
 
-- [ ] Promote the per-sandbox metering dimensions already collected (egress bytes, GPU seconds, unique and shared memory) to org/pool-labeled Prometheus gauges, fed from the SAME Phase 0 collector integrated records (store-fed cumulative, monotonic, bounded cardinality) so they are consistent with the billing figure. Labels: org, pool. No per-sandbox cardinality explosion.
-- [ ] TDD: after the collector runs against the mock source, the new gauges reflect the expected per-org/pool totals.
-- [ ] Clean; commit.
+- [x] Promote the per-sandbox metering dimensions already in the store's per-org cumulative Totals to org-labeled gauges, fed from the SAME store-fed cumulative (`OnTotals`), so they match the billing figure: egress bytes (`mitos_usage_egress_bytes_total`) and memory GiB-seconds (`mitos_usage_mem_gib_seconds_total`) already existed; this adds GPU-seconds (`mitos_usage_gpu_seconds_total`). Label is org only: `Totals` keys on (org, sandbox, window) and carries no pool, so a pool label is a documented follow-up that needs the metering report to carry the husk pod's pool. No per-sandbox cardinality.
+- [x] TDD: `TestMetricsObserveAllDimensions` asserts the egress and GPU gauges reflect the per-org totals, an empty-org row emits no series, and the label set is exactly {org}.
+- [x] Clean; committed.
 
 ## Task 1.c: close the OTel trace tail
 
