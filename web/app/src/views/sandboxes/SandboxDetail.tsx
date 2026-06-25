@@ -1,6 +1,7 @@
-// One sandbox, inspected. A tabbed detail view: Overview, Logs, and a Fork tree
-// scoped to this sandbox are real; Terminal, Filesystem, Metrics, Spending are
-// honest placeholders. Reads the $id route param.
+// One sandbox, inspected. A tabbed detail view: Overview and Logs are real;
+// Fork tree shows the org-wide tree (no per-sandbox BFF endpoint yet; a
+// scoped endpoint is tracked as a follow-up); Terminal, Filesystem, Metrics,
+// and Spending are honest placeholders. Reads the $id route param.
 import { useState } from 'react'
 import { useParams } from '@tanstack/react-router'
 import { useSandbox } from '../../data/sandboxes'
@@ -33,7 +34,12 @@ export function SandboxDetail() {
         {tab === 'files' && <PlaceholderTab title="Filesystem" surface="the existing files API" />}
         {tab === 'metrics' && <PlaceholderTab title="Metrics" surface="the guest telemetry pipeline" />}
         {tab === 'spending' && <PlaceholderTab title="Spending" surface="the usage and cost pipeline" />}
-        {tab === 'forks' && <ForkTree />}
+        {tab === 'forks' && (
+          <>
+            <p className="t-dim" style={{ marginBottom: 'var(--space-4)' }}>Org-wide fork tree. Per-sandbox scoping requires a new BFF endpoint and ships in a later phase.</p>
+            <ForkTree />
+          </>
+        )}
       </div>
     </section>
   )
