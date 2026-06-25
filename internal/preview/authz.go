@@ -53,10 +53,14 @@ func (d Decision) String() string {
 //     Any other value => DenyForbidden (fail closed).
 //
 //  3. AUDIENCE (only when id != nil and tier passed):
-//     AllowedPrincipals: id.Email must be in the list (case-sensitive).
+//     AllowedPrincipals: id.Email must be in the list (case-insensitive email
+//     match). IdPs emit one canonical email per identity, so case-folding avoids
+//     locking out a legitimate user when the operator typed a different case; it
+//     never lets a different mailbox match.
 //     AllowedEmailDomains: id.EmailVerified must be true, and emailDomain(id.Email)
 //     must exactly match one of the listed domains (case-folded). A suffix such as
-//     "evilacme.com" does NOT match an entry "acme.com".
+//     "evilacme.com" does NOT match an entry "acme.com". Empty allowlist entries
+//     are skipped so a stray "" can never match.
 func Authorize(route Route, id *Identity, clientIP net.IP) Decision {
 	// 1. NETWORK check.
 	if len(route.Network) > 0 {
@@ -102,7 +106,7 @@ func Authorize(route Route, id *Identity, clientIP net.IP) Decision {
 
 	// 3. AUDIENCE check (id is non-nil here).
 	if len(route.AllowedPrincipals) > 0 {
-		if !containsString(route.AllowedPrincipals, id.Email) {
+		if !containsEmailFolded(route.AllowedPrincipals, id.Email) {
 			return DenyForbidden
 		}
 	}
@@ -148,7 +152,8 @@ func ipInCIDRs(ip net.IP, cidrs []string) bool {
 	return false
 }
 
-// containsString reports whether slice contains s (case-sensitive).
+// containsString reports whether slice contains s (case-sensitive). Used for
+// org-ID membership, which is an opaque identifier compared byte-exact.
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {
@@ -158,11 +163,30 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// containsDomainFolded reports whether any entry in domains equals target
-// under case folding. It uses exact equality only; a suffix like "evilacme.com"
-// does not match an entry "acme.com".
+// containsEmailFolded reports whether any entry in emails equals target under
+// case folding. Empty configured entries are skipped so a stray "" never
+// matches a degenerate identity email.
+func containsEmailFolded(emails []string, target string) bool {
+	for _, e := range emails {
+		if e == "" {
+			continue
+		}
+		if strings.EqualFold(e, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsDomainFolded reports whether any entry in domains equals target under
+// case folding. It uses exact equality only; a suffix like "evilacme.com" does
+// not match an entry "acme.com". Empty configured entries are skipped so a stray
+// "" never matches an email with no '@' (whose emailDomain is "").
 func containsDomainFolded(domains []string, target string) bool {
 	for _, d := range domains {
+		if d == "" {
+			continue
+		}
 		if strings.EqualFold(d, target) {
 			return true
 		}

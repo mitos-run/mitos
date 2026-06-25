@@ -134,6 +134,27 @@ func TestAuthorize(t *testing.T) {
 		}
 	})
 
+	t.Run("org_tier_alias_forbidden_when_org_mismatch", func(t *testing.T) {
+		// Deny path for the org alias, mirroring private.
+		got := Authorize(
+			route("org", withOrg("org-abc")),
+			id("u1", "a@b.com", true, "org-other"),
+			nil,
+		)
+		if got != DenyForbidden {
+			t.Fatalf("want DenyForbidden, got %s", got)
+		}
+	})
+
+	t.Run("private_empty_org_with_empty_orgid_in_id_forbidden", func(t *testing.T) {
+		// route.OrgID=="" short-circuits to DenyForbidden even when id.OrgIDs
+		// contains "". The empty owner org can never be satisfied.
+		got := Authorize(route("private"), id("u1", "a@b.com", true, ""), nil)
+		if got != DenyForbidden {
+			t.Fatalf("want DenyForbidden, got %s", got)
+		}
+	})
+
 	// link tier.
 
 	t.Run("link_allow_when_id_set", func(t *testing.T) {
@@ -250,6 +271,30 @@ func TestAuthorize(t *testing.T) {
 		}
 	})
 
+	t.Run("principals_case_insensitive_match", func(t *testing.T) {
+		// IdP emits canonical lowercase; operator typed mixed case. Must match.
+		got := Authorize(
+			route("authenticated", withPrincipals("Bob@ACME.com")),
+			id("u1", "bob@acme.com", true),
+			nil,
+		)
+		if got != Allow {
+			t.Fatalf("want Allow (case-insensitive principal), got %s", got)
+		}
+	})
+
+	t.Run("principals_empty_entry_does_not_match", func(t *testing.T) {
+		// A stray "" entry must not match a degenerate identity email.
+		got := Authorize(
+			route("authenticated", withPrincipals("")),
+			id("u1", "", true),
+			nil,
+		)
+		if got != DenyForbidden {
+			t.Fatalf("want DenyForbidden (empty principal entry), got %s", got)
+		}
+	})
+
 	// AllowedEmailDomains audience checks.
 
 	t.Run("email_domains_allow_verified_exact_domain", func(t *testing.T) {
@@ -306,6 +351,18 @@ func TestAuthorize(t *testing.T) {
 		)
 		if got != Allow {
 			t.Fatalf("want Allow (case-folded), got %s", got)
+		}
+	})
+
+	t.Run("email_domains_empty_entry_does_not_match_no_at", func(t *testing.T) {
+		// emailDomain("noatsign") is ""; a stray "" allowlist entry must not match.
+		got := Authorize(
+			route("authenticated", withDomains("")),
+			id("u1", "noatsign", true),
+			nil,
+		)
+		if got != DenyForbidden {
+			t.Fatalf("want DenyForbidden (empty domain entry), got %s", got)
 		}
 	})
 
