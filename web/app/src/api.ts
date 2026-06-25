@@ -52,6 +52,17 @@ export type ForkNode = {
 
 export type ForkTree = { org_id: string; nodes: ForkNode[] }
 
+export type KeyView = { id: string; name: string; prefix: string; scopes: string[]; created_at: string; expires_at?: string; revoked_at?: string; revoked: boolean }
+export type CreateKeyResult = { org_id: string; raw_key: string; key: KeyView }
+export type AuditEvent = { org_id: string; actor_id: string; action: string; target: string; detail: string; at: string }
+export type TemplateView = { name: string; org_id: string; description: string; image: string; updated_at: string }
+export type UsageResponse = { org_id: string; records: unknown[]; totals: Record<string, number>; cost: Record<string, number> }
+export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }> }
+
+export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
+export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
+export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
@@ -91,6 +102,42 @@ export const api = {
     return r.text()
   },
   forktree: () => get<ForkTree>('/console/forktree'),
+  keys: () => get<{ keys: KeyView[] }>('/console/keys').then((r) => r.keys ?? []),
+  createKey: async (name: string, scopes: string[], ttlSeconds: number) => {
+    const r = await fetch('/console/keys', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, scopes, ttl_seconds: ttlSeconds }) })
+    if (!r.ok) throw new Error(`create key: ${r.status}`)
+    return (await r.json()) as CreateKeyResult
+  },
+  revokeKey: async (id: string) => {
+    const r = await fetch(`/console/keys/${encodeURIComponent(id)}/revoke`, { method: 'POST', credentials: 'same-origin' })
+    if (!r.ok) throw new Error(`revoke: ${r.status}`)
+  },
+  usage: () => get<UsageResponse>('/console/usage?from=&to='),
+  audit: () => get<{ events: AuditEvent[] }>('/console/audit').then((r) => r.events ?? []),
+  templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
+  billing: () => get<BillingView>('/console/billing'),
+  billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
+  members: () => get<{ org_id: string; members: MemberView[] }>('/console/members').then((r) => r.members ?? []),
+  setMemberRole: async (accountId: string, role: Role) => {
+    const r = await fetch(`/console/members/${encodeURIComponent(accountId)}/role`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role }),
+    })
+    if (!r.ok) throw new Error(`set role: ${r.status}`)
+  },
+  projects: () => get<{ org_id: string; projects: ProjectView[] }>('/console/projects').then((r) => r.projects ?? []),
+  createProject: async (name: string, description: string) => {
+    const r = await fetch('/console/projects', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    })
+    if (!r.ok) throw new Error(`create project: ${r.status}`)
+    return (await r.json()) as ProjectView
+  },
 }
 
 export function fmtBytes(n: number): string {

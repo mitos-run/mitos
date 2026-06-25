@@ -17,6 +17,15 @@ var ErrNotFound = errors.New("saas: record not found")
 // example a second account with the same email, or a duplicate key id).
 var ErrConflict = errors.New("saas: conflict")
 
+// ErrForbidden is returned when the actor's role does not grant the required
+// permission for the requested operation.
+var ErrForbidden = errors.New("saas: forbidden")
+
+// ErrLastOwner is returned when an operation would demote or remove the last
+// owner of an organization, which is not allowed: every org must retain at
+// least one owner at all times.
+var ErrLastOwner = errors.New("saas: cannot demote or remove the last owner of an organization")
+
 // Store is the pluggable persistence seam for the SaaS front door. The in-memory
 // implementation (MemStore) is the tested default; a Postgres implementation is
 // a documented follow-up (issue #211 owns the migrations seam). The interface is
@@ -51,6 +60,10 @@ type Store interface {
 	// caller asks for the members of an org it is authorized for, and never sees
 	// another org's members. It returns an empty slice for an unknown org.
 	ListOrgMembers(ctx context.Context, orgID string) ([]Membership, error)
+	// SetMembershipRole updates the role of targetAccountID in orgID. It returns
+	// ErrNotFound if there is no membership for that (org, account) pair. It
+	// returns ErrLastOwner if the update would demote the sole remaining owner.
+	SetMembershipRole(ctx context.Context, orgID, targetAccountID string, role Role) error
 
 	// PutApiKey stores an API key. The key carries only a hash, never a raw value.
 	// It returns ErrConflict if the id is already used.
@@ -180,6 +193,43 @@ func (s *MemStore) ListOrgMembers(_ context.Context, orgID string) ([]Membership
 		}
 	}
 	return out, nil
+}
+
+func (s *MemStore) SetMembershipRole(_ context.Context, orgID, targetAccountID string, role Role) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If the new role is not owner, check that at least one other owner remains.
+	if role != RoleOwner {
+		ownerCount := 0
+		targetIsOwner := false
+		for _, list := range s.members {
+			for _, m := range list {
+				if m.OrgID == orgID && m.Role == RoleOwner {
+					ownerCount++
+					if m.AccountID == targetAccountID {
+						targetIsOwner = true
+					}
+				}
+			}
+		}
+		if targetIsOwner && ownerCount <= 1 {
+			return ErrLastOwner
+		}
+	}
+
+	list, ok := s.members[targetAccountID]
+	if !ok {
+		return ErrNotFound
+	}
+	for i, m := range list {
+		if m.OrgID == orgID {
+			list[i].Role = role
+			s.members[targetAccountID] = list
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *MemStore) PutApiKey(_ context.Context, k ApiKey) error {

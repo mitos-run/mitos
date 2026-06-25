@@ -74,6 +74,15 @@ Every current runtime endpoint maps onto one `sandbox.v1.Sandbox` RPC. This tabl
 is the migration's normative correspondence; each row is a unit the follow-up
 slices port.
 
+The runtime routes below (exec, exec/stream, run_code/stream, files/*, pty,
+vitals) are DEPRECATED in favor of the Connect protocol: each response carries an
+RFC 8594 `Deprecation: true` header and a `Link: </sandbox.v1.Sandbox>;
+rel="successor-version"` header (`deprecatedRuntimeNote`, `internal/daemon/sandbox_api.go`).
+They stay active (deprecated-but-working) so existing SDK callers are not broken,
+and are removed once every SDK execs over Connect (#358). The lifecycle routes
+(`set_timeout`, `pause`, `resume`) have no Connect runtime successor and are NOT
+deprecated.
+
 ### HTTP sandbox API (forkd :9091)
 
 | Current endpoint | v2 RPC | Notes |
