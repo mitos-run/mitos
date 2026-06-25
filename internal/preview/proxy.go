@@ -19,7 +19,7 @@ type Config struct {
 }
 
 // Proxy is the per-sandbox preview reverse proxy. For each request it parses
-// the <sandbox-id>.preview.<domain> vhost, verifies the signed expiring token,
+// the <label>.<domain> vhost, verifies the signed expiring token,
 // binds the token to the requested sandbox, looks up the backend, attaches the
 // per-sandbox bearer (the same :9091 gate), and proxies to the backend.
 type Proxy struct {

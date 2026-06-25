@@ -94,7 +94,7 @@ func (p *SelfSignedProvider) mint(host string) (*tls.Certificate, error) {
 
 // CertMagicProvider documents the production on-demand TLS adapter. It is NOT
 // compiled with the certmagic dependency in this slice: real ACME issuance
-// needs a public domain, a DNS record for *.preview.<domain> (or per-host A
+// needs a public domain, a DNS record for *.<domain> (or per-host A
 // records), and a publicly reachable endpoint, none of which exist in CI, so
 // wiring the heavy dependency now would add an unverifiable code path. The
 // adapter is a thin follow-up: a maintainer with a domain installs certmagic
@@ -127,6 +127,6 @@ func (p *SelfSignedProvider) mint(host string) (*tls.Certificate, error) {
 // The DecisionFunc MUST consult the route table so the proxy only asks the CA
 // for a hostname that resolves to a real Ready sandbox; this caps ACME rate-limit
 // exposure. The bare-metal TLS story (self-hosted ACME such as step-ca, or a
-// maintainer-provided wildcard *.preview.<domain> cert loaded via
+// maintainer-provided wildcard *.<domain> cert loaded via
 // tls.LoadX509KeyPair) is documented in docs/preview-urls.md.
 type CertMagicProvider struct{}

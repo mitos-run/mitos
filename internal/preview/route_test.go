@@ -110,6 +110,12 @@ func TestIsReservedLabel(t *testing.T) {
 			t.Errorf("did not expect %q reserved", ok)
 		}
 	}
+	// Reserved matching is case-insensitive (DNS is case-insensitive).
+	for _, r := range []string{"ADMIN", "Console"} {
+		if !IsReservedLabel(r) {
+			t.Errorf("expected %q reserved (case-insensitive)", r)
+		}
+	}
 }
 
 func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
