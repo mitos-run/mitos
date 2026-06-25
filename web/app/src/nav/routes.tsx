@@ -9,6 +9,11 @@ import { ForkTree } from '../views/forktree/ForkTree'
 import { Secrets } from '../views/Secrets'
 import { Placeholder } from '../views/Placeholder'
 import { SandboxDetail } from '../views/sandboxes/SandboxDetail'
+import { Keys } from '../views/Keys'
+import { Usage } from '../views/Usage'
+import { Audit } from '../views/Audit'
+import { Templates } from '../views/Templates'
+import { Billing } from '../views/Billing'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -28,13 +33,13 @@ export const ROUTES: RouteDef[] = [
   { path: '/sandboxes/$id', label: 'Sandbox', group: 'Run', element: () => <SandboxDetail />, hidden: true },
   { path: '/forks', label: 'Fork tree', group: 'Run', element: () => <ForkTree /> },
   { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
-  { path: '/templates', label: 'Templates', group: 'Build', element: () => <Placeholder title="Templates" endpoint="/console/templates" phase="B2" /> },
+  { path: '/templates', label: 'Templates', group: 'Build', element: () => <Templates /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
-  { path: '/keys', label: 'API keys', group: 'Build', element: () => <Placeholder title="API keys" endpoint="/console/keys" phase="B2" /> },
+  { path: '/keys', label: 'API keys', group: 'Build', element: () => <Keys /> },
   { path: '/members', label: 'Members', group: 'Govern', element: () => <Placeholder title="Members & roles" endpoint="/console/members" phase="B2" />, when: (c) => c.teams },
-  { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Placeholder title="Audit log" endpoint="/console/audit" phase="B2" /> },
-  { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Placeholder title="Usage & cost" endpoint="/console/usage" phase="B2" /> },
-  { path: '/billing', label: 'Billing', group: 'Govern', element: () => <Placeholder title="Billing" endpoint="/console/billing" phase="B2" />, when: (c) => c.billing },
+  { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
+  { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Usage /> },
+  { path: '/billing', label: 'Billing', group: 'Govern', element: () => <Billing />, when: (c) => c.billing },
   { path: '/settings', label: 'Settings', group: 'Settings', element: () => <Placeholder title="Settings" endpoint="/console/capabilities" phase="B2" /> },
 ]
 
