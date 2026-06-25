@@ -32,7 +32,7 @@ export type RouteDef = {
 }
 
 export const ROUTES: RouteDef[] = [
-  { path: '/', label: 'Overview', group: 'Run', element: () => <Instruments />, when: (c) => c.proof },
+  { path: '/', label: 'Overview', group: 'Run', element: () => <Instruments /> },
   { path: '/sandboxes', label: 'Sandboxes', group: 'Run', element: () => <SandboxList /> },
   { path: '/sandboxes/$id', label: 'Sandbox', group: 'Run', element: () => <SandboxDetail />, hidden: true },
   { path: '/forks', label: 'Fork tree', group: 'Run', element: () => <ForkTree /> },

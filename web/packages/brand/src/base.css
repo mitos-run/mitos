@@ -266,6 +266,20 @@ a { color: var(--cyan); }
   margin-top: var(--space-5);
 }
 
+/* Overview operational panels: responsive card grid below the proof hero band.
+   Multi-column on desktop, single column on mobile. Reuses .card and tokens. */
+.overview-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+  gap: var(--space-5);
+}
+
+@media (max-width: 768px) {
+  .overview-panels {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Fork-tree visualization: Division motif node styles. Colors are signal
    tokens only; no raw hex. The SVG is aria-hidden; the table is the a11y
    source of truth. */

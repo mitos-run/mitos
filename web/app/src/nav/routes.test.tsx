@@ -46,9 +46,13 @@ describe('routes config', () => {
     expect(visible.find((r) => r.path === '/billing')).toBeDefined()
   })
 
-  it('hides the overview home when proof is false', () => {
+  it('always shows the overview home regardless of the proof capability', () => {
+    // Overview is a real operational home (not just a proof screen), so it must
+    // always be reachable even when proof is false.
     const visible = visibleRoutes({ ...base, proof: false })
-    expect(visible.find((r) => r.path === '/')).toBeUndefined()
+    expect(visible.find((r) => r.path === '/')).toBeDefined()
+    const visibleWithProof = visibleRoutes({ ...base, proof: true })
+    expect(visibleWithProof.find((r) => r.path === '/')).toBeDefined()
   })
 
   it('groups Usage and Billing under a Billing group, not Govern', () => {
