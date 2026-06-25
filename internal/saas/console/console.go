@@ -50,6 +50,7 @@ type Deps struct {
 	Secrets     SecretStore
 	Instruments InstrumentsSource
 	ForkTree    ForkTreeSource
+	Projects    ProjectStore
 	Portal      PortalLinker
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
@@ -88,6 +89,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.ForkTree == nil {
 		deps.ForkTree = NewMemForkTree()
+	}
+	if deps.Projects == nil {
+		deps.Projects = NewMemProjectStore()
 	}
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
@@ -143,6 +147,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
 	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
 	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
+	mux.HandleFunc("GET /console/projects", c.handleListProjects)
+	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
+	mux.HandleFunc("POST /console/members/{accountID}/role", c.handleSetMemberRole)
 	c.mux = mux
 }
 
@@ -539,6 +546,101 @@ func (c *Console) handleForkTree(w http.ResponseWriter, r *http.Request) {
 		tree.Nodes = []ForkNode{}
 	}
 	writeJSON(w, http.StatusOK, tree)
+}
+
+// --- Projects (org-scoped project containers) ---
+
+func (c *Console) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	_, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	projects, err := c.deps.Projects.List(r.Context(), orgID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the projects could not be listed"))
+		return
+	}
+	if projects == nil {
+		projects = []Project{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "projects": projects})
+}
+
+type createProjectRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+func (c *Console) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	accountID, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	var req createProjectRequest
+	if err := decodeBody(r, &req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
+			WithCause("the project-create body is not valid JSON"))
+		return
+	}
+	p, err := c.deps.Projects.Create(r.Context(), orgID, req.Name, req.Description)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the project could not be created"))
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID:   orgID,
+		ActorID: accountID,
+		Action:  "project.create",
+		Target:  p.ID,
+		Detail:  "created project " + p.Name,
+		At:      c.deps.Now(),
+	})
+	writeJSON(w, http.StatusCreated, p)
+}
+
+// --- Member role management ---
+
+type setMemberRoleRequest struct {
+	Role saas.Role `json:"role"`
+}
+
+func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
+	accountID, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	targetID := r.PathValue("accountID")
+	var req setMemberRoleRequest
+	if err := decodeBody(r, &req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
+			WithCause("the role body is not valid JSON"))
+		return
+	}
+	if err := c.deps.Accounts.SetMemberRole(r.Context(), accountID, orgID, targetID, req.Role); err != nil {
+		switch {
+		case errors.Is(err, saas.ErrForbidden):
+			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+				WithCause("the caller does not have permission to change member roles"))
+		case errors.Is(err, saas.ErrNotFound):
+			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+				WithCause("the target account is not a member of this organization"))
+		default:
+			c.failAccount(w, err, "the member role could not be changed")
+		}
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID:   orgID,
+		ActorID: accountID,
+		Action:  "member.role",
+		Target:  targetID,
+		Detail:  "set role " + string(req.Role),
+		At:      c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "account_id": targetID, "role": req.Role})
 }
 
 // --- helpers ---
