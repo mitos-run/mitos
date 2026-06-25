@@ -71,6 +71,10 @@ type SandboxView struct {
 	VCPUs     int32     `json:"vcpus"`
 	MemBytes  int64     `json:"mem_bytes"`
 	CreatedAt time.Time `json:"created_at"`
+	// ProjectID is the project this sandbox is assigned to. Empty string means
+	// unassigned. It is populated by the resource-project store in the list and
+	// inspect handlers; it is never stored in the SandboxControl itself.
+	ProjectID string `json:"project_id"`
 }
 
 // SandboxControl is the live-sandbox seam the console inspects and terminates

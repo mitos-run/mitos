@@ -85,6 +85,12 @@ type Deps struct {
 	// empty in-memory store so the BFF is safe to instantiate without a real
 	// backend.
 	ProjectMembers ProjectMembershipStore
+	// ResourceProjects is the org-scoped store that maps resources (sandboxes,
+	// etc.) to projects. It backs the PUT /console/sandboxes/{id}/project
+	// endpoint and is consulted in list and inspect handlers to populate each
+	// sandbox's project_id field. Defaults to an empty in-memory store so the
+	// BFF is safe to instantiate without a real backend.
+	ResourceProjects ResourceProjectStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -147,6 +153,9 @@ func New(deps Deps) *Console {
 	if deps.ProjectMembers == nil {
 		deps.ProjectMembers = NewMemProjectMembershipStore()
 	}
+	if deps.ResourceProjects == nil {
+		deps.ResourceProjects = NewMemResourceProjectStore()
+	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
 		// sandbox control with an empty transport: it enforces org ownership and
@@ -195,6 +204,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
+	mux.HandleFunc("PUT /console/sandboxes/{id}/project", c.handleSetSandboxProject)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
@@ -495,6 +505,12 @@ func (c *Console) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 	if boxes == nil {
 		boxes = []SandboxView{}
 	}
+	for i := range boxes {
+		pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", boxes[i].ID)
+		if err == nil {
+			boxes[i].ProjectID = pid
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "sandboxes": boxes})
 }
 
@@ -508,6 +524,10 @@ func (c *Console) handleInspectSandbox(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		c.failSandbox(w, err)
 		return
+	}
+	pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", sb.ID)
+	if err == nil {
+		sb.ProjectID = pid
 	}
 	writeJSON(w, http.StatusOK, sb)
 }
