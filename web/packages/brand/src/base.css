@@ -820,3 +820,46 @@ html[data-reduce-motion="1"] * {
 @media (min-width: 769px) {
   .topbar .menu-button { display: none; }
 }
+
+/* Page header: the uniform title zone every view opens with. Title left, the
+   primary action right; mirrors the marketing site .page-hero rhythm. */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.page-header-eyebrow {
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  margin-bottom: var(--space-2);
+}
+
+.page-header-title {
+  font-size: var(--step-3);
+  margin: 0;
+}
+
+.page-header-lede {
+  font-size: var(--step--1);
+  max-width: 60ch;
+  margin: var(--space-2) 0 0;
+}
+
+/* The action slot keeps the primary action aligned to the title baseline. */
+.page-header-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: var(--space-2);
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
