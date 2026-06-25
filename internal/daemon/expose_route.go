@@ -30,6 +30,13 @@ func (api *SandboxAPI) checkBearer(sandboxID string, r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(token)) == 1
 }
 
+// HandleExpose is the exported entry point so the standalone sandbox-server
+// (a separate package) can mount the guest HTTP proxy route. It is identical to
+// the route forkd mounts internally via handleExpose.
+func (api *SandboxAPI) HandleExpose(w http.ResponseWriter, r *http.Request) {
+	api.handleExpose(w, r)
+}
+
 // handleExpose reverse-proxies traffic to a guest port over the vsock tunnel. It
 // proxies arbitrary HTTP methods (GET for SSE and browser traffic, POST and the
 // rest for agent calls); it is registered without a method restriction. The path
