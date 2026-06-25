@@ -63,11 +63,21 @@ func main() {
 		Logger: logger,
 	})
 
+	// The admin token gates the route-sync endpoint. It is a bearer credential
+	// and is never logged; only its presence is checked here.
+	adminToken := os.Getenv("MITOS_EXPOSE_ADMIN_TOKEN")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Admin route-sync endpoint: mount before the catch-all proxy handler.
+	if adminToken != "" {
+		mux.Handle("/internal/routes", preview.NewAdminHandler(routes, adminToken, logger))
+	} else {
+		logger.Info("preview-proxy: MITOS_EXPOSE_ADMIN_TOKEN is unset; route-sync endpoint disabled (routes must be seeded another way)")
+	}
 	// Everything else is preview traffic resolved by vhost.
 	mux.Handle("/", proxy)
 
