@@ -9,7 +9,7 @@
 // provide the accessible, keyboard-driven interface.
 import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { Division } from '@mitos/brand'
+import { Mark } from '@mitos/brand'
 import { useCapabilities } from '../data/query'
 import { navRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
 import { CommandPalette } from './CommandPalette'
@@ -80,8 +80,8 @@ export function AppShell() {
           <span className="sr-only">Menu</span>
         </button>
         <div className="top-bar-brand" aria-hidden="true">
-          <Division size={22} />
-          <strong>mitos</strong>
+          <Mark size={22} glow />
+          <strong>Mitos</strong>
         </div>
       </div>
 
@@ -104,8 +104,8 @@ export function AppShell() {
         style={{ width: 220, padding: 'var(--space-5)', borderRight: '1px solid var(--hairline)' }}
       >
         <div className="nav-brand" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-6)' }}>
-          <Division size={28} />
-          <strong>mitos</strong>
+          <Mark size={26} glow />
+          <strong>Mitos</strong>
         </div>
         {GROUP_ORDER.map((group) => (
           <NavSection
@@ -172,7 +172,7 @@ function OwnershipBadge({ caps }: { caps: Capabilities }) {
   const selfHosted = caps.ownership === 'self-hosted'
   return (
     <div className="card" style={{ marginTop: 'var(--space-6)', fontSize: 'var(--step--1)' }}>
-      <div style={{ color: 'var(--cyan)' }}>{selfHosted ? 'Self-hosted' : 'Hosted by mitos'}</div>
+      <div style={{ color: 'var(--cyan)' }}>{selfHosted ? 'Self-hosted' : 'Hosted by Mitos'}</div>
       <div className="t-dim">
         {selfHosted
           ? 'Your data never leaves your infrastructure.'

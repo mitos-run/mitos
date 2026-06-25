@@ -13,7 +13,7 @@ const BENCH = 'bench/husk-activate-latency.sh'
 
 export function Instruments() {
   const { data, isLoading, error } = useInstruments()
-  if (error) return <EmptyState title="Instruments unavailable" body="The telemetry pipeline could not be read for this organization." />
+  if (error) return <EmptyState title="Overview unavailable" body="The telemetry pipeline could not be read for this organization." />
   if (isLoading || !data) return <Skeleton rows={4} />
 
   const noData = data.forks_served === 0 && data.activate_p50_ms === 0
@@ -28,7 +28,7 @@ export function Instruments() {
 
   return (
     <section>
-      <h2>Instruments</h2>
+      <h2>Overview</h2>
       <p className="t-dim">This organization's measured signal. Every number is reproducible.</p>
       <div className="cockpit-grid">
         <StatTile label="Activate P50" value={String(Math.round(data.activate_p50_ms))} unit="ms" hint="warm-claim, your cluster" reproduce={{ label: 'Reproduce this', command: BENCH }} />

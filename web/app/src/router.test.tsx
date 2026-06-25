@@ -55,7 +55,7 @@ describe('console router', () => {
   })
 
   it('redirects / to first visible route when proof is off (no dead-end on gated path)', async () => {
-    // When proof:false, the '/' (Instruments) route is not built. Navigating to
+    // When proof:false, the '/' (Overview) route is not built. Navigating to
     // '/' must resolve to the first visible route (Sandboxes) rather than a
     // "Not Found" dead-end. This test genuinely fails without the not-found
     // redirect in createConsoleRouter.

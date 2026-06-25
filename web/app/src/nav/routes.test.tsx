@@ -46,7 +46,7 @@ describe('routes config', () => {
     expect(visible.find((r) => r.path === '/billing')).toBeDefined()
   })
 
-  it('hides instruments when proof is false', () => {
+  it('hides the overview home when proof is false', () => {
     const visible = visibleRoutes({ ...base, proof: false })
     expect(visible.find((r) => r.path === '/')).toBeUndefined()
   })
