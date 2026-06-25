@@ -6,10 +6,17 @@ warm environment instead of rebuilding it. Run it fully hosted at
 [https://mitos.run](https://mitos.run) or self-hosted on your own Kubernetes
 cluster.
 
-This is the Ruby client for the direct sandbox API: create a template, fork a
-sandbox, run `exec`, and terminate. It uses only the Ruby standard library
-(`net/http`, `json`, `uri`, `securerandom`), so there are no gem dependencies. It
-targets Ruby 2.6 and later.
+This is the Ruby client for both modes mitos ships:
+
+- **Direct mode** (`Mitos.server`): the standalone or hosted sandbox-server REST
+  API. Create a template, fork a sandbox, run `exec`, and terminate.
+- **Cluster mode** (`Mitos::AgentRun`): drive the Kubernetes `mitos.run` CRDs
+  (`SandboxPool`, `Sandbox`, `Workspace`) directly over the Kubernetes REST API.
+
+Both modes use only the Ruby standard library, so there are no gem dependencies.
+Direct mode uses `net/http`, `json`, `uri`, and `securerandom`; cluster mode adds
+`openssl` (TLS and the cluster CA), `yaml` (kubeconfig parsing), and `base64`
+(in-cluster and Secret token decoding). It targets Ruby 2.6 and later.
 
 ## Install
 
@@ -80,6 +87,66 @@ Value objects:
 agent over vsock, so calling exec on a sandbox that is not yet up returns a typed
 `not_found` error.
 
+## Cluster mode (Kubernetes)
+
+When mitos is installed on your own Kubernetes cluster (the controller, forkd,
+and the `mitos.run` CRDs), `Mitos::AgentRun` drives the CRDs directly. It speaks
+the Kubernetes REST API itself, with no Kubernetes client gem: configuration
+comes from a kubeconfig (the `kubeconfig:` path, else `KUBECONFIG`, else
+`~/.kube/config`) or, in a pod, from the service-account mount
+(`in_cluster: true`). It is the Ruby port of the Python `AgentRun`.
+
+```ruby
+require "mitos"
+
+run = Mitos.cluster(namespace: "agents")          # or in_cluster: true in a pod
+
+# One-liner: lazily get-or-create the default pool mitos-default-python-3.12,
+# then start a Sandbox from it and block until it is Ready.
+sb = run.sandbox(image: "python:3.12", ready: true)
+puts sb.endpoint
+
+# Or start from an existing pool with env, secrets, a TTL, and a workspace.
+sb = run.create(
+  pool: "my-pool",
+  env: { "LOG_LEVEL" => "debug" },
+  secrets: { "OPENAI_API_KEY" => %w[my-secret api-key] },  # env var => [secret, key]
+  ttl: "30m",
+  workspace: "ws-1"
+)
+
+run.list(pool: "my-pool")                          # reconnect handles
+again = run.from_name(sb.name)                     # durable reconnect by name
+run.pool_status("my-pool").ready_snapshots         # warm capacity
+sb.terminate                                       # returns the bound workspace, if any
+```
+
+The default pool name is derived deterministically from the image and matches the
+Python and TypeScript SDKs byte for byte (lowercased; `/` and `:` and other
+unsafe characters become `-`; bounded and trimmed; prefixed `mitos-default-`), so
+the same image maps to the same default pool across every SDK. A reused default
+pool is checked against the requested image, so a slug collision serving a
+different image raises `pool_image_mismatch` rather than silently running the
+wrong image.
+
+| Method | Resource | Returns |
+| --- | --- | --- |
+| `Mitos.cluster(namespace:, kubeconfig:, in_cluster:)` | none | `AgentRun` |
+| `AgentRun#sandbox(image:/pool:, env:, secrets:, ttl:, workspace:, ready:)` | get-or-create pool + create Sandbox | `ClusterSandbox` |
+| `AgentRun#create(pool:, name:, env:, secrets:, ttl:, workspace:)` | create Sandbox | `ClusterSandbox` |
+| `AgentRun#get(name)` / `#from_name(name)` | read Sandbox | `ClusterSandbox` |
+| `AgentRun#list(pool:)` | list Sandboxes | `Array<ClusterSandbox>` |
+| `AgentRun#create_workspace(name)` / `#workspace(name)` / `#get_workspace(name)` / `#list_workspaces` | Workspaces | `Workspace` |
+| `AgentRun#pool_status(name)` | read SandboxPool status | `PoolStatus` |
+| `ClusterSandbox#wait_until_ready(timeout:)` | poll Sandbox status | `self` |
+| `ClusterSandbox#info` | read Sandbox status | `SandboxInfo` |
+| `ClusterSandbox#terminate` | delete Sandbox | workspace name or `nil` |
+
+The per-sandbox bearer token is read from the `<name>-sandbox-token` Secret, held
+in memory only, and never logged. Cluster-mode `exec` / `files` / `run_code` over
+the sandbox HTTP API are served by the Python and TypeScript SDKs and are not yet
+part of this gem (see Scope below).
+
 ## Auth and base URL precedence
 
 Resolution order, highest precedence first:
@@ -122,41 +189,43 @@ typed `invalid_sandbox_id` error before sending any request.
 
 ## Tests
 
-The tests spin up a WEBrick stub reproducing the sandbox-server wire shapes and
-assert the SDK round trips them. They need `minitest` and `webrick`; on Ruby 3.0+
-install `webrick` first (`gem install webrick`). The SDK itself has no runtime
-dependencies.
+The tests spin up WEBrick stubs reproducing the wire shapes and assert the SDK
+round trips them: `test/sandbox_server_test.rb` stubs the sandbox-server REST API
+(direct mode) and `test/cluster_test.rb` stubs the Kubernetes API server (cluster
+mode). They need `minitest` and `webrick`; on Ruby 3.0+ install `webrick` first
+(`gem install webrick`). The SDK itself has no runtime dependencies.
 
 ```bash
 cd sdk/ruby
 gem install webrick   # only needed on Ruby 3.0+
 ruby -Ilib -Itest test/sandbox_server_test.rb
-# or, with Rake:
+ruby -Ilib -Itest test/cluster_test.rb
+# or, with Rake (runs every test/**/*_test.rb):
 rake test
 ```
 
 ## Scope
 
-This gem is direct-mode only today. Cluster mode (driving the Kubernetes CRDs)
-ships in the Python and TypeScript SDKs and is planned for this gem too, for full
-parity. Beyond the create / fork / exec /
-terminate surface above, the following direct-mode endpoints are not part of this
-gem: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`), `run_code`,
-per-sandbox network posture, `set_timeout`, `pause` / `resume`, and
-`get_host(port)` preview URLs.
+This gem ships direct mode (create / fork / exec / terminate) and cluster mode
+(the `mitos.run` CRD lifecycle: pools, sandboxes, and workspaces). The following
+sandbox HTTP API surface is not yet part of this gem, in either mode: the files
+API (`/v1/files/*`), interactive PTY (`/v1/pty`), `run_code`, per-sandbox network
+posture, `set_timeout`, `pause` / `resume`, and `get_host(port)` preview URLs.
+These are served by the Python and TypeScript SDKs and are planned here for full
+parity.
 
 ## The Mitos SDK family
 
 Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
-1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python
-and TypeScript today and is planned for the rest, for full parity.
+1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python,
+TypeScript, and Ruby today and is planned for the rest, for full parity.
 
 | Language | Install | Covers |
 | --- | --- | --- |
 | Python | `pip install mitos-run` | direct + cluster + async |
 | TypeScript | `npm install @mitos/sdk` | direct + cluster |
-| Ruby | `gem install mitos` | direct |
+| Ruby | `gem install mitos` | direct + cluster |
 | Rust | `cargo add mitos` | direct |
 | Go | `go get github.com/mitos-run/mitos/sdk/go` | direct |
 | Java | build from source | direct |
