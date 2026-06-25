@@ -75,6 +75,11 @@ type Deps struct {
 	// store. When set, New wraps deps.Audit with a DispatchingRecorder so every
 	// audit event is best-effort forwarded to the org's enabled sinks.
 	Sinks SinkRegistry
+	// CustomRoles is the org-scoped custom-role definition store. It is used by
+	// the permission resolver to look up custom role names that do not match any
+	// built-in role. Defaults to an empty in-memory store so the BFF is safe to
+	// instantiate without a real custom-role backend.
+	CustomRoles CustomRoleStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -130,6 +135,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Sinks == nil {
 		deps.Sinks = NewMemSinkRegistry()
+	}
+	if deps.CustomRoles == nil {
+		deps.CustomRoles = NewMemCustomRoleStore()
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
