@@ -77,7 +77,7 @@ jobs:
       - name: Install test-only deps (webrick left the stdlib in Ruby 3.0)
         run: gem install webrick --no-document
       - name: minitest suite
-        run: ruby -Ilib -Itest test/sandbox_server_test.rb
+        run: ruby -Ilib -Itest test/sandbox_server_test.rb && ruby -Ilib -Itest test/cluster_test.rb
 
   sdk-rust:
     needs: changes
