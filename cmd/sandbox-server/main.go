@@ -336,6 +336,11 @@ func main() {
 	// address the caller dials. Real mode only; the Kubernetes Service/Ingress
 	// routing and the CRD port-declaration fields are tracked follow-ups.
 	mux.HandleFunc("POST /v1/sandboxes/{id}/forward", s.handleForward)
+	// Authenticated guest HTTP proxy (Mitos Expose slice 1): reverse-proxy to a
+	// guest port over the vsock tunnel, streaming responses (SSE-safe). On the
+	// standalone server this inherits the loopback tokenless trust model.
+	mux.HandleFunc("/v1/sandboxes/{id}/expose/{port}/", s.sandboxAPI.HandleExpose)
+	mux.HandleFunc("/v1/sandboxes/{id}/expose/{port}", s.sandboxAPI.HandleExpose)
 	// Preview URLs (issue #126): mint a signed, expiring URL for get_host(port).
 	mux.HandleFunc("POST /v1/preview", s.handlePreview)
 

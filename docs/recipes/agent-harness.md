@@ -58,17 +58,47 @@ per child to reach each. In-flight HTTP sessions do not transfer across a fork:
 the child resumes the snapshot's process state, not the parent's live TCP
 connections, so treat a fork as a fresh, independently-reachable instance.
 
+## Driving the in-guest daemon over HTTP (Mitos Expose)
+
+The `/expose` path lets you send HTTP traffic, including streaming SSE sessions,
+directly to the guest's in-box daemon without opening a separate host listener.
+It is available on forkd (authenticated) and on the standalone sandbox-server
+(tokenless, same trust model as the rest of the server).
+
+5. Start the guest daemon as in step 3 above, then send HTTP requests directly
+   through the expose route:
+
+   ```bash
+   # On forkd, supply the per-sandbox bearer token:
+   curl -N -H "Authorization: Bearer <token>" \
+     http://<forkd-node>:9091/v1/sandboxes/sbx-1/expose/8000/stream
+
+   # On the standalone sandbox-server (tokenless loopback):
+   curl -N http://localhost:8080/v1/sandboxes/sbx-1/expose/8000/stream
+   ```
+
+   The `-N` flag disables curl's output buffering so SSE frames print as they
+   arrive. The route accepts any HTTP method: `GET` for SSE or `POST` for agent
+   RPC calls. A trailing slash is also accepted
+   (`/v1/sandboxes/sbx-1/expose/8000/`).
+
+   The response is streamed immediately (`FlushInterval -1`, no buffering) so an
+   in-guest daemon that writes `data: ...\n\n` SSE frames sees them forwarded to
+   the caller as each frame is produced, not batched. Each request opens its own
+   vsock tunnel and guest TCP connection and tears it down on close.
+
+   The guest dial is forced to loopback by the guest agent, so the host never
+   steers the tunnel to a non-loopback interface; port must be in 1-65535.
+
 ## Follow-ups (not yet shipped)
 
-- Auth on the forward path. The standalone forward inherits the standalone
-  server's tokenless trust model; an authenticated forward for the hosted /
-  multi-tenant path is a follow-up.
 - Kubernetes Service / Ingress routing to the owning node's forwarded port (the
-  forkd / cluster path); today the forward is standalone-server only.
+  forkd / cluster path); today the forward and expose paths are standalone-server
+  and raw-forkd only.
 - A first-class CRD field to declare exposed guest ports on a SandboxPool.spec.template /
   Sandbox.
-- SSE / long-lived streaming specifics for the agent-session use case, and a
-  worked Rivet `sandbox-agent` integration.
-- For internet-facing, signed, expiring per-sandbox URLs (the E2B
-  `get_host(port)` equivalent), see `docs/preview-urls.md`; that is a separate
-  mechanism from this plain host-socket tunnel.
+- Internet-facing, subdomain-routed, TLS-terminated exposure (the
+  `<label>.<expose-domain>` scheme, slice 2). For signed, expiring per-sandbox
+  preview URLs see `docs/preview-urls.md`; that is a separate mechanism.
+- A KVM end-to-end CI phase that starts a real in-guest SSE daemon and streams
+  through the expose route on a KVM runner.

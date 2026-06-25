@@ -217,14 +217,23 @@ class SandboxPty:
         delivered to on_data on a background thread. Returns a PtyHandle with
         send_input(bytes), resize(cols, rows), kill(), and wait() -> exit_code.
 
-        The transport is a WebSocket to the sandbox API's /v1/pty, gated by the
-        per-sandbox bearer token (sent in the Authorization header, never
-        logged)."""
-        base = self._sandbox._base_url  # http://<endpoint>/v1
-        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        The transport is a WebSocket carrying the Connect
+        ``sandbox.v1.Sandbox.Exec`` bidi schema, gated by the per-sandbox bearer
+        token (sent in the Authorization header, never logged). The window size
+        rides the open ExecRequest frame, not the URL query."""
+        # The Connect service is mounted at the endpoint root (no /v1 suffix),
+        # the same base the runtime RPC client uses.
+        root = self._sandbox._connect_base  # http://<endpoint>
+        ws_base = root.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ref = self._sandbox._sandbox_ref
-        url = f"{ws_base}/pty?sandbox={ref}&cols={cols}&rows={rows}"
-        return PtyHandle(url=url, token=self._sandbox._token, on_data=on_data)
+        url = f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={ref}"
+        return PtyHandle(
+            url=url,
+            token=self._sandbox._token,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
+        )
 
 
 class Sandbox:
