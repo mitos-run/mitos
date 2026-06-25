@@ -209,28 +209,104 @@ func TestConnectExecWrongTokenIsUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestConnectJSONRouteStillReachable is a smoke assertion that the legacy JSON
-// /v1/exec/stream route remains registered after the Connect handler is mounted.
-// This verifies the routes co-exist on the same mux.
-func TestConnectJSONRouteStillReachable(t *testing.T) {
+// TestLegacyJSONRuntimeRoutesRemoved asserts the legacy JSON /v1 runtime routes
+// (exec, exec/stream, run_code/stream, files, vitals, pty) no longer exist on the
+// mux: the runtime surface is served only by the Connect sandbox.v1.Sandbox
+// protocol now (#358). A POST to any of them must NOT be handled (404 from the
+// catch-all under requireBearer), never a 200 NDJSON/JSON runtime response.
+func TestLegacyJSONRuntimeRoutesRemoved(t *testing.T) {
 	const sandboxID = "c-sb4"
 	_, rawURL, cleanup := newConnectTestServer(t, sandboxID, "")
 	defer cleanup()
 
-	// The JSON route is behind requireBearer but AllowTokenless was set (no
-	// token registered for this sandbox), so the request passes auth and
-	// reaches the handler. We just need a 200 or an NDJSON response, not a
-	// full exec result, to confirm the route is still registered.
-	body, _ := json.Marshal(map[string]any{"sandbox": sandboxID, "command": "echo hello"})
-	resp, err := http.Post(rawURL+"/v1/exec/stream", "application/json", bytes.NewReader(body))
+	for _, route := range []string{
+		"/v1/exec",
+		"/v1/exec/stream",
+		"/v1/run_code/stream",
+		"/v1/files/read",
+		"/v1/files/write",
+		"/v1/vitals",
+	} {
+		body, _ := json.Marshal(map[string]any{"sandbox": sandboxID, "command": "echo hello"})
+		resp, err := http.Post(rawURL+route, "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST %s: %v", route, err)
+		}
+		gotCT := resp.Header.Get("Content-Type")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404 (route removed)", route, resp.StatusCode)
+		}
+		if gotCT == "application/x-ndjson" {
+			t.Errorf("%s: still served a runtime NDJSON response; the route was not removed", route)
+		}
+	}
+}
+
+// TestConnectExecCarriesExecTimeMs is the regression guard for the gRPC
+// migration silently zeroing exec_time_ms: it drives a Connect Exec whose guest
+// reports a non-zero exec_time_ms and asserts the value rides through to the
+// terminal ExecExit frame. This preserves the coverage the legacy
+// /v1/exec exec_time_ms test once provided on the JSON wire.
+func TestConnectExecCarriesExecTimeMs(t *testing.T) {
+	const (
+		sandboxID = "c-ms"
+		wantMs    = 42.5
+	)
+	dir, err := os.MkdirTemp("/tmp", "connms")
 	if err != nil {
-		t.Fatalf("POST /v1/exec/stream: %v", err)
+		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("JSON /v1/exec/stream status = %d, want 200", resp.StatusCode)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "vsock.sock")
+	startFakeGuestGRPCUDS(t, sock, &fakeGuestSandbox{execStdout: "hi\n", execExit: 0, execTimeMs: wantMs})
+
+	api := NewSandboxAPI(dir)
+	api.AllowTokenless()
+	if err := api.RegisterSandbox(sandboxID, sock); err != nil {
+		t.Fatal(err)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/x-ndjson" {
-		t.Fatalf("Content-Type = %q, want application/x-ndjson", ct)
+	api.RegisterStreamPath(sandboxID, sock)
+
+	srv := httptest.NewUnstartedServer(api.Handler())
+	var p http.Protocols
+	p.SetHTTP1(true)
+	p.SetUnencryptedHTTP2(true)
+	srv.Config.Protocols = &p
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	var cp http.Protocols
+	cp.SetUnencryptedHTTP2(true)
+	httpClient := &http.Client{Transport: &http.Transport{Protocols: &cp}}
+	client := sandboxv1connect.NewSandboxClient(httpClient, srv.URL, connect.WithGRPC())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream := client.Exec(ctx)
+	stream.RequestHeader().Set("X-Sandbox-Id", sandboxID)
+	if err := stream.Send(&sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{Command: "true"}},
+	}); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("send open: %v", err)
+	}
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("close request: %v", err)
+	}
+	var gotMs float64
+	for {
+		resp, rerr := stream.Receive()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("receive: %v", rerr)
+		}
+		if ex := resp.GetExit(); ex != nil {
+			gotMs = ex.GetExecTimeMs()
+		}
+	}
+	if gotMs != wantMs {
+		t.Fatalf("exec_time_ms = %v, want %v", gotMs, wantMs)
 	}
 }

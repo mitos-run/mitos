@@ -77,21 +77,22 @@ distinct from `exec` (a shell command). State persists across calls for the
 sandbox lifetime: a variable set in one `run_code` is visible in the next. It is
 the E2B-shaped code-interpreter surface.
 
-- Endpoint: `POST /v1/run_code/stream` on the sandbox API (forkd :9091 or
-  sandbox-server), gated by the same per-sandbox bearer token as `/v1/exec`.
-  Request body: `{sandbox, code, language?="python", timeout?}`.
-- Transport: chunked NDJSON, one `ExecStreamFrame` per line, each tagged with a
-  `kind`:
-  - `{"kind":"stdout","stdout":<base64>}` and `{"kind":"stderr","stderr":<base64>}`: buffered logs.
-  - `{"kind":"result","result":{"text":<str>,"data":{<mime>:<payload>}}}`: one rich
-    display artifact. `data` maps a MIME type to its payload (base64 for
-    `image/png`/`image/jpeg`, raw text for `text/html`, `image/svg+xml`,
-    `text/markdown`, `text/latex`, `application/json`, `text/plain`). `text` is
-    the REPL last-expression value (the main result).
-  - `{"kind":"error","error":{"name","value","traceback":[...]}}`: a structured
-    exception.
-  - `{"kind":"exit","exit_code":<int>}`: terminal frame (0 ok, 1 on a guest-code
-    exception, 127 when the kernel is unavailable).
+- Endpoint: the `sandbox.v1.Sandbox.RunCode` Connect RPC (server-streaming) on
+  the sandbox API (forkd :9091 or sandbox-server), gated by the same per-sandbox
+  bearer token (the Connect `BearerInterceptor`) as `Exec`. The legacy JSON
+  `POST /v1/run_code/stream` route was removed in #358. Request:
+  `RunCodeOpen{code, language?="python", timeout_seconds?}` (sandbox id in the
+  `X-Sandbox-Id` header).
+- Transport: a `RunCodeResponse` stream, each frame one of:
+  - `stdout`/`stderr` chunks: buffered logs.
+  - `result{text, data:{<mime>:<payload>}}`: one rich display artifact. `data`
+    maps a MIME type to its payload (base64 for `image/png`/`image/jpeg`, raw
+    text for `text/html`, `image/svg+xml`, `text/markdown`, `text/latex`,
+    `application/json`, `text/plain`). `text` is the REPL last-expression value
+    (the main result).
+  - `error{name, value, traceback:[...]}`: a structured exception.
+  - `exit_code`: terminal frame (0 ok, 1 on a guest-code exception, 127 when the
+    kernel is unavailable).
 - SDKs return an `Execution` (`{text, logs:{stdout[],stderr[]}, results[],
   error}`) and fire `on_stdout`/`on_stderr`/`on_result` (Python) /
   `onStdout`/`onStderr`/`onResult` (TypeScript) live as frames arrive.

@@ -22,6 +22,7 @@ import {
 import type { MitosClaimClient } from "./claim-client.js";
 import { leaseToClaim } from "./claim-mapping.js";
 import type { MitosSandbox, SecretKeyRef } from "./claim-mapping.js";
+import { execStream } from "./connect-exec.js";
 
 /**
  * The driver backend. "server" maps the lease onto the standalone
@@ -392,19 +393,28 @@ const plugin = definePlugin({
     const cdPrefix = params.cwd ? `cd '${params.cwd}' && ` : "";
     const command = `${envPrefix}${cdPrefix}${fullCommand}`;
 
+    // The runtime exec call speaks the Connect sandbox.v1.Sandbox ExecStream RPC
+    // (issue #358); the legacy JSON exec route is gone. A bearer token, when
+    // the host puts one on the lease metadata (the hosted/forkd case), rides on
+    // Authorization and is never logged; the standalone server case is tokenless
+    // and routes the sandbox by the X-Sandbox-Id header.
+    const leaseMeta = (params.lease as { metadata?: Record<string, unknown> })
+      .metadata;
+    const token =
+      leaseMeta && typeof leaseMeta.token === "string"
+        ? leaseMeta.token
+        : undefined;
+
     try {
-      const resp = await sandboxFetch(config.serverUrl, "/v1/exec", {
-        method: "POST",
-        body: JSON.stringify({
-          sandbox: sandboxId,
-          command,
-          timeout: Math.ceil(config.timeoutMs / 1000),
-        }),
-      });
-      const result = await resp.json();
+      const result = await execStream(
+        config.serverUrl,
+        command,
+        Math.ceil(config.timeoutMs / 1000),
+        { sandboxId, token },
+      );
 
       return {
-        exitCode: result.exit_code ?? 1,
+        exitCode: result.exitCode ?? 1,
         timedOut: false,
         stdout: result.stdout ?? "",
         stderr: result.stderr ?? "",

@@ -1,10 +1,6 @@
 package daemon
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -111,42 +107,7 @@ func TestStreamCapConcurrent(t *testing.T) {
 	}
 }
 
-// TestExecStreamRejectedOverCap covers the HTTP surface: when a sandbox is at
-// its stream cap, a NEW /v1/exec/stream is rejected with 429 and the LLM-legible
-// error envelope, WITHOUT touching the existing streams. The cap is checked at
-// stream OPEN, before the dedicated vsock connection is dialed.
-func TestExecStreamRejectedOverCap(t *testing.T) {
-	api, _ := newStreamAPI(t)
-	api.SetMaxStreamsPerSandbox(1)
-
-	// Saturate the sandbox's single slot, simulating one in-flight stream.
-	rel, ok := api.acquireStream("sb1")
-	if !ok {
-		t.Fatal("setup: first slot must be acquirable")
-	}
-	defer rel()
-
-	body, _ := json.Marshal(execRequest{Sandbox: "sb1", Command: "echo hi"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/exec/stream", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	api.handleExecStream(rec, req)
-
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", rec.Code)
-	}
-	var env struct {
-		Error struct {
-			Code        string `json:"code"`
-			Remediation string `json:"remediation"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("decode error envelope: %v (body=%q)", err, rec.Body.String())
-	}
-	if env.Error.Code != "too_many_streams" {
-		t.Errorf("error code = %q, want too_many_streams", env.Error.Code)
-	}
-	if env.Error.Remediation == "" {
-		t.Error("error envelope must carry actionable remediation")
-	}
-}
+// The HTTP-surface cap rejection (a NEW interactive Exec over the cap is refused
+// without touching existing streams) is covered for the live runtime path by
+// TestExecWSStreamCapRejected in pty_test.go: the legacy /v1/exec/stream wire was
+// removed in #358, and the ws Exec endpoint shares the same acquireStream gate.

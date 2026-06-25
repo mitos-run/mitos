@@ -12,14 +12,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"mitos.run/mitos/internal/fork"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // newAuthTestAPI builds a SandboxAPI with a connected gRPC fake agent for
@@ -50,24 +55,73 @@ func newAuthTestAPI(t *testing.T) (*SandboxAPI, *httptest.Server) {
 	return api, ts
 }
 
+// postExec drives one exec against a sandbox over the Connect-over-WebSocket
+// Exec endpoint (the runtime path that replaced the legacy JSON /v1/exec, #358),
+// returning a status+body shaped like the old helper so the bearer-gate
+// assertions are unchanged:
+//   - the bearer gate (ptyAuth) and the registration check run BEFORE the
+//     WebSocket upgrade, so a 401 (auth) or 404 (sandbox not registered) is the
+//     handshake response, returned here verbatim (status + error body).
+//   - on a successful upgrade the exec is driven to its exit frame and the
+//     synthesized response is 200 with the collected guest stdout, so the
+//     success-path assertions (status 200, body contains the exec output) hold.
+//
+// ptyAuth and requireBearer consult the same api.tokens map and resolveSandboxID,
+// so this exercises the identical per-sandbox / single-sandbox token gate the
+// legacy /v1/exec path did.
 func postExec(t *testing.T, url, sandbox, bearer string) (*http.Response, string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"sandbox": sandbox, "command": "echo hi"})
-	req, err := http.NewRequest(http.MethodPost, url+"/v1/exec", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := &websocket.DialOptions{Subprotocols: []string{execWSSubprotocol}}
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + bearer}}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	wsURL := "ws" + strings.TrimPrefix(url, "http") + execWSPath + "?sandbox=" + sandbox
+	c, resp, err := websocket.Dial(ctx, wsURL, opts)
 	if err != nil {
-		t.Fatal(err)
+		// Pre-upgrade rejection (401 auth, 404 not registered): the handshake
+		// response carries the status and the error envelope body.
+		if resp == nil {
+			t.Fatalf("dial failed without a handshake response: %v", err)
+		}
+		var body string
+		if resp.Body != nil {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			body = string(b)
+		}
+		return resp, body
 	}
-	defer resp.Body.Close()
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-	return resp, buf.String()
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Upgrade succeeded: drive one exec and collect the guest stdout.
+	if werr := c.Write(ctx, websocket.MessageBinary, frameMessage(t, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{Command: "echo hi"}},
+	})); werr != nil {
+		t.Fatalf("write open: %v", werr)
+	}
+	var stdout strings.Builder
+	for {
+		typ, data, rerr := c.Read(ctx)
+		if rerr != nil {
+			var ce websocket.CloseError
+			if errors.As(rerr, &ce) && ce.Code == websocket.StatusNormalClosure {
+				break
+			}
+			break
+		}
+		if typ != websocket.MessageBinary {
+			continue
+		}
+		_, frame := unframeResponse(t, data)
+		if frame.GetExit() != nil {
+			break
+		}
+		stdout.Write(frame.GetStdout())
+	}
+	return &http.Response{StatusCode: http.StatusOK}, stdout.String()
 }
 
 func TestHandlerWithValidBearerSucceeds(t *testing.T) {
@@ -264,15 +318,18 @@ func TestForkRunningRegistersToken(t *testing.T) {
 	}
 }
 
-// Guard: the middleware must hand the buffered body through unmodified so
-// handlers decode the full request, not just the peeked sandbox field.
+// Guard: the requireBearer middleware (still used by the lifecycle JSON routes)
+// must hand the buffered body through unmodified so the handler decodes the full
+// request, not just the peeked sandbox field. set_timeout reads timeout_seconds
+// from the body after the same body-peeking auth, so a 200 proves the body
+// survived the peek.
 func TestAuthMiddlewarePreservesBody(t *testing.T) {
 	api, ts := newAuthTestAPI(t)
 	api.RegisterToken("sb-auth", "tok-correct")
 
-	payload := map[string]any{"sandbox": "sb-auth", "command": "echo hi", "timeout": 7}
+	payload := map[string]any{"sandbox": "sb-auth", "timeout_seconds": 600}
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/exec", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/set_timeout", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,5 +343,8 @@ func TestAuthMiddlewarePreservesBody(t *testing.T) {
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(resp.Body)
 		t.Fatalf("status = %d, body = %s, want 200", resp.StatusCode, buf.String())
+	}
+	if _, ok := api.Deadline("sb-auth"); !ok {
+		t.Fatal("set_timeout did not record a deadline; the body was not preserved through requireBearer")
 	}
 }

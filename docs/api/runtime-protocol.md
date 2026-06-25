@@ -68,34 +68,31 @@ the one `Sandbox` service end to end: forkd relays to the Rust guest agent's gRP
 server on vsock port 53 (`internal/daemon/sandbox_api.go`), and the
 cluster-internal and browser bindings are the remaining follow-ups.
 
-## 4. Endpoint mapping (current surface -> v2 RPC)
+## 4. Endpoint mapping (legacy surface -> v2 RPC)
 
-Every current runtime endpoint maps onto one `sandbox.v1.Sandbox` RPC. This table
-is the migration's normative correspondence; each row is a unit the follow-up
-slices port.
-
-The runtime routes below (exec, exec/stream, run_code/stream, files/*, pty,
-vitals) are DEPRECATED in favor of the Connect protocol: each response carries an
-RFC 8594 `Deprecation: true` header and a `Link: </sandbox.v1.Sandbox>;
-rel="successor-version"` header (`deprecatedRuntimeNote`, `internal/daemon/sandbox_api.go`).
-They stay active (deprecated-but-working) so existing SDK callers are not broken,
-and are removed once every SDK execs over Connect (#358). The lifecycle routes
-(`set_timeout`, `pause`, `resume`) have no Connect runtime successor and are NOT
-deprecated.
+Every runtime endpoint maps onto one `sandbox.v1.Sandbox` RPC. This is now the
+shipped surface: the Connect `sandbox.v1.Sandbox` service is the SOLE runtime
+protocol, and the legacy JSON `/v1` runtime routes below (exec, exec/stream,
+run_code/stream, files/*, pty, vitals) were REMOVED once every SDK and
+kubectl-mitos moved to Connect (#358). The table is kept as the historical
+correspondence the Connect surface implements. The lifecycle routes
+(`set_timeout`, `pause`, `resume`) have no Connect runtime successor and remain on
+the JSON sandbox API unchanged.
 
 ### HTTP sandbox API (forkd :9091)
 
-| Current endpoint | v2 RPC | Notes |
+| Legacy endpoint (removed in #358) | v2 RPC | Notes |
 | --- | --- | --- |
 | `POST /v1/exec` | `Exec` (bidi, no stdin, read to exit) | one-shot exec is a degenerate Exec stream |
 | `POST /v1/exec/stream` (x-ndjson) | `Exec` (bidi) | stdout/stderr chunks + exit map onto `ExecResponse` |
-| `GET /v1/pty` (WebSocket) | `Exec` with `open.pty` set | input/resize/output/exit frames map onto `ExecRequest.stdin`/`resize` and `ExecResponse.stdout`/`exit` |
-| `POST /v1/run_code/stream` | `Exec` (follow-up: a run_code-specific extension or a kernel-mode `ExecOpen`) | the stateful-kernel result/error frames are richer than plain exec; tracked as a follow-up shape decision, see section 7 |
+| `GET /v1/pty` (WebSocket) | `Exec` with `open.pty` set, over a Connect WebSocket (`GET /sandbox.v1.Sandbox/Exec`, subprotocol `connect.sandbox.v1`) | input/resize/output/exit frames map onto `ExecRequest.stdin`/`resize` and `ExecResponse.stdout`/`exit` |
+| `POST /v1/run_code/stream` | `RunCode` (server-streaming) | the stateful-kernel result/error frames map onto `RunCodeResponse` |
 | `POST /v1/files/read` | `ReadFile` -> stream `Chunk` | streamed instead of buffered |
 | `POST /v1/files/write` | `WriteFile` (stream) | streamed instead of buffered |
 | `POST /v1/files/list` | `List` | gains AIP-158 `page_size`/`page_token`/`filter` |
-| `POST /v1/files/mkdir` | (covered by `WriteFile` semantics / a follow-up `Mkdir` shape) | not in the v2 spec's RPC list; modeled as a follow-up if kept distinct |
-| `POST /v1/files/remove` | `Signal`-adjacent? no: a follow-up `Remove` shape | not in the v2 spec's RPC list; tracked as a follow-up |
+| `POST /v1/files/mkdir` | `Mkdir` | |
+| `POST /v1/files/remove` | `Remove` | |
+| `POST /v1/vitals` | `Vitals` (server-streaming, plus `Processes`) | per-sandbox guest telemetry snapshot, bearer-authenticated |
 | `GET /v1/metering` | (control-plane, not runtime) | stays on the node metering surface, out of scope for `Sandbox` |
 
 ### vsock guest-agent protocol (`internal/vsock`)

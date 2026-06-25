@@ -18,16 +18,16 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // newSingleSandboxAPI builds a SandboxAPI in single-sandbox mode with a
@@ -174,17 +174,12 @@ func TestMultiSandboxModeStillRequiresExactIDMatch(t *testing.T) {
 	}
 }
 
-// startFakePtyAgent serves a gRPC PTY-capable Exec handler on sockPath for the
-// single-sandbox PTY auth test. PTY now uses the gRPC Exec stream (port 53).
-func startFakePtyAgent(t *testing.T, sockPath string) {
-	t.Helper()
-	startFakePtyGRPCUDS(t, sockPath)
-}
-
-// In single-sandbox mode the PTY upgrade authenticates against the single
-// registered token regardless of the ?sandbox= id the SDK passes (the pod
-// name), and a wrong token is rejected. This proves ptyAuth got the same fix as
-// requireBearer.
+// In single-sandbox mode the interactive Exec upgrade (Connect over WebSocket)
+// authenticates against the single registered token regardless of the ?sandbox=
+// id the SDK passes (the pod name), and a wrong token is rejected. This proves
+// ptyAuth, the gate the ws Exec endpoint shares, got the same single-sandbox fix
+// as requireBearer. The legacy /v1/pty JSON wire was removed in #358; this is its
+// successor coverage.
 func TestSingleSandboxPtyAuthIgnoresRequestID(t *testing.T) {
 	const localID = "husk"
 	const podID = "mitos-py-husk-5gwmh"
@@ -196,7 +191,7 @@ func TestSingleSandboxPtyAuthIgnoresRequestID(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "vsock.sock")
-	startFakePtyAgent(t, sockPath)
+	startFakePtyGRPCUDS(t, sockPath)
 
 	api := NewSandboxAPI(dir)
 	if err := api.RegisterSandbox(localID, sockPath); err != nil {
@@ -208,42 +203,43 @@ func TestSingleSandboxPtyAuthIgnoresRequestID(t *testing.T) {
 
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Wrong token: the upgrade is rejected (handshake fails with non-101).
-	_, _, err = websocket.Dial(context.Background(), wsURL+"/v1/pty?sandbox="+podID,
+	_, resp, err := websocket.Dial(ctx, wsExecURL(ts.URL, podID),
 		&websocket.DialOptions{
-			Subprotocols: []string{ptySubprotocol},
+			Subprotocols: []string{execWSSubprotocol},
 			HTTPHeader:   http.Header{"Authorization": {"Bearer tok-wrong"}},
 		})
 	if err == nil {
-		t.Fatal("single-sandbox pty with wrong token: handshake succeeded, want rejection")
+		t.Fatal("single-sandbox exec ws with wrong token: handshake succeeded, want rejection")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v, want 401", resp)
 	}
 
-	// Correct token + pod id: the upgrade succeeds and we can drive the pty.
-	c, _, err := websocket.Dial(context.Background(), wsURL+"/v1/pty?sandbox="+podID,
+	// Correct token + pod id: the upgrade succeeds and we can drive the terminal.
+	c, _, err := websocket.Dial(ctx, wsExecURL(ts.URL, podID),
 		&websocket.DialOptions{
-			Subprotocols: []string{ptySubprotocol},
+			Subprotocols: []string{execWSSubprotocol},
 			HTTPHeader:   http.Header{"Authorization": {"Bearer " + token}},
 		})
 	if err != nil {
-		t.Fatalf("single-sandbox pty with correct token + pod id: dial failed: %v", err)
+		t.Fatalf("single-sandbox exec ws with correct token + pod id: dial failed: %v", err)
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
 
-	in, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("exit\n")})
-	if err := c.Write(context.Background(), websocket.MessageText, in); err != nil {
-		t.Fatalf("write pty input: %v", err)
-	}
-	_, data, err := c.Read(context.Background())
-	if err != nil {
-		t.Fatalf("read pty frame: %v", err)
-	}
-	var f vsock.PtyFrame
-	if err := json.Unmarshal(data, &f); err != nil {
-		t.Fatalf("unmarshal pty frame: %v", err)
-	}
-	if f.Kind != vsock.PtyExit {
-		t.Fatalf("want pty exit frame, got kind %q", f.Kind)
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{
+			Pty: &sandboxv1.PtyOptions{Size: &sandboxv1.WindowSize{Cols: 80, Rows: 24}},
+		}},
+	})
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Stdin{Stdin: []byte("exit\n")},
+	})
+	_, ex := readResponse(ctx, t, c)
+	if ex.GetExit() == nil {
+		t.Fatalf("want exit frame, got %+v", ex)
 	}
 }

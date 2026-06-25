@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -11,14 +10,14 @@ import (
 )
 
 // This file holds the host-side consumer of the Layer 3 guest telemetry bridge
-// (issue #164): the /v1/vitals endpoint asks a sandbox's guest agent over gRPC
-// for a one-shot vitals snapshot (CPU steal, memory vs balloon, in-guest process
-// table) and returns it LABELED with the claim/pool/workspace identity the host
-// knows. It is what `kubectl mitos ps`/top consume to show REAL guest
-// processes and vitals; without a reachable guest they fall back to the object
-// listing. The endpoint is per-sandbox traffic (it returns one sandbox's process
-// table), so it is mounted under the per-sandbox bearer middleware, unlike the
-// node-level /v1/metering report.
+// (issue #164): vitalsSnapshot asks a sandbox's guest agent over gRPC for a
+// one-shot vitals snapshot (CPU steal, memory vs balloon, in-guest process
+// table). The Connect sandbox.v1.Sandbox.Vitals RPC serves the per-sandbox,
+// bearer-authenticated snapshot to `kubectl mitos ps`/top (the legacy /v1/vitals
+// JSON route was removed in #358). The node-scoped GET /v1/vitals/node batch
+// endpoint below stays: it is unauthenticated operator telemetry, the same
+// access class as /v1/metering, and carries only numeric vitals plus a process
+// count, never the per-process table.
 
 // VitalsLabels is the control-plane identity the host attaches to a sandbox's
 // guest telemetry: the claim, pool, and workspace names. They are k8s object
@@ -32,16 +31,8 @@ type VitalsLabels struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// LabeledVitals is the /v1/vitals response: the guest snapshot plus the host's
-// claim/pool/workspace labels. The labels let an operator (or `kubectl mitos
-// ps`) attribute the in-guest processes and steal to a specific claim.
-type LabeledVitals struct {
-	VitalsLabels
-	Vitals vsock.VitalsResponse `json:"vitals"`
-}
-
 // SetVitalsLabels records the claim/pool/workspace identity for sandboxID so its
-// /v1/vitals snapshot is labeled. forkd calls it on the Fork path with the same
+// vitals snapshot is labeled. forkd calls it on the Fork path with the same
 // identity the OTel spans carry. Calling it again replaces the labels. The
 // labels are object names, never secrets.
 func (api *SandboxAPI) SetVitalsLabels(sandboxID string, labels VitalsLabels) {
@@ -165,36 +156,6 @@ func (api *SandboxAPI) handleNodeVitals(w http.ResponseWriter, r *http.Request) 
 				ProcessCount: len(v.Processes),
 			},
 		})
-	}
-	writeJSON(w, out)
-}
-
-// handleVitals asks the sandbox's guest agent for a telemetry snapshot and
-// returns it labeled. A guest that is unreachable or errors yields a 502 so the
-// caller (kubectl mitos ps/top) can fall back to the object listing rather
-// than render a fabricated value. The snapshot carries no secrets: process
-// entries are program names and resource counters only.
-func (api *SandboxAPI) handleVitals(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Sandbox string `json:"sandbox"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	sandboxID := api.resolveSandboxID(req.Sandbox)
-
-	v, err := api.vitalsSnapshot(r.Context(), sandboxID)
-	if err != nil {
-		writeErr(w, "guest vitals unavailable", http.StatusBadGateway)
-		return
-	}
-
-	api.touch(sandboxID)
-
-	out := LabeledVitals{
-		VitalsLabels: api.vitalsLabelsFor(sandboxID),
-		Vitals:       v,
 	}
 	writeJSON(w, out)
 }
