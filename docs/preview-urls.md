@@ -10,12 +10,14 @@ same per-sandbox token gate as the sandbox API.
 
 This document describes the verifiable core that ships today (the routing, the
 signed/expiring URL scheme, the route table and its GC, the reserved-name
-blocklist, the admin route-sync endpoint, and the SDK `get_host` call) and the
-parts that are deferred to later slices (the controller reconciler that pushes
-routes from Ready Sandboxes is slice 2b; wildcard and post-quantum TLS are slice 3;
+blocklist, the admin route-sync endpoint, the controller route-sync loop that
+pushes routes from Ready Sandboxes, and the SDK `get_host` call) and the parts
+that are deferred to later slices (wildcard and post-quantum TLS are slice 3;
 the full sharing ladder including audience selectors is slice 4).
 
-## What ships in this slice
+## What ships in slices 2a and 2b
+
+Slice 2a:
 
 - `internal/preview`: the signer (mint + verify signed expiring URLs), the host
   parser, the reserved-name blocklist, the route table with GC, the reverse proxy,
@@ -29,6 +31,43 @@ the full sharing ladder including audience selectors is slice 4).
   (the signing secret lives on the server, never in the SDK).
 - Python SDK `DirectSandbox.get_host(port)` and the E2B shim
   `Sandbox.get_host(port)`: return the signed URL.
+
+Slice 2b (the controller route-sync loop, completing the end-to-end path):
+
+- `Sandbox.spec.expose`: a new CRD field `{port (1-65535), label (single DNS
+  label), sharing (private|link|org|authenticated|public, default private)}`.
+  Declares that a guest port is reachable at the per-sandbox subdomain
+  `<label>.<expose-domain>`.
+- `ExposeRouteReconciler` in the controller: watches Sandboxes; on any change it
+  lists all sandboxes, selects those that are Ready (`Status.Phase==Ready`) with
+  `spec.expose` set and a non-empty `Status.Endpoint`, reads each one's per-sandbox
+  bearer from its `<name>-sandbox-token` Secret (key `token`), builds the full route
+  set, and POSTs it to `POST /internal/routes` on the proxy admin endpoint.
+- Full-set replace semantics: the proxy reaps any sandbox that leaves the
+  Ready-and-exposed set. The label for a sandbox that is no longer Ready or no
+  longer has `spec.expose` set drops from the next posted set, making it
+  unroutable.
+- Fail-safe: a missing `<name>-sandbox-token` Secret skips that sandbox and
+  requeues after 1 second. A poster error requeues with backoff. The controller
+  never crashes on a transient proxy failure.
+- Disabled by default: the reconciler is enabled only when `--expose-proxy-admin-url`
+  is set on the controller. The admin token is read from `EXPOSE_PROXY_ADMIN_TOKEN`
+  (environment variable, never argv, never logged).
+
+Known limitation, label uniqueness is not yet enforced. The route table keys by
+`label`, and `label` is the public subdomain, so it must be globally unique by
+construction. If two sandboxes declare the same `spec.expose.label` (even in
+different org namespaces) they collide in the posted set and the last one written
+wins non-deterministically. This is an availability and squatting concern, not a
+credential leak: each route still carries only its own sandbox's bearer (the token
+map is namespace-scoped, regression-tested). A global label-allocation registry
+with reserved-name enforcement across tenants is a later slice; until then label
+uniqueness is operator-owned.
+
+Together slices 2a and 2b complete the end-to-end path: a `Sandbox` with
+`spec.expose` set and `Status.Phase==Ready` is reachable at
+`<label>.<expose-domain>` through the proxy, with routes kept current by the
+controller reconciler.
 
 ## Request flow
 
@@ -157,7 +196,8 @@ with CONSTANT TIME on every request. The token VALUE is never logged and never
 appears in an error body. An empty `MITOS_EXPOSE_ADMIN_TOKEN` disables the endpoint
 entirely (returns `404` for all `POST /internal/routes` requests); it does NOT
 default to open. The controller reconciler that reads Ready Sandboxes and their
-`<name>-sandbox-token` Secrets and POSTs the route set is slice 2b.
+`<name>-sandbox-token` Secrets and POSTs the route set is the slice-2b
+`ExposeRouteReconciler` described in the section above.
 
 ## Sub-path and dot-segment behavior
 
@@ -203,7 +243,7 @@ expose-proxy --domain example.com --addr :8080
 
 The proxy listens on `--addr` (HTTP). Run it behind a TLS terminator for
 production. The route table starts empty and is populated by `POST /internal/routes`
-from the controller reconciler (slice 2b).
+from the controller `ExposeRouteReconciler`.
 
 ## Sharing ladder
 
