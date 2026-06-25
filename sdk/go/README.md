@@ -89,7 +89,8 @@ Point at a local standalone server by setting `MITOS_BASE_URL` (for example
 | `(*SandboxServer).ListTemplates(ctx)` | `GET /v1/templates` | `[]Template` |
 | `(*SandboxServer).Fork(ctx, template, id, opts...)` | `POST /v1/fork` | `*Sandbox` |
 | `(*SandboxServer).ListSandboxes(ctx)` | `GET /v1/sandboxes` | `[]ServerSandbox` |
-| `(*Sandbox).Exec(ctx, command, opts...)` | `POST /v1/exec` | `*ExecResult` |
+| `(*Sandbox).Exec(ctx, command, opts...)` | Connect `Sandbox/ExecStream` | `*ExecResult` |
+| `(*Sandbox).ExecStream(ctx, command, opts...)` | Connect `Sandbox/ExecStream` | `*ExecStream` |
 | `(*Sandbox).Terminate(ctx)` | `DELETE /v1/sandboxes/{id}` | `error` |
 
 Functional options: `WithBaseURL`, `WithAPIKey`, `WithHTTPClient`,
@@ -103,7 +104,37 @@ Value types:
 - `Template`: `ID`, `Ready`, `CreatedAt`, `CreationTimeMs`.
 - `ServerSandbox`: `ID`, `TemplateID`, `Endpoint`, `CreatedAt`, `ForkTimeMs`.
 - `ExecResult`: `ExitCode`, `Stdout`, `Stderr`, `ExecTimeMs`.
+- `ExecStream`: `Recv() (*ExecChunk, error)` (`io.EOF` at exit), `Result() ExecResult`, `Close() error`.
+- `ExecChunk`: `Stdout`, `Stderr` (`[]byte`; exactly one is set per chunk).
 - `Sandbox`: `ID`, `Template`, `Endpoint`, `ForkTimeMs`.
+
+## Streaming exec
+
+`Exec` runs over the Connect `sandbox.v1.Sandbox` runtime protocol (issue #24) and
+returns the buffered result. For live output, `ExecStream` yields stdout/stderr
+chunks as they are produced. The Go SDK speaks Connect over the standard library
+alone (no gRPC runtime, no codegen), so it stays dependency-free.
+
+```go
+stream, err := sb.ExecStream(ctx, "for i in 1 2 3; do echo line $i; sleep 1; done")
+if err != nil {
+	log.Fatal(err)
+}
+defer stream.Close()
+
+for {
+	chunk, err := stream.Recv()
+	if errors.Is(err, io.EOF) {
+		break
+	}
+	if err != nil {
+		log.Fatal(err) // a *mitos.Error on a sandbox-side failure
+	}
+	os.Stdout.Write(chunk.Stdout)
+	os.Stderr.Write(chunk.Stderr)
+}
+fmt.Printf("exit %d\n", stream.Result().ExitCode)
+```
 
 ## Auth and base URL precedence
 

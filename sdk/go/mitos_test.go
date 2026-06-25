@@ -183,6 +183,10 @@ func TestForkInvalidIDReturnsTypedErrorBeforeRequest(t *testing.T) {
 	}
 }
 
+// TestExecRoundTrip proves Fork (REST) then Exec (Connect runtime protocol)
+// round-trip to stdout + exit. Exec runs over /sandbox.v1.Sandbox/ExecStream
+// (issue #24), not the retired /v1/exec; the detailed Connect request assertions
+// (path, headers, request message) live in connect_test.go.
 func TestExecRoundTrip(t *testing.T) {
 	stub := newStubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/fork" {
@@ -191,9 +195,11 @@ func TestExecRoundTrip(t *testing.T) {
 			})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"exit_code": 0, "stdout": "hello\n", "stderr": "", "exec_time_ms": 4.0,
-		})
+		// Exec now speaks the Connect ExecStream RPC: stream enveloped frames.
+		w.Header().Set("Content-Type", "application/connect+json")
+		writeFrame(t, w, 0, []byte(`{"stdout":"`+b64("hello\n")+`"}`))
+		writeFrame(t, w, 0, []byte(`{"exit":{"exitCode":0,"execTimeMs":4.0}}`))
+		writeFrame(t, w, 0x02, []byte(`{}`))
 	})
 	srv := clientFor(t, stub.srv.URL)
 	sb, err := srv.Fork(context.Background(), "python", "sb-1")
@@ -207,11 +213,8 @@ func TestExecRoundTrip(t *testing.T) {
 	if res.Stdout != "hello\n" || res.ExitCode != 0 {
 		t.Fatalf("got %+v", res)
 	}
-	if stub.lastBodyJSON["command"] != "echo hello" || stub.lastBodyJSON["sandbox"] != "sb-1" {
-		t.Fatalf("exec body = %+v", stub.lastBodyJSON)
-	}
-	if stub.lastBodyJSON["timeout"].(float64) != float64(DefaultExecTimeoutSeconds) {
-		t.Fatalf("timeout = %v", stub.lastBodyJSON["timeout"])
+	if stub.lastPath != "/sandbox.v1.Sandbox/ExecStream" {
+		t.Fatalf("exec path = %q, want the Connect ExecStream RPC", stub.lastPath)
 	}
 }
 
