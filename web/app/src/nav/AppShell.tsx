@@ -11,7 +11,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { Division } from '@mitos/brand'
 import { useCapabilities } from '../data/query'
-import { visibleRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
+import { navRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
 import { CommandPalette } from './CommandPalette'
 import type { Capabilities } from '../api'
 
@@ -61,7 +61,7 @@ export function AppShell() {
     )
   }
 
-  const routes = visibleRoutes(caps)
+  const routes = navRoutes(caps)
 
   return (
     <div className="app-shell" style={{ display: 'flex', minHeight: '100vh', maxWidth: 'var(--maxw)', margin: '0 auto' }}>

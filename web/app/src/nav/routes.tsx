@@ -18,6 +18,7 @@ export type RouteDef = {
   group: NavGroupName
   element: () => JSX.Element
   when?: (c: Capabilities) => boolean
+  hidden?: boolean
 }
 
 export const ROUTES: RouteDef[] = [
@@ -37,4 +38,8 @@ export const ROUTES: RouteDef[] = [
 
 export function visibleRoutes(caps: Capabilities): RouteDef[] {
   return ROUTES.filter((r) => !r.when || r.when(caps))
+}
+
+export function navRoutes(caps: Capabilities): RouteDef[] {
+  return visibleRoutes(caps).filter((r) => !r.hidden)
 }
