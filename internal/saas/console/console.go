@@ -80,6 +80,11 @@ type Deps struct {
 	// built-in role. Defaults to an empty in-memory store so the BFF is safe to
 	// instantiate without a real custom-role backend.
 	CustomRoles CustomRoleStore
+	// ProjectMembers is the per-org, per-project membership store. It backs the
+	// GET/POST/DELETE /console/projects/{id}/members endpoints. Defaults to an
+	// empty in-memory store so the BFF is safe to instantiate without a real
+	// backend.
+	ProjectMembers ProjectMembershipStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -138,6 +143,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.CustomRoles == nil {
 		deps.CustomRoles = NewMemCustomRoleStore()
+	}
+	if deps.ProjectMembers == nil {
+		deps.ProjectMembers = NewMemProjectMembershipStore()
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
@@ -203,6 +211,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
 	mux.HandleFunc("GET /console/projects", c.handleListProjects)
 	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
+	mux.HandleFunc("GET /console/projects/{id}/members", c.handleListProjectMembers)
+	mux.HandleFunc("POST /console/projects/{id}/members", c.handleAssignProjectMember)
+	mux.HandleFunc("DELETE /console/projects/{id}/members/{accountID}", c.handleRevokeProjectMember)
 	mux.HandleFunc("POST /console/members/{accountID}/role", c.handleSetMemberRole)
 	mux.HandleFunc("GET /console/account", c.handleGetAccount)
 	mux.HandleFunc("PATCH /console/account", c.handlePatchAccount)
