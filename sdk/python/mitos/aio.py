@@ -7,14 +7,19 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Union
 
 import httpx
 
+from mitos._connect import AsyncConnectClient
 from mitos._k8s import k8s
+from mitos._runtime import (
+    aparse_run_code_connect,
+    b64_decode as _b64_decode,
+    fileinfo_from_proto as _fileinfo_from_proto,
+)
+from mitos._envelope import raise_for_status
 from mitos.client import API_GROUP, API_VERSION, default_pool_name
 from mitos.direct import _resolve_auth
 from mitos.errors import AgentRunError, ExecutionDeadlineError
-from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.sandbox import (
     EXEC_TIMEOUT_EXIT_CODE,
-    _parse_run_code_stream,
     _validate_timeout,
 )
 from mitos.types import Execution, ExecResult, FileInfo, Network, Result, SandboxPhase
@@ -28,49 +33,119 @@ POLL_INTERVAL = 0.05
 StreamCallback = Callable[[bytes], Union[Awaitable[None], None]]
 
 
+async def _aemit(cb: Optional[StreamCallback], chunk: bytes) -> None:
+    """Fire an exec stream callback, awaiting it when it returns a coroutine so
+    a sync or async callback both work."""
+    if cb is None:
+        return
+    r = cb(chunk)
+    if asyncio.iscoroutine(r):
+        await r
+
+
+async def _aexec_stream(
+    client: AsyncConnectClient,
+    command: str,
+    timeout: int,
+    working_dir: str,
+    env: Optional[dict[str, str]],
+    on_stdout: Optional[StreamCallback],
+    on_stderr: Optional[StreamCallback],
+) -> ExecResult:
+    """Drive the Connect ``ExecStream`` server-streaming RPC and fold the
+    proto-JSON ExecResponse frames into an ExecResult, firing the callbacks live.
+
+    The request is the ExecStreamRequest unary shape (camelCase: command, args,
+    env, cwd, timeoutSeconds); the reply frames are the ExecResponse oneof
+    (stdout/stderr base64 bytes, then a terminal ExecExit{exitCode, execTimeMs,
+    error}). A spawn failure rides ExecExit.error; exit 124 is the execution
+    deadline, surfaced as the typed ExecutionDeadlineError. Shared by the async
+    k8s and direct sandboxes so the exec wire folding is written once."""
+    req: dict = {"command": command, "timeoutSeconds": timeout}
+    if working_dir:
+        req["cwd"] = working_dir
+    if env:
+        req["env"] = [{"key": k, "value": v} for k, v in env.items()]
+    out = bytearray()
+    err = bytearray()
+    exit_code = 0
+    exec_time_ms = 0.0
+    async for frame in client.server_stream("ExecStream", req, timeout=timeout + 5):
+        if "stdout" in frame:
+            chunk = _b64_decode(frame.get("stdout"))
+            out.extend(chunk)
+            await _aemit(on_stdout, chunk)
+        elif "stderr" in frame:
+            chunk = _b64_decode(frame.get("stderr"))
+            err.extend(chunk)
+            await _aemit(on_stderr, chunk)
+        elif "exit" in frame:
+            ex = frame.get("exit") or {}
+            exit_code = int(ex.get("exitCode", 0))
+            exec_time_ms = float(ex.get("execTimeMs", 0.0))
+            # A spawn/transport failure rides ExecExit.error (an LLM-legible
+            # remediation string, never a secret); surface it rather than a
+            # misleading clean exit.
+            if ex.get("error"):
+                raise AgentRunError(
+                    "exec failed",
+                    code="exec_failed",
+                    cause=str(ex["error"]),
+                    remediation="Check the command is accessible in the sandbox filesystem.",
+                )
+    if exit_code == EXEC_TIMEOUT_EXIT_CODE:
+        raise ExecutionDeadlineError(
+            f"command exceeded its {timeout}s execution deadline and was terminated",
+            code="exec_timeout",
+            cause=f"command ran past its {timeout}s deadline (exit 124)",
+            remediation="Raise the timeout on the exec call or split the work into shorter steps.",
+            context={"timeout_s": timeout},
+        )
+    return ExecResult(
+        exit_code=exit_code,
+        stdout=out.decode("utf-8", "replace"),
+        stderr=err.decode("utf-8", "replace"),
+        exec_time_ms=exec_time_ms,
+    )
+
+
 class AsyncSandboxFiles:
-    """Async file operations. Mirrors mitos.sandbox.SandboxFiles."""
+    """Async file operations. Mirrors mitos.sandbox.SandboxFiles.
+
+    Speaks the Connect ``sandbox.v1.Sandbox`` file RPCs (ReadFile, WriteFile,
+    List) over the AsyncConnectClient instead of the legacy JSON ``/v1/files/*``
+    routes (issue #24). ReadFile is a server-stream of byte chunks, WriteFile a
+    client-stream; List is unary. The public async signatures and return types
+    are UNCHANGED."""
 
     def __init__(self, sandbox: "AsyncSandbox"):
         self._sb = sandbox
 
     async def read(self, path: str) -> str:
-        resp = await self._sb._http.post(
-            f"{self._sb._base_url}/files/read",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._token)
-        return resp.json()["content"]
+        return (await self.read_bytes(path)).decode("utf-8", "replace")
+
+    async def read_bytes(self, path: str) -> bytes:
+        """Read a file's bytes via the ReadFile server-stream: concatenate each
+        Chunk's bytes until the eof frame."""
+        parts: list[bytes] = []
+        async for frame in self._sb._aconnect().server_stream("ReadFile", {"path": path}):
+            parts.append(_b64_decode(frame.get("data")))
+        return b"".join(parts)
 
     async def write(self, path: str, content: Union[str, bytes], mode: int = 0o644) -> None:
-        data: dict = {"sandbox": self._sb.id, "path": path, "mode": mode}
-        if isinstance(content, bytes):
-            data["content"] = content.hex()
-            data["binary"] = True
-        else:
-            data["content"] = content
-        resp = await self._sb._http.post(
-            f"{self._sb._base_url}/files/write",
-            json=data,
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._token)
+        """Write a file via the WriteFile client-stream: an open frame with the
+        path and mode, then one data frame with the base64-encoded bytes."""
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        messages = [
+            {"open": {"path": path, "mode": mode}},
+            {"data": base64.b64encode(raw).decode("ascii")},
+        ]
+        async for _ in self._sb._aconnect().bidi("WriteFile", messages):
+            pass
 
     async def list(self, path: str = "/") -> list[FileInfo]:
-        resp = await self._sb._http.post(
-            f"{self._sb._base_url}/files/list",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._token)
-        return [
-            FileInfo(
-                name=f["name"], is_dir=f["is_dir"], size=f["size"],
-                mode=f.get("mode", 0), modified_at=f.get("modified_at"),
-            )
-            for f in resp.json()["entries"]
-        ]
+        resp = await self._sb._aconnect().unary("List", {"parent": path})
+        return [_fileinfo_from_proto(f) for f in (resp.get("entries") or [])]
 
 
 class AsyncSandbox:
@@ -110,6 +185,25 @@ class AsyncSandbox:
         return f"http://{ep}/v1"
 
     @property
+    def _connect_base(self) -> str:
+        """The Connect server base for this sandbox's runtime RPCs. The Connect
+        paths are ``/sandbox.v1.Sandbox/<Method>`` off the endpoint root, so
+        unlike _base_url this carries no ``/v1`` suffix."""
+        ep = self.endpoint
+        if "://" in ep:
+            return ep.rstrip("/")
+        return f"http://{ep}"
+
+    def _aconnect(self) -> AsyncConnectClient:
+        """An async Connect client for this sandbox's runtime RPCs (exec, files,
+        run_code). It addresses the sandbox by id via the X-Sandbox-Id header
+        (forkd routes on it) and sends the optional bearer token. The token VALUE
+        is never logged."""
+        return AsyncConnectClient(
+            self._http, self._connect_base, self.id, self._token
+        )
+
+    @property
     def phase(self) -> SandboxPhase:
         return self._phase
 
@@ -118,10 +212,13 @@ class AsyncSandbox:
             return {"Authorization": f"Bearer {self._token}"}
         return {}
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
-        base = self._base_url  # http(s)://<endpoint>/v1
-        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        return f"{ws_base}/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+    def pty_url(self) -> str:
+        # The Connect ``sandbox.v1.Sandbox.Exec`` bidi route over a WebSocket,
+        # mounted at the endpoint root (no /v1 suffix). The window size rides the
+        # open ExecRequest frame, not the query.
+        root = self._connect_base  # http(s)://<endpoint>
+        ws_base = root.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
         """Open an interactive PTY over a WebSocket and return an
@@ -130,9 +227,11 @@ class AsyncSandbox:
         from mitos.pty import AsyncPtyHandle
 
         return await AsyncPtyHandle.connect(
-            url=self.pty_url(cols, rows),
+            url=self.pty_url(),
             token=self._token,
             on_data=on_data,
+            cols=cols,
+            rows=rows,
         )
 
     async def set_timeout(self, timeout_seconds: int) -> int:
@@ -178,98 +277,18 @@ class AsyncSandbox:
         on_stdout: Optional[StreamCallback] = None,
         on_stderr: Optional[StreamCallback] = None,
     ) -> ExecResult:
-        """Run a command. With on_stdout/on_stderr it streams /v1/exec/stream
-        NDJSON and awaits-or-calls the callback per chunk; without them it uses
-        the blocking /v1/exec path. Mirrors the sync Sandbox.exec."""
+        """Run a command and return its aggregate result.
+
+        Drives the Connect ``ExecStream`` server-streaming RPC (issue #24): a
+        non-interactive exec whose unary request fully describes the command,
+        with a reply stream of stdout/stderr chunks then a terminal ExecExit.
+        When on_stdout/on_stderr are given they fire (awaited if a coroutine) per
+        chunk as it arrives. A command killed at its execution deadline reports
+        exit 124, surfaced as the typed ExecutionDeadlineError. The public return
+        shape is unchanged."""
         _validate_timeout(timeout)
-        if on_stdout is None and on_stderr is None:
-            payload: dict = {"sandbox": self.id, "command": command,
-                             "timeout": timeout, "working_dir": working_dir}
-            if env:
-                payload["env"] = env
-            resp = await self._http.post(
-                f"{self._base_url}/exec", json=payload,
-                timeout=timeout + 5, headers=self._auth_headers(),
-            )
-            raise_for_status(resp, token=self._token)
-            data = resp.json()
-            return ExecResult(
-                exit_code=data["exit_code"], stdout=data.get("stdout", ""),
-                stderr=data.get("stderr", ""), exec_time_ms=data.get("exec_time_ms", 0),
-            )
-        return await self._stream_exec(command, timeout, working_dir, env, on_stdout, on_stderr)
-
-    async def _stream_exec(self, command, timeout, working_dir, env, on_stdout, on_stderr) -> ExecResult:
-        import json as _json
-        payload: dict = {"sandbox": self.id, "command": command,
-                         "timeout": timeout, "working_dir": working_dir}
-        if env:
-            payload["env"] = env
-        out_parts: list[bytes] = []
-        err_parts: list[bytes] = []
-        exit_code = 0
-        exec_time_ms = 0.0
-        saw_exit = False
-
-        async def emit(cb, chunk):
-            if cb is None:
-                return
-            r = cb(chunk)
-            if asyncio.iscoroutine(r):
-                await r
-
-        async with self._http.stream(
-            "POST", f"{self._base_url}/exec/stream",
-            json=payload, timeout=None, headers=self._auth_headers(),
-        ) as resp:
-            if not resp.is_success:
-                await resp.aread()
-                raise_for_status(resp, token=self._token)
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                frame = _json.loads(line)
-                if "exit_code" in frame and "stream" not in frame:
-                    exit_code = frame["exit_code"]
-                    exec_time_ms = frame.get("exec_time_ms", 0.0)
-                    saw_exit = True
-                    if frame.get("error"):
-                        raise AgentRunError(
-                            "exec stream error", code="exec_stream_error",
-                            cause=frame["error"],
-                            remediation="Inspect the command and the forkd logs for the failure.",
-                        )
-                    continue
-                data = base64.b64decode(frame["data"]) if frame.get("data") else b""
-                if frame.get("stream") == "stderr":
-                    err_parts.append(data)
-                    await emit(on_stderr, data)
-                else:
-                    out_parts.append(data)
-                    await emit(on_stdout, data)
-        if not saw_exit:
-            raise AgentRunError(
-                "exec stream ended before the terminal exit frame",
-                code="exec_stream_truncated",
-                cause="the connection was truncated or dropped; the exit code is unknown",
-                remediation="Retry the command; if it persists, inspect the forkd or sandbox-server logs.",
-            )
-        if exit_code == EXEC_TIMEOUT_EXIT_CODE:
-            # The streaming terminal frame reports 124 inside a 200 response;
-            # surface the typed deadline error to match the blocking path's 504
-            # exec_timeout (issue #216).
-            raise ExecutionDeadlineError(
-                f"command exceeded its {timeout}s execution deadline and was terminated",
-                code="exec_timeout",
-                cause=f"command ran past its {timeout}s deadline (exit 124)",
-                remediation="Raise the timeout on the exec call or split the work into shorter steps.",
-                context={"timeout_s": timeout},
-            )
-        return ExecResult(
-            exit_code=exit_code,
-            stdout=b"".join(out_parts).decode("utf-8", "replace"),
-            stderr=b"".join(err_parts).decode("utf-8", "replace"),
-            exec_time_ms=exec_time_ms,
+        return await _aexec_stream(
+            self._aconnect(), command, timeout, working_dir, env, on_stdout, on_stderr
         )
 
     async def wait_until_ready(self, timeout: float = 30.0) -> "AsyncSandbox":
@@ -508,65 +527,49 @@ class AsyncAgentRun:
 
 
 class AsyncDirectSandboxFiles:
-    """Async file operations on an AsyncDirectSandbox. Mirrors the sync
-    DirectSandboxFiles wire calls against the sandbox-server REST API."""
+    """Async file operations on an AsyncDirectSandbox.
+
+    Speaks the Connect ``sandbox.v1.Sandbox`` file RPCs (ReadFile, WriteFile,
+    List, Mkdir, Remove) over the AsyncConnectClient instead of the legacy JSON
+    ``/v1/files/*`` routes (issue #24), mirroring the sync DirectSandboxFiles.
+    ReadFile is a server-stream of byte chunks, WriteFile a client-stream;
+    List/Mkdir/Remove are unary. The public async signatures and return types
+    are UNCHANGED."""
 
     def __init__(self, sandbox: "AsyncDirectSandbox"):
         self._sb = sandbox
 
     async def read(self, path: str) -> str:
-        resp = await self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/read",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return resp.json()["content"]
+        return (await self.read_bytes(path)).decode("utf-8", "replace")
+
+    async def read_bytes(self, path: str) -> bytes:
+        """Read a file's bytes via the ReadFile server-stream: concatenate each
+        Chunk's bytes until the eof frame."""
+        parts: list[bytes] = []
+        async for frame in self._sb._aconnect().server_stream("ReadFile", {"path": path}):
+            parts.append(_b64_decode(frame.get("data")))
+        return b"".join(parts)
 
     async def write(self, path: str, content: Union[str, bytes], mode: int = 0o644) -> None:
-        data: dict = {"sandbox": self._sb.id, "path": path, "mode": mode}
-        if isinstance(content, bytes):
-            data["content"] = content.hex()
-            data["binary"] = True
-        else:
-            data["content"] = content
-        resp = await self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/write",
-            json=data,
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        """Write a file via the WriteFile client-stream: an open frame with the
+        path and mode, then one data frame with the base64-encoded bytes."""
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        messages = [
+            {"open": {"path": path, "mode": mode}},
+            {"data": base64.b64encode(raw).decode("ascii")},
+        ]
+        async for _ in self._sb._aconnect().bidi("WriteFile", messages):
+            pass
 
     async def list(self, path: str = "/") -> list[FileInfo]:
-        resp = await self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/list",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
-        return [
-            FileInfo(
-                name=f["name"], is_dir=f["is_dir"], size=f["size"],
-                mode=f.get("mode", 0), modified_at=f.get("modified_at"),
-            )
-            for f in resp.json()["entries"]
-        ]
+        resp = await self._sb._aconnect().unary("List", {"parent": path})
+        return [_fileinfo_from_proto(f) for f in (resp.get("entries") or [])]
 
     async def remove(self, path: str) -> None:
-        resp = await self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/remove",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        await self._sb._aconnect().unary("Remove", {"path": path})
 
     async def mkdir(self, path: str) -> None:
-        resp = await self._sb._http.post(
-            f"{self._sb._server_url}/v1/files/mkdir",
-            json={"sandbox": self._sb.id, "path": path},
-            headers=self._sb._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sb._api_key)
+        await self._sb._aconnect().unary("Mkdir", {"path": path})
 
 
 class AsyncDirectSandbox:
@@ -597,19 +600,27 @@ class AsyncDirectSandbox:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
-    async def exec(self, command: str, timeout: int = 30) -> ExecResult:
-        _validate_timeout(timeout)
-        resp = await self._http.post(
-            f"{self._server_url}/v1/exec",
-            json={"sandbox": self.id, "command": command, "timeout": timeout},
-            timeout=timeout + 5,
-            headers=self._auth_headers(),
+    def _aconnect(self) -> AsyncConnectClient:
+        """An async Connect client for this sandbox's runtime RPCs (exec,
+        run_code, files). It addresses the sandbox by id via the X-Sandbox-Id
+        header (the server routes on it in both the tokenless standalone case and
+        the hosted bearer case) and sends the optional bearer key. The key VALUE
+        is never logged."""
+        return AsyncConnectClient(
+            self._http, self._server_url, self.id, self._api_key
         )
-        raise_for_status(resp, token=self._api_key)
-        data = resp.json()
-        return ExecResult(
-            exit_code=data["exit_code"], stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""), exec_time_ms=data.get("exec_time_ms", 0),
+
+    async def exec(self, command: str, timeout: int = 30) -> ExecResult:
+        """Run a command and return its aggregate result.
+
+        Drives the Connect ``ExecStream`` server-streaming RPC (issue #24): a
+        non-interactive exec whose unary request fully describes the command,
+        with a reply stream of stdout/stderr chunks then a terminal ExecExit.
+        Mirrors the sync DirectSandbox.exec; the public return shape is
+        unchanged."""
+        _validate_timeout(timeout)
+        return await _aexec_stream(
+            self._aconnect(), command, timeout, "", None, None, None
         )
 
     async def run_code(
@@ -622,25 +633,28 @@ class AsyncDirectSandbox:
         on_result: Optional[Callable[[Result], None]] = None,
     ) -> Execution:
         """Run a code snippet in the sandbox's stateful kernel. Mirrors the sync
-        DirectSandbox.run_code; folds the NDJSON stream into an Execution."""
-        _validate_timeout(timeout)
-        payload = {"sandbox": self.id, "code": code, "language": language, "timeout": timeout}
-        lines: list[bytes] = []
-        async with self._http.stream(
-            "POST", f"{self._server_url}/v1/run_code/stream",
-            json=payload, timeout=timeout + 10, headers=self._auth_headers(),
-        ) as resp:
-            if not resp.is_success:
-                await resp.aread()
-                raise_for_status_stream(resp, token=self._api_key)
-            async for line in resp.aiter_lines():
-                if line.strip():
-                    lines.append(line.encode() if isinstance(line, str) else line)
-        return _parse_run_code_stream(iter(lines), on_stdout, on_stderr, on_result)
+        DirectSandbox.run_code.
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
+        Drives the Connect ``RunCodeStream`` server-streaming RPC (issue #24): a
+        non-interactive run whose unary request fully describes the snippet, with
+        a reply stream of stdout/stderr chunks, rich RunResult frames, the
+        structured RunError, then the terminal exit code; the callbacks fire live
+        as frames arrive. The public return shape is unchanged."""
+        _validate_timeout(timeout)
+        req = {"code": code, "language": language, "timeoutSeconds": timeout}
+        return await aparse_run_code_connect(
+            self._aconnect().server_stream("RunCodeStream", req, timeout=timeout + 10),
+            on_stdout,
+            on_stderr,
+            on_result,
+        )
+
+    def pty_url(self) -> str:
+        # The Connect ``sandbox.v1.Sandbox.Exec`` bidi route over a WebSocket,
+        # mounted at the server root. The window size rides the open ExecRequest
+        # frame, not the query.
         ws_base = self._server_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        return f"{ws_base}/v1/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
         """Open an interactive PTY over a WebSocket and return an
@@ -649,7 +663,11 @@ class AsyncDirectSandbox:
         from mitos.pty import AsyncPtyHandle
 
         return await AsyncPtyHandle.connect(
-            url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data
+            url=self.pty_url(),
+            token=self._api_key,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
         )
 
     async def fork(self, n: int = 1, id: Optional[str] = None) -> list["AsyncDirectSandbox"]:

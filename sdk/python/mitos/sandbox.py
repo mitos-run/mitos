@@ -9,8 +9,14 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import httpx
 
+from mitos._connect import ConnectClient
 from mitos._k8s import k8s
-from mitos._envelope import raise_for_status, raise_for_status_stream
+from mitos._envelope import raise_for_status
+from mitos._runtime import (
+    b64_decode as _b64_decode,
+    fileinfo_from_proto as _fileinfo_from_proto,
+    parse_run_code_connect,
+)
 from mitos.errors import AgentRunError, ExecutionDeadlineError, TimeoutTooLargeError
 from mitos.pty import PtyHandle
 from mitos.types import (
@@ -136,61 +142,48 @@ def _validate_timeout(timeout: int) -> None:
 
 
 class SandboxFiles:
-    """File operations on a sandbox."""
+    """File operations on a sandbox.
+
+    Speaks the Connect ``sandbox.v1.Sandbox`` file RPCs (ReadFile, WriteFile,
+    List, Mkdir, Remove) forkd serves at ``/sandbox.v1.Sandbox/<Method>`` (issue
+    #24), instead of the legacy JSON ``/v1/files/*`` routes. ReadFile is a
+    server-stream of byte chunks, WriteFile a client-stream of chunks;
+    List/Mkdir/Remove are unary. The public method signatures and return types
+    are UNCHANGED. The sandbox is addressed by id via the X-Sandbox-Id header."""
 
     def __init__(self, sandbox: Sandbox):
         self._sandbox = sandbox
 
     def read(self, path: str) -> str:
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/read",
-            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
-        return resp.json()["content"]
+        return self.read_bytes(path).decode("utf-8", "replace")
 
     def read_bytes(self, path: str) -> bytes:
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/read",
-            json={"sandbox": self._sandbox._sandbox_ref, "path": path, "binary": True},
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
-        return bytes.fromhex(resp.json()["content"])
+        """Read a file's bytes via the ReadFile server-stream: concatenate each
+        Chunk's bytes until the eof frame. The same bytes back both read (utf-8
+        decoded) and read_bytes (raw)."""
+        parts: list[bytes] = []
+        for frame in self._sandbox._connect().server_stream("ReadFile", {"path": path}):
+            parts.append(_b64_decode(frame.get("data")))
+        return b"".join(parts)
 
     def write(self, path: str, content: str | bytes, mode: int = 0o644) -> None:
-        data: dict = {"sandbox": self._sandbox._sandbox_ref, "path": path, "mode": mode}
-        if isinstance(content, bytes):
-            data["content"] = content.hex()
-            data["binary"] = True
-        else:
-            data["content"] = content
-
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/write",
-            json=data,
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
+        """Write a file via the WriteFile client-stream: an open frame carrying
+        the path and mode, then one data frame with the (base64-encoded) bytes.
+        str content is utf-8 encoded; bytes are written verbatim."""
+        raw = content.encode("utf-8") if isinstance(content, str) else content
+        messages = [
+            {"open": {"path": path, "mode": mode}},
+            {"data": base64.b64encode(raw).decode("ascii")},
+        ]
+        # WriteFile is a client-stream returning a unary WriteFileResult; the
+        # bidi helper drives the half-duplex send-then-read, and the single
+        # result frame is consumed (bytes_written is not part of the public API).
+        for _ in self._sandbox._connect().bidi("WriteFile", messages):
+            pass
 
     def list(self, path: str = "/") -> list[FileInfo]:
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/list",
-            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
-        return [
-            FileInfo(
-                name=f["name"],
-                is_dir=f["is_dir"],
-                size=f["size"],
-                mode=f.get("mode", 0),
-                modified_at=f.get("modified_at"),
-            )
-            for f in resp.json()["entries"]
-        ]
+        resp = self._sandbox._connect().unary("List", {"parent": path})
+        return [_fileinfo_from_proto(f) for f in (resp.get("entries") or [])]
 
     def exists(self, path: str) -> bool:
         try:
@@ -202,20 +195,10 @@ class SandboxFiles:
             raise
 
     def remove(self, path: str) -> None:
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/remove",
-            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
+        self._sandbox._connect().unary("Remove", {"path": path})
 
     def mkdir(self, path: str) -> None:
-        resp = self._sandbox._http.post(
-            f"{self._sandbox._base_url}/files/mkdir",
-            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
-            headers=self._sandbox._auth_headers(),
-        )
-        raise_for_status(resp, token=self._sandbox._token)
+        self._sandbox._connect().unary("Mkdir", {"path": path})
 
 
 class SandboxPty:
@@ -234,14 +217,23 @@ class SandboxPty:
         delivered to on_data on a background thread. Returns a PtyHandle with
         send_input(bytes), resize(cols, rows), kill(), and wait() -> exit_code.
 
-        The transport is a WebSocket to the sandbox API's /v1/pty, gated by the
-        per-sandbox bearer token (sent in the Authorization header, never
-        logged)."""
-        base = self._sandbox._base_url  # http://<endpoint>/v1
-        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        The transport is a WebSocket carrying the Connect
+        ``sandbox.v1.Sandbox.Exec`` bidi schema, gated by the per-sandbox bearer
+        token (sent in the Authorization header, never logged). The window size
+        rides the open ExecRequest frame, not the URL query."""
+        # The Connect service is mounted at the endpoint root (no /v1 suffix),
+        # the same base the runtime RPC client uses.
+        root = self._sandbox._connect_base  # http://<endpoint>
+        ws_base = root.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ref = self._sandbox._sandbox_ref
-        url = f"{ws_base}/pty?sandbox={ref}&cols={cols}&rows={rows}"
-        return PtyHandle(url=url, token=self._sandbox._token, on_data=on_data)
+        url = f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={ref}"
+        return PtyHandle(
+            url=url,
+            token=self._sandbox._token,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
+        )
 
 
 class Sandbox:
@@ -299,6 +291,24 @@ class Sandbox:
         if not self._endpoint:
             self._wait_ready()
         return f"http://{self._endpoint}/v1"
+
+    @property
+    def _connect_base(self) -> str:
+        """The Connect server base for this sandbox's runtime RPCs. The Connect
+        paths are ``/sandbox.v1.Sandbox/<Method>`` off the endpoint root, so
+        unlike _base_url this carries no ``/v1`` suffix."""
+        if not self._endpoint:
+            self._wait_ready()
+        return f"http://{self._endpoint}"
+
+    def _connect(self) -> ConnectClient:
+        """A Connect client for this sandbox's runtime RPCs (files, run_code). It
+        addresses the sandbox by id via the X-Sandbox-Id header (forkd routes on
+        it) and sends the optional bearer token. The token VALUE is never
+        logged."""
+        return ConnectClient(
+            self._http, self._connect_base, self._sandbox_ref, self._token
+        )
 
     @property
     def _sandbox_ref(self) -> str:
@@ -401,25 +411,26 @@ class Sandbox:
     ) -> ExecResult:
         """Execute a command in the sandbox.
 
-        When on_stdout or on_stderr is given, output is streamed over
-        /v1/exec/stream (NDJSON) and the callbacks fire per chunk as bytes
-        arrive; the returned ExecResult still carries the full aggregate. With
-        no callbacks the blocking /v1/exec path is used unchanged.
+        Drives the Connect ``ExecStream`` server-streaming RPC (issue #24): a
+        non-interactive exec whose unary request fully describes the command,
+        with a reply stream of stdout/stderr chunks then a terminal ExecExit.
+        When on_stdout or on_stderr is given the callbacks fire per chunk as
+        bytes arrive; the returned ExecResult always carries the full aggregate.
+        A command killed at its execution deadline reports exit 124, surfaced as
+        the typed ExecutionDeadlineError. The public return shape is unchanged.
         """
         _validate_timeout(timeout)
-        if on_stdout is None and on_stderr is None:
-            return self._exec_blocking(command, timeout, working_dir, env)
         out_parts: list[bytes] = []
         err_parts: list[bytes] = []
-        exit_code, exec_time_ms = self._stream(
+        exit_code, exec_time_ms = self._exec_stream(
             command, timeout, working_dir, env,
             lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
             lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
         )
         if exit_code == EXEC_TIMEOUT_EXIT_CODE:
-            # The streaming terminal frame reports 124 inside a 200 response (the
-            # status header is already sent); surface the typed deadline error so
-            # the streaming path matches the blocking path's 504 exec_timeout.
+            # The terminal ExecExit reports 124 inside an already-200 stream;
+            # surface the typed deadline error so exec matches the blocking
+            # path's old 504 exec_timeout type.
             raise ExecutionDeadlineError(
                 f"command exceeded its {timeout}s execution deadline and was terminated",
                 code="exec_timeout",
@@ -434,31 +445,6 @@ class Sandbox:
             stdout=b"".join(out_parts).decode("utf-8", "replace"),
             stderr=b"".join(err_parts).decode("utf-8", "replace"),
             exec_time_ms=exec_time_ms,
-        )
-
-    def _exec_blocking(self, command, timeout, working_dir, env) -> ExecResult:
-        _validate_timeout(timeout)
-        payload: dict = {
-            "sandbox": self._sandbox_ref,
-            "command": command,
-            "timeout": timeout,
-            "working_dir": working_dir,
-        }
-        if env:
-            payload["env"] = env
-        resp = self._http.post(
-            f"{self._base_url}/exec",
-            json=payload,
-            timeout=timeout + 5,
-            headers=self._auth_headers(),
-        )
-        raise_for_status(resp, token=self._token)
-        data = resp.json()
-        return ExecResult(
-            exit_code=data["exit_code"],
-            stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""),
-            exec_time_ms=data.get("exec_time_ms", 0),
         )
 
     def set_timeout(self, timeout_seconds: int) -> int:
@@ -511,81 +497,75 @@ class Sandbox:
         (rich display artifacts), and error. Streams via the callbacks as frames
         arrive. Requires a base image with the code-interpreter kernel; without
         it the Execution carries a KernelUnavailable error.
+
+        Drives the Connect ``RunCodeStream`` server-streaming RPC (issue #24): a
+        non-interactive run whose unary request fully describes the snippet, with
+        a reply stream of stdout/stderr chunks, rich RunResult frames, the
+        structured RunError, then the terminal exit code. The public return shape
+        is unchanged.
         """
         _validate_timeout(timeout)
-        payload: dict = {
-            "sandbox": self._sandbox_ref,
-            "code": code,
-            "language": language,
-            "timeout": timeout,
-        }
-        with self._http.stream(
-            "POST",
-            f"{self._base_url}/run_code/stream",
-            json=payload,
-            timeout=timeout + 10,
-            headers=self._auth_headers(),
-        ) as resp:
-            raise_for_status_stream(resp, token=self._token)
-            return _parse_run_code_stream(
-                resp.iter_lines(),
-                on_stdout,
-                on_stderr,
-                on_result,
-            )
+        req = {"code": code, "language": language, "timeoutSeconds": timeout}
+        return parse_run_code_connect(
+            self._connect().server_stream("RunCodeStream", req, timeout=timeout + 10),
+            on_stdout,
+            on_stderr,
+            on_result,
+        )
 
-    def _stream(
+    def _exec_stream(
         self, command, timeout, working_dir, env, on_out, on_err,
-        client=None, on_response=None,
+        connect=None, on_response=None,
     ):
-        """Opens /v1/exec/stream and feeds chunks to on_out/on_err. Returns
-        (exit_code, exec_time_ms). Raises on transport error frames and on a
-        stream that ends before the terminal exit frame.
+        """Drive the Connect ``ExecStream`` server-stream and feed each
+        stdout/stderr chunk's bytes to on_out/on_err. Returns
+        (exit_code, exec_time_ms). Raises on a spawn/transport error carried on
+        the terminal ExecExit and on a stream that ends before that exit frame.
 
-        Streams on `client` when given (a dedicated per-stream httpx client so a
-        kill() can tear down only that connection), otherwise on the shared
-        Sandbox client. When on_response is given it is called with the live
-        streaming Response so a kill() can close that exact connection and
-        unblock the in-flight read deterministically, independent of how the
-        installed httpx version handles Client.close()."""
-        http = client if client is not None else self._http
-        payload: dict = {
-            "sandbox": self._sandbox_ref,
-            "command": command,
-            "timeout": timeout,
-            "working_dir": working_dir,
-        }
+        Streams on `connect` when given (a dedicated per-stream ConnectClient
+        over its own httpx client so a kill() can tear down only that
+        connection), otherwise on the shared Sandbox Connect client. When
+        on_response is given (the background path) it is forwarded to the
+        Connect call so a kill() can close that exact streaming Response, and the
+        stream read timeout is disabled (None) so that close unblocks the
+        in-flight read deterministically: a finite httpx read timeout would
+        leave the read pinned until it expired instead of aborting on close. The
+        foreground exec keeps a bounded read timeout.
+
+        The ExecStream request is the proto-JSON ExecStreamRequest: command,
+        timeoutSeconds, plus the optional workingDir and env the cluster path
+        carried. stdout/stderr frames carry base64 bytes; the terminal ExecExit
+        carries exitCode/execTimeMs and an optional error string."""
+        client = connect if connect is not None else self._connect()
+        req: dict = {"command": command, "timeoutSeconds": timeout}
+        if working_dir:
+            req["workingDir"] = working_dir
         if env:
-            payload["env"] = env
+            req["env"] = env
+        # The background/kill path (on_response set) disables the read timeout so
+        # a kill's resp.close() aborts the blocked read at once; the foreground
+        # path bounds it at the exec deadline plus slack.
+        stream_timeout = None if on_response is not None else timeout + 5
         exit_code = 0
         exec_time_ms = 0.0
         saw_exit = False
-        with http.stream(
-            "POST",
-            f"{self._base_url}/exec/stream",
-            json=payload,
-            timeout=None,
-            headers=self._auth_headers(),
-        ) as resp:
-            if on_response is not None:
-                on_response(resp)
-            raise_for_status_stream(resp, token=self._token)
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                frame = json.loads(line)
-                if "exit_code" in frame and "stream" not in frame:
-                    exit_code = frame["exit_code"]
-                    exec_time_ms = frame.get("exec_time_ms", 0.0)
-                    saw_exit = True
-                    if frame.get("error"):
-                        raise RuntimeError(f"exec stream error: {frame['error']}")
-                    continue
-                data = base64.b64decode(frame["data"]) if frame.get("data") else b""
-                if frame.get("stream") == "stderr":
-                    on_err(data)
-                else:
-                    on_out(data)
+        for frame in client.server_stream(
+            "ExecStream", req, timeout=stream_timeout, on_response=on_response
+        ):
+            if "stdout" in frame:
+                on_out(_b64_decode(frame.get("stdout")))
+            elif "stderr" in frame:
+                on_err(_b64_decode(frame.get("stderr")))
+            elif "exit" in frame:
+                ex = frame.get("exit") or {}
+                exit_code = int(ex.get("exitCode", 0))
+                exec_time_ms = float(ex.get("execTimeMs", 0.0))
+                saw_exit = True
+                # A spawn/transport failure rides ExecExit.error (an LLM-legible
+                # remediation string, never a secret); surface it rather than a
+                # misleading clean exit.
+                if ex.get("error"):
+                    raise RuntimeError(f"exec stream error: {ex['error']}")
         if not saw_exit:
             # The body ended before the terminal exit frame: the stream was
             # truncated or dropped. Surface it as an error rather than a
@@ -616,11 +596,15 @@ class Sandbox:
         err_parts: list[bytes] = []
         # Resolve the endpoint and token on the calling thread so a failure to
         # become ready surfaces here, not silently inside the drain thread.
-        base_url = self._base_url
-        self._sandbox_ref  # noqa: B018  force readiness/id resolution
-        # A dedicated client so kill() tears down only this stream, never the
-        # shared Sandbox client that other exec/file calls ride on.
+        connect_base = self._connect_base
+        sandbox_ref = self._sandbox_ref  # force readiness/id resolution
+        # A dedicated httpx client (and Connect client over it) so kill() tears
+        # down only this stream, never the shared Sandbox client that other
+        # exec/file calls ride on.
         stream_http = httpx.Client(timeout=30.0)
+        stream_connect = ConnectClient(
+            stream_http, connect_base, sandbox_ref, self._token
+        )
 
         state: dict = {"result": None, "error": None, "response": None}
         done = threading.Event()
@@ -632,11 +616,11 @@ class Sandbox:
 
         def drain_thread() -> None:
             try:
-                exit_code, exec_time_ms = self._stream(
+                exit_code, exec_time_ms = self._exec_stream(
                     command, timeout, working_dir, env,
                     lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
                     lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
-                    client=stream_http,
+                    connect=stream_connect,
                     on_response=capture_response,
                 )
                 state["result"] = ExecResult(
@@ -651,9 +635,9 @@ class Sandbox:
                 stream_http.close()
                 done.set()
 
-        # _base_url is read inside _stream; the thread relies on it being
-        # resolved above so no k8s call happens off the calling thread.
-        assert base_url
+        # The Connect base and sandbox ref are resolved above on the calling
+        # thread, so the drain thread does no k8s readiness call off-thread.
+        assert connect_base and sandbox_ref
         thread = threading.Thread(target=drain_thread, daemon=True)
         thread.start()
 

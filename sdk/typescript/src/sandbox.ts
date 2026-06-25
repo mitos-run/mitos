@@ -2,6 +2,7 @@
 // (forkd :9091 or the standalone sandbox-server). Mirrors the Python Sandbox
 // surface (sdk/python/mitos/sandbox.py), camelCased.
 
+import { ConnectClient, b64ToBytes, bytesToB64 } from "./connect.js";
 import {
   AgentRunError,
   ExecutionDeadlineError,
@@ -54,76 +55,102 @@ export interface SandboxOptions {
   terminator?: Terminator;
 }
 
-// Wire shapes returned by the sandbox API. snake_case as the Go handlers emit.
-interface execResponseWire {
-  exit_code: number;
-  stdout?: string;
-  stderr?: string;
-  exec_time_ms?: number;
-}
-
-interface readResponseWire {
-  content: string;
-  size?: number;
-}
-
-interface listEntryWire {
-  name: string;
-  is_dir: boolean;
-  size: number;
+// Proto-JSON wire shapes for the Connect sandbox.v1.Sandbox file RPCs. The
+// fields are camelCase as proto-JSON emits, and bytes fields are base64 strings.
+interface connectFileInfoWire {
+  name?: string;
+  path?: string;
+  isDir?: boolean;
+  size?: number | string;
   mode?: number;
-  modified_at?: string;
+  modifiedAtUnix?: number | string;
 }
 
 interface listResponseWire {
-  entries: listEntryWire[];
+  entries?: connectFileInfoWire[];
+  nextPageToken?: string;
 }
 
 /**
- * File operations on a sandbox. POST /v1/files/{read,write,list}.
+ * File operations on a sandbox. Speaks the Connect sandbox.v1.Sandbox file RPCs
+ * the sandbox-server and forkd serve at /sandbox.v1.Sandbox/<Method> (issue
+ * #24): ReadFile (a server-stream of byte chunks), WriteFile (a client-stream of
+ * chunks), and the unary List. The public method signatures and return types are
+ * UNCHANGED from the legacy /v1/files/* routes they replace.
  */
 export class SandboxFiles {
   constructor(
     private readonly sandbox: Sandbox,
-    private readonly http: HttpClient,
+    private readonly connect: ConnectClient,
   ) {}
 
+  /**
+   * Read a file via the ReadFile server-stream: concatenate each Chunk's
+   * (base64-decoded) bytes until the stream ends, then utf-8 decode them.
+   */
   async read(path: string): Promise<string> {
-    const resp = await this.http.post<readResponseWire>("/v1/files/read", {
-      sandbox: this.sandbox.id,
-      path,
-    });
-    return resp.content;
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for await (const frame of this.connect.serverStream("ReadFile", { path })) {
+      const bytes = b64ToBytes(frame["data"]);
+      if (bytes.length > 0) {
+        parts.push(bytes);
+        total += bytes.length;
+      }
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      all.set(p, off);
+      off += p.length;
+    }
+    return new TextDecoder().decode(all);
   }
 
+  /**
+   * Write a file via the WriteFile client-stream: an open frame carrying the
+   * path and mode, then one data frame with the (base64-encoded) bytes. The
+   * single WriteFileResult frame is consumed (bytesWritten is not part of the
+   * public API).
+   */
   async write(
     path: string,
     content: string,
     opts?: { mode?: number },
   ): Promise<void> {
-    const body: Record<string, unknown> = {
-      sandbox: this.sandbox.id,
-      path,
-      content,
-    };
+    const raw = new TextEncoder().encode(content);
+    const open: Record<string, unknown> = { path };
     if (opts?.mode !== undefined) {
-      body["mode"] = opts.mode;
+      open["mode"] = opts.mode;
     }
-    await this.http.post<{ status?: string }>("/v1/files/write", body);
+    const messages: Array<Record<string, unknown>> = [
+      { open },
+      { data: bytesToB64(raw) },
+    ];
+    // The client-stream returns a single unary WriteFileResult; drain it.
+    for await (const _ of this.connect.bidi("WriteFile", messages)) {
+      void _;
+    }
   }
 
+  /**
+   * List a directory via the unary List RPC. The proto-JSON FileInfo carries
+   * camelCase fields and modifiedAtUnix (mtime in unix seconds), which maps onto
+   * the public FileInfo.modifiedAt (kept as the unix-second value, as the Python
+   * SDK does).
+   */
   async list(path: string = "/"): Promise<FileInfo[]> {
-    const resp = await this.http.post<listResponseWire>("/v1/files/list", {
-      sandbox: this.sandbox.id,
-      path,
-    });
+    const resp = (await this.connect.unary("List", {
+      parent: path,
+    })) as listResponseWire;
     const entries = resp.entries ?? [];
     return entries.map((e) => ({
-      name: e.name,
-      isDir: e.is_dir,
-      size: e.size,
+      name: e.name ?? "",
+      isDir: e.isDir ?? false,
+      size: Number(e.size ?? 0),
       mode: e.mode ?? 0,
-      modifiedAt: e.modified_at,
+      modifiedAt:
+        e.modifiedAtUnix !== undefined ? String(e.modifiedAtUnix) : undefined,
     }));
   }
 }
@@ -138,6 +165,10 @@ export class Sandbox {
   readonly files: SandboxFiles;
 
   private readonly http: HttpClient;
+  // Connect client for the runtime RPCs (exec, files, run_code) over the
+  // sandbox.v1.Sandbox service (issue #24). The control-plane lifecycle routes
+  // (set_timeout, pause, resume) and the PTY WebSocket stay on http/ws.
+  private readonly connect: ConnectClient;
   private readonly terminator?: Terminator;
   // Retained so createPty can authenticate the WebSocket upgrade; the PTY
   // endpoint is gated by the same per-sandbox bearer token as the HTTP API.
@@ -157,8 +188,12 @@ export class Sandbox {
     this.endpoint = opts.endpoint;
     this.token = opts.token;
     this.http = opts.http ?? new HttpClient(toBaseUrl(opts.endpoint), opts.token);
+    // The Connect runtime client addresses this sandbox by id via X-Sandbox-Id
+    // and carries the same bearer token; it talks to the same base URL the
+    // legacy /v1/* routes did (the endpoint is the server's own address).
+    this.connect = new ConnectClient(toBaseUrl(opts.endpoint), opts.id, opts.token);
     this.terminator = opts.terminator;
-    this.files = new SandboxFiles(this, this.http);
+    this.files = new SandboxFiles(this, this.connect);
   }
 
   /**
@@ -175,15 +210,19 @@ export class Sandbox {
     const wsBase = toBaseUrl(this.endpoint)
       .replace(/^http:\/\//, "ws://")
       .replace(/^https:\/\//, "wss://");
-    const url = `${wsBase}/v1/pty?sandbox=${this.id}&cols=${cols}&rows=${rows}`;
-    return createPty({ url, token: this.token, onData });
+    // The PTY rides the Connect sandbox.v1.Sandbox/Exec RPC over a WebSocket; the
+    // size travels in the opening ExecRequest{open}, not the URL query.
+    const url = `${wsBase}/sandbox.v1.Sandbox/Exec?sandbox=${this.id}`;
+    return createPty({ url, cols, rows, token: this.token, onData });
   }
 
   /**
-   * Runs a command in the sandbox. With no stream callbacks it POSTs /v1/exec
-   * and maps the snake_case response. With onStdout/onStderr it streams
-   * /v1/exec/stream (NDJSON) and fires the callbacks per chunk while still
-   * resolving the full aggregate ExecResult.
+   * Runs a command in the sandbox over the Connect ExecStream server-streaming
+   * RPC (sandbox.v1.Sandbox/ExecStream, issue #24). With no stream callbacks it
+   * drains the stream into the aggregate ExecResult; with onStdout/onStderr it
+   * fires the callbacks per output chunk while still resolving the full
+   * aggregate. Connect serves server-streaming over HTTP/1.1, which the
+   * fetch-based, dependency-free client reaches.
    */
   async exec(
     command: string,
@@ -198,20 +237,7 @@ export class Sandbox {
     if (opts?.timeoutSeconds !== undefined) {
       validateTimeout(opts.timeoutSeconds);
     }
-    if (!opts?.onStdout && !opts?.onStderr) {
-      const body: Record<string, unknown> = { sandbox: this.id, command };
-      if (opts?.timeoutSeconds !== undefined) {
-        body["timeout"] = opts.timeoutSeconds;
-      }
-      const resp = await this.http.post<execResponseWire>("/v1/exec", body);
-      return {
-        exitCode: resp.exit_code,
-        stdout: resp.stdout ?? "",
-        stderr: resp.stderr ?? "",
-        execTimeMs: resp.exec_time_ms,
-      };
-    }
-    return this.streamExec(command, opts);
+    return this.streamExec(command, opts ?? {});
   }
 
   /**
@@ -291,86 +317,75 @@ export class Sandbox {
     if (opts.timeoutSeconds !== undefined) {
       validateTimeout(opts.timeoutSeconds);
     }
-    const body: Record<string, unknown> = { sandbox: this.id, command };
+    // ExecStreamRequest (proto-JSON, camelCase): command and the optional
+    // timeoutSeconds. The reply is a stream of ExecResponse oneof frames
+    // (stdout/stderr base64 chunks, then a terminal exit).
+    const req: Record<string, unknown> = { command };
     if (opts.timeoutSeconds !== undefined) {
-      body["timeout"] = opts.timeoutSeconds;
+      req["timeoutSeconds"] = opts.timeoutSeconds;
     }
-    const resp = await this.http.postStream("/v1/exec/stream", body, signal);
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
     const td = new TextDecoder();
-    let buffered = "";
     let exitCode = 0;
     let execTimeMs: number | undefined;
     let sawExit = false;
     const outParts: string[] = [];
     const errParts: string[] = [];
 
-    const handleLine = (line: string) => {
-      if (line === "") return;
-      const frame = JSON.parse(line) as {
-        stream?: string;
-        data?: string;
-        exit_code?: number;
-        exec_time_ms?: number;
-        error?: string;
-      };
-      if (frame.exit_code !== undefined && frame.stream === undefined) {
-        exitCode = frame.exit_code;
-        execTimeMs = frame.exec_time_ms;
+    const handleFrame = (frame: Record<string, unknown>) => {
+      if ("exit" in frame) {
+        const exit = (frame["exit"] ?? {}) as {
+          exitCode?: number;
+          execTimeMs?: number;
+          error?: string;
+        };
+        exitCode = exit.exitCode ?? 0;
+        execTimeMs = exit.execTimeMs;
         sawExit = true;
-        if (frame.error) {
-          throw new AgentRunError(`exec stream error: ${frame.error}`, {
+        // A spawn/transport failure rides ExecExit.error (an LLM-legible
+        // remediation string, never a secret); surface it rather than a
+        // misleading clean exit.
+        if (exit.error) {
+          throw new AgentRunError(`exec stream error: ${exit.error}`, {
             code: "exec_stream_error",
-            cause: frame.error,
+            cause: exit.error,
             remediation: "Inspect the command and the forkd logs for the failure.",
           });
         }
         return;
       }
-      const bytes = frame.data
-        ? Uint8Array.from(Buffer.from(frame.data, "base64"))
-        : new Uint8Array();
-      const text = td.decode(bytes);
-      if (frame.stream === "stderr") {
-        errParts.push(text);
+      if ("stderr" in frame) {
+        const bytes = b64ToBytes(frame["stderr"]);
+        if (bytes.length === 0) return;
+        errParts.push(td.decode(bytes));
         opts.onStderr?.(bytes);
-      } else {
-        outParts.push(text);
+        return;
+      }
+      if ("stdout" in frame) {
+        const bytes = b64ToBytes(frame["stdout"]);
+        if (bytes.length === 0) return;
+        outParts.push(td.decode(bytes));
         opts.onStdout?.(bytes);
       }
     };
 
     let aborted = false;
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
+      for await (const frame of this.connect.serverStream("ExecStream", req, signal)) {
         if (signal?.aborted) {
           aborted = true;
-          await reader.cancel();
           break;
         }
-        if (done) break;
-        buffered += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buffered.indexOf("\n")) >= 0) {
-          const line = buffered.slice(0, nl);
-          buffered = buffered.slice(nl + 1);
-          handleLine(line);
-        }
+        handleFrame(frame);
       }
     } catch (e) {
-      // An abort tears the fetch down: reader.read() rejects with an
-      // AbortError. That is an intentional kill, not a truncation; fall through
-      // and return the partial result rather than the truncation error below.
+      // An abort tears the fetch down: the iterator rejects with an AbortError.
+      // That is an intentional kill, not a truncation; fall through and return
+      // the partial result rather than the truncation error below.
       if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) {
         aborted = true;
       } else {
         throw e;
       }
-    }
-    if (!aborted && buffered.trim() !== "") {
-      handleLine(buffered.trim());
     }
 
     if (!aborted && !sawExit) {
@@ -415,11 +430,12 @@ export class Sandbox {
   }
 
   /**
-   * Runs a code snippet in the sandbox's stateful kernel. State persists across
-   * runCode calls for the sandbox lifetime. Streams stdout/stderr/results via
-   * the callbacks and resolves to the full Execution. Requires a base image with
-   * the code-interpreter kernel; without it the Execution carries a
-   * KernelUnavailable error.
+   * Runs a code snippet in the sandbox's stateful kernel over the Connect
+   * RunCodeStream server-streaming RPC (sandbox.v1.Sandbox/RunCodeStream, issue
+   * #24). State persists across runCode calls for the sandbox lifetime. Streams
+   * stdout/stderr/results via the callbacks and resolves to the full Execution.
+   * Requires a base image with the code-interpreter kernel; without it the
+   * Execution carries a KernelUnavailable error.
    */
   async runCode(
     code: string,
@@ -428,16 +444,16 @@ export class Sandbox {
     if (opts?.timeoutSeconds !== undefined) {
       validateTimeout(opts.timeoutSeconds);
     }
-    const body: Record<string, unknown> = {
-      sandbox: this.id,
+    // RunCodeStreamRequest (proto-JSON, camelCase): code, language, and the
+    // optional timeoutSeconds.
+    const req: Record<string, unknown> = {
       code,
       language: opts?.language ?? "python",
     };
     if (opts?.timeoutSeconds !== undefined) {
-      body["timeout"] = opts.timeoutSeconds;
+      req["timeoutSeconds"] = opts.timeoutSeconds;
     }
-    const resp = await this.http.postStream("/v1/run_code/stream", body);
-    return parseRunCodeStream(ndjsonLines(resp), {
+    return parseRunCodeConnect(this.connect.serverStream("RunCodeStream", req), {
       onStdout: opts?.onStdout,
       onStderr: opts?.onStderr,
       onResult: opts?.onResult,
@@ -476,25 +492,100 @@ function decodeStreamBytes(value: unknown): string {
 }
 
 /**
- * Decodes a streaming Response body into NDJSON lines (one JSON object per
- * yielded string). The trailing partial line, if non-empty, is yielded last.
+ * Decode a Connect RunResult.data map (proto-JSON map<string,bytes>: every value
+ * is a base64 string) back to the MIME->payload form the Result type expects.
+ * The guest stores each display value as the raw bytes of the kernel's string
+ * output (text/plain is "42"; image/png is the already-base64 PNG string), so
+ * base64-decoding recovers exactly the kernel value: text stays text and an
+ * image stays its base64 payload, matching Result.text / the image slot.
  */
-async function* ndjsonLines(resp: Response): AsyncIterable<string> {
-  if (!resp.body) return;
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      yield buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
+function decodeResultData(data: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [mime, value] of Object.entries(data ?? {})) {
+    if (typeof value !== "string") {
+      out[mime] = value === undefined || value === null ? "" : String(value);
+      continue;
+    }
+    try {
+      out[mime] = new TextDecoder().decode(b64ToBytes(value));
+    } catch {
+      out[mime] = value;
     }
   }
-  if (buf.trim()) yield buf;
+  return out;
+}
+
+/**
+ * Folds a Connect RunCodeStream response-frame stream into an Execution, firing
+ * the callbacks live as frames arrive. The proto-JSON frames are the
+ * RunCodeResponse oneof: stdout/stderr (base64 bytes), result
+ * (RunResult{text,data}), error (RunError{name,value,traceback}), and the
+ * terminal exitCode. Result and error payloads are tenant code output and are
+ * never logged here.
+ */
+export async function parseRunCodeConnect(
+  source: AsyncIterable<Record<string, unknown>>,
+  cb: RunCodeCallbacks,
+): Promise<Execution> {
+  const ex: Execution = {
+    text: null,
+    logs: { stdout: [], stderr: [] },
+    results: [],
+    error: null,
+  };
+  const td = new TextDecoder();
+  let sawExit = false;
+  for await (const frame of source) {
+    if ("stdout" in frame) {
+      const text = td.decode(b64ToBytes(frame["stdout"]));
+      ex.logs.stdout.push(text);
+      cb.onStdout?.(text);
+    } else if ("stderr" in frame) {
+      const text = td.decode(b64ToBytes(frame["stderr"]));
+      ex.logs.stderr.push(text);
+      cb.onStderr?.(text);
+    } else if ("result" in frame) {
+      const payload = (frame["result"] ?? {}) as {
+        text?: string;
+        data?: Record<string, unknown>;
+      };
+      const data = decodeResultData(payload.data ?? {});
+      const text = payload.text ?? "";
+      const isMain = Boolean(text);
+      // The REPL last-value is delivered in RunResult.text; mirror it into the
+      // text/plain slot so Result.text resolves the same way the NDJSON path did.
+      if (isMain && data["text/plain"] === undefined) {
+        data["text/plain"] = text;
+      }
+      const result: Result = { data, isMainResult: isMain };
+      ex.results.push(result);
+      if (isMain && text) {
+        ex.text = text;
+      }
+      cb.onResult?.(result);
+    } else if ("error" in frame) {
+      const payload = (frame["error"] ?? {}) as Partial<ExecutionError>;
+      ex.error = {
+        name: payload.name ?? "",
+        value: payload.value ?? "",
+        traceback: payload.traceback ?? [],
+      };
+    } else if ("exitCode" in frame) {
+      sawExit = true;
+      return ex;
+    }
+  }
+  if (!sawExit) {
+    // The stream ended before the terminal exit frame: it was truncated or
+    // dropped. Surface it rather than a misleading clean Execution success.
+    throw new AgentRunError("run_code stream ended before the terminal exit frame", {
+      code: "run_code_stream_truncated",
+      cause: "the connection was truncated or dropped; the result is unknown",
+      remediation:
+        "Retry the snippet; if it persists, inspect the forkd or sandbox-server logs for a dropped connection.",
+    });
+  }
+  return ex;
 }
 
 /**

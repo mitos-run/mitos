@@ -38,8 +38,14 @@ import httpx
 
 from mitos._connect import ConnectClient
 from mitos._envelope import raise_for_status
+from mitos._runtime import (
+    b64_decode as _b64_decode,
+    decode_result_data as _decode_result_data,
+    fileinfo_from_proto as _fileinfo_from_proto,
+    parse_run_code_connect as _parse_run_code_connect,
+)
 from mitos.errors import AgentRunError, ExecutionDeadlineError
-from mitos.types import Execution, ExecResult, ExecutionError, FileInfo, Network, Result
+from mitos.types import Execution, ExecResult, FileInfo, Network, Result
 from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _validate_timeout
 
 
@@ -130,16 +136,6 @@ def _resolve_auth(
     return key, url.rstrip("/")
 
 
-def _b64_decode(value) -> bytes:
-    """Decode a proto-JSON bytes field (base64 string) to raw bytes. None and
-    the empty string both decode to empty bytes."""
-    if not value:
-        return b""
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    return base64.b64decode(value)
-
-
 class DirectSandboxFiles:
     """File operations on a DirectSandbox.
 
@@ -186,16 +182,7 @@ class DirectSandboxFiles:
 
     def list(self, path: str = "/") -> list[FileInfo]:
         resp = self._sb._connect().unary("List", {"parent": path})
-        return [
-            FileInfo(
-                name=f.get("name", ""),
-                is_dir=f.get("isDir", False),
-                size=int(f.get("size", 0)),
-                mode=int(f.get("mode", 0)),
-                modified_at=f.get("modifiedAtUnix"),
-            )
-            for f in (resp.get("entries") or [])
-        ]
+        return [_fileinfo_from_proto(f) for f in (resp.get("entries") or [])]
 
     def exists(self, path: str) -> bool:
         try:
@@ -211,85 +198,6 @@ class DirectSandboxFiles:
 
     def mkdir(self, path: str) -> None:
         self._sb._connect().unary("Mkdir", {"path": path})
-
-
-def _decode_result_data(data: dict) -> dict[str, str]:
-    """Decode a Connect RunResult.data map (proto-JSON map<string,bytes>: every
-    value is base64) back to the MIME->payload form the Result type expects.
-
-    The guest stores each display value as raw bytes of the kernel's string
-    output (text/plain is "42", image/png is the already-base64 string), and
-    proto-JSON base64-encodes the byte map for the wire. Decoding the base64 back
-    to a utf-8 string recovers exactly the kernel value, so text stays text and
-    an image stays its base64 payload, matching Result.text / Result.png."""
-    out: dict[str, str] = {}
-    for mime, value in (data or {}).items():
-        try:
-            out[mime] = base64.b64decode(value).decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001  not base64: keep the value as-is
-            out[mime] = value if isinstance(value, str) else str(value)
-    return out
-
-
-def _parse_run_code_connect(
-    frames,
-    on_stdout: Optional[Callable[[str], None]],
-    on_stderr: Optional[Callable[[str], None]],
-    on_result: Optional[Callable[[Result], None]],
-) -> Execution:
-    """Fold a Connect RunCodeStream response-frame stream into an Execution,
-    firing the callbacks live as frames arrive. The proto-JSON frames are the
-    RunCodeResponse oneof: stdout/stderr (base64 bytes), result
-    (RunResult{text,data}), error (RunError{name,value,traceback}), and the
-    terminal exitCode. Result and error payloads are tenant code output and are
-    never logged here."""
-    ex = Execution()
-    saw_exit = False
-    for frame in frames:
-        if "stdout" in frame:
-            text = _b64_decode(frame.get("stdout")).decode("utf-8", "replace")
-            ex.logs["stdout"].append(text)
-            if on_stdout:
-                on_stdout(text)
-        elif "stderr" in frame:
-            text = _b64_decode(frame.get("stderr")).decode("utf-8", "replace")
-            ex.logs["stderr"].append(text)
-            if on_stderr:
-                on_stderr(text)
-        elif "result" in frame:
-            payload = frame.get("result") or {}
-            data = _decode_result_data(payload.get("data") or {})
-            text = payload.get("text") or ""
-            is_main = bool(text)
-            # The REPL last-value is delivered in RunResult.text; mirror it into
-            # the text/plain MIME slot so Result.text resolves the same way the
-            # NDJSON path did.
-            if is_main and "text/plain" not in data:
-                data["text/plain"] = text
-            result = Result(data=data, is_main_result=is_main)
-            ex.results.append(result)
-            if is_main and text:
-                ex.text = text
-            if on_result:
-                on_result(result)
-        elif "error" in frame:
-            payload = frame.get("error") or {}
-            ex.error = ExecutionError(
-                name=payload.get("name", ""),
-                value=payload.get("value", ""),
-                traceback=payload.get("traceback", []) or [],
-            )
-        elif "exitCode" in frame:
-            saw_exit = True
-            break
-    if not saw_exit:
-        # The stream ended before the terminal exit frame: it was truncated or
-        # dropped. Surface it rather than a misleading clean Execution.
-        raise RuntimeError(
-            "run_code stream ended before the terminal exit frame: "
-            "the connection was truncated or dropped; the result is unknown"
-        )
-    return ex
 
 
 class DirectSandbox:
@@ -451,14 +359,16 @@ class DirectSandbox:
             on_result,
         )
 
-    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
-        """The WebSocket URL for an interactive PTY in this sandbox. The bearer
-        key (when set) is sent in the Authorization header on connect, never on
-        the URL."""
+    def pty_url(self) -> str:
+        """The WebSocket URL for an interactive PTY in this sandbox: the Connect
+        ``sandbox.v1.Sandbox.Exec`` bidi route carried over a WebSocket. The
+        bearer key (when set) is sent in the Authorization header on connect,
+        never on the URL; the window size rides the open ExecRequest frame, not
+        the query."""
         ws_base = self._server_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
         )
-        return f"{ws_base}/v1/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+        return f"{ws_base}/sandbox.v1.Sandbox/Exec?sandbox={self.id}"
 
     def pty(self, on_data: Callable[[bytes], None], cols: int = 80, rows: int = 24):
         """Open an interactive PTY (a shell) in the sandbox over a WebSocket.
@@ -469,7 +379,13 @@ class DirectSandbox:
         header, never logged."""
         from mitos.pty import PtyHandle
 
-        return PtyHandle(url=self.pty_url(cols, rows), token=self._api_key, on_data=on_data)
+        return PtyHandle(
+            url=self.pty_url(),
+            token=self._api_key,
+            on_data=on_data,
+            cols=cols,
+            rows=rows,
+        )
 
     def set_timeout(self, timeout_seconds: int) -> int:
         """Adjust this RUNNING sandbox's TTL to now + timeout_seconds (issue

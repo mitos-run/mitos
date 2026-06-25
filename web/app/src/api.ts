@@ -66,6 +66,13 @@ export type ProjectView = { id: string; org_id: string; name: string; descriptio
 export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
 export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
 
+export type DataRetentionPolicy = {
+  sandbox_metadata_days: number
+  logs_days: number
+  usage_days: number
+  legal_hold: boolean
+}
+
 export type AccountView = {
   account_id: string
   email: string
@@ -218,6 +225,17 @@ export const api = {
     if (!r.ok && r.status !== 204) throw new Error(`delete sink: ${r.status}`)
   },
   auditExportUrl: () => '/console/audit/export',
+  dataRetention: () => get<DataRetentionPolicy>('/console/retention'),
+  setDataRetention: async (policy: DataRetentionPolicy) => {
+    const r = await fetch('/console/retention', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(policy),
+    })
+    if (!r.ok) throw new Error(`set retention policy: ${r.status}`)
+    return (await r.json()) as DataRetentionPolicy
+  },
 }
 
 export function fmtBytes(n: number): string {

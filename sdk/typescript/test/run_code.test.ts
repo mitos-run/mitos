@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Execution, Result, ExecutionError } from "../src/types.js";
-import { parseRunCodeStream } from "../src/sandbox.js";
+import { parseRunCodeStream, Sandbox } from "../src/sandbox.js";
 import { AgentRunError } from "../src/errors.js";
+import { streamBody } from "./connect_helpers.js";
 
 function b64(s: string): string {
   return Buffer.from(s, "utf-8").toString("base64");
@@ -57,6 +58,84 @@ describe("parseRunCodeStream", () => {
     );
     await expect(promise).rejects.toBeInstanceOf(AgentRunError);
     await expect(promise).rejects.toMatchObject({ code: "run_code_stream_truncated" });
+  });
+});
+
+describe("Sandbox.runCode (Connect RunCodeStream)", () => {
+  it("drives the RunCodeStream RPC, decodes results, and fires callbacks", async () => {
+    // RunResult.data is a proto-JSON map<string,bytes>: every value is base64.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        streamBody([
+          { stdout: b64("hi\n") },
+          {
+            result: {
+              text: "42",
+              data: { "text/plain": b64("42"), "image/png": b64("PNGDATA") },
+            },
+          },
+          { exitCode: 0 },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/connect+json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const sb = new Sandbox({ id: "sb1", endpoint: "localhost:8080" });
+    const seenStdout: string[] = [];
+    const ex = await sb.runCode("print(42)", { onStdout: (s) => seenStdout.push(s) });
+
+    expect(ex.text).toBe("42");
+    expect(ex.logs.stdout).toEqual(["hi\n"]);
+    expect(ex.results[0].data["text/plain"]).toBe("42");
+    expect(ex.results[0].data["image/png"]).toBe("PNGDATA");
+    expect(seenStdout).toEqual(["hi\n"]);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/sandbox\.v1\.Sandbox\/RunCodeStream$/);
+    expect((init as RequestInit).headers).toMatchObject({
+      "Content-Type": "application/connect+json",
+      "X-Sandbox-Id": "sb1",
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("captures a structured kernel error from a RunError frame", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          streamBody([
+            { error: { name: "ValueError", value: "bad", traceback: ["ValueError: bad"] } },
+            { exitCode: 1 },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/connect+json" } },
+        ),
+      ),
+    );
+    const sb = new Sandbox({ id: "sb1", endpoint: "localhost:8080" });
+    const ex = await sb.runCode("raise ValueError('bad')");
+    expect(ex.error?.name).toBe("ValueError");
+    expect(ex.text).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("throws when the run_code stream ends before the terminal exit frame", async () => {
+    // Data frames then a clean end-stream, but no exitCode frame: truncated.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(streamBody([{ stdout: b64("partial\n") }]), {
+          status: 200,
+          headers: { "Content-Type": "application/connect+json" },
+        }),
+      ),
+    );
+    const sb = new Sandbox({ id: "sb1", endpoint: "localhost:8080" });
+    await expect(sb.runCode("x")).rejects.toMatchObject({
+      code: "run_code_stream_truncated",
+    });
+    vi.unstubAllGlobals();
   });
 });
 

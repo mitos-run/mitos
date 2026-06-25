@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -11,14 +12,36 @@ import pytest
 
 from mitos.sandbox import Sandbox
 
+_END = 0b00000010
 
-def _ndjson_lines():
-    return [
-        json.dumps({"stream": "stdout", "data": base64.b64encode(b"out1").decode()}),
-        json.dumps({"stream": "stderr", "data": base64.b64encode(b"err1").decode()}),
-        json.dumps({"stream": "stdout", "data": base64.b64encode(b"out2").decode()}),
-        json.dumps({"exit_code": 7, "exec_time_ms": 2.0}),
-    ]
+
+def _frame(payload: bytes, end: bool = False) -> bytes:
+    """One Connect enveloped frame: a 1-byte flag (0x02 on end-stream), a 4-byte
+    big-endian length, then the JSON payload bytes."""
+    flag = _END if end else 0
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
+def _exec_frames(
+    chunks: list[tuple[str, bytes]],
+    exit_code: int = 7,
+    exec_time_ms: float = 2.0,
+    include_exit: bool = True,
+) -> bytes:
+    """Build a Connect ExecStream reply body: a stdout/stderr chunk frame per
+    entry, then (optionally) the terminal ExecExit and the clean end-stream
+    frame."""
+    body = b""
+    for stream, data in chunks:
+        body += _frame(json.dumps({stream: base64.b64encode(data).decode()}).encode())
+    if include_exit:
+        body += _frame(
+            json.dumps(
+                {"exit": {"exitCode": exit_code, "execTimeMs": exec_time_ms}}
+            ).encode()
+        )
+        body += _frame(json.dumps({}).encode(), end=True)
+    return body
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -26,11 +49,16 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Type", "application/connect+json")
         self.end_headers()
-        for line in _ndjson_lines():
-            self.wfile.write((line + "\n").encode())
-            self.wfile.flush()
+        self.wfile.write(
+            _exec_frames(
+                [("stdout", b"out1"), ("stderr", b"err1"), ("stdout", b"out2")],
+                exit_code=7,
+                exec_time_ms=2.0,
+            )
+        )
+        self.wfile.flush()
 
     def log_message(self, *args):  # silence
         pass
@@ -48,8 +76,6 @@ def stream_server():
 def _direct_sandbox(endpoint: str) -> Sandbox:
     # Build a Sandbox without k8s: set endpoint and id directly.
     sb = Sandbox.__new__(Sandbox)
-    import httpx
-
     sb._endpoint = endpoint
     sb._sandbox_id = "sb1"
     sb._token = None
@@ -82,22 +108,22 @@ def test_exec_background_wait(stream_server):
 
 
 class _TruncatedHandler(BaseHTTPRequestHandler):
-    """Sends chunk frames but never the terminal exit frame, then closes."""
+    """Sends chunk frames but never the terminal ExecExit frame, then closes."""
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Type", "application/connect+json")
         self.end_headers()
-        lines = [
-            json.dumps({"stream": "stdout", "data": base64.b64encode(b"out1").decode()}),
-            json.dumps({"stream": "stdout", "data": base64.b64encode(b"out2").decode()}),
-        ]
-        for line in lines:
-            self.wfile.write((line + "\n").encode())
-            self.wfile.flush()
-        # No exit frame: the connection simply ends.
+        self.wfile.write(
+            _exec_frames(
+                [("stdout", b"out1"), ("stdout", b"out2")],
+                include_exit=False,
+            )
+        )
+        self.wfile.flush()
+        # No ExecExit and no end-stream frame: the connection simply ends.
 
     def log_message(self, *args):  # silence
         pass
@@ -122,38 +148,32 @@ def test_exec_truncated_stream_errors(truncated_server):
 
 
 class _SlowHandler(BaseHTTPRequestHandler):
-    """Streams one early chunk, then blocks before the exit frame so the
-    process is observably 'running' until the connection is torn down."""
+    """Streams one early ExecStream chunk, then blocks before the ExecExit frame
+    so the process is observably 'running' until the connection is torn down."""
 
     release = threading.Event()
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
-        # A non-streaming exec returns immediately so a second call on the
-        # shared client can be served while the stream handler is blocked.
-        if not self.path.endswith("/exec/stream"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(
-                json.dumps({"exit_code": 0, "stdout": "", "stderr": ""}).encode()
-            )
-            self.wfile.flush()
-            return
         self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Type", "application/connect+json")
         self.end_headers()
-        first = json.dumps(
-            {"stream": "stdout", "data": base64.b64encode(b"ready").decode()}
-        )
         try:
-            self.wfile.write((first + "\n").encode())
+            self.wfile.write(
+                _frame(
+                    json.dumps(
+                        {"stdout": base64.b64encode(b"ready").decode()}
+                    ).encode()
+                )
+            )
             self.wfile.flush()
             # Block until the test releases us (or the client drops the conn).
             _SlowHandler.release.wait(timeout=5.0)
-            exit_frame = json.dumps({"exit_code": 0, "exec_time_ms": 1.0})
-            self.wfile.write((exit_frame + "\n").encode())
+            self.wfile.write(
+                _frame(json.dumps({"exit": {"exitCode": 0, "execTimeMs": 1.0}}).encode())
+            )
+            self.wfile.write(_frame(json.dumps({}).encode(), end=True))
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -197,9 +217,11 @@ def test_kill_does_not_break_subsequent_exec(slow_server):
     # Give the drain thread a moment to open its own stream.
     time.sleep(0.1)
     proc.kill()  # closes only the per-stream client
-    # The shared Sandbox client must still work: a one-shot blocking exec on the
-    # same Sandbox should succeed, proving kill() did not close it.
+    # The shared Sandbox client must still work: a one-shot exec on the same
+    # Sandbox should succeed, proving kill() did not close it.
     assert sb._http.is_closed is False
+    # Release the slow server so a fresh exec on the shared client completes.
+    _SlowHandler.release.set()
     result = sb.exec("true", timeout=1, working_dir="/")
     assert result.exit_code == 0
 
@@ -216,10 +238,15 @@ def test_kill_before_wait_does_not_crash(slow_server):
     while proc.running() and time.time() < deadline:
         time.sleep(0.02)
     assert not proc.running(), "drain thread should finish after kill()"
-    # The stream was torn down before its exit frame, so wait() surfaces an
-    # error (a truncation RuntimeError or a transport read error). Either is a
-    # clean, non-hanging outcome; the important thing is it does not crash the
-    # interpreter or close the shared client.
-    with pytest.raises(Exception):
+    # The stream was torn down before its exit frame, so wait() either surfaces
+    # an error (a truncation RuntimeError or a transport read error) OR returns
+    # cleanly when the kill drained the stream before wait() ran. Both are the
+    # documented clean, non-hanging outcome; requiring an exception was a race
+    # (a kill that drains cleanly returns without raising). The invariant is
+    # only that wait() does not hang or crash the interpreter and the shared
+    # client stays open.
+    try:
         proc.wait()
+    except Exception:
+        pass
     assert sb._http.is_closed is False

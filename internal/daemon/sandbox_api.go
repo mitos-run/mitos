@@ -16,6 +16,10 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/sandboxrpc"
@@ -126,6 +130,15 @@ type SandboxAPI struct {
 	// an unlabeled sandbox returns empty label fields, never a fabricated one.
 	// The labels are k8s object names, never secrets.
 	vitalsLabels map[string]VitalsLabels
+	// firstExecSeen records, per sandbox id, whether the FIRST exec has already
+	// been traced with the forkd.first-exec span (issue #164, the trace tail).
+	// Guarded by mu. It is the bounded per-sandbox guard so only the first exec
+	// after a fork gets the distinct first-exec span name; every later exec is a
+	// normal request with no first-exec span. The map is bounded by the live
+	// sandbox count: one bool per sandbox, deleted in UnregisterSandbox so it
+	// never outlives the sandbox (no leak across sandbox lifetimes). It holds
+	// only a boolean keyed by an id, never a command, argv, or any secret.
+	firstExecSeen map[string]bool
 }
 
 // defaultMaxExecTimeoutSeconds is the default ceiling on a requested exec or
@@ -150,6 +163,7 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		vitalsLabels:   make(map[string]VitalsLabels),
 		forwards:       make(map[string][]*portForward),
 		maxForwards:    defaultMaxForwards,
+		firstExecSeen:  make(map[string]bool),
 	}
 }
 
@@ -364,6 +378,8 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	delete(api.deadlines, sandboxID)
 	delete(api.paused, sandboxID)
 	delete(api.vitalsLabels, sandboxID)
+	// Drop the first-exec guard so the bounded map does not outlive the sandbox.
+	delete(api.firstExecSeen, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -593,6 +609,12 @@ func (api *SandboxAPI) Handler() http.Handler {
 	// (issue #24), so it carries the same Deprecation note as the other runtime
 	// routes (set on the upgrade handshake response).
 	outer.HandleFunc("GET /v1/pty", deprecatedRuntimeNote(api.handlePty))
+	// Connect-over-WebSocket bidi Exec: the same sandbox.v1.Sandbox.Exec schema
+	// the Connect HTTP handler serves over HTTP/2, but on a GET WebSocket upgrade
+	// so the thin half-duplex-over-HTTP/1.1 SDK clients can reach the full-duplex
+	// interactive (PTY) case. The Connect HTTP handler keeps POST on this path;
+	// this more-specific GET pattern takes the upgrade (issue #358).
+	outer.HandleFunc("GET "+execWSPath, api.handleExecWS)
 	outer.Handle(connectPath, connectHandler)
 	// Authenticated guest HTTP proxy (Mitos Expose slice 1). Mounted OUTSIDE
 	// requireBearer because it proxies arbitrary and streaming HTTP and cannot be
@@ -774,7 +796,7 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var out, errb strings.Builder
-	exit, err := api.runExecStream(r.Context(), req, func(stream vsock.StreamName, data []byte) error {
+	exit, err := api.runExecStream(traceContextFromRequest(r), req, func(stream vsock.StreamName, data []byte) error {
 		if stream == vsock.StreamStdout {
 			out.Write(data)
 		} else {
@@ -846,9 +868,58 @@ func execTimeoutSeconds(requested int) int {
 	return requested
 }
 
+// traceContextFromRequest extracts a W3C trace context (traceparent header)
+// from the incoming exec request into the request context, so the first-exec
+// span CONTINUES the sandbox's trace when the SDK or controller propagated one
+// (the same W3C context that crosses controller -> forkd on the fork RPC, and
+// the trace id the controller stamps on the mitos.run/trace-id annotation). When
+// no trace context is present the request context is returned unchanged and the
+// first-exec span starts a new root, per the task. It reads only headers; no
+// body, command, or secret is touched.
+func traceContextFromRequest(r *http.Request) context.Context {
+	return otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+}
+
+// startFirstExecSpan starts the forkd.first-exec span for the FIRST exec served
+// for a sandbox after its fork (issue #164, the trace tail), and returns the
+// span-carrying context and the span. For every later exec it is a no-op: it
+// returns the input ctx and a nil span, so subsequent execs are NOT marked
+// first. The per-sandbox guard (firstExecSeen) is bounded by the live sandbox
+// count and cleaned up in UnregisterSandbox, so it never leaks.
+//
+// The span continues the sandbox's trace when the exec request carried a W3C
+// trace context (extracted into ctx by the handler); otherwise tracer.Start
+// begins a new root span for the exec. The attributes are ONLY the sandbox id
+// and a first=true marker: never the command, argv, env, cwd, or any output.
+// When tracing is off the package tracer is the no-op tracer, so this costs
+// nothing and the returned span is a no-op (its End is a no-op too).
+func (api *SandboxAPI) startFirstExecSpan(ctx context.Context, sandboxID string) (context.Context, trace.Span) {
+	api.mu.Lock()
+	first := !api.firstExecSeen[sandboxID]
+	if first {
+		api.firstExecSeen[sandboxID] = true
+	}
+	api.mu.Unlock()
+	if !first {
+		return ctx, nil
+	}
+	ctx, span := tracer.Start(ctx, "forkd.first-exec", trace.WithAttributes(
+		attribute.String("sandbox.id", sandboxID),
+		attribute.Bool("first", true),
+	))
+	return ctx, span
+}
+
 // runExecStream drives one exec via gRPC, invoking onChunk per output chunk
 // and returning the terminal frame. It opens a fresh gRPC connection per call.
 func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChunk vsock.ChunkFunc) (*vsock.ExecStreamFrame, error) {
+	// First exec after a fork gets the forkd.first-exec span (the trace tail);
+	// later execs are normal. The span carries only the sandbox id and a first
+	// marker, never the command or env.
+	ctx, firstSpan := api.startFirstExecSpan(ctx, req.Sandbox)
+	if firstSpan != nil {
+		defer firstSpan.End()
+	}
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = defaultExecTimeoutSeconds
@@ -864,6 +935,9 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 	}
 	stream, err := g.Exec(ctx, open)
 	if err != nil {
+		if firstSpan != nil {
+			firstSpan.RecordError(err)
+		}
 		return nil, fmt.Errorf("exec guest gRPC: %w", err)
 	}
 	defer stream.Close()
@@ -875,6 +949,9 @@ func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChu
 			break
 		}
 		if ferr != nil {
+			if firstSpan != nil {
+				firstSpan.RecordError(ferr)
+			}
 			return nil, ferr
 		}
 		if frame.Done {
@@ -931,8 +1008,18 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 	for k, v := range req.Env {
 		open.Env = append(open.Env, &sandboxv1.EnvVar{Key: k, Value: v})
 	}
-	stream, err := g.Exec(r.Context(), open)
+	// First exec after a fork gets the forkd.first-exec span (the trace tail),
+	// continuing the request's W3C trace context when present. The span carries
+	// only the sandbox id and a first marker, never the command or env.
+	execCtx, firstSpan := api.startFirstExecSpan(traceContextFromRequest(r), req.Sandbox)
+	if firstSpan != nil {
+		defer firstSpan.End()
+	}
+	stream, err := g.Exec(execCtx, open)
 	if err != nil {
+		if firstSpan != nil {
+			firstSpan.RecordError(err)
+		}
 		// vsockGuestConn.Exec returns a recognisable "concurrent exec-stream limit"
 		// message when the per-sandbox slot cap is full; map that to the typed 429
 		// so callers can branch. Any other open failure (dial, vsock) maps to 503.
