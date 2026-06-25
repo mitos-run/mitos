@@ -3,12 +3,137 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	connect "connectrpc.com/connect"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
+
+// fakeSandbox is a Connect sandbox.v1.Sandbox handler for the runtime RPCs the
+// HTTPBackend now rides (issue #358). It implements ExecStream, ReadFile, and
+// WriteFile with canned data and records the Authorization and X-Sandbox-Id
+// headers and request fields each call carried so tests can assert auth and
+// round-trip. requireToken, when set, rejects any call whose bearer token does
+// not match with connect CodeUnauthenticated, modeling the forkd token gate.
+type fakeSandbox struct {
+	sandboxv1connect.UnimplementedSandboxHandler
+
+	requireToken string
+
+	// recorded inputs.
+	execAuth       string
+	execSandboxID  string
+	execCommand    string
+	execTimeout    int32
+	readAuth       string
+	readSandboxID  string
+	readPath       string
+	writeAuth      string
+	writeSandboxID string
+	writePath      string
+	writeContent   []byte
+
+	// canned exec output.
+	execStdout   string
+	execStderr   string
+	execExitCode int32
+	// canned file content for ReadFile.
+	readContent string
+}
+
+func (f *fakeSandbox) checkToken(h http.Header) error {
+	if f.requireToken == "" {
+		return nil
+	}
+	if h.Get("Authorization") != "Bearer "+f.requireToken {
+		// Hostile-server modeling: echo the presented Authorization header (which
+		// carries the client's bearer token) into the error so the leak test can
+		// prove the backend redacts it before surfacing the error.
+		return connect.NewError(connect.CodeUnauthenticated, errors.New("rejected: "+h.Get("Authorization")))
+	}
+	return nil
+}
+
+func (f *fakeSandbox) ExecStream(_ context.Context, req *connect.Request[sandboxv1.ExecStreamRequest], stream *connect.ServerStream[sandboxv1.ExecResponse]) error {
+	if err := f.checkToken(req.Header()); err != nil {
+		return err
+	}
+	f.execAuth = req.Header().Get("Authorization")
+	f.execSandboxID = req.Header().Get("X-Sandbox-Id")
+	f.execCommand = req.Msg.GetCommand()
+	f.execTimeout = req.Msg.GetTimeoutSeconds()
+	if f.execStdout != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(f.execStdout)}}); err != nil {
+			return err
+		}
+	}
+	if f.execStderr != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: []byte(f.execStderr)}}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: f.execExitCode}}})
+}
+
+func (f *fakeSandbox) ReadFile(_ context.Context, req *connect.Request[sandboxv1.ReadFileRequest], stream *connect.ServerStream[sandboxv1.Chunk]) error {
+	if err := f.checkToken(req.Header()); err != nil {
+		return err
+	}
+	f.readAuth = req.Header().Get("Authorization")
+	f.readSandboxID = req.Header().Get("X-Sandbox-Id")
+	f.readPath = req.Msg.GetPath()
+	if f.readContent != "" {
+		if err := stream.Send(&sandboxv1.Chunk{Data: []byte(f.readContent)}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.Chunk{Eof: true})
+}
+
+func (f *fakeSandbox) WriteFile(_ context.Context, stream *connect.ClientStream[sandboxv1.WriteFileRequest]) (*connect.Response[sandboxv1.WriteFileResult], error) {
+	if err := f.checkToken(stream.RequestHeader()); err != nil {
+		return nil, err
+	}
+	f.writeAuth = stream.RequestHeader().Get("Authorization")
+	f.writeSandboxID = stream.RequestHeader().Get("X-Sandbox-Id")
+	var written int64
+	for stream.Receive() {
+		msg := stream.Msg()
+		if open := msg.GetOpen(); open != nil {
+			f.writePath = open.GetPath()
+		}
+		if data := msg.GetData(); len(data) > 0 {
+			f.writeContent = append(f.writeContent, data...)
+			written += int64(len(data))
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&sandboxv1.WriteFileResult{BytesWritten: written}), nil
+}
+
+// connectServer stands up an httptest.Server that serves the Connect
+// sandbox.v1.Sandbox handler (runtime RPCs) AND the legacy /v1/fork and
+// /v1/sandboxes/ lifecycle JSON routes on one mux, so a single HTTPBackend can
+// exercise both transports against one baseURL. lifecycle handles the legacy
+// routes; it may be nil when a test needs only the runtime RPCs.
+func connectServer(t *testing.T, fake *fakeSandbox, lifecycle http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	path, handler := sandboxv1connect.NewSandboxHandler(fake)
+	mux.Handle(path, handler)
+	if lifecycle != nil {
+		mux.HandleFunc("/v1/", lifecycle)
+	}
+	return httptest.NewServer(mux)
+}
 
 // capturedRequest records what the backend sent so assertions can inspect the
 // method, path, headers, and decoded body of each HTTP call.
@@ -77,11 +202,13 @@ func TestHTTPBackendCreate(t *testing.T) {
 	}
 }
 
+// TestHTTPBackendExec asserts Exec rides the Connect ExecStream RPC: it folds
+// stdout chunks and the terminal exit code into ExecResult, passes the timeout
+// through, and carries BOTH the bearer token (Authorization) and the sandbox id
+// (X-Sandbox-Id) on the request.
 func TestHTTPBackendExec(t *testing.T) {
-	var got []capturedRequest
-	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
-		return http.StatusOK, map[string]any{"exit_code": 7, "stdout": "out", "stderr": "err"}
-	})
+	fake := &fakeSandbox{execStdout: "out", execStderr: "err", execExitCode: 7}
+	srv := connectServer(t, fake, nil)
 	defer srv.Close()
 
 	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
@@ -92,26 +219,41 @@ func TestHTTPBackendExec(t *testing.T) {
 	if res.ExitCode != 7 || res.Stdout != "out" || res.Stderr != "err" {
 		t.Fatalf("Exec result = %+v", res)
 	}
-	req := got[0]
-	if req.Method != http.MethodPost || req.Path != "/v1/exec" {
-		t.Fatalf("Exec sent %s %s, want POST /v1/exec", req.Method, req.Path)
+	if fake.execAuth != "Bearer tok-123" {
+		t.Fatalf("Exec Authorization = %q, want Bearer tok-123", fake.execAuth)
 	}
-	if req.Auth != "Bearer tok-123" {
-		t.Fatalf("Exec auth = %q", req.Auth)
+	if fake.execSandboxID != "sbx-1" {
+		t.Fatalf("Exec X-Sandbox-Id = %q, want sbx-1", fake.execSandboxID)
 	}
-	if req.Body["sandbox"] != "sbx-1" || req.Body["command"] != "echo hi" {
-		t.Fatalf("Exec body = %v", req.Body)
+	if fake.execCommand != "echo hi" {
+		t.Fatalf("Exec command = %q, want echo hi", fake.execCommand)
 	}
-	if req.Body["timeout"] != float64(12) {
-		t.Fatalf("Exec timeout = %v, want 12", req.Body["timeout"])
+	if fake.execTimeout != 12 {
+		t.Fatalf("Exec timeout = %d, want 12", fake.execTimeout)
 	}
 }
 
+// TestHTTPBackendExecZeroTimeout asserts a timeoutSec of 0 passes 0 on the wire
+// so the guest default applies.
+func TestHTTPBackendExecZeroTimeout(t *testing.T) {
+	fake := &fakeSandbox{execExitCode: 0}
+	srv := connectServer(t, fake, nil)
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
+	if _, err := b.Exec(context.Background(), "sbx-1", "true", 0); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if fake.execTimeout != 0 {
+		t.Fatalf("Exec timeout = %d, want 0", fake.execTimeout)
+	}
+}
+
+// TestHTTPBackendReadFile asserts ReadFile rides the Connect ReadFile RPC,
+// concatenating the streamed chunks, and carries both auth headers.
 func TestHTTPBackendReadFile(t *testing.T) {
-	var got []capturedRequest
-	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
-		return http.StatusOK, map[string]any{"content": "hello", "size": 5}
-	})
+	fake := &fakeSandbox{readContent: "hello"}
+	srv := connectServer(t, fake, nil)
 	defer srv.Close()
 
 	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
@@ -122,32 +264,40 @@ func TestHTTPBackendReadFile(t *testing.T) {
 	if content != "hello" {
 		t.Fatalf("ReadFile content = %q", content)
 	}
-	req := got[0]
-	if req.Method != http.MethodPost || req.Path != "/v1/files/read" {
-		t.Fatalf("ReadFile sent %s %s, want POST /v1/files/read", req.Method, req.Path)
+	if fake.readAuth != "Bearer tok-123" {
+		t.Fatalf("ReadFile Authorization = %q", fake.readAuth)
 	}
-	if req.Body["sandbox"] != "sbx-1" || req.Body["path"] != "/etc/hosts" {
-		t.Fatalf("ReadFile body = %v", req.Body)
+	if fake.readSandboxID != "sbx-1" {
+		t.Fatalf("ReadFile X-Sandbox-Id = %q, want sbx-1", fake.readSandboxID)
+	}
+	if fake.readPath != "/etc/hosts" {
+		t.Fatalf("ReadFile path = %q, want /etc/hosts", fake.readPath)
 	}
 }
 
+// TestHTTPBackendWriteFile asserts WriteFile rides the Connect WriteFile
+// client-stream RPC: the open carries the path, the content round-trips, and
+// both auth headers ride the request.
 func TestHTTPBackendWriteFile(t *testing.T) {
-	var got []capturedRequest
-	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
-		return http.StatusOK, map[string]any{"status": "ok"}
-	})
+	fake := &fakeSandbox{}
+	srv := connectServer(t, fake, nil)
 	defer srv.Close()
 
 	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
 	if err := b.WriteFile(context.Background(), "sbx-1", "/tmp/x", "data"); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	req := got[0]
-	if req.Method != http.MethodPost || req.Path != "/v1/files/write" {
-		t.Fatalf("WriteFile sent %s %s, want POST /v1/files/write", req.Method, req.Path)
+	if fake.writeAuth != "Bearer tok-123" {
+		t.Fatalf("WriteFile Authorization = %q", fake.writeAuth)
 	}
-	if req.Body["sandbox"] != "sbx-1" || req.Body["path"] != "/tmp/x" || req.Body["content"] != "data" {
-		t.Fatalf("WriteFile body = %v", req.Body)
+	if fake.writeSandboxID != "sbx-1" {
+		t.Fatalf("WriteFile X-Sandbox-Id = %q, want sbx-1", fake.writeSandboxID)
+	}
+	if fake.writePath != "/tmp/x" {
+		t.Fatalf("WriteFile path = %q, want /tmp/x", fake.writePath)
+	}
+	if string(fake.writeContent) != "data" {
+		t.Fatalf("WriteFile content = %q, want data", string(fake.writeContent))
 	}
 }
 
@@ -257,15 +407,14 @@ func TestHTTPBackendNon2xxIsError(t *testing.T) {
 
 // TestHTTPBackendNeverLeaksToken asserts the token never appears in an error
 // returned to the caller, even when the server echoes the Authorization header
-// back in its error body. The backend must not log; this test guards the error
-// path, the only string the backend surfaces.
+// (which carries the token) back in its error message. The backend must not
+// log; this test guards the error path, the only string the backend surfaces.
 func TestHTTPBackendNeverLeaksToken(t *testing.T) {
 	const token = "super-secret-token-value"
-	var got []capturedRequest
-	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
-		// Hostile server echoes the presented auth header into its error body.
-		return http.StatusInternalServerError, map[string]any{"error": cr.Auth}
-	})
+	// The fake requires a DIFFERENT token, so the presented (correct-for-client)
+	// token is rejected and echoed into the connect error message.
+	fake := &fakeSandbox{requireToken: "the-expected-token"}
+	srv := connectServer(t, fake, nil)
 	defer srv.Close()
 
 	b := NewHTTPBackend(srv.URL, token, srv.Client())
@@ -275,6 +424,28 @@ func TestHTTPBackendNeverLeaksToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Fatalf("token leaked into error: %q", err.Error())
+	}
+}
+
+// TestHTTPBackendExecAuthError asserts a rejected bearer token (connect
+// unauthenticated) maps to an auth error that names the 401 status, mirroring
+// the legacy /v1 bearer-token gate, and never leaks the token.
+func TestHTTPBackendExecAuthError(t *testing.T) {
+	const token = "client-token"
+	fake := &fakeSandbox{requireToken: "server-expects-other"}
+	srv := connectServer(t, fake, nil)
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, token, srv.Client())
+	_, err := b.Exec(context.Background(), "sbx-1", "x", 0)
+	if err == nil {
+		t.Fatal("expected an auth error")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("auth error should name 401, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked into auth error: %q", err.Error())
 	}
 }
 

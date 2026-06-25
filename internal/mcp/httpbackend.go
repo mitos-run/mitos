@@ -6,12 +6,17 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+
+	connect "connectrpc.com/connect"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 )
 
 // sandboxIDRe is the allowlist for sandbox ids received from tool arguments
@@ -27,11 +32,18 @@ func validSandboxID(id string) bool {
 	return sandboxIDRe.MatchString(id)
 }
 
-// HTTPBackend implements SandboxBackend over the standalone sandbox-server REST
-// API (cmd/sandbox-server). It is the simplest real backend: one process, plain
-// HTTP, a single launch-time bearer token. A Kubernetes claim backend (create a
-// SandboxClaim, read its token Secret, exec via forkd) is a planned follow-up
-// and is intentionally not implemented here.
+// HTTPBackend implements SandboxBackend over the standalone sandbox-server. It
+// is the simplest real backend: one process, plain HTTP, a single launch-time
+// bearer token. A Kubernetes claim backend (create a SandboxClaim, read its
+// token Secret, exec via forkd) is a planned follow-up and is intentionally not
+// implemented here.
+//
+// Transport split (issue #358): the runtime calls (exec, file read, file write)
+// ride the Connect sandbox.v1.Sandbox protocol via the in-module generated
+// connect-go client (ExecStream, ReadFile, WriteFile RPCs); the lifecycle calls
+// (fork, terminate) stay on the legacy /v1 JSON routes via do. Both reach the
+// same baseURL with the same bearer token; the sandbox id rides the
+// X-Sandbox-Id header on the runtime RPCs.
 //
 // Token scoping: every request carries the launch-time bearer token, so the MCP
 // server can do exactly what that token authorizes on the sandbox-server and
@@ -152,61 +164,137 @@ func (b *HTTPBackend) Create(ctx context.Context, pool string) (string, error) {
 	return id, nil
 }
 
-type execResponse struct {
-	ExitCode int    `json:"exit_code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
+// sandboxClient builds a Connect client for the runtime RPCs against baseURL,
+// mirroring cmd/kubectl-mitos/exec.go and bench/claim/main.go. The per-sandbox
+// bearer token and sandbox id are set as request headers by each caller, not
+// here, so this stays a thin constructor.
+func (b *HTTPBackend) sandboxClient() sandboxv1connect.SandboxClient {
+	return sandboxv1connect.NewSandboxClient(b.client, b.baseURL)
 }
 
-// Exec runs command in the sandbox via POST /v1/exec. A timeoutSec of 0 omits
-// the field so the server default applies.
+// runtimeHeaders sets the Authorization and X-Sandbox-Id headers on a Connect
+// request. The token is sent only when non-empty, matching the legacy do
+// behavior; the token VALUE is never logged.
+func (b *HTTPBackend) runtimeHeaders(h http.Header, sandboxID string) {
+	if b.token != "" {
+		h.Set("Authorization", "Bearer "+b.token)
+	}
+	h.Set("X-Sandbox-Id", sandboxID)
+}
+
+// connectError maps a Connect runtime failure to the backend's error shape. A
+// connect unauthenticated code becomes the same auth error the legacy /v1 path
+// produced (a 401 from the bearer-token gate); any other failure is wrapped
+// with op as context. The token value is redacted from any wrapped cause so it
+// never reaches an error string a caller, a log, or an LLM might see.
+func (b *HTTPBackend) connectError(op string, err error) error {
+	if connect.CodeOf(err) == connect.CodeUnauthenticated {
+		return fmt.Errorf("%s: status 401: %s", op, b.redact(err.Error()))
+	}
+	return errors.New(op + ": " + b.redact(err.Error()))
+}
+
+// Exec runs command in the sandbox over the Connect sandbox.v1.Sandbox/ExecStream
+// RPC (the HTTP/1.1-reachable non-interactive exec). It drains the server stream,
+// accumulating stdout and stderr chunks and reading the terminal exit code, then
+// folds the result into ExecResult. A timeoutSec of 0 passes 0 so the guest
+// default applies.
 func (b *HTTPBackend) Exec(ctx context.Context, sandboxID, command string, timeoutSec int) (ExecResult, error) {
 	if !validSandboxID(sandboxID) {
 		return ExecResult{}, fmt.Errorf("exec: invalid sandbox id %q", sandboxID)
 	}
-	reqBody := map[string]any{
-		"sandbox": sandboxID,
-		"command": command,
-	}
+	timeout := 0
 	if timeoutSec > 0 {
-		reqBody["timeout"] = timeoutSec
+		timeout = timeoutSec
 	}
-	var resp execResponse
-	if err := b.do(ctx, http.MethodPost, "/v1/exec", reqBody, &resp); err != nil {
-		return ExecResult{}, err
+	req := connect.NewRequest(&sandboxv1.ExecStreamRequest{
+		Command:        command,
+		TimeoutSeconds: int32(timeout),
+	})
+	b.runtimeHeaders(req.Header(), sandboxID)
+
+	stream, err := b.sandboxClient().ExecStream(ctx, req)
+	if err != nil {
+		return ExecResult{}, b.connectError("exec", err)
 	}
-	return ExecResult(resp), nil
+	defer func() { _ = stream.Close() }()
+
+	var res ExecResult
+	var stdout, stderr strings.Builder
+	for stream.Receive() {
+		msg := stream.Msg()
+		if out := msg.GetStdout(); len(out) > 0 {
+			stdout.Write(out)
+		}
+		if errOut := msg.GetStderr(); len(errOut) > 0 {
+			stderr.Write(errOut)
+		}
+		if exit := msg.GetExit(); exit != nil {
+			res.ExitCode = int(exit.GetExitCode())
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return ExecResult{}, b.connectError("exec", err)
+	}
+	res.Stdout = stdout.String()
+	res.Stderr = stderr.String()
+	return res, nil
 }
 
-type readFileResponse struct {
-	Content string `json:"content"`
-}
-
-// ReadFile reads path from the sandbox via POST /v1/files/read.
+// ReadFile reads path from the sandbox over the Connect
+// sandbox.v1.Sandbox/ReadFile RPC, concatenating the streamed byte chunks into
+// the returned string.
 func (b *HTTPBackend) ReadFile(ctx context.Context, sandboxID, path string) (string, error) {
 	if !validSandboxID(sandboxID) {
 		return "", fmt.Errorf("read_file: invalid sandbox id %q", sandboxID)
 	}
-	var resp readFileResponse
-	if err := b.do(ctx, http.MethodPost, "/v1/files/read", map[string]any{
-		"sandbox": sandboxID,
-		"path":    path,
-	}, &resp); err != nil {
-		return "", err
+	req := connect.NewRequest(&sandboxv1.ReadFileRequest{Path: path})
+	b.runtimeHeaders(req.Header(), sandboxID)
+
+	stream, err := b.sandboxClient().ReadFile(ctx, req)
+	if err != nil {
+		return "", b.connectError("read_file", err)
 	}
-	return resp.Content, nil
+	defer func() { _ = stream.Close() }()
+
+	var content bytes.Buffer
+	for stream.Receive() {
+		if data := stream.Msg().GetData(); len(data) > 0 {
+			content.Write(data)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", b.connectError("read_file", err)
+	}
+	return content.String(), nil
 }
 
-// WriteFile writes content to path in the sandbox via POST /v1/files/write.
+// WriteFile writes content to path in the sandbox over the Connect
+// sandbox.v1.Sandbox/WriteFile RPC: the first message carries the path (the
+// guest applies its default mode), then a single content chunk.
 func (b *HTTPBackend) WriteFile(ctx context.Context, sandboxID, path, content string) error {
 	if !validSandboxID(sandboxID) {
 		return fmt.Errorf("write_file: invalid sandbox id %q", sandboxID)
 	}
-	return b.do(ctx, http.MethodPost, "/v1/files/write", map[string]any{
-		"sandbox": sandboxID,
-		"path":    path,
-		"content": content,
-	}, nil)
+	stream := b.sandboxClient().WriteFile(ctx)
+	b.runtimeHeaders(stream.RequestHeader(), sandboxID)
+
+	if err := stream.Send(&sandboxv1.WriteFileRequest{
+		Msg: &sandboxv1.WriteFileRequest_Open{Open: &sandboxv1.WriteFileOpen{Path: path}},
+	}); err != nil {
+		return b.connectError("write_file", err)
+	}
+	if len(content) > 0 {
+		if err := stream.Send(&sandboxv1.WriteFileRequest{
+			Msg: &sandboxv1.WriteFileRequest_Data{Data: []byte(content)},
+		}); err != nil {
+			return b.connectError("write_file", err)
+		}
+	}
+	if _, err := stream.CloseAndReceive(); err != nil {
+		return b.connectError("write_file", err)
+	}
+	return nil
 }
 
 // Fork forks the sandbox replicas times. The sandbox-server fork endpoint has
