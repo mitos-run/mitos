@@ -7,20 +7,44 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"mitos.run/mitos/internal/saas"
 )
+
+// newSinksAccountService builds a real AccountService with two owners: one for
+// orgA and one for orgB. It returns the service, the owner account IDs, and the
+// org IDs so tests can use WithCaller to authenticate as the right account.
+func newSinksAccountService(t *testing.T) (accounts *saas.AccountService, acctA, acctB, orgA, orgB string) {
+	t.Helper()
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts = saas.NewAccountService(store, keys)
+	ctx := context.Background()
+	ownerA, oA, err := accounts.SignUp(ctx, "sinks-owner-a@example.com")
+	if err != nil {
+		t.Fatalf("SignUp A: %v", err)
+	}
+	ownerB, oB, err := accounts.SignUp(ctx, "sinks-owner-b@example.com")
+	if err != nil {
+		t.Fatalf("SignUp B: %v", err)
+	}
+	return accounts, ownerA.ID, ownerB.ID, oA.ID, oB.ID
+}
 
 // TestSinksOrgScopedCRUD verifies that sinks are scoped to the org: a sink
 // created for orgA is invisible to orgB, and delete by a different org returns
 // not found.
 func TestSinksOrgScopedCRUD(t *testing.T) {
+	// POST /console/audit/sinks requires PermManageSettings; seed owners for both orgs.
+	accounts, acctA, acctB, orgA, orgB := newSinksAccountService(t)
 	reg := NewMemSinkRegistry()
-	c := New(Deps{Sinks: reg})
+	c := New(Deps{Accounts: accounts, Sinks: reg})
 
 	// POST a sink for orgA.
 	post := httptest.NewRequest(
 		"POST", "/console/audit/sinks",
 		strings.NewReader(`{"type":"webhook","endpoint":"https://siem.example/hook"}`),
-	).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+	).WithContext(WithCaller(context.Background(), acctA, orgA))
 	rr := httptest.NewRecorder()
 	c.ServeHTTP(rr, post)
 	if rr.Code != http.StatusCreated {
@@ -29,7 +53,7 @@ func TestSinksOrgScopedCRUD(t *testing.T) {
 
 	// orgB sees no sinks.
 	get := httptest.NewRequest("GET", "/console/audit/sinks", nil).
-		WithContext(WithCaller(context.Background(), "acct", "orgB"))
+		WithContext(WithCaller(context.Background(), acctB, orgB))
 	rr2 := httptest.NewRecorder()
 	c.ServeHTTP(rr2, get)
 	if want := `"sinks":[]`; !strings.Contains(rr2.Body.String(), want) {
@@ -70,19 +94,21 @@ func TestSinksListReturnsOwnOrg(t *testing.T) {
 }
 
 // TestSinksDeleteCrossOrgReturnsNotFound verifies that deleting a sink owned by
-// a different org returns 404.
+// a different org returns 404. The caller has PermManageSettings in their own
+// org; the registry enforces that a sink not in their org returns not_found.
 func TestSinksDeleteCrossOrgReturnsNotFound(t *testing.T) {
+	accounts, _, acctB, orgA, orgB := newSinksAccountService(t)
 	reg := NewMemSinkRegistry()
-	cfg, err := reg.Add(context.Background(), "orgA", "webhook", "https://a.example/")
+	cfg, err := reg.Add(context.Background(), orgA, "webhook", "https://a.example/")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
-	c := New(Deps{Sinks: reg})
+	c := New(Deps{Accounts: accounts, Sinks: reg})
 
-	// orgB tries to delete orgA's sink.
+	// orgB (as its owner) tries to delete orgA's sink: the registry returns not_found.
 	del := httptest.NewRequest("DELETE", "/console/audit/sinks/"+cfg.ID, nil).
-		WithContext(WithCaller(context.Background(), "acct-b", "orgB"))
+		WithContext(WithCaller(context.Background(), acctB, orgB))
 	rr := httptest.NewRecorder()
 	c.ServeHTTP(rr, del)
 	if rr.Code != http.StatusNotFound {
@@ -90,7 +116,7 @@ func TestSinksDeleteCrossOrgReturnsNotFound(t *testing.T) {
 	}
 
 	// orgA's sink must still be there.
-	sinks := reg.List(context.Background(), "orgA")
+	sinks := reg.List(context.Background(), orgA)
 	if len(sinks) != 1 {
 		t.Errorf("orgA should still have 1 sink after cross-org delete attempt, got %d", len(sinks))
 	}
@@ -214,7 +240,8 @@ func TestEveryEndpointRefusesMissingOrgContextSinks(t *testing.T) {
 
 // TestSinksCreateValidation verifies that POST /console/audit/sinks rejects
 // unknown types and non-https endpoints with 400, and accepts a valid request
-// with 201.
+// with 201. The caller is an owner so permission is always granted; validation
+// errors are returned before the registry is called.
 func TestSinksCreateValidation(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -250,11 +277,14 @@ func TestSinksCreateValidation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := New(Deps{})
+			// Each sub-test gets its own AccountService with an owner so that
+			// c.authorize passes and the handler reaches the validation check.
+			accounts, acct, _, org, _ := newSinksAccountService(t)
+			c := New(Deps{Accounts: accounts})
 			req := httptest.NewRequest(
 				"POST", "/console/audit/sinks",
 				strings.NewReader(tc.body),
-			).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+			).WithContext(WithCaller(context.Background(), acct, org))
 			rr := httptest.NewRecorder()
 			c.ServeHTTP(rr, req)
 			if rr.Code != tc.wantCode {

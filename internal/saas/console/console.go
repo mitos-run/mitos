@@ -292,7 +292,7 @@ type createKeyRequest struct {
 }
 
 func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -332,7 +332,7 @@ func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -499,7 +499,7 @@ func (c *Console) handleInspectSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -634,7 +634,7 @@ type createProjectRequest struct {
 }
 
 func (c *Console) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageProjects)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -729,7 +729,7 @@ type createSinkRequest struct {
 // handleCreateSink adds a new audit-sink destination for the caller's org and
 // audits the action.
 func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -764,7 +764,7 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSink removes an audit-sink destination from the caller's org.
 // A sink belonging to a different org returns not_found.
 func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return

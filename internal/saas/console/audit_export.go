@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
 )
 
 // RetentionStore is the per-org audit-retention policy seam. Get returns the
@@ -102,7 +103,7 @@ func (c *Console) handleGetRetention(w http.ResponseWriter, r *http.Request) {
 // must be {"days": N}. The GC sweep that enforces the policy runs in the
 // controller (issue #163); this endpoint stores and exposes the policy only.
 func (c *Console) handleSetRetention(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	_, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return
