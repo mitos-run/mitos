@@ -57,6 +57,12 @@ func main() {
 	// so a provider event (payment failed / canceled) is reflected in the console.
 	statusStore := billing.NewMemStatusStore()
 	bill := setupBilling(logger, statusStore)
+
+	// sessionStore is created before console.New so it can be passed into
+	// Deps.Sessions in the production branch. In dev mode it is unused (the
+	// console's noopSessionLister default is fine for local smoke testing).
+	sessionStore := saas.NewSessionStore()
+
 	con := console.New(console.Deps{
 		Accounts: accounts,
 		Usage:    usage.NewMemUsageStore(),
@@ -78,7 +84,13 @@ func main() {
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
 		Capabilities: caps,
-		Log:          logger,
+		// Wire the real session store so /console/account/sessions reflects live
+		// sessions. The adapter translates saas.Session to console.SessionRecord.
+		// Both dev and production share the same store; in dev the store is empty
+		// (no real session middleware issues tokens), which is fine for local
+		// smoke testing.
+		Sessions: sessionStoreAdapter{s: sessionStore},
+		Log:      logger,
 	})
 
 	mux := http.NewServeMux()
@@ -94,7 +106,6 @@ func main() {
 		// OIDC session cookie, and the embedded SPA is served at the root. ONE
 		// binary serves the BFF and the UI. The login flow and the middleware share
 		// ONE session store so a session issued at /auth/callback resolves here.
-		sessionStore := saas.NewSessionStore()
 		sessions := saas.NewSessionService(sessionStore, accounts)
 		mux.Handle("/console/", console.SessionMiddleware(sessions)(con))
 		mux.Handle("/", spa.Handler())
@@ -122,6 +133,31 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// sessionStoreAdapter bridges *saas.SessionStore to the console.SessionLister
+// seam. It translates saas.Session to console.SessionRecord so the console
+// package does not import the production store directly.
+type sessionStoreAdapter struct{ s *saas.SessionStore }
+
+func (a sessionStoreAdapter) ListByAccount(accountID string) []console.SessionRecord {
+	recs := a.s.ListByAccount(accountID)
+	out := make([]console.SessionRecord, len(recs))
+	for i, r := range recs {
+		out[i] = console.SessionRecord{
+			ID:        r.ID,
+			AccountID: r.AccountID,
+			Label:     r.Label,
+			CreatedAt: r.CreatedAt,
+		}
+	}
+	return out
+}
+
+func (a sessionStoreAdapter) Revoke(accountID, sessionID string) error {
+	return a.s.Revoke(accountID, sessionID)
+}
+
+func (a sessionStoreAdapter) RevokeAll(accountID string) { a.s.RevokeAll(accountID) }
 
 // mountAuth discovers the OIDC issuer and mounts /auth/login, /auth/callback,
 // and /auth/logout. The LoginManager issues sessions into the SAME store the
