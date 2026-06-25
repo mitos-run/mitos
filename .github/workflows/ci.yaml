@@ -705,7 +705,21 @@ jobs:
           KERNEL_VERSION=6.1.155
           KERNEL_KEY="firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
           echo "Staging pinned kernel: $KERNEL_KEY"
-          curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
+          # The kernel fetch is a plain S3 GET over the public internet on a shared
+          # runner: a transient network or S3 5xx blip here is pure environment
+          # flake, not a code regression, so retry it before failing. The pinned
+          # KERNEL_KEY makes every attempt fetch the SAME byte-for-byte object, so
+          # a retry can never mask a real change. A real failure (404 on a removed
+          # key, a checksum drift) still fails the job after the attempts are spent.
+          dl_ok=0
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"; then
+              dl_ok=1; break
+            fi
+            echo "  kernel download attempt ${attempt}/5 failed (transient S3/network); retrying"
+            sleep 5
+          done
+          [ "$dl_ok" = "1" ] || { echo "HUSK-SETUP: kernel download failed after 5 attempts (not a transient blip)"; exit 1; }
           # The kind worker node is a docker container named mitos-husk-worker;
           # copy the kernel into its /var/lib/mitos (the forkd/husk hostPath).
           worker=$(docker ps --format '{{.Names}}' | grep -m1 'mitos-husk-worker')
@@ -1751,7 +1765,19 @@ jobs:
           set -euo pipefail
           ARCH=$(uname -m)
           KERNEL_VERSION=6.1.155
-          curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
+          # Retry the public S3 kernel GET: a transient network or S3 5xx blip on a
+          # shared runner is environment flake, not a regression. The pinned version
+          # means every attempt fetches the SAME object, so a retry cannot mask a
+          # real change; a genuine failure still fails the job after the attempts.
+          dl_ok=0
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"; then
+              dl_ok=1; break
+            fi
+            echo "  kernel download attempt ${attempt}/5 failed (transient S3/network); retrying"
+            sleep 5
+          done
+          [ "$dl_ok" = "1" ] || { echo "PLACEMENT-SETUP: kernel download failed after 5 attempts (not a transient blip)"; exit 1; }
           for worker in $(docker ps --format '{{.Names}}' | grep 'mitos-placement-worker'); do
             docker exec "$worker" mkdir -p /var/lib/mitos
             docker cp /tmp/vmlinux "$worker:/var/lib/mitos/vmlinux"

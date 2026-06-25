@@ -99,14 +99,22 @@ func drainConnect(t *testing.T, client sandboxv1connect.SandboxClient, sandboxID
 	}
 	stream.RequestHeader().Set("X-Sandbox-Id", sandboxID)
 
+	// Per the Connect contract, when the server returns an error (for example a
+	// CodeUnauthenticated rejection from the BearerInterceptor, which fires
+	// before any request body is read), Send and CloseRequest return an error
+	// that wraps io.EOF. The authoritative status lives on the stream and must
+	// be retrieved with Receive. Returning the Send/CloseRequest error here
+	// instead would surface a transport-level "unknown" code that races the auth
+	// rejection, so we swallow the io.EOF sentinel and fall through to Receive,
+	// which deterministically yields the server's real status code.
 	if err := stream.Send(&sandboxv1.ExecRequest{
 		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{
 			Command: "echo hello connect",
 		}},
-	}); err != nil {
+	}); err != nil && !errors.Is(err, io.EOF) {
 		return "", 0, err
 	}
-	if err := stream.CloseRequest(); err != nil {
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
 		return "", 0, err
 	}
 
