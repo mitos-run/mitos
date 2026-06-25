@@ -180,7 +180,7 @@ func newTestStubWithNotifier(t *testing.T, vm *fakeVMM, ready guestReady, n *fak
 	})
 }
 
-func readyOK(string, time.Duration) error { return nil }
+func readyOK(context.Context, string, time.Duration) error { return nil }
 
 func TestActivateBeforePrepareErrors(t *testing.T) {
 	s := newTestStub(t, &fakeVMM{}, readyOK)
@@ -297,7 +297,7 @@ func TestActivateLoadFailureFailsClosed(t *testing.T) {
 
 func TestActivateGuestNotReadyFailsClosed(t *testing.T) {
 	vm := &fakeVMM{}
-	readyTimeout := func(string, time.Duration) error {
+	readyTimeout := func(context.Context, string, time.Duration) error {
 		return errors.New("no ping")
 	}
 	s := newTestStub(t, vm, readyTimeout)
@@ -476,7 +476,7 @@ func TestServeDispatchesActivate(t *testing.T) {
 	vm := &fakeVMM{}
 	// A readiness wait long enough that the measured activate latency is
 	// non-zero even on a fast machine (the fake load is instantaneous).
-	readySlow := func(string, time.Duration) error {
+	readySlow := func(context.Context, string, time.Duration) error {
 		time.Sleep(time.Millisecond)
 		return nil
 	}

@@ -1,79 +1,96 @@
 package daemon
 
 import (
-	"bufio"
-	"encoding/json"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// startFakeTunnelUDS serves the Firecracker UDS preamble, then for a tunnel
-// request dials the in-test loopback target() and splices bytes. It mirrors the
-// real guest agent's tunnel handler so the host-proxy can be proven without KVM.
-func startFakeTunnelUDS(t *testing.T, sockPath string, target func(port int) (net.Conn, error)) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
+// fakeTunnelGuestSandbox is an in-process Sandbox gRPC server whose
+// PortForward handler dials a local TCP address (the test echo server) and
+// splices bytes between the gRPC bidi stream and that TCP connection.
+type fakeTunnelGuestSandbox struct {
+	sandboxv1.UnimplementedSandboxServer
+	target func(port int) (net.Conn, error)
+}
+
+// PortForward receives the open Frame, dials the target, splices bytes until
+// either side closes, then sends a Close frame.
+func (s *fakeTunnelGuestSandbox) PortForward(stream sandboxv1.Sandbox_PortForwardServer) error {
+	first, err := stream.Recv()
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	t.Cleanup(func() { lis.Close() })
+	open := first.GetOpen()
+	if open == nil {
+		return io.ErrUnexpectedEOF
+	}
+	tc, derr := s.target(int(open.GetPort()))
+	if derr != nil {
+		return derr
+	}
+	defer tc.Close()
+
+	// Guest-to-client: read from tcp conn and send data frames.
+	guestDone := make(chan error, 1)
 	go func() {
+		buf := make([]byte, 32*1024)
 		for {
-			conn, err := lis.Accept()
-			if err != nil {
+			n, rerr := tc.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				if serr := stream.Send(&sandboxv1.Frame{
+					Msg: &sandboxv1.Frame_Data{Data: chunk},
+				}); serr != nil {
+					guestDone <- serr
+					return
+				}
+			}
+			if rerr != nil {
+				// Send a close frame before returning so the client knows we are done.
+				_ = stream.Send(&sandboxv1.Frame{Msg: &sandboxv1.Frame_Close{Close: true}})
+				guestDone <- nil
 				return
 			}
-			go func(c net.Conn) {
-				br := bufio.NewReader(c)
-				connectLine, err := br.ReadString('\n')
-				if err != nil {
-					c.Close()
-					return
-				}
-				if strings.HasPrefix(connectLine, "CONNECT ") {
-					c.Write([]byte("OK 52\n"))
-				}
-				reqLine, err := br.ReadBytes('\n')
-				if err != nil {
-					c.Close()
-					return
-				}
-				var req vsock.Request
-				if err := json.Unmarshal(reqLine, &req); err != nil || req.Tunnel == nil {
-					c.Close()
-					return
-				}
-				tc, derr := target(req.Tunnel.Port)
-				if derr != nil {
-					b, _ := json.Marshal(vsock.TunnelAck{OK: false, Error: derr.Error()})
-					c.Write(append(b, '\n'))
-					c.Close()
-					return
-				}
-				b, _ := json.Marshal(vsock.TunnelAck{OK: true})
-				c.Write(append(b, '\n'))
-				done := make(chan struct{}, 2)
-				go func() { io.Copy(tc, br); tc.Close(); done <- struct{}{} }()
-				go func() { io.Copy(c, tc); c.Close(); done <- struct{}{} }()
-				<-done
-				<-done
-			}(conn)
 		}
 	}()
+
+	// Client-to-guest: receive data frames and write to tcp conn.
+	for {
+		select {
+		case err := <-guestDone:
+			return err
+		default:
+		}
+		frame, rerr := stream.Recv()
+		if rerr == io.EOF {
+			return <-guestDone
+		}
+		if rerr != nil {
+			tc.Close()
+			return rerr
+		}
+		if frame.GetClose() {
+			tc.Close()
+			return <-guestDone
+		}
+		if data := frame.GetData(); len(data) > 0 {
+			if _, werr := tc.Write(data); werr != nil {
+				tc.Close()
+				return werr
+			}
+		}
+	}
 }
 
 // newForwardAPI wires a tokenless SandboxAPI whose sb1 guest agent tunnels to a
-// local echo server.
+// local echo server via the gRPC PortForward RPC.
 func newForwardAPI(t *testing.T) (*SandboxAPI, net.Listener) {
 	t.Helper()
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
@@ -93,7 +110,7 @@ func newForwardAPI(t *testing.T) (*SandboxAPI, net.Listener) {
 				for {
 					n, err := c.Read(buf)
 					if n > 0 {
-						c.Write(append([]byte("g:"), buf[:n]...))
+						c.Write(append([]byte("g:"), buf[:n]...)) //nolint:errcheck // test
 					}
 					if err != nil {
 						return
@@ -105,9 +122,15 @@ func newForwardAPI(t *testing.T) (*SandboxAPI, net.Listener) {
 
 	dir := shortVsockDir(t)
 	sock := filepath.Join(dir, "sb1", "vsock.sock")
-	startFakeTunnelUDS(t, sock, func(port int) (net.Conn, error) {
-		return net.Dial("tcp", echo.Addr().String())
-	})
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTunnelGuestSandbox{
+		target: func(_ int) (net.Conn, error) {
+			return net.Dial("tcp", echo.Addr().String())
+		},
+	}
+	startFakeGuestGRPCUDS(t, sock, fake)
 	api := NewSandboxAPI(dir)
 	api.AllowTokenless()
 	if err := api.RegisterSandbox("sb1", sock); err != nil {
@@ -118,8 +141,8 @@ func newForwardAPI(t *testing.T) (*SandboxAPI, net.Listener) {
 }
 
 // TestForwardPortRoundTrips opens a forward, dials the returned host address,
-// and asserts bytes round-trip through the host listener -> vsock tunnel ->
-// guest echo and back.
+// and asserts bytes round-trip through the host listener -> gRPC PortForward
+// tunnel -> guest echo and back.
 func TestForwardPortRoundTrips(t *testing.T) {
 	api, _ := newForwardAPI(t)
 	defer api.CloseForwards("sb1")

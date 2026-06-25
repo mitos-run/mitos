@@ -12,18 +12,18 @@ package daemon
 // deterministic: a missing vsock path is always "unreachable".
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"mitos.run/mitos/internal/fork"
-	"mitos.run/mitos/internal/vsock"
 	forkdpb "mitos.run/mitos/proto/forkd"
+	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,
@@ -101,137 +101,64 @@ func TestForkMockEngineSkipsDelivery(t *testing.T) {
 	}
 }
 
-// startFakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS
-// preamble, then the JSON agent protocol, recording configure and
-// notify_forked payloads. On notify_forked it replies OK with a
-// NotifyForkedResponse reporting ReseededRNG:true, the success the daemon's
-// fail-closed gate requires.
-func startFakeVsockAgent(t *testing.T, sockPath string) *recordedConfig {
-	return startFakeVsockAgentErr(t, sockPath, false)
+// fakeControlServer is an in-process sandbox.internal.v1.Control server used
+// by delivery tests. It records Configure and NotifyForked calls and can be
+// configured to return errors or report un-reseeded forks.
+type fakeControlServer struct {
+	internalv1.UnimplementedControlServer
+
+	mu         sync.Mutex
+	configures []*internalv1.ConfigureRequest
+	notifies   []*internalv1.NotifyForkedRequest
+
+	// notifyErr, when true, returns a gRPC Unavailable error on NotifyForked.
+	notifyErr bool
+	// reseeded controls the ReseededRng field in NotifyForkedResponse.
+	reseeded bool
 }
 
-// startFakeVsockAgentNoReseed replies to notify_forked with OK:true but
-// ReseededRNG:false, the real un-reseeded-fork failure mode: the transport
-// succeeds, yet the guest signals it did not reseed its CRNG. The daemon must
-// FAIL CLOSED on this and never mark the sandbox Ready.
-func startFakeVsockAgentNoReseed(t *testing.T, sockPath string) *recordedConfig {
+func (s *fakeControlServer) Configure(_ context.Context, req *internalv1.ConfigureRequest) (*internalv1.ConfigureResponse, error) {
+	s.mu.Lock()
+	s.configures = append(s.configures, req)
+	s.mu.Unlock()
+	return &internalv1.ConfigureResponse{}, nil
+}
+
+func (s *fakeControlServer) NotifyForked(_ context.Context, req *internalv1.NotifyForkedRequest) (*internalv1.NotifyForkedResponse, error) {
+	s.mu.Lock()
+	s.notifies = append(s.notifies, req)
+	s.mu.Unlock()
+	if s.notifyErr {
+		return nil, status.Error(codes.Internal, "reseed failed")
+	}
+	return &internalv1.NotifyForkedResponse{ReseededRng: s.reseeded}, nil
+}
+
+func (s *fakeControlServer) Ping(_ context.Context, _ *internalv1.PingRequest) (*internalv1.PingResponse, error) {
+	return &internalv1.PingResponse{}, nil
+}
+
+// startFakeVsockAgent starts an in-process gRPC Control server on sockPath
+// and returns the recorder. It reports reseeded=true on NotifyForked.
+func startFakeVsockAgent(t *testing.T, sockPath string) *fakeControlServer {
+	t.Helper()
+	return startFakeVsockAgentReseed(t, sockPath, false, true)
+}
+
+// startFakeVsockAgentNoReseed reports reseeded=false on NotifyForked.
+func startFakeVsockAgentNoReseed(t *testing.T, sockPath string) *fakeControlServer {
 	return startFakeVsockAgentReseed(t, sockPath, false, false)
 }
 
-func startFakeVsockAgentErr(t *testing.T, sockPath string, notifyErr bool) *recordedConfig {
-	// notifyErr replies with a transport-level OK:false; otherwise the guest
-	// reports a successful reseed (ReseededRNG:true).
+func startFakeVsockAgentErr(t *testing.T, sockPath string, notifyErr bool) *fakeControlServer {
 	return startFakeVsockAgentReseed(t, sockPath, notifyErr, true)
 }
 
-func startFakeVsockAgentReseed(t *testing.T, sockPath string, notifyErr, reseeded bool) *recordedConfig {
+func startFakeVsockAgentReseed(t *testing.T, sockPath string, notifyErr, reseeded bool) *fakeControlServer {
 	t.Helper()
-	rec := &recordedConfig{}
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lis.Close() })
-
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), 1<<20)
-				if !sc.Scan() { // "CONNECT 52"
-					return
-				}
-				if _, err := c.Write([]byte("OK 52\n")); err != nil {
-					return
-				}
-				for sc.Scan() {
-					var req vsock.Request
-					if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-						return
-					}
-					if req.Type == vsock.TypeConfigure {
-						rec.mu.Lock()
-						rec.got = req.Configure
-						rec.mu.Unlock()
-					}
-					if req.Type == vsock.TypeNotifyForked {
-						rec.mu.Lock()
-						rec.notifies = append(rec.notifies, req.NotifyForked)
-						rec.mu.Unlock()
-						if notifyErr {
-							resp, _ := json.Marshal(vsock.Response{OK: false, Error: "reseed failed"})
-							if _, err := c.Write(append(resp, '\n')); err != nil {
-								return
-							}
-							continue
-						}
-						// Transport OK; the guest reports whether it actually
-						// reseeded its CRNG. reseeded=false is the silent
-						// un-reseeded fork the daemon must fail closed on.
-						resp, _ := json.Marshal(vsock.Response{
-							OK:           true,
-							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: reseeded},
-						})
-						if _, err := c.Write(append(resp, '\n')); err != nil {
-							return
-						}
-						continue
-					}
-					resp, _ := json.Marshal(vsock.Response{OK: true})
-					if _, err := c.Write(append(resp, '\n')); err != nil {
-						return
-					}
-				}
-			}(conn)
-		}
-	}()
-	return rec
-}
-
-type recordedConfig struct {
-	mu       sync.Mutex
-	got      *vsock.ConfigureRequest
-	notifies []*vsock.NotifyForkedRequest
-}
-
-func TestForkDeliversConfigureToAgent(t *testing.T) {
-	// Short tempdir: unix socket paths must fit in sun_path (~104 bytes on
-	// macOS), which t.TempDir() can exceed.
-	dir, err := os.MkdirTemp("/tmp", "fcv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	mock := fork.NewMockEngine()
-	mock.ForkDelay = 0
-	mock.VsockDir = dir
-	engine := &kvmReportingEngine{MockEngine: mock}
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	// The mock will report this exact path for sandbox "sb-ok".
-	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-ok", "vsock.sock"))
-
-	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
-	if _, err := srv.Fork(context.Background(), "py", "sb-ok",
-		map[string]string{"SESSION": "abc"},
-		map[string]string{"API_KEY": "v"}, nil, nil, "test-token", VitalsLabels{}); err != nil {
-		t.Fatalf("fork with reachable agent: %v", err)
-	}
-
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if rec.got == nil || rec.got.Env["SESSION"] != "abc" || rec.got.Secrets["API_KEY"] != "v" {
-		t.Fatalf("agent saw %+v", rec.got)
-	}
+	ctrl := &fakeControlServer{notifyErr: notifyErr, reseeded: reseeded}
+	startFakeControlUDS(t, sockPath, &fakeGuestSandbox{}, ctrl)
+	return ctrl
 }
 
 // shortVsockDir returns a /tmp-rooted dir; unix socket paths must fit in
@@ -265,6 +192,38 @@ func isAllZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+func TestForkDeliversConfigureToAgent(t *testing.T) {
+	// Short tempdir: unix socket paths must fit in sun_path (~104 bytes on
+	// macOS), which t.TempDir() can exceed.
+	dir, err := os.MkdirTemp("/tmp", "fcv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	mock := fork.NewMockEngine()
+	mock.ForkDelay = 0
+	mock.VsockDir = dir
+	engine := &kvmReportingEngine{MockEngine: mock}
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The mock will report this exact path for sandbox "sb-ok".
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-ok", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.Fork(context.Background(), "py", "sb-ok",
+		map[string]string{"SESSION": "abc"},
+		map[string]string{"API_KEY": "v"}, nil, nil, "test-token", VitalsLabels{}); err != nil {
+		t.Fatalf("fork with reachable agent: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.configures) == 0 || rec.configures[0].GetEnv()["SESSION"] != "abc" || rec.configures[0].GetSecrets()["API_KEY"] != "v" {
+		t.Fatalf("agent saw %+v", rec.configures)
+	}
 }
 
 func TestForkNotifiesAgentWithFreshEntropy(t *testing.T) {

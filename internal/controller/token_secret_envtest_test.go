@@ -145,8 +145,9 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	}
 
 	// Round-trip against the fake forkd's real HTTP handler. Without the
-	// bearer: 401. With it: auth passes; the fake has no guest agent, so
-	// the proof is the 404 agent-missing error, not a 401.
+	// bearer: 401. With it: auth passes; on the mock engine the sandbox has no
+	// guest agent so it is legitimately unregistered, and the proof is the
+	// 404 "not found or not registered" error, not a 401.
 	status, body := execStatus(t, got.Status.Endpoint, got.Status.SandboxID, "")
 	if status != 401 {
 		t.Fatalf("exec without token: status = %d, body = %s, want 401", status, body)
@@ -157,10 +158,10 @@ func TestClaimReadyCreatesOwnedTokenSecretAndGatesHTTP(t *testing.T) {
 	}
 	status, body = execStatus(t, got.Status.Endpoint, got.Status.SandboxID, token)
 	if status != 404 {
-		t.Fatalf("exec with token: status = %d, body = %s, want 404 (auth passed, no agent)", status, body)
+		t.Fatalf("exec with token: status = %d, body = %s, want 404 (auth passed, sandbox unregistered on mock engine)", status, body)
 	}
-	if !bytes.Contains([]byte(body), []byte("not found or agent not connected")) {
-		t.Fatalf("want agent-missing error after auth, got: %s", body)
+	if !bytes.Contains([]byte(body), []byte("not found or not registered")) {
+		t.Fatalf("want not-registered error after auth, got: %s", body)
 	}
 }
 
@@ -238,15 +239,16 @@ func TestForkReadyCreatesOwnedTokenSecret(t *testing.T) {
 		t.Fatalf("secret controller owner = %+v, want Sandbox tokf-fork", owner)
 	}
 
-	// The fork's own token gates its sandbox: 401 without, agent-missing
-	// 404 with.
+	// The fork's own token gates its sandbox: 401 without, 404 with.
+	// On the mock engine the sandbox has no guest agent so it is legitimately
+	// unregistered; the 404 "not found or not registered" proves auth passed.
 	status, body := execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, "")
 	if status != 401 {
 		t.Fatalf("fork exec without token: status = %d, body = %s, want 401", status, body)
 	}
 	status, body = execStatus(t, forkInfo.Endpoint, forkInfo.SandboxID, token)
-	if status != 404 || !bytes.Contains([]byte(body), []byte("not found or agent not connected")) {
-		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 agent-missing", status, body)
+	if status != 404 || !bytes.Contains([]byte(body), []byte("not found or not registered")) {
+		t.Fatalf("fork exec with token: status = %d, body = %s, want 404 not-registered (auth passed, mock engine sandbox unregistered)", status, body)
 	}
 }
 

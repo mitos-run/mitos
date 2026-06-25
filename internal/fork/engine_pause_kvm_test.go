@@ -1,14 +1,17 @@
 package fork
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
-	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/guestgrpc"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
 // TestEnginePauseResumePreservesStateKVM is the KVM acceptance bar for issue
@@ -69,27 +72,27 @@ func TestEnginePauseResumePreservesStateKVM(t *testing.T) {
 	}
 	defer func() { _ = engine.Terminate(sandboxID) }()
 
-	client, err := connectAgent(res.VsockPath)
+	client, err := connectAgentGRPC(res.VsockPath)
 	if err != nil {
 		t.Fatalf("connect agent: %v", err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck // best-effort teardown
 
 	// Filesystem state: write a marker file BEFORE any pause. It must survive
 	// every pause/resume cycle (the E2B filesystem-persistence bug).
 	const marker = "/pause-marker.txt"
 	const want = "state-before-pause"
-	if _, err := execOKAgent(client, fmt.Sprintf("printf %s > %s", want, marker)); err != nil {
+	if _, err := execOKAgentGRPC(client, fmt.Sprintf("printf %s > %s", want, marker)); err != nil {
 		t.Fatalf("write marker file: %v", err)
 	}
 
 	// Memory state: start a long-running process and capture its PID. If it is
 	// still alive (same PID) after each resume, the in-memory process table
 	// survived the snapshot+restore, i.e. memory was preserved, not rebooted.
-	if _, err := execOKAgent(client, "sh -c 'sleep 600 & echo $! > /sleeper.pid'"); err != nil {
+	if _, err := execOKAgentGRPC(client, "sh -c 'sleep 600 & echo $! > /sleeper.pid'"); err != nil {
 		t.Fatalf("start sleeper: %v", err)
 	}
-	pid, err := execOKAgent(client, "cat /sleeper.pid")
+	pid, err := execOKAgentGRPC(client, "cat /sleeper.pid")
 	if err != nil {
 		t.Fatalf("read sleeper pid: %v", err)
 	}
@@ -105,7 +108,7 @@ func TestEnginePauseResumePreservesStateKVM(t *testing.T) {
 		}
 
 		// Filesystem invariant: the marker survives.
-		got, err := execOKAgent(client, fmt.Sprintf("cat %s", marker))
+		got, err := execOKAgentGRPC(client, fmt.Sprintf("cat %s", marker))
 		if err != nil {
 			t.Fatalf("cycle %d: read marker failed (filesystem not preserved?): %v", i, err)
 		}
@@ -115,40 +118,60 @@ func TestEnginePauseResumePreservesStateKVM(t *testing.T) {
 
 		// Memory invariant: the same process is still alive (proves the in-memory
 		// state was restored, not rebooted).
-		if _, err := execOKAgent(client, fmt.Sprintf("kill -0 %s", pid)); err != nil {
+		if _, err := execOKAgentGRPC(client, fmt.Sprintf("kill -0 %s", pid)); err != nil {
 			t.Fatalf("cycle %d: sleeper pid %s not alive after resume (memory state lost across pause/resume): %v", i, pid, err)
 		}
 	}
 }
 
-// connectAgent dials a forked guest agent over vsock with a bounded retry.
-func connectAgent(udsPath string) (*vsock.Client, error) {
-	var client *vsock.Client
-	var err error
-	for attempt := 0; attempt < 30; attempt++ {
-		client, err = vsock.Connect(udsPath, vsock.AgentPort)
-		if err == nil {
-			_, perr := client.Ping()
-			if perr == nil {
-				return client, nil
-			}
-			_ = client.Close()
-			err = perr
-		}
-		time.Sleep(1 * time.Second)
+// connectAgentGRPC dials the Rust guest agent on AgentGRPCPort (53) with a
+// bounded retry, replacing the removed JSON vsock.Connect path (#310).
+func connectAgentGRPC(udsPath string) (*guestgrpc.Client, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := guestgrpc.WaitReady(ctx, udsPath, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect agent gRPC: %w", err)
 	}
-	return nil, fmt.Errorf("connect after retries: %w", err)
+	return client, nil
 }
 
-// execOKAgent runs a command in the sandbox over the guest agent and returns
-// stdout, failing if the transport errors or the command exits nonzero.
-func execOKAgent(client *vsock.Client, command string) (string, error) {
-	res, err := client.Exec(command, "/", nil, 60)
+// execOKAgentGRPC runs a shell command in the sandbox via the gRPC Sandbox
+// service and returns stdout, failing if the transport errors or the command
+// exits nonzero.
+func execOKAgentGRPC(client *guestgrpc.Client, command string) (string, error) {
+	stream, err := client.Sandbox.ExecStream(context.Background(), &sandboxv1.ExecStreamRequest{
+		Command:        command,
+		Cwd:            "/",
+		TimeoutSeconds: 60,
+	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("exec stream: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return res.Stdout, fmt.Errorf("command %q exited %d: %s", command, res.ExitCode, res.Stderr)
+	var stdout, stderr strings.Builder
+	var exitCode int32
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("recv exec frame: %w", err)
+		}
+		switch m := msg.Msg.(type) {
+		case *sandboxv1.ExecResponse_Stdout:
+			stdout.Write(m.Stdout)
+		case *sandboxv1.ExecResponse_Stderr:
+			stderr.Write(m.Stderr)
+		case *sandboxv1.ExecResponse_Exit:
+			exitCode = m.Exit.GetExitCode()
+			if spawnErr := m.Exit.GetError(); spawnErr != "" {
+				return "", fmt.Errorf("exec spawn error: %s", spawnErr)
+			}
+		}
 	}
-	return res.Stdout, nil
+	if exitCode != 0 {
+		return stdout.String(), fmt.Errorf("command %q exited %d: %s", command, exitCode, stderr.String())
+	}
+	return stdout.String(), nil
 }

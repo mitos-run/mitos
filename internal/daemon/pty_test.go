@@ -1,68 +1,74 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"net"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"mitos.run/mitos/internal/vsock"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
-// startFakePtyUDS serves the CONNECT preamble, reads the pty request line, then
-// echoes any input frame as an output frame and exits on "exit\n".
-func startFakePtyUDS(t *testing.T, sockPath string) {
-	t.Helper()
-	lis, err := net.Listen("unix", sockPath)
+// fakePtyGuestSandbox is an in-process Sandbox gRPC server for PTY tests. Its
+// Exec handler reads the ExecOpen (PTY mode), then echoes each stdin chunk as
+// stdout, and terminates cleanly when stdin "exit\n" is received or when the
+// stream closes.
+type fakePtyGuestSandbox struct {
+	sandboxv1.UnimplementedSandboxServer
+}
+
+// Exec implements the PTY path: reads ExecOpen (ignoring argv since the
+// client sends no command), then echoes stdin bytes as stdout frames until
+// "exit\n" or stream close.
+func (s *fakePtyGuestSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
+	first, err := stream.Recv()
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	t.Cleanup(func() { lis.Close() })
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc := bufio.NewScanner(c)
-				sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
-				if !sc.Scan() {
-					return
-				}
-				if strings.HasPrefix(sc.Text(), "CONNECT ") {
-					c.Write([]byte("OK 52\n"))
-				}
-				if !sc.Scan() {
-					return // pty request line
-				}
-				for sc.Scan() {
-					var f vsock.PtyFrame
-					if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
-						return
-					}
-					if f.Kind == vsock.PtyInput {
-						if string(f.Data) == "exit\n" {
-							b, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 0})
-							c.Write(append(b, '\n'))
-							return
-						}
-						b, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyOutput, Data: f.Data})
-						c.Write(append(b, '\n'))
-					}
-				}
-			}(conn)
+	open := first.GetOpen()
+	if open == nil {
+		return io.ErrUnexpectedEOF
+	}
+	// Echo each stdin chunk as stdout; exit cleanly on "exit\n" or stream close.
+	for {
+		msg, rerr := stream.Recv()
+		if rerr == io.EOF {
+			return stream.Send(&sandboxv1.ExecResponse{
+				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
+			})
 		}
-	}()
+		if rerr != nil {
+			return rerr
+		}
+		data := msg.GetStdin()
+		if len(data) == 0 {
+			continue
+		}
+		if string(data) == "exit\n" {
+			return stream.Send(&sandboxv1.ExecResponse{
+				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
+			})
+		}
+		if err := stream.Send(&sandboxv1.ExecResponse{
+			Msg: &sandboxv1.ExecResponse_Stdout{Stdout: data},
+		}); err != nil {
+			return err
+		}
+	}
+}
+
+// startFakePtyGRPCUDS starts an in-process gRPC server with a PTY-capable Exec
+// handler on sockPath, suitable for replacing startFakePtyUDS in PTY tests.
+func startFakePtyGRPCUDS(t *testing.T, sockPath string) {
+	t.Helper()
+	startFakeGuestGRPCUDS(t, sockPath, &fakePtyGuestSandbox{})
 }
 
 func newPtyAPI(t *testing.T, token string) (*SandboxAPI, *httptest.Server) {
@@ -72,7 +78,7 @@ func newPtyAPI(t *testing.T, token string) (*SandboxAPI, *httptest.Server) {
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	startFakePtyUDS(t, sock)
+	startFakePtyGRPCUDS(t, sock)
 	api := NewSandboxAPI(dir)
 	if token != "" {
 		api.RegisterToken("sb1", token)
@@ -89,7 +95,11 @@ func newPtyAPI(t *testing.T, token string) (*SandboxAPI, *httptest.Server) {
 }
 
 func wsURL(httpURL, sandbox string) string {
-	return strings.Replace(httpURL, "http://", "ws://", 1) + "/v1/pty?sandbox=" + sandbox
+	s := httpURL
+	if len(s) > 7 && s[:7] == "http://" {
+		s = "ws://" + s[7:]
+	}
+	return s + "/v1/pty?sandbox=" + sandbox
 }
 
 func TestPtyWebSocketEchoExit(t *testing.T) {
@@ -175,7 +185,7 @@ func TestPtyWebSocketRejectsCrossSandboxToken(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		startFakePtyUDS(t, sock)
+		startFakePtyGRPCUDS(t, sock)
 		api.RegisterToken(sb.id, sb.token)
 		if err := api.RegisterSandbox(sb.id, sock); err != nil {
 			t.Fatal(err)
@@ -221,4 +231,135 @@ func TestPtyWebSocketTokenlessAllowed(t *testing.T) {
 	if ex.Kind != vsock.PtyExit {
 		t.Fatalf("expected exit, got %+v", ex)
 	}
+}
+
+// TestPtyStreamCapRejected verifies the per-sandbox concurrent-stream cap (3)
+// admits streams up to the cap and rejects the N+1th as a clean 429 BEFORE the
+// WebSocket upgrade (the client gets a non-101 response, not a close code).
+func TestPtyStreamCapRejected(t *testing.T) {
+	_, srv := newPtyAPI(t, "")
+	// Lower cap to 1 so we only need one held slot to trigger rejection.
+	api, _ := newPtyAPI(t, "")
+	api.SetMaxStreamsPerSandbox(1)
+	srv2 := httptest.NewServer(api.Handler())
+	t.Cleanup(srv2.Close)
+	_ = srv
+
+	// Pre-saturate the slot.
+	rel, ok := api.acquireStream("sb1")
+	if !ok {
+		t.Fatal("pre-saturate: slot must be acquirable")
+	}
+	defer rel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, wsURL(srv2.URL, "sb1"), &websocket.DialOptions{
+		Subprotocols: []string{"mitos.pty.v1"},
+	})
+	if err == nil {
+		t.Fatal("expected dial to fail when stream cap is exceeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %v, want 429", resp)
+	}
+}
+
+// TestPtyResizeForwarded verifies that a resize frame sent over the WebSocket
+// reaches the gRPC Exec stream as a WindowSize resize message, by using a fake
+// that echoes resize events as a synthetic stdout line.
+func TestPtyResizeForwarded(t *testing.T) {
+	// Use a custom fake that responds to resize with a confirmation on stdout.
+	dir := shortVsockDir(t)
+	sock := filepath.Join(dir, "sbr", "vsock.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	startFakeGuestGRPCUDS(t, sock, &fakeResizeSandbox{})
+	api := NewSandboxAPI(dir)
+	api.AllowTokenless()
+	if err := api.RegisterSandbox("sbr", sock); err != nil {
+		t.Fatal(err)
+	}
+	api.RegisterStreamPath("sbr", sock)
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "sbr"), &websocket.DialOptions{
+		Subprotocols: []string{"mitos.pty.v1"},
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Send a resize.
+	resizeFrame, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyResize, Cols: 120, Rows: 40})
+	if err := c.Write(ctx, websocket.MessageText, resizeFrame); err != nil {
+		t.Fatalf("write resize: %v", err)
+	}
+	// The fake echoes back a stdout confirmation then exits.
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var f vsock.PtyFrame
+	_ = json.Unmarshal(data, &f)
+	if f.Kind != vsock.PtyOutput {
+		t.Fatalf("want output frame, got %+v", f)
+	}
+	if string(f.Data) != "resize:120x40\n" {
+		t.Fatalf("resize confirmation = %q, want resize:120x40", f.Data)
+	}
+}
+
+// fakeResizeSandbox echoes resize events as "resize:CxR\n" stdout and exits after.
+type fakeResizeSandbox struct {
+	sandboxv1.UnimplementedSandboxServer
+}
+
+func (s *fakeResizeSandbox) Exec(stream sandboxv1.Sandbox_ExecServer) error {
+	_, err := stream.Recv() // read ExecOpen
+	if err != nil {
+		return err
+	}
+	for {
+		msg, rerr := stream.Recv()
+		if rerr == io.EOF {
+			return stream.Send(&sandboxv1.ExecResponse{
+				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
+			})
+		}
+		if rerr != nil {
+			return rerr
+		}
+		if ws := msg.GetResize(); ws != nil {
+			out := []byte("resize:" + uintStr(ws.GetCols()) + "x" + uintStr(ws.GetRows()) + "\n")
+			if err := stream.Send(&sandboxv1.ExecResponse{
+				Msg: &sandboxv1.ExecResponse_Stdout{Stdout: out},
+			}); err != nil {
+				return err
+			}
+			return stream.Send(&sandboxv1.ExecResponse{
+				Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: 0}},
+			})
+		}
+	}
+}
+
+// uintStr converts a uint32 to a decimal string without importing strconv
+// (keeping the test file dependency-light).
+func uintStr(n uint32) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := make([]byte, 0, 10)
+	for n > 0 {
+		buf = append([]byte{byte('0' + n%10)}, buf...)
+		n /= 10
+	}
+	return string(buf)
 }

@@ -19,6 +19,7 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/cpupin"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
@@ -190,6 +191,14 @@ type Engine struct {
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
 	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
+
+	// captureGuestReady waits for the guest agent gRPC Control service to answer
+	// Ping and returns the ready client. It is the seam used by
+	// CaptureTemplateHotPages so that path can be unit-tested without KVM or a
+	// real vsock. The production seam uses guestgrpc.WaitReady (vsock, port 53).
+	// Nil uses the production seam. The timeout mirrors connectVsockRetry's 50
+	// attempts at 20 ms each (1 second).
+	captureGuestReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
 
 	// maxSandboxes is the per-node host-DoS ceiling (production-blocker #2): the
 	// maximum number of live sandboxes this engine admits. Fork refuses with
@@ -644,7 +653,6 @@ type Sandbox struct {
 	MemoryUnique int64
 	MemoryShared int64
 	fcClient     *firecracker.Client
-	agentClient  *vsock.Client
 	VsockPath    string
 	// rootfsPath is the host path of the drive backing file embedded in
 	// the snapshot this sandbox was restored from; live-forks inherit it
@@ -869,6 +877,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
 		return err
 	}
+	e.captureGuestReady = guestgrpc.WaitReady
 	// Crash recovery (issue #12): before serving, read the on-disk journal and
 	// either re-adopt still-running pre-crash VMs into the live map (so
 	// ListSandboxes reports them and the controller GC can reconcile them) or
@@ -1596,9 +1605,6 @@ func (e *Engine) Terminate(sandboxID string) error {
 	// later forks (issue #168). No-op when the fork was never pinned.
 	e.forgetPin(sandboxID)
 
-	if sandbox.agentClient != nil {
-		sandbox.agentClient.Close()
-	}
 	if sandbox.fcClient != nil {
 		_ = sandbox.fcClient.Kill()
 	} else if sandbox.adopted {

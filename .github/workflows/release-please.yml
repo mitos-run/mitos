@@ -14,5 +14,14 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # A release or tag created with the default GITHUB_TOKEN does NOT
+          # trigger other workflows (GitHub blocks recursive token-driven runs),
+          # so the tag/release that release-please cuts would never start
+          # publish.yaml (images) or operator-release.yaml (OperatorHub bundle).
+          # Set the RELEASE_PLEASE_TOKEN secret to a PAT or GitHub App token with
+          # contents:write and workflow scope so the release event cascades to
+          # those workflows. It falls back to GITHUB_TOKEN when unset, which keeps
+          # today's behavior (the release PR still lands, downstream stays manual).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

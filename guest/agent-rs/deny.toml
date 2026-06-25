@@ -1,0 +1,35 @@
+# cargo-deny configuration for sandbox-agent.
+#
+# Enforces license, duplicate, and advisory policies. Run with:
+#   cargo deny check
+#
+# This file is referenced in CI (not yet wired, tracked in task-0.1 deferred
+# list) but cargo deny is not a hard build-time gate in this task.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+unused-allowed-license = "allow"
+
+[advisories]
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

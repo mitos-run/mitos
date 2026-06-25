@@ -1,5 +1,98 @@
 # Changelog
 
+## [1.0.0](https://github.com/mitos-run/mitos/compare/v0.14.0...v1.0.0) (2026-06-24)
+
+The Rust guest agent is now the sole guest agent. SP1.5 migrated every host caller to the gRPC contract (AgentGRPCPort 53); the legacy JSON vsock protocol and the Go agent are removed. Measured on bare metal (both agents, same gRPC contract, only /init differs): about 17 to 19 percent faster fork-to-first-response, about 4.7x smaller static binary, with round-trip latency and per-VM RSS within noise and no regression.
+
+
+
+### Features
+
+* **agent-rs:** add error.rs and env.rs shared primitives ([#310](https://github.com/mitos-run/mitos/issues/310)) ([8022bd8](https://github.com/mitos-run/mitos/commit/8022bd82e9f72bb011962495d406376cefebf867))
+* **agent-rs:** add sys/ module: AF_VSOCK, RNDADDENTROPY, clock_settime wrappers ([#310](https://github.com/mitos-run/mitos/issues/310)) ([10a0340](https://github.com/mitos-run/mitos/commit/10a03408a87b6ee9e6767cea084b0a5ffcec4355))
+* **agent-rs:** Archive and Upload RPC implementations ([#310](https://github.com/mitos-run/mitos/issues/310)) ([48499ca](https://github.com/mitos-run/mitos/commit/48499ca053f33229283a64cd2ceef29adcefa425))
+* **agent-rs:** clippy -D warnings clean, musl size gate, 3 hygiene fixes ([#310](https://github.com/mitos-run/mitos/issues/310)) ([244569e](https://github.com/mitos-run/mitos/commit/244569eb893b86b038f76d0dd20a818085168132))
+* **agent-rs:** Exec and PTY RPC implementation ([#310](https://github.com/mitos-run/mitos/issues/310)) ([945d90d](https://github.com/mitos-run/mitos/commit/945d90d74c377247778db69dd7e409732141a281))
+* **agent-rs:** fork/clock - CLOCK_REALTIME step with 500ms threshold ([#310](https://github.com/mitos-run/mitos/issues/310)) ([4c9c5b8](https://github.com/mitos-run/mitos/commit/4c9c5b8e3f2828ffc83228a2588d4a30d8c9c6cd))
+* **agent-rs:** fork/mod - handle_notify_forked orchestrator ([#310](https://github.com/mitos-run/mitos/issues/310)) ([4dc89e5](https://github.com/mitos-run/mitos/commit/4dc89e57eaf481e7f597a4cdc54f897f34f5eecc))
+* **agent-rs:** fork/network - eth0 reconfiguration via raw netlink ([#310](https://github.com/mitos-run/mitos/issues/310)) ([b17cadd](https://github.com/mitos-run/mitos/commit/b17cadd6f24c6c390c64bad40ceb9820d2bc22ca))
+* **agent-rs:** fork/reseed - credited CRNG reseed, fail-closed ([#310](https://github.com/mitos-run/mitos/issues/310)) ([7cb6ec7](https://github.com/mitos-run/mitos/commit/7cb6ec756b36d726f135e29ebeaf9a3e43410885))
+* **agent-rs:** fork/volumes - per-fork volume mounts ([#310](https://github.com/mitos-run/mitos/issues/310)) ([939174b](https://github.com/mitos-run/mitos/commit/939174b8321e60f9920225d652f08155b00ee65c))
+* **agent-rs:** implement ExecStream gRPC RPC (production /init parity) ([#310](https://github.com/mitos-run/mitos/issues/310)) ([d64b1a8](https://github.com/mitos-run/mitos/commit/d64b1a8f964b683341f2e73ed80e98caad2444e3))
+* **agent-rs:** init/ module and tonic gRPC skeleton over vsock ([#310](https://github.com/mitos-run/mitos/issues/310)) ([bcdb3a8](https://github.com/mitos-run/mitos/commit/bcdb3a8369d6bc13c42e41b74fc439dc89e6ea2c))
+* **agent-rs:** PortForward bidirectional TCP splice RPC ([#310](https://github.com/mitos-run/mitos/issues/310)) ([569ebae](https://github.com/mitos-run/mitos/commit/569ebae8ff0d1d63b3a1e6bc9afb3e71f379e58d))
+* **agent-rs:** production Rust guest agent, full sandbox.v1 gRPC parity (WIP, [#310](https://github.com/mitos-run/mitos/issues/310)) ([cb36e5c](https://github.com/mitos-run/mitos/commit/cb36e5c9c6b09bd6cc00fe08b39db8fcdc7e6321))
+* **agent-rs:** ReadFile/WriteFile/List/Stat/Mkdir/Remove RPC implementations ([#310](https://github.com/mitos-run/mitos/issues/310)) ([b65d219](https://github.com/mitos-run/mitos/commit/b65d219b355478cb4b08c0d78ef2e8363d8272b9))
+* **agent-rs:** replace spike scaffolding with gRPC production toolchain ([#310](https://github.com/mitos-run/mitos/issues/310)) ([1ecd3cd](https://github.com/mitos-run/mitos/commit/1ecd3cd63f4862d504a4e3c5268e994b5ed7b7b3))
+* **agent-rs:** RunCode RPC + KernelManager driver subprocess ([#310](https://github.com/mitos-run/mitos/issues/310)) ([d9f907d](https://github.com/mitos-run/mitos/commit/d9f907d106951085a0cb40e9b87151645ff9287e))
+* **agent-rs:** Vitals streaming RPC with /proc sampler ([#310](https://github.com/mitos-run/mitos/issues/310)) ([f14466b](https://github.com/mitos-run/mitos/commit/f14466b7dcd1e9fa203c7ff1b5e82c882367cd36))
+* **agent-rs:** Watch RPC with inotify event streaming ([#310](https://github.com/mitos-run/mitos/issues/310)) ([6b0477d](https://github.com/mitos-run/mitos/commit/6b0477dead46b01ce1597e408c10736595b655a8))
+* **agent-rs:** wire NotifyForked control service and final main ([#310](https://github.com/mitos-run/mitos/issues/310)) ([ab13eb0](https://github.com/mitos-run/mitos/commit/ab13eb0f61757e5e5ee59bbf3e7fad427c499e6a))
+* **api:** consolidate to stable mitos.run/v1 (three nouns), remove v1alpha1 ([#299](https://github.com/mitos-run/mitos/issues/299)) ([30a0484](https://github.com/mitos-run/mitos/commit/30a0484461b62c0758f81cb08ea140c494d97d6a))
+* Connect runtime protocol (gRPC over vsock) + Python SDK ([#24](https://github.com/mitos-run/mitos/issues/24)) ([f1f04e4](https://github.com/mitos-run/mitos/commit/f1f04e44c0dccba84439e38832cf39c18faea326))
+* **console:** Phase B0 dashboard shell (responsive, accessible) + console design spec ([#332](https://github.com/mitos-run/mitos/issues/332)) ([2111842](https://github.com/mitos-run/mitos/commit/2111842e85f1c62add9d1b3ecf8ca4ebb32c513d))
+* **daemon:** real vsockGuestConn over gRPC for Connect service ([#24](https://github.com/mitos-run/mitos/issues/24) stage 5) ([c071e08](https://github.com/mitos-run/mitos/commit/c071e083ebdee0f25a9e6685dd1cbc0acc597dcc))
+* **guest-agent-rs:** implement Processes and Signal RPCs (task 2.5, [#310](https://github.com/mitos-run/mitos/issues/310)) ([292decb](https://github.com/mitos-run/mitos/commit/292decb69b532ce9ddc83625ac082a7c3544f3b3))
+* **guestgrpc:** host-side gRPC guest client over vsock with ready-retry ([#310](https://github.com/mitos-run/mitos/issues/310)) ([f8f5c05](https://github.com/mitos-run/mitos/commit/f8f5c05c2bc51e48445b5e569c5b04be48da9ae9))
+* **guest:** implement ExecStream and RunCodeStream gRPC RPCs in the Go agent ([#310](https://github.com/mitos-run/mitos/issues/310)) ([f3d5e37](https://github.com/mitos-run/mitos/commit/f3d5e37e3b7c00cd170b588be819a9056eab163d))
+* **guest:** implement reuse-able Sandbox gRPC RPCs in the guest agent ([f3112d6](https://github.com/mitos-run/mitos/commit/f3112d6365399efa03256030ca5d2590d6a40bf2))
+* **guest:** implement Watch, Processes, Signal gRPC RPCs (Task 5.1c) ([a278452](https://github.com/mitos-run/mitos/commit/a278452e3a167f6744976de06b6c18b06284e5c0))
+* **guest:** serve gRPC Exec and Control over vsock alongside JSON loop ([80a297c](https://github.com/mitos-run/mitos/commit/80a297c6119c14dcb4d2a00ee7a3ff93ffe12a40))
+* **host:** migrate guest callers from JSON to gRPC (SP1.5, [#310](https://github.com/mitos-run/mitos/issues/310)) ([f8bbcfd](https://github.com/mitos-run/mitos/commit/f8bbcfdb21da4c512e09cf8f1b65f3dcf491f581))
+* **proto:** add RunCode, Mkdir, Remove, Upload to sandbox.v1 ([e873234](https://github.com/mitos-run/mitos/commit/e8732349d9df6d2f7206c5dc67d88d92a4be6cdf))
+* **proto:** internal control service (NotifyForked, Configure, Ping) ([c240d73](https://github.com/mitos-run/mitos/commit/c240d73f3a1736bd3826f7528cf033527984edc9))
+* **rootfs,ci:** make the Rust guest agent the production default; firecracker-test validates it ([#310](https://github.com/mitos-run/mitos/issues/310)) ([58b6f9b](https://github.com/mitos-run/mitos/commit/58b6f9b78b9a43636cba86040dc07e0d720844ab))
+* **rootfs,ci:** make the Rust guest agent the production default; firecracker-test validates it ([#310](https://github.com/mitos-run/mitos/issues/310)) ([de66b03](https://github.com/mitos-run/mitos/commit/de66b034d6752fe40f9b46acf0fed10f791ffada))
+* **sandbox:** add ExecStream and RunCodeStream server-streaming RPCs ([#24](https://github.com/mitos-run/mitos/issues/24)) ([5530c26](https://github.com/mitos-run/mitos/commit/5530c26a4abad51be31c1e0369fc013928fe1736))
+* **sandboxrpc:** file RPCs (ReadFile, WriteFile, List, Stat, Mkdir, Remove) ([40e1af2](https://github.com/mitos-run/mitos/commit/40e1af28d20261c9549fb76bd04bfbed540b9fdc))
+* **sandboxrpc:** GuestConn port and Service.Guest field; Exec streams via a fake guest ([5664ccc](https://github.com/mitos-run/mitos/commit/5664ccc7a342ef21966c49d413311a655b909d80))
+* **sandboxrpc:** implement Archive (download) and Upload (untar) RPCs ([e30f26f](https://github.com/mitos-run/mitos/commit/e30f26fad98b046b666c6cc923cc5d56edf7c1d4))
+* **sandboxrpc:** implement PortForward, Vitals, Watch, Processes, Signal RPCs ([b278610](https://github.com/mitos-run/mitos/commit/b27861037639a93cf71b7c78a8f9cab60bd049a7))
+* **sandboxrpc:** implement RunCode RPC (Task 2.3) ([9fb4037](https://github.com/mitos-run/mitos/commit/9fb4037b37f71161650d808b6c766812d18c4109))
+* **sandboxrpc:** mount Connect handler on :9091 with bearer-token gate and GuestConn exec bridge (Task 3.2, issue [#24](https://github.com/mitos-run/mitos/issues/24)) ([200cd91](https://github.com/mitos-run/mitos/commit/200cd91b06bbfa5e2a239265d9ff9048f423555b))
+* **sandboxrpc:** per-sandbox bearer token interceptor, fail-closed ([ed4e35b](https://github.com/mitos-run/mitos/commit/ed4e35b196edc4a97e7183aedce331027dba74b7))
+* **sdk:** migrate direct-mode file transport to the Connect Sandbox service ([#24](https://github.com/mitos-run/mitos/issues/24)) ([887a617](https://github.com/mitos-run/mitos/commit/887a617efefaa03fd423d83dac01590afe4ca8f0))
+* **sdk:** ride exec and run_code on the Connect ExecStream/RunCodeStream RPCs ([#24](https://github.com/mitos-run/mitos/issues/24)) ([9f36f03](https://github.com/mitos-run/mitos/commit/9f36f03b2651ca3ae8a090d8d4158f9704911227))
+* **vsock:** gRPC-over-net.Conn dialer spike (task 4.1) ([c9cb54a](https://github.com/mitos-run/mitos/commit/c9cb54aa83192662834b9af69ab0576765820c0d))
+
+
+### Bug Fixes
+
+* **agent-rs:** address review findings in per-fork netlink reconfiguration ([#310](https://github.com/mitos-run/mitos/issues/310)) ([548e4cc](https://github.com/mitos-run/mitos/commit/548e4ccf41f1abd2be4d9c4f52c48947a95ff2c7))
+* **agent-rs:** address SP1 1.2 review findings in sys/ safety-critical module ([#310](https://github.com/mitos-run/mitos/issues/310)) ([c4e413f](https://github.com/mitos-run/mitos/commit/c4e413fdaf5ff482037a708b3d0db7679b61a45d))
+* **agent-rs:** address SP1 review findings in error.rs and env.rs ([#310](https://github.com/mitos-run/mitos/issues/310)) ([ab46ce8](https://github.com/mitos-run/mitos/commit/ab46ce8e185465c55f0314f5cc879065073ee956))
+* **agent-rs:** eliminate global WORKSPACE_ROOT, thread root through SandboxService ([#310](https://github.com/mitos-run/mitos/issues/310)) ([79a02a4](https://github.com/mitos-run/mitos/commit/79a02a48a08474d2c78ae142d12f2b42a114b9b9))
+* **agent-rs:** harden KernelManager line cap, graceful JSON error, RunCode gRPC conformance tests ([#310](https://github.com/mitos-run/mitos/issues/310)) ([0460845](https://github.com/mitos-run/mitos/commit/04608454cff4c12b6ebf25a8941397da290610a0))
+* **agent-rs:** patch path-traversal in path_allowed, cap at 64 MiB, quality fixes ([#310](https://github.com/mitos-run/mitos/issues/310)) ([8ce2315](https://github.com/mitos-run/mitos/commit/8ce231562c5828da81c89269b027baa20db51603))
+* **agent-rs:** prompt client-disconnect kill, reader join, signal exit -1, PTY conformance test ([#310](https://github.com/mitos-run/mitos/issues/310)) ([1393cd1](https://github.com/mitos-run/mitos/commit/1393cd13d550b8bbd503f9829d1bb638f64a05f0))
+* **ci,docker:** build the Rust agent everywhere the Go agent was built ([#310](https://github.com/mitos-run/mitos/issues/310)) ([01bc11b](https://github.com/mitos-run/mitos/commit/01bc11b249e114865cfddef8f6067d4848b5a1e0))
+* **ci:** restore warm.min on husk-mode e2e SandboxPools (v1 migration regression, [#299](https://github.com/mitos-run/mitos/issues/299)) ([8ebf2d3](https://github.com/mitos-run/mitos/commit/8ebf2d3bcd950424b1fd7b7eea8009de69d1edad))
+* **ci:** restore warm.min on husk-mode e2e SandboxPools (v1 migration regression, [#299](https://github.com/mitos-run/mitos/issues/299)) ([b758f89](https://github.com/mitos-run/mitos/commit/b758f89aa39d74c756c224e7b2f6f25142348941))
+* **console:** pin pnpm so the console image builds reproducibly ([e512c91](https://github.com/mitos-run/mitos/commit/e512c910df96fab1679989b492c50e8b72b59ff3))
+* **controller:** bootstrap PKI in the operator's own namespace ([#335](https://github.com/mitos-run/mitos/issues/335)) ([8c21598](https://github.com/mitos-run/mitos/commit/8c2159826f6aa453a21b26b43b1ae07e7fec1a5c))
+* **daemon:** enforce the concurrent-stream cap on the Connect exec path ([b4bf662](https://github.com/mitos-run/mitos/commit/b4bf662faa11e24e226bb5062ac66af9c07839a1))
+* **daemon:** restore exec_time_ms, single stream slot, full list entries on the gRPC exec path ([#310](https://github.com/mitos-run/mitos/issues/310)) ([5d23efc](https://github.com/mitos-run/mitos/commit/5d23efc04739643180fbd4c3f1523efc8f405e67))
+* **docker:** add musl target to the pinned toolchain after entering the crate dir ([#310](https://github.com/mitos-run/mitos/issues/310)) ([44745c3](https://github.com/mitos-run/mitos/commit/44745c39fc56a03516cea1321093f114d8d09aa4))
+* **guest-agent-rs:** atomic WriteFile mode and explicit Mkdir 0o755 ([#310](https://github.com/mitos-run/mitos/issues/310)) ([a04b909](https://github.com/mitos-run/mitos/commit/a04b909eec8416bf0468bbe6783f2f1fa15dddfd))
+* **guest-agent-rs:** review fixes for notify-forked orchestrator and SIGUSR2 signal ([#310](https://github.com/mitos-run/mitos/issues/310)) ([281b5df](https://github.com/mitos-run/mitos/commit/281b5dfef9f357c8e036a5f76c89ee2e698c7ea5))
+* **guest-agent-rs:** signal ResourceExhausted on Watch channel overflow, add event tests ([#310](https://github.com/mitos-run/mitos/issues/310)) ([03c8239](https://github.com/mitos-run/mitos/commit/03c82392f7a034e8bda36fd5eeaa2c8629e1ca79))
+* **guest:** bounds-checked integer narrowing in gRPC vitals/process mapping (CodeQL) ([e0bacdf](https://github.com/mitos-run/mitos/commit/e0bacdfcea6dec86cb11702357241ee4c809a9b2))
+* **guest:** non-nil vsock net.Addr so the gRPC server cannot kernel-panic the VM ([9c5961e](https://github.com/mitos-run/mitos/commit/9c5961ed36e31efefbf550a610ea8b47beab8b31))
+* **husk:** re-apply host-side tar size cap on the gRPC workspace transport ([#310](https://github.com/mitos-run/mitos/issues/310)) ([652ebd5](https://github.com/mitos-run/mitos/commit/652ebd59d64e7a04bfafdaa9b3b90d696657090c))
+* **krew:** point plugin homepage at the GitHub repo for the stars badge ([#307](https://github.com/mitos-run/mitos/issues/307)) ([56f48e1](https://github.com/mitos-run/mitos/commit/56f48e1016f2dff310196c14c1883704f6ec8b34))
+* revert unconditional sandbox registration, assert honest not-registered 404 in token tests ([#310](https://github.com/mitos-run/mitos/issues/310)) ([b18e60c](https://github.com/mitos-run/mitos/commit/b18e60ccc2723417a8ca07d0444fe8e09aafc8d7))
+* **sandbox-server:** serve the Guest-wired Connect service; tokenless id routing ([6a1d67a](https://github.com/mitos-run/mitos/commit/6a1d67a05991a7480b9b8cee315d284bbae2c45c))
+* **sandboxrpc:** fix PortForward defer-order deadlock; connectErr chain and cleanups ([67ca13f](https://github.com/mitos-run/mitos/commit/67ca13ff829dfa838497d14fb155d43693ddf000))
+* **sandboxrpc:** prevent Upload reader-goroutine leak on early guest error ([761837b](https://github.com/mitos-run/mitos/commit/761837b98ed7ea0e733d4c9e6a766ca416c83d24))
+* **sandboxrpc:** reject empty registered token in BearerInterceptor (defense-in-depth) ([2910796](https://github.com/mitos-run/mitos/commit/2910796b026e3e6f3b9b968568a97bbd587c10bc))
+* **sandboxrpc:** test RunCode transport-error exit and correct its comment ([18a7325](https://github.com/mitos-run/mitos/commit/18a7325fa27b8807e275a5b73349bb0b9d885347))
+* **sandboxrpc:** thread WriteFile mode through GuestConn; comment + test fixups ([b5cb1f3](https://github.com/mitos-run/mitos/commit/b5cb1f3db38a1ceb2e73de2d4da76bba474cd89b))
+
+
+### Chores
+
+* release 1.0.0 ([#302](https://github.com/mitos-run/mitos/issues/302)) ([24f3f73](https://github.com/mitos-run/mitos/commit/24f3f73f917fdd6d3eee558b883236b50fbb15ff))
+
 ## [0.14.0](https://github.com/mitos-run/mitos/compare/v0.13.0...v0.14.0) (2026-06-23)
 
 
@@ -24,12 +117,12 @@
 * **console:** billing provider abstraction (Stripe first, MoR-ready) ([1d5359d](https://github.com/mitos-run/mitos/commit/1d5359d920df49058b3f1a56006b3f6a48e59587))
 * **console:** embed the SPA in cmd/console + capabilities-from-env + Dockerfile ([095e4c6](https://github.com/mitos-run/mitos/commit/095e4c604146dc039cbe38c7acbd4ed34c4ed5e3)), closes [#214](https://github.com/mitos-run/mitos/issues/214)
 * **console:** GET /console/billing/portal (provider-neutral manage-subscription link) ([ca3f85c](https://github.com/mitos-run/mitos/commit/ca3f85c7fff5300dced86f7c1f2654401a9d66eb))
-* **console:** hosted/self-hosted dashboard — spec + Phase A backend seams ([baca9a7](https://github.com/mitos-run/mitos/commit/baca9a7f1e9590918ab12165204f46b8a1eb46ea))
+* **console:** hosted/self-hosted dashboard: spec + Phase A backend seams ([baca9a7](https://github.com/mitos-run/mitos/commit/baca9a7f1e9590918ab12165204f46b8a1eb46ea))
 * **console:** kube SecretStore provider (org-namespaced Secrets) ([4d56aaa](https://github.com/mitos-run/mitos/commit/4d56aaa426f0a2b27401810b1a1f4454777c39ae)), closes [#275](https://github.com/mitos-run/mitos/issues/275)
 * **console:** mount the signature-verified billing webhook + portal wiring ([a5f91cc](https://github.com/mitos-run/mitos/commit/a5f91cc57251bd8bd36767bdb8cef8801d92c231))
 * **console:** OpenBao/Vault SecretStore provider (per-org KV-v2 path scoping) ([8dea216](https://github.com/mitos-run/mitos/commit/8dea216df3cef3435ef4ba11994d7f5802bedefd)), closes [#275](https://github.com/mitos-run/mitos/issues/275)
 * **console:** org-scoped SandboxControl + hard-isolation tenant convention ([#2](https://github.com/mitos-run/mitos/issues/2)) ([#287](https://github.com/mitos-run/mitos/issues/287)) ([586f7aa](https://github.com/mitos-run/mitos/commit/586f7aa276b830d540fc8e85a5d1f5e502d4e6f4))
-* **console:** phase 2 — billing portal, secret provider selection, billing webhook ([0eb75f1](https://github.com/mitos-run/mitos/commit/0eb75f13f9c9c2fca53e7a6a1cf15eec51b2d321))
+* **console:** phase 2: billing portal, secret provider selection, billing webhook ([0eb75f1](https://github.com/mitos-run/mitos/commit/0eb75f13f9c9c2fca53e7a6a1cf15eec51b2d321))
 * **console:** real go-oidc verifier + /auth login flow ([caa8201](https://github.com/mitos-run/mitos/commit/caa820117125692115c8831ee2222828424c5144)), closes [#214](https://github.com/mitos-run/mitos/issues/214)
 * **console:** select the real secret backend in cmd/console ([d156a7d](https://github.com/mitos-run/mitos/commit/d156a7d60bf93701771ec82bb8c9db00b69b39d6))
 * **sdk:** official Java SDK (direct mode, hosted mitos.run) ([#250](https://github.com/mitos-run/mitos/issues/250)) ([#290](https://github.com/mitos-run/mitos/issues/290)) ([279da4f](https://github.com/mitos-run/mitos/commit/279da4fc603e8464f814adf58e18fa1dee9d62ba))

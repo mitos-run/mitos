@@ -427,5 +427,5 @@ darwin against fixtures (`internal/guestvitals`, `internal/vsock`,
 `cmd/kubectl-mitos/ps_guest_test.go`).
 
 GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest
-collector reads real `/proc` and is exercised by a linux-tagged fixture test
-(`guest/agent/vitals_test.go`) so the next KVM run drives it end to end.
+collector reads real `/proc` and is exercised by the fixture tests in
+`guest/agent-rs/src/service/vitals.rs` so the next KVM run drives it end to end.

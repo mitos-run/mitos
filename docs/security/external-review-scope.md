@@ -25,7 +25,7 @@ live findings tracker that drives each finding to closure is
    the device model, the jailer configuration, `/dev/kvm` exposure, the snapshot
    restore path. The forkd DaemonSet currently runs `privileged: true`
    (jailer-in-pod narrowing is a tracked follow-up); review that blast radius.
-2. **Guest -> host channels** (`guest/agent`, `internal/vsock`, `internal/daemon`
+2. **Guest -> host channels** (`guest/agent-rs`, `internal/vsock`, `internal/daemon`
    :9091): the vsock + HTTP exec/file API the guest and SDK reach. Token gating,
    input handling, path traversal in the file API, the exec request parsing.
 3. **Snapshot integrity** (`internal/fork`, `internal/husk`): the CAS

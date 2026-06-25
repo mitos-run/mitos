@@ -74,17 +74,19 @@ wire only in flag-less dev deployments, where forkd warns loudly
 ### Used
 
 Inside the guest, the agent stores the delivered env and secrets in a single
-in-memory map, `configuredEnv`, guarded by a mutex; the values are never logged
-(`guest/agent/main.go:32-44`, `guest/agent/main.go:254-269`). Each `exec` copies
-that map into the child process environment (`guest/agent/main.go:289-294`). The
-map lives in the guest process memory only: it is never persisted to the guest
-filesystem, and specifically never written under `/workspace`
-(`guest/agent/tardir.go:18-24`).
+in-memory map (`ConfiguredEnv`), guarded by an `RwLock`; the values are never
+logged, only key counts (`guest/agent-rs/src/env.rs`). The map is populated by
+the host-trusted Configure RPC (`guest/agent-rs/src/service/control.rs`). Each
+`exec` copies that map into the child process environment
+(`guest/agent-rs/src/service/exec.rs`). The map lives in the guest process
+memory only: it is never persisted to the guest filesystem, and specifically
+never written under `/workspace` (the archive transfer is confined to the
+`/workspace` allowlist, `guest/agent-rs/src/service/archive.rs`).
 
 ### Destroyed
 
 A secret's lifetime is the VM's lifetime. The guest holds it only in process
-memory (`guest/agent/main.go:32-33`), so VM teardown (the sandbox being reaped or
+memory (`guest/agent-rs/src/env.rs`), so VM teardown (the sandbox being reaped or
 its claim TTL expiring) discards it with the VM's memory. The sandbox-API bearer
 token is held in a controller-owned Secret that is owner-referenced to the claim
 or fork, so Kubernetes garbage-collects it when the owner is deleted
@@ -140,16 +142,17 @@ reaching another, with its citation.
   (`internal/controller/workspace_binding.go:147-151`). The guest tar transfer is
   itself confined to `/workspace` and refuses any path outside it, so the bulk
   transfer can never reach the guest's in-memory secret state
-  (`guest/agent/tardir.go:18-24`, `guest/agent/tardir.go:28-37`).
+  (`guest/agent-rs/src/service/archive.rs`, the workspace allowlist and the
+  `safe_join` traversal barrier).
 
 ## 4. The in-guest self-service socket carries names, never values
 
 The in-VM workload (and the `mitos.guest` SDK) can read its own identity and
 budget from a unix socket advertised via `MITOS_SOCKET`, with no network egress
-(`guest/agent/selfservice.go:13-23`). The handler reads from the same
-`configuredEnv` map that holds the claim-time env and secrets, but it whitelists
-the keys it surfaces: it only returns the non-secret `MITOS_` identity and budget
-keys, never a secret VALUE (`guest/agent/selfservice.go:45-58`). The socket env
+(`internal/guestsock/protocol.go`, `internal/guestsock/server.go`). The handler
+reads identity and budget through an env-lookup seam, but it surfaces only the
+non-secret `MITOS_` identity and budget keys, never a secret VALUE
+(`internal/guestsock/server.go`, the `TypeInfo` handler). The socket env
 variables forkd advertises are a NAME and a path, never a secret value
 (`internal/daemon/server.go:305-312`, `internal/daemon/server.go:323-335`).
 
