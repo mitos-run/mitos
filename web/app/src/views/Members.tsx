@@ -51,16 +51,7 @@ export function Members() {
                 <tr key={m.account_id}>
                   <td>{m.account_id}</td>
                   <td>
-                    <span
-                      style={{
-                        display: 'inline-block',
-                        marginRight: 'var(--space-2)',
-                        padding: '0 var(--space-2)',
-                        borderRadius: '4px',
-                        fontSize: 'var(--step--1)',
-                        background: 'var(--surface-2, #f0f0f0)',
-                      }}
-                    >
+                    <span className={`role-badge role-${m.role}`}>
                       {m.role}
                     </span>
                     <label
