@@ -492,7 +492,7 @@ func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
 // --- Live sandboxes (over the SandboxControl seam) ---
 
 func (c *Console) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -511,11 +511,24 @@ func (c *Console) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 			boxes[i].ProjectID = pid
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "sandboxes": boxes})
+	// Filter to sandboxes the caller can read. On a real access-check error we
+	// fail the whole request (500) rather than silently drop boxes.
+	visible := boxes[:0]
+	for _, box := range boxes {
+		canSee, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, box.ProjectID, saas.PermReadOnly)
+		if accessErr != nil {
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+			return
+		}
+		if canSee {
+			visible = append(visible, box)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "sandboxes": visible})
 }
 
 func (c *Console) handleInspectSandbox(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -529,16 +542,51 @@ func (c *Console) handleInspectSandbox(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		sb.ProjectID = pid
 	}
+	// Check per-project access. Return 404 (not 403) to avoid leaking existence.
+	canSee, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, sb.ProjectID, saas.PermReadOnly)
+	if accessErr != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+		return
+	}
+	if !canSee {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+			WithCause("the sandbox does not exist or is not accessible"))
+		return
+	}
 	writeJSON(w, http.StatusOK, sb)
 }
 
 func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
 		return
 	}
 	id := r.PathValue("id")
+	// Fetch the sandbox first to resolve its project assignment (needed for the
+	// per-project access check). ErrNotFound is treated as not-found (404).
+	sb, err := c.deps.Sandboxes.Get(r.Context(), orgID, id)
+	if err != nil {
+		c.failSandbox(w, err)
+		return
+	}
+	pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", sb.ID)
+	if err == nil {
+		sb.ProjectID = pid
+	}
+	// Check that the caller may use resources on this sandbox. Return 403 so the
+	// caller knows the sandbox exists but they lack permission (the spec says 403
+	// for terminate, not 404).
+	canAct, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, sb.ProjectID, saas.PermUseResources)
+	if accessErr != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+		return
+	}
+	if !canAct {
+		apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+			WithCause("the caller's role does not grant access to this sandbox"))
+		return
+	}
 	if err := c.deps.Sandboxes.Terminate(r.Context(), orgID, id); err != nil {
 		c.failSandbox(w, err)
 		return
