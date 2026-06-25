@@ -3,7 +3,7 @@
 // keyboard behavior only.
 export type TabDef = { key: string; label: string }
 
-export function Tabs({ tabs, active, onChange }: { tabs: TabDef[]; active: string; onChange: (key: string) => void }) {
+export function Tabs({ tabs, active, onChange, ariaLabel }: { tabs: TabDef[]; active: string; onChange: (key: string) => void; ariaLabel: string }) {
   function onKey(e: React.KeyboardEvent, i: number) {
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault()
@@ -12,7 +12,7 @@ export function Tabs({ tabs, active, onChange }: { tabs: TabDef[]; active: strin
     }
   }
   return (
-    <div role="tablist" className="tabs" aria-label="Sandbox detail sections">
+    <div role="tablist" className="tabs" aria-label={ariaLabel}>
       {tabs.map((t, i) => (
         <button
           key={t.key}

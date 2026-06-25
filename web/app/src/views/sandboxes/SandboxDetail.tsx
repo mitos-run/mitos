@@ -18,7 +18,7 @@ const TABS: TabDef[] = [
 ]
 
 export function SandboxDetail() {
-  const { id } = useParams({ strict: false }) as { id: string }
+  const { id } = useParams({ from: '/sandboxes/$id' })
   const [tab, setTab] = useState('overview')
   const { data: sb, isLoading, isError } = useSandbox(id)
   if (isError) return <EmptyState title="Sandbox unavailable" body="This sandbox does not exist or is not in this organization." />
@@ -26,8 +26,8 @@ export function SandboxDetail() {
   return (
     <section>
       <h2 className="mono">{sb.id}</h2>
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
-      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} style={{ marginTop: 'var(--space-5)' }}>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} ariaLabel="Sandbox detail sections" />
+      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} style={{ marginTop: 'var(--space-5)' }}>
         {tab === 'overview' && <OverviewTab sb={sb} />}
         {tab === 'logs' && <LogsTab id={sb.id} />}
         {tab === 'terminal' && <PlaceholderTab title="Terminal" surface="the existing PTY transport" />}

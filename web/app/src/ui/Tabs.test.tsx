@@ -6,7 +6,7 @@ import { Tabs } from './Tabs'
 describe('Tabs', () => {
   it('renders a tablist and fires onChange on click and arrow keys', async () => {
     const onChange = vi.fn()
-    render(<Tabs tabs={[{ key: 'a', label: 'Overview' }, { key: 'b', label: 'Logs' }]} active="a" onChange={onChange} />)
+    render(<Tabs tabs={[{ key: 'a', label: 'Overview' }, { key: 'b', label: 'Logs' }]} active="a" onChange={onChange} ariaLabel="Test sections" />)
     const list = screen.getByRole('tablist')
     expect(list).toBeInTheDocument()
     const overview = screen.getByRole('tab', { name: 'Overview' })

@@ -92,4 +92,26 @@ describe('SandboxList', () => {
     const link = screen.getByRole('link', { name: 'sb-1' })
     expect(link).toHaveAttribute('href', '/sandboxes/sb-1')
   })
+
+  it('rolls back the optimistic removal when the server rejects terminate', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.endsWith('/console/sandboxes')) {
+        return Promise.resolve(new Response(JSON.stringify({ sandboxes }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.includes('/console/sandboxes/')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'forbidden' }), { status: 403, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByText('sb-1')).toBeInTheDocument())
+    const [firstTerminate] = screen.getAllByRole('button', { name: /terminate/i })
+    fireEvent.click(firstTerminate)
+    await waitFor(() => expect(screen.getByText('sb-1')).toBeInTheDocument())
+    expect(screen.getByText('sb-2')).toBeInTheDocument()
+  })
 })
