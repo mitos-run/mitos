@@ -609,6 +609,12 @@ func (api *SandboxAPI) Handler() http.Handler {
 	// (issue #24), so it carries the same Deprecation note as the other runtime
 	// routes (set on the upgrade handshake response).
 	outer.HandleFunc("GET /v1/pty", deprecatedRuntimeNote(api.handlePty))
+	// Connect-over-WebSocket bidi Exec: the same sandbox.v1.Sandbox.Exec schema
+	// the Connect HTTP handler serves over HTTP/2, but on a GET WebSocket upgrade
+	// so the thin half-duplex-over-HTTP/1.1 SDK clients can reach the full-duplex
+	// interactive (PTY) case. The Connect HTTP handler keeps POST on this path;
+	// this more-specific GET pattern takes the upgrade (issue #358).
+	outer.HandleFunc("GET "+execWSPath, api.handleExecWS)
 	outer.Handle(connectPath, connectHandler)
 	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
