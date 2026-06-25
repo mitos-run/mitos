@@ -38,6 +38,12 @@ spec:
             - --domain={{ $domain }}
             - --tls-cert=/tls/tls.crt
             - --tls-key=/tls/tls.key
+            {{- if .Values.expose.oidc.issuer }}
+            - --oidc-issuer={{ .Values.expose.oidc.issuer }}
+            - --oidc-client-id={{ .Values.expose.oidc.clientID }}
+            {{- $resolveURL := .Values.expose.identityResolve.resolveURL | default (printf "http://mitos-console.%s.svc:80" (include "mitos.namespace" .)) }}
+            - --resolve-url={{ $resolveURL }}
+            {{- end }}
           env:
             - name: MITOS_PREVIEW_SECRET
               valueFrom:
@@ -49,6 +55,38 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.expose.secretName }}
                   key: admin-token
+            {{- if .Values.expose.oidc.issuer }}
+            - name: MITOS_EXPOSE_GRANT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: grant-secret
+            - name: MITOS_EXPOSE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: session-secret
+            - name: MITOS_EXPOSE_SSO_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: sso-secret
+            - name: MITOS_EXPOSE_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: state-secret
+            - name: MITOS_EXPOSE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: oidc-client-secret
+            - name: MITOS_EXPOSE_RESOLVE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: resolve-token
+            {{- end }}
           ports:
             - name: https
               containerPort: 8443

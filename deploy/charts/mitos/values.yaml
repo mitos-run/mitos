@@ -337,6 +337,43 @@ expose:
     secretName: mitos-expose-tls
   # Name of the Secret holding signing-secret and admin-token keys shared by the
   # proxy and the controller. If absent from the cluster, create it out of band.
+  # The operator MUST populate this Secret with the following keys before enabling
+  # expose or expose.oidc:
+  #   signing-secret      (MITOS_PREVIEW_SECRET: at least 16 random bytes)
+  #   admin-token         (MITOS_EXPOSE_ADMIN_TOKEN: at least 16 random bytes)
+  #   grant-secret        (MITOS_EXPOSE_GRANT_SECRET: at least 32 random bytes, OIDC only)
+  #   session-secret      (MITOS_EXPOSE_SESSION_SECRET: at least 32 random bytes, OIDC only)
+  #   sso-secret          (MITOS_EXPOSE_SSO_SECRET: at least 32 random bytes, OIDC only)
+  #   state-secret        (MITOS_EXPOSE_STATE_SECRET: at least 32 random bytes, OIDC only)
+  #   oidc-client-secret  (MITOS_EXPOSE_OIDC_CLIENT_SECRET: from your IdP, OIDC only)
+  #   resolve-token       (MITOS_EXPOSE_RESOLVE_TOKEN / MITOS_IDENTITY_RESOLVE_TOKEN:
+  #                        shared between the proxy and the console; at least 32 random bytes)
+  # Secret VALUES are NEVER inlined in the chart; they are always mounted via
+  # secretKeyRef. Generate and apply the Secret out of band:
+  #   kubectl create secret generic mitos-expose -n mitos \
+  #     --from-literal=signing-secret=<...> --from-literal=admin-token=<...> \
+  #     --from-literal=grant-secret=<...> --from-literal=session-secret=<...> \
+  #     --from-literal=sso-secret=<...> --from-literal=state-secret=<...> \
+  #     --from-literal=oidc-client-secret=<...> --from-literal=resolve-token=<...>
   secretName: mitos-expose
+  # OIDC relying-party configuration for the central auth.<expose-domain> origin.
+  # When oidc.issuer is empty the proxy runs in token-only/public mode and the
+  # private/org/authenticated tiers return 401. Requires expose.enabled true.
+  oidc:
+    # OIDC discovery issuer URL (e.g. https://accounts.google.com or
+    # https://dex.example.com). Empty disables OIDC.
+    issuer: ""
+    # OIDC client ID registered at the issuer.
+    clientID: ""
+  # Identity resolve endpoint: the in-cluster console service that maps a verified
+  # email to org IDs. Used by the private and org sharing tiers. The resolve token
+  # is a SHARED secret between the proxy (MITOS_EXPOSE_RESOLVE_TOKEN) and the
+  # console (MITOS_IDENTITY_RESOLVE_TOKEN); both read it from the same Secret key
+  # (expose.secretName, key resolve-token). When resolveURL is empty the resolve
+  # hop is skipped and the proxy falls back to OIDC claims/forwardAuth.
+  identityResolve:
+    # URL of the resolve endpoint. Default points at the in-cluster console
+    # Service. Override if your console runs in a different namespace or port.
+    resolveURL: ""
   # Proxy container resource requests and limits.
   resources: {}
