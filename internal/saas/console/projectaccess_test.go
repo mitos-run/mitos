@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -351,5 +352,77 @@ func TestProjectAccessOrg2ListSeesOnlyOwnSandboxes(t *testing.T) {
 		if s.OrgID == f.orgID {
 			t.Errorf("org2 list leaked org1 sandbox %s", s.ID)
 		}
+	}
+}
+
+// failingResourceProjects is a ResourceProjectStore whose Project lookup always
+// errors, used to prove the access path fails closed (an assigned box must not
+// be silently reclassified as unassigned and re-granted org-wide access).
+type failingResourceProjects struct{}
+
+func (failingResourceProjects) Project(context.Context, string, string, string) (string, error) {
+	return "", errTagStore
+}
+func (failingResourceProjects) SetProject(context.Context, string, string, string, string) error {
+	return errTagStore
+}
+
+var errTagStore = stubErr("tag store unavailable")
+
+type stubErr string
+
+func (e stubErr) Error() string { return string(e) }
+
+// TestProjectAccessTagStoreErrorFailsClosed verifies that when the resource ->
+// project tag lookup errors, list/inspect/terminate fail (500) rather than
+// treating the box as unassigned and applying org-wide access. A member must
+// never reach an assigned box through a tag-store error.
+func TestProjectAccessTagStoreErrorFailsClosed(t *testing.T) {
+	f := newProjectAccessFixture(t)
+	// Swap in a tag store that always errors.
+	f.con.deps.ResourceProjects = failingResourceProjects{}
+
+	for _, tc := range []struct {
+		name, method, target string
+	}{
+		{"list", "GET", "/console/sandboxes"},
+		{"inspect", "GET", "/console/sandboxes/" + f.sandboxSP},
+		{"terminate", "DELETE", "/console/sandboxes/" + f.sandboxSP},
+	} {
+		w := f.do(t, tc.method, tc.target, f.memberAcct, f.orgID)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("%s with erroring tag store = %d, want 500 (fail closed); body=%s", tc.name, w.Code, w.Body.String())
+		}
+		// A fail-closed 500 returns an error envelope, never the sandbox list, so
+		// the assigned box cannot leak through the body.
+		if tc.name == "list" && strings.Contains(w.Body.String(), f.sandboxSP) {
+			t.Errorf("assigned box %s leaked through a tag-store error: %s", f.sandboxSP, w.Body.String())
+		}
+	}
+}
+
+// TestProjectAccessViewerMatrix exercises a plain org-wide Viewer (read-only, no
+// resources.use, no project role): sees the unassigned box, not the assigned
+// one; inspect of the assigned box is 404; terminate of the unassigned box is
+// 403 (a viewer cannot use resources even on unassigned sandboxes).
+func TestProjectAccessViewerMatrix(t *testing.T) {
+	f := newProjectAccessFixture(t)
+
+	lw := f.do(t, "GET", "/console/sandboxes", f.viewerAcct, f.orgID)
+	if lw.Code != http.StatusOK {
+		t.Fatalf("viewer list = %d, want 200", lw.Code)
+	}
+	body := lw.Body.String()
+	if !strings.Contains(body, f.sandboxSU) {
+		t.Errorf("viewer should see the unassigned box SU; body=%s", body)
+	}
+	if strings.Contains(body, f.sandboxSP) {
+		t.Errorf("viewer must NOT see the assigned box SP; body=%s", body)
+	}
+	if iw := f.do(t, "GET", "/console/sandboxes/"+f.sandboxSP, f.viewerAcct, f.orgID); iw.Code != http.StatusNotFound {
+		t.Errorf("viewer inspect SP = %d, want 404", iw.Code)
+	}
+	if tw := f.do(t, "DELETE", "/console/sandboxes/"+f.sandboxSU, f.viewerAcct, f.orgID); tw.Code != http.StatusForbidden {
+		t.Errorf("viewer terminate SU = %d, want 403", tw.Code)
 	}
 }
