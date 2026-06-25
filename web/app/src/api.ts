@@ -59,6 +59,10 @@ export type TemplateView = { name: string; org_id: string; description: string; 
 export type UsageResponse = { org_id: string; records: unknown[]; totals: Record<string, number>; cost: Record<string, number> }
 export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }> }
 
+export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
+export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
+export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
@@ -113,6 +117,27 @@ export const api = {
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
+  members: () => get<{ org_id: string; members: MemberView[] }>('/console/members').then((r) => r.members ?? []),
+  setMemberRole: async (accountId: string, role: Role) => {
+    const r = await fetch(`/console/members/${encodeURIComponent(accountId)}/role`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role }),
+    })
+    if (!r.ok) throw new Error(`set role: ${r.status}`)
+  },
+  projects: () => get<{ org_id: string; projects: ProjectView[] }>('/console/projects').then((r) => r.projects ?? []),
+  createProject: async (name: string, description: string) => {
+    const r = await fetch('/console/projects', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    })
+    if (!r.ok) throw new Error(`create project: ${r.status}`)
+    return (await r.json()) as ProjectView
+  },
 }
 
 export function fmtBytes(n: number): string {

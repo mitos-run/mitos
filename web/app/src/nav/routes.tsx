@@ -14,6 +14,8 @@ import { Usage } from '../views/Usage'
 import { Audit } from '../views/Audit'
 import { Templates } from '../views/Templates'
 import { Billing } from '../views/Billing'
+import { Members } from '../views/Members'
+import { Projects } from '../views/Projects'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -36,7 +38,8 @@ export const ROUTES: RouteDef[] = [
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Templates /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
   { path: '/keys', label: 'API keys', group: 'Build', element: () => <Keys /> },
-  { path: '/members', label: 'Members', group: 'Govern', element: () => <Placeholder title="Members & roles" endpoint="/console/members" phase="B2" />, when: (c) => c.teams },
+  { path: '/members', label: 'Members', group: 'Govern', element: () => <Members />, when: (c) => c.teams },
+  { path: '/projects', label: 'Projects', group: 'Govern', element: () => <Projects />, when: (c) => c.teams },
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
   { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Usage /> },
   { path: '/billing', label: 'Billing', group: 'Govern', element: () => <Billing />, when: (c) => c.billing },
