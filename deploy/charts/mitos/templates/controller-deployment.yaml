@@ -52,7 +52,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
             {{- if .Values.expose.enabled }}
-            - --expose-proxy-admin-url=https://mitos-expose.{{ include "mitos.namespace" . }}.svc
+            - --expose-proxy-admin-url=http://mitos-expose-admin.{{ include "mitos.namespace" . }}.svc:8080
             {{- end }}
           env:
             # Run the control plane (PKI bootstrap, forkd discovery) in the
