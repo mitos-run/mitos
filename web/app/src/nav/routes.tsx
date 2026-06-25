@@ -18,6 +18,7 @@ import { Members } from '../views/Members'
 import { Projects } from '../views/Projects'
 import { Settings } from '../views/Settings'
 import { Retention } from '../views/Retention'
+import { Roles } from '../views/Roles'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing']
@@ -44,6 +45,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/projects', label: 'Projects', group: 'Govern', element: () => <Projects />, when: (c) => c.teams },
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
   { path: '/retention', label: 'Data and retention', group: 'Govern', element: () => <Retention /> },
+  { path: '/roles', label: 'Roles', group: 'Govern', element: () => <Roles />, when: (c) => c.teams },
   { path: '/usage', label: 'Usage', group: 'Billing', element: () => <Usage /> },
   { path: '/billing', label: 'Billing', group: 'Billing', element: () => <Billing />, when: (c) => c.billing },
   // Account settings is reached from the top-bar account menu, not the sidebar;

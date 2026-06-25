@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
 )
 
 // SecretView is the console's NON-SECRET view of one org secret. It deliberately
@@ -79,7 +80,7 @@ func (c *Console) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 // handleCreateSecret creates or rotates a secret. The value is write-only: it is
 // never logged and never returned. The response carries only metadata.
 func (c *Console) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
-	actorID, orgID, e, ok := c.caller(r)
+	actorID, orgID, e, ok := c.authorize(r, saas.PermManageSecrets)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -115,7 +116,7 @@ func (c *Console) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteSecret deletes a secret. A cross-org name is reported as 404.
 func (c *Console) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
-	actorID, orgID, e, ok := c.caller(r)
+	actorID, orgID, e, ok := c.authorize(r, saas.PermManageSecrets)
 	if !ok {
 		apierr.Encode(w, e)
 		return

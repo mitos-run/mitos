@@ -90,12 +90,15 @@ const (
 	PermManageBilling  Permission = "billing.manage"
 	PermUseResources   Permission = "resources.use"
 	PermReadOnly       Permission = "read"
+	// PermManageSettings gates org-level settings (name, defaults, integrations).
+	// Granted to Owner and Admin only.
+	PermManageSettings Permission = "settings.manage"
 )
 
 // rolePerms is the built-in role -> permission map. Every role implies PermReadOnly.
 var rolePerms = map[Role]map[Permission]bool{
-	RoleOwner:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermManageBilling: true, PermUseResources: true, PermReadOnly: true},
-	RoleAdmin:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermUseResources: true, PermReadOnly: true},
+	RoleOwner:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermManageBilling: true, PermUseResources: true, PermReadOnly: true, PermManageSettings: true},
+	RoleAdmin:   {PermManageMembers: true, PermManageProjects: true, PermManageSecrets: true, PermUseResources: true, PermReadOnly: true, PermManageSettings: true},
 	RoleBilling: {PermManageBilling: true, PermReadOnly: true},
 	RoleMember:  {PermUseResources: true, PermReadOnly: true},
 	RoleViewer:  {PermReadOnly: true},

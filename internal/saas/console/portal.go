@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
 )
 
 // PortalLinker returns the provider-hosted "manage subscription" URL for an org
@@ -27,7 +28,9 @@ func (noPortal) PortalURL(context.Context, string) (string, error) { return "", 
 // portal is configured (community edition, or no customer yet) it is a 404, so
 // the UI never shows a fabricated link.
 func (c *Console) handleBillingPortal(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	// The portal link is a billing-management action; gate it on billing.manage
+	// so a viewer or member cannot reach the manage-subscription surface.
+	_, orgID, e, ok := c.authorize(r, saas.PermManageBilling)
 	if !ok {
 		apierr.Encode(w, e)
 		return

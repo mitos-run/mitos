@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
 )
 
 // DataRetentionPolicy is the per-org data retention configuration. Zero values
@@ -83,7 +84,7 @@ func (c *Console) handleGetDataRetention(w http.ResponseWriter, r *http.Request)
 // policy runs in the controller (issue #163); this endpoint stores and exposes
 // the policy only. A legal hold pauses all automated deletion for the org.
 func (c *Console) handleSetDataRetention(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	_, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return

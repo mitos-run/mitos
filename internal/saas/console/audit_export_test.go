@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"mitos.run/mitos/internal/saas"
 )
 
 func TestAuditExportIsOrgScopedNDJSON(t *testing.T) {
@@ -36,14 +38,24 @@ func TestAuditExportIsOrgScopedNDJSON(t *testing.T) {
 }
 
 func TestAuditRetentionRoundTrip(t *testing.T) {
-	c := New(Deps{Retention: NewMemRetentionStore()})
-	put := httptest.NewRequest("PUT", "/console/audit/retention", strings.NewReader(`{"days":90}`)).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+	// PUT /console/audit/retention requires PermManageSettings; seed an owner.
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	owner, org, err := accounts.SignUp(context.Background(), "retention-owner@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	c := New(Deps{Accounts: accounts, Retention: NewMemRetentionStore()})
+	put := httptest.NewRequest("PUT", "/console/audit/retention", strings.NewReader(`{"days":90}`)).
+		WithContext(WithCaller(context.Background(), owner.ID, org.ID))
 	rr := httptest.NewRecorder()
 	c.ServeHTTP(rr, put)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("put status %d", rr.Code)
+		t.Fatalf("put status %d, body=%s", rr.Code, rr.Body.String())
 	}
-	get := httptest.NewRequest("GET", "/console/audit/retention", nil).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+	get := httptest.NewRequest("GET", "/console/audit/retention", nil).
+		WithContext(WithCaller(context.Background(), owner.ID, org.ID))
 	rr2 := httptest.NewRecorder()
 	c.ServeHTTP(rr2, get)
 	if !strings.Contains(rr2.Body.String(), "90") {
