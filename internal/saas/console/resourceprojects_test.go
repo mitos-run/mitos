@@ -91,11 +91,11 @@ func newResourceProjectsFixture(t *testing.T) *resourceProjectsFixture {
 
 	resProj := NewMemResourceProjectStore()
 	con := New(Deps{
-		Accounts:        accounts,
-		Projects:        projects,
-		Sandboxes:       sandboxes,
+		Accounts:         accounts,
+		Projects:         projects,
+		Sandboxes:        sandboxes,
 		ResourceProjects: resProj,
-		Now:             time.Now,
+		Now:              time.Now,
 	})
 	return &resourceProjectsFixture{
 		con:        con,
@@ -157,6 +157,41 @@ func TestResourceProjectAdminSetsAndListReflects(t *testing.T) {
 	}
 	if resp.Sandboxes[0].ProjectID != f.projectID {
 		t.Errorf("sandbox project_id = %q, want %q", resp.Sandboxes[0].ProjectID, f.projectID)
+	}
+}
+
+// TestResourceProjectCrossOrgIsolation locks the per-org keying invariant
+// directly at the store: after alice's org tags a sandbox, bob's org never sees
+// that tag for the same resource id, and a tag bob's org sets for the same id is
+// independent. This is defense in depth in case the handler-level project
+// validation is ever bypassed or refactored.
+func TestResourceProjectCrossOrgIsolation(t *testing.T) {
+	f := newResourceProjectsFixture(t)
+	ctx := context.Background()
+
+	// Alice's org tags the sandbox with its project.
+	pw := f.req(t, "PUT", "/console/sandboxes/"+f.sandboxID+"/project",
+		`{"project_id":"`+f.projectID+`"}`, f.adminAcct, f.aliceOrg)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("alice PUT status = %d, want 200; body=%s", pw.Code, pw.Body.String())
+	}
+
+	// Bob's org must NOT see alice's tag for the same resource id.
+	got, err := f.resProj.Project(ctx, f.bobOrg, "sandbox", f.sandboxID)
+	if err != nil {
+		t.Fatalf("Project(bobOrg): %v", err)
+	}
+	if got != "" {
+		t.Fatalf("bob's org sees alice's tag %q for the same sandbox id; per-org keying leaked", got)
+	}
+
+	// Alice's tag is intact.
+	aliceTag, err := f.resProj.Project(ctx, f.aliceOrg, "sandbox", f.sandboxID)
+	if err != nil {
+		t.Fatalf("Project(aliceOrg): %v", err)
+	}
+	if aliceTag != f.projectID {
+		t.Fatalf("alice tag = %q, want %q", aliceTag, f.projectID)
 	}
 }
 
