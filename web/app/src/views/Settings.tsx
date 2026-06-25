@@ -184,7 +184,7 @@ function SecurityTab() {
                 <th scope="col">Label</th>
                 <th scope="col">Created</th>
                 <th scope="col">Status</th>
-                <th scope="col"></th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -274,7 +274,12 @@ export function Settings() {
     <div>
       <h2>Settings</h2>
       <Tabs tabs={TABS} active={activeTab} onChange={setActiveTab} ariaLabel="Settings" />
-      <div style={{ marginTop: 'var(--space-6)' }}>
+      <div
+        id={`panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`tab-${activeTab}`}
+        style={{ marginTop: 'var(--space-6)' }}
+      >
         {activeTab === 'profile' && <ProfileTab />}
         {activeTab === 'security' && <SecurityTab />}
         {activeTab === 'appearance' && <AppearanceTab />}
