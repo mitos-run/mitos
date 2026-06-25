@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"mitos.run/mitos/internal/apierr"
@@ -40,6 +41,12 @@ var builtinRoles = map[saas.Role]bool{
 // custom role name returns an EMPTY map (deny by default), not an error. A
 // MemberRole lookup error propagates unchanged.
 func (c *Console) permissionsFor(ctx context.Context, accountID, orgID string) (map[saas.Permission]bool, error) {
+	// Fail closed: without an account service we cannot resolve a role, so we
+	// deny rather than panic. Production always wires Accounts; this guards a
+	// misconfigured Console.
+	if c.deps.Accounts == nil {
+		return nil, fmt.Errorf("permissionsFor: no account service is configured")
+	}
 	role, err := c.deps.Accounts.MemberRole(ctx, accountID, orgID)
 	if err != nil {
 		return nil, err

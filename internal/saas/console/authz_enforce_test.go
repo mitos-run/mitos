@@ -118,6 +118,17 @@ func (ef *enforceFixture) do(t *testing.T, method, target, body, acct, org strin
 	return w
 }
 
+// TestEnforceMemberCannotReachBillingPortal verifies that the billing-portal
+// link is gated on billing.manage: a member (no billing.manage) gets 403 before
+// any portal lookup, so the manage-subscription surface is not reachable.
+func TestEnforceMemberCannotReachBillingPortal(t *testing.T) {
+	ef := newEnforceFixture(t)
+	w := ef.do(t, "GET", "/console/billing/portal", "", ef.memberAcct, ef.ownerOrg)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("member GET /console/billing/portal = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
 // TestEnforceMemberCannotManageSecrets verifies that a caller with RoleMember
 // (which has PermUseResources and PermReadOnly, but NOT PermManageSecrets)
 // receives 403 on POST /console/secrets.
