@@ -18,6 +18,7 @@ import type { Capabilities } from '../api'
 export function AppShell() {
   const { data: caps } = useCapabilities()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
 
   // Refs for focus management.
   const navRef = useRef<HTMLElement>(null)
@@ -40,6 +41,18 @@ export function AppShell() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  // Toggle the command palette on Cmd-K / Ctrl-K.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   // Focus management: move focus into the nav when the drawer opens;
@@ -121,7 +134,7 @@ export function AppShell() {
         <Outlet />
       </main>
 
-      <CommandPalette caps={caps} />
+      <CommandPalette caps={caps} open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   )
 }

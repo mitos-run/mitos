@@ -1,7 +1,6 @@
-// Cmd-K command palette: fuzzy navigation to any visible route. Opens on
-// Cmd/Ctrl-K, filters as you type, navigates on Enter or click. Actions (fork a
-// sandbox, create a key) are added by later phases as those flows land; this B0
-// version is navigation-complete.
+// Cmd-K command palette: fuzzy navigation to any visible route. Controlled
+// component: open state and the Cmd-K shortcut are owned by AppShell; the
+// palette renders when open is true and reports closes via onOpenChange.
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { visibleRoutes } from './routes'
@@ -19,38 +18,29 @@ export function fuzzyMatch(query: string, label: string): boolean {
   return i === q.length
 }
 
-export function CommandPalette({ caps }: { caps: Capabilities }) {
-  const [open, setOpen] = useState(false)
+export function CommandPalette({ caps, open, onOpenChange }: { caps: Capabilities; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [query, setQuery] = useState('')
   const navigate = useNavigate()
   const routes = useMemo(() => visibleRoutes(caps), [caps])
   const results = useMemo(() => routes.filter((r) => fuzzyMatch(query, r.label)), [routes, query])
 
+  // Reset the filter each time the palette opens.
+  useEffect(() => { if (open) setQuery('') }, [open])
+
+  // Escape closes (the input has focus, so a window listener is enough here).
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setOpen((v) => {
-          if (!v) setQuery('')
-          return !v
-        })
-      }
-      if (e.key === 'Escape') setOpen(false)
-    }
+    if (!open) return
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onOpenChange(false) }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open, onOpenChange])
 
   if (!open) return null
 
-  function go(path: string) {
-    setOpen(false)
-    setQuery('')
-    void navigate({ to: path })
-  }
+  function go(path: string) { onOpenChange(false); setQuery(''); void navigate({ to: path }) }
 
   return (
-    <div role="dialog" aria-label="Command palette" className="palette-backdrop" onClick={() => setOpen(false)}>
+    <div role="dialog" aria-label="Command palette" className="palette-backdrop" onClick={() => onOpenChange(false)}>
       <div className="palette" onClick={(e) => e.stopPropagation()}>
         <input
           autoFocus
@@ -58,9 +48,7 @@ export function CommandPalette({ caps }: { caps: Capabilities }) {
           placeholder="Jump to..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && results[0]) go(results[0].path)
-          }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && results[0]) go(results[0].path) }}
         />
         <ul>
           {results.map((r) => (
