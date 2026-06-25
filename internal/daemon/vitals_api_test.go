@@ -106,9 +106,15 @@ func TestForkRecordsVitalsLabels(t *testing.T) {
 }
 
 // TestHandleNodeVitals_Batch drives the node-level vitals batch endpoint the
-// control-plane sampler scrapes (issue #164 Phase 1.a): it returns one
-// LabeledVitals per guest-reachable sandbox on this forkd, and a sandbox whose
+// control-plane sampler scrapes (issue #164 Phase 1.a): it returns one numeric
+// NodeVitalsEntry per guest-reachable sandbox on this forkd, and a sandbox whose
 // guest is unreachable is skipped+counted, never failing the report.
+//
+// SECRET HYGIENE (the point of this test): this endpoint is UNAUTHENTICATED, so it
+// must carry ONLY the numeric vitals plus a numeric process_count, NEVER the
+// per-process table. The assertions below confirm process_count == 2 for the
+// 2-process fixture and that the serialized JSON does not contain any per-process
+// command string ("agent"/"python") or per-process key (comm/pid/state).
 func TestHandleNodeVitals_Batch(t *testing.T) {
 	dir := t.TempDir()
 	api := NewSandboxAPI(dir)
@@ -148,6 +154,17 @@ func TestHandleNodeVitals_Batch(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+
+	// Regression guard: the raw JSON wire MUST NOT contain any per-process command
+	// name or per-process field key. The unauthenticated node endpoint leaks only
+	// numeric vitals plus a count; re-embedding the table would re-leak comm/pid/state.
+	raw := rec.Body.String()
+	for _, forbidden := range []string{"agent", "python", "comm", `"pid"`, `"state"`, `"rss_kb"`, "processes"} {
+		if strings.Contains(raw, forbidden) {
+			t.Errorf("node vitals JSON leaks per-process token %q; body = %s", forbidden, raw)
+		}
+	}
+
 	var got NodeVitals
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -165,8 +182,9 @@ func TestHandleNodeVitals_Batch(t *testing.T) {
 	if e.Vitals.StealFraction != 0.2 || e.Vitals.BalloonReclaimedKB != 512000 {
 		t.Errorf("vitals not carried: %+v", e.Vitals)
 	}
-	if len(e.Vitals.Processes) != 2 {
-		t.Errorf("process count = %d, want 2", len(e.Vitals.Processes))
+	// Only the numeric process_count crosses the wire, never the table.
+	if e.Vitals.ProcessCount != 2 {
+		t.Errorf("process_count = %d, want 2", e.Vitals.ProcessCount)
 	}
 }
 

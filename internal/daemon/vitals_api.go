@@ -59,7 +59,7 @@ func (api *SandboxAPI) vitalsLabelsFor(sandboxID string) VitalsLabels {
 	return l
 }
 
-// NodeVitals is the GET /v1/vitals/node response: one LabeledVitals per sandbox
+// NodeVitals is the GET /v1/vitals/node response: one NodeVitalsEntry per sandbox
 // this forkd currently serves whose guest answered, so the control plane can
 // publish org/pool-labeled guest health metrics WITHOUT holding each sandbox's
 // per-sandbox bearer token. It is node-scoped operational data (the same access
@@ -68,25 +68,52 @@ func (api *SandboxAPI) vitalsLabelsFor(sandboxID string) VitalsLabels {
 // count is the number of sandboxes whose guest was unreachable this scrape (a
 // degradation signal); no sandbox id or error text is carried for them.
 //
-// SECRET HYGIENE: every entry carries ONLY the control-plane labels (claim, pool,
-// workspace, namespace; all k8s object names) and the numeric guest vitals plus
-// the program-name process table. No argv, env, secret, or token is present, and
-// the control-plane sampler that consumes this exports ONLY numeric fields and
-// the org/pool labels, never any process string.
+// SECRET HYGIENE: this node-scoped endpoint is UNAUTHENTICATED, so it carries ONLY
+// the control-plane labels (claim, pool, workspace, namespace; all k8s object
+// names), the numeric guest vitals (steal, balloon, used/total memory), and a
+// numeric process COUNT. It deliberately does NOT carry the per-process table:
+// no process command name, pid, state, rss, argv, env, secret, or token is on the
+// wire here. The full per-process table stays behind the per-sandbox bearer
+// authenticated /v1/vitals (used by kubectl mitos ps --processes), never on this
+// node batch. The control-plane sampler that consumes this reads ONLY the numeric
+// fields (including process_count) and the org/pool labels.
 type NodeVitals struct {
 	Sandboxes []NodeVitalsEntry `json:"sandboxes"`
 	Skipped   int               `json:"skipped"`
 }
 
-// NodeVitalsEntry is one sandbox's labeled vitals in the node report, plus its
-// forkd SandboxID. The SandboxID is the husk pod name; it is NOT a secret (it
-// already flows through /v1/metering) and lets the control-plane sampler resolve
-// the trusted mitos.run/org label off the husk pod, exactly as the usage scraper
-// does. The sampler uses the SandboxID ONLY to resolve org; it never becomes a
-// metric label, so it adds no cardinality.
+// NodeVitalsEntry is one sandbox's numeric vitals in the node report, plus its
+// control-plane labels and forkd SandboxID. The SandboxID is the husk pod name;
+// it is NOT a secret (it already flows through /v1/metering) and lets the
+// control-plane sampler resolve the trusted mitos.run/org label off the husk pod,
+// exactly as the usage scraper does. The sampler uses the SandboxID ONLY to
+// resolve org; it never becomes a metric label, so it adds no cardinality.
+//
+// This struct intentionally carries the NUMERIC vitals inline plus a numeric
+// ProcessCount, and NEVER embeds the guest process table (vsock.ProcessEntry). A
+// per-process command name, pid, state, or rss CANNOT appear on this unauthenticated
+// node-scoped endpoint by construction: there is no field on the wire to hold one.
+// ProcessCount is the LENGTH of the guest's process table, the only process signal
+// the control-plane sampler needs.
 type NodeVitalsEntry struct {
 	SandboxID string `json:"sandbox_id"`
-	LabeledVitals
+	VitalsLabels
+	Vitals NodeVitalsNumbers `json:"vitals"`
+}
+
+// NodeVitalsNumbers is the numeric-only guest vitals carried on the node-scoped
+// batch endpoint: it mirrors the numeric fields of vsock.VitalsResponse but
+// replaces the per-process table with a numeric ProcessCount. It exists so the
+// unauthenticated node endpoint physically cannot serialize a process command,
+// pid, state, or rss: the type has no field for one.
+type NodeVitalsNumbers struct {
+	StealFraction      float64 `json:"steal_fraction"`
+	MemTotalKB         uint64  `json:"mem_total_kb"`
+	MemAvailableKB     uint64  `json:"mem_available_kb"`
+	MemUsedKB          uint64  `json:"mem_used_kb"`
+	BalloonReclaimedKB uint64  `json:"balloon_reclaimed_kb"`
+	// ProcessCount is len(guest process table), never a per-process field.
+	ProcessCount int `json:"process_count"`
 }
 
 // registeredSandboxIDs returns the ids of the sandboxes with a registered vsock
@@ -102,12 +129,19 @@ func (api *SandboxAPI) registeredSandboxIDs() []string {
 	return ids
 }
 
-// handleNodeVitals returns one LabeledVitals per sandbox this forkd serves, for
-// the control-plane vitals sampler (issue #164 Phase 1.a). A sandbox whose guest
-// is unreachable is SKIPPED and counted, never failing the whole report: one
-// stuck guest must not blind the operator to the healthy fleet. It is mounted on
-// the operational mux (no per-sandbox bearer) because it is node-scoped operator
-// telemetry, like /v1/metering; it returns no secret values.
+// handleNodeVitals returns one numeric-only NodeVitalsEntry per sandbox this forkd
+// serves, for the control-plane vitals sampler (issue #164 Phase 1.a). A sandbox
+// whose guest is unreachable is SKIPPED and counted, never failing the whole
+// report: one stuck guest must not blind the operator to the healthy fleet. It is
+// mounted on the operational mux (no per-sandbox bearer) because it is node-scoped
+// operator telemetry, like /v1/metering.
+//
+// SECRET HYGIENE: this endpoint is UNAUTHENTICATED, so the per-process table is
+// stripped at the source here. We read the guest snapshot, take ONLY its numeric
+// fields plus len(snapshot.Processes) as ProcessCount, and write the dedicated
+// NodeVitalsNumbers struct, which has no field for a process command, pid, state,
+// or rss. The full process table is served only by the bearer-authenticated
+// /v1/vitals.
 func (api *SandboxAPI) handleNodeVitals(w http.ResponseWriter, r *http.Request) {
 	out := NodeVitals{}
 	for _, id := range api.registeredSandboxIDs() {
@@ -119,10 +153,16 @@ func (api *SandboxAPI) handleNodeVitals(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		out.Sandboxes = append(out.Sandboxes, NodeVitalsEntry{
-			SandboxID: id,
-			LabeledVitals: LabeledVitals{
-				VitalsLabels: api.vitalsLabelsFor(id),
-				Vitals:       v,
+			SandboxID:    id,
+			VitalsLabels: api.vitalsLabelsFor(id),
+			Vitals: NodeVitalsNumbers{
+				StealFraction:      v.StealFraction,
+				MemTotalKB:         v.MemTotalKB,
+				MemAvailableKB:     v.MemAvailableKB,
+				MemUsedKB:          v.MemUsedKB,
+				BalloonReclaimedKB: v.BalloonReclaimedKB,
+				// Strip the table: only its LENGTH crosses this unauthenticated wire.
+				ProcessCount: len(v.Processes),
 			},
 		})
 	}

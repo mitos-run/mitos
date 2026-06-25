@@ -34,7 +34,9 @@ type scrapedVitals struct {
 // used ONLY to resolve the trusted org label; it never becomes a metric label.
 // Pool is a control-plane object name (the SandboxPool), a bounded metric label.
 // The numeric vitals are the only values exported; no process command, argv,
-// pid, or env field is decoded or exported.
+// pid, or env field is decoded or exported. The node endpoint serves a NUMERIC
+// process_count (never the per-process table), so this struct decodes that
+// number directly and never holds any process object.
 type scrapedVitalsEntry struct {
 	SandboxID string `json:"sandbox_id"`
 	Pool      string `json:"pool"`
@@ -42,11 +44,10 @@ type scrapedVitalsEntry struct {
 		StealFraction      float64 `json:"steal_fraction"`
 		MemUsedKB          uint64  `json:"mem_used_kb"`
 		BalloonReclaimedKB uint64  `json:"balloon_reclaimed_kb"`
-		Processes          []struct {
-			// Intentionally empty: only the COUNT (len) of the process list is read,
-			// never a per-process field, so no command/argv/pid/env can leak into a
-			// metric. The slice length is the process_count signal.
-		} `json:"processes"`
+		// ProcessCount is the LENGTH of the guest's process table, decoded as a
+		// number. The node endpoint never sends a per-process command/argv/pid/state,
+		// and this struct has no field to receive one, so nothing can leak into a metric.
+		ProcessCount int `json:"process_count"`
 	} `json:"vitals"`
 }
 
@@ -75,9 +76,10 @@ type vitalsAgg struct {
 // attributed to a guessed or empty org, so an unbillable/unknown sandbox cannot
 // pollute another org's series. It is PURE and unit-testable without a cluster.
 //
-// SECRET HYGIENE: it reads only the numeric vitals and the process-list LENGTH;
-// it never touches a process command, argv, pid, or env. The only strings it
-// emits are the org and pool labels, both bounded control-plane values.
+// SECRET HYGIENE: it reads only the numeric vitals and the numeric process_count;
+// it never touches a process command, argv, pid, or env (the node endpoint does
+// not even send one). The only strings it emits are the org and pool labels, both
+// bounded control-plane values.
 func aggregateVitals(entries []scrapedVitalsEntry, orgFor func(sandboxID string) (string, bool)) (map[vitalsKey]vitalsAgg, int) {
 	out := map[vitalsKey]vitalsAgg{}
 	unattributed := 0
@@ -96,7 +98,7 @@ func aggregateVitals(entries []scrapedVitalsEntry, orgFor func(sandboxID string)
 		}
 		a.sumBalloonBytes += e.Vitals.BalloonReclaimedKB * 1024
 		a.sumUsedBytes += e.Vitals.MemUsedKB * 1024
-		a.sumProcessCount += len(e.Vitals.Processes)
+		a.sumProcessCount += e.Vitals.ProcessCount
 		out[k] = a
 	}
 	return out, unattributed

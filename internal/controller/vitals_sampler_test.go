@@ -20,7 +20,7 @@ func mkEntry(sandboxID, pool string, steal float64, balloonKB, usedKB uint64, n 
 	e.Vitals.StealFraction = steal
 	e.Vitals.BalloonReclaimedKB = balloonKB
 	e.Vitals.MemUsedKB = usedKB
-	e.Vitals.Processes = make([]struct{}, n) //nolint:staticcheck // length is the only signal
+	e.Vitals.ProcessCount = n // the numeric count is the only process signal
 	return e
 }
 
@@ -160,10 +160,11 @@ func TestVitalsMetricsObserve_ResetDropsStaleSeries(t *testing.T) {
 }
 
 // TestVitalsScrape_DecodesNodeReport proves the scraper decodes forkd's
-// /v1/vitals/node JSON wire shape (sandbox_id, pool, numeric vitals, process
-// list length) and the unreachable-guest skip count, against an httptest server.
+// /v1/vitals/node JSON wire shape (sandbox_id, pool, numeric vitals, numeric
+// process_count) and the unreachable-guest skip count, against an httptest server.
+// The node endpoint sends a numeric process_count, never a per-process table.
 func TestVitalsScrape_DecodesNodeReport(t *testing.T) {
-	const body = `{"sandboxes":[{"sandbox_id":"sb-a1","pool":"pool-x","vitals":{"steal_fraction":0.25,"mem_used_kb":1000,"balloon_reclaimed_kb":100,"processes":[{"pid":1,"comm":"agent"},{"pid":2,"comm":"python"}]}}],"skipped":3}`
+	const body = `{"sandboxes":[{"sandbox_id":"sb-a1","pool":"pool-x","vitals":{"steal_fraction":0.25,"mem_used_kb":1000,"balloon_reclaimed_kb":100,"process_count":2}}],"skipped":3}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != nodeVitalsPath {
 			http.NotFound(w, r)
@@ -192,8 +193,8 @@ func TestVitalsScrape_DecodesNodeReport(t *testing.T) {
 	if e.Vitals.StealFraction != 0.25 || e.Vitals.MemUsedKB != 1000 {
 		t.Errorf("vitals wrong: %+v", e.Vitals)
 	}
-	if len(e.Vitals.Processes) != 2 {
-		t.Errorf("process count = %d, want 2 (length only, no command read)", len(e.Vitals.Processes))
+	if e.Vitals.ProcessCount != 2 {
+		t.Errorf("process_count = %d, want 2 (numeric count only, no command read)", e.Vitals.ProcessCount)
 	}
 }
 
