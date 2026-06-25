@@ -155,6 +155,49 @@ func TestSyncAddsReadyRemovesTerminated(t *testing.T) {
 	}
 }
 
+// TestSyncCarriesOrgAndAudienceFields verifies that a Sync carrying OrgID,
+// Network, ForwardAuthURL, AllowedPrincipals, and AllowedEmailDomains on a
+// ClaimState round-trips those fields through to the Route returned by Lookup.
+func TestSyncCarriesOrgAndAudienceFields(t *testing.T) {
+	rt := NewRouteTable()
+	rt.Sync([]ClaimState{
+		{
+			Label:               "acme-app",
+			SandboxID:           "sbx-org",
+			NodeEndpoint:        "10.0.1.1:9091",
+			Port:                8080,
+			Token:               "tok",
+			Sharing:             "private",
+			OrgID:               "acme",
+			Network:             []string{"10.0.0.0/8"},
+			ForwardAuthURL:      "https://auth.acme.com/verify",
+			AllowedPrincipals:   []string{"alice@acme.com"},
+			AllowedEmailDomains: []string{"acme.com"},
+			Ready:               true,
+		},
+	})
+
+	r, ok := rt.Lookup("acme-app")
+	if !ok {
+		t.Fatal("expected route present after Sync")
+	}
+	if r.OrgID != "acme" {
+		t.Errorf("OrgID: got %q, want %q", r.OrgID, "acme")
+	}
+	if len(r.Network) != 1 || r.Network[0] != "10.0.0.0/8" {
+		t.Errorf("Network: got %v, want [10.0.0.0/8]", r.Network)
+	}
+	if r.ForwardAuthURL != "https://auth.acme.com/verify" {
+		t.Errorf("ForwardAuthURL: got %q, want %q", r.ForwardAuthURL, "https://auth.acme.com/verify")
+	}
+	if len(r.AllowedPrincipals) != 1 || r.AllowedPrincipals[0] != "alice@acme.com" {
+		t.Errorf("AllowedPrincipals: got %v, want [alice@acme.com]", r.AllowedPrincipals)
+	}
+	if len(r.AllowedEmailDomains) != 1 || r.AllowedEmailDomains[0] != "acme.com" {
+		t.Errorf("AllowedEmailDomains: got %v, want [acme.com]", r.AllowedEmailDomains)
+	}
+}
+
 func TestRouteTableKeyedByLabel(t *testing.T) {
 	tbl := NewRouteTable()
 	tbl.Sync([]ClaimState{

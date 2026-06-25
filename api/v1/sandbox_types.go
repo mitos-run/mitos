@@ -194,6 +194,27 @@ type SandboxExpose struct {
 	// +kubebuilder:default=private
 	// +optional
 	Sharing string `json:"sharing,omitempty"`
+	// Network is a CIDR allowlist evaluated on every request before any
+	// identity check. An empty list means all source IPs are allowed.
+	// +optional
+	Network []string `json:"network,omitempty"`
+	// ForwardAuthURL is an optional external forward-auth endpoint. When set
+	// the proxy makes a subrequest to this URL; a non-2xx response is returned
+	// to the client and a 2xx response's identity headers are trusted as the
+	// caller identity.
+	// +optional
+	ForwardAuthURL string `json:"forwardAuthURL,omitempty"`
+	// AllowedPrincipals is an optional audience allowlist by email. When set
+	// only callers whose verified email is in this list may access the route.
+	// Rejected as a misconfiguration on the public tier (no identity).
+	// +optional
+	AllowedPrincipals []string `json:"allowedPrincipals,omitempty"`
+	// AllowedEmailDomains is an optional audience allowlist by email domain
+	// (exact, case-folded, registrable domain, not a suffix match). Only
+	// callers with a verified email in one of these domains may access the
+	// route. Unverified email is rejected.
+	// +optional
+	AllowedEmailDomains []string `json:"allowedEmailDomains,omitempty"`
 }
 
 // SandboxBudget is the capability budget for runtime self-service (v2-spec

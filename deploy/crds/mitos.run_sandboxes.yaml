@@ -263,6 +263,30 @@ spec:
                   Expose edge proxy at a per-sandbox subdomain. Optional; absent means the
                   sandbox is not exposed.
                 properties:
+                  allowedEmailDomains:
+                    description: |-
+                      AllowedEmailDomains is an optional audience allowlist by email domain
+                      (exact, case-folded, registrable domain, not a suffix match). Only
+                      callers with a verified email in one of these domains may access the
+                      route. Unverified email is rejected.
+                    items:
+                      type: string
+                    type: array
+                  allowedPrincipals:
+                    description: |-
+                      AllowedPrincipals is an optional audience allowlist by email. When set
+                      only callers whose verified email is in this list may access the route.
+                      Rejected as a misconfiguration on the public tier (no identity).
+                    items:
+                      type: string
+                    type: array
+                  forwardAuthURL:
+                    description: |-
+                      ForwardAuthURL is an optional external forward-auth endpoint. When set
+                      the proxy makes a subrequest to this URL; a non-2xx response is returned
+                      to the client and a 2xx response's identity headers are trusted as the
+                      caller identity.
+                    type: string
                   label:
                     description: |-
                       Label is the single subdomain label the route is served at (for example
@@ -270,6 +294,13 @@ spec:
                     maxLength: 63
                     pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                     type: string
+                  network:
+                    description: |-
+                      Network is a CIDR allowlist evaluated on every request before any
+                      identity check. An empty list means all source IPs are allowed.
+                    items:
+                      type: string
+                    type: array
                   port:
                     description: Port is the guest TCP port to expose.
                     format: int32
