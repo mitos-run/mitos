@@ -195,6 +195,53 @@ func (s *AccountService) ListMembers(ctx context.Context, accountID, orgID strin
 	return members, nil
 }
 
+// ProfileUpdate carries the fields a caller may change on an account. Only
+// non-empty fields are applied; an empty field leaves the stored value
+// unchanged.
+type ProfileUpdate struct {
+	DisplayName string
+	Timezone    string
+	Locale      string
+}
+
+// Profile returns the account and its memberships for accountID. It is the
+// read side of the profile surface: the console profile page calls this to
+// populate the form.
+func (s *AccountService) Profile(ctx context.Context, accountID string) (Account, []Membership, error) {
+	acct, err := s.store.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("profile: %w", err)
+	}
+	mems, err := s.store.ListMemberships(ctx, accountID)
+	if err != nil {
+		return Account{}, nil, fmt.Errorf("profile: list memberships: %w", err)
+	}
+	return acct, mems, nil
+}
+
+// UpdateProfile applies non-empty fields from u to the account identified by
+// accountID, persists the result, and returns the updated account. If the
+// account does not exist, ErrNotFound is returned.
+func (s *AccountService) UpdateProfile(ctx context.Context, accountID string, u ProfileUpdate) (Account, error) {
+	acct, err := s.store.GetAccount(ctx, accountID)
+	if err != nil {
+		return Account{}, fmt.Errorf("update profile: %w", err)
+	}
+	if u.DisplayName != "" {
+		acct.DisplayName = u.DisplayName
+	}
+	if u.Timezone != "" {
+		acct.Timezone = u.Timezone
+	}
+	if u.Locale != "" {
+		acct.Locale = u.Locale
+	}
+	if err := s.store.PutAccount(ctx, acct); err != nil {
+		return Account{}, fmt.Errorf("update profile: store account: %w", err)
+	}
+	return acct, nil
+}
+
 // RevokeKey revokes a key by id on behalf of accountID, enforcing that the key
 // belongs to an org the account is a member of. This prevents an account from
 // revoking another org's key even if it learns the key id.
