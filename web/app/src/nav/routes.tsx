@@ -16,6 +16,7 @@ import { Templates } from '../views/Templates'
 import { Billing } from '../views/Billing'
 import { Members } from '../views/Members'
 import { Projects } from '../views/Projects'
+import { Settings } from '../views/Settings'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -43,7 +44,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
   { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Usage /> },
   { path: '/billing', label: 'Billing', group: 'Govern', element: () => <Billing />, when: (c) => c.billing },
-  { path: '/settings', label: 'Settings', group: 'Settings', element: () => <Placeholder title="Settings" endpoint="/console/capabilities" phase="B2" /> },
+  { path: '/settings', label: 'Settings', group: 'Settings', element: () => <Settings /> },
 ]
 
 export function visibleRoutes(caps: Capabilities): RouteDef[] {

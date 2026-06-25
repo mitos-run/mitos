@@ -545,3 +545,31 @@ textarea::placeholder {
     overflow-x: auto;
   }
 }
+
+/* Settings layout: vertical rhythm for settings sections. */
+.settings-section {
+  margin-bottom: var(--space-7);
+}
+
+.settings-section h3 {
+  margin-bottom: var(--space-4);
+}
+
+/* Density override: compact tightens table cell padding. */
+html[data-density="compact"] .tbl th,
+html[data-density="compact"] .tbl td {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* Reduced-motion override: JS-controlled complement to prefers-reduced-motion. */
+html[data-reduce-motion="1"] * {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* Mobile: settings form fills viewport width. */
+@media (max-width: 768px) {
+  .settings-section form {
+    max-width: 100%;
+  }
+}

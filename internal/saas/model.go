@@ -33,6 +33,16 @@ type Account struct {
 	CreatedAt time.Time
 	// PersonalOrgID is the id of the org created alongside the account.
 	PersonalOrgID string
+	// DisplayName is the human-readable name shown in the console. Optional.
+	DisplayName string
+	// Timezone is the IANA timezone string preferred by the account holder (for
+	// example "Europe/Berlin"). Optional; empty means the console falls back to
+	// browser-local time.
+	Timezone string
+	// Locale is the BCP 47 language tag for the account holder (for example
+	// "en-GB"). Optional; empty means the console falls back to the browser
+	// locale.
+	Locale string
 }
 
 // Organization is the unit of ownership, billing, and quota. Every sandbox,

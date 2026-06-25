@@ -498,6 +498,11 @@ func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
 		{"GET", "/console/projects"},
 		{"POST", "/console/projects"},
 		{"POST", "/console/members/someacct/role"},
+		{"GET", "/console/account"},
+		{"PATCH", "/console/account"},
+		{"GET", "/console/account/sessions"},
+		{"DELETE", "/console/account/sessions/x"},
+		{"DELETE", "/console/account/sessions"},
 	}
 	for _, ep := range endpoints {
 		// No WithCaller: the request carries no org context.

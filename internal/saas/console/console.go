@@ -52,6 +52,11 @@ type Deps struct {
 	ForkTree    ForkTreeSource
 	Projects    ProjectStore
 	Portal      PortalLinker
+	// Sessions is the account-scoped session-listing seam. It is used by the
+	// account-session endpoints (list, revoke one, revoke all) and defaults to a
+	// no-op in-memory implementation so the BFF is safe to instantiate without a
+	// real session store.
+	Sessions SessionLister
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -95,6 +100,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
+	}
+	if deps.Sessions == nil {
+		deps.Sessions = noopSessionLister{}
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
@@ -150,6 +158,11 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/projects", c.handleListProjects)
 	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
 	mux.HandleFunc("POST /console/members/{accountID}/role", c.handleSetMemberRole)
+	mux.HandleFunc("GET /console/account", c.handleGetAccount)
+	mux.HandleFunc("PATCH /console/account", c.handlePatchAccount)
+	mux.HandleFunc("GET /console/account/sessions", c.handleListSessions)
+	mux.HandleFunc("DELETE /console/account/sessions/{id}", c.handleRevokeSession)
+	mux.HandleFunc("DELETE /console/account/sessions", c.handleRevokeAllSessions)
 	c.mux = mux
 }
 

@@ -218,6 +218,22 @@ func TestSetMemberRoleAuthorization(t *testing.T) {
 	}
 }
 
+// TestUpdateProfile asserts UpdateProfile persists display name, timezone, and
+// locale, and that Profile returns the updated values alongside memberships.
+func TestUpdateProfile(t *testing.T) {
+	svc, _, ownerID, _ := seedOrgWithOwnerAndMember(t)
+	if _, err := svc.UpdateProfile(context.Background(), ownerID, ProfileUpdate{DisplayName: "Alice A", Timezone: "Europe/Berlin", Locale: "en-GB"}); err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+	acct, _, err := svc.Profile(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("Profile: %v", err)
+	}
+	if acct.DisplayName != "Alice A" || acct.Timezone != "Europe/Berlin" || acct.Locale != "en-GB" {
+		t.Fatalf("profile not updated: %+v", acct)
+	}
+}
+
 // TestListMembersReturnsOrgMembers asserts a member can list its org's members
 // and that another org's members are never included.
 func TestListMembersReturnsOrgMembers(t *testing.T) {
