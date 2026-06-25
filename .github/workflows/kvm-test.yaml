@@ -3375,3 +3375,70 @@ jobs:
           echo "================================"
           echo "  Jailer-boot proof passed"
           echo "================================"
+
+      # Seccomp enforcement proof (issue #353): the VMM is the host-facing edge
+      # of the isolation boundary, and Firecracker's built-in BPF filter is the
+      # second wall behind KVM. This is the defense-in-depth analog of the husk
+      # PSA admission test: it proves, on a REAL Firecracker on KVM, that the VMM
+      # runs under a seccomp FILTER (SECCOMP_MODE_FILTER, /proc Seccomp: 2) so a
+      # disallowed syscall is blocked, and that the filter is absent ONLY when
+      # explicitly disabled with --no-seccomp (the negative control, mode 0).
+      # Mitos never passes --no-seccomp and fails closed if asked to
+      # (internal/firecracker assertSeccompEnforced), so production always gets
+      # mode 2. Load-bearing (no continue-on-error): it needs only the VMM to
+      # start, not a full snapshot restore.
+      - name: Seccomp filter enforced on the Firecracker VMM (issue #353)
+        timeout-minutes: 3
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          seccomp_mode() {
+            # Echo the Seccomp mode from /proc/<pid>/status (0 none, 1 strict,
+            # 2 filter), or empty if the field/pid is gone.
+            grep -E '^Seccomp:' "/proc/$1/status" 2>/dev/null | awk '{print $2}'
+          }
+
+          # Default launch: the built-in production filter must be installed.
+          rm -f /tmp/fc-seccomp.sock
+          /usr/local/bin/firecracker --api-sock /tmp/fc-seccomp.sock \
+            > /tmp/fc-seccomp.log 2>&1 &
+          FC_PID=$!
+          for _ in $(seq 1 20); do
+            [ -n "$(seccomp_mode "$FC_PID")" ] && break
+            sleep 0.5
+          done
+          MODE="$(seccomp_mode "$FC_PID")"
+          echo "default-launch VMM Seccomp mode = '${MODE}' (2 = SECCOMP_MODE_FILTER)"
+          sudo kill "$FC_PID" 2>/dev/null || true
+          if [ "$MODE" != "2" ]; then
+            echo "FAIL: the Firecracker VMM is NOT running under a seccomp filter (mode '${MODE}'); expected 2"
+            cat /tmp/fc-seccomp.log || true
+            exit 1
+          fi
+
+          # Negative control: --no-seccomp disables it (mode 0). This proves the
+          # assertion above actually distinguishes enforced from absent, so a
+          # green default-launch check is meaningful and not vacuous.
+          rm -f /tmp/fc-noseccomp.sock
+          /usr/local/bin/firecracker --no-seccomp --api-sock /tmp/fc-noseccomp.sock \
+            > /tmp/fc-noseccomp.log 2>&1 &
+          FC_PID2=$!
+          for _ in $(seq 1 20); do
+            [ -n "$(seccomp_mode "$FC_PID2")" ] && break
+            sleep 0.5
+          done
+          MODE2="$(seccomp_mode "$FC_PID2")"
+          echo "--no-seccomp VMM Seccomp mode = '${MODE2}' (expect 0)"
+          sudo kill "$FC_PID2" 2>/dev/null || true
+          if [ "$MODE2" != "0" ]; then
+            echo "FAIL: negative control did not show seccomp disabled (mode '${MODE2}'); the mode-2 assertion would be vacuous"
+            cat /tmp/fc-noseccomp.log || true
+            exit 1
+          fi
+
+          echo "==============================================="
+          echo "  Seccomp enforced by default (filter mode 2);"
+          echo "  absent only with --no-seccomp (mode 0)."
+          echo "  The VMM filter holds; a disallowed syscall is blocked."
+          echo "==============================================="
