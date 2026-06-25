@@ -90,6 +90,25 @@ configured. Order is stable (kube first).
 {{- end -}}
 
 {{/*
+Database DSN env entry shared by the gateway and console pods. When
+database.dsnSecretRef.name is set, it renders a single env var
+MITOS_DATABASE_DSN sourced from that Secret via secretKeyRef, so the DSN (which
+carries the database password) is NEVER placed in the rendered manifests as a
+plaintext value. When unset, it renders nothing, and the binary falls back to
+in-memory persistence (dev only). The rendered fragment is a list entry intended
+to be nindent'd into a container's env list.
+*/}}
+{{- define "mitos.database.env" -}}
+{{- if .Values.database.dsnSecretRef.name }}
+- name: MITOS_DATABASE_DSN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.dsnSecretRef.name | quote }}
+      key: {{ .Values.database.dsnSecretRef.key | default "dsn" | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 imagePullSecrets block shared by every workload pod spec.
 */}}
 {{- define "mitos.imagePullSecrets" -}}
