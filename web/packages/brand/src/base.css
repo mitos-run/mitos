@@ -40,6 +40,10 @@ h1, h2, h3 {
 
 code, kbd, pre, .mono { font-family: var(--mono); }
 
+/* Inline links default to the cyan signal. Styled links (.nav-link, .tbl a)
+   carry their own color via higher-specificity class rules and are unaffected. */
+a { color: var(--cyan); }
+
 /* Surfaces: elevation by the lightness ladder + a single hairline. Never a
    hairline AND a shadow on the same element. */
 .card {
@@ -571,5 +575,35 @@ html[data-reduce-motion="1"] * {
 @media (max-width: 768px) {
   .settings-section form {
     max-width: 100%;
+  }
+}
+
+/* Trust view: honest security posture banner (amber-accented) and posture
+   section layout. Colors are signal tokens only; no raw hex. */
+.trust-banner {
+  border: 1px solid var(--amber);
+  border-left: 4px solid var(--amber);
+  border-radius: var(--r-md);
+  padding: var(--space-5);
+  margin-bottom: var(--space-7);
+  background: color-mix(in srgb, var(--amber) 8%, var(--field-1));
+}
+
+.trust-banner-links {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-top: var(--space-4);
+}
+
+/* Posture section: vertically-spaced data residency or compliance block. */
+.trust-section {
+  margin-bottom: var(--space-7);
+}
+
+/* Mobile: trust banner padding tightens on narrow viewports. */
+@media (max-width: 768px) {
+  .trust-banner {
+    padding: var(--space-4);
   }
 }
