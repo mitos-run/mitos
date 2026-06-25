@@ -119,7 +119,7 @@ export function Roles() {
               <tr>
                 <th scope="col">Name</th>
                 <th scope="col">Permissions</th>
-                <th scope="col"></th>
+                <th scope="col"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
