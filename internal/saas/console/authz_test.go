@@ -14,9 +14,9 @@ import (
 // resolves from actual memberships. It returns the console, the account service,
 // and the in-memory store so tests can seed memberships and custom roles.
 type authzFixture struct {
-	con        *Console
-	accounts   *saas.AccountService
-	store      *saas.MemStore
+	con         *Console
+	accounts    *saas.AccountService
+	store       *saas.MemStore
 	customRoles *MemCustomRoleStore
 }
 
@@ -45,18 +45,11 @@ func TestAuthzAdminPermissions(t *testing.T) {
 	f := newAuthzFixture(t)
 	ctx := context.Background()
 
-	// Sign up and seed an admin into an org.
-	alice, aliceOrg, err := f.accounts.SignUp(ctx, "alice-authz@example.com")
-	if err != nil {
-		t.Fatalf("SignUp: %v", err)
-	}
-	// Change alice from owner to admin to test admin-specific permission set.
+	// Sign up an account and seed it as an admin of its own org.
 	admin, adminOrg, err := f.accounts.SignUp(ctx, "admin-authz@example.com")
 	if err != nil {
 		t.Fatalf("SignUp admin: %v", err)
 	}
-	_ = alice
-	_ = aliceOrg
 	if err := f.store.PutMembership(ctx, saas.Membership{
 		AccountID: admin.ID,
 		OrgID:     adminOrg.ID,
@@ -133,6 +126,31 @@ func TestAuthzCustomRoleAuditor(t *testing.T) {
 	}
 	if apiErr.Status != http.StatusForbidden {
 		t.Errorf("authorize status = %d, want 403", apiErr.Status)
+	}
+}
+
+// TestAuthzMemberRoleErrorIsInternalNotForbidden verifies the error-vs-deny
+// distinction: a caller whose role cannot be resolved (no membership in the
+// context org) must yield a 500, NOT a 403. A lookup failure must never be
+// silently masked as a clean deny.
+func TestAuthzMemberRoleErrorIsInternalNotForbidden(t *testing.T) {
+	f := newAuthzFixture(t)
+	ctx := context.Background()
+
+	// A real account, but with NO membership in the org we attach to the request.
+	user, _, err := f.accounts.SignUp(ctx, "stranger-authz@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r = r.WithContext(WithCaller(r.Context(), user.ID, "org-the-user-does-not-belong-to"))
+	_, _, apiErr, ok := f.con.authorize(r, saas.PermReadOnly)
+	if ok {
+		t.Fatal("authorize must not succeed when the role cannot be resolved")
+	}
+	if apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("authorize status = %d, want 500 (an unresolved role is an error, not a clean 403)", apiErr.Status)
 	}
 }
 
