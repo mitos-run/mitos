@@ -30,11 +30,13 @@ func (api *SandboxAPI) checkBearer(sandboxID string, r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(token)) == 1
 }
 
-// handleExpose reverse-proxies GET/POST traffic to a guest port over the vsock
-// tunnel. The path is /v1/sandboxes/{id}/expose/{port}/...; everything after the
-// port is forwarded to the guest daemon. Auth is the per-sandbox bearer
-// (checkBearer); the body-peeking requireBearer wrapper cannot front this route
-// because it proxies arbitrary and streaming HTTP.
+// handleExpose reverse-proxies traffic to a guest port over the vsock tunnel. It
+// proxies arbitrary HTTP methods (GET for SSE and browser traffic, POST and the
+// rest for agent calls); it is registered without a method restriction. The path
+// is /v1/sandboxes/{id}/expose/{port}/...; everything after the port is forwarded
+// to the guest daemon. Auth is the per-sandbox bearer (checkBearer); the
+// body-peeking requireBearer wrapper cannot front this route because it proxies
+// arbitrary and streaming HTTP.
 func (api *SandboxAPI) handleExpose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	portStr := r.PathValue("port")

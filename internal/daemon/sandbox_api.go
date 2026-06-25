@@ -599,6 +599,12 @@ func (api *SandboxAPI) Handler() http.Handler {
 	// body-peeked; checkBearer enforces the same per-sandbox token gate. The
 	// trailing-slash pattern captures every sub-path under the port.
 	outer.HandleFunc("/v1/sandboxes/{id}/expose/{port}/", api.handleExpose)
+	// Also match the bare (no trailing slash) form so a request to the app root
+	// /v1/sandboxes/{id}/expose/{port} reaches handleExpose rather than falling
+	// through to the JSON catch-all (which would answer a confusing 400 invalid
+	// json). handleExpose strips the same prefix for both: the bare form strips to
+	// "" and normalizes to "/", the slash form strips to "/sub/path".
+	outer.HandleFunc("/v1/sandboxes/{id}/expose/{port}", api.handleExpose)
 	outer.Handle("/", api.requireBearer(jsonMux))
 	return outer
 }
