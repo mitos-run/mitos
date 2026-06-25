@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ func TestGrantRoundTrip(t *testing.T) {
 		Sub:           "user-1",
 		Email:         "user@example.com",
 		EmailVerified: true,
-		OrgIDs:        []string{"org-a", "org-b"},
+		OrgIDs:        []string{"acme", "beta"},
 	}
 	exp := time.Now().Add(5 * time.Minute)
 
@@ -38,8 +39,8 @@ func TestGrantRoundTrip(t *testing.T) {
 	if got.EmailVerified != id.EmailVerified {
 		t.Errorf("EmailVerified: got %v want %v", got.EmailVerified, id.EmailVerified)
 	}
-	if len(got.OrgIDs) != len(id.OrgIDs) {
-		t.Errorf("OrgIDs len: got %d want %d", len(got.OrgIDs), len(id.OrgIDs))
+	if !reflect.DeepEqual(got.OrgIDs, id.OrgIDs) {
+		t.Errorf("OrgIDs: got %v want %v", got.OrgIDs, id.OrgIDs)
 	}
 }
 
@@ -128,8 +129,14 @@ func TestGrantTamperedTag(t *testing.T) {
 func TestGrantWrongKey(t *testing.T) {
 	secret1 := []byte("supersecretkey1234567890")
 	secret2 := []byte("differentsecret12345678")
-	gs1, _ := NewGrantSigner(secret1)
-	gs2, _ := NewGrantSigner(secret2)
+	gs1, err := NewGrantSigner(secret1)
+	if err != nil {
+		t.Fatalf("NewGrantSigner(secret1): %v", err)
+	}
+	gs2, err := NewGrantSigner(secret2)
+	if err != nil {
+		t.Fatalf("NewGrantSigner(secret2): %v", err)
+	}
 
 	id := Identity{Sub: "user-1", Email: "user@example.com"}
 	tok, err := gs1.Mint("app1", id, time.Now().Add(5*time.Minute))

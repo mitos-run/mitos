@@ -36,6 +36,10 @@ type SessionCodec struct {
 
 // NewSessionCodec returns a SessionCodec over secret. It rejects a secret
 // shorter than minSecretLen to prevent deployment with a weak key.
+//
+// Callers should pass a secret DISTINCT from the one given to NewGrantSigner.
+// The domain tags make sharing one secret cryptographically safe, but distinct
+// secrets limit the blast radius if either one leaks.
 func NewSessionCodec(secret []byte) (*SessionCodec, error) {
 	if len(secret) < minSecretLen {
 		return nil, fmt.Errorf("session signing secret must be at least %d bytes; configure a longer secret", minSecretLen)

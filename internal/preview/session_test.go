@@ -2,6 +2,7 @@ package preview
 
 import (
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -17,7 +18,7 @@ func TestSessionRoundTrip(t *testing.T) {
 		Sub:           "user-1",
 		Email:         "user@example.com",
 		EmailVerified: true,
-		OrgIDs:        []string{"org-a"},
+		OrgIDs:        []string{"acme", "beta"},
 	}
 	exp := time.Now().Add(24 * time.Hour)
 
@@ -38,6 +39,9 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 	if got.EmailVerified != id.EmailVerified {
 		t.Errorf("EmailVerified: got %v want %v", got.EmailVerified, id.EmailVerified)
+	}
+	if !reflect.DeepEqual(got.OrgIDs, id.OrgIDs) {
+		t.Errorf("OrgIDs: got %v want %v", got.OrgIDs, id.OrgIDs)
 	}
 }
 
