@@ -3,6 +3,7 @@ import { render, waitFor, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createConsoleRouter } from './router'
+import { ToastProvider } from './ui/Toast'
 import type { Capabilities } from './api'
 
 const caps: Capabilities = {
@@ -27,7 +28,9 @@ describe('console router', () => {
     await router.navigate({ to: '/sandboxes' })
     render(
       <QueryClientProvider client={client}>
-        <RouterProvider router={router} />
+        <ToastProvider>
+          <RouterProvider router={router} />
+        </ToastProvider>
       </QueryClientProvider>,
     )
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sandboxes/i })).toBeInTheDocument())
@@ -70,7 +73,9 @@ describe('console router', () => {
     await router.navigate({ to: '/' })
     render(
       <QueryClientProvider client={client}>
-        <RouterProvider router={router} />
+        <ToastProvider>
+          <RouterProvider router={router} />
+        </ToastProvider>
       </QueryClientProvider>,
     )
     // Must show Sandboxes (first visible route), never "Not Found".

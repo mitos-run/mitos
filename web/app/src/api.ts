@@ -38,6 +38,8 @@ export type SandboxView = {
   node: string
   phase: string
   vcpus: number
+  mem_bytes: number
+  created_at: string
 }
 
 export type ForkNode = {
@@ -78,6 +80,16 @@ export const api = {
     if (!r.ok && r.status !== 204) throw new Error(`delete secret: ${r.status}`)
   },
   sandboxes: () => get<{ sandboxes: SandboxView[] }>('/console/sandboxes').then((r) => r.sandboxes ?? []),
+  sandbox: (id: string) => get<SandboxView>(`/console/sandboxes/${encodeURIComponent(id)}`),
+  terminateSandbox: async (id: string) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' })
+    if (!r.ok && r.status !== 204) throw new Error(`terminate: ${r.status}`)
+  },
+  sandboxLogs: async (id: string) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/logs`, { credentials: 'same-origin' })
+    if (!r.ok) throw new Error(`logs: ${r.status}`)
+    return r.text()
+  },
   forktree: () => get<ForkTree>('/console/forktree'),
 }
 

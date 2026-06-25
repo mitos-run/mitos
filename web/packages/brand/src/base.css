@@ -322,3 +322,85 @@ code, kbd, pre, .mono { font-family: var(--mono); }
     display: none;
   }
 }
+
+/* Tab bar: flex row of button tabs, hairline bottom border. */
+.tabs {
+  display: flex;
+  flex-direction: row;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: var(--space-4);
+}
+
+.tab {
+  font: inherit;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--space-2) var(--space-3);
+  min-height: 44px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab-active {
+  color: var(--ink);
+  border-bottom: 2px solid var(--magenta);
+}
+
+/* Key-value definition grid: label dim, value mono. */
+.kv {
+  display: grid;
+  gap: var(--space-2) 0;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 30%) 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.kv-row dt {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kv-row dd {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  margin: 0;
+  color: var(--ink);
+}
+
+/* Logs block: monospace, scrollable, raised-field background. */
+.logs {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--space-4);
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre-wrap;
+  color: var(--ink-2);
+}
+
+/* Mobile: tab bar scrolls horizontally; table wrapper degrades. */
+@media (max-width: 768px) {
+  .tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .tbl {
+    min-width: 600px;
+  }
+}
