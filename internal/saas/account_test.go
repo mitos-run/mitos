@@ -202,13 +202,10 @@ func TestSetMemberRoleAuthorization(t *testing.T) {
 	}
 
 	// A non-member actor gets a not-a-member error (ErrKeyWrongOrg).
-	_, otherOrg, _ := svc.SignUp(ctx, "outsider.seed@example.com")
-	outsiderID := otherOrg.ID // use the outsider account's personal org - get the account id instead
-	outsider, _, _ := svc.SignUp(ctx, "outsider2.seed@example.com")
+	outsider, _, _ := svc.SignUp(ctx, "outsider.seed@example.com")
 	if err := svc.SetMemberRole(ctx, outsider.ID, orgID, ownerID, RoleMember); !errors.Is(err, ErrKeyWrongOrg) {
 		t.Fatalf("non-member SetMemberRole err = %v, want ErrKeyWrongOrg", err)
 	}
-	_ = outsiderID
 
 	// The last owner cannot be demoted.
 	if err := svc.SetMemberRole(ctx, ownerID, orgID, ownerID, RoleMember); !errors.Is(err, ErrLastOwner) {
