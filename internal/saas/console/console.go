@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -719,6 +720,10 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 			WithCause("the sink-create body is not valid JSON"))
 		return
 	}
+	if err := validateSinkRequest(req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).WithCause(err.Error()))
+		return
+	}
 	cfg, err := c.deps.Sinks.Add(r.Context(), orgID, req.Type, req.Endpoint)
 	if err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
@@ -764,6 +769,32 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		At:      c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "deleted": id})
+}
+
+// allowedSinkTypes is the set of sink type values accepted by handleCreateSink.
+// Any type not in this set is rejected with a 400 before the registry is called.
+var allowedSinkTypes = map[string]bool{
+	"webhook": true,
+	"s3":      true,
+	"splunk":  true,
+	"datadog": true,
+}
+
+// validateSinkRequest checks that the sink type is in the allowed set and that
+// the endpoint is a non-empty https URL. It returns an actionable, non-secret
+// error message suitable for use as an apierr cause.
+func validateSinkRequest(req createSinkRequest) error {
+	if !allowedSinkTypes[req.Type] {
+		return errors.New("unknown sink type: must be one of webhook, s3, splunk, datadog")
+	}
+	if req.Endpoint == "" {
+		return errors.New("the sink endpoint must be an https URL")
+	}
+	u, err := url.Parse(req.Endpoint)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("the sink endpoint must be an https URL")
+	}
+	return nil
 }
 
 // --- helpers ---

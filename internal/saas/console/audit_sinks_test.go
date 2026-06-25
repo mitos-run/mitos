@@ -212,6 +212,59 @@ func TestEveryEndpointRefusesMissingOrgContextSinks(t *testing.T) {
 	}
 }
 
+// TestSinksCreateValidation verifies that POST /console/audit/sinks rejects
+// unknown types and non-https endpoints with 400, and accepts a valid request
+// with 201.
+func TestSinksCreateValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantCode int
+	}{
+		{
+			name:     "unknown type is rejected",
+			body:     `{"type":"syslog","endpoint":"https://siem.example/hook"}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "http endpoint is rejected",
+			body:     `{"type":"webhook","endpoint":"http://internal/hook"}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "javascript scheme is rejected",
+			body:     `{"type":"webhook","endpoint":"javascript:alert(1)"}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "empty endpoint is rejected",
+			body:     `{"type":"webhook","endpoint":""}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "valid webhook https endpoint is accepted",
+			body:     `{"type":"webhook","endpoint":"https://siem.example/hook"}`,
+			wantCode: http.StatusCreated,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(Deps{})
+			req := httptest.NewRequest(
+				"POST", "/console/audit/sinks",
+				strings.NewReader(tc.body),
+			).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+			rr := httptest.NewRecorder()
+			c.ServeHTTP(rr, req)
+			if rr.Code != tc.wantCode {
+				t.Errorf("body=%s: got status %d, want %d; response=%s",
+					tc.body, rr.Code, tc.wantCode, rr.Body.String())
+			}
+		})
+	}
+}
+
 // testSinkError is a test-only error type for sink delivery failures.
 type testSinkError struct{ msg string }
 

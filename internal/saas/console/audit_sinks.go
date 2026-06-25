@@ -187,6 +187,12 @@ func (r *DispatchingRecorder) withLog(l *slog.Logger) *DispatchingRecorder {
 // Record appends the event to the inner recorder, then best-effort dispatches
 // to the org's enabled sinks in a goroutine tracked by wg. Any delivery
 // failure is logged and swallowed.
+//
+// KNOWN FOLLOW-UP: the per-event goroutine-per-sink dispatch below is
+// unbounded: a burst of events or a large sink list can spawn an unbounded
+// number of goroutines. A bounded worker pool and full SSRF egress protection
+// (blocking private/loopback ranges at the transport level) are tracked for
+// production hardening before this code reaches a multi-tenant environment.
 func (r *DispatchingRecorder) Record(ctx context.Context, ev AuditEvent) error {
 	if err := r.inner.Record(ctx, ev); err != nil {
 		return err
