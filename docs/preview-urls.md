@@ -1,50 +1,73 @@
-# Preview URLs: per-sandbox port exposure with auto-TLS
+# Expose URLs: per-sandbox port exposure via the edge proxy
 
-A preview URL exposes a port inside a running sandbox to the caller through a
-single per-sandbox hostname, `<sandbox-id>.preview.<domain>`, served by a
-controller-managed reverse proxy with automatic TLS. It is the Mitos equivalent
-of E2B `sandbox.getHost(port)` and Daytona signed, expiring preview URLs: one
-internet-facing entrypoint fronting many ephemeral per-sandbox backends,
-Kubernetes-native, with the same per-sandbox token gate as the sandbox API.
+An expose URL makes a port inside a running sandbox reachable through the Mitos
+expose edge proxy. The URL uses a single-label hostname, `<label>.<expose-domain>`,
+where `<expose-domain>` is the operator-configured domain and `<label>` is an opaque
+routing key assigned when the route is registered. It is the Mitos equivalent of
+E2B `sandbox.getHost(port)` and Daytona signed, expiring preview URLs: one
+internet-facing entrypoint fronting many ephemeral per-sandbox backends, with the
+same per-sandbox token gate as the sandbox API.
 
 This document describes the verifiable core that ships today (the routing, the
-signed/expiring URL scheme, the route table and its GC, the SDK `get_host`
-call) and the parts that are wired behind an interface for a maintainer to
-enable with a real domain (the CertMagic on-demand ACME path).
+signed/expiring URL scheme, the route table and its GC, the reserved-name
+blocklist, the admin route-sync endpoint, and the SDK `get_host` call) and the
+parts that are deferred to later slices (the controller reconciler that pushes
+routes from Ready Sandboxes is slice 2b; wildcard and post-quantum TLS are slice 3;
+the full sharing ladder including audience selectors is slice 4).
 
 ## What ships in this slice
 
 - `internal/preview`: the signer (mint + verify signed expiring URLs), the host
-  parser, the route table with GC, the reverse proxy, and the `CertProvider`
-  interface with a self-signed test provider.
-- `cmd/preview-proxy`: the standalone proxy binary. One HTTPS entrypoint that
-  resolves the vhost, verifies the token, looks up the backend, and proxies.
-- `sandbox-server` `POST /v1/preview`: mints a signed preview URL for a sandbox
-  port (the signing secret lives on the server, never in the SDK).
+  parser, the reserved-name blocklist, the route table with GC, the reverse proxy,
+  and the admin route-sync endpoint. The Go package keeps the name `internal/preview`
+  (and the binary `cmd/preview-proxy`) for now while the product subsystem is named
+  Mitos Expose; the package rename is a deferred cleanup.
+- `cmd/preview-proxy`: the standalone proxy binary. One entrypoint that resolves the
+  single-label hostname, verifies the signed token, looks up the route, and proxies
+  to the owning forkd node.
+- `sandbox-server` `POST /v1/preview`: mints a signed expose URL for a sandbox port
+  (the signing secret lives on the server, never in the SDK).
 - Python SDK `DirectSandbox.get_host(port)` and the E2B shim
   `Sandbox.get_host(port)`: return the signed URL.
 
 ## Request flow
 
 ```
-caller ──HTTPS──▶  preview-proxy (one entrypoint)
-                     1. parse  <sandbox-id>.preview.<domain>  ─▶ sandbox id
-                     2. verify signed expiring token (HMAC, not expired)
-                     3. bind token to the sandbox in the host (reject cross-sandbox)
-                     4. look up backend IP:port in the route table (Ready claims)
-                     5. attach the per-sandbox bearer (the :9091 gate),
-                        strip the preview token from the forwarded query
-                     6. reverse-proxy to the sandbox backend port
+caller ──HTTPS──> expose-proxy (one entrypoint)
+                    1. parse  <label>.<expose-domain>  -> label
+                    2. reject reserved labels (www, app, api, console, admin,
+                       auth, login, ...) with 404
+                    3. resolve label to a route (NodeEndpoint, SandboxID, Port,
+                       Token, Sharing) via the route table; unknown label is 404
+                    4. verify the signed expiring token (HMAC, not expired)
+                    5. bind token to the sandbox and port in the route
+                       (token for a different sandbox or port is 403)
+                    6. attach the per-sandbox bearer, strip the expose token from
+                       the forwarded query, unconditionally delete any inbound
+                       Authorization header, clean dot-segments from the sub-path
+                    7. reverse-proxy to
+                       http://<NodeEndpoint>/v1/sandboxes/<id>/expose/<port>/<sub-path>
+                       (the forkd expose handler, slice 1)
 ```
 
-A failure at any step is terse and never echoes the token: unknown vhost or no
-route is `404`, missing/invalid/expired token is `401`, a token for a different
-sandbox is `403`, an unreachable backend is `502`.
+The proxy reaches forkd `:9091` over plain HTTP. forkd already serves the sandbox
+API in cleartext with per-sandbox bearer auth; this matches the existing SDK path
+and is not a new weakening. The cluster network is the trust boundary between the
+edge proxy and forkd. The per-sandbox bearer is the guard on forkd; the signed
+expose token is the guard at the public edge.
+
+A failure at any step is terse and never echoes the token: a reserved or unknown
+label is `404`, a missing or invalid token is `401`, a token for a different
+sandbox or port is `403`, an unreachable backend is `502`.
+
+Streaming responses (SSE, chunked bodies) are forwarded with `FlushInterval -1`
+so the proxy never buffers output.
 
 ## The signed, expiring URL scheme
 
-A preview URL is `https://<sandbox-id>.preview.<domain>/?token=<token>`. The
-token is a detached HMAC over a compact JSON payload:
+An expose URL is `https://<label>.<expose-domain>/?token=<token>`. The label is an
+opaque routing key (NOT the sandbox id). The token is a detached HMAC over a
+compact JSON payload:
 
 ```
 payload = base64url(json{ "s": sandboxID, "p": port, "e": expiryUnix })
@@ -63,13 +86,13 @@ that matter, each unit-tested in `internal/preview/sign_test.go`:
 - **Never accept wrong key.** A token minted under a different server secret
   fails to verify.
 - **Bound to one sandbox and one port.** The proxy additionally requires the
-  verified token to name the sandbox in the vhost, so a leaked URL cannot be
-  replayed against another sandbox.
+  verified token to name the sandbox and port in the route, so a leaked URL
+  cannot be replayed against another sandbox or a different port.
 
 ### Why not a captoken
 
 Mitos already has macaroon-style attenuated capability tokens
-(`internal/captoken`). A preview token needs no attenuation chain,
+(`internal/captoken`). An expose token needs no attenuation chain,
 only a single expiring binding of `(sandbox, port)`, so a focused signer keeps
 the scheme small and auditable. It reuses the SAME standard-library HMAC-SHA256
 and constant-time-compare core as captoken and the W4 S3 SigV4 signer
@@ -80,61 +103,79 @@ and constant-time-compare core as captoken and the W4 S3 SigV4 signer
 The server secret (`MITOS_PREVIEW_SECRET`, at least 16 bytes) and every minted
 token are BEARER CREDENTIALS. They are never logged, never put in an error,
 condition, or event, and never written to a host path. The proxy logs the
-sandbox id and the HTTP status only; the signing path logs nothing. The proxy
-strips the `token` query parameter before forwarding, so the sandbox backend
-never sees the preview bearer.
+label, sandbox id, and the HTTP status only; the signing path logs nothing. The
+proxy strips the `token` query parameter before forwarding, so the forkd expose
+handler never sees the expose bearer. Any inbound `Authorization` header is
+unconditionally deleted before the upstream request is sent, so the edge proxy
+cannot be used to relay an unrelated bearer to forkd.
 
 ## Route table and GC
 
-The route table maps `<sandbox-id>` to its backend `IP:port` and the
-per-sandbox token. It is built ONLY from Ready claims: a claim with
-`Status.Phase==Ready` and a non-empty `Status.Endpoint` becomes a route.
-`RouteTable.Sync(states)` reconciles the table to exactly the current Ready set,
-so a sandbox that leaves the Ready set (terminate) has its route REAPED on the
-next sync and is immediately unroutable (`404`). The table logic and the
-add-on-ready / remove-on-terminate GC are unit-tested against an injectable
-claim source (`ClaimState`); the controller wiring that feeds it from the live
-claim watch is a thin documented follow-up.
+The route table maps a `<label>` (opaque routing key) to a `Route` carrying:
+the owning forkd node endpoint (`NodeEndpoint`, the `Sandbox.Status.Endpoint`
+`host:port` of forkd `:9091`), the sandbox id, the guest port, the per-sandbox
+bearer, and the access tier.
+
+The table is populated exclusively via the admin route-sync endpoint (see below).
+`RouteTable.Sync(routes)` reconciles the table to exactly the provided set:
+routes not in the new set are REAPED immediately, so a sandbox that leaves the
+Ready set has its route removed on the next sync and is unroutable (`404`). No
+route means 404, so an expose URL for a terminated sandbox cannot proxy anywhere.
+
+### Reserved-name blocklist
+
+A fixed set of labels is permanently blocked and never routable regardless of what
+the route table contains: `www`, `app`, `api`, `console`, `admin`, `auth`,
+`login`, and others. A request whose `<label>` matches any reserved name receives
+`404`. This is enforced by `IsReservedLabel` in the host parser before route
+table lookup, so the blocklist cannot be bypassed by registering a route under a
+reserved name.
+
+### Dot-segment cleaning
+
+The URL sub-path after `/` is cleaned with `path.Clean` before it is appended to
+the upstream path `http://<NodeEndpoint>/v1/sandboxes/<id>/expose/<port>/`. This
+removes `.` and `..` segments so a traversal cannot escape the expose path prefix
+and reach unintended forkd routes.
+
+## Admin route-sync endpoint
+
+The proxy exposes a single authenticated admin endpoint for the controller
+reconciler (slice 2b) to push the current route set:
+
+```
+POST /internal/routes
+Authorization: Bearer <MITOS_EXPOSE_ADMIN_TOKEN>
+Content-Type: application/json
+
+[ { "label": "...", "nodeEndpoint": "...", "sandboxID": "...",
+    "port": 8080, "token": "...", "sharing": "private" }, ... ]
+```
+
+The admin bearer is read from `MITOS_EXPOSE_ADMIN_TOKEN` at startup and compared
+with CONSTANT TIME on every request. The token VALUE is never logged and never
+appears in an error body. An empty `MITOS_EXPOSE_ADMIN_TOKEN` disables the endpoint
+entirely (returns `404` for all `POST /internal/routes` requests); it does NOT
+default to open. The controller reconciler that reads Ready Sandboxes and their
+`<name>-sandbox-token` Secrets and POSTs the route set is slice 2b.
+
+## Sub-path and dot-segment behavior
+
+The proxy appends the request path after the label hostname to the upstream expose
+path. Before appending, it calls `path.Clean` on the sub-path so traversal
+sequences (`../`, `./`) are resolved to their canonical form and cannot escape the
+`/v1/sandboxes/<id>/expose/<port>/` prefix. An empty sub-path becomes `/`.
 
 ## TLS
 
-TLS issuance is wired behind a single interface so the routing and signing core
-never depend on a working ACME path:
-
-```go
-type CertProvider interface {
-    GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
-}
-```
-
-The signature matches `tls.Config.GetCertificate`, so a provider installs
-directly. This slice ships `SelfSignedProvider`, which mints a self-signed cert
-per SNI host on first request (the same per-hostname, mint-on-first-request
-shape as on-demand TLS). A self-signed cert is NOT browser-trusted and is never
-a production substitute.
-
-### Production: CertMagic on-demand TLS (follow-up)
-
-Real ACME issuance needs a public domain, a `*.preview.<domain>` DNS record (or
-per-host A records), and a publicly reachable endpoint, none of which exist in
-CI, so the heavy `certmagic` dependency is NOT compiled in this slice. A
-maintainer with a domain implements `CertProvider` over CertMagic (the Go ACME
-library behind Caddy), embedded natively; the documented adapter lives in the
-`CertMagicProvider` doc comment in `internal/preview/cert.go`. The on-demand
-`DecisionFunc` MUST consult the route table so the proxy only asks the CA for a
-hostname that resolves to a live Ready sandbox; this caps ACME rate-limit
-exposure and stops the proxy being a CA amplifier for arbitrary SNI.
+This slice does not enable TLS. The proxy can be run behind a separate TLS
+terminator. Wildcard certificate provisioning and post-quantum TLS are slice 3.
 
 ### Bare metal
 
-Bare metal is a first-class target, so the TLS story does not require a public
-CA:
-
-- **Self-hosted ACME.** Point CertMagic at an internal ACME server (for example
-  `step-ca`) instead of Let's Encrypt; the same `CertProvider` adapter applies.
-- **Provided wildcard cert.** Load a maintainer-provided `*.preview.<domain>`
-  certificate with `tls.LoadX509KeyPair` and serve it from a `CertProvider` that
-  returns it for every matching SNI host. No ACME at all.
+Bare metal is a first-class target. A maintainer can terminate TLS in front of the
+proxy (Caddy, nginx, or any ACME-capable reverse proxy with a wildcard cert for
+`*.<expose-domain>`) without any change to the proxy binary.
 
 ## SDK usage
 
@@ -142,13 +183,13 @@ CA:
 import mitos
 
 sb = mitos.create("python")
-url = sb.get_host(8080)          # signed, expiring preview URL for port 8080
-# url == "https://<id>.preview.<domain>/?token=..."
+url = sb.get_host(8080)          # signed, expiring expose URL for port 8080
+# url == "https://<label>.<expose-domain>/?token=..."
 ```
 
 `get_host(port)` asks the server to mint the URL (`POST /v1/preview`) and
 returns it; the signing secret never leaves the server. A server that does not
-expose the preview proxy returns a typed `501`. The E2B compatibility shim
+expose the proxy returns a typed `501`. The E2B compatibility shim
 (`mitos.e2b.Sandbox.get_host`) delegates to this same method, so an
 E2B script's `sandbox.get_host(port)` works unchanged.
 
@@ -156,17 +197,23 @@ E2B script's `sandbox.get_host(port)` works unchanged.
 
 ```bash
 export MITOS_PREVIEW_SECRET=<at least 16 random bytes, kept secret>
-preview-proxy --domain example.com --addr :8443
+export MITOS_EXPOSE_ADMIN_TOKEN=<at least 16 random bytes, kept secret>
+expose-proxy --domain example.com --addr :8080
 ```
 
-The proxy serves HTTPS using the `CertProvider` (self-signed by default in this
-slice). `--http-addr` adds a plaintext listener for testing or for running
-behind a separate TLS terminator. The route table is populated from Ready
-claims by the controller wiring follow-up.
+The proxy listens on `--addr` (HTTP). Run it behind a TLS terminator for
+production. The route table starts empty and is populated by `POST /internal/routes`
+from the controller reconciler (slice 2b).
+
+## Sharing ladder
+
+The `Sharing` field on a route carries the access tier (`private`, `org`,
+`audience`). The full sharing ladder with audience selectors and org-scoped access
+is slice 4 and NOT implemented in this slice. All routes in this slice are treated
+as private (the signed token is the sole gate).
 
 ## Production gate
 
 This ingress adds a public attack surface. It is NOT cleared for production
-tenants until the external security review covers it. Edge rate
-limiting and an SNI/connection cap are documented follow-ups. See
-docs/threat-model.md section 7c.
+tenants until the external security review covers it. Edge rate limiting and an
+SNI/connection cap are documented follow-ups. See docs/threat-model.md section 7c.

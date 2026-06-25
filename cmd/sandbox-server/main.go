@@ -65,7 +65,7 @@ type server struct {
 	forkGeneration atomic.Uint64
 	// previewSigner mints signed, expiring preview URLs for get_host(port)
 	// (issue #126). nil disables the /v1/preview route (no signing secret
-	// configured). previewDomain is the base domain for <id>.preview.<domain>.
+	// configured). previewDomain is the base domain for <id>.<domain>.
 	// previewTTL is how long a minted URL stays valid.
 	previewSigner *preview.Signer
 	previewDomain string
@@ -259,7 +259,7 @@ func main() {
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.IntVar(&maxStreamsPerSandbox, "max-streams-per-sandbox", 16, "Per-sandbox ceiling on concurrent OPEN streams (production-blocker #2): streaming exec, run_code, and PTY each hold a dedicated vsock connection plus host goroutines for the command lifetime, so an unbounded number would exhaust host vsock connections and goroutines. A NEW stream opened over this cap is rejected with 429 (the too_many_streams error); existing streams are never killed. The cap is checked at stream OPEN, off the fork path. 0 disables the cap (unbounded, the prior behavior). Matches the forkd default of 16.")
 	flag.IntVar(&maxExecTimeoutSecs, "max-exec-timeout-seconds", 86400, "Ceiling (seconds) on a requested exec or run_code timeout (issue #216). A request over the ceiling is REJECTED with the typed timeout_too_large error, never silently reduced. Default 86400 (24h). 0 disables the ceiling. Matches the forkd default.")
-	flag.StringVar(&previewDomain, "preview-domain", "", "Base domain for per-sandbox preview URLs (issue #126): get_host(port) mints https://<id>.preview.<domain>/?token=... . Requires MITOS_PREVIEW_SECRET (>=16 bytes). Empty disables the /v1/preview route. The preview reverse proxy that serves these URLs is a separate component (cmd/preview-proxy).")
+	flag.StringVar(&previewDomain, "preview-domain", "", "Base domain for per-sandbox preview URLs (issue #126): get_host(port) mints https://<id>.<domain>/?token=... . Requires MITOS_PREVIEW_SECRET (>=16 bytes). Empty disables the /v1/preview route. The preview reverse proxy that serves these URLs is a separate component (cmd/preview-proxy).")
 	flag.IntVar(&previewTTLSecs, "preview-ttl-seconds", 3600, "How long a minted preview URL stays valid (issue #126). Default 3600 (1h).")
 	flag.Parse()
 

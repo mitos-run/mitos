@@ -198,6 +198,25 @@ Composable layers, applied in addition to the tier:
 
 - network: an IP or CIDR allowlist, evaluated on every request (not only at
   login), so a network constraint cannot be outlived by a session.
+- audience: identity allowlists that narrow which authenticated principals pass,
+  the Cloudflare Access "Include" model (emails, email domains, groups). Two
+  selectors, either or both:
+  - `allowedPrincipals`: an explicit list of user identities (for example
+    `alice@x.com`, `bob@y.com`); only a listed principal passes.
+  - `allowedEmailDomains`: a list of email domains (for example `acme.com`); any
+    authenticated identity whose email matches a listed domain passes (the
+    "anyone at company.com" share). The match is on the VERIFIED email only: an
+    identity whose IdP did not assert `email_verified` (or the SaaS console
+    equivalent) is rejected, never trusted on a raw or unverified email claim.
+    Trusting an unverified email domain is a known account-takeover vector and is
+    a recorded threat-model item. Domain comparison is an exact, case-folded
+    match on the registrable email domain, not a suffix match (so `evilacme.com`
+    does not match `acme.com`).
+  The audience layer requires an authenticated identity, so it composes with the
+  org, authenticated, and forwardAuth paths (it resolves the principal email from
+  the mitos console identity on the SaaS path and from the OIDC claims on the
+  self-host/forwardAuth path); it is meaningless on the public tier (no identity)
+  and is rejected as a misconfiguration there.
 - forwardAuth: a bring-your-own identity-provider seam. The proxy implements the
   standard forward-auth subrequest contract (a 2xx from the auth service grants
   and its identity headers are copied onto the forwarded request; any other
@@ -209,8 +228,11 @@ Composable layers, applied in addition to the tier:
 Enforcement is a single ordered pipeline so the matrix is testable: resolve Host
 and label, look up the route and its tier, evaluate network layer, evaluate
 forwardAuth layer if configured, then evaluate the tier (identity check, or
-signed-link verify-and-exchange, or public pass-through), then inject the
-per-sandbox bearer and proxy. Any failure is terse and never echoes a token.
+signed-link verify-and-exchange, or public pass-through), then evaluate the
+audience layer against the resolved identity (verified email for the domain
+selector), then inject the per-sandbox bearer and proxy. Any failure is terse and
+never echoes a token. The audience selectors and the verified-email requirement
+are built in the slice 4 auth ladder.
 
 ## 8. Identity backend
 
@@ -296,7 +318,8 @@ across a fork, and the exposure token rotates per child (section 14).
 - `Sandbox.spec` and `SandboxPool.spec.template`: add `exposedPorts` (the guest
   ports a sandbox declares as exposable) and `expose` (the per-port sharing tier,
   optional stable alias, optional network allowlist, optional forwardAuth
-  reference).
+  reference, and the optional audience selectors `allowedPrincipals` and
+  `allowedEmailDomains`, section 7).
 - `Workspace.spec`: add a default `expose` block so `serve` has a tier and
   optional alias to apply without per-call flags.
 - `Sandbox.status`: surface the exposed URL or URLs once Ready, so the controller
@@ -357,7 +380,14 @@ the operating principles; touches to `internal/fork`, `internal/daemon`, and
    then DNS reconciled, then resource decommissioned, never the reverse. The
    route GC already makes a terminated sandbox unroutable.
 9. Reserved-name enforcement at claim time (section 5).
-10. Wildcard-key blast radius (section 6) and the shared-domain residual risk
+10. Verified-email audience rule (section 7). The `allowedEmailDomains` selector
+    matches only an identity whose email the IdP asserted as verified
+    (`email_verified`, or the SaaS console equivalent); an unverified or raw email
+    claim is never honored for a domain rule. Domain comparison is an exact,
+    case-folded match on the registrable email domain, not a suffix match. The
+    audience layer is rejected as a misconfiguration on the identity-less public
+    tier.
+11. Wildcard-key blast radius (section 6) and the shared-domain residual risk
     (below) are recorded threat-model items.
 
 Shared-domain residual risk, recorded honestly: serving user apps on

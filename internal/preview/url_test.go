@@ -2,7 +2,6 @@ package preview
 
 import (
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 )
@@ -20,8 +19,8 @@ func TestMintURL(t *testing.T) {
 	if parsed.Scheme != "https" {
 		t.Errorf("scheme = %q, want https", parsed.Scheme)
 	}
-	if parsed.Host != "sb-1.preview.example.com" {
-		t.Errorf("host = %q, want sb-1.preview.example.com", parsed.Host)
+	if parsed.Host != "sb-1.example.com" {
+		t.Errorf("host = %q, want sb-1.example.com", parsed.Host)
 	}
 	tok := parsed.Query().Get("token")
 	if tok == "" {
@@ -34,9 +33,6 @@ func TestMintURL(t *testing.T) {
 	}
 	if claims.SandboxID != "sb-1" || claims.Port != 8080 {
 		t.Errorf("claims = %+v", claims)
-	}
-	if !strings.Contains(u, "preview") {
-		t.Error("URL missing preview label")
 	}
 }
 

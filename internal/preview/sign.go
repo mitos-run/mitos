@@ -1,6 +1,6 @@
 // Package preview implements per-sandbox preview URLs: a signed, expiring URL
 // (Daytona style) that names a sandbox and a port, plus a reverse proxy that
-// resolves <sandbox-id>.preview.<domain> to the sandbox backend, verifies the
+// resolves <label>.<domain> to the sandbox backend, verifies the
 // signed token and the per-sandbox bearer gate, and proxies to the backend
 // (issue #126).
 //
