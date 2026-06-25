@@ -1,0 +1,76 @@
+{{- /*
+RBAC for the public gateway's real control plane (ROADMAP SaaS P1). The gateway
+turns an authenticated, org-scoped customer request into Kubernetes actions on
+the mitos.run/v1 Sandbox kind and reads the per-sandbox token Secret to proxy
+runtime calls. It runs as its own ServiceAccount with a least-privilege
+ClusterRole: Sandboxes (the lifecycle verbs), SandboxPools (read, to validate a
+named pool), Secrets (get, the per-sandbox token only), and Namespaces (get, to
+surface a clear error when an org namespace is not provisioned). It does NOT get
+cluster-wide write on Secrets; it only reads the token Secret the controller
+wrote. Gated by gateway.enabled.
+*/}}
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mitos-gateway
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+{{- include "mitos.imagePullSecrets" . | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-gateway
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+rules:
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxes
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - delete
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxpools
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mitos-gateway
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+subjects:
+  - kind: ServiceAccount
+    name: mitos-gateway
+    namespace: {{ include "mitos.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mitos-gateway
+{{- end }}

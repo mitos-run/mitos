@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,12 +14,15 @@ import (
 )
 
 // fakeControlPlane records every ForwardRequest it receives so a test can assert
-// exactly which org the gateway attached. It returns a canned response.
+// exactly which org the gateway attached. It returns a canned response, which may
+// carry a streamed body and custom headers (the runtime proxy case).
 type fakeControlPlane struct {
-	got      []ForwardRequest
-	respBody []byte
-	respCode int
-	err      error
+	got        []ForwardRequest
+	respBody   []byte
+	respStream io.ReadCloser
+	respHeader http.Header
+	respCode   int
+	err        error
 }
 
 func (f *fakeControlPlane) Forward(_ context.Context, req ForwardRequest) (ForwardResponse, error) {
@@ -30,7 +34,7 @@ func (f *fakeControlPlane) Forward(_ context.Context, req ForwardRequest) (Forwa
 	if code == 0 {
 		code = http.StatusOK
 	}
-	return ForwardResponse{Status: code, Body: f.respBody}, nil
+	return ForwardResponse{Status: code, Body: f.respBody, BodyStream: f.respStream, Header: f.respHeader}, nil
 }
 
 // denyQuota is a QuotaEnforcer that always denies, to exercise the quota seam.
@@ -260,6 +264,77 @@ func TestGatewayCrossOrgIsolation(t *testing.T) {
 	}
 	if cp.got[1].OrgID != "org-b" {
 		t.Errorf("key B request forwarded with OrgID %q, want org-b", cp.got[1].OrgID)
+	}
+}
+
+// TestGatewayRoutesRuntimeConnectPath asserts a Connect runtime path is routed as
+// the sandbox.runtime op, the request body is handed across the seam UNBUFFERED
+// (BodyStream, not Body), the curated headers (X-Sandbox-Id, Content-Type) cross,
+// and the client Authorization is NOT placed in the forwarded header.
+func TestGatewayRoutesRuntimeConnectPath(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	req := httptest.NewRequest(http.MethodPost, "/sandbox.v1.Sandbox/Exec", strings.NewReader(`{"cmd":["true"]}`))
+	req.Header.Set("Authorization", "Bearer "+f.rawA)
+	req.Header.Set("X-Sandbox-Id", "sb-1")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.gw.ServeHTTP(rec, req)
+
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	g := f.cp.got[0]
+	if g.Op != "sandbox.runtime" {
+		t.Errorf("op = %q, want sandbox.runtime", g.Op)
+	}
+	if g.OrgID != "org-a" {
+		t.Errorf("orgID = %q, want org-a", g.OrgID)
+	}
+	if g.BodyStream == nil {
+		t.Error("runtime request body was buffered into Body, want an unbuffered BodyStream")
+	} else {
+		b, _ := io.ReadAll(g.BodyStream)
+		if string(b) != `{"cmd":["true"]}` {
+			t.Errorf("streamed body = %q", b)
+		}
+	}
+	if g.Header.Get("X-Sandbox-Id") != "sb-1" {
+		t.Errorf("forwarded X-Sandbox-Id = %q", g.Header.Get("X-Sandbox-Id"))
+	}
+	if g.Header.Get("Authorization") != "" {
+		t.Errorf("client Authorization was forwarded across the seam: %q (it must be stripped)", g.Header.Get("Authorization"))
+	}
+}
+
+// TestGatewayRoutesRuntimeAliasPath asserts the /v1/sandboxes/<id>/exec friendly
+// alias also routes as the runtime op.
+func TestGatewayRoutesRuntimeAliasPath(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes/sb-7/exec", f.rawA, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 || f.cp.got[0].Op != "sandbox.runtime" {
+		t.Errorf("op = %+v, want sandbox.runtime", f.cp.got)
+	}
+}
+
+// TestGatewayStreamsRuntimeResponse asserts a control-plane response carrying a
+// BodyStream is streamed to the caller with the control-plane Content-Type.
+func TestGatewayStreamsRuntimeResponse(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = nil
+	f.cp.respStream = io.NopCloser(strings.NewReader(`{"streamed":true}`))
+	f.cp.respHeader = http.Header{"Content-Type": []string{"application/connect+json"}}
+	rec := doRequest(f.gw, http.MethodPost, "/sandbox.v1.Sandbox/Exec", f.rawA, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.String() != `{"streamed":true}` {
+		t.Errorf("streamed response = %q", rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/connect+json" {
+		t.Errorf("Content-Type = %q, want the control-plane value", ct)
 	}
 }
 

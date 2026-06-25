@@ -1,6 +1,10 @@
 package saas
 
-import "context"
+import (
+	"context"
+	"io"
+	"net/http"
+)
 
 // QuotaEnforcer is the seam the quota and rate-limit workstream (issue #213)
 // implements. The gateway calls Check after it has authenticated the key and
@@ -26,18 +30,42 @@ func (AllowAllQuota) Check(_ context.Context, _ string, _ string) error { return
 // the control plane. OrgID is attached by the gateway after key verification and
 // is the ONLY org the forward target may act on; the target must scope every
 // effect to it. Op is the public operation; Body is the opaque request payload.
+//
+// Method and Header carry the original request method and a curated subset of the
+// request headers, populated by the gateway for the runtime-proxy op
+// (sandbox.runtime): the control plane reverse-proxies the request to the
+// sandbox endpoint and needs the method (Connect is POST) and the
+// X-Sandbox-Id / Content-Type headers. For the lifecycle ops (create, status,
+// list, terminate) these may be empty; the control plane reads Body and Path.
+//
+// BodyStream, when non-nil, is the unbuffered request body the control plane MUST
+// stream to the sandbox (this carries ExecStream, which must not be buffered).
+// When BodyStream is nil the control plane uses Body. The gateway sets exactly
+// one for a runtime op and Body for the lifecycle ops.
 type ForwardRequest struct {
-	OrgID string
-	Op    string
-	Path  string
-	Body  []byte
+	OrgID      string
+	Op         string
+	Path       string
+	Method     string
+	Header     http.Header
+	Body       []byte
+	BodyStream io.Reader
 }
 
 // ForwardResponse is the control plane's reply. Status is an HTTP-style status
-// the gateway echoes; Body is the opaque response payload.
+// the gateway echoes; Body is the opaque buffered response payload (used by the
+// lifecycle ops). Header carries response headers the gateway echoes (the
+// runtime proxy sets Content-Type so a streamed Connect response is decodable).
+//
+// BodyStream, when non-nil, is an unbuffered response body the gateway streams to
+// the caller and then closes (the runtime proxy sets it so a streaming Connect
+// response is not buffered in the gateway). When BodyStream is nil the gateway
+// writes Body.
 type ForwardResponse struct {
-	Status int
-	Body   []byte
+	Status     int
+	Header     http.Header
+	Body       []byte
+	BodyStream io.ReadCloser
 }
 
 // ControlPlane is the seam the gateway forwards authenticated, org-scoped
