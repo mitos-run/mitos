@@ -73,6 +73,26 @@ export type DataRetentionPolicy = {
   legal_hold: boolean
 }
 
+export type Permission =
+  | 'members.manage'
+  | 'projects.manage'
+  | 'secrets.manage'
+  | 'settings.manage'
+  | 'billing.manage'
+  | 'resources.use'
+  | 'read'
+
+export type CustomRole = {
+  name: string
+  permissions: string[]
+}
+
+export type RolesView = {
+  org_id: string
+  builtins: CustomRole[]
+  custom: CustomRole[]
+}
+
 export type AccountView = {
   account_id: string
   email: string
@@ -223,6 +243,23 @@ export const api = {
       credentials: 'same-origin',
     })
     if (!r.ok && r.status !== 204) throw new Error(`delete sink: ${r.status}`)
+  },
+  roles: () => get<RolesView>('/console/roles'),
+  upsertRole: async (role: CustomRole) => {
+    const r = await fetch('/console/roles', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(role),
+    })
+    if (!r.ok) throw new Error(`upsert role: ${r.status}`)
+  },
+  deleteRole: async (name: string) => {
+    const r = await fetch(`/console/roles/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`delete role: ${r.status}`)
   },
   auditExportUrl: () => '/console/audit/export',
   dataRetention: () => get<DataRetentionPolicy>('/console/retention'),
