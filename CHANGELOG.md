@@ -2,6 +2,9 @@
 
 ## [1.1.0](https://github.com/mitos-run/mitos/compare/v1.0.0...v1.1.0) (2026-06-25)
 
+All six SDKs (Python, TypeScript, Go, Ruby, Rust, Java) now have Kubernetes cluster mode (an AgentRun that drives the mitos.run/v1 CRDs through the Kubernetes API), with byte-for-byte identical default-pool naming. The Go, Ruby, Rust, and Java SDKs add a thin Kubernetes REST client built on each language standard library (no heavy client dependency), so direct mode stays unchanged and the dependency-free SDKs stay dependency-free.
+
+
 
 ### Features
 
