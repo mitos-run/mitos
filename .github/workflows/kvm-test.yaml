@@ -3379,66 +3379,112 @@ jobs:
       # Seccomp enforcement proof (issue #353): the VMM is the host-facing edge
       # of the isolation boundary, and Firecracker's built-in BPF filter is the
       # second wall behind KVM. This is the defense-in-depth analog of the husk
-      # PSA admission test: it proves, on a REAL Firecracker on KVM, that the VMM
-      # runs under a seccomp FILTER (SECCOMP_MODE_FILTER, /proc Seccomp: 2) so a
-      # disallowed syscall is blocked, and that the filter is absent ONLY when
-      # explicitly disabled with --no-seccomp (the negative control, mode 0).
-      # Mitos never passes --no-seccomp and fails closed if asked to
+      # PSA admission test: it proves, on a REAL Firecracker on KVM, that the
+      # running VMM is under a seccomp FILTER (SECCOMP_MODE_FILTER, /proc
+      # Seccomp: 2) so a disallowed syscall is blocked, and that the filter is
+      # absent ONLY when explicitly disabled with --no-seccomp (the negative
+      # control). Mitos never passes --no-seccomp and fails closed if asked to
       # (internal/firecracker assertSeccompEnforced), so production always gets
-      # mode 2. Load-bearing (no continue-on-error): it needs only the VMM to
-      # start, not a full snapshot restore.
+      # the filter.
+      #
+      # Firecracker installs its per-thread seccomp filters at VM START (when the
+      # vCPUs are launched), NOT at API-server start, so this BOOTS a microVM and
+      # then checks the VMM's threads. It reuses the kernel + rootfs the
+      # fork-correctness phase already staged. Load-bearing (no continue-on-error).
       - name: Seccomp filter enforced on the Firecracker VMM (issue #353)
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: |
           set -e
           sudo chmod 666 /dev/kvm
 
-          seccomp_mode() {
-            # Echo the Seccomp mode from /proc/<pid>/status (0 none, 1 strict,
-            # 2 filter), or empty if the field/pid is gone.
-            grep -E '^Seccomp:' "/proc/$1/status" 2>/dev/null | awk '{print $2}'
+          KERNEL=/tmp/mitos-test/vmlinux
+          ROOTFS=/tmp/mitos-test/fork-correctness/rootfs.ext4
+          [ -f "$KERNEL" ] || { echo "FAIL: kernel $KERNEL is missing (fork-correctness phase did not stage it)"; exit 1; }
+          [ -f "$ROOTFS" ] || { echo "FAIL: rootfs $ROOTFS is missing (fork-correctness phase did not stage it)"; exit 1; }
+
+          # Echo 2 if ANY thread of the process runs under a seccomp FILTER. After
+          # boot the vCPU/VMM threads carry the filter; scanning the task threads
+          # (not just the leader) is robust to which thread installs it.
+          any_thread_filter() {
+            local pid=$1 m
+            for st in "/proc/$pid/status" /proc/"$pid"/task/*/status; do
+              m=$(grep -E '^Seccomp:' "$st" 2>/dev/null | awk '{print $2}')
+              [ "$m" = "2" ] && { echo 2; return; }
+            done
+            echo 0
           }
 
-          # Default launch: the built-in production filter must be installed.
-          rm -f /tmp/fc-seccomp.sock
-          /usr/local/bin/firecracker --api-sock /tmp/fc-seccomp.sock \
-            > /tmp/fc-seccomp.log 2>&1 &
-          FC_PID=$!
-          for _ in $(seq 1 20); do
-            [ -n "$(seccomp_mode "$FC_PID")" ] && break
+          dump_threads() {
+            local pid=$1
+            for st in "/proc/$pid/status" /proc/"$pid"/task/*/status; do
+              [ -r "$st" ] || continue
+              echo "    $st -> $(grep -E '^Seccomp:' "$st" 2>/dev/null | tr -d '\t' | tr '\n' ' ')"
+            done
+          }
+
+          # Boot a microVM and set BOOT_PID to its pid. Firecracker resolves the
+          # absolute device paths directly (no jailer here). It is launched in the
+          # MAIN shell (not a command substitution) to avoid the backgrounded-
+          # process-in-$()-holds-the-fd hang.
+          BOOT_PID=
+          boot_vm() {
+            local extra="$1" sock="$2" log="$3"
+            rm -f "$sock"
+            # shellcheck disable=SC2086
+            /usr/local/bin/firecracker $extra --api-sock "$sock" </dev/null > "$log" 2>&1 &
+            BOOT_PID=$!
+            for _ in $(seq 1 20); do [ -S "$sock" ] && break; sleep 0.5; done
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/boot-source \
+              -H 'Content-Type: application/json' \
+              -d "{\"kernel_image_path\": \"$KERNEL\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off\"}" >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/drives/rootfs \
+              -H 'Content-Type: application/json' \
+              -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$ROOTFS\", \"is_root_device\": true, \"is_read_only\": true}" >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/machine-config \
+              -H 'Content-Type: application/json' \
+              -d '{"vcpu_count": 1, "mem_size_mib": 128}' >/dev/null
+            curl -sf --unix-socket "$sock" -X PUT http://localhost/actions \
+              -H 'Content-Type: application/json' \
+              -d '{"action_type": "InstanceStart"}' >/dev/null
+          }
+
+          # Default boot: the built-in production filter MUST be installed once the
+          # vCPUs run.
+          boot_vm "" /tmp/fc-seccomp.sock /tmp/fc-seccomp.log
+          FC_PID=$BOOT_PID
+          GOT=0
+          for _ in $(seq 1 10); do
+            GOT=$(any_thread_filter "$FC_PID")
+            [ "$GOT" = "2" ] && break
             sleep 0.5
           done
-          MODE="$(seccomp_mode "$FC_PID")"
-          echo "default-launch VMM Seccomp mode = '${MODE}' (2 = SECCOMP_MODE_FILTER)"
+          echo "default boot: VMM under a seccomp filter = ${GOT} (2 = SECCOMP_MODE_FILTER); threads:"
+          dump_threads "$FC_PID"
           sudo kill "$FC_PID" 2>/dev/null || true
-          if [ "$MODE" != "2" ]; then
-            echo "FAIL: the Firecracker VMM is NOT running under a seccomp filter (mode '${MODE}'); expected 2"
+          if [ "$GOT" != "2" ]; then
+            echo "FAIL: the running Firecracker VMM has NO thread under a seccomp filter; expected mode 2"
             cat /tmp/fc-seccomp.log || true
             exit 1
           fi
 
-          # Negative control: --no-seccomp disables it (mode 0). This proves the
-          # assertion above actually distinguishes enforced from absent, so a
-          # green default-launch check is meaningful and not vacuous.
-          rm -f /tmp/fc-noseccomp.sock
-          /usr/local/bin/firecracker --no-seccomp --api-sock /tmp/fc-noseccomp.sock \
-            > /tmp/fc-noseccomp.log 2>&1 &
-          FC_PID2=$!
-          for _ in $(seq 1 20); do
-            [ -n "$(seccomp_mode "$FC_PID2")" ] && break
-            sleep 0.5
-          done
-          MODE2="$(seccomp_mode "$FC_PID2")"
-          echo "--no-seccomp VMM Seccomp mode = '${MODE2}' (expect 0)"
+          # Negative control: --no-seccomp boot leaves every thread unfiltered
+          # (mode 0). This proves the assertion above distinguishes enforced from
+          # absent, so a green check is meaningful and not vacuous.
+          boot_vm "--no-seccomp" /tmp/fc-noseccomp.sock /tmp/fc-noseccomp.log
+          FC_PID2=$BOOT_PID
+          sleep 2
+          GOT2=$(any_thread_filter "$FC_PID2")
+          echo "--no-seccomp boot: VMM under a seccomp filter = ${GOT2} (expect 0); threads:"
+          dump_threads "$FC_PID2"
           sudo kill "$FC_PID2" 2>/dev/null || true
-          if [ "$MODE2" != "0" ]; then
-            echo "FAIL: negative control did not show seccomp disabled (mode '${MODE2}'); the mode-2 assertion would be vacuous"
+          if [ "$GOT2" != "0" ]; then
+            echo "FAIL: negative control still shows a seccomp filter (mode '${GOT2}'); the mode-2 assertion would be vacuous"
             cat /tmp/fc-noseccomp.log || true
             exit 1
           fi
 
           echo "==============================================="
-          echo "  Seccomp enforced by default (filter mode 2);"
+          echo "  Running VMM is under a seccomp filter (mode 2);"
           echo "  absent only with --no-seccomp (mode 0)."
           echo "  The VMM filter holds; a disallowed syscall is blocked."
           echo "==============================================="

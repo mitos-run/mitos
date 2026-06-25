@@ -15,12 +15,15 @@ assert the filter holds" is the difference the threat model is held to.
 
 ## What Firecracker provides
 
-Firecracker installs a production seccomp BPF filter on every VMM thread at
-startup, BEFORE the API server begins serving, UNLESS the operator passes
-`--no-seccomp`. The filter is the "advanced" level: an allowlist scoped to the
-syscalls (and, for some, the argument values) the VMM actually needs on its
-supported paths. It is maintained in the Firecracker tree and tested against each
-Firecracker release.
+Firecracker installs a production seccomp BPF filter on the VMM threads when the
+microVM STARTS (the vCPUs are launched, on `InstanceStart` or a snapshot resume),
+UNLESS the operator passes `--no-seccomp`. The filter is NOT installed merely by
+starting the API server: a Firecracker that has only opened its API socket and is
+idle (no VM configured) reports seccomp mode 0 on its main thread, which is why
+the CI proof boots a microVM before checking. The filter is the "advanced" level:
+an allowlist scoped to the syscalls (and, for some, the argument values) the VMM
+actually needs on its supported paths. It is maintained in the Firecracker tree
+and tested against each Firecracker release.
 
 ## Enforcement in Mitos (what ships)
 
@@ -31,13 +34,14 @@ Firecracker release.
    pass it" into a checked invariant that a future flag or refactor cannot
    silently break. Unit-tested in `internal/firecracker/seccomp_test.go`.
 
-2. **Proven on KVM.** The `kvm-test.yaml` step launches a real Firecracker on a
-   KVM runner and asserts the VMM reports `Seccomp: 2` (SECCOMP_MODE_FILTER) in
-   `/proc/<pid>/status`, so a disallowed syscall is blocked by the installed
-   filter. A `--no-seccomp` negative control asserts mode 0, proving the check
-   distinguishes enforced from absent (it is not vacuously green). This step is
-   load-bearing (no `continue-on-error`); it needs only the VMM to start, not a
-   full snapshot restore, so it is robust.
+2. **Proven on KVM.** The `kvm-test.yaml` step BOOTS a real microVM on a KVM
+   runner (Firecracker installs its filters at vCPU start, not at API-server
+   start) and asserts a VMM thread reports `Seccomp: 2` (SECCOMP_MODE_FILTER) in
+   `/proc/<pid>/task/*/status`, so a disallowed syscall is blocked by the
+   installed filter. A `--no-seccomp` boot is the negative control: every thread
+   stays mode 0, proving the check distinguishes enforced from absent (it is not
+   vacuously green). The step is load-bearing (no `continue-on-error`) and reuses
+   the kernel and rootfs the fork-correctness phase already staged.
 
 ## Custom tightened profile: evaluated and declined
 
