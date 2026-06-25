@@ -105,6 +105,27 @@ func TestStripForwardAuthHeaders_RemovesXAuthRequest(t *testing.T) {
 	}
 }
 
+func TestForwardAuth_ForwardsXForwardedFor(t *testing.T) {
+	var capturedFor string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedFor = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://preview.example.com/page", nil)
+	req.Host = "preview.example.com"
+	req.RemoteAddr = "10.0.0.1:54321"
+
+	_, _, _, _, err := ForwardAuth(context.Background(), http.DefaultClient, srv.URL, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedFor != "10.0.0.1" {
+		t.Errorf("X-Forwarded-For: got %q want %q", capturedFor, "10.0.0.1")
+	}
+}
+
 func TestStripForwardAuthHeaders_PreservesOtherHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Forwarded-For", "1.2.3.4")

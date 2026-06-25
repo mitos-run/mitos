@@ -2,6 +2,8 @@ package preview
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -28,6 +30,11 @@ func ForwardAuth(ctx context.Context, client *http.Client, authURL string, r *ht
 	req.Header.Set("X-Forwarded-Method", r.Method)
 	req.Header.Set("X-Forwarded-Uri", r.URL.RequestURI())
 	req.Header.Set("X-Forwarded-Host", r.Host)
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		req.Header.Set("X-Forwarded-For", host)
+	} else {
+		req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	}
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
@@ -39,6 +46,7 @@ func ForwardAuth(ctx context.Context, client *http.Client, authURL string, r *ht
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return false, nil, nil, resp.StatusCode, nil
 	}
 

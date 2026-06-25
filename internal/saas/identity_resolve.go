@@ -1,7 +1,7 @@
 package saas
 
 import (
-	"crypto/subtle"
+	"crypto/hmac"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -36,7 +36,7 @@ func NewIdentityResolveHandler(accounts *AccountService, token string, log *slog
 func (h *identityResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Constant-time bearer gate; the token is never logged.
 	presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if h.token == "" || !ok || subtle.ConstantTimeCompare([]byte(presented), []byte(h.token)) != 1 {
+	if h.token == "" || !ok || !hmac.Equal([]byte(presented), []byte(h.token)) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

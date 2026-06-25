@@ -80,6 +80,22 @@ func TestIdentityResolveHandler_Success(t *testing.T) {
 	}
 }
 
+func TestIdentityResolveHandler_EmptyConfiguredToken(t *testing.T) {
+	store := NewMemStore()
+	keys := NewKeyService(store)
+	accounts := NewAccountService(store, keys)
+	h := NewIdentityResolveHandler(accounts, "", nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/internal/identity/resolve", bytes.NewBufferString(`{"email":"alice@example.com"}`))
+	r.Header.Set("Authorization", "Bearer anythingatall")
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
 func TestIdentityResolveHandler_BadBody(t *testing.T) {
 	store := NewMemStore()
 	keys := NewKeyService(store)
