@@ -83,11 +83,11 @@ func TestParseHostSingleLabel(t *testing.T) {
 	}{
 		{"openclaw.mitos.run", "mitos.run", "openclaw", true},
 		{"8000-sbx1.mitos.run", "mitos.run", "8000-sbx1", true},
-		{"OpenClaw.Mitos.Run", "mitos.run", "openclaw", true},       // case-insensitive
-		{"openclaw.mitos.run:443", "mitos.run", "openclaw", true},   // strips port
-		{"a.b.mitos.run", "mitos.run", "", false},                   // two labels: reject
-		{"mitos.run", "mitos.run", "", false},                       // apex: no label
-		{"openclaw.evil.com", "mitos.run", "", false},               // wrong domain
+		{"OpenClaw.Mitos.Run", "mitos.run", "openclaw", true},     // case-insensitive
+		{"openclaw.mitos.run:443", "mitos.run", "openclaw", true}, // strips port
+		{"a.b.mitos.run", "mitos.run", "", false},                 // two labels: reject
+		{"mitos.run", "mitos.run", "", false},                     // apex: no label
+		{"openclaw.evil.com", "mitos.run", "", false},             // wrong domain
 		{"", "mitos.run", "", false},
 		{"openclaw.sandbox.example.com", "sandbox.example.com", "openclaw", true}, // configurable domain
 	}

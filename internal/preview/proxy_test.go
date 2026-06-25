@@ -275,3 +275,40 @@ func TestProxyRejectsTokenForWrongPort(t *testing.T) {
 		t.Fatalf("token for the wrong port must 403, got %d", rec.Code)
 	}
 }
+
+// TestProxyDropsInboundAuthorization is a security property test: the proxy must
+// unconditionally delete any inbound Authorization header before forwarding to
+// forkd, even when the route Token is empty. A signed query token authenticates
+// the request; an attacker-supplied Authorization header must never reach forkd.
+func TestProxyDropsInboundAuthorization(t *testing.T) {
+	var capturedAuth string
+	forkd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer forkd.Close()
+
+	secret := []byte("0123456789abcdef")
+	signer, _ := NewSigner(secret)
+	routes := NewRouteTable()
+	// Empty Token: the proxy sets no Authorization on the upstream request, so any
+	// inbound Authorization surviving to forkd would be a raw client credential leak.
+	routes.Upsert(Route{Label: "openclaw", SandboxID: "sbx1", NodeEndpoint: strings.TrimPrefix(forkd.URL, "http://"), Port: 8000, Token: "", Sharing: "link"})
+	p := NewProxy(Config{Domain: "mitos.run", Signer: signer, Routes: routes})
+
+	// A valid signed token in the query so the gate passes.
+	tok, _ := signer.Mint("sbx1", 8000, time.Now().Add(time.Minute))
+	req := httptest.NewRequest(http.MethodGet, "https://openclaw.mitos.run/?token="+tok, nil)
+	req.Host = "openclaw.mitos.run"
+	// Attacker-supplied credential in the inbound Authorization header.
+	req.Header.Set("Authorization", "Bearer attacker-creds")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if capturedAuth != "" {
+		t.Fatalf("inbound Authorization was not stripped: forkd received %q", capturedAuth)
+	}
+}

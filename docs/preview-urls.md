@@ -17,10 +17,12 @@ the full sharing ladder including audience selectors is slice 4).
 
 ## What ships in this slice
 
-- `internal/expose`: the signer (mint + verify signed expiring URLs), the host
+- `internal/preview`: the signer (mint + verify signed expiring URLs), the host
   parser, the reserved-name blocklist, the route table with GC, the reverse proxy,
-  and the admin route-sync endpoint.
-- `cmd/expose-proxy`: the standalone proxy binary. One entrypoint that resolves the
+  and the admin route-sync endpoint. The Go package keeps the name `internal/preview`
+  (and the binary `cmd/preview-proxy`) for now while the product subsystem is named
+  Mitos Expose; the package rename is a deferred cleanup.
+- `cmd/preview-proxy`: the standalone proxy binary. One entrypoint that resolves the
   single-label hostname, verifies the signed token, looks up the route, and proxies
   to the owning forkd node.
 - `sandbox-server` `POST /v1/preview`: mints a signed expose URL for a sandbox port
@@ -75,7 +77,7 @@ token   = payload + "." + tag
 
 `Verify` recomputes the tag, compares it in CONSTANT TIME (`crypto/subtle`),
 then rejects the token if `now` is after the embedded expiry. The properties
-that matter, each unit-tested in `internal/expose/sign_test.go`:
+that matter, each unit-tested in `internal/preview/sign_test.go`:
 
 - **Never accept after expiry.** A token one second past its expiry, and a token
   checked far in the future, both fail. The expiry boundary is inclusive.
