@@ -63,6 +63,28 @@ export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
 export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
 
+export type AccountView = {
+  account_id: string
+  email: string
+  display_name: string
+  timezone: string
+  locale: string
+  memberships: MemberView[]
+}
+
+export type AccountPatch = {
+  display_name?: string
+  timezone?: string
+  locale?: string
+}
+
+export type SessionView = {
+  id: string
+  label: string
+  created_at: string
+  current: boolean
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
@@ -137,6 +159,32 @@ export const api = {
     })
     if (!r.ok) throw new Error(`create project: ${r.status}`)
     return (await r.json()) as ProjectView
+  },
+  account: () => get<AccountView>('/console/account'),
+  updateAccount: async (patch: AccountPatch) => {
+    const r = await fetch('/console/account', {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) throw new Error(`update account: ${r.status}`)
+    return (await r.json()) as AccountView
+  },
+  sessions: () => get<{ sessions: SessionView[] }>('/console/account/sessions').then((r) => r.sessions ?? []),
+  revokeSession: async (id: string) => {
+    const r = await fetch(`/console/account/sessions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke session: ${r.status}`)
+  },
+  revokeAllSessions: async () => {
+    const r = await fetch('/console/account/sessions', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke all sessions: ${r.status}`)
   },
 }
 
