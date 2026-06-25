@@ -95,9 +95,11 @@ Jobs:
 - **python-test**: SDK pytest.
 - **docker-build**: controller and forkd images.
 - **kind-e2e**: mock engine on kind (config hack/kind-config.yaml).
+- **kind-e2e-husk**: husk-pod warm-pool e2e on kind (transient nested-KVM steps retry; the warm.min reconcile and placement gates hard-fail).
+- **kind-e2e-placement**: placement-confinement e2e on kind.
 - **firecracker-test** (kvm-test.yaml): real Firecracker snapshot/restore plus guest agent exec over vsock on KVM runners.
 
-All six are required checks on main; main requires branches to be up to date.
+All eight are required checks on main; main requires branches to be up to date.
 
 ## Security Practices
 
