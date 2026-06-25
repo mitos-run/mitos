@@ -18,6 +18,7 @@ import { Members } from '../views/Members'
 import { Projects } from '../views/Projects'
 import { Settings } from '../views/Settings'
 import { Trust } from '../views/Trust'
+import { Retention } from '../views/Retention'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -44,6 +45,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/projects', label: 'Projects', group: 'Govern', element: () => <Projects />, when: (c) => c.teams },
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Audit /> },
   { path: '/trust', label: 'Trust', group: 'Govern', element: () => <Trust /> },
+  { path: '/retention', label: 'Data and retention', group: 'Govern', element: () => <Retention /> },
   { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Usage /> },
   { path: '/billing', label: 'Billing', group: 'Govern', element: () => <Billing />, when: (c) => c.billing },
   { path: '/settings', label: 'Settings', group: 'Settings', element: () => <Settings /> },
