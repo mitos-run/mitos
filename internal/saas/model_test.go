@@ -2,6 +2,26 @@ package saas
 
 import "testing"
 
+// TestSettingsPermissionOnAdminNotMember asserts that Admin (and Owner) can
+// manage settings, while Member and Viewer cannot.
+func TestSettingsPermissionOnAdminNotMember(t *testing.T) {
+	if !RoleOwner.Can(PermManageSettings) {
+		t.Fatal("owner must have settings.manage")
+	}
+	if !RoleAdmin.Can(PermManageSettings) {
+		t.Fatal("admin must have settings.manage")
+	}
+	if RoleBilling.Can(PermManageSettings) {
+		t.Fatal("billing must NOT have settings.manage")
+	}
+	if RoleMember.Can(PermManageSettings) {
+		t.Fatal("member must NOT have settings.manage")
+	}
+	if RoleViewer.Can(PermManageSettings) {
+		t.Fatal("viewer must NOT have settings.manage")
+	}
+}
+
 func TestRolePermissions(t *testing.T) {
 	cases := []struct {
 		role Role

@@ -62,6 +62,7 @@ export type BillingView = { org_id: string; status: string; balance_cents: numbe
 export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
 export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
+export type ProjectMembership = { account_id: string; project_id: string; role: Role }
 
 export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
 export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
@@ -71,6 +72,26 @@ export type DataRetentionPolicy = {
   logs_days: number
   usage_days: number
   legal_hold: boolean
+}
+
+export type Permission =
+  | 'members.manage'
+  | 'projects.manage'
+  | 'secrets.manage'
+  | 'settings.manage'
+  | 'billing.manage'
+  | 'resources.use'
+  | 'read'
+
+export type CustomRole = {
+  name: string
+  permissions: string[]
+}
+
+export type RolesView = {
+  org_id: string
+  builtins: CustomRole[]
+  custom: CustomRole[]
 }
 
 export type AccountView = {
@@ -224,6 +245,23 @@ export const api = {
     })
     if (!r.ok && r.status !== 204) throw new Error(`delete sink: ${r.status}`)
   },
+  roles: () => get<RolesView>('/console/roles'),
+  upsertRole: async (role: CustomRole) => {
+    const r = await fetch('/console/roles', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(role),
+    })
+    if (!r.ok) throw new Error(`upsert role: ${r.status}`)
+  },
+  deleteRole: async (name: string) => {
+    const r = await fetch(`/console/roles/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`delete role: ${r.status}`)
+  },
   auditExportUrl: () => '/console/audit/export',
   dataRetention: () => get<DataRetentionPolicy>('/console/retention'),
   setDataRetention: async (policy: DataRetentionPolicy) => {
@@ -235,6 +273,24 @@ export const api = {
     })
     if (!r.ok) throw new Error(`set retention policy: ${r.status}`)
     return (await r.json()) as DataRetentionPolicy
+  },
+  projectMembers: (projectId: string) =>
+    get<{ project_id: string; members: ProjectMembership[] }>(`/console/projects/${encodeURIComponent(projectId)}/members`).then((r) => r.members ?? []),
+  assignProjectMember: async (projectId: string, accountId: string, role: Role) => {
+    const r = await fetch(`/console/projects/${encodeURIComponent(projectId)}/members`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ account_id: accountId, role }),
+    })
+    if (!r.ok) throw new Error(`assign project member: ${r.status}`)
+  },
+  revokeProjectMember: async (projectId: string, accountId: string) => {
+    const r = await fetch(`/console/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(accountId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
   },
 }
 

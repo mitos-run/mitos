@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"mitos.run/mitos/internal/saas"
 )
 
 func TestProjectsAreOrgScoped(t *testing.T) {
@@ -31,20 +33,30 @@ func TestProjectsAreOrgScoped(t *testing.T) {
 }
 
 func TestProjectCreate(t *testing.T) {
-	c := New(Deps{Projects: NewMemProjectStore()})
+	// POST /console/projects requires PermManageProjects; seed an owner (owner has all perms).
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	owner, org, err := accounts.SignUp(context.Background(), "proj-owner@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+
+	c := New(Deps{Accounts: accounts, Projects: NewMemProjectStore()})
 	body := strings.NewReader(`{"name":"gamma","description":"team gamma"}`)
-	req := httptest.NewRequest("POST", "/console/projects", body).WithContext(WithCaller(context.Background(), "acct", "orgA"))
+	req := httptest.NewRequest("POST", "/console/projects", body).
+		WithContext(WithCaller(context.Background(), owner.ID, org.ID))
 	rr := httptest.NewRecorder()
 	c.ServeHTTP(rr, req)
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("create status %d", rr.Code)
+		t.Fatalf("create status %d, body=%s", rr.Code, rr.Body.String())
 	}
 	var p Project
 	if err := json.NewDecoder(rr.Body).Decode(&p); err != nil {
 		t.Fatalf("decode response body: %v", err)
 	}
-	if p.OrgID != "orgA" {
-		t.Errorf("created project OrgID = %q, want %q", p.OrgID, "orgA")
+	if p.OrgID != org.ID {
+		t.Errorf("created project OrgID = %q, want %q", p.OrgID, org.ID)
 	}
 	if p.Name != "gamma" {
 		t.Errorf("created project Name = %q, want %q", p.Name, "gamma")

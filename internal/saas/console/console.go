@@ -75,6 +75,16 @@ type Deps struct {
 	// store. When set, New wraps deps.Audit with a DispatchingRecorder so every
 	// audit event is best-effort forwarded to the org's enabled sinks.
 	Sinks SinkRegistry
+	// CustomRoles is the org-scoped custom-role definition store. It is used by
+	// the permission resolver to look up custom role names that do not match any
+	// built-in role. Defaults to an empty in-memory store so the BFF is safe to
+	// instantiate without a real custom-role backend.
+	CustomRoles CustomRoleStore
+	// ProjectMembers is the per-org, per-project membership store. It backs the
+	// GET/POST/DELETE /console/projects/{id}/members endpoints. Defaults to an
+	// empty in-memory store so the BFF is safe to instantiate without a real
+	// backend.
+	ProjectMembers ProjectMembershipStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -130,6 +140,12 @@ func New(deps Deps) *Console {
 	}
 	if deps.Sinks == nil {
 		deps.Sinks = NewMemSinkRegistry()
+	}
+	if deps.CustomRoles == nil {
+		deps.CustomRoles = NewMemCustomRoleStore()
+	}
+	if deps.ProjectMembers == nil {
+		deps.ProjectMembers = NewMemProjectMembershipStore()
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
@@ -195,6 +211,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
 	mux.HandleFunc("GET /console/projects", c.handleListProjects)
 	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
+	mux.HandleFunc("GET /console/projects/{id}/members", c.handleListProjectMembers)
+	mux.HandleFunc("POST /console/projects/{id}/members", c.handleAssignProjectMember)
+	mux.HandleFunc("DELETE /console/projects/{id}/members/{accountID}", c.handleRevokeProjectMember)
 	mux.HandleFunc("POST /console/members/{accountID}/role", c.handleSetMemberRole)
 	mux.HandleFunc("GET /console/account", c.handleGetAccount)
 	mux.HandleFunc("PATCH /console/account", c.handlePatchAccount)
@@ -203,6 +222,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("DELETE /console/account/sessions", c.handleRevokeAllSessions)
 	mux.HandleFunc("GET /console/retention", c.handleGetDataRetention)
 	mux.HandleFunc("PUT /console/retention", c.handleSetDataRetention)
+	mux.HandleFunc("GET /console/roles", c.handleListRoles)
+	mux.HandleFunc("POST /console/roles", c.handleUpsertRole)
+	mux.HandleFunc("DELETE /console/roles/{name}", c.handleDeleteRole)
 	c.mux = mux
 }
 
@@ -284,7 +306,7 @@ type createKeyRequest struct {
 }
 
 func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -324,7 +346,7 @@ func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -491,7 +513,7 @@ func (c *Console) handleInspectSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermUseResources)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -626,7 +648,7 @@ type createProjectRequest struct {
 }
 
 func (c *Console) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageProjects)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -721,7 +743,7 @@ type createSinkRequest struct {
 // handleCreateSink adds a new audit-sink destination for the caller's org and
 // audits the action.
 func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return
@@ -756,7 +778,7 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSink removes an audit-sink destination from the caller's org.
 // A sink belonging to a different org returns not_found.
 func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
-	accountID, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.authorize(r, saas.PermManageSettings)
 	if !ok {
 		apierr.Encode(w, e)
 		return
