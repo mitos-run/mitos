@@ -1,0 +1,99 @@
+// Package controlplane is the real hosted control plane behind the public
+// gateway (issue #210, ROADMAP SaaS P1). It turns an authenticated, org-scoped
+// ForwardRequest into real Kubernetes actions on the mitos.run/v1 Sandbox kind
+// and reverse-proxies runtime calls (exec, files, run_code over the Connect
+// sandbox.v1.Sandbox service) to the sandbox endpoint with the per-sandbox
+// bearer token.
+//
+// Security: this is the cross-tenant boundary. The org id is taken ONLY from
+// ForwardRequest.OrgID (the gateway verified it from the customer key); a
+// customer can never influence it. Every Get, List, Delete, and proxy is scoped
+// to NamespaceForOrg(orgID) AND re-checks the mitos.run/org label on the object,
+// so a request that names another org's sandbox id returns not_found and never
+// mutates or reaches it. The per-sandbox token is read from the controller-owned
+// Secret and is returned to the caller ONLY on create (so the SDK can address the
+// sandbox directly); it is never logged and never placed in an error.
+package controlplane
+
+import (
+	"net/http"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// Defaults for the readiness poll. A create call blocks until the sandbox is
+// Ready, Failed, or the timeout elapses; these bound that wait.
+const (
+	defaultReadyTimeout = 120 * time.Second
+	defaultPollInterval = 250 * time.Millisecond
+)
+
+// K8sControlPlane is the real ControlPlane. It holds a controller-runtime client
+// (the lifecycle path), an http.Client (the runtime reverse proxy), and config.
+type K8sControlPlane struct {
+	c            client.Client
+	httpClient   *http.Client
+	readyTimeout time.Duration
+	pollInterval time.Duration
+	// defaultPool is the pool a create request falls back to when it names neither
+	// a pool nor an image. Empty means a create without a pool is rejected.
+	defaultPool string
+	now          func() time.Time
+}
+
+// Option configures a K8sControlPlane.
+type Option func(*K8sControlPlane)
+
+// WithReadyTimeout sets the create readiness poll ceiling. A non-positive value
+// is ignored (the default stands).
+func WithReadyTimeout(d time.Duration) Option {
+	return func(k *K8sControlPlane) {
+		if d > 0 {
+			k.readyTimeout = d
+		}
+	}
+}
+
+// WithPollInterval sets the create readiness poll interval. A non-positive value
+// is ignored.
+func WithPollInterval(d time.Duration) Option {
+	return func(k *K8sControlPlane) {
+		if d > 0 {
+			k.pollInterval = d
+		}
+	}
+}
+
+// WithDefaultPool sets the fallback pool name used when a create request names
+// neither a pool nor an image.
+func WithDefaultPool(name string) Option {
+	return func(k *K8sControlPlane) { k.defaultPool = name }
+}
+
+// WithHTTPClient overrides the runtime-proxy HTTP client (tests inject one that
+// targets an httptest.Server).
+func WithHTTPClient(h *http.Client) Option {
+	return func(k *K8sControlPlane) {
+		if h != nil {
+			k.httpClient = h
+		}
+	}
+}
+
+// New builds a K8sControlPlane over the given controller-runtime client. The
+// client's scheme MUST have mitos.run/v1 and corev1 registered so the control
+// plane can read Sandboxes and the per-sandbox token Secret.
+func New(c client.Client, opts ...Option) *K8sControlPlane {
+	k := &K8sControlPlane{
+		c:            c,
+		httpClient:   &http.Client{Timeout: 0}, // no overall timeout: streams are long-lived.
+		readyTimeout: defaultReadyTimeout,
+		pollInterval: defaultPollInterval,
+		now:          time.Now,
+	}
+	for _, o := range opts {
+		o(k)
+	}
+	return k
+}

@@ -14,6 +14,47 @@ import (
 // gateway with an unbounded upload. It mirrors the daemon sandbox API ceiling.
 const maxBodyBytes = 8 << 20 // 8 MiB
 
+// opRuntime is the public operation for a runtime proxy call (exec, files,
+// run_code over the Connect sandbox.v1.Sandbox service). It is reverse-proxied to
+// the sandbox endpoint by the control plane, not handled as a lifecycle verb. It
+// requires the sandbox scope because it acts inside a running sandbox.
+const opRuntime = "sandbox.runtime"
+
+// runtimeMethod returns the Connect method name and true when path is a runtime
+// proxy call, otherwise "", false. Two shapes are accepted: the native Connect
+// path /sandbox.v1.Sandbox/<Method>, and the friendly
+// /v1/sandboxes/<id>/{exec,files,run_code} alias. The control plane resolves the
+// sandbox id from the X-Sandbox-Id header (native) or the path (alias).
+func runtimeMethod(path string) (string, bool) {
+	const connectPrefix = "/sandbox.v1.Sandbox/"
+	if strings.HasPrefix(path, connectPrefix) {
+		m := strings.TrimPrefix(path, connectPrefix)
+		if m != "" && !strings.Contains(m, "/") {
+			return m, true
+		}
+		return "", false
+	}
+	p := strings.TrimPrefix(path, "/v1/")
+	if !strings.HasPrefix(p, "sandboxes/") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(p, "sandboxes/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", false
+	}
+	switch parts[1] {
+	case "exec":
+		return "Exec", true
+	case "files":
+		return "Files", true
+	case "run_code":
+		return "RunCode", true
+	default:
+		return "", false
+	}
+}
+
 // requiredScopeFor maps a public operation to the scope a key must carry. A
 // read-only op is satisfied by either scope; a mutating op requires the sandbox
 // scope. An unknown op requires the sandbox scope (fail closed).
@@ -56,9 +97,14 @@ func NewGateway(keys *KeyService, quota QuotaEnforcer, cp ControlPlane, log *slo
 }
 
 // opFromPath derives the public operation name from the request path and method.
-// The gateway exposes a flat surface under /v1/sandboxes; the op is used for
-// scope selection, quota accounting, and forwarding.
+// The gateway exposes a flat surface under /v1/sandboxes plus the Connect runtime
+// service; the op is used for scope selection, quota accounting, and forwarding.
+// A runtime proxy call (Connect path or the /v1/sandboxes/<id>/{exec,files,
+// run_code} alias) maps to opRuntime; the lifecycle verbs map as before.
 func opFromPath(method, path string) string {
+	if _, ok := runtimeMethod(path); ok {
+		return opRuntime
+	}
 	p := strings.TrimPrefix(path, "/v1/")
 	switch {
 	case p == "sandboxes" && method == http.MethodGet:
@@ -109,20 +155,32 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-	if err != nil {
-		g.fail(w, apierr.Get(apierr.CodeInternal).WithCause("read request body failed"))
-		return
-	}
-	if len(body) > maxBodyBytes {
-		g.fail(w, apierr.Get(apierr.CodeBodyTooLarge).
-			WithCause("the forwarded request body exceeds the gateway limit"))
-		return
-	}
-
 	// The OrgID forwarded is taken ONLY from the verified key. The request body
 	// and path cannot influence it, so a key for org A cannot address org B.
-	fwd := ForwardRequest{OrgID: orgID, Op: op, Path: r.URL.Path, Body: body}
+	fwd := ForwardRequest{OrgID: orgID, Op: op, Path: r.URL.Path, Method: r.Method}
+
+	if op == opRuntime {
+		// Runtime (exec, files, run_code over Connect) is reverse-proxied and may
+		// carry an unbounded stream (ExecStream), so the body is NOT buffered or
+		// size-capped here; it is streamed by the control plane. Only a curated set
+		// of headers crosses the seam, and the client Authorization is NEVER
+		// forwarded: the control plane attaches the per-sandbox token itself.
+		fwd.BodyStream = r.Body
+		fwd.Header = curatedRuntimeHeaders(r.Header)
+	} else {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+		if err != nil {
+			g.fail(w, apierr.Get(apierr.CodeInternal).WithCause("read request body failed"))
+			return
+		}
+		if len(body) > maxBodyBytes {
+			g.fail(w, apierr.Get(apierr.CodeBodyTooLarge).
+				WithCause("the forwarded request body exceeds the gateway limit"))
+			return
+		}
+		fwd.Body = body
+	}
+
 	g.log.Info("gateway forward", "key_id", res.Key.ID, "key_prefix", res.Key.Prefix, "org", orgID, "op", op)
 
 	resp, err := g.cp.Forward(r.Context(), fwd)
@@ -135,9 +193,37 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	w.Header().Set("Content-Type", "application/json")
+	// A control-plane response may carry its own headers (the runtime proxy sets
+	// Content-Type so a streamed Connect body is decodable). Default to JSON for
+	// the lifecycle ops.
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(status)
+	if resp.BodyStream != nil {
+		// Stream the response without buffering (this carries a streamed Connect
+		// response), then close the upstream body.
+		defer func() { _ = resp.BodyStream.Close() }()
+		_, _ = io.Copy(w, resp.BodyStream)
+		return
+	}
 	_, _ = w.Write(resp.Body)
+}
+
+// curatedRuntimeHeaders copies only the headers the runtime proxy needs across
+// the control-plane seam. The client Authorization is deliberately EXCLUDED: the
+// control plane attaches the per-sandbox bearer token, so a customer cannot
+// influence the credential presented to the sandbox.
+func curatedRuntimeHeaders(in http.Header) http.Header {
+	out := http.Header{}
+	for _, k := range []string{"X-Sandbox-Id", "Content-Type", "Accept", "Connect-Protocol-Version", "Connect-Timeout-Ms"} {
+		if v := in.Get(k); v != "" {
+			out.Set(k, v)
+		}
+	}
+	return out
 }
 
 // failVerify maps a key-verification error to the public envelope. A missing,
