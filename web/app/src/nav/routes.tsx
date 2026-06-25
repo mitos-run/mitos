@@ -9,6 +9,7 @@ import { ForkTree } from '../views/forktree/ForkTree'
 import { Secrets } from '../views/Secrets'
 import { Placeholder } from '../views/Placeholder'
 import { SandboxDetail } from '../views/sandboxes/SandboxDetail'
+import { Keys } from '../views/Keys'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -30,7 +31,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Placeholder title="Templates" endpoint="/console/templates" phase="B2" /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
-  { path: '/keys', label: 'API keys', group: 'Build', element: () => <Placeholder title="API keys" endpoint="/console/keys" phase="B2" /> },
+  { path: '/keys', label: 'API keys', group: 'Build', element: () => <Keys /> },
   { path: '/members', label: 'Members', group: 'Govern', element: () => <Placeholder title="Members & roles" endpoint="/console/members" phase="B2" />, when: (c) => c.teams },
   { path: '/audit', label: 'Audit', group: 'Govern', element: () => <Placeholder title="Audit log" endpoint="/console/audit" phase="B2" /> },
   { path: '/usage', label: 'Usage', group: 'Govern', element: () => <Placeholder title="Usage & cost" endpoint="/console/usage" phase="B2" /> },
