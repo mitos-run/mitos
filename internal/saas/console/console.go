@@ -211,6 +211,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("DELETE /console/account/sessions", c.handleRevokeAllSessions)
 	mux.HandleFunc("GET /console/retention", c.handleGetDataRetention)
 	mux.HandleFunc("PUT /console/retention", c.handleSetDataRetention)
+	mux.HandleFunc("GET /console/roles", c.handleListRoles)
+	mux.HandleFunc("POST /console/roles", c.handleUpsertRole)
+	mux.HandleFunc("DELETE /console/roles/{name}", c.handleDeleteRole)
 	c.mux = mux
 }
 
