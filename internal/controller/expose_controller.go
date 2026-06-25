@@ -70,11 +70,14 @@ func (r *ExposeRouteReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (
 			}
 			return ctrl.Result{}, fmt.Errorf("expose reconcile: get token secret %s/%s: %w", sb.Namespace, secretName, err)
 		}
-		tokens[sb.Name] = string(secret.Data["token"])
+		// Key by namespace-qualified name: the tenant model is namespace-per-org
+		// (mitos-org-<id>), so two sandboxes of the same name in different
+		// namespaces must not collide and inherit each other's bearer token.
+		tokens[client.ObjectKeyFromObject(sb).String()] = string(secret.Data["token"])
 	}
 
 	tokenFor := func(sb v1.Sandbox) (string, bool) {
-		tok, ok := tokens[sb.Name]
+		tok, ok := tokens[client.ObjectKeyFromObject(&sb).String()]
 		return tok, ok
 	}
 
