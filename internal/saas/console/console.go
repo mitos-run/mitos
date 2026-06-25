@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -52,11 +53,21 @@ type Deps struct {
 	ForkTree    ForkTreeSource
 	Projects    ProjectStore
 	Portal      PortalLinker
+	// Retention is the per-org audit-retention policy seam. It stores and
+	// exposes the retention window in days for each org; the GC sweep that
+	// enforces the policy runs in the controller (issue #163). Defaults to the
+	// in-memory fake so the BFF is safe to instantiate without a real store.
+	Retention RetentionStore
 	// Sessions is the account-scoped session-listing seam. It is used by the
 	// account-session endpoints (list, revoke one, revoke all) and defaults to a
 	// no-op in-memory implementation so the BFF is safe to instantiate without a
 	// real session store.
 	Sessions SessionLister
+	// Sinks is the org-scoped audit-sink registry. Defaults to an empty
+	// in-memory registry so the BFF is safe to instantiate without a real sink
+	// store. When set, New wraps deps.Audit with a DispatchingRecorder so every
+	// audit event is best-effort forwarded to the org's enabled sinks.
+	Sinks SinkRegistry
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
 	// self-hosted community edition.
@@ -101,8 +112,14 @@ func New(deps Deps) *Console {
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
 	}
+	if deps.Retention == nil {
+		deps.Retention = NewMemRetentionStore()
+	}
 	if deps.Sessions == nil {
 		deps.Sessions = noopSessionLister{}
+	}
+	if deps.Sinks == nil {
+		deps.Sinks = NewMemSinkRegistry()
 	}
 	if deps.Logs == nil {
 		// Default to an authorizing streamer over the (already-defaulted)
@@ -126,6 +143,11 @@ func New(deps Deps) *Console {
 	if deps.Capabilities.Edition == "" {
 		deps.Capabilities = defaultCapabilities()
 	}
+	// Wrap the audit recorder with a DispatchingRecorder so every audit event
+	// is best-effort forwarded to the org's enabled sinks. The webhook sink is
+	// the default dispatcher; tests inject a sinkFunc via NewDispatchingRecorder.
+	deps.Audit = NewDispatchingRecorder(deps.Audit, deps.Sinks, newWebhookSink()).
+		withLog(deps.Log)
 	c := &Console{deps: deps}
 	c.routes()
 	return c
@@ -149,6 +171,12 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
+	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
+	mux.HandleFunc("GET /console/audit/retention", c.handleGetRetention)
+	mux.HandleFunc("PUT /console/audit/retention", c.handleSetRetention)
+	mux.HandleFunc("GET /console/audit/sinks", c.handleListSinks)
+	mux.HandleFunc("POST /console/audit/sinks", c.handleCreateSink)
+	mux.HandleFunc("DELETE /console/audit/sinks/{id}", c.handleDeleteSink)
 	mux.HandleFunc("GET /console/templates", c.handleListTemplates)
 	mux.HandleFunc("GET /console/secrets", c.handleListSecrets)
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
@@ -654,6 +682,119 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		At:      c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "account_id": targetID, "role": req.Role})
+}
+
+// --- Audit sinks (GET/POST/DELETE /console/audit/sinks) ---
+
+// handleListSinks returns the org's configured audit-sink destinations.
+func (c *Console) handleListSinks(w http.ResponseWriter, r *http.Request) {
+	_, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	cfgs := c.deps.Sinks.List(r.Context(), orgID)
+	if cfgs == nil {
+		cfgs = []SinkConfig{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "sinks": cfgs})
+}
+
+// createSinkRequest is the body of POST /console/audit/sinks.
+type createSinkRequest struct {
+	Type     string `json:"type"`
+	Endpoint string `json:"endpoint"`
+}
+
+// handleCreateSink adds a new audit-sink destination for the caller's org and
+// audits the action.
+func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
+	accountID, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	var req createSinkRequest
+	if err := decodeBody(r, &req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
+			WithCause("the sink-create body is not valid JSON"))
+		return
+	}
+	if err := validateSinkRequest(req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).WithCause(err.Error()))
+		return
+	}
+	cfg, err := c.deps.Sinks.Add(r.Context(), orgID, req.Type, req.Endpoint)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
+			WithCause("the audit sink could not be created"))
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID:   orgID,
+		ActorID: accountID,
+		Action:  "audit.sink.create",
+		Target:  cfg.ID,
+		Detail:  "created audit sink type " + cfg.Type,
+		At:      c.deps.Now(),
+	})
+	writeJSON(w, http.StatusCreated, cfg)
+}
+
+// handleDeleteSink removes an audit-sink destination from the caller's org.
+// A sink belonging to a different org returns not_found.
+func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
+	accountID, orgID, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	id := r.PathValue("id")
+	if err := c.deps.Sinks.Delete(r.Context(), orgID, id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+				WithCause("the audit sink does not exist or does not belong to this organization"))
+			return
+		}
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
+			WithCause("the audit sink could not be deleted"))
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID:   orgID,
+		ActorID: accountID,
+		Action:  "audit.sink.delete",
+		Target:  id,
+		Detail:  "deleted audit sink " + id,
+		At:      c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "deleted": id})
+}
+
+// allowedSinkTypes is the set of sink type values accepted by handleCreateSink.
+// Any type not in this set is rejected with a 400 before the registry is called.
+var allowedSinkTypes = map[string]bool{
+	"webhook": true,
+	"s3":      true,
+	"splunk":  true,
+	"datadog": true,
+}
+
+// validateSinkRequest checks that the sink type is in the allowed set and that
+// the endpoint is a non-empty https URL. It returns an actionable, non-secret
+// error message suitable for use as an apierr cause.
+func validateSinkRequest(req createSinkRequest) error {
+	if !allowedSinkTypes[req.Type] {
+		return errors.New("unknown sink type: must be one of webhook, s3, splunk, datadog")
+	}
+	if req.Endpoint == "" {
+		return errors.New("the sink endpoint must be an https URL")
+	}
+	u, err := url.Parse(req.Endpoint)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("the sink endpoint must be an https URL")
+	}
+	return nil
 }
 
 // --- helpers ---
