@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { waitFor, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
@@ -13,11 +14,16 @@ function mockFor(map: Record<string, unknown>) {
   })
 }
 
+const twoTemplates = [
+  { name: 'python-3.12', org_id: 'o', description: 'Python 3.12', image: 'ghcr.io/x/py:3.12', updated_at: '2026-06-01T00:00:00Z' },
+  { name: 'node-22', org_id: 'o', description: 'Node.js 22', image: 'ghcr.io/x/node:22', updated_at: '2026-06-02T00:00:00Z' },
+]
+
 beforeEach(() => {
   mockFor({
     '/console/capabilities': caps,
     '/console/audit': { org_id: 'o', events: [{ org_id: 'o', actor_id: 'alice', action: 'key.create', target: 'k1', detail: 'created api key mitos_live_ab12', at: '2026-06-25T08:00:00Z' }] },
-    '/console/templates': { org_id: 'o', templates: [{ name: 'python-3.12', org_id: 'o', description: 'Python 3.12', image: 'ghcr.io/x/py:3.12', updated_at: '2026-06-01T00:00:00Z' }] },
+    '/console/templates': { org_id: 'o', templates: twoTemplates },
     '/console/billing': { org_id: 'o', status: 'active', balance_cents: 5000, spend_cents: 1234, soft_cap_cents: 0, hard_cap_cents: 0, ledger_entries: [] },
     '/console/usage': { org_id: 'o', records: [], totals: { vcpu_seconds: 3600 }, cost: { total_cents: 1234 } },
   })
@@ -32,6 +38,16 @@ describe('read views', () => {
   it('templates shows a template', async () => {
     await renderAt('/templates', caps)
     await waitFor(() => expect(screen.getByText('python-3.12')).toBeInTheDocument())
+  })
+
+  it('filters the templates table when a search query is typed', async () => {
+    await renderAt('/templates', caps)
+    await waitFor(() => expect(screen.getByText('python-3.12')).toBeInTheDocument())
+    expect(screen.getByText('node-22')).toBeInTheDocument()
+    const searchBox = screen.getByRole('searchbox', { name: /search templates/i })
+    await userEvent.type(searchBox, 'python')
+    expect(screen.getByText('python-3.12')).toBeInTheDocument()
+    expect(screen.queryByText('node-22')).not.toBeInTheDocument()
   })
   it('billing shows status when capability is on', async () => {
     await renderAt('/billing', caps)

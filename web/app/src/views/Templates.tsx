@@ -5,9 +5,11 @@ import { useTemplates } from '../data/account'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 export function Templates() {
   const { data: templates = [], isLoading } = useTemplates()
+  const { query, setQuery, filtered } = useTableFilter(templates, (t) => `${t.name} ${t.description}`)
 
   return (
     <section>
@@ -22,6 +24,7 @@ export function Templates() {
         />
       ) : (
         <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="templates" />
           <table className="tbl" aria-label="Templates">
             <thead>
               <tr>
@@ -32,7 +35,7 @@ export function Templates() {
               </tr>
             </thead>
             <tbody>
-              {templates.map((t) => (
+              {filtered.map((t) => (
                 <tr key={t.name}>
                   <td className="mono">{t.name}</td>
                   <td className="mono t-dim">{t.image}</td>

@@ -6,6 +6,7 @@ import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { Role } from '../api'
 import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 const ROLES: Role[] = ['owner', 'admin', 'billing', 'member', 'viewer']
 
@@ -13,6 +14,7 @@ export function Members() {
   const { data: members = [], isLoading, isError } = useMembers()
   const setRole = useSetRole()
   const { notify } = useToast()
+  const { query, setQuery, filtered } = useTableFilter(members, (m) => `${m.account_id} ${m.role}`)
 
   function onRoleChange(accountId: string, role: Role) {
     setRole.mutate(
@@ -36,6 +38,7 @@ export function Members() {
         <EmptyState title="No members" body="No members found in this org." />
       ) : (
         <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="members" />
           <table className="tbl" aria-label="Members">
             <thead>
               <tr>
@@ -45,7 +48,7 @@ export function Members() {
               </tr>
             </thead>
             <tbody>
-              {members.map((m) => (
+              {filtered.map((m) => (
                 <tr key={m.account_id}>
                   <td>{m.account_id}</td>
                   <td>
