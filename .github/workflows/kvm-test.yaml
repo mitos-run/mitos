@@ -2896,16 +2896,20 @@ jobs:
 
           # connect_exec BEARER OUTFILE: frames the ExecStream request, sends it
           # with the given bearer (empty to omit the Authorization header), writes
-          # the decoded stdout to OUTFILE, and echoes the HTTP status code. The
-          # sandbox id is always "husk" (the husk stub's single registered id).
+          # the decoded guest stdout to OUTFILE, and echoes the Connect error code
+          # from the terminal end-stream frame (empty when the stream succeeded).
+          # NOTE: a Connect SERVER-STREAMING RPC returns HTTP 200 even on an auth
+          # failure; the unauthenticated error is carried in the end-stream frame,
+          # not the HTTP status. So the token gate is proven by that error code
+          # (and the absence of guest stdout), NOT by the HTTP status. The sandbox
+          # id is always "husk" (the husk stub's single registered id).
           connect_exec() {
-            local bearer="$1" outfile="$2" req_len resp_file total off flen frame_json chunk_b64 hdrs
+            local bearer="$1" outfile="$2" req_len resp_file total off flen frame_json chunk_b64 frame_err err_code hdrs
             req_len=${#EXEC_REQ}
             resp_file="$WORKBASE/exec-resp.bin"
             hdrs=(-H 'Content-Type: application/connect+json' -H 'X-Sandbox-Id: husk')
             if [ -n "$bearer" ]; then hdrs+=(-H "Authorization: Bearer $bearer"); fi
-            local code
-            code=$({
+            {
               printf '\x00'
               # shellcheck disable=SC2059
               printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
@@ -2914,9 +2918,10 @@ jobs:
                 $(( (req_len >> 8) & 0xff )) \
                 $(( req_len & 0xff )))"
               printf '%s' "$EXEC_REQ"
-            } | curl -s -o "$resp_file" -w '%{http_code}' -X POST \
-              "${hdrs[@]}" --data-binary @- "http://$SBADDR/sandbox.v1.Sandbox/ExecStream" || echo 000)
+            } | curl -s -o "$resp_file" -X POST \
+              "${hdrs[@]}" --data-binary @- "http://$SBADDR/sandbox.v1.Sandbox/ExecStream" || true
             : >"$outfile"
+            err_code=""
             total=$(wc -c <"$resp_file" 2>/dev/null || echo 0)
             off=0
             while [ $((off + 5)) -le "$total" ]; do
@@ -2928,17 +2933,21 @@ jobs:
               frame_json="$(dd if="$resp_file" bs=1 skip=$((off + 5)) count="$flen" 2>/dev/null)"
               chunk_b64="$(printf '%s' "$frame_json" | jq -r '.stdout // empty' 2>/dev/null)"
               if [ -n "$chunk_b64" ]; then printf '%s' "$chunk_b64" | base64 -d 2>/dev/null >>"$outfile"; fi
+              # The Connect end-stream frame carries {"error":{"code":...}} on failure.
+              frame_err="$(printf '%s' "$frame_json" | jq -r '.error.code // empty' 2>/dev/null)"
+              if [ -n "$frame_err" ]; then err_code="$frame_err"; fi
               off=$((off + 5 + flen))
             done
-            echo "$code"
+            echo "$err_code"
           }
 
-          # GATE 5a: tokened exec works and reaches the guest.
-          HTTP_CODE=$(connect_exec "$SANDBOX_TOKEN" "$WORKBASE/exec.out")
-          if [ "$HTTP_CODE" != "200" ]; then
+          # GATE 5a: tokened exec works and reaches the guest (clean stream, the
+          # guest's stdout marker present, no end-stream error).
+          OK_ERR=$(connect_exec "$SANDBOX_TOKEN" "$WORKBASE/exec.out")
+          if [ -n "$OK_ERR" ]; then
             echo "=== exec.out ==="; cat $WORKBASE/exec.out || true
             echo "=== stub log ==="; cat $STUBLOG || true
-            fail_net "tokened Connect ExecStream over the sandbox endpoint returned $HTTP_CODE, want 200 (the advertised endpoint is not reachable + token-gated)"
+            fail_net "tokened Connect ExecStream returned an end-stream error '$OK_ERR', want a clean stream (the advertised endpoint is not reachable + token-gated)"
           fi
           if ! grep -q "husk-http-exec-ok" $WORKBASE/exec.out; then
             echo "=== exec.out ==="; cat $WORKBASE/exec.out || true
@@ -2946,19 +2955,23 @@ jobs:
           fi
           echo "PASS: tokened Connect ExecStream over the sandbox endpoint reached the guest"
 
-          # GATE 5b: an exec WITHOUT the token is rejected (fail closed).
-          NOTOK_CODE=$(connect_exec "" "$WORKBASE/exec-notok.out")
-          case "$NOTOK_CODE" in
-            401|403) echo "PASS: untokened Connect ExecStream rejected ($NOTOK_CODE)";;
-            *) fail_net "untokened Connect ExecStream returned $NOTOK_CODE, want 401/403 (the sandbox endpoint is NOT token-gated)";;
-          esac
+          # GATE 5b: an exec WITHOUT the token is rejected (fail closed). A Connect
+          # server-stream returns HTTP 200 with an 'unauthenticated' error in the
+          # end-stream frame, and the command must NOT have run (no guest stdout).
+          NOTOK_ERR=$(connect_exec "" "$WORKBASE/exec-notok.out")
+          if [ -z "$NOTOK_ERR" ] || grep -q "husk-http-exec-ok" "$WORKBASE/exec-notok.out"; then
+            echo "=== exec-notok.out ==="; cat "$WORKBASE/exec-notok.out" || true
+            fail_net "untokened Connect ExecStream was NOT token-gated (end-stream error='$NOTOK_ERR', guest stdout present); want an unauthenticated error and no guest output"
+          fi
+          echo "PASS: untokened Connect ExecStream rejected (end-stream error '$NOTOK_ERR', no guest output)"
 
-          # GATE 5c: an exec with a WRONG token is rejected.
-          WRONG_CODE=$(connect_exec "wrong-token-not-the-real-one" "$WORKBASE/exec-wrong.out")
-          case "$WRONG_CODE" in
-            401|403) echo "PASS: wrong-token Connect ExecStream rejected ($WRONG_CODE)";;
-            *) fail_net "wrong-token Connect ExecStream returned $WRONG_CODE, want 401/403";;
-          esac
+          # GATE 5c: an exec with a WRONG token is rejected the same way.
+          WRONG_ERR=$(connect_exec "wrong-token-not-the-real-one" "$WORKBASE/exec-wrong.out")
+          if [ -z "$WRONG_ERR" ] || grep -q "husk-http-exec-ok" "$WORKBASE/exec-wrong.out"; then
+            echo "=== exec-wrong.out ==="; cat "$WORKBASE/exec-wrong.out" || true
+            fail_net "wrong-token Connect ExecStream was NOT token-gated (end-stream error='$WRONG_ERR', guest stdout present); want an unauthenticated error and no guest output"
+          fi
+          echo "PASS: wrong-token Connect ExecStream rejected (end-stream error '$WRONG_ERR', no guest output)"
 
           # GATE 5 leak check: the bearer token VALUE must not appear in any
           # host-side stub/client log.
