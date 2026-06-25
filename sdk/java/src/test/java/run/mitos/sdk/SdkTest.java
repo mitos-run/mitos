@@ -42,6 +42,11 @@ public final class SdkTest {
         testErrorEnvelopeParsed();
         testTokenNeverInExceptionMessage();
 
+        // Cluster mode (AgentRun) tests run against the same in-process HttpServer
+        // stub, reproducing the Kubernetes custom-resource REST wire shapes. They
+        // share the assert helpers and Stub harness below via package-private hooks.
+        ClusterTest.run();
+
         System.out.println();
         System.out.println("RESULT: " + passed + " passed, " + failed + " failed");
         if (failed > 0) {
@@ -283,17 +288,17 @@ public final class SdkTest {
 
     // ---- tiny assert + stub harness ----
 
-    private static void ok(String name) {
+    static void ok(String name) {
         passed++;
         System.out.println("PASS: " + name);
     }
 
-    private static void fail(String name) {
+    static void fail(String name) {
         failed++;
         System.out.println("FAIL: " + name);
     }
 
-    private static void assertTrue(boolean cond, String name) {
+    static void assertTrue(boolean cond, String name) {
         if (cond) {
             return;
         }
@@ -301,7 +306,7 @@ public final class SdkTest {
         throw new AssertionError(name);
     }
 
-    private static void assertEquals(Object expected, Object actual, String name) {
+    static void assertEquals(Object expected, Object actual, String name) {
         if (expected == null ? actual == null : expected.equals(actual)) {
             return;
         }
@@ -377,7 +382,7 @@ public final class SdkTest {
         }
     }
 
-    private static void json(HttpExchange ex, int status, String body) throws IOException {
+    static void json(HttpExchange ex, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json");
         ex.sendResponseHeaders(status, bytes.length);
@@ -386,7 +391,7 @@ public final class SdkTest {
         }
     }
 
-    private static String readBody(HttpExchange ex) throws IOException {
+    static String readBody(HttpExchange ex) throws IOException {
         return new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
     }
 
