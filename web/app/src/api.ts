@@ -40,6 +40,16 @@ export type SandboxView = {
   vcpus: number
 }
 
+export type ForkNode = {
+  id: string
+  parent_id: string
+  phase: string
+  private_dirty_bytes: number
+  shared_bytes: number
+}
+
+export type ForkTree = { org_id: string; nodes: ForkNode[] }
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
@@ -68,6 +78,7 @@ export const api = {
     if (!r.ok && r.status !== 204) throw new Error(`delete secret: ${r.status}`)
   },
   sandboxes: () => get<{ sandboxes: SandboxView[] }>('/console/sandboxes').then((r) => r.sandboxes ?? []),
+  forktree: () => get<ForkTree>('/console/forktree'),
 }
 
 export function fmtBytes(n: number): string {

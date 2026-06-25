@@ -1,42 +1,42 @@
-// The instrument-panel home (#276): the org's OWN measured Pareto metrics. No
-// fabricated competitor numbers — only what the server measured.
-import { useEffect, useState } from 'react'
-import { Card, Division } from '@mitos/brand'
-import { api, fmtBytes, type Instruments as I } from '../api'
+// The cockpit: the org's OWN measured numbers, not a welcome screen. Activate
+// latency (warm-claim P50/P99, their cluster), CoW density (memory saved by
+// page-sharing) and marginal bytes per fork, forks served. Every headline metric
+// carries a "Reproduce this" affordance pointing at the in-repo bench. No number
+// is invented here; all values come from /console/instruments.
+import { useInstruments } from '../data/instruments'
+import { StatTile } from '../ui/StatTile'
+import { Skeleton } from '../ui/Skeleton'
+import { EmptyState } from '../ui/EmptyState'
+import { fmtBytes } from '../api'
 
-function Metric({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <Card style={{ flex: 1, minWidth: 180 }}>
-      <div className="t-dim" style={{ fontSize: 'var(--step--1)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
-      <div style={{ fontSize: 'var(--step-3)', fontFamily: 'var(--mono)' }}>{value}</div>
-      {sub && <div className="t-dim" style={{ fontSize: 'var(--step--1)' }}>{sub}</div>}
-    </Card>
-  )
-}
+const BENCH = 'bench/husk-activate-latency.sh'
 
 export function Instruments() {
-  const [d, setD] = useState<I | null>(null)
-  const [err, setErr] = useState<string>()
-  useEffect(() => {
-    api.instruments().then(setD).catch((e) => setErr(String(e)))
-  }, [])
-  if (err) return <div className="t-dim">instruments unavailable: {err}</div>
-  if (!d) return <div className="t-dim">measuring…</div>
+  const { data, isLoading, error } = useInstruments()
+  if (error) return <EmptyState title="Instruments unavailable" body="The telemetry pipeline could not be read for this organization." />
+  if (isLoading || !data) return <Skeleton rows={4} />
+
+  const noData = data.forks_served === 0 && data.activate_p50_ms === 0
+  if (noData) {
+    return (
+      <EmptyState
+        title="No measured signal yet"
+        body="Fork a sandbox to see this org's activate latency and CoW density here. Only measured signal emits light."
+      />
+    )
+  }
+
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-5)' }}>
-        <Division size={40} />
-        <div>
-          <h2 style={{ margin: 0 }}>Instruments</h2>
-          <div className="t-dim" style={{ fontSize: 'var(--step--1)' }}>measured on your cluster · reproduce with bench/husk-activate-latency.sh</div>
-        </div>
+    <section>
+      <h2>Instruments</h2>
+      <p className="t-dim">This organization's measured signal. Every number is reproducible.</p>
+      <div className="cockpit-grid">
+        <StatTile label="Activate P50" value={String(Math.round(data.activate_p50_ms))} unit="ms" hint="warm-claim, your cluster" reproduce={{ label: 'Reproduce this', command: BENCH }} />
+        <StatTile label="Activate P99" value={String(Math.round(data.activate_p99_ms))} unit="ms" hint="warm-claim, your cluster" reproduce={{ label: 'Reproduce this', command: BENCH }} />
+        <StatTile label="CoW savings" value={fmtBytes(data.cow_savings_bytes)} hint="memory not spent, forks share parent pages" reproduce={{ label: 'Reproduce this', command: BENCH }} />
+        <StatTile label="Marginal / fork" value={fmtBytes(data.marginal_bytes_per_fork)} hint="mean private-dirty set per fork" reproduce={{ label: 'Reproduce this', command: BENCH }} />
+        <StatTile label="Forks served" value={String(data.forks_served)} hint="total for this org" />
       </div>
-      <div style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
-        <Metric label="Warm-claim activate" value={`${d.activate_p50_ms} ms`} sub={`p99 ${d.activate_p99_ms} ms`} />
-        <Metric label="Forks served" value={`${d.forks_served}`} />
-        <Metric label="CoW savings" value={fmtBytes(d.cow_savings_bytes)} sub="memory not spent via page sharing" />
-        <Metric label="Marginal / fork" value={fmtBytes(d.marginal_bytes_per_fork)} sub="private-dirty per fork" />
-      </div>
-    </div>
+    </section>
   )
 }
