@@ -2,22 +2,80 @@ package agentcli
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	connect "connectrpc.com/connect"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	v1 "mitos.run/mitos/api/v1"
+	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// connectExecFake is a Connect SandboxHandler stub serving ExecStream for the
+// cluster-backend exec tests, which now ride the Connect runtime path (the
+// legacy /v1/exec JSON route is retired, issue #358). It records the bearer and
+// the sandbox id from the request headers and returns a canned exec result, or
+// a Connect error (optionally echoing the token, to prove redaction).
+type connectExecFake struct {
+	sandboxv1connect.UnimplementedSandboxHandler
+
+	stdout string
+	stderr string
+	exit   int32
+	// errMsg, when non-empty, makes ExecStream return a CodeInternal error whose
+	// message is errMsg with %TOKEN% replaced by the presented bearer token.
+	errMsg string
+
+	gotAuth    string
+	gotSandbox string
+	gotCommand string
+}
+
+func (f *connectExecFake) ExecStream(_ context.Context, req *connect.Request[sandboxv1.ExecStreamRequest], stream *connect.ServerStream[sandboxv1.ExecResponse]) error {
+	f.gotAuth = req.Header().Get("Authorization")
+	f.gotSandbox = req.Header().Get("X-Sandbox-Id")
+	f.gotCommand = req.Msg.GetCommand()
+	if f.errMsg != "" {
+		presented := strings.TrimPrefix(f.gotAuth, "Bearer ")
+		return connect.NewError(connect.CodeInternal, execErrString(strings.ReplaceAll(f.errMsg, "%TOKEN%", presented)))
+	}
+	if f.stdout != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stdout{Stdout: []byte(f.stdout)}}); err != nil {
+			return err
+		}
+	}
+	if f.stderr != "" {
+		if err := stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Stderr{Stderr: []byte(f.stderr)}}); err != nil {
+			return err
+		}
+	}
+	return stream.Send(&sandboxv1.ExecResponse{Msg: &sandboxv1.ExecResponse_Exit{Exit: &sandboxv1.ExecExit{ExitCode: f.exit}}})
+}
+
+type execErrString string
+
+func (e execErrString) Error() string { return string(e) }
+
+// connectExecServer mounts the fake Connect Sandbox handler on an HTTP/1.1
+// httptest server.
+func connectExecServer(t *testing.T, fake *connectExecFake) *httptest.Server {
+	t.Helper()
+	path, handler := sandboxv1connect.NewSandboxHandler(fake)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -179,22 +237,10 @@ func TestClusterBackendForkCreatesFork(t *testing.T) {
 
 func TestClusterBackendExecSendsBearerAndRedactsToken(t *testing.T) {
 	const token = "super-secret-token-value"
-	var gotAuth string
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		if r.URL.Path == "/v1/exec" {
-			// Echo the token back in the error to prove redaction protects it.
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"boom token=` + token + `"}`))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+	// The Connect runtime server echoes the presented bearer token into its error
+	// message; the backend must redact it before surfacing the error.
+	connFake := &connectExecFake{errMsg: "boom token=%TOKEN%"}
+	srv := connectExecServer(t, connFake)
 
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
 	scheme := testScheme(t)
@@ -211,7 +257,7 @@ func TestClusterBackendExecSendsBearerAndRedactsToken(t *testing.T) {
 
 	_, err := be.Exec(context.Background(), "sbx-1", "echo hi", 10)
 	if err == nil {
-		t.Fatalf("Exec: want an error from the 500 response")
+		t.Fatalf("Exec: want an error from the failed exec RPC")
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Fatalf("error leaked the token: %q", err.Error())
@@ -219,21 +265,20 @@ func TestClusterBackendExecSendsBearerAndRedactsToken(t *testing.T) {
 	if !strings.Contains(err.Error(), "REDACTED") {
 		t.Fatalf("error should show the token redacted, got: %q", err.Error())
 	}
-	if gotAuth != "Bearer "+token {
-		t.Fatalf("Authorization header = %q, want bearer token", gotAuth)
+	// The exec rode the Connect runtime path with the bearer token and the
+	// sandbox id on the headers (the SAME gate the SDK uses).
+	if connFake.gotAuth != "Bearer "+token {
+		t.Fatalf("Authorization header = %q, want bearer token", connFake.gotAuth)
 	}
-	if gotBody["command"] != "echo hi" || gotBody["sandbox"] != "sbx-1" {
-		t.Fatalf("exec body = %v, want sandbox/command set", gotBody)
+	if connFake.gotCommand != "echo hi" || connFake.gotSandbox != "sbx-1" {
+		t.Fatalf("exec command = %q, sandbox = %q, want 'echo hi' / sbx-1", connFake.gotCommand, connFake.gotSandbox)
 	}
 }
 
 func TestClusterBackendExecSuccess(t *testing.T) {
 	const token = "tkn"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"exit_code":5,"stdout":"out","stderr":"err"}`))
-	}))
-	defer srv.Close()
+	connFake := &connectExecFake{stdout: "out", stderr: "err", exit: 5}
+	srv := connectExecServer(t, connFake)
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
 
 	scheme := testScheme(t)
