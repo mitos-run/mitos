@@ -1,5 +1,6 @@
 // The result of a Sandbox.exec call. Mirrors the Python ExecResult and the
-// sandbox-server /v1/exec response {exit_code, stdout, stderr, exec_time_ms}.
+// Connect sandbox.v1.Sandbox ExecStream response (stdout/stderr frames plus the
+// terminal exit frame {exitCode, execTimeMs}), reassembled into one record.
 package run.mitos.sdk;
 
 /**

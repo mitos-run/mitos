@@ -308,31 +308,11 @@ fn fork_rejects_path_traversal_id() {
     drop(stub);
 }
 
-#[test]
-fn exec_round_trips_stdout_and_exit_code() {
-    let stub = StubServer::start(vec![
-        StubResponse::ok(
-            r#"{"id":"box","template_id":"python","endpoint":"e","fork_time_ms":1.0}"#,
-        ),
-        StubResponse::ok(r#"{"exit_code":0,"stdout":"hello\n","stderr":"","exec_time_ms":4.2}"#),
-    ]);
-    let server = client_for(&stub.base_url);
-
-    let sandbox = server.fork_as("python", "box").expect("fork");
-    let _fork_req = stub.next_request();
-
-    let result = sandbox.exec("echo hello").expect("exec");
-    assert_eq!(result.exit_code, 0);
-    assert_eq!(result.stdout, "hello\n");
-    assert!(result.success());
-
-    let req = stub.next_request();
-    assert_eq!(req.method, "POST");
-    assert_eq!(req.path, "/v1/exec");
-    assert!(req.body.contains("\"sandbox\":\"box\""));
-    assert!(req.body.contains("\"command\":\"echo hello\""));
-    assert!(req.body.contains("\"timeout\":30"));
-}
+// `exec` now speaks the Connect `sandbox.v1.Sandbox/ExecStream` runtime
+// protocol rather than the legacy `POST /v1/exec` JSON route. Its wire (enveloped
+// streaming frames, an `application/connect+json` response) needs a stub that
+// emits raw framed bytes, which the JSON-only `StubServer` above cannot do, so the
+// exec coverage lives in `tests/connect_test.rs` against a Connect stub.
 
 #[test]
 fn terminate_issues_delete() {
