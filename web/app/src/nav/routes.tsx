@@ -8,6 +8,7 @@ import { Sandboxes } from '../views/Sandboxes'
 import { ForkTree } from '../views/forktree/ForkTree'
 import { Secrets } from '../views/Secrets'
 import { Placeholder } from '../views/Placeholder'
+import { SandboxDetail } from '../views/sandboxes/SandboxDetail'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Settings'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Settings']
@@ -24,6 +25,7 @@ export type RouteDef = {
 export const ROUTES: RouteDef[] = [
   { path: '/', label: 'Instruments', group: 'Run', element: () => <Instruments />, when: (c) => c.proof },
   { path: '/sandboxes', label: 'Sandboxes', group: 'Run', element: () => <Sandboxes /> },
+  { path: '/sandboxes/$id', label: 'Sandbox', group: 'Run', element: () => <SandboxDetail />, hidden: true },
   { path: '/forks', label: 'Fork tree', group: 'Run', element: () => <ForkTree /> },
   { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Placeholder title="Templates" endpoint="/console/templates" phase="B2" /> },
