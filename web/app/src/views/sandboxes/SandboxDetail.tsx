@@ -4,7 +4,8 @@
 // and Spending are honest placeholders. Reads the $id route param.
 import { useState } from 'react'
 import { useParams } from '@tanstack/react-router'
-import { useSandbox } from '../../data/sandboxes'
+import { useSandbox, useSetSandboxProject } from '../../data/sandboxes'
+import { useProjects } from '../../data/org'
 import { Tabs, type TabDef } from '../../ui/Tabs'
 import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
@@ -17,6 +18,37 @@ const TABS: TabDef[] = [
   { key: 'forks', label: 'Fork tree' },
 ]
 
+function ProjectControl({ id, projectId }: { id: string; projectId?: string }) {
+  const { data: projects = [] } = useProjects()
+  const setProject = useSetSandboxProject()
+
+  function onChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    setProject.mutate({ id, projectId: e.target.value })
+  }
+
+  return (
+    <div style={{ marginBottom: 'var(--space-4)' }}>
+      <label htmlFor="sandbox-project-select" style={{ display: 'block', marginBottom: 'var(--space-2)' }} className="t-dim">
+        Project
+      </label>
+      <select
+        id="sandbox-project-select"
+        value={projectId ?? ''}
+        onChange={onChange}
+        disabled={setProject.isPending}
+      >
+        <option value="">Unassigned</option>
+        {projects.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
+      </select>
+      <p className="t-dim" style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
+        Per-project access enforcement applies to this sandbox when enabled.
+      </p>
+    </div>
+  )
+}
+
 export function SandboxDetail() {
   const { id } = useParams({ from: '/sandboxes/$id' })
   const [tab, setTab] = useState('overview')
@@ -26,6 +58,7 @@ export function SandboxDetail() {
   return (
     <section>
       <h2 className="mono">{sb.id}</h2>
+      <ProjectControl id={sb.id} projectId={sb.project_id} />
       <Tabs tabs={TABS} active={tab} onChange={setTab} ariaLabel="Sandbox detail sections" />
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} style={{ marginTop: 'var(--space-5)' }}>
         {tab === 'overview' && <OverviewTab sb={sb} />}

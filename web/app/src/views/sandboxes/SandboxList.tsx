@@ -69,6 +69,7 @@ export function SandboxList() {
               <th scope="col">Template</th>
               <th scope="col">Node</th>
               <th scope="col">Phase</th>
+              <th scope="col">Project</th>
               <th scope="col">vCPUs</th>
               <th scope="col">Memory</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
@@ -86,6 +87,7 @@ export function SandboxList() {
                   <StatusDot entity={phaseEntity(s.phase)} />
                   {' '}{s.phase}
                 </td>
+                <td>{s.project_id ? s.project_id : <span className="t-dim">Unassigned</span>}</td>
                 <td>{s.vcpus}</td>
                 <td className="mono">{fmtBytes(s.mem_bytes)}</td>
                 <td>

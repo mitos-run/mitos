@@ -16,6 +16,17 @@ export function useSandboxLogs(id: string) {
   return useQuery<string>({ queryKey: ['sandbox-logs', id], queryFn: () => api.sandboxLogs(id), enabled: !!id })
 }
 
+export function useSetSandboxProject() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { id: string; projectId: string }) => api.setSandboxProject(v.id, v.projectId),
+    onSettled: (_data, _err, v) => {
+      void qc.invalidateQueries({ queryKey: ['sandboxes'] })
+      void qc.invalidateQueries({ queryKey: ['sandbox', v.id] })
+    },
+  })
+}
+
 export function useTerminateSandbox() {
   const qc = useQueryClient()
   return useMutation({

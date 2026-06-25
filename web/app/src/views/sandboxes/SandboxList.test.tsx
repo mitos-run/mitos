@@ -1,5 +1,5 @@
 // Behavior test for the live sandboxes list. Asserts row count, status dot,
-// terminate action (optimistic remove), and the empty-state fallback.
+// terminate action (optimistic remove), the empty-state fallback, and project column.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent, waitFor, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -15,7 +15,7 @@ const caps: Capabilities = {
 }
 
 const sandboxes = [
-  { id: 'sb-1', org_id: 'o1', template: 'python-3.12', node: 'w1', phase: 'Running', vcpus: 2, mem_bytes: 2147483648, created_at: '2026-01-01T00:00:00Z' },
+  { id: 'sb-1', org_id: 'o1', template: 'python-3.12', node: 'w1', phase: 'Running', vcpus: 2, mem_bytes: 2147483648, created_at: '2026-01-01T00:00:00Z', project_id: 'p1' },
   { id: 'sb-2', org_id: 'o1', template: 'node-22', node: 'w2', phase: 'Pending', vcpus: 1, mem_bytes: 1073741824, created_at: '2026-01-02T00:00:00Z' },
 ]
 
@@ -113,5 +113,13 @@ describe('SandboxList', () => {
     fireEvent.click(firstTerminate)
     await waitFor(() => expect(screen.getByText('sb-1')).toBeInTheDocument())
     expect(screen.getByText('sb-2')).toBeInTheDocument()
+  })
+
+  it('shows project_id in the Project column and "Unassigned" when empty', async () => {
+    await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByRole('table', { name: /sandboxes/i })).toBeInTheDocument())
+    // sb-1 has project_id 'p1', sb-2 has no project_id
+    expect(screen.getByText('p1')).toBeInTheDocument()
+    expect(screen.getByText('Unassigned')).toBeInTheDocument()
   })
 })
