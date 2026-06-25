@@ -8,6 +8,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { api, type SinkType } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 
 function RetentionPanel() {
   const { data: retention, isLoading } = useAuditRetention()
@@ -30,7 +31,7 @@ function RetentionPanel() {
 
   return (
     <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-      <h3 style={{ marginBottom: 'var(--space-3)' }}>Retention and export</h3>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Retention and export</h2>
       {isLoading ? (
         <Skeleton rows={2} />
       ) : (
@@ -108,7 +109,7 @@ function SinksPanel() {
 
   return (
     <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-      <h3 style={{ marginBottom: 'var(--space-3)' }}>Sinks</h3>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Sinks</h2>
       <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
         Forward audit events to external destinations. Endpoint must be HTTPS.
       </p>
@@ -212,10 +213,7 @@ export function Audit() {
 
   return (
     <section>
-      <h2>Audit log</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Immutable record of org-scoped actions. Filter by actor, action, target, or detail.
-      </p>
+      <PageHeader title="Audit log" lede="Immutable record of org-scoped actions. Filter by actor, action, target, or detail." />
 
       <RetentionPanel />
       <SinksPanel />

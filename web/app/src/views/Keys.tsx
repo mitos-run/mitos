@@ -7,6 +7,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { CreateKeyResult } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 
 const TTL_OPTIONS = [
   { label: 'Never expires', value: 0 },
@@ -55,10 +56,7 @@ export function Keys() {
 
   return (
     <section>
-      <h2>API keys</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Keys authenticate requests to the Mitos API. The raw key is shown only once on creation; store it immediately.
-      </p>
+      <PageHeader title="API keys" lede="Keys authenticate requests to the Mitos API. The raw key is shown only once on creation; store it immediately." />
 
       {revealed && (
         <div style={{ marginBottom: 'var(--space-5)' }}>

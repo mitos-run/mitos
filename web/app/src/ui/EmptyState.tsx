@@ -13,7 +13,7 @@ export function EmptyState({
 }) {
   return (
     <div className="card" style={{ textAlign: 'center', padding: 'var(--space-8)' }}>
-      <h3 style={{ marginBottom: 'var(--space-2)' }}>{title}</h3>
+      <h2 style={{ marginBottom: 'var(--space-2)' }}>{title}</h2>
       <p className="t-dim" style={{ marginBottom: 'var(--space-5)' }}>{body}</p>
       {action && <Button onClick={action.onClick}>{action.label}</Button>}
     </div>
