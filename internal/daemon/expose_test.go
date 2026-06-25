@@ -16,45 +16,51 @@ import (
 )
 
 func TestProxyHTTPStreamsSSE(t *testing.T) {
-	// A backend SSE server that emits three events with a gap between them, so a
-	// buffering proxy would fail this test (the first event must arrive before
-	// the backend has written the last).
+	// A backend SSE server that blocks after the first flushed event until the
+	// test has read it. A buffering proxy can never deliver the first event
+	// because the response is not complete, so the discriminator is structural
+	// rather than timing-based. The 2s timeout is only a fail-fast backstop.
+	proceed := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sse" {
 			http.Error(w, "bad path "+r.URL.Path, http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fl, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("backend ResponseWriter is not a Flusher")
-			return
-		}
-		for i := 0; i < 3; i++ {
-			_, _ = io.WriteString(w, "data: tick\n\n")
-			fl.Flush()
-			time.Sleep(20 * time.Millisecond)
-		}
+		fl := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: tick\n\n")
+		fl.Flush()
+		<-proceed // block: a buffering proxy never delivers the first event, because the response is not complete
+		_, _ = io.WriteString(w, "data: tick\n\n")
+		fl.Flush()
 	}))
 	defer backend.Close()
+	defer close(proceed) // ensure the backend goroutine can exit even if the read fails
 
+	port := portOf(t, backend)
 	api := newExposeTestAPI(t, backend.Listener.Addr().String())
 
-	rp, err := api.ProxyHTTP("sb1", portOf(t, backend), "/v1/sandboxes/sb1/expose/"+itoa(portOf(t, backend)))
+	rp, err := api.ProxyHTTP("sb1", port, "/v1/sandboxes/sb1/expose/"+itoa(port))
 	if err != nil {
 		t.Fatalf("ProxyHTTP: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/sb1/expose/"+itoa(portOf(t, backend))+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/sb1/expose/"+itoa(port)+"/sse", nil)
 	rec := newStreamRecorder()
 	defer rec.Close()
 	go rp.ServeHTTP(rec, req)
 
-	// The first SSE line must arrive while the backend is still mid-stream.
 	br := bufio.NewReader(rec)
-	line, err := br.ReadString('\n')
-	if err != nil || line != "data: tick\n" {
-		t.Fatalf("first SSE line: got %q err %v", line, err)
+	got := make(chan string, 1)
+	go func() { line, _ := br.ReadString('\n'); got <- line }()
+	select {
+	case line := <-got:
+		if line != "data: tick\n" {
+			t.Fatalf("first SSE line: got %q", line)
+		}
+		// streaming proven: the first event arrived while the backend is still blocked mid-response
+	case <-time.After(2 * time.Second):
+		t.Fatal("first SSE line did not arrive before the backend continued: proxy is buffering")
 	}
 }
 
@@ -107,7 +113,10 @@ func portOf(t *testing.T, s *httptest.Server) int {
 	if err != nil {
 		t.Fatalf("split host port: %v", err)
 	}
-	n, _ := strconv.Atoi(p)
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
 	return n
 }
 
