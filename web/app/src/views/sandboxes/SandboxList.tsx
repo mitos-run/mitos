@@ -67,7 +67,7 @@ export function SandboxList() {
               <th scope="col">Phase</th>
               <th scope="col">vCPUs</th>
               <th scope="col">Memory</th>
-              <th scope="col" />
+              <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>

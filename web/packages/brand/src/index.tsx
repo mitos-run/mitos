@@ -50,7 +50,7 @@ export type Entity = 'ready' | 'fork' | 'parent' | 'warn'
 
 /** Status dot whose color encodes a real entity (alive=green, fork=magenta…). */
 export function StatusDot({ entity }: { entity: Entity }) {
-  return <span className={`dot dot-${entity}`} aria-label={entity} />
+  return <span className={`dot dot-${entity}`} role="img" aria-label={entity} />
 }
 
 /**
