@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"log"
@@ -36,6 +35,8 @@ func main() {
 	addr := flag.String("addr", ":8443", "HTTPS listen address")
 	httpAddr := flag.String("http-addr", "", "optional plaintext HTTP listen address (testing / behind a TLS terminator)")
 	domain := flag.String("domain", "", "base preview domain; routes <label>.<domain>")
+	tlsCert := flag.String("tls-cert", "", "path to the wildcard TLS certificate (PEM); empty uses a self-signed cert")
+	tlsKey := flag.String("tls-key", "", "path to the wildcard TLS private key (PEM)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -81,9 +82,24 @@ func main() {
 	// Everything else is preview traffic resolved by vhost.
 	mux.Handle("/", proxy)
 
-	certProvider, err := preview.NewSelfSignedProvider()
-	if err != nil {
-		log.Fatalf("preview-proxy: cert provider: %v", err)
+	var certProvider preview.CertProvider
+	if *tlsCert != "" || *tlsKey != "" {
+		if *tlsCert == "" || *tlsKey == "" {
+			log.Fatal("preview-proxy: --tls-cert and --tls-key must be set together")
+		}
+		wp, err := preview.NewWildcardProvider(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Fatalf("preview-proxy: %v", err)
+		}
+		certProvider = wp
+		logger.Info("preview-proxy: serving the operator wildcard certificate", "cert", *tlsCert)
+	} else {
+		ss, err := preview.NewSelfSignedProvider()
+		if err != nil {
+			log.Fatalf("preview-proxy: cert provider: %v", err)
+		}
+		certProvider = ss
+		logger.Info("preview-proxy: serving self-signed certificates (no --tls-cert set; not browser trusted)")
 	}
 
 	servers := startServers(*addr, *httpAddr, mux, certProvider, logger)
@@ -105,12 +121,9 @@ func startServers(httpsAddr, httpAddr string, h http.Handler, cp preview.CertPro
 	var servers []*http.Server
 
 	httpsSrv := &http.Server{
-		Addr:    httpsAddr,
-		Handler: h,
-		TLSConfig: &tls.Config{
-			GetCertificate: cp.GetCertificate,
-			MinVersion:     tls.VersionTLS12,
-		},
+		Addr:      httpsAddr,
+		Handler:   h,
+		TLSConfig: preview.ServerTLSConfig(cp),
 	}
 	servers = append(servers, httpsSrv)
 	go func() {
