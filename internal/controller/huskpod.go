@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	v1 "mitos.run/mitos/api/v1"
+	"mitos.run/mitos/internal/tenant"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -848,6 +849,21 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 				},
 			},
 		},
+	}
+
+	// Billing trust boundary (issue #164): stamp the metering attribution org on
+	// the husk pod, derived from the TRUSTED per-org namespace the control plane
+	// placed the pool in (mitos-org-<id>), NEVER from a client-set field or label
+	// on the input object. The org label is the key the usage pipeline meters by,
+	// so a client must not be able to bill another org by setting it. We always
+	// derive from pod.Namespace (== the pool/sandbox namespace): if it is an org
+	// namespace, stamp mitos.run/org=<id>; if it is a non-org namespace (self-host
+	// single-tenant), leave the pod unattributed (no org label) rather than forcing
+	// a bogus org. Any org label the caller put on the input is ignored: this set
+	// is the controller's own label map, and the value comes only from the
+	// namespace.
+	if orgID, ok := tenant.OrgFromNamespace(pod.Namespace); ok {
+		pod.Labels[tenant.OrgLabelKey] = orgID
 	}
 
 	// Name-based egress needs the kernel to route the guest /30 out the pod
