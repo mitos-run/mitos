@@ -80,6 +80,29 @@ type Service struct {
 	// Takes priority over exec when non-nil. Zero-value Service{Guest: ...}
 	// is valid for tests that drive the GuestConn seam directly.
 	Guest func(sandboxID string) (GuestConn, error)
+	// MaxExecTimeoutSeconds is the ceiling on a requested exec or run_code
+	// timeout (issue #216), mirroring the legacy /v1 path. A request whose
+	// TimeoutSeconds exceeds this ceiling is REJECTED with CodeInvalidArgument
+	// before the guest stream is opened, never silently reduced, so a requested
+	// deadline is always honored or rejected. <=0 disables the ceiling (any
+	// timeout honored). The daemon sets this from SandboxAPI.maxExecTimeout.
+	MaxExecTimeoutSeconds int
+}
+
+// checkExecTimeout enforces the requested-timeout ceiling (issue #216) on the
+// Connect runtime path, mirroring the legacy /v1 handlers. It returns nil when
+// the timeout is honored (at or under the ceiling, or the ceiling is disabled).
+// When the requested timeout exceeds the ceiling it returns a CodeInvalidArgument
+// error whose message names the requested value and the ceiling, so the caller is
+// rejected deterministically rather than having its deadline silently clamped.
+// requested and the ceiling are plain integers (seconds), never secret values.
+func (s *Service) checkExecTimeout(requested int) error {
+	if s.MaxExecTimeoutSeconds <= 0 || requested <= s.MaxExecTimeoutSeconds {
+		return nil
+	}
+	return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
+		"requested timeout %ds exceeds the ceiling of %ds; request a timeout at or under the ceiling",
+		requested, s.MaxExecTimeoutSeconds))
 }
 
 // NewService builds the Connect Sandbox handler. exec is required (the streaming
@@ -149,6 +172,11 @@ func (s *Service) Exec(ctx context.Context, stream *connect.BidiStream[sandboxv1
 	open := first.GetOpen()
 	if open == nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("first ExecRequest must carry the open oneof (command, env, cwd, pty), got %T", first.Msg))
+	}
+	// Reject an over-ceiling timeout BEFORE opening the guest stream (issue
+	// #216), never silently reducing it. Mirrors the legacy /v1/exec gate.
+	if err := s.checkExecTimeout(int(open.GetTimeoutSeconds())); err != nil {
+		return err
 	}
 
 	// GuestConn path (Task 2.1): delegate through the port when it is wired.
@@ -295,6 +323,11 @@ func (s *Service) ExecStream(ctx context.Context, req *connect.Request[sandboxv1
 	}
 
 	r := req.Msg
+	// Reject an over-ceiling timeout BEFORE opening the guest stream (issue
+	// #216), never silently reducing it. Mirrors the legacy /v1/exec/stream gate.
+	if err := s.checkExecTimeout(int(r.GetTimeoutSeconds())); err != nil {
+		return err
+	}
 	open := &sandboxv1.ExecOpen{
 		Command:        r.GetCommand(),
 		Args:           r.GetArgs(),

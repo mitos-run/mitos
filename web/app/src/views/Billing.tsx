@@ -6,6 +6,7 @@ import { api } from '../api'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { StatTile } from '../ui/StatTile'
+import { PageHeader } from '../ui/PageHeader'
 
 function fmtDollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`
@@ -21,10 +22,7 @@ export function Billing() {
 
   return (
     <section>
-      <h2>Billing</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Balance, spend, and ledger for this org.
-      </p>
+      <PageHeader title="Billing" lede="Balance, spend, and ledger for this org." />
 
       {isLoading ? (
         <Skeleton rows={4} />
@@ -60,7 +58,7 @@ export function Billing() {
             />
           </div>
 
-          <h3 style={{ marginBottom: 'var(--space-3)' }}>Ledger</h3>
+          <h2 style={{ marginBottom: 'var(--space-3)' }}>Ledger</h2>
           {data.ledger_entries.length === 0 ? (
             <EmptyState
               title="No ledger entries"

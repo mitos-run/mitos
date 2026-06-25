@@ -4,6 +4,11 @@ import userEvent from '@testing-library/user-event'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
+vi.mock('../data/account-settings', () => ({
+  useAccount: () => ({ data: { display_name: 'Test User', email: 'test@example.com', memberships: [] } }),
+  useSignOut: () => ({ mutate: vi.fn(), isPending: false }),
+}))
+
 const caps: Capabilities = {
   edition: 'community', billing: false, signup: false, teams: true, idp: 'oidc',
   orgSwitcher: false, secrets: { providers: ['kube'] }, proof: true, ownership: 'self-hosted',
@@ -39,7 +44,7 @@ describe('AppShell responsive drawer', () => {
   it('exposes a menu button that toggles the nav drawer and reports aria-expanded', async () => {
     const user = userEvent.setup()
     await renderAt('/sandboxes', caps)
-    const menu = await screen.findByRole('button', { name: /menu/i })
+    const menu = await screen.findByRole('button', { name: /open navigation menu/i })
     expect(menu).toHaveAttribute('aria-expanded', 'false')
     await user.click(menu)
     expect(menu).toHaveAttribute('aria-expanded', 'true')
@@ -48,7 +53,7 @@ describe('AppShell responsive drawer', () => {
   it('closes the drawer on Escape', async () => {
     const user = userEvent.setup()
     await renderAt('/sandboxes', caps)
-    const menu = await screen.findByRole('button', { name: /menu/i })
+    const menu = await screen.findByRole('button', { name: /open navigation menu/i })
     await user.click(menu)
     expect(menu).toHaveAttribute('aria-expanded', 'true')
     await user.keyboard('{Escape}')
@@ -63,7 +68,7 @@ describe('AppShell responsive drawer', () => {
   it('moves focus into the primary nav when the drawer opens', async () => {
     const user = userEvent.setup()
     await renderAt('/sandboxes', caps)
-    const menu = await screen.findByRole('button', { name: /menu/i })
+    const menu = await screen.findByRole('button', { name: /open navigation menu/i })
     await user.click(menu)
     const nav = screen.getByRole('navigation', { name: /primary/i })
     expect(nav).toHaveFocus()
@@ -72,7 +77,7 @@ describe('AppShell responsive drawer', () => {
   it('returns focus to the menu button when the drawer closes via Escape', async () => {
     const user = userEvent.setup()
     await renderAt('/sandboxes', caps)
-    const menu = await screen.findByRole('button', { name: /menu/i })
+    const menu = await screen.findByRole('button', { name: /open navigation menu/i })
     await user.click(menu)
     await user.keyboard('{Escape}')
     expect(menu).toHaveFocus()

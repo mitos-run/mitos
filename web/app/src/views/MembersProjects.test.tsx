@@ -2,6 +2,7 @@
 // TDD suite: covers list rendering, loading/empty states, role change, and project creation.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, waitFor, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
@@ -102,6 +103,16 @@ describe('Members view', () => {
     // Change the first select (alice) to 'admin'
     fireEvent.change(selects[0], { target: { value: 'admin' } })
     await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument())
+  })
+
+  it('filters the members table when a search query is typed', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
+    expect(screen.getByText('bob')).toBeInTheDocument()
+    const searchBox = screen.getByRole('searchbox', { name: /search members/i })
+    await userEvent.type(searchBox, 'alice')
+    expect(screen.getByText('alice')).toBeInTheDocument()
+    expect(screen.queryByText('bob')).not.toBeInTheDocument()
   })
 })
 

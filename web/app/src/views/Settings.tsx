@@ -9,6 +9,7 @@ import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { useAccount, useUpdateAccount, useSessions, useRevokeSession, useRevokeAllSessions } from '../data/account-settings'
 import { getAppearance, setAppearance } from '../appearance'
+import { PageHeader } from '../ui/PageHeader'
 
 const TABS: TabDef[] = [
   { key: 'profile', label: 'Profile' },
@@ -55,7 +56,7 @@ function ProfileTab() {
 
   return (
     <section>
-      <h3>Profile</h3>
+      <h2>Profile</h2>
 
       <div style={{ marginBottom: 'var(--space-5)' }}>
         <p className="t-dim" style={{ fontSize: 'var(--step--1)' }}>
@@ -112,7 +113,7 @@ function ProfileTab() {
 
       {account.memberships.length > 0 && (
         <div style={{ marginTop: 'var(--space-7)' }}>
-          <h4 style={{ marginBottom: 'var(--space-4)' }}>Memberships</h4>
+          <h3 style={{ marginBottom: 'var(--space-4)' }}>Memberships</h3>
           <div style={{ overflowX: 'auto' }}>
             <table className="tbl" aria-label="Memberships">
               <thead>
@@ -165,7 +166,7 @@ function SecurityTab() {
 
   return (
     <section>
-      <h3>Security</h3>
+      <h2>Security</h2>
       <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
         Active sessions for your account. Revoke any session you do not recognise.
       </p>
@@ -235,7 +236,7 @@ function AppearanceTab() {
 
   return (
     <section>
-      <h3>Appearance</h3>
+      <h2>Appearance</h2>
       <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
         Changes apply immediately and persist across sessions.
       </p>
@@ -272,7 +273,7 @@ export function Settings() {
 
   return (
     <div>
-      <h2>Settings</h2>
+      <PageHeader title="Settings" />
       <Tabs tabs={TABS} active={activeTab} onChange={setActiveTab} ariaLabel="Settings" />
       <div
         id={`panel-${activeTab}`}

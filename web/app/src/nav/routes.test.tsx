@@ -46,8 +46,26 @@ describe('routes config', () => {
     expect(visible.find((r) => r.path === '/billing')).toBeDefined()
   })
 
-  it('hides instruments when proof is false', () => {
+  it('always shows the overview home regardless of the proof capability', () => {
+    // Overview is a real operational home (not just a proof screen), so it must
+    // always be reachable even when proof is false.
     const visible = visibleRoutes({ ...base, proof: false })
-    expect(visible.find((r) => r.path === '/')).toBeUndefined()
+    expect(visible.find((r) => r.path === '/')).toBeDefined()
+    const visibleWithProof = visibleRoutes({ ...base, proof: true })
+    expect(visibleWithProof.find((r) => r.path === '/')).toBeDefined()
+  })
+
+  it('groups Usage and Billing under a Billing group, not Govern', () => {
+    expect(GROUP_ORDER).toContain('Billing')
+    expect(ROUTES.find((r) => r.path === '/usage')?.group).toBe('Billing')
+    expect(ROUTES.find((r) => r.path === '/billing')?.group).toBe('Billing')
+  })
+
+  it('keeps Settings reachable but out of the sidebar nav (moved to the account menu)', () => {
+    // Account Settings lives in the top-bar account menu now, not a nav group.
+    expect(GROUP_ORDER).not.toContain('Settings')
+    expect(ROUTES.find((r) => r.path === '/settings')?.hidden).toBe(true)
+    expect(navRoutes(base).find((r) => r.path === '/settings')).toBeUndefined()
+    expect(visibleRoutes(base).find((r) => r.path === '/settings')).toBeDefined()
   })
 })

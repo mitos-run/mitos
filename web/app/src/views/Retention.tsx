@@ -7,6 +7,7 @@ import { useDataRetention, useSetDataRetention } from '../data/retention'
 import { Skeleton } from '../ui/Skeleton'
 import { useToast } from '../ui/Toast'
 import type { DataRetentionPolicy } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 
 function retentionLabel(days: number): string {
   if (days === 0) return 'Kept indefinitely'
@@ -65,16 +66,11 @@ export function Retention() {
 
   return (
     <div>
-      <h2>Data and retention</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Configure per-resource retention windows for this org. The garbage collector in the controller
-        enforces these settings on a scheduled basis. Setting a value to 0 means the data is kept forever.
-        A legal hold pauses all automated deletion regardless of the configured windows.
-      </p>
+      <PageHeader title="Data and retention" lede="Configure per-resource retention windows for this org. The garbage collector in the controller enforces these settings on a scheduled basis. Setting a value to 0 means the data is kept forever. A legal hold pauses all automated deletion regardless of the configured windows." />
 
       <form onSubmit={onSubmit}>
         <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-          <h3 style={{ marginBottom: 'var(--space-4)' }}>Retention windows</h3>
+          <h2 style={{ marginBottom: 'var(--space-4)' }}>Retention windows</h2>
           <p className="t-dim" style={{ fontSize: 'var(--step--2)', marginBottom: 'var(--space-4)' }}>
             0 = keep forever. Values are in days.
           </p>
@@ -125,7 +121,7 @@ export function Retention() {
         </section>
 
         <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-          <h3 style={{ marginBottom: 'var(--space-3)' }}>Legal hold</h3>
+          <h2 style={{ marginBottom: 'var(--space-3)' }}>Legal hold</h2>
           <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
             Enabling legal hold pauses all automated deletion driven by the retention windows above.
             No data is removed while a legal hold is active, regardless of the configured periods.
@@ -144,7 +140,7 @@ export function Retention() {
         </section>
 
         <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-          <h3 style={{ marginBottom: 'var(--space-3)' }}>What gets deleted when</h3>
+          <h2 style={{ marginBottom: 'var(--space-3)' }}>What gets deleted when</h2>
           <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
             The garbage collector runs on a schedule in the controller. It applies the configured retention
             windows to each resource class. A legal hold prevents any deletion until it is lifted.

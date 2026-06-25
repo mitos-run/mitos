@@ -600,7 +600,23 @@ func (api *SandboxAPI) Handler() http.Handler {
 	svc.Guest = func(sandboxID string) (sandboxrpc.GuestConn, error) {
 		return newVsockGuestConn(api, sandboxID), nil
 	}
-	connectPath, connectHandler := sandboxv1connect.NewSandboxHandler(svc, connect.WithInterceptors(authIC))
+	// Plumb the exec-timeout ceiling onto the Connect runtime path (issue #216)
+	// so an over-ceiling Exec/RunCode is rejected with CodeInvalidArgument before
+	// the guest stream is opened, never silently reduced; <=0 disables it. This
+	// mirrors the legacy /v1 handlers' checkTimeout gate.
+	svc.MaxExecTimeoutSeconds = api.maxExecTimeout
+
+	// auditIC records one AuditEvent per sandbox.v1.Sandbox runtime RPC AFTER it
+	// completes, restoring the per-op audit the legacy /v1 handlers performed.
+	// It is constructed with the SAME auditor SetAuditor controls (NopAuditor =
+	// off), and it carries ONLY the op string, the authenticated sandbox id, and
+	// OK: never a command, argv, env, path, or content.
+	auditIC := newConnectAuditInterceptor(func() Auditor { return api.auditor })
+	// Interceptor order: AUTH is OUTERMOST so it populates the authenticated
+	// sandbox id in ctx (sandboxrpc.SandboxIDFromContext) BEFORE audit runs and
+	// reads it. connect.WithInterceptors applies them outer-to-inner in the order
+	// given, so authIC must precede auditIC.
+	connectPath, connectHandler := sandboxv1connect.NewSandboxHandler(svc, connect.WithInterceptors(authIC, auditIC))
 
 	// outer combines all three auth surfaces. The order of Handle calls matters:
 	// more specific prefixes (Connect, PTY) take precedence over the catch-all "/".

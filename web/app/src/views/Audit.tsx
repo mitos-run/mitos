@@ -8,6 +8,8 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { api, type SinkType } from '../api'
+import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 function RetentionPanel() {
   const { data: retention, isLoading } = useAuditRetention()
@@ -30,7 +32,7 @@ function RetentionPanel() {
 
   return (
     <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-      <h3 style={{ marginBottom: 'var(--space-3)' }}>Retention and export</h3>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Retention and export</h2>
       {isLoading ? (
         <Skeleton rows={2} />
       ) : (
@@ -108,7 +110,7 @@ function SinksPanel() {
 
   return (
     <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
-      <h3 style={{ marginBottom: 'var(--space-3)' }}>Sinks</h3>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Sinks</h2>
       <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
         Forward audit events to external destinations. Endpoint must be HTTPS.
       </p>
@@ -196,76 +198,48 @@ function SinksPanel() {
 
 export function Audit() {
   const { data: events = [], isLoading } = useAudit()
-  const [filter, setFilter] = useState('')
-
-  const filtered = filter
-    ? events.filter((e) => {
-        const q = filter.toLowerCase()
-        return (
-          e.actor_id.toLowerCase().includes(q) ||
-          e.action.toLowerCase().includes(q) ||
-          e.target.toLowerCase().includes(q) ||
-          e.detail.toLowerCase().includes(q)
-        )
-      })
-    : events
+  const { query, setQuery, filtered } = useTableFilter(events, (e) => `${e.actor_id} ${e.action} ${e.target} ${e.detail}`)
 
   return (
     <section>
-      <h2>Audit log</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Immutable record of org-scoped actions. Filter by actor, action, target, or detail.
-      </p>
+      <PageHeader title="Audit log" lede="Immutable record of org-scoped actions. Filter by actor, action, target, or detail." />
 
       <RetentionPanel />
       <SinksPanel />
 
       {isLoading ? (
         <Skeleton rows={5} />
+      ) : events.length === 0 ? (
+        <EmptyState
+          title="No audit events yet"
+          body="Actions taken in this org will appear here."
+        />
       ) : (
-        <>
-          <div style={{ marginBottom: 'var(--space-4)' }}>
-            <input
-              aria-label="Filter audit"
-              placeholder="Filter by actor, action, target, or detail"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              style={{ width: '100%', maxWidth: '400px' }}
-            />
-          </div>
-
-          {filtered.length === 0 ? (
-            <EmptyState
-              title={events.length === 0 ? 'No audit events yet' : 'No matching events'}
-              body={events.length === 0 ? 'Actions taken in this org will appear here.' : 'Try a different filter term.'}
-            />
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table className="tbl" aria-label="Audit log">
-                <thead>
-                  <tr>
-                    <th scope="col">Time</th>
-                    <th scope="col">Actor</th>
-                    <th scope="col">Action</th>
-                    <th scope="col">Target</th>
-                    <th scope="col">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((e, i) => (
-                    <tr key={i}>
-                      <td className="t-dim">{new Date(e.at).toLocaleString()}</td>
-                      <td className="mono">{e.actor_id}</td>
-                      <td className="mono">{e.action}</td>
-                      <td className="mono">{e.target}</td>
-                      <td>{e.detail}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
+        <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="events" />
+          <table className="tbl" aria-label="Audit log">
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">Actor</th>
+                <th scope="col">Action</th>
+                <th scope="col">Target</th>
+                <th scope="col">Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((e, i) => (
+                <tr key={i}>
+                  <td className="t-dim">{new Date(e.at).toLocaleString()}</td>
+                  <td className="mono">{e.actor_id}</td>
+                  <td className="mono">{e.action}</td>
+                  <td className="mono">{e.target}</td>
+                  <td>{e.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   )

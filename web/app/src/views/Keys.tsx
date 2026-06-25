@@ -7,6 +7,8 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { CreateKeyResult } from '../api'
+import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 const TTL_OPTIONS = [
   { label: 'Never expires', value: 0 },
@@ -19,6 +21,7 @@ export function Keys() {
   const createKey = useCreateKey()
   const revokeKey = useRevokeKey()
   const { notify } = useToast()
+  const { query, setQuery, filtered } = useTableFilter(keys, (k) => `${k.name} ${k.prefix}`)
 
   const [name, setName] = useState('')
   const [scopeSandboxes, setScopeSandboxes] = useState(true)
@@ -55,10 +58,7 @@ export function Keys() {
 
   return (
     <section>
-      <h2>API keys</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Keys authenticate requests to the Mitos API. The raw key is shown only once on creation; store it immediately.
-      </p>
+      <PageHeader title="API keys" lede="Keys authenticate requests to the Mitos API. The raw key is shown only once on creation; store it immediately." />
 
       {revealed && (
         <div style={{ marginBottom: 'var(--space-5)' }}>
@@ -145,6 +145,7 @@ export function Keys() {
         />
       ) : (
         <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="keys" />
           <table className="tbl" aria-label="API keys">
             <thead>
               <tr>
@@ -157,7 +158,7 @@ export function Keys() {
               </tr>
             </thead>
             <tbody>
-              {keys.map((k) => (
+              {filtered.map((k) => (
                 <tr key={k.id}>
                   <td>{k.name}</td>
                   <td className="mono">{k.prefix}</td>

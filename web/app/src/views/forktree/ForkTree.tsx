@@ -7,6 +7,7 @@ import { useForkTree } from '../../data/forktree'
 import { fmtBytes } from '../../api'
 import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
+import { PageHeader } from '../../ui/PageHeader'
 import { layoutForkTree, type PositionedNode } from './layout'
 
 // Minimum and maximum visual radius for a node circle. Size encodes
@@ -31,7 +32,7 @@ export function ForkTree() {
   if (isError) {
     return (
       <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
-        <h2 style={{ marginBottom: 'var(--space-4)' }}>Fork tree</h2>
+        <PageHeader title="Fork tree" />
         <EmptyState
           title="Fork tree unavailable"
           body="The fork tree could not be read for this organization."
@@ -43,7 +44,7 @@ export function ForkTree() {
   if (isLoading) {
     return (
       <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
-        <h2 style={{ marginBottom: 'var(--space-4)' }}>Fork tree</h2>
+        <PageHeader title="Fork tree" />
         <Skeleton rows={4} />
       </section>
     )
@@ -52,7 +53,7 @@ export function ForkTree() {
   if (!data || data.nodes.length === 0) {
     return (
       <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
-        <h2 style={{ marginBottom: 'var(--space-4)' }}>Fork tree</h2>
+        <PageHeader title="Fork tree" />
         <EmptyState
           title="No forks yet"
           body="Fork a sandbox to see its copy-on-write tree."
@@ -66,7 +67,7 @@ export function ForkTree() {
 
   return (
     <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
-      <h2 style={{ marginBottom: 'var(--space-4)' }}>Fork tree</h2>
+      <PageHeader title="Fork tree" />
 
       {/* SVG visualization: decorative, hidden from screen readers. The table
           below is the accessible source of truth for assistive technology. */}

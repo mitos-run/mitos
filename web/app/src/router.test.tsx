@@ -54,22 +54,28 @@ describe('console router', () => {
     expect(Object.keys(router.routesByPath)).toContain('/billing')
   })
 
-  it('redirects / to first visible route when proof is off (no dead-end on gated path)', async () => {
-    // When proof:false, the '/' (Instruments) route is not built. Navigating to
-    // '/' must resolve to the first visible route (Sandboxes) rather than a
-    // "Not Found" dead-end. This test genuinely fails without the not-found
-    // redirect in createConsoleRouter.
+  it('resolves / to the Overview view when proof is off (Overview is always built)', async () => {
+    // Overview is a real operational home now, so the '/' route is always built
+    // regardless of the proof capability. Navigating to '/' must show Overview.
     const noproofCaps: Capabilities = { ...caps, proof: false }
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/console/capabilities')) {
         return Promise.resolve(new Response(JSON.stringify(noproofCaps), { status: 200, headers: { 'content-type': 'application/json' } }))
       }
-      return Promise.resolve(new Response(JSON.stringify({ sandboxes: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/sandboxes')) {
+        return Promise.resolve(new Response(JSON.stringify({ sandboxes: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.endsWith('/console/instruments')) {
+        return Promise.resolve(new Response(JSON.stringify({ org_id: 'o1', activate_p50_ms: 0, activate_p99_ms: 0, forks_served: 0, cow_savings_bytes: 0, marginal_bytes_per_fork: 0 }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.endsWith('/console/audit')) {
+        return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
     })
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const router = createConsoleRouter(noproofCaps)
-    // Navigate to '/' which is not a built route when proof:false.
     await router.navigate({ to: '/' })
     render(
       <QueryClientProvider client={client}>
@@ -78,8 +84,8 @@ describe('console router', () => {
         </ToastProvider>
       </QueryClientProvider>,
     )
-    // Must show Sandboxes (first visible route), never "Not Found".
-    await waitFor(() => expect(screen.getByRole('heading', { name: /Sandboxes/i })).toBeInTheDocument())
+    // Must show the Overview heading, never "Not Found".
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Overview/i })).toBeInTheDocument())
     expect(screen.queryByText('Not Found')).not.toBeInTheDocument()
   })
 })

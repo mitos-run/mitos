@@ -8,6 +8,8 @@ import { fmtBytes } from '../../api'
 import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
 import { useToast } from '../../ui/Toast'
+import { PageHeader } from '../../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../../ui/TableToolbar'
 
 function phaseEntity(phase: string): Entity {
   if (phase === 'Running') return 'ready'
@@ -19,6 +21,7 @@ export function SandboxList() {
   const { data: rows = [], isLoading, isError } = useSandboxes()
   const terminate = useTerminateSandbox()
   const { notify } = useToast()
+  const { query, setQuery, filtered } = useTableFilter(rows, (s) => `${s.id} ${s.template} ${s.node} ${s.phase}`)
 
   function onTerminate(id: string) {
     terminate.mutate(id, {
@@ -30,7 +33,7 @@ export function SandboxList() {
   if (isError) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <EmptyState title="Sandboxes unavailable" body="The sandbox list could not be loaded." />
       </section>
     )
@@ -39,7 +42,7 @@ export function SandboxList() {
   if (isLoading) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <Skeleton rows={4} />
       </section>
     )
@@ -48,7 +51,7 @@ export function SandboxList() {
   if (rows.length === 0) {
     return (
       <section>
-        <h2>Sandboxes</h2>
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
         <EmptyState title="No live sandboxes" body="Fork your first sandbox to see it here." />
       </section>
     )
@@ -56,8 +59,9 @@ export function SandboxList() {
 
   return (
     <section>
-      <h2>Sandboxes</h2>
+      <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
       <div style={{ overflowX: 'auto' }}>
+        <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="sandboxes" />
         <table className="tbl" aria-label="Live sandboxes">
           <thead>
             <tr>
@@ -71,7 +75,7 @@ export function SandboxList() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((s) => (
+            {filtered.map((s) => (
               <tr key={s.id}>
                 <td className="mono">
                   <Link to="/sandboxes/$id" params={{ id: s.id }}>{s.id}</Link>

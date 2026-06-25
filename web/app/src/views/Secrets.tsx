@@ -7,6 +7,8 @@ import { api, type SecretView } from '../api'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
+import { PageHeader } from '../ui/PageHeader'
+import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 function useSecrets() {
   return useQuery<SecretView[]>({ queryKey: ['secrets'], queryFn: () => api.secrets() })
@@ -33,6 +35,7 @@ export function Secrets() {
   const createSecret = useCreateSecret()
   const deleteSecret = useDeleteSecret()
   const { notify } = useToast()
+  const { query, setQuery, filtered } = useTableFilter(secrets, (s) => `${s.name} ${s.provider ?? ''}`)
 
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
@@ -61,10 +64,7 @@ export function Secrets() {
 
   return (
     <section>
-      <h2>Secrets</h2>
-      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }}>
-        Write-only. Values are encrypted server-side and injected into sandboxes; they are never shown again. Rotate, do not read.
-      </p>
+      <PageHeader title="Secrets" lede="Write-only. Values are encrypted server-side and injected into sandboxes; they are never shown again. Rotate, do not read." />
 
       <form onSubmit={onSubmit} style={{ marginBottom: 'var(--space-6)' }}>
         <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -116,6 +116,7 @@ export function Secrets() {
         />
       ) : (
         <div style={{ overflowX: 'auto' }}>
+          <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="secrets" />
           <table className="tbl" aria-label="Secrets">
             <thead>
               <tr>
@@ -128,7 +129,7 @@ export function Secrets() {
               </tr>
             </thead>
             <tbody>
-              {secrets.map((s) => (
+              {filtered.map((s) => (
                 <tr key={s.name}>
                   <td className="mono">{s.name}</td>
                   <td>{s.provider}</td>
