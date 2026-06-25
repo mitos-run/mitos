@@ -63,6 +63,9 @@ export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
 export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
 
+export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
+export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
+
 export type AccountView = {
   account_id: string
   email: string
@@ -186,6 +189,35 @@ export const api = {
     })
     if (!r.ok && r.status !== 204) throw new Error(`revoke all sessions: ${r.status}`)
   },
+  auditRetention: () => get<{ days: number }>('/console/audit/retention'),
+  setAuditRetention: async (days: number) => {
+    const r = await fetch('/console/audit/retention', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ days }),
+    })
+    if (!r.ok) throw new Error(`set retention: ${r.status}`)
+  },
+  auditSinks: () => get<{ sinks: SinkView[] }>('/console/audit/sinks').then((r) => r.sinks ?? []),
+  addAuditSink: async (type: SinkType, endpoint: string) => {
+    const r = await fetch('/console/audit/sinks', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type, endpoint }),
+    })
+    if (!r.ok) throw new Error(`add sink: ${r.status}`)
+    return (await r.json()) as SinkView
+  },
+  deleteAuditSink: async (id: string) => {
+    const r = await fetch(`/console/audit/sinks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`delete sink: ${r.status}`)
+  },
+  auditExportUrl: () => '/console/audit/export',
 }
 
 export function fmtBytes(n: number): string {
