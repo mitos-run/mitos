@@ -835,6 +835,37 @@ html[data-reduce-motion="1"] * {
   .topbar .menu-button { display: none; }
 }
 
+/* Table toolbar: a quiet search box and a live count above a list. The search
+   reuses the field look; the count sits to the right. */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.table-search {
+  flex: 1;
+  max-width: 320px;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--step--1);
+  color: var(--ink);
+  background: var(--field-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
+
+.table-search:focus-visible {
+  outline: none;
+  border-color: var(--cyan);
+}
+
+.table-count {
+  margin-left: auto;
+  font-size: var(--step--1);
+  white-space: nowrap;
+}
+
 /* Page header: the uniform title zone every view opens with. Title left, the
    primary action right; mirrors the marketing site .page-hero rhythm. */
 .page-header {
