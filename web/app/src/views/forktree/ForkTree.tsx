@@ -146,9 +146,8 @@ export function ForkTree() {
             {data.nodes.map((node) => (
               <tr key={node.id}>
                 <td>
-                  {/* Link to the sandboxes list. B2 will deep-link to the
-                      specific sandbox detail view once that route exists. */}
-                  <Link to="/sandboxes">{node.id}</Link>
+                  {/* Deep-link to the sandbox detail view for this node. */}
+                  <Link to="/sandboxes/$id" params={{ id: node.id }}>{node.id}</Link>
                 </td>
                 <td>{node.parent_id || '-'}</td>
                 <td>{node.phase}</td>
