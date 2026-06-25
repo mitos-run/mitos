@@ -126,20 +126,28 @@ difference is the audit-visible CoW saving.
 ## Collection seam and the org mapping
 
 The collector (`Collector`) scrapes each node on a fixed cadence and tags every
-sample with org, sandbox, node, and timestamp. The actual multi-node HTTP scrape
-needs a live cluster, so the collector takes an injectable `SampleSource`: the
-aggregation and integration are fully unit-tested against a mock source, and the
-real HTTP scrape of `GET /v1/metering` across nodes is a documented follow-up
-that implements `SampleSource`.
+sample with org, sandbox, node, and timestamp through an injectable
+`SampleSource`. The live multi-node scrape is now wired (issue #164, Phase 0):
+`NodeRegistrySource` (`internal/usage/livesource.go`) lists the forkd nodes from
+the controller NodeRegistry, HTTP GETs `GET /v1/metering` per node with a bounded
+per-request timeout, parses the metering report, and converts each per-sandbox
+row to an org-tagged `Sample`. A node that is unreachable or errors is skipped and
+counted, never failing the whole cycle. The collector runs behind the
+`--usage-collector` controller flag, which is OFF by default so a self-host
+deployment that does not want metering is unaffected; it is turned on for hosted
+multi-tenant. See `docs/design/observability-and-billing-spine.md`.
 
-The **org tag** comes from the sandbox -> owning-org mapping. A sandbox is
-created through a Sandbox; the sandbox is created by a gateway request that
-carries the verified org (the org is taken solely from the verified
-API key). So the owning org of a sandbox is the org of the request that created
-it. The mapping is the `OrgResolver` seam: `OrgFor(sandboxID) -> orgID`. The
-tested default is a static map; the real resolver reads the sandbox -> org label
-the gateway stamps on the Sandbox (a documented follow-up, the controller
-wiring).
+The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
+trust boundary: the org is derived solely from control-plane identity, never from
+client input. A sandbox is created in the org's hard-isolation namespace
+`mitos-org-<id>`; the controller stamps the trusted `mitos.run/org` label on the
+sandbox's husk pod, derived from that namespace via `tenant.OrgFromNamespace` (a
+client-set `mitos.run/org` on the input is ignored). The `OrgResolver` seam
+(`OrgFor(sandboxID) -> orgID`) is implemented live by `LabelOrgResolver`
+(`internal/usage/k8sresolver.go`), which reads that controller-stamped label off
+the husk pod. A self-host sandbox in a non-org namespace carries no org label and
+is left unattributed (kept in node-reconciliation totals, dropped from billable),
+never misbilled to a default org.
 
 ## Public usage API (org-scoped)
 

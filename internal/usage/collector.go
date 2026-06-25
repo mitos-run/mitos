@@ -104,6 +104,25 @@ type Collector struct {
 	src   SampleSource
 	store UsageStore
 	cfg   Config
+
+	// OnTotals, when set, is called AFTER each cycle's records are upserted with
+	// the store's CUMULATIVE per-org Totals (from a store that implements
+	// TotalsProvider), so the per-org Prometheus series (issue #164) is driven from
+	// the same monotonic cumulative the bill rolls up, NOT from this cycle's pruned
+	// sample buffer. It is purely observational. Nil disables it; it is also skipped
+	// if the store does not implement TotalsProvider (no cumulative to read).
+	OnTotals func(map[string]Totals)
+
+	// buf is the rolling sample buffer. A live scrape yields only the CURRENT
+	// instant's level for each sandbox, but the rate units (vCPU-seconds, memory
+	// GiB-seconds) are an integral of level over time, which needs at least two
+	// samples spanning an interval. So the collector retains recent samples and
+	// integrates the buffer each cycle rather than each lone scrape in isolation.
+	// Integrate is pure and dedupes by (sandbox, timestamp), so re-upserting the
+	// recomputed window record replaces (never adds): the buffer preserves the
+	// (sandbox, window) idempotency. Old samples are pruned past the retention
+	// horizon so the buffer is bounded and settled windows are not re-walked.
+	buf []Sample
 }
 
 // NewCollector builds a collector over a sample source and a usage store.
@@ -114,20 +133,60 @@ func NewCollector(src SampleSource, store UsageStore, cfg Config) *Collector {
 	return &Collector{src: src, store: store, cfg: cfg}
 }
 
-// CollectOnce runs a single scrape-integrate-upsert cycle. It is the unit the
-// Run loop calls on each tick and the unit the idempotency tests drive directly.
+// retention is how far back the sample buffer is kept. It spans the current
+// window plus MaxHold so the leading edge of the current window can still be
+// integrated against the trailing sample of the previous one, while settled
+// windows fall out of the buffer and are never re-walked.
+func (c *Collector) retention() time.Duration { return c.cfg.Window + c.cfg.MaxHold }
+
+// CollectOnce runs a single scrape-buffer-integrate-upsert cycle. It is the unit
+// the Run loop calls on each tick and the unit the idempotency tests drive
+// directly. It appends the scrape to the rolling buffer, prunes samples past the
+// retention horizon, and integrates the buffer so the rate units accumulate
+// across cycles while staying idempotent on (sandbox, window).
 func (c *Collector) CollectOnce(ctx context.Context) error {
 	samples, err := c.src.Collect(ctx)
 	if err != nil {
 		return fmt.Errorf("collect samples: %w", err)
 	}
-	recs := Integrate(samples, c.cfg)
+	c.buf = append(c.buf, samples...)
+	c.pruneBuffer()
+	recs := Integrate(c.buf, c.cfg)
 	for _, r := range recs {
 		if err := c.store.UpsertRecord(ctx, r); err != nil {
 			return fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
 		}
 	}
+	if c.OnTotals != nil {
+		if tp, ok := c.store.(TotalsProvider); ok {
+			c.OnTotals(tp.TotalsByOrg())
+		}
+	}
 	return nil
+}
+
+// pruneBuffer drops samples older than the retention horizon, measured from the
+// newest sample in the buffer (a wall clock independent of the test clock). It
+// keeps the buffer bounded and stops settled windows from being re-integrated on
+// every cycle. It is a no-op on an empty buffer.
+func (c *Collector) pruneBuffer() {
+	if len(c.buf) == 0 {
+		return
+	}
+	var newest time.Time
+	for _, s := range c.buf {
+		if s.Timestamp.After(newest) {
+			newest = s.Timestamp
+		}
+	}
+	cutoff := newest.Add(-c.retention())
+	kept := c.buf[:0]
+	for _, s := range c.buf {
+		if !s.Timestamp.Before(cutoff) {
+			kept = append(kept, s)
+		}
+	}
+	c.buf = kept
 }
 
 // Run scrapes on a fixed cadence until the context is canceled. Each tick is a

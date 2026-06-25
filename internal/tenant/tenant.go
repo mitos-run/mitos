@@ -24,6 +24,27 @@ func NamespaceForOrg(orgID string) string {
 	return namespacePrefix + orgID
 }
 
+// OrgFromNamespace is the exact inverse of NamespaceForOrg: it recovers the org
+// id from a hard-isolation namespace mitos-org-<id>, returning ok=false for any
+// namespace that is not an org namespace (default, mitos, kube-system, a
+// self-host single-tenant namespace).
+//
+// This is the TRUSTED billing attribution source. The control plane places a
+// tenant's workloads in mitos-org-<id>, so the namespace is a control-plane fact,
+// not client input. The controller derives the org from the namespace via this
+// helper and stamps OrgLabelKey; a client-set org label is never trusted. A
+// non-org namespace returns ("", false) so self-host stays unattributed rather
+// than being forced into a bogus org.
+func OrgFromNamespace(ns string) (orgID string, ok bool) {
+	if len(ns) <= len(namespacePrefix) {
+		return "", false
+	}
+	if ns[:len(namespacePrefix)] != namespacePrefix {
+		return "", false
+	}
+	return ns[len(namespacePrefix):], true
+}
+
 // OrgLabels returns the standard label set stamping an object as owned by orgID.
 func OrgLabels(orgID string) map[string]string {
 	return map[string]string{OrgLabelKey: orgID}
