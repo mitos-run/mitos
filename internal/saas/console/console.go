@@ -58,6 +58,13 @@ type Deps struct {
 	// enforces the policy runs in the controller (issue #163). Defaults to the
 	// in-memory fake so the BFF is safe to instantiate without a real store.
 	Retention RetentionStore
+	// DataRetention is the per-org data-retention policy seam. It stores and
+	// exposes the multi-dimensional retention policy (sandbox metadata, logs,
+	// usage) and a legal-hold flag for each org. The GC sweep that enforces the
+	// policy runs in the controller (issue #163); a legal hold pauses all
+	// automated deletion. Defaults to the in-memory fake so the BFF is safe to
+	// instantiate without a real store.
+	DataRetention DataRetentionStore
 	// Sessions is the account-scoped session-listing seam. It is used by the
 	// account-session endpoints (list, revoke one, revoke all) and defaults to a
 	// no-op in-memory implementation so the BFF is safe to instantiate without a
@@ -114,6 +121,9 @@ func New(deps Deps) *Console {
 	}
 	if deps.Retention == nil {
 		deps.Retention = NewMemRetentionStore()
+	}
+	if deps.DataRetention == nil {
+		deps.DataRetention = NewMemDataRetentionStore()
 	}
 	if deps.Sessions == nil {
 		deps.Sessions = noopSessionLister{}
@@ -191,6 +201,8 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/account/sessions", c.handleListSessions)
 	mux.HandleFunc("DELETE /console/account/sessions/{id}", c.handleRevokeSession)
 	mux.HandleFunc("DELETE /console/account/sessions", c.handleRevokeAllSessions)
+	mux.HandleFunc("GET /console/retention", c.handleGetDataRetention)
+	mux.HandleFunc("PUT /console/retention", c.handleSetDataRetention)
 	c.mux = mux
 }
 
