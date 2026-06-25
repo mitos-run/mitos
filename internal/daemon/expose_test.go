@@ -21,6 +21,8 @@ func TestProxyHTTPStreamsSSE(t *testing.T) {
 	// because the response is not complete, so the discriminator is structural
 	// rather than timing-based. The 2s timeout is only a fail-fast backstop.
 	proceed := make(chan struct{})
+	var once sync.Once
+	closeProceed := func() { once.Do(func() { close(proceed) }) }
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sse" {
 			http.Error(w, "bad path "+r.URL.Path, http.StatusNotFound)
@@ -35,7 +37,7 @@ func TestProxyHTTPStreamsSSE(t *testing.T) {
 		fl.Flush()
 	}))
 	defer backend.Close()
-	defer close(proceed) // ensure the backend goroutine can exit even if the read fails
+	defer closeProceed() // safety net for the timeout/failure path; no double-close
 
 	port := portOf(t, backend)
 	api := newExposeTestAPI(t, backend.Listener.Addr().String())
@@ -61,6 +63,18 @@ func TestProxyHTTPStreamsSSE(t *testing.T) {
 		// streaming proven: the first event arrived while the backend is still blocked mid-response
 	case <-time.After(2 * time.Second):
 		t.Fatal("first SSE line did not arrive before the backend continued: proxy is buffering")
+	}
+	closeProceed() // unblock the backend to send the second event
+	// Drain the second event so the proxy's copy completes before the pipe closes
+	// (pristine output). Each SSE event is "data: tick\n\n" (a data line plus a
+	// blank terminator line), so after the first data line we read the blank
+	// terminator then the second data line. After receiving from `got` the reader
+	// goroutine has exited, so reading br here is race-free.
+	if line, _ := br.ReadString('\n'); line != "\n" {
+		t.Fatalf("SSE event terminator: got %q", line)
+	}
+	if line, _ := br.ReadString('\n'); line != "data: tick\n" {
+		t.Fatalf("second SSE line: got %q", line)
 	}
 }
 
@@ -113,6 +127,8 @@ func newExposeTestAPI(t *testing.T, backendAddr string) *SandboxAPI {
 // fail-fast backstop; the discriminator is structural.
 func TestHandleExposeStreamsSSEEndToEnd(t *testing.T) {
 	proceed := make(chan struct{})
+	var once sync.Once
+	closeProceed := func() { once.Do(func() { close(proceed) }) }
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sse" {
 			http.Error(w, "bad path "+r.URL.Path, http.StatusNotFound)
@@ -127,7 +143,7 @@ func TestHandleExposeStreamsSSEEndToEnd(t *testing.T) {
 		fl.Flush()
 	}))
 	defer backend.Close()
-	defer close(proceed) // unblock the backend goroutine on test exit
+	defer closeProceed() // safety net for the timeout/failure path; no double-close
 
 	api := newExposeTestAPI(t, backend.Listener.Addr().String())
 	api.RegisterToken("sb1", "tok")
@@ -152,6 +168,18 @@ func TestHandleExposeStreamsSSEEndToEnd(t *testing.T) {
 		// streaming proven: the first event arrived while the backend is still blocked mid-response
 	case <-time.After(2 * time.Second):
 		t.Fatal("first SSE line did not arrive before the backend continued: proxy is buffering")
+	}
+	closeProceed() // unblock the backend to send the second event
+	// Drain the second event so the proxy's copy completes before the pipe closes
+	// (pristine output). Each SSE event is "data: ev\n\n" (a data line plus a blank
+	// terminator line), so after the first data line we read the blank terminator
+	// then the second data line. After receiving from `got` the reader goroutine
+	// has exited, so reading br here is race-free.
+	if line, _ := br.ReadString('\n'); line != "\n" {
+		t.Fatalf("SSE event terminator: got %q", line)
+	}
+	if line, _ := br.ReadString('\n'); line != "data: ev\n" {
+		t.Fatalf("second SSE line: got %q", line)
 	}
 }
 
