@@ -18,13 +18,7 @@ const COMPLIANCE_ITEMS = [
 function SecurityReviewBanner() {
   return (
     <div
-      style={{
-        border: '1px solid var(--color-amber, #d97706)',
-        borderRadius: 'var(--radius-2)',
-        padding: 'var(--space-5)',
-        marginBottom: 'var(--space-7)',
-        background: 'color-mix(in srgb, var(--color-amber, #d97706) 8%, transparent)',
-      }}
+      className="trust-banner"
       role="note"
       aria-label="Security review status"
     >
@@ -34,7 +28,7 @@ function SecurityReviewBanner() {
       <p style={{ margin: 0, marginBottom: 'var(--space-4)', fontSize: 'var(--step--1)' }} className="t-dim">
         The threat model documents the exact per-boundary security status for each component and data path.
       </p>
-      <div style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
+      <div className="trust-banner-links">
         <a
           href={THREAT_MODEL_URL}
           target="_blank"
@@ -58,7 +52,7 @@ function SecurityReviewBanner() {
 
 function SelfHostedPosture() {
   return (
-    <section style={{ marginBottom: 'var(--space-7)' }}>
+    <section className="trust-section">
       <h3>Data residency</h3>
       <p style={{ fontWeight: 600, marginBottom: 'var(--space-3)' }}>Deployed in the operator cluster</p>
       <p style={{ fontSize: 'var(--step--1)' }} className="t-dim">
@@ -72,7 +66,7 @@ function SelfHostedPosture() {
 
 function HostedCompliance() {
   return (
-    <section style={{ marginBottom: 'var(--space-7)' }}>
+    <section className="trust-section">
       <h3>Compliance</h3>
       <p style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-5)' }} className="t-dim">
         These are operated and delivered artifacts. Statuses reflect current availability, not completed
