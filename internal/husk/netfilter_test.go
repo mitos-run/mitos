@@ -2,6 +2,7 @@ package husk
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -20,6 +21,33 @@ type recordingRunner struct{ calls []recordedCall }
 func (r *recordingRunner) run(_ context.Context, argv []string, stdin string) error {
 	r.calls = append(r.calls, recordedCall{argv: argv, stdin: stdin})
 	return nil
+}
+
+// failingRunner records calls and returns err on the call at index failAt, so a
+// test can simulate a step failing AFTER the tap is created.
+type failingRunner struct {
+	calls  []recordedCall
+	failAt int
+	err    error
+}
+
+func (r *failingRunner) run(_ context.Context, argv []string, stdin string) error {
+	idx := len(r.calls)
+	r.calls = append(r.calls, recordedCall{argv: argv, stdin: stdin})
+	if r.err != nil && idx == r.failAt {
+		return r.err
+	}
+	return nil
+}
+
+func sawTapDelete(calls []recordedCall, tap string) bool {
+	want := strings.Join(netconf.LinkDelArgs(tap), " ")
+	for _, c := range calls {
+		if strings.Join(c.argv, " ") == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
@@ -137,5 +165,53 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 	}
 	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err == nil {
 		t.Fatal("expected error on malformed allow entry, got nil")
+	}
+}
+
+// TestApplyEgressFilterTearsDownTapOnPartialFailure proves that when a step
+// after tap creation fails, applyEgressFilter removes the tap it created (issue
+// #428). The tap name is deterministic per template, so a leaked tap makes every
+// retry fail at tap creation with EBUSY and masks the real first-attempt error.
+func TestApplyEgressFilterTearsDownTapOnPartialFailure(t *testing.T) {
+	stepErr := errors.New("RTNETLINK answers: operation not permitted")
+	// Call index 0 is the tap add; index 1 is the host-IP assignment, the first
+	// step after the tap exists. Fail there.
+	rr := &failingRunner{failAt: 1, err: stepErr}
+	cfg := NetfilterConfig{
+		Tap:     "sbtapdeadbeef",
+		GuestIP: net.ParseIP("10.200.0.2"),
+		HostIP:  net.ParseIP("10.200.0.1"),
+		Egress:  v1.EgressDeny,
+	}
+	err := applyEgressFilter(context.Background(), rr.run, nil, cfg)
+	if err == nil {
+		t.Fatal("expected an error from the failing step, got nil")
+	}
+	// The real step error is surfaced (wrapped), not masked by a later EBUSY.
+	if !errors.Is(err, stepErr) {
+		t.Fatalf("want the underlying step error wrapped, got: %v", err)
+	}
+	// The tap was torn down: a link delete for this exact tap was issued on the
+	// failure path, so a retry will not hit EBUSY.
+	if !sawTapDelete(rr.calls, cfg.Tap) {
+		t.Fatalf("applyEgressFilter leaked tap %q on failure (no link del); calls: %+v", cfg.Tap, rr.calls)
+	}
+}
+
+// TestApplyEgressFilterDoesNotTearDownOnSuccess proves the happy path leaves the
+// tap in place (teardown is the stub's job on Close, not apply's on success).
+func TestApplyEgressFilterDoesNotTearDownOnSuccess(t *testing.T) {
+	rr := &recordingRunner{}
+	cfg := NetfilterConfig{
+		Tap:     "sbtap0",
+		GuestIP: net.ParseIP("10.200.0.2"),
+		HostIP:  net.ParseIP("10.200.0.1"),
+		Egress:  v1.EgressDeny,
+	}
+	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if sawTapDelete(rr.calls, cfg.Tap) {
+		t.Fatalf("applyEgressFilter tore down the tap on success; calls: %+v", rr.calls)
 	}
 }

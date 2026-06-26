@@ -57,7 +57,7 @@ type netfilterRunner func(ctx context.Context, argv []string, stdin string) erro
 // assign the host IP, bring it up, apply the idempotent shared table, then this
 // VM's per-tap chain. A malformed allowlist fails the whole call (fail-closed:
 // a VM never comes up with a half-applied filter).
-func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) error {
+func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) (err error) {
 	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
 	if err != nil {
 		return fmt.Errorf("husk netfilter: parse allowlist: %w", err)
@@ -78,6 +78,21 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.TapAddArgs(cfg.Tap), ""); err != nil {
 		return fmt.Errorf("husk netfilter: create tap %s: %w", cfg.Tap, err)
 	}
+	// The tap now exists. Its name is deterministic per template, so if ANY step
+	// below fails we MUST remove the tap (and any partial chain state) or the next
+	// activation attempt fails right here at tap creation with EBUSY (Device or
+	// resource busy), which masks the real first-attempt error and permanently
+	// poisons the warm pod (issue #428). Tear down idempotently on every error
+	// path; the original error is preserved as the named return so the true
+	// root-cause step error is surfaced, not the EBUSY of a later retry.
+	defer func() {
+		if err != nil {
+			// Detached from ctx so cleanup still runs when the failure was a
+			// context cancellation or deadline (otherwise the same canceled ctx
+			// would fail the teardown commands and re-leak the tap).
+			_ = teardownEgressFilter(context.WithoutCancel(ctx), run, cfg.Tap)
+		}
+	}()
 	if err := run(ctx, netconf.AddrAddArgs(cfg.HostIP, cfg.Tap), ""); err != nil {
 		return fmt.Errorf("husk netfilter: assign host ip to tap %s: %w", cfg.Tap, err)
 	}
