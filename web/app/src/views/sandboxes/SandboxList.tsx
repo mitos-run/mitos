@@ -33,7 +33,7 @@ export function SandboxList() {
   if (isError) {
     return (
       <section>
-        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
         <EmptyState title="Sandboxes unavailable" body="The sandbox list could not be loaded." />
       </section>
     )
@@ -42,7 +42,7 @@ export function SandboxList() {
   if (isLoading) {
     return (
       <section>
-        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
         <Skeleton rows={4} />
       </section>
     )
@@ -51,7 +51,7 @@ export function SandboxList() {
   if (rows.length === 0) {
     return (
       <section>
-        <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
+        <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
         <EmptyState title="No live sandboxes" body="Fork your first sandbox to see it here." />
       </section>
     )
@@ -59,7 +59,7 @@ export function SandboxList() {
 
   return (
     <section>
-      <PageHeader title="Sandboxes" lede="Live sandboxes for this org." />
+      <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
       <div style={{ overflowX: 'auto' }}>
         <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="sandboxes" />
         <table className="tbl" aria-label="Live sandboxes">
