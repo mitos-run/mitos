@@ -1,6 +1,7 @@
 package ociroot
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -71,6 +72,16 @@ func DirSizeMB(dir string) (int, error) {
 	var total int64
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Tolerate a subtree the walker cannot read. apt-based images
+			// (debian/ubuntu/python-slim) ship root-only dirs such as
+			// /var/cache/apt/archives/partial (mode 0700, owned by _apt); a
+			// non-root forkd cannot traverse them, and the size measurement must
+			// not abort the whole template build over a cache/staging dir (#415).
+			// Such dirs are near-empty, and the headroom multiplier plus the
+			// minRootfsMB floor below absorb the small undercount.
+			if errors.Is(err, fs.ErrPermission) {
+				return nil
+			}
 			return err
 		}
 		if d.Type().IsRegular() {

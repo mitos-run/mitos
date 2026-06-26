@@ -95,3 +95,32 @@ func TestDirSizeMBHasHeadroomAndFloor(t *testing.T) {
 		t.Errorf("size = %d, want at least 280 (content*1.4)", size)
 	}
 }
+
+// TestDirSizeMBToleratesUnreadableSubdir reproduces #415: apt-based images
+// (debian/ubuntu/python-slim) contain root-only dirs such as
+// /var/cache/apt/archives/partial (mode 0700, owned by _apt). When forkd is
+// non-root it cannot traverse them, so the size walk must skip the unreadable
+// subtree and still return a usable size instead of aborting the whole build.
+func TestDirSizeMBToleratesUnreadableSubdir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks; cannot exercise EACCES")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "f"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "partial")
+	if err := os.Mkdir(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restore perms so the test temp dir can be cleaned up.
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+
+	size, err := DirSizeMB(root)
+	if err != nil {
+		t.Fatalf("DirSizeMB returned an error on an unreadable subdir (#415): %v", err)
+	}
+	if size < minRootfsMB {
+		t.Fatalf("size = %d, want at least the floor %d", size, minRootfsMB)
+	}
+}
