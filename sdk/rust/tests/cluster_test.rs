@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use mitos::{default_pool_name, AgentRun, CreateSandbox, SandboxPhase};
+use mitos::{default_pool_name, AgentRun, CreateSandbox, SandboxPhase, ServeOptions};
 
 #[derive(Debug, Clone)]
 struct CapturedRequest {
@@ -487,4 +487,346 @@ fn terminate_returns_workspace_ref() {
         del_req.path,
         "/apis/mitos.run/v1/namespaces/default/sandboxes/box1"
     );
+}
+
+// --- Workspace::serve tests --------------------------------------------------
+
+// A zero poll interval keeps the serve tests from sleeping. The interval is a
+// per-Workspace value (no shared global), so parallel tests do not race on it.
+fn zero_interval() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
+// The two tests that read or clear MITOS_EXPOSE_DOMAIN mutate a process-global
+// env var; serialize them through this mutex so they cannot race each other when
+// the test binary runs them in parallel.
+static EXPOSE_DOMAIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn serve_creates_sandbox_with_expose_and_returns_url() {
+    // Sequence: POST sandbox (201), GET sandbox (Ready).
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-aa01"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-aa01"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws1")
+        .with_serve_wait_interval(zero_interval());
+
+    let result = ws
+        .serve(
+            ServeOptions::new()
+                .pool("my-pool")
+                .label("mybot")
+                .expose_domain("mitos.app"),
+        )
+        .expect("serve");
+
+    assert_eq!(result.url, "https://mybot.mitos.app/");
+    assert_eq!(result.label, "mybot");
+    assert_eq!(result.sharing, "private");
+
+    // Verify the POST body contains spec.expose and workspaceRef.
+    let post_req = mock.next_request();
+    assert_eq!(post_req.method, "POST");
+    assert_eq!(
+        post_req.path,
+        "/apis/mitos.run/v1/namespaces/default/sandboxes"
+    );
+    assert!(post_req
+        .body
+        .contains("\"workspaceRef\":{\"name\":\"ws1\"}"));
+    assert!(post_req.body.contains("\"expose\""));
+    assert!(post_req.body.contains("\"label\":\"mybot\""));
+    assert!(post_req.body.contains("\"sharing\":\"private\""));
+    assert!(post_req.body.contains("\"port\":8080"));
+    assert!(post_req.body.contains("\"poolRef\":{\"name\":\"my-pool\"}"));
+
+    // Verify the poll GET happened.
+    let get_req = mock.next_request();
+    assert_eq!(get_req.method, "GET");
+    assert!(get_req
+        .path
+        .starts_with("/apis/mitos.run/v1/namespaces/default/sandboxes/"));
+}
+
+#[test]
+fn serve_label_defaults_to_sandbox_name() {
+    // No explicit label: the sandbox name (generated) becomes the label.
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-bb02"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-bb02"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws2")
+        .with_serve_wait_interval(zero_interval());
+
+    let result = ws
+        .serve(ServeOptions::new().pool("p1").expose_domain("mitos.app"))
+        .expect("serve without explicit label");
+
+    // The URL label must match the returned label, and the label must look like
+    // a sandbox- name (which is a valid DNS label: all lowercase hex).
+    assert!(result.url.starts_with("https://sandbox-"));
+    assert!(result.url.ends_with(".mitos.app/"));
+    assert_eq!(result.label, result.sandbox_name);
+
+    let post_req = mock.next_request();
+    // The body label must match what the URL uses.
+    let label_fragment = format!("\"label\":\"{}\"", result.label);
+    assert!(
+        post_req.body.contains(&label_fragment),
+        "expected {:?} in body {:?}",
+        label_fragment,
+        post_req.body
+    );
+    let _ = mock.next_request();
+}
+
+#[test]
+fn serve_respects_port_and_sharing_options() {
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-cc03"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-cc03"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws3")
+        .with_serve_wait_interval(zero_interval());
+
+    let result = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("toolbot")
+                .port(3000)
+                .sharing("link")
+                .expose_domain("mitos.app"),
+        )
+        .expect("serve with custom port and sharing");
+
+    assert_eq!(result.sharing, "link");
+    assert_eq!(result.url, "https://toolbot.mitos.app/");
+
+    let post_req = mock.next_request();
+    assert!(post_req.body.contains("\"port\":3000"));
+    assert!(post_req.body.contains("\"sharing\":\"link\""));
+    let _ = mock.next_request();
+}
+
+#[test]
+fn serve_polls_until_ready() {
+    // First GET returns Pending, second returns Ready.
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-dd04"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-dd04"},"status":{"phase":"Pending"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-dd04"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws4")
+        .with_serve_wait_interval(zero_interval());
+
+    let result = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("polltest")
+                .expose_domain("mitos.app"),
+        )
+        .expect("serve with polling");
+
+    assert_eq!(result.url, "https://polltest.mitos.app/");
+
+    let post_req = mock.next_request();
+    assert_eq!(post_req.method, "POST");
+    let get1 = mock.next_request();
+    assert_eq!(get1.method, "GET"); // Pending
+    let get2 = mock.next_request();
+    assert_eq!(get2.method, "GET"); // Ready
+}
+
+#[test]
+fn serve_returns_error_on_failed_sandbox() {
+    // GET returns Failed: serve must surface sandbox_failed.
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-ee05"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-ee05"},"status":{"phase":"Failed"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws5")
+        .with_serve_wait_interval(zero_interval());
+
+    let err = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("failbot")
+                .expose_domain("mitos.app"),
+        )
+        .expect_err("should surface sandbox_failed");
+
+    assert_eq!(err.code, "sandbox_failed");
+    let _ = mock.next_request();
+    let _ = mock.next_request();
+}
+
+#[test]
+fn serve_error_missing_pool() {
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws6");
+
+    let err = ws
+        .serve(ServeOptions::new().expose_domain("mitos.app"))
+        .expect_err("pool is required");
+    assert_eq!(err.code, "missing_serve_pool");
+}
+
+#[test]
+fn serve_error_missing_expose_domain() {
+    // Hold the env lock: this test and the env-var fallback test both mutate
+    // MITOS_EXPOSE_DOMAIN and must not run concurrently.
+    let _guard = EXPOSE_DOMAIN_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Clear the env var so the fallback also fails.
+    std::env::remove_var("MITOS_EXPOSE_DOMAIN");
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws7");
+
+    let err = ws
+        .serve(ServeOptions::new().pool("p1").label("mybot"))
+        .expect_err("expose domain is required");
+    assert_eq!(err.code, "missing_expose_domain");
+}
+
+#[test]
+fn serve_error_invalid_port_zero() {
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws8");
+
+    let err = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("mybot")
+                .port(0)
+                .expose_domain("mitos.app"),
+        )
+        .expect_err("port 0 is invalid");
+    assert_eq!(err.code, "invalid_serve_port");
+}
+
+#[test]
+fn serve_error_reserved_label() {
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws9");
+
+    for reserved in &["www", "api", "console", "admin", "status"] {
+        let err = ws
+            .serve(
+                ServeOptions::new()
+                    .pool("p1")
+                    .label(*reserved)
+                    .expose_domain("mitos.app"),
+            )
+            .expect_err(&format!("reserved label {reserved:?} must be rejected"));
+        assert_eq!(
+            err.code, "reserved_expose_label",
+            "expected reserved_expose_label for {:?}",
+            reserved
+        );
+    }
+}
+
+#[test]
+fn serve_error_invalid_label_hyphen_start() {
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws10");
+
+    let err = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("-badlabel")
+                .expose_domain("mitos.app"),
+        )
+        .expect_err("label starting with hyphen is invalid");
+    assert_eq!(err.code, "invalid_expose_label");
+}
+
+#[test]
+fn serve_label_is_lowercased() {
+    // An uppercase label must be lowercased before validation and use.
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-ff06"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-ff06"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws11")
+        .with_serve_wait_interval(zero_interval());
+
+    let result = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label("MyBot")
+                .expose_domain("mitos.app"),
+        )
+        .expect("uppercase label is lowercased");
+
+    assert_eq!(result.label, "mybot");
+    assert_eq!(result.url, "https://mybot.mitos.app/");
+    let _ = mock.next_request();
+    let _ = mock.next_request();
+}
+
+#[test]
+fn serve_error_label_too_long() {
+    let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
+    let ws = client.workspace("ws12");
+    let long_label: String = "a".repeat(64);
+
+    let err = ws
+        .serve(
+            ServeOptions::new()
+                .pool("p1")
+                .label(long_label)
+                .expose_domain("mitos.app"),
+        )
+        .expect_err("label exceeding 63 chars is invalid");
+    assert_eq!(err.code, "invalid_expose_label");
+}
+
+#[test]
+fn serve_env_var_expose_domain_fallback() {
+    // When expose_domain is not passed as an option, MITOS_EXPOSE_DOMAIN is used.
+    let mock = MockApiServer::start(vec![
+        StubResponse::status(201, "Created", r#"{"metadata":{"name":"sandbox-gg07"}}"#),
+        StubResponse::ok(r#"{"metadata":{"name":"sandbox-gg07"},"status":{"phase":"Ready"}}"#),
+    ]);
+    let client = AgentRun::for_testing(&mock.base_url, "default");
+    let ws = client
+        .workspace("ws13")
+        .with_serve_wait_interval(zero_interval());
+
+    // Hold the env lock while mutating MITOS_EXPOSE_DOMAIN so this cannot race
+    // with serve_error_missing_expose_domain.
+    let guard = EXPOSE_DOMAIN_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    std::env::set_var("MITOS_EXPOSE_DOMAIN", "env.example.com");
+    let result = ws
+        .serve(ServeOptions::new().pool("p1").label("envbot"))
+        .expect("serve with env-var domain");
+    std::env::remove_var("MITOS_EXPOSE_DOMAIN");
+    drop(guard);
+
+    assert_eq!(result.url, "https://envbot.env.example.com/");
+    let _ = mock.next_request();
+    let _ = mock.next_request();
 }

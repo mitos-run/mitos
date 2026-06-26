@@ -79,7 +79,7 @@ pub use client::{
 };
 pub use cluster::{
     default_pool_name, AgentRun, ClusterSandbox, CreateSandbox, PoolStatus, SandboxPhase,
-    Workspace, API_GROUP, API_VERSION,
+    ServeOptions, ServedWorkspace, Workspace, API_GROUP, API_VERSION,
 };
 pub use error::MitosError;
 pub use types::{ExecResult, ServerSandbox, Template};

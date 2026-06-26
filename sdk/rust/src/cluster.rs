@@ -405,6 +405,7 @@ impl AgentRun {
             name: name.to_string(),
             namespace: self.namespace.clone(),
             client: self.client.clone(),
+            serve_wait_interval: DEFAULT_SERVE_WAIT_INTERVAL,
         }
     }
 
@@ -649,6 +650,150 @@ impl std::fmt::Debug for ClusterSandbox {
     }
 }
 
+/// Options for [`Workspace::serve`]. Build with the fluent setters; unset fields
+/// use documented defaults.
+#[derive(Default, Clone)]
+pub struct ServeOptions {
+    /// The SandboxPool to claim a sandbox from. Required.
+    pool: Option<String>,
+    /// The guest TCP port to expose. Defaults to 8080. Must be 1-65535.
+    port: Option<u16>,
+    /// The access sharing tier: "private", "link", "org", "authenticated", or
+    /// "public". Defaults to "private".
+    sharing: Option<String>,
+    /// An explicit single DNS label for the subdomain. When absent the created
+    /// sandbox name is used. Lowercased before validation.
+    label: Option<String>,
+    /// The base expose domain, for example "mitos.app". When absent the
+    /// `MITOS_EXPOSE_DOMAIN` environment variable is used.
+    expose_domain: Option<String>,
+}
+
+impl ServeOptions {
+    /// Starts a new option set with all fields at their defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the SandboxPool to claim from. Required.
+    pub fn pool(mut self, pool: impl Into<String>) -> Self {
+        self.pool = Some(pool.into());
+        self
+    }
+
+    /// Sets the guest TCP port to expose. Defaults to 8080.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Sets the access sharing tier. Defaults to "private".
+    pub fn sharing(mut self, sharing: impl Into<String>) -> Self {
+        self.sharing = Some(sharing.into());
+        self
+    }
+
+    /// Sets an explicit subdomain label. When absent the sandbox name is used.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Sets the base expose domain. When absent `MITOS_EXPOSE_DOMAIN` is used.
+    pub fn expose_domain(mut self, domain: impl Into<String>) -> Self {
+        self.expose_domain = Some(domain.into());
+        self
+    }
+}
+
+/// The handle returned by [`Workspace::serve`]. Carries the public HTTPS URL
+/// (the primary deliverable for issue #312, slice 5b) and the identity of the
+/// backing sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedWorkspace {
+    /// The public HTTPS URL: `https://<label>.<expose_domain>/`.
+    pub url: String,
+    /// The name of the Sandbox CRD that backs this serve session.
+    pub sandbox_name: String,
+    /// The single DNS label used in the URL subdomain.
+    pub label: String,
+    /// The effective access sharing tier.
+    pub sharing: String,
+}
+
+/// Labels that are reserved by the Mitos control plane and may not be used by
+/// tenants. Mirrors `internal/preview/route.go reservedLabels` and the Go SDK.
+const RESERVED_EXPOSE_LABELS: &[&str] = &[
+    "www", "app", "api", "console", "gateway", "admin", "auth", "login", "account", "mail",
+    "static", "assets", "cdn", "status",
+];
+
+/// Validates a single DNS label and an expose domain, then builds and returns
+/// the HTTPS URL. The label is lowercased before validation. Mirrors
+/// `buildExposeURL` in the Go SDK (`sdk/go/serve.go`). The SDK must not import
+/// `internal/`; this function is the SDK-local equivalent.
+fn build_expose_url(label: &str, expose_domain: &str) -> Result<String, MitosError> {
+    if expose_domain.is_empty() {
+        return Err(MitosError::client(
+            "missing_expose_domain",
+            "expose domain is required",
+            "no expose domain was provided and MITOS_EXPOSE_DOMAIN is not set",
+            "Pass ServeOptions::expose_domain(domain) or set the MITOS_EXPOSE_DOMAIN environment variable.",
+        ));
+    }
+    if label.is_empty() {
+        return Err(MitosError::client(
+            "invalid_expose_label",
+            "expose label is required",
+            "label is empty",
+            "Pass ServeOptions::label(name) or use a sandbox name that is a valid single DNS label.",
+        ));
+    }
+    if label.len() > 63 {
+        return Err(MitosError::client(
+            "invalid_expose_label",
+            format!("expose label {:?} exceeds 63 characters", label),
+            format!("label length {} > 63", label.len()),
+            "Use a shorter label (at most 63 characters).",
+        ));
+    }
+    // Must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ (already lowercased by caller).
+    let valid = {
+        let bytes = label.as_bytes();
+        let first_ok = bytes[0].is_ascii_alphanumeric();
+        let last_ok = bytes[bytes.len() - 1].is_ascii_alphanumeric();
+        let middle_ok = bytes[1..bytes.len().saturating_sub(1)]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'-');
+        first_ok && last_ok && middle_ok
+    };
+    if !valid {
+        return Err(MitosError::client(
+            "invalid_expose_label",
+            format!("expose label {:?} is not a valid single DNS label", label),
+            "label must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+            "Use only lowercase letters, digits, and hyphens; do not start or end with a hyphen.",
+        ));
+    }
+    if RESERVED_EXPOSE_LABELS.contains(&label) {
+        return Err(MitosError::client(
+            "reserved_expose_label",
+            format!(
+                "expose label {:?} is reserved and may not be used by tenants",
+                label
+            ),
+            format!("label {:?} is in the reserved set", label),
+            "Choose a different label that is not a well-known control-plane name.",
+        ));
+    }
+    Ok(format!("https://{label}.{expose_domain}/"))
+}
+
+/// The default polling interval used while waiting for a serve sandbox to reach
+/// Ready. Held per [`Workspace`] instance so parallel tests can each shrink it
+/// without sharing mutable global state.
+const DEFAULT_SERVE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// A durable, forkable workspace handle. Lazy: it touches the cluster only when
 /// a verb is called. Mirrors the Python `Workspace`.
 #[derive(Clone)]
@@ -658,6 +803,9 @@ pub struct Workspace {
     /// The namespace the workspace lives in.
     pub namespace: String,
     client: K8sClient,
+    /// The interval [`Workspace::serve`] sleeps between Ready polls. Per-instance
+    /// (not a shared global) so parallel tests cannot race on it.
+    serve_wait_interval: std::time::Duration,
 }
 
 impl Workspace {
@@ -701,6 +849,149 @@ impl Workspace {
             .and_then(|s| s.get("resumable"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false))
+    }
+
+    /// Overrides the Ready-poll interval for [`Workspace::serve`]. Not part of the
+    /// public surface: the integration tests use it to drop the interval to zero
+    /// so they do not sleep, with no shared mutable global between parallel tests.
+    #[doc(hidden)]
+    pub fn with_serve_wait_interval(mut self, interval: std::time::Duration) -> Self {
+        self.serve_wait_interval = interval;
+        self
+    }
+
+    /// Creates a workspace-bound Sandbox with `spec.expose` set, waits until it
+    /// reaches Ready, then returns a [`ServedWorkspace`] carrying the public HTTPS
+    /// URL (`https://<label>.<expose_domain>/`).
+    ///
+    /// The pool is required; all other options have documented defaults. Token
+    /// minting is a follow-up: the per-sandbox bearer token is intentionally not
+    /// set here; the proxy enforces the sharing tier independently.
+    ///
+    /// # Errors
+    ///
+    /// - `missing_serve_pool`: no pool was provided.
+    /// - `invalid_serve_port`: port is 0.
+    /// - `missing_expose_domain`: no domain was provided and `MITOS_EXPOSE_DOMAIN`
+    ///   is not set.
+    /// - `invalid_expose_label` / `reserved_expose_label`: the label fails
+    ///   DNS validation or is in the reserved set.
+    /// - `sandbox_failed`: the sandbox reached the Failed phase before Ready.
+    /// - Any transport or Kubernetes API error from the underlying client.
+    pub fn serve(&self, opts: ServeOptions) -> Result<ServedWorkspace, MitosError> {
+        let pool = opts.pool.ok_or_else(|| {
+            MitosError::client(
+                "missing_serve_pool",
+                "Workspace::serve needs a pool",
+                "ServeOptions::pool was not provided",
+                "Call ServeOptions::new().pool(name) to select the SandboxPool to claim from.",
+            )
+        })?;
+
+        let port = opts.port.unwrap_or(8080);
+        if port == 0 {
+            return Err(MitosError::client(
+                "invalid_serve_port",
+                "serve port must be 1-65535",
+                "port 0 is not a valid TCP port",
+                "Pass ServeOptions::port(n) with a port in the range 1-65535.",
+            ));
+        }
+
+        let sharing = opts.sharing.unwrap_or_else(|| "private".to_string());
+
+        // Resolve the expose domain: option first, then env var.
+        let expose_domain = opts
+            .expose_domain
+            .filter(|d| !d.is_empty())
+            .or_else(|| {
+                std::env::var("MITOS_EXPOSE_DOMAIN")
+                    .ok()
+                    .filter(|d| !d.is_empty())
+            })
+            .unwrap_or_default();
+
+        // Generate a sandbox name now so it can serve as the default label.
+        let sandbox_name = random_sandbox_name();
+
+        // Determine the effective label: explicit option, else sandbox name.
+        // Lowercase before validation to match Go SDK behavior.
+        let label = opts
+            .label
+            .map(|l| l.to_lowercase())
+            .unwrap_or_else(|| sandbox_name.clone());
+
+        // Validate and build the URL before touching the cluster so a bad label
+        // fails fast without leaving a partially configured sandbox.
+        let url = build_expose_url(&label, &expose_domain)?;
+
+        // POST the Sandbox CRD with spec.expose in the same body as
+        // spec.source.poolRef and spec.workspaceRef. The JSON keys match the
+        // api/v1 SandboxExpose shape: port (number), label (string), sharing
+        // (string). Optional policy fields are omitted here.
+        let body = json!({
+            "apiVersion": format!("{API_GROUP}/{API_VERSION}"),
+            "kind": "Sandbox",
+            "metadata": {"name": sandbox_name, "namespace": self.namespace},
+            "spec": {
+                "source": {"poolRef": {"name": pool}},
+                "workspaceRef": {"name": self.name},
+                "expose": {
+                    "port": port,
+                    "label": label,
+                    "sharing": sharing,
+                },
+            },
+        });
+        self.client
+            .create(API_GROUP, API_VERSION, &self.namespace, "sandboxes", &body)?;
+
+        // Poll until Ready or context-equivalent (loop bounded by the caller
+        // dropping the reference; a real timeout should be set by the caller).
+        self.wait_sandbox_ready(&sandbox_name)?;
+
+        Ok(ServedWorkspace {
+            url,
+            sandbox_name,
+            label,
+            sharing,
+        })
+    }
+
+    /// Polls the Sandbox until it reaches `Ready` or `Failed`. Returns
+    /// immediately on `Ready`; returns a `sandbox_failed` error on `Failed`.
+    /// Loops indefinitely on transient or unknown phases, sleeping
+    /// `SERVE_WAIT_INTERVAL` between polls.
+    fn wait_sandbox_ready(&self, sandbox_name: &str) -> Result<(), MitosError> {
+        loop {
+            let obj = self.client.get(
+                API_GROUP,
+                API_VERSION,
+                &self.namespace,
+                "sandboxes",
+                sandbox_name,
+            )?;
+            let phase = SandboxPhase::parse(
+                obj.get("status")
+                    .and_then(|s| s.get("phase"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Pending"),
+            );
+            match phase {
+                SandboxPhase::Ready => return Ok(()),
+                SandboxPhase::Failed => {
+                    return Err(MitosError::client(
+                        "sandbox_failed",
+                        format!("sandbox {sandbox_name} reached Failed phase"),
+                        "the controller reported a Failed phase before Ready",
+                        format!(
+                            "Check the Sandbox status for more detail (kubectl describe sandbox {sandbox_name})."
+                        ),
+                    ))
+                }
+                _ => std::thread::sleep(self.serve_wait_interval),
+            }
+        }
     }
 }
 
