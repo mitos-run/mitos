@@ -113,8 +113,6 @@ field carries a secret value, env value, file content, or token.
 - The guest-side first-exec and guest-ready spans (the in-VM telemetry bridge
   over vsock: cpu steal, balloon pressure, in-guest process table) are the
   bare-metal tail and are not yet wired.
-- A single trace id stamped across Hubble network flows needs the Cilium/Hubble
-  integration.
 - Grafana dashboards and PrometheusRule alerts that pivot on the trace id are a
   1.0 maturity item.
 
@@ -236,9 +234,9 @@ pending-requeue, orphan-sweep, claim-error, and pool-reconcile paths).
   the pull site, and alerted on (`SnapshotDistributionLagHigh`). Its VALUE is
   populated only on the multi-node distribution path; a single-node cluster
   leaves the series empty by design (#3).
-- OpenCost and Hubble layers ride on husk pods; the per-sandbox resolution
-  and reconcile logic is implemented and unit-tested (see "Layers 1-3" below),
-  with the live integrations cluster-gated.
+- Per-sandbox egress observability is the nftables egress counter (#211) and cost
+  attribution is the CoW-aware metering pipeline (#33); the Hubble and OpenCost
+  layers were dropped as the wrong tools (see "Observability layers" below).
 
 The Grafana dashboard, PrometheusRule alerts with runbook URLs, and the
 conditions/reason-code catalogue that ride on these metrics are shipped; see
@@ -345,9 +343,10 @@ busy or virtualized node does not page on the target itself.
 ### OPEN
 
 - Per-cluster threshold tuning is left to the operator (the runbooks say to tune).
-- Hubble flow panels and OpenCost cost-attribution dashboards need the live
-  Cilium/OpenCost integrations; the resolution and reconcile logic is
-  implemented and unit-tested (see "Layers 1-3" below).
+- Hubble flow panels and OpenCost cost-attribution dashboards were dropped as the
+  wrong tools for this architecture; per-sandbox egress and cost are served by the
+  nftables egress counter (#211) and CoW-aware metering (#33) instead (see
+  "Observability layers" below).
 
 The dashboard and the PrometheusRule alerts are packaged BOTH as the
 `deploy/monitoring/` kustomize layer and in the Helm chart under an opt-in
@@ -355,75 +354,57 @@ The dashboard and the PrometheusRule alerts are packaged BOTH as the
 `SnapshotDistributionLagHigh` alert ships in both layers; its metric is
 populated only on the multi-node distribution path.
 
-## Layers 1-3: Hubble, OpenCost, and the guest telemetry bridge
+## Observability layers: the guest telemetry bridge (Hubble and OpenCost dropped)
 
-The observability stack is structured in layers. Layers 1 and 2 attribute
-network flows and cost to a sandbox; Layer 3 reaches inside the guest. The
-per-sandbox resolution, reconcile, and parsing logic is implemented and
-unit-tested without a cluster or KVM; the LIVE integrations are gated as noted.
+Layer 3 (the guest telemetry bridge) is built. Layers 1 (Hubble flow logs) and 2
+(OpenCost cost attribution) were considered and dropped as the wrong tools for a
+microVM-on-nftables architecture; the correct, already-shipped solutions are
+named below (issue #164).
 
-### Layer 1: Cilium Hubble flow logs
+### Layer 1: Cilium Hubble flow logs (dropped)
 
-Hubble identifies an endpoint by its pod namespace, pod name, and pod labels.
-Mitos husk pods (and any pod-backed sandbox) carry `mitos.run/claim` and
-`mitos.run/pool` labels, so `internal/observability.ResolveSandbox` maps a Hubble
-flow endpoint onto the claim it belongs to, and `ClassifyEgress` turns a flow
-into a per-sandbox egress event with a `Denied` flag (a `DROPPED` verdict is a
-policy drop). This is how a denied egress surfaces tied to its claim.
+Not built, intentionally. Sandbox egress is enforced by host-side nftables (a
+per-sandbox tap + /30 + default-deny chain), not Cilium NetworkPolicy, so a
+denial happens in nftables before Cilium's eBPF datapath ever sees the packet:
+Hubble cannot observe the per-sandbox policy drop, and attributing one to a claim
+would imply a pod-scoped CNI mechanism governs sandboxes, which it does not (the
+honest-Kubernetes-semantics principle). Per-sandbox egress observability is
+served instead by the nftables per-sandbox egress counter the metering pipeline
+reads (#211), which sits on the datapath the traffic actually travels.
 
-Enabling it (cluster-gated): run Cilium with Hubble and flow export enabled,
-then consume the Hubble flow stream (relay gRPC or the exported JSON) and decode
-each flow into the `HubbleFlow` shape; `ClassifyEgress` does the per-sandbox
-attribution. The denied-egress-appears-in-Hubble acceptance test requires a live
-Cilium/Hubble cluster and is documented and gated; the verdict-to-claim mapping
-itself is unit-tested (`internal/observability/hubble_test.go`).
+### Layer 2: OpenCost cost attribution (dropped)
 
-### Layer 2: OpenCost cost attribution
-
-OpenCost reports allocation cost per namespace. Mitos meters each claim's
-resource-seconds (cpu-core-seconds, memory-GB-seconds). `ReconcileNamespaceCost`
-prices the metered resource-seconds at the cluster rates and compares the sum
-against the OpenCost-reported namespace spend, flagging relative drift beyond a
-tolerance. This checks billing self-consistency: what Mitos metered, priced at
-cluster rates, should match what OpenCost attributes to the namespace.
-
-Enabling it (cluster-gated): install OpenCost, read the cluster pricing rates and
-the per-namespace allocation from its API, and feed the namespace spend plus the
-per-claim resource-seconds (from the Mitos metering pipeline) into
-`ReconcileNamespaceCost`. The namespace-spend-reconciles-within-tolerance
-acceptance test needs a live OpenCost cluster and is gated; the pricing and
-tolerance arithmetic is unit-tested (`internal/observability/opencost_test.go`).
+Not built, intentionally. OpenCost attributes cost per pod from pod resource
+usage, which double-counts the shared copy-on-write memory across forks of one
+template, the exact error CoW-aware metering (#33) was built to eliminate. Cost
+attribution is served instead by the CoW-aware metering pipeline
+(`internal/metering`, `GET /v1/metering`, `mitos_cow_memory_savings_bytes`),
+which counts each template's shared page set once.
 
 ### Layer 3: guest telemetry bridge (over vsock)
 
 The guest agent samples CPU steal (`/proc/stat` steal field), memory vs balloon
 (`/proc/meminfo`), and the in-guest process table (`/proc/<pid>/stat`), and
-reports them over the existing vsock protocol on a `vitals` request. forkd
-consumes the snapshot, labels it with the sandbox's claim/pool/workspace/namespace,
-and serves it at the per-sandbox `POST /v1/vitals` endpoint (bearer-gated, like
-exec). `kubectl mitos ps <name> --processes` consumes the REAL in-guest process
-table; when the guest is unreachable (claim not running, no KVM behind it) it
-falls back to the fork Sandbox listing, so it never renders a fabricated
-table.
+serves them over the Connect `sandbox.v1.Sandbox/Vitals` (server-stream of
+samples) and `Processes` (unary process table) RPCs, bearer-gated like exec.
+`kubectl mitos ps <name> --processes` consumes the REAL in-guest process table;
+when the guest is unreachable (claim not running, no KVM behind it) it falls back
+to the fork Sandbox listing, so it never renders a fabricated table.
 
-The labeling is end to end. The controller knows the claim, its pool, its bound
-workspace, and the namespace when it reconciles a claim, and it threads that
-identity through the Fork gRPC (`ForkRequest.vitals_labels`). forkd records it
-per-sandbox on the Fork path and returns it in the `POST /v1/vitals` response, so
-every forked sandbox's guest telemetry is attributable to its claim. Any label is
-reported empty when the controller does not know it (a poolless or workspaceless
-fork); an empty field is never guessed. The labels are Kubernetes object names,
-never secrets.
+The claim/pool/workspace labels rendered alongside the table are Kubernetes
+control-plane metadata the guest cannot know (the guest is just a VM), so the
+`ps` consumer resolves them from the Sandbox object (`sandboxLabels`: claim is
+the sandbox name, pool is `spec.source.poolRef`, workspace is
+`spec.workspaceRef`), not over the guest RPC. A label the object does not carry
+renders as a dash; nothing is guessed. The labels are object names, never secrets.
 
 The snapshot carries no secrets: process entries are the program name (`comm`)
 and resource counters, never argv or the process environment.
 
 PROVEN: the `/proc/stat` steal parse, the process-table snapshot, the balloon
-arithmetic, the vsock message shapes, the host-side labeling, the
-claim-to-Fork-to-vitals label plumbing, and the `ps` consumer are unit-tested on
-darwin against fixtures (`internal/guestvitals`, `internal/vsock`,
-`internal/daemon/vitals_api_test.go`,
-`internal/controller/forkd_client_test.go`,
+arithmetic, the vsock message shapes, the CRD-sourced labels, and the `ps`
+consumer are unit-tested on darwin against fixtures (`internal/guestvitals`,
+`internal/vsock`, `internal/daemon/vitals_api_test.go`,
 `cmd/kubectl-mitos/ps_guest_test.go`).
 
 GATED: the real in-VM `/proc` sampling runs only on a KVM guest; the guest
