@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/mitos-run/mitos/compare/v1.3.0...v1.3.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **console:** request email/profile scope so OIDC login is not always rejected ([#431](https://github.com/mitos-run/mitos/issues/431)) ([acd9bc9](https://github.com/mitos-run/mitos/commit/acd9bc9e602bdf07fce237a0d1359326e77d3007)), closes [#430](https://github.com/mitos-run/mitos/issues/430)
+* **husk:** tear down the tap on partial egress-filter failure ([#428](https://github.com/mitos-run/mitos/issues/428)) ([#429](https://github.com/mitos-run/mitos/issues/429)) ([10c4ce2](https://github.com/mitos-run/mitos/commit/10c4ce233a8249332bb854bd0ebf250def6b7aee))
+
 ## [1.3.0](https://github.com/mitos-run/mitos/compare/v1.2.0...v1.3.0) (2026-06-26)
 
 
