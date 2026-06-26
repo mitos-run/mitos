@@ -28,7 +28,7 @@ E2B method -> mitos op (and whether it works TODAY against the standalone server
     sandbox.run_code(code)     -> DirectSandbox.run_code (rich MIME)  needs guest agent
     sandbox.set_timeout(s)     -> DirectSandbox.set_timeout (issue #218)  works today
     sandbox.kill()             -> DirectSandbox.terminate             works today
-    sandbox.get_host(port)     -> preview URLs (issue #126)           NOT AVAILABLE
+    sandbox.get_host(port)     -> preview URLs (issue #126)           works (proxy deployed)
 
 "works today" vs "needs guest agent": the create / connect / list / kill /
 set_timeout lifecycle answers on the bare mock-engine sandbox-server (no KVM).
@@ -36,10 +36,11 @@ exec / files / run_code need a real guest agent over vsock, so they are proven
 against a fake target in the unit tests and run end-to-end in the KVM CI job;
 this exactly mirrors the LangChain / OpenAI adapters (#203 / #204).
 
-``get_host`` is the ONE op with no honest mapping yet: it depends on preview
-URLs (issue #126), which are not built. Rather than fabricate a URL, it raises a
-clear typed ``AgentRunError`` (the #216 apierr envelope: stable ``code``, a
-``cause``, and actionable ``remediation``) naming the missing feature.
+``get_host`` delegates to the native ``DirectSandbox.get_host``: it returns a
+signed, expiring preview URL for the port, served by the per-sandbox preview
+reverse proxy (issue #126, now built). A server that does not expose the preview
+proxy returns a typed ``AgentRunError`` (the #216 apierr envelope: stable
+``code``, ``cause``, actionable ``remediation``) rather than a fabricated URL.
 
 NO hard dependency on the ``e2b`` package: this module imports it NEVER. The
 class and namespace shapes (``sandbox.commands.run``, ``sandbox.files.read``)
