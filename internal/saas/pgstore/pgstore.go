@@ -91,11 +91,15 @@ func timePtr(t time.Time) *time.Time {
 }
 
 // timeVal maps a nullable column back to a Go time; NULL becomes the zero time.
+// It normalizes to UTC: pgx returns a timestamptz in a connection-dependent
+// *time.Location, so two values for the same instant would not be reflect.Equal
+// to a caller's UTC time (and would diverge from the in-memory store). Returning
+// UTC makes the round trip deterministic and store-equivalent.
 func timeVal(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}
 	}
-	return *t
+	return t.UTC()
 }
 
 // PutAccount inserts or updates an account. A second account claiming an email
