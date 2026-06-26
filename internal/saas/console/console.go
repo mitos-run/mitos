@@ -198,6 +198,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/keys", c.handleCreateKey)
 	mux.HandleFunc("POST /console/keys/{id}/revoke", c.handleRevokeKey)
 	mux.HandleFunc("GET /console/usage", c.handleUsage)
+	mux.Handle("GET /console/usage/api", c.usageAPIHandler())
 	mux.HandleFunc("GET /console/billing", c.handleBilling)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
@@ -378,6 +379,31 @@ func (c *Console) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Usage / cost (over #211) ---
+
+// usageAPIHandler mounts the #211 usage API (usage.NewUsageHandler) on the
+// console so the SPA can query the org's records/totals/cost in the canonical
+// usage-API shape, served from the SAME store and price list the console's own
+// usage view reads. It is ORG-SCOPED via the gateway-verified identity: the org
+// is taken from the console request context (attached by the session/gateway
+// middleware, never from the client) and bridged into the usage handler's own
+// org context, so a request authenticated as org A can never read org B. A
+// request with no org context is refused before the usage handler runs.
+func (c *Console) usageAPIHandler() http.Handler {
+	inner := usage.NewUsageHandler(c.deps.Usage, c.deps.Prices)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, orgID, e, ok := c.caller(r)
+		if !ok {
+			apierr.Encode(w, e)
+			return
+		}
+		// Re-derive the org ONLY from the verified console context and inject it
+		// into the usage handler's context. The usage handler reads the org from
+		// usage.OrgFromContext and ignores any org in the query, so the client can
+		// never widen the scope.
+		ctx := usage.WithOrg(r.Context(), orgID)
+		inner.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 func (c *Console) handleUsage(w http.ResponseWriter, r *http.Request) {
 	_, orgID, e, ok := c.caller(r)
