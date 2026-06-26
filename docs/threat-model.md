@@ -993,7 +993,16 @@ per-pool/template assurance FLOOR, both shipped here:
   husk server key, never the CA signing key and never the shared forkd key.
   Scope: the cluster-wide secrets grant is the enabling privilege for writing
   ca.crt into pool namespaces; a namespaced grant scoped to pool namespaces is a
-  follow-up once pool namespaces are enumerable at install time.
+  follow-up once pool namespaces are enumerable at install time. This
+  pool-namespace-holds-no-CA-signing-key property holds for MULTI-namespace
+  deployments. In the single-namespace self-host topology (a pool created in the
+  controller's own namespace, now supported so husk pods start, #414) the pool IS
+  the controller namespace and therefore naturally holds ca.key: the
+  cross-namespace isolation boundary does not exist there because there is no
+  second namespace. This is an accepted simplicity/isolation tradeoff for
+  single-tenant self-host; multi-tenant deployments MUST give each pool (tenant)
+  its own namespace distinct from the controller's, where the property above
+  applies.
 - Husk activation target authenticity (warm-slot impersonation). Activation
   delivers the claim's resolved secrets plus the per-sandbox bearer token to the
   husk pod's self-reported PodIP over the mTLS control channel. So if pod
