@@ -1,10 +1,11 @@
 name: Release Helm chart
 
-# Package the Mitos Helm chart and publish it to the gh-pages branch as a
-# classic HTTP Helm repository, plus attach the .tgz to a GitHub release. The
-# repository is served from https://mitos.run/charts via a Cloudflare rewrite to
-# this repo's GitHub Pages site (see docs/distribution.md). Artifact Hub then
-# indexes https://mitos.run/charts and the listing backlinks to mitos.run.
+# Package the Mitos Helm chart and publish it BOTH ways (#397):
+#   1. the gh-pages classic HTTP Helm repository, served from
+#      https://mitos.run/charts via a Cloudflare rewrite and indexed by Artifact
+#      Hub (see docs/distribution.md); and
+#   2. an OCI registry artifact at oci://ghcr.io/mitos-run/charts (the modern
+#      `helm install oci://...` path, alongside the component images on GHCR).
 #
 # chart-releaser only publishes a chart version that does not already have a
 # release, so bump deploy/charts/mitos/Chart.yaml `version` for each change.
@@ -26,6 +27,8 @@ jobs:
     permissions:
       # chart-releaser pushes to gh-pages and creates the chart release.
       contents: write
+      # helm push needs write access to the GHCR OCI registry.
+      packages: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -47,6 +50,22 @@ jobs:
           charts_dir: deploy/charts
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish chart to the GHCR OCI registry
+        # Package the current chart and push it to oci://ghcr.io/mitos-run/charts
+        # so `helm install oci://ghcr.io/mitos-run/charts/mitos --version <v>`
+        # works. The package is created PRIVATE by default on GHCR; making it
+        # public is the same one-time per-package UI toggle as the images (#399).
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${GHCR_TOKEN}" | helm registry login ghcr.io \
+            -u "${GITHUB_ACTOR}" --password-stdin
+          pkg_dir="$(mktemp -d)"
+          helm package deploy/charts/mitos -d "$pkg_dir"
+          helm push "$pkg_dir"/mitos-*.tgz oci://ghcr.io/mitos-run/charts
+          helm registry logout ghcr.io || true
 
       - name: Publish Artifact Hub repository metadata to gh-pages
         # The repository ownership file must sit at the repo root next to

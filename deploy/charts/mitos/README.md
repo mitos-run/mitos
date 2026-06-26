@@ -49,6 +49,13 @@ helm repo update
 helm install mitos mitos/mitos -n mitos --set namespace.create=false
 ```
 
+Or install straight from the OCI registry on GHCR (no `helm repo add`), the same
+registry the component images live on:
+
+```
+helm install mitos oci://ghcr.io/mitos-run/charts/mitos -n mitos --set namespace.create=false
+```
+
 The published chart is indexed on Artifact Hub at
 https://artifacthub.io/packages/helm/mitos/mitos.
 
