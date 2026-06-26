@@ -491,6 +491,17 @@ fn terminate_returns_workspace_ref() {
 
 // --- Workspace::serve tests --------------------------------------------------
 
+// A zero poll interval keeps the serve tests from sleeping. The interval is a
+// per-Workspace value (no shared global), so parallel tests do not race on it.
+fn zero_interval() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
+// The two tests that read or clear MITOS_EXPOSE_DOMAIN mutate a process-global
+// env var; serialize them through this mutex so they cannot race each other when
+// the test binary runs them in parallel.
+static EXPOSE_DOMAIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn serve_creates_sandbox_with_expose_and_returns_url() {
     // Sequence: POST sandbox (201), GET sandbox (Ready).
@@ -499,7 +510,9 @@ fn serve_creates_sandbox_with_expose_and_returns_url() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-aa01"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws1");
+    let ws = client
+        .workspace("ws1")
+        .with_serve_wait_interval(zero_interval());
 
     let result = ws
         .serve(
@@ -546,7 +559,9 @@ fn serve_label_defaults_to_sandbox_name() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-bb02"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws2");
+    let ws = client
+        .workspace("ws2")
+        .with_serve_wait_interval(zero_interval());
 
     let result = ws
         .serve(ServeOptions::new().pool("p1").expose_domain("mitos.app"))
@@ -577,7 +592,9 @@ fn serve_respects_port_and_sharing_options() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-cc03"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws3");
+    let ws = client
+        .workspace("ws3")
+        .with_serve_wait_interval(zero_interval());
 
     let result = ws
         .serve(
@@ -608,7 +625,9 @@ fn serve_polls_until_ready() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-dd04"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws4");
+    let ws = client
+        .workspace("ws4")
+        .with_serve_wait_interval(zero_interval());
 
     let result = ws
         .serve(
@@ -637,7 +656,9 @@ fn serve_returns_error_on_failed_sandbox() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-ee05"},"status":{"phase":"Failed"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws5");
+    let ws = client
+        .workspace("ws5")
+        .with_serve_wait_interval(zero_interval());
 
     let err = ws
         .serve(
@@ -666,6 +687,11 @@ fn serve_error_missing_pool() {
 
 #[test]
 fn serve_error_missing_expose_domain() {
+    // Hold the env lock: this test and the env-var fallback test both mutate
+    // MITOS_EXPOSE_DOMAIN and must not run concurrently.
+    let _guard = EXPOSE_DOMAIN_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     // Clear the env var so the fallback also fails.
     std::env::remove_var("MITOS_EXPOSE_DOMAIN");
     let client = AgentRun::for_testing("http://127.0.0.1:1", "default");
@@ -740,7 +766,9 @@ fn serve_label_is_lowercased() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-ff06"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws11");
+    let ws = client
+        .workspace("ws11")
+        .with_serve_wait_interval(zero_interval());
 
     let result = ws
         .serve(
@@ -782,13 +810,21 @@ fn serve_env_var_expose_domain_fallback() {
         StubResponse::ok(r#"{"metadata":{"name":"sandbox-gg07"},"status":{"phase":"Ready"}}"#),
     ]);
     let client = AgentRun::for_testing(&mock.base_url, "default");
-    let ws = client.workspace("ws13");
+    let ws = client
+        .workspace("ws13")
+        .with_serve_wait_interval(zero_interval());
 
+    // Hold the env lock while mutating MITOS_EXPOSE_DOMAIN so this cannot race
+    // with serve_error_missing_expose_domain.
+    let guard = EXPOSE_DOMAIN_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     std::env::set_var("MITOS_EXPOSE_DOMAIN", "env.example.com");
     let result = ws
         .serve(ServeOptions::new().pool("p1").label("envbot"))
         .expect("serve with env-var domain");
     std::env::remove_var("MITOS_EXPOSE_DOMAIN");
+    drop(guard);
 
     assert_eq!(result.url, "https://envbot.env.example.com/");
     let _ = mock.next_request();

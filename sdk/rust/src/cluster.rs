@@ -405,6 +405,7 @@ impl AgentRun {
             name: name.to_string(),
             namespace: self.namespace.clone(),
             client: self.client.clone(),
+            serve_wait_interval: DEFAULT_SERVE_WAIT_INTERVAL,
         }
     }
 
@@ -788,12 +789,10 @@ fn build_expose_url(label: &str, expose_domain: &str) -> Result<String, MitosErr
     Ok(format!("https://{label}.{expose_domain}/"))
 }
 
-/// The polling interval used while waiting for a serve sandbox to reach Ready.
-/// A variable so tests can override it to avoid sleeping.
-#[cfg(not(test))]
-static SERVE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-#[cfg(test)]
-static SERVE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(0);
+/// The default polling interval used while waiting for a serve sandbox to reach
+/// Ready. Held per [`Workspace`] instance so parallel tests can each shrink it
+/// without sharing mutable global state.
+const DEFAULT_SERVE_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A durable, forkable workspace handle. Lazy: it touches the cluster only when
 /// a verb is called. Mirrors the Python `Workspace`.
@@ -804,6 +803,9 @@ pub struct Workspace {
     /// The namespace the workspace lives in.
     pub namespace: String,
     client: K8sClient,
+    /// The interval [`Workspace::serve`] sleeps between Ready polls. Per-instance
+    /// (not a shared global) so parallel tests cannot race on it.
+    serve_wait_interval: std::time::Duration,
 }
 
 impl Workspace {
@@ -847,6 +849,15 @@ impl Workspace {
             .and_then(|s| s.get("resumable"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false))
+    }
+
+    /// Overrides the Ready-poll interval for [`Workspace::serve`]. Not part of the
+    /// public surface: the integration tests use it to drop the interval to zero
+    /// so they do not sleep, with no shared mutable global between parallel tests.
+    #[doc(hidden)]
+    pub fn with_serve_wait_interval(mut self, interval: std::time::Duration) -> Self {
+        self.serve_wait_interval = interval;
+        self
     }
 
     /// Creates a workspace-bound Sandbox with `spec.expose` set, waits until it
@@ -978,7 +989,7 @@ impl Workspace {
                         ),
                     ))
                 }
-                _ => std::thread::sleep(SERVE_WAIT_INTERVAL),
+                _ => std::thread::sleep(self.serve_wait_interval),
             }
         }
     }
