@@ -35,6 +35,7 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/controlplane"
+	"mitos.run/mitos/internal/saas/pgstore"
 )
 
 // stubControlPlane is a dev-only forward target, selected with --allow-stub. It
@@ -83,13 +84,19 @@ func main() {
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
+	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// In-memory store and default-allow quota: the tested seams. Postgres and the
-	// real enforcer are documented follow-ups (other phases).
-	store := saas.NewMemStore()
+	// Durable Postgres when a DSN is configured (flag or MITOS_DATABASE_DSN),
+	// in-memory otherwise (dev only). The DSN value is never logged. A bad DSN
+	// fails fast below.
+	store, closeStore, err := pgstore.ResolveStore(context.Background(), *databaseDSN, logger)
+	if err != nil {
+		log.Fatalf("persistence: %v", err)
+	}
+	defer closeStore()
 	keys := saas.NewKeyService(store)
 
 	var cp saas.ControlPlane

@@ -35,6 +35,10 @@ spec:
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           args:
             - --addr=:8080
+          {{- if .Values.database.dsnSecretRef.name }}
+          env:
+            {{- include "mitos.database.env" . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8080

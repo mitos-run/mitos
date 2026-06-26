@@ -234,6 +234,35 @@ imagePullSecrets:
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}
 
+# Durable persistence for the hosted/self-hosted SaaS front door (the console BFF
+# and the public gateway): accounts, organizations, memberships, and API keys.
+# This is the durability foundation; without it those records live only in memory
+# and are lost on every restart.
+#
+# Bring your own managed Postgres (RDS, Cloud SQL, Neon, Supabase, and so on).
+# The chart does NOT bundle a database for the production path: a bundled,
+# single-replica Postgres would be a data-loss footgun, and a managed database is
+# the right operational choice. You supply the connection string out of band as a
+# Kubernetes Secret and reference it here. For example:
+#
+#   kubectl create secret generic mitos-db \
+#     --namespace mitos-system \
+#     --from-literal=dsn='postgres://mitos:PASSWORD@db.example.com:5432/mitos?sslmode=require'
+#
+# then set database.dsnSecretRef.name=mitos-db. The DSN is injected into the
+# gateway and console pods via a secretKeyRef (env valueFrom), never as a
+# plaintext value in the rendered manifests, so the password is not exposed in
+# `helm get values`, `kubectl get deploy -o yaml`, or chart output.
+database:
+  # Reference an existing Secret holding the Postgres DSN. Empty disables durable
+  # persistence: the gateway and console fall back to in-memory storage, which is
+  # DEV ONLY (all accounts, orgs, memberships, and API keys are lost on restart).
+  dsnSecretRef:
+    # Name of the Secret in the release namespace. Empty disables persistence.
+    name: ""
+    # Key within that Secret holding the postgres://user:pass@host:5432/db DSN.
+    key: "dsn"
+
 # Console (Deployment): the hosted/self-hosted web console (issue #214). The BFF
 # plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
 # BOTH editions; behavior is driven entirely by the capabilities below, which the

@@ -35,20 +35,27 @@ import (
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/oidcauth"
+	"mitos.run/mitos/internal/saas/pgstore"
 	"mitos.run/mitos/internal/usage"
 )
 
 func main() {
 	addr := flag.String("addr", ":8090", "console listen address")
 	dev := flag.Bool("dev", false, "enable the local dev auth shim (X-Console-Account / X-Console-Org headers); NEVER enable in production")
+	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// In-memory stores: the tested seams. Postgres, the real billing service, the
-	// control-plane live-sandbox query, and the SandboxTemplate lister are
-	// documented follow-ups (docs/saas/console.md).
-	store := saas.NewMemStore()
+	// Durable Postgres when a DSN is configured (flag or MITOS_DATABASE_DSN),
+	// in-memory otherwise (dev only). The DSN value is never logged. The real
+	// billing service, control-plane live-sandbox query, and SandboxTemplate
+	// lister remain documented follow-ups (docs/saas/console.md).
+	store, closeStore, err := pgstore.ResolveStore(context.Background(), *databaseDSN, logger)
+	if err != nil {
+		log.Fatalf("persistence: %v", err)
+	}
+	defer closeStore()
 	keys := saas.NewKeyService(store)
 	accounts := saas.NewAccountService(store, keys)
 

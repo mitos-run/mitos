@@ -149,6 +149,7 @@ spec:
                   name: {{ .Values.expose.secretName }}
                   key: resolve-token
             {{- end }}
+            {{- include "mitos.database.env" . | nindent 12 }}
             {{- with .Values.console.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
