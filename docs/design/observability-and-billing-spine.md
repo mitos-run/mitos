@@ -68,10 +68,11 @@ The right tool per layer, not one tool everywhere.
 - Layer 1, network: Cilium with Hubble (eBPF). In-kernel L3/L4/L7 flow
   visibility and identity-aware policy, no sidecars, low overhead. This is the
   correct place for eBPF. Per-sandbox egress flows (destination, port, DNS,
-  allowed vs denied) resolve to a claim and org via pod labels; the pure
-  resolver already exists in `internal/observability/hubble.go`. Reconcile
-  Hubble flow bytes against the existing nftables `EgressBytes` counter for two
-  independent egress sources.
+  allowed vs denied) resolve to a claim and org via pod labels. Caveat (#164):
+  sandbox egress is dropped in host-side nftables, before Cilium's datapath sees
+  it, so Hubble cannot observe a per-sandbox DENIAL; the implemented per-sandbox
+  egress source is the nftables `EgressBytes` counter (#211), and the earlier
+  pure-resolver scaffolding was removed as superseded (see docs/observability.md).
 - Layer 3, guest telemetry: the in-guest agent reading `/proc` over vsock. NOT
   eBPF. Sandboxes are Firecracker microVMs with their own kernel; host eBPF
   cannot introspect guest processes. The agent already samples CPU steal,
@@ -127,8 +128,9 @@ to billing `Rates`). Provable cost is a UX feature and a sales asset.
   self-tracked cost is both leaner and more accurate. OpenCost is therefore an
   OPTIONAL operator reconcile, not a dependency: an operator who runs OpenCost
   can cross-check that the priced resource-seconds match the cluster node cost
-  within a tolerance (the pure reconcile in `internal/observability/opencost.go`
-  already does this), but the system requires no OpenCost deployment to bill.
+  within a tolerance, but the system requires no OpenCost deployment to bill.
+  (The earlier pure-reconcile scaffolding was removed as superseded by CoW-aware
+  metering, #33/#164; see docs/observability.md.)
 - Phase 4, UX and payments: build the console Usage and Cost and Billing rich
   views; per-org Grafana; the cost-per-fork headline; Helm-package the Cilium and
   Prometheus dependencies (OpenCost optional). Payments stay behind the NEUTRAL
