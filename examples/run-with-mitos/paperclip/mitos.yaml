@@ -1,0 +1,48 @@
+# mitos.yaml  .  Run with Mitos manifest  .  schema v1
+# Proof the SAME mechanism carries a stateful, multi-service control plane.
+# See docs/superpowers/specs/2026-06-26-run-with-mitos-flagship-proposal.md
+name: paperclip
+title: Paperclip . your AI company control plane
+
+source:
+  image: ghcr.io/paperclipinc/control-plane:latest
+  track:
+    watch: ghcr.io/paperclipinc/control-plane
+    channel: stable
+    on_new_release: resnapshot+offer-rebase
+
+run:
+  command: ["node", "dist/server.js"]
+  # Bundle the control-plane plus an embedded Postgres in the golden so the whole
+  # control plane forks warm as one unit. Alternative: split the DB into its own
+  # mitos Workspace volume (same persistence layer) so runtime and data scale and
+  # roll back independently. Either way it is the same fork and Workspace mechanism.
+  ready:
+    http: { port: 3300, path: /healthz, expect: 200 }
+    timeout: 120s
+
+preview:
+  port: 3300             # becomes acme.paperclip.mitos.run
+  auth: ladder
+
+secrets:
+  - name: PAPERCLIP_ADMIN_TOKEN
+    label: Admin token
+    generate: 32
+  - name: ANTHROPIC_API_KEY
+    label: Model key
+    required: true
+
+egress:
+  allow: [api.anthropic.com, api.stripe.com, "*.paperclip.inc"]
+
+workspace:
+  # The durable control-plane database and state.
+  path: /var/lib/postgresql/data
+  persist: true
+
+resources:
+  pool: paperclip
+  cpu: 4
+  memory: 4Gi
+  lifetime: persistent

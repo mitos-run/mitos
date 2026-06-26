@@ -1,0 +1,59 @@
+# mitos.yaml  .  Run with Mitos manifest  .  schema v1
+# DeerFlow (bytedance/deer-flow): a long-horizon MULTI-AGENT research harness.
+# This is the dogfood for the fork-native subagent SDK (#340 piece 2): its lead
+# agent spawns sub-agents dynamically, so on mitos each sub-agent forks the warm
+# golden instead of cold-starting.
+# Ports/commands below are from the public repo docs (web UI 2026, backend API 8001).
+name: deerflow
+title: DeerFlow . long-horizon multi-agent research harness
+
+source:
+  # No published image: mitos builds the golden from the repo (zero-config-from-repo
+  # gradient). The build is cached; the result is the reusable golden snapshot.
+  build:
+    repo: github.com/bytedance/deer-flow
+    # mitos infers the Dockerfile / docker-compose; `make docker-start` is the
+    # documented bring-up.
+  track:
+    watch: github.com/bytedance/deer-flow
+    channel: main
+    on_new_release: resnapshot+offer-rebase
+
+run:
+  command: ["make", "docker-start"]
+  ready:
+    http: { port: 2026, path: /, expect: 200 }   # unified web UI (backend on 8001)
+    timeout: 180s
+
+preview:
+  port: 2026
+  auth: ladder
+
+secrets:
+  - name: ANTHROPIC_API_KEY
+    label: Model key (the research brain)
+    required: true
+  - name: TAVILY_API_KEY
+    label: Web search key (optional)
+    required: false
+
+egress:
+  allow: [api.anthropic.com, api.openai.com, api.tavily.com]
+
+workspace:
+  # Research artifacts, memory, and reports survive updates and rebases; fork it to
+  # branch a long-running investigation.
+  path: /app/data
+  persist: true
+
+resources:
+  pool: deerflow
+  cpu: 4
+  memory: 4Gi
+  lifetime: persistent
+
+# The headline for DeerFlow specifically: with the fork-native subagent SDK, the
+# lead agent forks this warm golden to spawn each sub-agent (inheriting loaded deps,
+# tools, and model handles) in fork latency rather than cold-starting a fresh
+# process. A `bench/` number comparing warm-subagent spawn vs DeerFlow's cold-start
+# path is the proof point in #340's acceptance.

@@ -1,0 +1,49 @@
+# mitos.yaml  .  Run with Mitos manifest  .  schema v1
+# Hermes (NousResearch/hermes-agent): a SELF-IMPROVING personal AI agent that grows
+# more capable the longer it runs. Showcases two mitos angles especially well:
+#   1. fork-your-evolved-state: its state grows in a durable Workspace, so you can
+#      fork your evolved agent to branch or experiment without risking the original.
+#   2. mitos as a fork-native backend: Hermes already supports local/Docker/SSH/
+#      Modal/Daytona terminal backends; mitos is the warm-fork one.
+# Ports/commands below are from the public Docker docs (gateway/OpenAI-API 8642,
+# WebUI 8787, data /opt/data).
+name: hermes-agent
+title: Hermes . the self-improving AI agent
+
+source:
+  image: docker.io/nousresearch/hermes-agent:latest
+  track:
+    watch: docker.io/nousresearch/hermes-agent
+    channel: latest
+    on_new_release: resnapshot+offer-rebase
+
+run:
+  # The image's documented bring-up: `... gateway run`.
+  command: ["gateway", "run"]
+  ready:
+    http: { port: 8642, path: /health, expect: 200 }   # OpenAI-compatible gateway
+    timeout: 90s
+
+preview:
+  port: 8787            # the WebUI (the human surface); the API is on 8642
+  auth: ladder
+
+secrets:
+  - name: OPENAI_API_KEY
+    label: Model key (OpenAI-compatible; Anthropic also works)
+    required: true
+
+egress:
+  allow: [api.openai.com, api.anthropic.com]
+
+workspace:
+  # Hermes "grows" here. This is the durable, versioned state that survives updates
+  # and rebases and that you can fork with the runtime.
+  path: /opt/data
+  persist: true
+
+resources:
+  pool: hermes
+  cpu: 2
+  memory: 2Gi
+  lifetime: persistent
