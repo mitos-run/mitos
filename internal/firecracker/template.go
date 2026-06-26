@@ -2,6 +2,8 @@ package firecracker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -411,6 +413,29 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		return nil, fmt.Errorf("create snapshot: %w", err)
 	}
 
+	// Wait for the snapshot mem to stop changing BEFORE the caller records its
+	// digest. Firecracker writes the mem through an mmap and CreateSnapshot can
+	// return before the kernel has populated every page; the digest the build
+	// records must match the bytes the husk re-hashes at prepare/load time, or
+	// integrity verification fails and the husk cannot load the snapshot (#461).
+	// A byte-level diff on a live node proved it: forkd recorded an EARLIER chunk-0
+	// than the settled on-disk mem, intermittently and only for snapshots large
+	// enough that the write was still in flight. A plain fsync, and even a
+	// kill-then-fsync, did not fix it (SIGKILL can interrupt the in-flight write).
+	// Polling shows the mem settles within ~1s of becoming full-size, so wait for
+	// two consecutive identical reads (Firecracker is still alive and finishing the
+	// write; the deferred Kill runs only after this returns), then fsync for
+	// durability.
+	if err := waitForStableFile(memFile, stableReadInterval, snapshotStableTimeout); err != nil {
+		return nil, fmt.Errorf("wait for snapshot mem to settle: %w", err)
+	}
+	if err := syncFile(memFile); err != nil {
+		return nil, fmt.Errorf("sync snapshot mem file: %w", err)
+	}
+	if err := syncFile(vmStateFile); err != nil {
+		return nil, fmt.Errorf("sync snapshot vmstate file: %w", err)
+	}
+
 	// Get snapshot size
 	memInfo, err := os.Stat(memFile)
 	if err != nil {
@@ -492,4 +517,76 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// syncFile fsyncs a file by path so its bytes are durable and identical for every
+// later reader (the digest recorder and the husk's prepare/load), not just
+// visible in this process's page cache. Used after Firecracker writes a snapshot
+// whose mmap'd mem pages may not be flushed when CreateSnapshot returns (#461).
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle; Sync is the durability barrier
+	return f.Sync()
+}
+
+// snapshotStableTimeout bounds how long CreateTemplate waits for the snapshot mem
+// to stop changing after CreateSnapshot returns. Polling on a live node showed
+// the mem settles within ~1s of becoming full-size even for a multi-hundred-MB
+// snapshot, so this is generous. stableReadInterval is the gap between the two
+// reads that must match for the file to count as settled.
+const (
+	snapshotStableTimeout = 30 * time.Second
+	stableReadInterval    = 250 * time.Millisecond
+)
+
+// fileChunk0Digest returns the lowercase hex sha256 of the first cas.ChunkSize
+// (4 MiB) bytes of path, the same chunk-0 the build records and the husk
+// re-hashes. Reading only chunk 0 keeps the stability poll cheap; chunk 0 is the
+// region the #461 race was observed to corrupt, and it is written first, so it is
+// the last to settle only if the whole file is still in flight.
+func fileChunk0Digest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	h := sha256.New()
+	if _, err := io.CopyN(h, f, 4<<20); err != nil && err != io.EOF {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// waitForStableFile blocks until two reads of path's chunk-0 digest, interval
+// apart, agree, or timeout elapses. Firecracker writes the snapshot mem through
+// an mmap and CreateSnapshot can return before the kernel has populated every
+// page; recording the digest before the write settles makes it disagree with the
+// husk's later re-hash and the snapshot fails integrity verification (#461). This
+// waits for the write to settle rather than trying to force it (a SIGKILL of the
+// VMM can interrupt the in-flight write, which is why kill-then-fsync did not fix
+// it). A nonexistent or short file (chunk 0 not yet written) counts as not-yet
+// stable and keeps polling until it appears.
+func waitForStableFile(path string, interval, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	prev := ""
+	prevOK := false
+	for {
+		cur, err := fileChunk0Digest(path)
+		if err == nil && prevOK && cur == prev {
+			return nil
+		}
+		if err == nil {
+			prev, prevOK = cur, true
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("snapshot mem %s never became readable within %s: %w", path, timeout, err)
+			}
+			return fmt.Errorf("snapshot mem %s never settled within %s", path, timeout)
+		}
+		time.Sleep(interval)
+	}
 }
