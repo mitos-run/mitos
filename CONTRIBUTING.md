@@ -68,10 +68,34 @@ the disclosure process in [SECURITY.md](SECURITY.md).
 
 ## Pull requests
 
+Substantial portions of this codebase are AI-assisted, and AI agents may open
+PRs on a contributor's behalf. The template is required; fill every section. The
+agentic-specific sections exist so a reviewer or a future agent can reconstruct
+why a change exists, not just what it does:
+
+- **Thinking Path**: trace your reasoning from project context down to this
+  change (5 to 8 steps, blockquote style).
+- **Model Used**: the AI model that produced or assisted the change (provider,
+  exact model id, context window, reasoning mode), or "None, human-authored".
+  CI rejects an empty Model Used section.
+- **No internal references**: reference only public `mitos-run/mitos` issues and
+  PRs. Do not paste internal or instance-local references that others cannot
+  open: Paperclip ticket ids (`PAP-123` / `PAPA-123`), `agent://` links, or
+  localhost/tailnet URLs. CI rejects these in the PR body.
+
+Every PR also needs:
+
+- A conventional-commit PR title (`type(scope): description`), enforced in CI.
 - Tests for every behavior change, in the same commit.
 - Docs updated in the same PR.
 - If the security surface moved, include the threat-model delta (docs/threat-model.md) in the same PR.
-- All six CI checks must be green: go-test, go-lint, python-test, docker-build, kind-e2e, firecracker-test.
+- A benchmark run (bench/) if the hot path was touched.
+
+The PR-policy check (`.github/workflows/pr-policy.yaml`) enforces the title
+format, the required PR sections, the no-internal-references rule, and the
+no-dashes rule on added lines. All required CI checks must be green, including
+go-test, go-lint, python-test, docker-build, the kind-e2e suites, and
+firecracker-test.
 
 ## Where to start
 
