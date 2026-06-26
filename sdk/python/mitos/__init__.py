@@ -14,6 +14,7 @@ from mitos.errors import (
 )
 from mitos.sandbox import Sandbox
 from mitos.template import Template
+from mitos.workspace import ServedWorkspace
 from mitos.types import (
     Execution,
     ExecResult,
@@ -41,6 +42,7 @@ __all__ = [
     "AsyncSandbox",
     "Sandbox",
     "Template",
+    "ServedWorkspace",
     "ExecResult",
     "Execution",
     "ExecutionError",
