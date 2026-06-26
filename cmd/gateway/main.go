@@ -36,6 +36,7 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/controlplane"
 	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/telemetry"
 )
 
 // stubControlPlane is a dev-only forward target, selected with --allow-stub. It
@@ -125,7 +126,18 @@ func main() {
 	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
 	_ = wiring.billingSuspender // billing past-due / spend-cap driver (wired into the suspension store).
 
-	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger).
+	// Product telemetry is OPT-IN and OFF by default. FromEnv returns a no-op
+	// emitter unless MITOS_TELEMETRY_ENABLED is truthy AND an endpoint is set, and
+	// is force-disabled by DO_NOT_TRACK. The salt and any token are secrets and are
+	// never logged. A startup line states enabled/disabled and the sink name.
+	tel := telemetry.FromEnv(logger)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tel.Shutdown(ctx)
+	}()
+
+	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger, saas.WithTelemetry(tel)).
 		WithTrustedProxyHops(saas.TrustedProxyHops(*trustedProxyHops))
 
 	mux := http.NewServeMux()

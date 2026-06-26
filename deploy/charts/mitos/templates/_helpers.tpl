@@ -109,6 +109,44 @@ to be nindent'd into a container's env list.
 {{- end -}}
 
 {{/*
+Product-telemetry env entries shared by the gateway and console pods. Telemetry
+is OPT-IN and OFF by default: this renders nothing unless telemetry.enabled is
+true AND telemetry.endpoint is set, so the binaries fail closed to a no-op
+emitter. The salt and the optional collector token are SECRETS: they are sourced
+via secretKeyRef ONLY and never appear as plaintext in the rendered manifests.
+With no salt Secret the org id is dropped from every event (fail closed). The
+rendered fragment is a set of env list entries intended to be nindent'd into a
+container's env list. DO_NOT_TRACK is honored by the binary at runtime; an
+operator can also force-disable via telemetry.optOut here.
+*/}}
+{{- define "mitos.telemetry.env" -}}
+{{- if and .Values.telemetry.enabled .Values.telemetry.endpoint }}
+- name: MITOS_TELEMETRY_ENABLED
+  value: "true"
+- name: MITOS_TELEMETRY_ENDPOINT
+  value: {{ .Values.telemetry.endpoint | quote }}
+{{- if .Values.telemetry.optOut }}
+- name: MITOS_TELEMETRY_OPTOUT
+  value: "true"
+{{- end }}
+{{- if .Values.telemetry.saltSecretRef.name }}
+- name: MITOS_TELEMETRY_SALT
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.telemetry.saltSecretRef.name | quote }}
+      key: {{ .Values.telemetry.saltSecretRef.key | default "salt" | quote }}
+{{- end }}
+{{- if .Values.telemetry.tokenSecretRef.name }}
+- name: MITOS_TELEMETRY_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.telemetry.tokenSecretRef.name | quote }}
+      key: {{ .Values.telemetry.tokenSecretRef.key | default "token" | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
 imagePullSecrets block shared by every workload pod spec.
 */}}
 {{- define "mitos.imagePullSecrets" -}}
