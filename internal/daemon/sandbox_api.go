@@ -125,6 +125,26 @@ type SandboxAPI struct {
 	// an unlabeled sandbox returns empty label fields, never a fabricated one.
 	// The labels are k8s object names, never secrets.
 	vitalsLabels map[string]VitalsLabels
+
+	// maxExpose is the per-sandbox ceiling on concurrent OPEN expose tunnels
+	// (authenticated guest HTTP proxy, slice-1 follow-up). Each expose request
+	// opens its own vsock PortForward tunnel; without a cap a single tenant could
+	// open unbounded tunnels and exhaust host vsock connections and goroutines. A
+	// NEW tunnel over the cap is rejected with 429; existing tunnels are never
+	// killed by the cap. Zero or negative disables the cap (unbounded). Set via
+	// SetMaxExposePerSandbox; defaults to defaultMaxExpose.
+	maxExpose int
+	// openExpose counts the currently OPEN expose tunnels per sandbox id, guarded
+	// by mu. acquireExpose increments on open and the returned release decrements
+	// on close, deleting the entry at zero so the map does not grow across sandbox
+	// lifetimes.
+	openExpose map[string]int
+	// exposeConns tracks every live expose net.Conn per sandbox id, guarded by mu.
+	// In ProxyHTTP's dial closure each created pfConn is registered here so that
+	// CloseExpose (called by UnregisterSandbox on terminate) can close every
+	// in-flight tunnel and prevent tunnel goroutines from outliving the sandbox.
+	// Absent until the first expose dial; cleared by CloseExpose.
+	exposeConns map[string]map[net.Conn]struct{}
 }
 
 // defaultMaxExecTimeoutSeconds is the default ceiling on a requested exec or
@@ -149,6 +169,9 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		vitalsLabels:   make(map[string]VitalsLabels),
 		forwards:       make(map[string][]*portForward),
 		maxForwards:    defaultMaxForwards,
+		maxExpose:      defaultMaxExpose,
+		openExpose:     make(map[string]int),
+		exposeConns:    make(map[string]map[net.Conn]struct{}),
 	}
 }
 
@@ -355,6 +378,10 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	// host TCP listener and tunnel goroutines that must not outlive the sandbox.
 	// CloseForwards takes mu itself, so call it before the lock below.
 	api.CloseForwards(sandboxID)
+	// Close any in-flight expose tunnels: each pfConn holds a vsock PortForward
+	// stream that must not outlive the sandbox. CloseExpose takes mu itself, so
+	// call it before the lock below.
+	api.CloseExpose(sandboxID)
 
 	api.mu.Lock()
 	delete(api.streamPaths, sandboxID)

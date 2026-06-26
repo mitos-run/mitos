@@ -63,6 +63,17 @@ func (api *SandboxAPI) handleExpose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "guest port must be an integer in 1-65535", http.StatusBadRequest)
 		return
 	}
+
+	// Enforce the per-sandbox expose concurrency cap BEFORE opening the tunnel.
+	// A NEW request over the cap is rejected 429; existing tunnels are never
+	// killed. acquireExpose returns (nil, false) when the cap is hit.
+	release, ok := api.acquireExpose(id)
+	if !ok {
+		http.Error(w, "too many concurrent expose connections", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+
 	prefix := "/v1/sandboxes/" + id + "/expose/" + portStr
 	rp, err := api.ProxyHTTP(id, port, prefix)
 	if err != nil {
