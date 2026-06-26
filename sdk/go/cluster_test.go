@@ -532,3 +532,191 @@ func assertHit(t *testing.T, m *mockK8s, method, path string) {
 	}
 	t.Errorf("expected a %s %s request; recorded: %v", method, path, m.requests)
 }
+
+// --- Workspace.Serve tests ---
+
+// TestWorkspaceServe verifies that Workspace.Serve creates a Sandbox with
+// spec.expose set (port, label, sharing) and spec.workspaceRef pointing to the
+// workspace, then returns a *ServedWorkspace whose URL matches the expected
+// pattern. The poll handler is registered inside the POST handler so it is
+// keyed to the generated sandbox name.
+func TestWorkspaceServe(t *testing.T) {
+	// Speed up the wait loop for this test.
+	old := serveWaitInterval
+	serveWaitInterval = 0
+	t.Cleanup(func() { serveWaitInterval = old })
+
+	m := newMockK8s(t)
+
+	var sbBody map[string]any
+	pollCount := 0
+	m.on(http.MethodPost, sbPath(""), func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &sbBody)
+		sbName := deepString(sbBody, "metadata", "name")
+		writeObj(w, http.StatusCreated, sbBody)
+		// Register the per-name poll handler now that we know sbName.
+		m.on(http.MethodGet, sbPath(sbName), func(w http.ResponseWriter, r *http.Request) {
+			pollCount++
+			phase := "Pending"
+			if pollCount >= 2 {
+				phase = "Ready"
+			}
+			writeObj(w, http.StatusOK, map[string]any{
+				"metadata": map[string]any{"name": sbName},
+				"status":   map[string]any{"phase": phase, "endpoint": "10.0.0.1:9091"},
+			})
+		})
+	})
+
+	a := m.agent(t, ns)
+	ws := a.Workspace("ws-serve")
+
+	served, err := ws.Serve(context.Background(),
+		WithServePool("python"),
+		WithServeExposeDomain("mitos.app"),
+	)
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	// The URL must be https://<label>.mitos.app/.
+	if !strings.HasPrefix(served.URL, "https://") || !strings.HasSuffix(served.URL, ".mitos.app/") {
+		t.Errorf("URL = %q, want https://<label>.mitos.app/", served.URL)
+	}
+	if served.SandboxName == "" {
+		t.Errorf("SandboxName is empty")
+	}
+	if served.Sharing != "private" {
+		t.Errorf("Sharing = %q, want private", served.Sharing)
+	}
+	if served.Label == "" {
+		t.Errorf("Label is empty")
+	}
+
+	// The sandbox CRD POST body must carry spec.expose with port, label, sharing.
+	if deepFloat(sbBody, "spec", "expose", "port") != 8080 {
+		t.Errorf("spec.expose.port = %v, want 8080", deepValue(sbBody, "spec", "expose", "port"))
+	}
+	if deepString(sbBody, "spec", "expose", "sharing") != "private" {
+		t.Errorf("spec.expose.sharing = %q, want private", deepString(sbBody, "spec", "expose", "sharing"))
+	}
+	if exposeLabel := deepString(sbBody, "spec", "expose", "label"); exposeLabel == "" {
+		t.Errorf("spec.expose.label is empty")
+	}
+	// workspaceRef must be set.
+	if deepString(sbBody, "spec", "workspaceRef", "name") != "ws-serve" {
+		t.Errorf("spec.workspaceRef.name = %q, want ws-serve", deepString(sbBody, "spec", "workspaceRef", "name"))
+	}
+}
+
+// TestWorkspaceServeExplicitLabelAndPort verifies explicit label/port options
+// are passed through to spec.expose and the URL.
+func TestWorkspaceServeExplicitLabelAndPort(t *testing.T) {
+	old := serveWaitInterval
+	serveWaitInterval = 0
+	t.Cleanup(func() { serveWaitInterval = old })
+
+	m := newMockK8s(t)
+
+	var sbBody map[string]any
+	m.on(http.MethodPost, sbPath(""), func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &sbBody)
+		sbName := deepString(sbBody, "metadata", "name")
+		writeObj(w, http.StatusCreated, sbBody)
+		m.on(http.MethodGet, sbPath(sbName), func(w http.ResponseWriter, r *http.Request) {
+			writeObj(w, http.StatusOK, map[string]any{
+				"metadata": map[string]any{"name": sbName},
+				"status":   map[string]any{"phase": "Ready", "endpoint": "10.0.0.2:9091"},
+			})
+		})
+	})
+
+	a := m.agent(t, ns)
+	ws := a.Workspace("ws-2")
+	served, err := ws.Serve(context.Background(),
+		WithServePool("python"),
+		WithServeExposeDomain("example.run"),
+		WithServeLabel("myapp"),
+		WithServePort(3000),
+		WithServeSharing("link"),
+	)
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if served.URL != "https://myapp.example.run/" {
+		t.Errorf("URL = %q, want https://myapp.example.run/", served.URL)
+	}
+	if served.Sharing != "link" {
+		t.Errorf("Sharing = %q, want link", served.Sharing)
+	}
+	if deepFloat(sbBody, "spec", "expose", "port") != 3000 {
+		t.Errorf("spec.expose.port = %v, want 3000", deepValue(sbBody, "spec", "expose", "port"))
+	}
+	if deepString(sbBody, "spec", "expose", "label") != "myapp" {
+		t.Errorf("spec.expose.label = %q, want myapp", deepString(sbBody, "spec", "expose", "label"))
+	}
+}
+
+// TestWorkspaceServeRequiresPool verifies that omitting WithServePool returns a
+// typed error.
+func TestWorkspaceServeRequiresPool(t *testing.T) {
+	m := newMockK8s(t)
+	a := m.agent(t, ns)
+	ws := a.Workspace("ws-3")
+	_, err := ws.Serve(context.Background(), WithServeExposeDomain("mitos.app"))
+	if !errors.Is(err, &Error{Code: "missing_serve_pool"}) {
+		t.Fatalf("expected missing_serve_pool, got %v", err)
+	}
+}
+
+// TestWorkspaceServeRequiresDomain verifies that omitting WithServeExposeDomain
+// (and no env var) returns a typed error.
+func TestWorkspaceServeRequiresDomain(t *testing.T) {
+	m := newMockK8s(t)
+	a := m.agent(t, ns)
+	ws := a.Workspace("ws-4")
+	t.Setenv("MITOS_EXPOSE_DOMAIN", "")
+	_, err := ws.Serve(context.Background(), WithServePool("python"))
+	if !errors.Is(err, &Error{Code: "missing_expose_domain"}) {
+		t.Fatalf("expected missing_expose_domain, got %v", err)
+	}
+}
+
+// TestBuildExposeURL unit-tests the URL builder in isolation.
+func TestBuildExposeURL(t *testing.T) {
+	cases := []struct {
+		label    string
+		domain   string
+		wantURL  string
+		wantCode string
+	}{
+		{"myapp", "mitos.app", "https://myapp.mitos.app/", ""},
+		{"a1b2", "example.run", "https://a1b2.example.run/", ""},
+		{"", "mitos.app", "", "invalid_expose_label"},
+		{"www", "mitos.app", "", "reserved_expose_label"},
+		{"console", "mitos.app", "", "reserved_expose_label"},
+		{"UPPER", "mitos.app", "https://upper.mitos.app/", ""}, // normalized
+		{"too-long-" + strings.Repeat("x", 60), "mitos.app", "", "invalid_expose_label"},
+		{"myapp", "", "", "missing_expose_domain"},
+		{"-bad", "mitos.app", "", "invalid_expose_label"},
+		{"bad-", "mitos.app", "", "invalid_expose_label"},
+	}
+	for _, tc := range cases {
+		url, err := buildExposeURL(tc.label, tc.domain)
+		if tc.wantCode == "" {
+			if err != nil {
+				t.Errorf("buildExposeURL(%q, %q) error = %v, want nil", tc.label, tc.domain, err)
+				continue
+			}
+			if url != tc.wantURL {
+				t.Errorf("buildExposeURL(%q, %q) = %q, want %q", tc.label, tc.domain, url, tc.wantURL)
+			}
+		} else {
+			if !errors.Is(err, &Error{Code: tc.wantCode}) {
+				t.Errorf("buildExposeURL(%q, %q) error code = %v, want %s", tc.label, tc.domain, err, tc.wantCode)
+			}
+		}
+	}
+}

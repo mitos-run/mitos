@@ -301,7 +301,13 @@ func (b *ClusterBackend) List(ctx context.Context, namespace string) ([]SandboxI
 // Workspace returns a ClusterWorkspaceBackend bound to the same client and
 // namespace.
 func (b *ClusterBackend) Workspace() WorkspaceBackend {
-	return &ClusterWorkspaceBackend{client: b.client, namespace: b.namespace, now: b.now}
+	return &ClusterWorkspaceBackend{
+		client:       b.client,
+		namespace:    b.namespace,
+		now:          b.now,
+		pollInterval: b.pollInterval,
+		pollTimeout:  b.pollTimeout,
+	}
 }
 
 // Template returns the template authoring surface over the cluster: it applies
@@ -359,6 +365,14 @@ type ClusterWorkspaceBackend struct {
 	client    client.Client
 	namespace string
 	now       func() time.Time
+
+	pollInterval time.Duration
+	pollTimeout  time.Duration
+
+	// readyHook is a test seam: when set, it is invoked once right after a
+	// sandbox is created, simulating the controller reconciling it to Ready.
+	// In production it is nil and the poll observes the real controller.
+	readyHook func(ctx context.Context, name string)
 }
 
 func (w *ClusterWorkspaceBackend) verbs() *controller.WorkspaceVerbs {
@@ -483,6 +497,110 @@ func (w *ClusterWorkspaceBackend) Bind(ctx context.Context, sandboxID, workspace
 		return fmt.Errorf("bind sandbox %s to workspace %s: %w", sandboxID, workspace, err)
 	}
 	return nil
+}
+
+// waitSandboxReady polls the sandbox until its phase is Ready (success),
+// Failed (error), or the timeout elapses.
+// Note: this poll loop mirrors ClusterBackend.waitSandboxReady; refactor to a shared helper in a follow-up.
+func (w *ClusterWorkspaceBackend) waitSandboxReady(ctx context.Context, name string) error {
+	pollInterval := w.pollInterval
+	if pollInterval == 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+	pollTimeout := w.pollTimeout
+	if pollTimeout == 0 {
+		pollTimeout = 60 * time.Second
+	}
+	deadline := w.now().Add(pollTimeout)
+	for {
+		var sandbox v1.Sandbox
+		if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: name}, &sandbox); err != nil {
+			return fmt.Errorf("get sandbox %s: %w", name, err)
+		}
+		switch sandbox.Status.Phase {
+		case v1.SandboxReady:
+			if sandbox.Status.Endpoint != "" {
+				return nil
+			}
+		case v1.SandboxFailed:
+			return fmt.Errorf("sandbox %s failed", name)
+		}
+		if w.now().After(deadline) {
+			return fmt.Errorf("sandbox %s not ready after %s", name, pollTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// Serve creates a Sandbox with a workspaceRef and expose configuration, waits
+// for it to be Ready, and returns a ServeResult with the expose URL. The URL
+// is reachable once the expose proxy is deployed and *.<exposeDomain> DNS
+// resolves to it.
+//
+// For sharing=="link": link-token minting is deferred to slice 5b; the clean
+// URL is returned for now.
+func (w *ClusterWorkspaceBackend) Serve(ctx context.Context, workspace, exposeDomain string, opts ServeOptions) (ServeResult, error) {
+	if opts.Pool == "" {
+		return ServeResult{}, fmt.Errorf("serve: pool is required")
+	}
+	if exposeDomain == "" {
+		return ServeResult{}, fmt.Errorf("serve: expose domain is required")
+	}
+
+	name := randName("sbx")
+
+	effectivePort := opts.Port
+	if effectivePort == 0 {
+		effectivePort = 8080
+	}
+	effectiveSharing := opts.Sharing
+	if effectiveSharing == "" {
+		effectiveSharing = "private"
+	}
+	effectiveLabel := opts.Label
+	if effectiveLabel == "" {
+		effectiveLabel = name
+	}
+
+	sandbox := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{
+				PoolRef: &v1.LocalObjectReference{Name: opts.Pool},
+			},
+			WorkspaceRef: &v1.LocalObjectReference{Name: workspace},
+			Expose: &v1.SandboxExpose{
+				Port:    int32(effectivePort),
+				Label:   effectiveLabel,
+				Sharing: effectiveSharing,
+			},
+		},
+	}
+	if err := w.client.Create(ctx, sandbox); err != nil {
+		return ServeResult{}, fmt.Errorf("create sandbox for workspace serve: %w", err)
+	}
+	if w.readyHook != nil {
+		w.readyHook(ctx, name)
+	}
+	if err := w.waitSandboxReady(ctx, name); err != nil {
+		return ServeResult{}, err
+	}
+
+	url, err := BuildExposeURL(effectiveLabel, exposeDomain)
+	if err != nil {
+		return ServeResult{}, fmt.Errorf("serve: %w", err)
+	}
+
+	return ServeResult{
+		SandboxName: name,
+		Label:       effectiveLabel,
+		URL:         url,
+		Sharing:     effectiveSharing,
+	}, nil
 }
 
 // revisionLineageStr renders the human-legible lineage of a revision.
