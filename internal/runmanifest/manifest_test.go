@@ -104,6 +104,32 @@ func TestSecretValuesNeverInGolden(t *testing.T) {
 	}
 }
 
+// TestGoldenPoolTrackAnnotations asserts the source.track policy is stamped onto
+// the golden pool as annotations for the auto-update reconciler to read.
+func TestGoldenPoolTrackAnnotations(t *testing.T) {
+	m, err := Parse(mustRead(t, "openclaw.yaml"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	pool, err := m.GoldenPool("ns")
+	if err != nil {
+		t.Fatalf("GoldenPool: %v", err)
+	}
+	ann := pool.Annotations
+	if ann[AnnTrackWatch] != "ghcr.io/openclaw/openclaw" {
+		t.Errorf("track-watch = %q", ann[AnnTrackWatch])
+	}
+	if ann[AnnTrackChannel] != "latest" {
+		t.Errorf("track-channel = %q", ann[AnnTrackChannel])
+	}
+	if ann[AnnTrackAction] != "resnapshot+offer-rebase" {
+		t.Errorf("track-action = %q", ann[AnnTrackAction])
+	}
+	if ann[AnnResolvedImage] != "ghcr.io/openclaw/openclaw:latest" {
+		t.Errorf("resolved-image = %q", ann[AnnResolvedImage])
+	}
+}
+
 // TestGoldenPoolBuildNotYet asserts a build-from-source manifest parses but
 // GoldenPool fails loudly until that slice lands (no silent half-mapping).
 func TestGoldenPoolBuildNotYet(t *testing.T) {
