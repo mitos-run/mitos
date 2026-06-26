@@ -256,7 +256,7 @@ class TestWorkspaceServeErrors:
         with patch.object(ws_module, "_SERVE_POLL_INTERVAL", 0):
             result = workspace.serve(pool="python", expose_domain="arg.example.com",
                                      label="bot")
-        assert "arg.example.com" in result.url
+        assert result.url == "https://bot.arg.example.com/"
 
     def test_reserved_label_raises(self):
         workspace = _workspace()
