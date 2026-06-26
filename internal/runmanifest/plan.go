@@ -55,6 +55,7 @@ func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
 				Command:   m.effectiveCommand(),
 				Env:       m.nonSecretEnv(),
 				Resources: res,
+				Network:   m.egressPolicy(),
 			},
 			Snapshots: &v1.PoolSnapshots{
 				ReplicasPerNode: 1,
@@ -120,6 +121,20 @@ func (m *Manifest) sandboxResources() (v1.SandboxResources, error) {
 		r.Memory = q
 	}
 	return r, nil
+}
+
+// egressPolicy turns the manifest egress allowlist into a default-deny pool
+// network policy: deny everything, allow only the declared destinations. An empty
+// allowlist leaves the pool default in place (nil) rather than block all egress,
+// since some apps declare egress per-fork; the provisioner can still tighten it.
+func (m *Manifest) egressPolicy() *v1.NetworkPolicy {
+	if len(m.Egress.Allow) == 0 {
+		return nil
+	}
+	return &v1.NetworkPolicy{
+		Egress: v1.EgressDeny,
+		Allow:  append([]string(nil), m.Egress.Allow...),
+	}
 }
 
 // RequiredSecretNames returns the names of secrets the clicker must supply (those
