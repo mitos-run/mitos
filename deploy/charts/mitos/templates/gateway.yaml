@@ -35,6 +35,8 @@ spec:
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           args:
             - --addr=:8080
+            - --enforce-quota={{ .Values.gateway.enforce.enabled }}
+            - --trusted-proxy-hops={{ int .Values.gateway.enforce.trustedProxyHops }}
           {{- if .Values.database.dsnSecretRef.name }}
           env:
             {{- include "mitos.database.env" . | nindent 12 }}

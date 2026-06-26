@@ -43,6 +43,26 @@ func TestGatewayRBACAbsentWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestGatewayEnforcementDefaultsOn asserts the hosted profile renders the gateway
+// with quota/abuse enforcement enabled by default and the trusted-proxy-hops flag
+// set, so the public front door enforces quotas out of the box.
+func TestGatewayEnforcementDefaultsOn(t *testing.T) {
+	out := render(t)
+	deploy := section(t, out, "kind: Deployment", "mitos-gateway")
+	mustContain(t, deploy, "--enforce-quota=true")
+	mustContain(t, deploy, "--trusted-proxy-hops=0")
+}
+
+// TestGatewayEnforcementOverridable asserts an operator can disable enforcement
+// and set the trusted-proxy hop count, so a trusted single-tenant deployment can
+// opt out and a deployment behind an ingress can resolve the client IP correctly.
+func TestGatewayEnforcementOverridable(t *testing.T) {
+	out := render(t, "gateway.enforce.enabled=false", "gateway.enforce.trustedProxyHops=1")
+	deploy := section(t, out, "kind: Deployment", "mitos-gateway")
+	mustContain(t, deploy, "--enforce-quota=false")
+	mustContain(t, deploy, "--trusted-proxy-hops=1")
+}
+
 // section returns the YAML document containing both marker and name, to scope an
 // assertion to one rendered resource.
 func section(t *testing.T, out, marker, name string) string {

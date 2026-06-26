@@ -85,6 +85,8 @@ func main() {
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
+	enforceQuota := flag.Bool("enforce-quota", true, "enforce per-organization quotas, rate limits, and the abuse kill-switch before forwarding. Default on (the hosted profile). Set to false only for a trusted single-tenant deployment; the bypass is logged at startup.")
+	trustedProxyHops := flag.Int("trusted-proxy-hops", 0, "number of trusted reverse-proxy hops in front of the gateway for client-IP resolution. 0 (the default) does NOT trust X-Forwarded-For and uses the connection RemoteAddr. Set to the count of trusted proxies (for example 1 behind a single ingress) so the per-IP rate limit keys on the real client; a too-short or spoofed X-Forwarded-For fails closed to RemoteAddr.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -112,7 +114,19 @@ func main() {
 		logger.Info("gateway using the real control plane", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool)
 	}
 
-	gw := saas.NewGateway(keys, saas.AllowAllQuota{}, cp, logger)
+	// Build the quota/abuse enforcement surface: the real quota.Enforcer wrapped in
+	// the gateway adapter when enabled (the hosted default), or the permissive
+	// AllowAllQuota when explicitly disabled. The same suspension store backs the
+	// enforcer, the abuse kill-switch, and the billing suspender, so a suspended org
+	// is blocked at the gateway. The mode is logged so the posture is never silent.
+	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops}
+	wiring := buildQuotaEnforcer(encfg)
+	logEnforcementMode(logger, encfg, wiring)
+	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
+	_ = wiring.billingSuspender // billing past-due / spend-cap driver (wired into the suspension store).
+
+	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger).
+		WithTrustedProxyHops(saas.TrustedProxyHops(*trustedProxyHops))
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", gw)
