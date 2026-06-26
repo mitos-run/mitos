@@ -1,0 +1,63 @@
+# mitos.yaml  .  Run with Mitos manifest  .  schema v1
+# Flagship demo: fork a warm OpenClaw (a personal AI assistant) on mitos.
+# See docs/superpowers/specs/2026-06-26-run-with-mitos-flagship-proposal.md
+name: openclaw
+title: OpenClaw . your personal AI assistant
+icon: https://openclaw.dev/lobster.png
+
+source:
+  # The golden microVM template is built from this image.
+  image: ghcr.io/openclaw/openclaw:latest
+  # Auto-update spine: watch upstream releases and re-snapshot the golden on a new
+  # tag, then offer running instances a one-click rebase (fork the new golden,
+  # reattach the Workspace, terminate the old). Rollback is re-forking the old golden.
+  track:
+    watch: ghcr.io/openclaw/openclaw
+    channel: latest
+    on_new_release: resnapshot+offer-rebase
+
+run:
+  workdir: /app
+  # OpenClaw binds 0.0.0.0 on --bind lan and requires a gateway token to bind a
+  # non-loopback address (an auth guard observed during the box2 run).
+  command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+  env:
+    HOME: /home/node
+  # mitos snapshots the golden ONLY after this is true, so every fork boots
+  # already-serving. This is what makes the click feel instant.
+  ready:
+    http: { port: 18789, path: /healthz, expect: 200 }
+    timeout: 90s
+
+preview:
+  port: 18789            # becomes you.openclaw.mitos.run
+  auth: ladder           # expose auth ladder; never raw-public by default
+
+secrets:
+  # Prompted at click; injected per-fork; NEVER baked into the golden snapshot
+  # (fork-correctness secret non-inheritance). The golden is publicly shareable
+  # because it holds no one's keys; each fork gets its own.
+  - name: OPENCLAW_GATEWAY_TOKEN
+    label: Gateway token (locks your assistant)
+    generate: 32         # mitos mints a strong one if left blank
+  - name: ANTHROPIC_API_KEY
+    label: Claude API key (the brain)
+    required: true
+  - name: OPENCLAW_CHANNELS
+    label: Channel logins (WhatsApp / Telegram / ... ; optional)
+    required: false
+
+egress:
+  # Default-deny. The assistant reaches only what it declares.
+  allow: [api.anthropic.com, api.openai.com, api.telegram.org, "*.slack.com"]
+
+workspace:
+  # Durable, versioned, S3-backed. Survives updates, rebases, and node loss.
+  path: /home/node/.openclaw
+  persist: true
+
+resources:
+  pool: openclaw
+  cpu: 2
+  memory: 2Gi
+  lifetime: persistent
