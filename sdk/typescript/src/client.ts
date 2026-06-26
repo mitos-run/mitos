@@ -349,12 +349,12 @@ export class AgentRun {
       spec: {},
     };
     await this.k8s.createWorkspace(this.namespace, body);
-    return new Workspace(name, this.namespace, this.k8s);
+    return new Workspace(name, this.namespace, this.k8s, this.sleep);
   }
 
   /** Lazy handle to a workspace (does not touch the cluster). */
   workspace(name: string): Workspace {
-    return new Workspace(name, this.namespace, this.k8s);
+    return new Workspace(name, this.namespace, this.k8s, this.sleep);
   }
 
   /** Reconnect to an existing workspace, throwing if it is absent. */
@@ -368,7 +368,7 @@ export class AgentRun {
         remediation: "Create it with createWorkspace(name) first.",
       });
     }
-    return new Workspace(name, this.namespace, this.k8s);
+    return new Workspace(name, this.namespace, this.k8s, this.sleep);
   }
 
   /** List the workspaces in the client's namespace. */
