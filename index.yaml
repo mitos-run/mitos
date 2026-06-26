@@ -64,6 +64,94 @@ entries:
       artifacthub.io/operatorCapabilities: Basic Install
       artifacthub.io/prerelease: "true"
     apiVersion: v2
+    appVersion: v1.4.0
+    created: "2026-06-26T16:55:01.077762273Z"
+    description: Snapshot-fork sandboxes for AI agents on Kubernetes.
+    digest: 384acae5f1afedf18659a29e6627b27f5fc71b807a6c177be711bd6c18c77e5e
+    home: https://mitos.run
+    icon: https://raw.githubusercontent.com/mitos-run/mitos/main/docs/assets/mitos-mark-black.svg
+    keywords:
+    - sandbox
+    - firecracker
+    - microvm
+    - snapshot
+    - fork
+    - ai-agents
+    - operator
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: mitos-run
+      url: https://mitos.run
+    name: mitos
+    sources:
+    - https://github.com/mitos-run/mitos
+    type: application
+    urls:
+    - https://github.com/mitos-run/mitos/releases/download/mitos-1.4.0/mitos-1.4.0.tgz
+    version: 1.4.0
+  - annotations:
+      artifacthub.io/category: ai-machine-learning
+      artifacthub.io/crds: |
+        - kind: SandboxPool
+          version: v1
+          name: sandboxpools.mitos.run
+          displayName: Sandbox Pool
+          description: Warm pool of pre-snapshotted sandboxes with an inline template (Pools prepare).
+        - kind: Sandbox
+          version: v1
+          name: sandboxes.mitos.run
+          displayName: Sandbox
+          description: A single running microVM sandbox instance, sourced from a pool, live fork, or revision (Sandboxes run).
+        - kind: Workspace
+          version: v1
+          name: workspaces.mitos.run
+          displayName: Workspace
+          description: A durable, versioned filesystem a sandbox persists into (Workspaces persist).
+        - kind: WorkspaceRevision
+          version: v1
+          name: workspacerevisions.mitos.run
+          displayName: Workspace Revision
+          description: One immutable snapshot in a workspace revision DAG.
+      artifacthub.io/crdsExamples: |
+        - apiVersion: mitos.run/v1
+          kind: Sandbox
+          metadata:
+            name: agent-session-1
+          spec:
+            source:
+              poolRef:
+                name: python-agent-pool
+            lifetime:
+              timeout: 30m
+      artifacthub.io/images: |
+        - name: controller
+          image: ghcr.io/mitos-run/mitos-controller:v0.13.0
+        - name: forkd
+          image: ghcr.io/mitos-run/mitos-forkd:v0.13.0
+        - name: husk-stub
+          image: ghcr.io/mitos-run/mitos-husk-stub:v0.13.0
+        - name: kvm-device-plugin
+          image: ghcr.io/mitos-run/mitos-kvm-device-plugin:v0.13.0
+        - name: facade
+          image: ghcr.io/mitos-run/mitos-facade:v0.13.0
+        - name: console
+          image: ghcr.io/mitos-run/mitos-console:v0.13.0
+        - name: gateway
+          image: ghcr.io/mitos-run/mitos-gateway:v0.13.0
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Homepage
+          url: https://mitos.run
+        - name: Documentation
+          url: https://mitos.run
+        - name: Source
+          url: https://github.com/mitos-run/mitos
+        - name: support
+          url: https://github.com/mitos-run/mitos/issues
+      artifacthub.io/operator: "true"
+      artifacthub.io/operatorCapabilities: Basic Install
+      artifacthub.io/prerelease: "true"
+    apiVersion: v2
     appVersion: v0.13.0
     created: "2026-06-24T11:48:30.52448332Z"
     description: Snapshot-fork sandboxes for AI agents on Kubernetes.
@@ -190,4 +278,4 @@ entries:
     urls:
     - https://github.com/mitos-run/mitos/releases/download/mitos-0.4.0/mitos-0.4.0.tgz
     version: 0.4.0
-generated: "2026-06-24T11:48:30.524490623Z"
+generated: "2026-06-26T16:55:01.077779084Z"
