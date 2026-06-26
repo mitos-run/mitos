@@ -46,10 +46,14 @@ jobs:
         if: ${{ steps.release.outputs.releases_created == 'true' && env.HAS_RP_TOKEN != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release.outputs['.--tag_name'] }}
         run: |
+          # Resolve the tag release-please just created from the latest release,
+          # rather than a release-please-action output whose key has varied across
+          # versions (a missing key silently skipped publishing). The latest
+          # release is the one release-please created on this run.
+          TAG="$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName')"
           if [ -z "${TAG}" ]; then
-            echo "release created but no tag name resolved; not dispatching publish" >&2
+            echo "release created but no tag resolved; not dispatching publish" >&2
             exit 1
           fi
           echo "Release ${TAG} cut with GITHUB_TOKEN; dispatching the signed-image publish workflow for it."
