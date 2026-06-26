@@ -39,6 +39,7 @@ final class ClusterTest {
         testReadyTokenFromSecretNeverLogged();
         testWorkspaceCreateAndNotFound();
         testKubeconfigBearerTokenParse();
+        ServeTest.run();
     }
 
     // The minimal kubeconfig parser resolves the current context's server and
