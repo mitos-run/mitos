@@ -212,6 +212,10 @@ func cmdServe(ctx context.Context, args []string, b WorkspaceBackend, out, errw 
 		fmt.Fprintf(errw, "ws serve: --expose-domain is required (or set MITOS_EXPOSE_DOMAIN)\n")
 		return 2
 	}
+	if *port < 1 || *port > 65535 {
+		fmt.Fprintf(errw, "ws serve: --port %d out of range 1-65535\n", *port)
+		return 2
+	}
 
 	res, err := b.Serve(ctx, workspace, *exposeDomain, ServeOptions{
 		Pool:    *pool,
