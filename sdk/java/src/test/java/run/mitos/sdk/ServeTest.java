@@ -55,8 +55,6 @@ final class ServeTest {
         SdkTest.Stub stub2 = stubWithReadyHandler();
         try (stub2) {
             ClusterWorkspace ws = workspaceFor(stub2, "ws-1");
-            // Disable sleep in polling.
-            ClusterWorkspace.serveWaitIntervalMs = 0;
 
             ServeOptions opts = ServeOptions.builder()
                     .pool("my-pool")
@@ -87,7 +85,6 @@ final class ServeTest {
         });
         try (stub) {
             ClusterWorkspace ws = workspaceFor(stub, "ws-2");
-            ClusterWorkspace.serveWaitIntervalMs = 0;
             ServeOptions opts = ServeOptions.builder()
                     .pool("my-pool")
                     .port(3000)
@@ -125,7 +122,6 @@ final class ServeTest {
         });
         try (stub) {
             ClusterWorkspace ws = workspaceFor(stub, "ws-ref");
-            ClusterWorkspace.serveWaitIntervalMs = 0;
             ServeOptions opts = ServeOptions.builder()
                     .pool("pool-x")
                     .exposeDomain("mitos.app")
@@ -291,7 +287,6 @@ final class ServeTest {
         });
         try (stub) {
             ClusterWorkspace ws = workspaceFor(stub, "ws-9");
-            ClusterWorkspace.serveWaitIntervalMs = 0;
             MitosException thrown = null;
             try {
                 ws.serve(ServeOptions.builder()
@@ -325,7 +320,6 @@ final class ServeTest {
         });
         try (stub) {
             ClusterWorkspace ws = workspaceFor(stub, "ws-10");
-            ClusterWorkspace.serveWaitIntervalMs = 0;
             ServedWorkspace sw = ws.serve(ServeOptions.builder()
                     .pool("p")
                     .exposeDomain("mitos.app")
@@ -336,10 +330,14 @@ final class ServeTest {
         ok("serve() polls through Pending before returning a ServedWorkspace on Ready");
     }
 
-    // workspaceFor wires a ClusterWorkspace to the in-process stub.
+    // workspaceFor wires a ClusterWorkspace to the in-process stub. The Ready poll
+    // interval is set to 0 on this specific instance so the wait never sleeps;
+    // because it is a per-instance field, no mutable state is shared across tests.
     private static ClusterWorkspace workspaceFor(SdkTest.Stub stub, String wsName) {
         K8s k8s = K8s.of(stub.url(), null, HttpClient.newHttpClient());
-        return new ClusterWorkspace(wsName, "default", k8s);
+        ClusterWorkspace ws = new ClusterWorkspace(wsName, "default", k8s);
+        ws.setServeWaitIntervalMs(0);
+        return ws;
     }
 
     // stubWithReadyHandler returns a Stub that returns Ready on any sandbox GET

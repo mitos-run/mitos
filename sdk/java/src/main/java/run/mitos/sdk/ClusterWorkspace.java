@@ -22,10 +22,23 @@ public final class ClusterWorkspace {
     private final String namespace;
     private final K8s k8s;
 
+    // serveWaitIntervalMs is the polling interval, in milliseconds, while waiting
+    // for the sandbox to reach Ready. It is a per-instance field so two workspaces
+    // never share mutable wait state; tests set it on their own instance via
+    // setServeWaitIntervalMs to avoid sleeping. Defaults to 500ms.
+    private long serveWaitIntervalMs = 500;
+
     ClusterWorkspace(String name, String namespace, K8s k8s) {
         this.name = name;
         this.namespace = namespace;
         this.k8s = k8s;
+    }
+
+    // setServeWaitIntervalMs overrides the per-instance Ready poll interval. It is
+    // package-private so a test can set it to 0 on its specific workspace without
+    // sharing state with any other instance.
+    void setServeWaitIntervalMs(long ms) {
+        this.serveWaitIntervalMs = ms;
     }
 
     /** The Workspace object name. */
@@ -106,10 +119,6 @@ public final class ClusterWorkspace {
 
     private static final SecureRandom SERVE_RANDOM = new SecureRandom();
     private static final char[] SERVE_HEX = "0123456789abcdef".toCharArray();
-
-    // serveWaitIntervalMs is the polling interval while waiting for the sandbox
-    // to reach Ready. Tests can reassign this field to avoid sleeping.
-    static long serveWaitIntervalMs = 500;
 
     /**
      * Creates a Sandbox bound to this workspace with {@code spec.expose} set,
