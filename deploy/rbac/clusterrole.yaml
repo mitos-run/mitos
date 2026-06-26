@@ -179,6 +179,43 @@ rules:
       - patch
       - update
       - watch
+  # Org-namespace tenancy (issue #288, used only when --enable-org-tenancy is
+  # set; off by default so self-host is unaffected). The reconciler provisions
+  # the per-org isolation namespace and its ResourceQuota/LimitRange ceilings.
+  # RBAC grants the capability; the flag gates whether the controller uses it.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - resourcequotas
+      - limitranges
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # The Org CRD the tenancy reconciler watches and whose status it writes.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs/status
+    verbs:
+      - get
+      - patch
+      - update
   # Leader election: the controller Deployment runs multiple replicas for HA but
   # exactly one may reconcile at a time. controller-runtime coordinates that with
   # a Lease in the controller's namespace, so it needs leases create/get/update

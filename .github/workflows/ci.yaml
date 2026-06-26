@@ -1709,6 +1709,69 @@ jobs:
           kubectl -n default delete sandboxpool husk-e2e --ignore-not-found=true || true
           kubectl get pods -A -l mitos.run/husk=true -o wide || true
 
+  kind-e2e-tenancy:
+    # Per-org namespace tenancy object-level proof on kind (issue #288, the
+    # hosted-SaaS multi-tenant boundary). It stands up the SAME mock control
+    # plane as kind-e2e (no KVM, no VMM tail), turns on --enable-org-tenancy,
+    # applies two Org CRs, and asserts each org gets its own isolated namespace
+    # stack (ResourceQuota + default-deny NetworkPolicy + PSA enforce=privileged +
+    # mitos-pool-secrets RoleBinding) and that the two namespaces are distinct,
+    # each carrying ONLY its own org label.
+    #
+    # SCOPE: this is an OBJECT-LEVEL proof. Live NetworkPolicy enforcement needs a
+    # CNI that implements it; kind's default kindnet does NOT enforce egress
+    # policy, so cross-org PACKET blocking is out of scope and is the documented
+    # CNI caveat (docs/threat-model.md). The object being correct is what is
+    # asserted here.
+    runs-on: ubuntu-latest
+    needs: [go-test, docker-build]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: mitos-tenancy
+          config: hack/kind-config.yaml
+      - name: Build and load images
+        run: |
+          docker build -f Dockerfile.controller -t mitos-controller:ci .
+          docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+          docker build -f Dockerfile.kvm-device-plugin -t mitos-kvm-device-plugin:ci .
+          kind load docker-image mitos-controller:ci --name mitos-tenancy
+          kind load docker-image mitos-forkd:ci --name mitos-tenancy
+          kind load docker-image mitos-kvm-device-plugin:ci --name mitos-tenancy
+      - name: Build mitos CLI
+        run: go build -o /usr/local/bin/mitos ./cmd/mitos/
+      - name: mitos dev up (mock control plane on the existing kind cluster)
+        run: mitos dev up --skip-cluster-create
+      - name: Wait for the mock control plane to be Ready
+        run: |
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+      - name: Turn on org tenancy on the running controller
+        # The dev overlay does not set --enable-org-tenancy (it is OFF by default
+        # so self-host is unaffected). Patch it on and wait for the new rollout so
+        # the OrgReconciler runs for this proof.
+        run: |
+          set -euo pipefail
+          kubectl -n mitos patch deployment/mitos-controller --type=json -p='[
+            {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-org-tenancy"}
+          ]'
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+      - name: Run the org-tenancy e2e
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/org-tenancy-e2e.sh
+          test/cluster-e2e/org-tenancy-e2e.sh
+      - name: Org-tenancy e2e diagnostics
+        if: failure()
+        run: |
+          kubectl get orgs -o wide || true
+          kubectl get namespaces -L mitos.run/org,pod-security.kubernetes.io/enforce || true
+          kubectl get resourcequota,networkpolicy,rolebinding -A | grep -E 'mitos-org' || true
+          kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
+
   kind-e2e-placement:
     # The dedicatedNodes placement proof on a MULTI-NODE kind cluster (issue
     # #172, gate G3). It stands up the same husk-default stack as kind-e2e-husk

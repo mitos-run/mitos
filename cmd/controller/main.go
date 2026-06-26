@@ -71,6 +71,10 @@ func main() {
 	var vitalsSampler bool
 	var vitalsSamplerInterval time.Duration
 	var exposeProxyAdminURL string
+	var enableOrgTenancy bool
+	var orgDefaultMaxSandboxes int
+	var orgDefaultCPU string
+	var orgDefaultMemory string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -95,6 +99,10 @@ func main() {
 	flag.BoolVar(&vitalsSampler, "vitals-sampler", false, "Run the guest vitals sampler: on a fixed interval, scrape every forkd node's GET /v1/vitals/node, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, aggregate per (org, pool), and publish the mitos_guest_cpu_steal_percent, mitos_guest_mem_balloon_bytes, mitos_guest_mem_used_bytes, and mitos_guest_process_count Prometheus gauges. cpu_steal is the MAX across the bucket (the worst-starved sandbox); memory and process_count are SUMs (the fleet footprint). OFF by default so a self-host deployment without guest telemetry is unaffected; turn it on for hosted/multi-tenant. The path carries only ids (for org resolution), pool names, and numeric vitals plus the process-list length, never argv, env, process command lines, pids, or secret values.")
 	flag.DurationVar(&vitalsSamplerInterval, "vitals-sampler-interval", 60*time.Second, "Interval between guest vitals samples when --vitals-sampler is set. Defaults to the usage window (60s). Only used when --vitals-sampler is on.")
 	flag.StringVar(&exposeProxyAdminURL, "expose-proxy-admin-url", "", "Expose proxy admin endpoint base URL for route-sync (POST /internal/routes); empty disables")
+	flag.BoolVar(&enableOrgTenancy, "enable-org-tenancy", false, "Hosted-SaaS multi-tenancy (issue #288): run the OrgReconciler, which provisions a per-org isolation namespace (mitos-org-<id>) for every Org CR with PSA privileged labels, a per-org ResourceQuota ceiling, a LimitRange, a default-deny NetworkPolicy with a DNS egress allow, and the mitos-pool-secrets RoleBinding, all owner-referenced to the Org so org deletion cascades. OFF by default so a self-host single-tenant install is unaffected; hosted sets it true. Cross-org isolation is the separate namespace + default-deny NetworkPolicy + ResourceQuota + the microVM (a NetworkPolicy-enforcing CNI is required in a multi-tenant cluster; see docs/threat-model.md).")
+	flag.IntVar(&orgDefaultMaxSandboxes, "org-default-max-sandboxes", 50, "Default per-org sandbox/pod count ceiling applied to an Org's ResourceQuota when the Org sets no spec.quota override. The per-org abuse-control primitive: it bounds how much one tenant can schedule. Only used with --enable-org-tenancy.")
+	flag.StringVar(&orgDefaultCPU, "org-default-cpu", "32", "Default per-org aggregate CPU limit ceiling (a Kubernetes quantity, for example 32 or 32000m) applied to an Org's ResourceQuota when the Org sets no spec.quota override. Only used with --enable-org-tenancy.")
+	flag.StringVar(&orgDefaultMemory, "org-default-memory", "64Gi", "Default per-org aggregate memory limit ceiling (a Kubernetes quantity, for example 64Gi) applied to an Org's ResourceQuota when the Org sets no spec.quota override. Only used with --enable-org-tenancy.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -304,6 +312,39 @@ func main() {
 	if err := wsReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "Workspace")
 		os.Exit(1)
+	}
+
+	// Per-org namespace tenancy (issue #288, the hosted-SaaS multi-tenant
+	// boundary). OFF by default (--enable-org-tenancy) so a self-host single-tenant
+	// install is unaffected: with the flag off the OrgReconciler is never wired, so
+	// the controller does not touch namespaces/quotas/policies for org provisioning.
+	if enableOrgTenancy {
+		orgCPU, perr := resourceapi.ParseQuantity(orgDefaultCPU)
+		if perr != nil {
+			logger.Error(perr, "invalid --org-default-cpu", "value", orgDefaultCPU)
+			os.Exit(1)
+		}
+		orgMem, perr := resourceapi.ParseQuantity(orgDefaultMemory)
+		if perr != nil {
+			logger.Error(perr, "invalid --org-default-memory", "value", orgDefaultMemory)
+			os.Exit(1)
+		}
+		orgReconciler := &controller.OrgReconciler{
+			Client:               mgr.GetClient(),
+			PoolSecretsSubject:   "mitos-controller",
+			PoolSecretsNamespace: poolControllerNamespace,
+			DefaultMaxSandboxes:  int32(orgDefaultMaxSandboxes), //nolint:gosec // flag value, operator-controlled, bounded by ResourceQuota semantics
+			DefaultCPU:           orgCPU,
+			DefaultMemory:        orgMem,
+		}
+		if err := orgReconciler.SetupWithManager(mgr); err != nil {
+			logger.Error(err, "unable to create controller", "controller", "Org")
+			os.Exit(1)
+		}
+		logger.Info("org tenancy: ENABLED; provisioning per-org isolation namespaces (mitos-org-<id>) with PSA privileged labels, a ResourceQuota ceiling, a LimitRange, a default-deny NetworkPolicy + DNS egress, and the mitos-pool-secrets RoleBinding. Cross-org isolation is the separate namespace + default-deny NetworkPolicy + ResourceQuota + the microVM; a NetworkPolicy-enforcing CNI is required",
+			"default-max-sandboxes", orgDefaultMaxSandboxes, "default-cpu", orgDefaultCPU, "default-memory", orgDefaultMemory)
+	} else {
+		logger.Info("org tenancy: disabled (default); self-host single-tenant. Pass --enable-org-tenancy for hosted multi-tenant per-org namespaces")
 	}
 
 	if exposeProxyAdminURL != "" {

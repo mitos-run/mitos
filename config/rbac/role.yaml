@@ -126,3 +126,50 @@ rules:
       - patch
       - update
       - watch
+  # Per-org namespace tenancy (issue #288): the OrgReconciler manages org
+  # isolation namespaces and their ResourceQuota/LimitRange ceilings, and reads
+  # the cluster-scoped Org CRD plus writes its status. The chart gates these
+  # behind controller.orgTenancy.enabled; this mirror lists them unconditionally.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - resourcequotas
+      - limitranges
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs/status
+    verbs:
+      - get
+      - patch
+      - update

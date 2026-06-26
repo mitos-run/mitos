@@ -182,6 +182,60 @@ rules:
       - patch
       - update
       - watch
+  {{- if .Values.controller.orgTenancy.enabled }}
+  # Per-org namespace tenancy (issue #288, the hosted-SaaS multi-tenant boundary).
+  # The OrgReconciler provisions a per-org isolation namespace (mitos-org-<id>)
+  # with a ResourceQuota ceiling, a LimitRange, a default-deny NetworkPolicy, and
+  # the mitos-pool-secrets RoleBinding, all owner-referenced to the Org so org
+  # deletion cascades. networkpolicies and rolebindings verbs are already granted
+  # above (husk netpol + pool-secrets RBAC); these add the namespace, quota, and
+  # limitrange management and the Org CRD read/status surface. Gated behind
+  # controller.orgTenancy.enabled so a self-host single-tenant install never grants
+  # the namespace-management surface.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - resourcequotas
+      - limitranges
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - mitos.run
+    resources:
+      - orgs/status
+    verbs:
+      - get
+      - patch
+      - update
+  {{- end }}
   # Leader election: the controller Deployment runs multiple replicas for HA but
   # exactly one may reconcile at a time. controller-runtime coordinates that with
   # a Lease in the controller's namespace, so it needs leases create/get/update
