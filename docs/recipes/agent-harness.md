@@ -4,10 +4,13 @@ A Mitos sandbox can host a coding-agent harness (a
 Rivet `sandbox-agent` style daemon, `opencode` web, or any in-box HTTP server)
 and be driven from outside over HTTP. The integration surface such a harness
 needs is exactly two things: shell access (Mitos has `exec` over vsock) and a
-reachable network port. The port half ships today (`docs/ports.md`): a
-TCP-over-vsock tunnel through the standalone
-`sandbox-server`. This recipe shows the end-to-end flow using what ships today,
-and is explicit about what is still a follow-up.
+reachable network port. Both halves ship today, at three levels: a
+TCP-over-vsock tunnel through the standalone `sandbox-server` (`docs/ports.md`),
+a direct authenticated `/expose` HTTP path on a single node, and an
+internet-facing authenticated `https://<label>.<expose-domain>/` URL through the
+Mitos Expose edge proxy (`docs/preview-urls.md`). This recipe walks all three,
+ending with a fork fan-out swarm, and is explicit about what is still a
+follow-up.
 
 ## What works today (standalone sandbox-server, real mode)
 
@@ -90,15 +93,104 @@ It is available on forkd (authenticated) and on the standalone sandbox-server
    The guest dial is forced to loopback by the guest agent, so the host never
    steers the tunnel to a non-loopback interface; port must be in 1-65535.
 
+## End to end: a Rivet harness on an authenticated URL
+
+The raw `/expose` path above reaches a single node directly. For an
+internet-facing, TLS-terminated, authenticated URL, run the harness in a
+workspace-bound sandbox and let the Mitos Expose edge proxy route to it. This is
+the path `mitos workspace serve` sets up.
+
+Prerequisites: the expose proxy is deployed (the `expose.enabled` Helm values), a
+wildcard `*.<expose-domain>` certificate is issued, `*.<expose-domain>` DNS
+resolves to the proxy, and for the private default tier the proxy's OIDC relying
+party is configured. With those in place:
+
+1. Create a durable workspace, backed by a warm pool whose template has the Rivet
+   `sandbox-agent` daemon and its dependencies installed:
+
+   ```bash
+   mitos workspace create harness
+   ```
+
+2. Serve the workspace. This claims a forked sandbox from the pool, binds it to
+   the workspace, sets `spec.expose`, waits until it is Ready, and prints the
+   URL:
+
+   ```bash
+   mitos workspace serve harness --pool rivet --port 8000 --expose-domain mitos.app
+   # https://harness-7f3a.mitos.app/
+   ```
+
+   By default the URL is private: a caller authenticates through the proxy's OIDC
+   flow against the owner's org. Pass `--sharing link` for a signed shareable
+   link, `--sharing authenticated` for any logged-in user, or `--sharing public`
+   for an open URL. The composable layers (a network IP allowlist, an audience of
+   allowed principals or verified email domains, and a forwardAuth bring-your-own
+   identity provider) are documented in `docs/preview-urls.md`.
+
+3. Start the daemon inside the guest with `exec` (as in step 3 of the first
+   section), then stream its SSE session from the authenticated URL:
+
+   ```bash
+   curl -N https://harness-7f3a.mitos.app/stream
+   ```
+
+   The proxy enforces the access tier, terminates TLS (post-quantum
+   X25519MLKEM768 key exchange when the client supports it; this protects the
+   transport, not the certificate), and forwards the request to the owning node's
+   expose handler, which streams each `data: ...` frame back without buffering
+   (`FlushInterval -1`). A `POST` to the same URL drives the harness's agent RPC.
+
+The SDKs return the same URL as a handle. With the Go SDK:
+
+   ```go
+   served, err := ws.Serve(ctx, mitos.WithServePool("rivet"),
+       mitos.WithServeExposeDomain("mitos.app"))
+   // served.URL == "https://harness-7f3a.mitos.app/"
+   ```
+
+   The Python, TypeScript, Ruby, Rust, and Java SDKs expose the same `serve` verb
+   returning a handle with a `url`.
+
+## Fork fan-out: a swarm of harnesses, each its own URL
+
+The fork angle and the authenticated URL compose. Warm one sandbox with the
+harness installed, fork it into a swarm, and give each child its own label so
+each is reachable at its own authenticated URL:
+
+1. Serve N children, each with a distinct label, from the same warm pool:
+
+   ```bash
+   for i in $(seq 1 8); do
+     mitos workspace serve harness --pool rivet --as agent-$i --port 8000 \
+       --expose-domain mitos.app
+   done
+   # https://agent-1.mitos.app/ ... https://agent-8.mitos.app/
+   ```
+
+   Each child is an independent microVM restored from the snapshot, with its own
+   copy of the running daemon, its own `spec.expose` label, and its own access
+   tier. A fan-out orchestrator can hand each agent session its own URL and stream
+   all of them concurrently.
+
+2. The labels share one wildcard certificate and one proxy, so adding a child
+   needs no new certificate issuance or DNS record. A label must be a single DNS
+   label; a small set of names (for example `auth`, `api`, `console`) is
+   reserved, and the owner is responsible for label uniqueness within a domain.
+
+In-flight HTTP sessions do not transfer across a fork (a child resumes the
+snapshot's process state, not the parent's live TCP connections), so treat each
+forked URL as a fresh, independently-reachable harness.
+
 ## Follow-ups (not yet shipped)
 
-- Kubernetes Service / Ingress routing to the owning node's forwarded port (the
-  forkd / cluster path); today the forward and expose paths are standalone-server
-  and raw-forkd only.
-- A first-class CRD field to declare exposed guest ports on a SandboxPool.spec.template /
-  Sandbox.
-- Internet-facing, subdomain-routed, TLS-terminated exposure (the
-  `<label>.<expose-domain>` scheme, slice 2). For signed, expiring per-sandbox
-  preview URLs see `docs/preview-urls.md`; that is a separate mechanism.
 - A KVM end-to-end CI phase that starts a real in-guest SSE daemon and streams
-  through the expose route on a KVM runner.
+  through the authenticated expose URL on a KVM runner. The expose path is
+  covered by unit and mock tests today; the live in-guest SSE stream is
+  maintainer-verified.
+- Minting a signed `--sharing link` token from inside the cluster. The CLI and
+  SDKs construct the private and identity-tier URLs directly; link-token minting
+  in the cluster path is still being wired.
+- Deriving org membership from an OIDC groups claim for self-hosted identity
+  providers. The forwardAuth path and the hosted identity resolver are the
+  supported org sources today.
