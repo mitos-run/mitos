@@ -1,0 +1,27 @@
+name: deerflow
+title: DeerFlow . multi-agent research harness
+source:
+  build:
+    repo: github.com/bytedance/deer-flow
+  track:
+    watch: github.com/bytedance/deer-flow
+    channel: main
+run:
+  command: ["make", "docker-start"]
+  ready:
+    http: { port: 2026, path: /, expect: 200 }
+    timeout: 180s
+preview:
+  port: 2026
+  auth: ladder
+secrets:
+  - { name: ANTHROPIC_API_KEY, label: Model key, required: true }
+  - { name: TAVILY_API_KEY, label: Web search key, required: false }
+egress:
+  allow: [api.anthropic.com, api.tavily.com]
+workspace:
+  path: /app/data
+  persist: true
+resources:
+  cpu: "4"
+  memory: 4Gi

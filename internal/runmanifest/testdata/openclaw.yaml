@@ -1,0 +1,32 @@
+name: openclaw
+title: OpenClaw . your personal AI assistant
+source:
+  image: ghcr.io/openclaw/openclaw:latest
+  track:
+    watch: ghcr.io/openclaw/openclaw
+    channel: latest
+    on_new_release: resnapshot+offer-rebase
+run:
+  workdir: /app
+  command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+  env:
+    HOME: /home/node
+  ready:
+    http: { port: 18789, path: /healthz, expect: 200 }
+    timeout: 90s
+preview:
+  port: 18789
+  auth: ladder
+secrets:
+  - { name: OPENCLAW_GATEWAY_TOKEN, label: Gateway token, generate: 32 }
+  - { name: ANTHROPIC_API_KEY, label: Claude API key, required: true }
+egress:
+  allow: [api.anthropic.com, api.telegram.org]
+workspace:
+  path: /home/node/.openclaw
+  persist: true
+resources:
+  pool: openclaw
+  cpu: "2"
+  memory: 2Gi
+  lifetime: persistent

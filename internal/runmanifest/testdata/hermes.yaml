@@ -1,0 +1,25 @@
+name: hermes-agent
+title: Hermes . self-improving AI agent
+source:
+  image: docker.io/nousresearch/hermes-agent:latest
+  track:
+    watch: docker.io/nousresearch/hermes-agent
+    channel: latest
+    on_new_release: resnapshot+offer-rebase
+run:
+  command: ["gateway", "run"]
+  ready:
+    http: { port: 8642, path: /health, expect: 200 }
+preview:
+  port: 8787
+  auth: ladder
+secrets:
+  - { name: OPENAI_API_KEY, label: Model key, required: true }
+egress:
+  allow: [api.openai.com, api.anthropic.com]
+workspace:
+  path: /opt/data
+  persist: true
+resources:
+  cpu: "2"
+  memory: 2Gi
