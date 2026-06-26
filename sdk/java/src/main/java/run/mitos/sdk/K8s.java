@@ -511,6 +511,9 @@ final class K8s {
     private Object send(String method, String path, Object body, String contentType) {
         HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(server + path))
+                // Bound every request so a non-responding API server cannot block a
+                // caller (for example serve()'s readiness poll) forever.
+                .timeout(Duration.ofSeconds(30))
                 .header("Accept", "application/json");
         if (token != null) {
             b.header("Authorization", "Bearer " + token);

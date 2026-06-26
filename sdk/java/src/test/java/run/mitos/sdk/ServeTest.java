@@ -29,6 +29,7 @@ final class ServeTest {
         testServeInvalidLabelFormat();
         testServeLabelTooLong();
         testServeSandboxFailed();
+        testServeTimeout();
         testServeWaitsUntilReady();
     }
 
@@ -300,6 +301,35 @@ final class ServeTest {
             assertEquals("sandbox_failed", thrown.getCode(), "sandbox_failed code");
         }
         ok("serve() throws sandbox_failed when the sandbox reaches Failed phase");
+    }
+
+    // serve() throws serve_timeout (it does not hang) when the sandbox never
+    // reaches Ready within the attempt cap.
+    private static void testServeTimeout() throws Exception {
+        SdkTest.Stub stub = new SdkTest.Stub();
+        stub.handle("POST", "/apis/mitos.run/v1/namespaces/default/sandboxes", ex -> {
+            Map<String, Object> body = Json.parseObject(SdkTest.readBody(ex));
+            String sbName = K8s.nestedString(body, "metadata", "name");
+            stub.handle("GET", "/apis/mitos.run/v1/namespaces/default/sandboxes/" + sbName,
+                    e2 -> SdkTest.json(e2, 200, "{\"status\":{\"phase\":\"Pending\"}}"));
+            SdkTest.json(ex, 201, "{\"metadata\":{\"name\":\"" + sbName + "\"}}");
+        });
+        try (stub) {
+            ClusterWorkspace ws = workspaceFor(stub, "ws-timeout");
+            ws.setServeMaxAttempts(3);
+            MitosException thrown = null;
+            try {
+                ws.serve(ServeOptions.builder()
+                        .pool("p")
+                        .exposeDomain("mitos.app")
+                        .build());
+            } catch (MitosException e) {
+                thrown = e;
+            }
+            assertTrue(thrown != null, "never-Ready throws instead of hanging");
+            assertEquals("serve_timeout", thrown.getCode(), "serve_timeout code");
+        }
+        ok("serve() throws serve_timeout when the sandbox never becomes Ready");
     }
 
     // serve() polls until the sandbox becomes Ready (transitions through Pending).

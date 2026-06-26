@@ -28,6 +28,13 @@ public final class ClusterWorkspace {
     // setServeWaitIntervalMs to avoid sleeping. Defaults to 500ms.
     private long serveWaitIntervalMs = 500;
 
+    // serveMaxAttempts bounds the readiness poll so serve() cannot loop forever
+    // when a sandbox never reaches Ready or Failed (an unknown phase maps to
+    // Pending). With the 500ms default interval this is about a 5 minute ceiling;
+    // tests set the interval to 0, so the cap is reached almost instantly when a
+    // fixture never returns Ready. Per-instance so workspaces never share state.
+    private int serveMaxAttempts = 600;
+
     ClusterWorkspace(String name, String namespace, K8s k8s) {
         this.name = name;
         this.namespace = namespace;
@@ -39,6 +46,12 @@ public final class ClusterWorkspace {
     // sharing state with any other instance.
     void setServeWaitIntervalMs(long ms) {
         this.serveWaitIntervalMs = ms;
+    }
+
+    // setServeMaxAttempts overrides the per-instance readiness poll cap. Package
+    // private so a test can lower it on its own instance.
+    void setServeMaxAttempts(int attempts) {
+        this.serveMaxAttempts = attempts;
     }
 
     /** The Workspace object name. */
@@ -248,9 +261,10 @@ public final class ClusterWorkspace {
         }
     }
 
-    // waitSandboxReady polls the Sandbox until it reaches Ready or Failed.
+    // waitSandboxReady polls the Sandbox until it reaches Ready or Failed, or the
+    // attempt cap is reached (so an unknown or stuck phase cannot hang serve()).
     private void waitSandboxReady(String sbName) {
-        while (true) {
+        for (int attempt = 0; attempt < serveMaxAttempts; attempt++) {
             Map<String, Object> obj;
             try {
                 obj = k8s.getObject(namespace, "sandboxes", sbName);
@@ -287,6 +301,12 @@ public final class ClusterWorkspace {
                         0);
             }
         }
+        throw new MitosException(
+                "sandbox " + sbName + " did not become Ready in time",
+                "serve_timeout",
+                "the readiness poll reached its attempt cap before the sandbox reported Ready",
+                "Check the Sandbox status (kubectl describe sandbox " + sbName + ") and the pool capacity.",
+                0);
     }
 
     private static String serveRandomHex(int bytes) {
