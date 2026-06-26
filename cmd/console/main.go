@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"mitos.run/mitos/cmd/console/spa"
@@ -207,6 +208,18 @@ func (a sessionStoreAdapter) Revoke(accountID, sessionID string) error {
 
 func (a sessionStoreAdapter) RevokeAll(accountID string) { a.s.RevokeAll(accountID) }
 
+// oidcScopes returns the OAuth scopes the console requests beyond openid (which
+// NewProvider always adds). SignIn rejects any identity without a verified email,
+// so the email scope MUST be requested or every login is rejected; default to
+// "email profile". MITOS_CONSOLE_OIDC_SCOPES (space-separated) overrides for IdPs
+// that name these differently.
+func oidcScopes() []string {
+	if v := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_OIDC_SCOPES")); v != "" {
+		return strings.Fields(v)
+	}
+	return []string{"email", "profile"}
+}
+
 // mountAuth discovers the OIDC issuer and mounts /auth/login, /auth/callback,
 // and /auth/logout. The LoginManager issues sessions into the SAME store the
 // SessionMiddleware reads. If issuer discovery fails the console still serves
@@ -217,6 +230,7 @@ func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountSe
 		ClientID:     os.Getenv("MITOS_CONSOLE_OIDC_CLIENT_ID"),
 		ClientSecret: os.Getenv("MITOS_CONSOLE_OIDC_CLIENT_SECRET"),
 		RedirectURL:  os.Getenv("MITOS_CONSOLE_OIDC_REDIRECT_URL"),
+		Scopes:       oidcScopes(),
 	})
 	if err != nil {
 		logger.Error("oidc provider discovery failed; /auth not mounted", "issuer", issuer, "err", err.Error())
