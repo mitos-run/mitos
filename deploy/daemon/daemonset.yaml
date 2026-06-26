@@ -115,9 +115,10 @@ spec:
               containerPort: 9092
           # NOT privileged. forkd is the privileged BUILDER concentrated to the
           # explicit builder capability set, not a privileged-and-long-lived
-          # daemon: it drops ALL capabilities and adds back ONLY the six the
+          # daemon: it drops ALL capabilities and adds back ONLY the seven the
           # builder needs (cmd/forkd/jailer.go forkdRequiredCapabilities, the
-          # single source of truth: the five jailer caps plus NET_ADMIN):
+          # single source of truth: the five jailer caps plus NET_ADMIN and
+          # DAC_OVERRIDE):
           #   - SYS_ADMIN: mount(2) for the chroot-base pivot setup, plus the
           #     jailer's cgroup and namespace setup;
           #   - CHOWN:     hand the per-VM chroot files to the jailed uid/gid;
@@ -126,6 +127,9 @@ spec:
           #   - NET_ADMIN: create the per-template placeholder tap at BUILD time
           #     (`ip tuntap add`, --enable-networking); scoped to forkd's own pod
           #     netns (forkd is not hostNetwork), like the husk pod's NET_ADMIN.
+          #   - DAC_OVERRIDE: reopen the template rootfs.ext4 the builder itself
+          #     wrote, after the jailer chowned the shared inode to the per-VM
+          #     uid, so a rebuild does not fail with EACCES (#426).
           # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
           # NOT a privileged hostPath, so the device cgroup is scoped by the
           # kubelet. allowPrivilegeEscalation: false and seccompProfile
@@ -144,6 +148,7 @@ spec:
                 - SETGID
                 - MKNOD
                 - NET_ADMIN
+                - DAC_OVERRIDE
             seccompProfile:
               type: RuntimeDefault
           resources:

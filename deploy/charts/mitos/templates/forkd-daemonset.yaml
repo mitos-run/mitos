@@ -88,7 +88,9 @@ spec:
           # cgroup/namespace setup; CHOWN to hand the chroot to the jailed uid;
           # SETUID/SETGID to drop to it; MKNOD for the in-chroot device nodes;
           # NET_ADMIN for the BUILD-time placeholder tap (`ip tuntap add`,
-          # --enable-networking), scoped to forkd's own pod netns).
+          # --enable-networking), scoped to forkd's own pod netns; DAC_OVERRIDE so
+          # the builder can reopen the template rootfs.ext4 it wrote after the
+          # jailer chowned the shared inode to the per-VM uid, #426).
           # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
           # not a privileged hostPath. allowPrivilegeEscalation: false and
           # seccompProfile RuntimeDefault complete the hardening. See
@@ -106,6 +108,7 @@ spec:
                 - SETGID
                 - MKNOD
                 - NET_ADMIN
+                - DAC_OVERRIDE
             seccompProfile:
               type: RuntimeDefault
           resources:

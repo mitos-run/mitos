@@ -137,13 +137,14 @@ func TestJailerRequiredCapabilities(t *testing.T) {
 
 // TestForkdRequiredCapabilities pins the FULL capability set the forkd CONTAINER
 // runs with after dropping privileged: true. It is the jailer set
-// (jailerRequiredCapabilities) PLUS CAP_NET_ADMIN, which the BUILDER needs to
-// create the per-template placeholder tap host-side (internal/fork/engine.go,
-// `ip tuntap add`) when networking is enabled; the jailer itself does not need
-// NET_ADMIN, so the two sets are kept distinct. This list is the authority the
-// DaemonSet securityContext.capabilities.add must agree with
-// (manifest_conformance_test.go). NET_ADMIN is scoped to forkd's own pod netns
-// (forkd is not hostNetwork), exactly as the husk pod's NET_ADMIN is.
+// (jailerRequiredCapabilities) PLUS two BUILDER extras the jailer itself does not
+// need: CAP_NET_ADMIN to create the per-template placeholder tap host-side
+// (internal/fork/engine.go, `ip tuntap add`) when networking is enabled, and
+// CAP_DAC_OVERRIDE so the builder can reopen the template rootfs.ext4 it wrote
+// after the jailer chowned the shared inode to the per-VM uid (#426). The jailer
+// and builder sets are kept distinct. This list is the authority the DaemonSet
+// securityContext.capabilities.add must agree with (manifest_conformance_test.go).
+// Both extras are scoped to forkd's own pod, not the host.
 func TestForkdRequiredCapabilities(t *testing.T) {
 	want := []string{
 		"CAP_SYS_ADMIN",
@@ -151,7 +152,8 @@ func TestForkdRequiredCapabilities(t *testing.T) {
 		"CAP_SETUID",
 		"CAP_SETGID",
 		"CAP_MKNOD",
-		"CAP_NET_ADMIN", // build-time placeholder tap (NOT a jailer requirement)
+		"CAP_NET_ADMIN",    // build-time placeholder tap (NOT a jailer requirement)
+		"CAP_DAC_OVERRIDE", // reopen the builder's own rootfs after the jailer chown (#426)
 	}
 	got := forkdRequiredCapabilities()
 	if len(got) != len(want) {
@@ -165,21 +167,25 @@ func TestForkdRequiredCapabilities(t *testing.T) {
 }
 
 // TestForkdRequiredCapabilitiesExtendsJailerSet asserts forkd's container set is
-// exactly the jailer set plus NET_ADMIN, so the jailer set stays the minimal
-// authority for the jail and NET_ADMIN is the single, documented builder extra.
+// exactly the jailer set followed by the documented builder extras (NET_ADMIN,
+// DAC_OVERRIDE), so the jailer set stays the minimal authority for the jail and
+// every builder addition is explicit and ordered.
 func TestForkdRequiredCapabilitiesExtendsJailerSet(t *testing.T) {
 	jailer := jailerRequiredCapabilities()
 	forkd := forkdRequiredCapabilities()
-	if len(forkd) != len(jailer)+1 {
-		t.Fatalf("forkd set %v should be the jailer set %v plus exactly one capability", forkd, jailer)
+	builderExtras := []string{"CAP_NET_ADMIN", "CAP_DAC_OVERRIDE"}
+	if len(forkd) != len(jailer)+len(builderExtras) {
+		t.Fatalf("forkd set %v should be the jailer set %v plus the builder extras %v", forkd, jailer, builderExtras)
 	}
 	for i := range jailer {
 		if forkd[i] != jailer[i] {
 			t.Fatalf("forkd set must start with the jailer set in order: forkd[%d]=%q, jailer[%d]=%q", i, forkd[i], i, jailer[i])
 		}
 	}
-	if forkd[len(forkd)-1] != "CAP_NET_ADMIN" {
-		t.Fatalf("the one builder extra must be CAP_NET_ADMIN, got %q", forkd[len(forkd)-1])
+	for j, extra := range builderExtras {
+		if forkd[len(jailer)+j] != extra {
+			t.Fatalf("builder extra[%d] = %q, want %q", j, forkd[len(jailer)+j], extra)
+		}
 	}
 }
 

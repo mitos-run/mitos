@@ -113,7 +113,7 @@ open, with a severity on the review rows) is preserved throughout.
 | Guest agent - Rust (`guest/agent-rs`) | PID 1 in guest; the SOLE production agent since Phase E (#310). Baked as `/init` by `guest/rootfs/build.sh` and `kvm-test.yaml`. Serves ONLY gRPC on vsock port 53 (AgentGRPCPort); all host callers speak gRPC (SP1.5 merged, Go agent and legacy JSON protocol removed). SECURITY-SENSITIVE: requires named human reviewer; see `docs/security-review-policy.md`. | nothing | forkd / husk stub (gRPC, port 53) |
 | husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), `seccomp: RuntimeDefault`, read-only snapshot mount; the long-lived husk-stub container is NOT privileged | controller (mTLS control channel) | controller |
 | husk `enable-ip-forward` init container (name-egress pools only) | short-lived PRIVILEGED init container on the husk pod; writes `net.ipv4.ip_forward=1` in the shared pod netns and exits BEFORE the workload runs; added only when name-based egress is configured (`--husk-dns-upstream` set) | controller (it is part of the pod spec) | controller |
-| forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | NON-privileged DaemonSet pod (uid 0, `privileged: false`, `allowPrivilegeEscalation: false`, `seccomp: RuntimeDefault`): drops ALL capabilities and adds back ONLY the explicit builder set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` for the jailer, plus `NET_ADMIN` for the build-time placeholder tap; `cmd/forkd/jailer.go` `forkdRequiredCapabilities`). The per-VM jailer is ENABLED in the shipped DaemonSet (`deploy/daemon/daemonset.yaml`: `--jailer`/`--chroot-base`/`--uid-range`), so every build/raw-forkd VM runs under a dedicated uid/gid in a per-VM chroot. `/dev/kvm` and `/dev/net/tun` come from the device plugin (`mitos.run/kvm`), NOT a privileged hostPath. (#352) | controller | controller, nodes |
+| forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | NON-privileged DaemonSet pod (uid 0, `privileged: false`, `allowPrivilegeEscalation: false`, `seccomp: RuntimeDefault`): drops ALL capabilities and adds back ONLY the explicit builder set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` for the jailer, plus `NET_ADMIN` for the build-time placeholder tap and `DAC_OVERRIDE` so the builder can reopen the template `rootfs.ext4` it wrote after the jailer chowned the shared inode to the per-VM uid, #426; `cmd/forkd/jailer.go` `forkdRequiredCapabilities`). `DAC_OVERRIDE` is negligible marginal authority next to the `CAP_SYS_ADMIN` the builder already holds. The per-VM jailer is ENABLED in the shipped DaemonSet (`deploy/daemon/daemonset.yaml`: `--jailer`/`--chroot-base`/`--uid-range`), so every build/raw-forkd VM runs under a dedicated uid/gid in a per-VM chroot. `/dev/kvm` and `/dev/net/tun` come from the device plugin (`mitos.run/kvm`), NOT a privileged hostPath. (#352) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
 
@@ -162,8 +162,10 @@ privileged process and RUN many times by unprivileged pods.
   per-node BUILDER and the raw-forkd fallback: building a snapshot runs the
   jailer, which needs `CAP_SYS_ADMIN` (chroot-base mount setup, cgroup, and
   namespace setup), `CAP_CHOWN`/`CAP_SETUID`/`CAP_SETGID` (hand and drop to the
-  per-VM uid), `CAP_MKNOD` (in-chroot `/dev/kvm` and `/dev/net/tun` nodes), and
-  `CAP_NET_ADMIN` (the build-time placeholder tap). forkd runs with EXACTLY that
+  per-VM uid), `CAP_MKNOD` (in-chroot `/dev/kvm` and `/dev/net/tun` nodes),
+  `CAP_NET_ADMIN` (the build-time placeholder tap), and `CAP_DAC_OVERRIDE` (reopen
+  the template `rootfs.ext4` the builder wrote after the jailer chowned the shared
+  inode to the per-VM uid, #426). forkd runs with EXACTLY that
   set (`drop: [ALL]`, `privileged: false`, `allowPrivilegeEscalation: false`,
   `seccompProfile: RuntimeDefault`), and `/dev/kvm`/`/dev/net/tun` come from the
   device plugin (`mitos.run/kvm`), not a privileged hostPath. Status: mitigated.

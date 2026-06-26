@@ -47,11 +47,23 @@ func jailerRequiredCapabilities() []string {
 // NET_ADMIN, so the jailer list stays the minimal authority for the jail and
 // NET_ADMIN is the single, documented builder extra. NET_ADMIN is scoped to
 // forkd's own pod netns (forkd is not hostNetwork), exactly like the husk pod's
-// NET_ADMIN; it cannot reach the host netns. This is the single source of truth
-// the DaemonSet securityContext.capabilities.add must match
+// NET_ADMIN; it cannot reach the host netns.
+//
+// It also includes CAP_DAC_OVERRIDE: the builder copies and finalizes the
+// template rootfs.ext4 under <dataDir>/templates, and that file becomes owned by
+// a per-VM jailed uid (the jailer hard-links the rootfs into the chroot and
+// chowns the shared inode to the per-VM uid). On a subsequent build forkd (root,
+// but subject to normal DAC checks without this cap) otherwise cannot reopen its
+// own template rootfs for write and the snapshot build fails with EACCES (#426).
+// DAC_OVERRIDE is negligible marginal authority next to the CAP_SYS_ADMIN the
+// builder already holds, and like the rest of the set it is scoped to forkd's
+// own pod, not the host.
+//
+// This is the single source of truth the DaemonSet
+// securityContext.capabilities.add must match
 // (cmd/forkd/manifest_conformance_test.go). Widening it is a threat-model change.
 func forkdRequiredCapabilities() []string {
-	return append(jailerRequiredCapabilities(), "CAP_NET_ADMIN")
+	return append(jailerRequiredCapabilities(), "CAP_NET_ADMIN", "CAP_DAC_OVERRIDE")
 }
 
 // parseUIDRange parses the --uid-range flag, "low-high" inclusive.
