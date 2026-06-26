@@ -93,6 +93,25 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Org-namespace tenancy (issue #288, used only when --enable-org-tenancy is set;
+  # off by default so self-host is unaffected). The OrgReconciler watches the Org
+  # CRD and provisions each org's isolation namespace with its ResourceQuota,
+  # LimitRange, default-deny NetworkPolicy, and pool-secrets RoleBinding.
+  - apiGroups: ["mitos.run"]
+    resources: ["orgs"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["mitos.run"]
+    resources: ["orgs/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Leader election: the controller binary acquires a Lease at startup (the same
   # code runs in mock mode), so the dev mock controller needs leases even at
   # replicas 1, or the manager blocks the reconcilers and claims never reconcile.
