@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"math"
 	"os/exec"
 	"path/filepath"
@@ -80,6 +81,9 @@ func DirSizeMB(dir string) (int, error) {
 			// Such dirs are near-empty, and the headroom multiplier plus the
 			// minRootfsMB floor below absorb the small undercount.
 			if errors.Is(err, fs.ErrPermission) {
+				// Leave a trail so a later undercount is diagnosable without a re-run
+				// (matches the extract.go skip logging style).
+				log.Printf("ociroot: skipping unreadable path %q during size measurement: %v", path, err)
 				return nil
 			}
 			return err
