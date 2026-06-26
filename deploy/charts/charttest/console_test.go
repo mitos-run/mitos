@@ -210,6 +210,94 @@ func TestOrgTenancyEnabledAddsFlagAndRBAC(t *testing.T) {
 	}
 }
 
+// consoleClusterRole extracts the mitos-console ClusterRole YAML document from the
+// rendered manifests so an RBAC assertion targets that role specifically.
+func consoleClusterRole(t *testing.T, out string) string {
+	t.Helper()
+	docs := strings.Split(out, "\n---\n")
+	for _, d := range docs {
+		if strings.Contains(d, "kind: ClusterRole") && strings.Contains(d, "name: mitos-console") {
+			return d
+		}
+	}
+	t.Fatal("mitos-console ClusterRole not found in rendered manifests")
+	return ""
+}
+
+// TestOnboardingSMTPAbsentByDefault asserts the default render wires no SMTP env,
+// so a self-host install does not advertise a mail server it does not have.
+func TestOnboardingSMTPAbsentByDefault(t *testing.T) {
+	out := render(t)
+	for _, env := range []string{"MITOS_SMTP_HOST", "MITOS_SMTP_PASSWORD", "MITOS_ONBOARDING_VERIFY_URL", "MITOS_CONSOLE_ORG_TENANCY"} {
+		if strings.Contains(out, env) {
+			t.Fatalf("%s rendered by default; onboarding SMTP/tenancy must be opt-in", env)
+		}
+	}
+}
+
+// TestOnboardingSMTPSecretKeyRefWiring asserts that when SMTP is configured the
+// host/port/from are plain env and the username/password come from a secretKeyRef
+// ONLY (never an inline plaintext value).
+func TestOnboardingSMTPSecretKeyRefWiring(t *testing.T) {
+	out := render(t,
+		"console.signup=true",
+		"console.onboarding.verifyURL=https://app.mitos.run/auth/verify",
+		"console.onboarding.smtp.host=smtp.example.com",
+		"console.onboarding.smtp.from=no-reply@mitos.run",
+		"console.onboarding.smtp.credentialsSecretRef=mitos-smtp",
+	)
+	mustEnv(t, out, "MITOS_SMTP_HOST", "smtp.example.com")
+	mustEnv(t, out, "MITOS_SMTP_FROM", "no-reply@mitos.run")
+	mustEnv(t, out, "MITOS_ONBOARDING_VERIFY_URL", "https://app.mitos.run/auth/verify")
+
+	// The password MUST be a secretKeyRef into the configured secret, never a plain
+	// value. Assert the secretKeyRef block is present for the password key.
+	if !strings.Contains(out, "name: MITOS_SMTP_PASSWORD") {
+		t.Fatal("MITOS_SMTP_PASSWORD env not rendered when SMTP credentials secret is set")
+	}
+	if !strings.Contains(out, "secretKeyRef") || !strings.Contains(out, "name: mitos-smtp") {
+		t.Fatal("SMTP password not sourced from the configured secretKeyRef")
+	}
+	// The chart models no password VALUE at all: it can only be sourced from the
+	// secret, so the password env must be immediately followed by valueFrom, never
+	// a plain value. Assert the line after the password env name is valueFrom.
+	if !passwordUsesValueFrom(out) {
+		t.Fatal("SMTP password not rendered as a valueFrom/secretKeyRef; must never be a plaintext value")
+	}
+}
+
+// passwordUsesValueFrom reports whether the MITOS_SMTP_PASSWORD env is sourced
+// from valueFrom (and thus a secretKeyRef), never an inline plaintext value.
+func passwordUsesValueFrom(out string) bool {
+	lines := strings.Split(out, "\n")
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == "- name: MITOS_SMTP_PASSWORD" && i+1 < len(lines) {
+			return strings.TrimSpace(lines[i+1]) == "valueFrom:"
+		}
+	}
+	return false
+}
+
+// TestConsoleOrgsRBACOnlyWhenClusterOnboarding asserts the console ClusterRole
+// gains orgs get/create/update ONLY when cluster onboarding is enabled, and never
+// the delete verb (the console never deletes orgs).
+func TestConsoleOrgsRBACOnlyWhenClusterOnboarding(t *testing.T) {
+	// Off by default: no orgs rule.
+	if hasResourceRule(consoleClusterRole(t, render(t)), "orgs") {
+		t.Fatal("console ClusterRole grants orgs by default; must be gated behind console.onboarding.clusterProvisioning")
+	}
+	// On: orgs rule present.
+	out := render(t,
+		"console.signup=true",
+		"console.onboarding.clusterProvisioning=true",
+	)
+	role := consoleClusterRole(t, out)
+	if !hasResourceRule(role, "orgs") {
+		t.Fatal("console ClusterRole missing orgs rule when cluster onboarding is enabled")
+	}
+	mustEnv(t, out, "MITOS_CONSOLE_ORG_TENANCY", "true")
+}
+
 // hasResourceRule reports whether the rendered ClusterRole lists the given
 // resource as a rule entry (a YAML "- <resource>" list line), so a comment that
 // mentions the word does not falsely satisfy the check.

@@ -31,6 +31,17 @@ rules:
   - apiGroups: ["mitos.run"]
     resources: ["sandboxes", "sandboxpools", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.console.onboarding.clusterProvisioning }}
+  # Cluster onboarding (issue #215): a verified signup creates the cluster-scoped
+  # Org custom resource, which the controller's OrgReconciler turns into a per-org
+  # namespace. The console needs get/create/update on orgs to do this idempotently
+  # (CreateOrUpdate). It never deletes orgs and never touches the org status. Only
+  # granted when cluster onboarding is enabled.
+  - apiGroups: ["mitos.run"]
+    resources:
+      - orgs
+    verbs: ["get", "create", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -161,6 +172,41 @@ spec:
             {{- end }}
             - name: MITOS_CONSOLE_SECRET_PROVIDERS
               value: {{ include "mitos.console.secretProviders" . | quote }}
+            {{- /*
+            Onboarding (issue #215). The public signup/verify endpoints are mounted
+            only when console.signup is true; this env configures HOW the
+            verification email is delivered and WHETHER a verified signup provisions
+            the per-org namespace. The SMTP password is sourced from a Secret ONLY,
+            never inlined as a plain env value.
+            */}}
+            {{- if .Values.console.onboarding.verifyURL }}
+            - name: MITOS_ONBOARDING_VERIFY_URL
+              value: {{ .Values.console.onboarding.verifyURL | quote }}
+            {{- end }}
+            {{- if .Values.console.onboarding.clusterProvisioning }}
+            - name: MITOS_CONSOLE_ORG_TENANCY
+              value: "true"
+            {{- end }}
+            {{- if .Values.console.onboarding.smtp.host }}
+            - name: MITOS_SMTP_HOST
+              value: {{ .Values.console.onboarding.smtp.host | quote }}
+            - name: MITOS_SMTP_PORT
+              value: {{ .Values.console.onboarding.smtp.port | quote }}
+            - name: MITOS_SMTP_FROM
+              value: {{ .Values.console.onboarding.smtp.from | quote }}
+            {{- if .Values.console.onboarding.smtp.credentialsSecretRef }}
+            - name: MITOS_SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.console.onboarding.smtp.credentialsSecretRef }}
+                  key: username
+            - name: MITOS_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.console.onboarding.smtp.credentialsSecretRef }}
+                  key: password
+            {{- end }}
+            {{- end }}
             {{- if .Values.console.secrets.openbao.enabled }}
             - name: MITOS_CONSOLE_OPENBAO_ADDR
               value: {{ .Values.console.secrets.openbao.address | quote }}
