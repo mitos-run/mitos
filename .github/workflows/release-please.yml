@@ -7,21 +7,50 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # actions:write lets the cascade step below dispatch publish.yaml when a
+  # release is cut without a PAT configured.
+  actions: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    env:
+      # When RELEASE_PLEASE_TOKEN (a PAT or GitHub App token) is set, the tag
+      # release-please pushes triggers publish.yaml naturally, so the explicit
+      # dispatch below is skipped to avoid a duplicate publish run.
+      HAS_RP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           # A release or tag created with the default GITHUB_TOKEN does NOT
           # trigger other workflows (GitHub blocks recursive token-driven runs),
-          # so the tag/release that release-please cuts would never start
-          # publish.yaml (images) or operator-release.yaml (OperatorHub bundle).
-          # Set the RELEASE_PLEASE_TOKEN secret to a PAT or GitHub App token with
-          # contents:write and workflow scope so the release event cascades to
-          # those workflows. It falls back to GITHUB_TOKEN when unset, which keeps
-          # today's behavior (the release PR still lands, downstream stays manual).
+          # so the tag release-please cuts would not start publish.yaml (images)
+          # on its own. Two ways to make releases publish automatically:
+          #   1. Set the RELEASE_PLEASE_TOKEN secret to a PAT or GitHub App token
+          #      with contents:write and workflow scope; the release event then
+          #      cascades to every downstream workflow naturally.
+          #   2. Leave it unset (the default): the cascade step below dispatches
+          #      publish.yaml explicitly. workflow_dispatch IS allowed under
+          #      GITHUB_TOKEN (unlike push/tag/release events), so no secret is
+          #      needed and images still publish on every release.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Publish the signed images for the new release. Without this, a release cut
+      # with the default GITHUB_TOKEN would tag the repo but never build or push
+      # images, leaving users unable to pull the new version (the v1.3.0 gap).
+      # Skipped when a PAT is configured, since the tag push already cascades.
+      - name: Publish images for the new release
+        if: ${{ steps.release.outputs.releases_created == 'true' && env.HAS_RP_TOKEN != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs['.--tag_name'] }}
+        run: |
+          if [ -z "${TAG}" ]; then
+            echo "release created but no tag name resolved; not dispatching publish" >&2
+            exit 1
+          fi
+          echo "Release ${TAG} cut with GITHUB_TOKEN; dispatching the signed-image publish workflow for it."
+          gh workflow run publish.yaml -f tag="${TAG}" -f ref="${TAG}"

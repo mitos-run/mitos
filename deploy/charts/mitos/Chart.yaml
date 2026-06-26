@@ -5,8 +5,8 @@ name: mitos
 # lifecycle through the mitos.run CRDs.
 description: Snapshot-fork sandboxes for AI agents on Kubernetes.
 type: application
-version: 0.4.1
-appVersion: "v0.13.0"
+version: 0.4.1 # x-release-please-version
+appVersion: "v0.13.0" # x-release-please-version
 kubeVersion: ">=1.29.0-0"
 keywords:
   - sandbox

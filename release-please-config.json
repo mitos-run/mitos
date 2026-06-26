@@ -13,6 +13,9 @@
         { "type": "ci", "section": "CI", "hidden": true },
         { "type": "test", "section": "Tests", "hidden": true },
         { "type": "refactor", "section": "Refactoring", "hidden": true }
+      ],
+      "extra-files": [
+        { "type": "generic", "path": "deploy/charts/mitos/Chart.yaml" }
       ]
     }
   }
