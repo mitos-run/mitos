@@ -355,6 +355,36 @@ console:
       # Paddle API host. Default is live; set to https://sandbox-api.paddle.com
       # for the sandbox. Empty uses the binary's built-in live default.
       baseURL: ""
+  # Public self-serve onboarding (issue #215): the unauthenticated signup +
+  # verify endpoints and the verification email. The public endpoints are mounted
+  # only when console.signup is true (the #208 gate); this block configures HOW
+  # the verification email is delivered and WHETHER a verified signup provisions
+  # the per-org tenant namespace.
+  onboarding:
+    # The base URL the verification link points at. The console appends the
+    # one-time token as a ?token= query parameter. Normally
+    # https://<console-host>/auth/verify. Required when SMTP is configured.
+    verifyURL: ""
+    # When true, a verified signup creates the cluster-scoped Org custom resource,
+    # which the controller's OrgReconciler turns into a per-org namespace. Requires
+    # controller.orgTenancy.enabled and the console orgs RBAC (rendered below when
+    # this is on). When false (default), a verified signup creates the account and
+    # org in the store but provisions no namespace.
+    clusterProvisioning: false
+    # SMTP delivery for the verification email. host/port/from are plain config;
+    # the username and password are sourced from a Secret ONLY (never inlined).
+    # When smtp.host is empty the console uses the DEV log sender (no real email is
+    # delivered) and logs that mode at startup.
+    smtp:
+      host: ""
+      port: 587
+      from: ""
+      # Name of an existing Secret holding the SMTP credentials. The username is
+      # read from key "username" and the password from key "password". Empty omits
+      # the auth env entirely (the console then uses the dev log sender unless host
+      # is set with anonymous relay, which is uncommon). The password VALUE is
+      # never placed in the chart or in a plain env var.
+      credentialsSecretRef: ""
   ingress:
     enabled: false
     className: ""

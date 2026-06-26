@@ -127,6 +127,14 @@ func main() {
 			logger.Warn("MITOS_CONSOLE_OIDC_ISSUER unset; /auth login flow not mounted (BFF requires a session)")
 		}
 	}
+	// The onboarding funnel is PUBLIC and unauthenticated by design: signup and
+	// verify are how a brand-new user with no session creates an account. They are
+	// mounted OUTSIDE the session middleware. They are gated by the same
+	// server-controlled signup flag (caps.Signup, the #208 gate); when off, nothing
+	// is mounted and the funnel stays in waitlist mode. The SMTP password and the
+	// verify token are never logged.
+	mountOnboarding(mux, logger, accounts, store, capsGate{signup: caps.Signup})
+
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session
 	// middleware. It verifies the signature before touching any billing state.

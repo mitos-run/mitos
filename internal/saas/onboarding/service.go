@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -43,6 +45,22 @@ var (
 	// ErrTokenExpired is returned when a verify token resolved but is past expiry.
 	ErrTokenExpired = errors.New("onboarding: verification token has expired")
 )
+
+// OrgProvisioner is the seam that materializes the tenant isolation stack for a
+// freshly verified org: in cluster mode it creates the cluster-scoped Org custom
+// resource (api/v1.Org, name = org id), which the OrgReconciler turns into a
+// per-org namespace (mitos-org-<id>) with its quota and default-deny policy.
+//
+// It is OPTIONAL: a pure dev deployment with no Kubernetes client supplies none,
+// and Verify skips provisioning with a warning rather than failing the signup.
+// Implementations MUST be idempotent: a re-verify (or a controller retry) calls
+// Provision again with the same id, and an already-existing Org is a success, not
+// an error.
+type OrgProvisioner interface {
+	// Provision ensures the tenant Org resource exists for orgID with the given
+	// display name. It MUST treat an already-existing org as success.
+	Provision(ctx context.Context, orgID, displayName string) error
+}
 
 // EmailSender is the seam that delivers the verification email. The fake
 // (FakeEmailSender) is the tested default; the real SMTP/provider is a follow-up
@@ -201,7 +219,9 @@ type Service struct {
 	ledger    billing.CreditLedger
 	credit    billing.Money
 	email     EmailSender
+	provision OrgProvisioner
 	events    EventRecorder
+	logger    *slog.Logger
 	now       func() time.Time
 	idgen     func() string
 	tokengen  func() (string, error)
@@ -237,6 +257,22 @@ func WithTokenTTL(d time.Duration) Option { return func(s *Service) { s.tokenTTL
 // WithEventRecorder sets the funnel instrumentation sink.
 func WithEventRecorder(r EventRecorder) Option { return func(s *Service) { s.events = r } }
 
+// WithOrgProvisioner sets the tenant Org-CR provisioner. When unset, a verified
+// signup creates the account and org in the store but provisions no Kubernetes
+// namespace (pure dev mode); Verify logs a warning in that case.
+func WithOrgProvisioner(p OrgProvisioner) Option { return func(s *Service) { s.provision = p } }
+
+// WithLogger sets the structured logger. It is used only for non-secret
+// operational lines (for example the skip-provisioning warning); it never logs an
+// email or a token. When unset, a discarding logger is used.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
 // NewService builds an onboarding service. accounts and ledger are required; the
 // remaining dependencies default to the in-memory tested implementations.
 func NewService(accounts *saas.AccountService, store saas.Store, pending PendingStore, ledger billing.CreditLedger, email EmailSender, opts ...Option) *Service {
@@ -249,6 +285,7 @@ func NewService(accounts *saas.AccountService, store saas.Store, pending Pending
 		credit:    billing.DefaultSignupCredit(),
 		email:     email,
 		events:    nopRecorder{},
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:       time.Now,
 		idgen:     randomID,
 		tokengen:  randomToken,
@@ -397,6 +434,21 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 	}
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("onboarding verify: provision account: %w", err)
+	}
+
+	// Provision the tenant isolation stack: create the cluster-scoped Org custom
+	// resource so the OrgReconciler stands up the per-org namespace (#288). This is
+	// the signup -> namespace integration. In pure dev mode no provisioner is wired,
+	// so skip with a warning rather than failing the signup. A provisioner that
+	// errors DOES fail the verify so the user can retry it idempotently rather than
+	// landing in an org with no namespace; the provisioner is required to be
+	// idempotent so a retry is safe.
+	if s.provision != nil {
+		if err := s.provision.Provision(ctx, org.ID, org.Name); err != nil {
+			return VerifyResult{}, fmt.Errorf("onboarding verify: provision tenant org: %w", err)
+		}
+	} else {
+		s.logger.Warn("onboarding verify: no org provisioner configured; skipping tenant namespace provisioning", "org", org.ID)
 	}
 
 	// Grant the free signup credit (#212). The ledger keys the grant by org id so a
