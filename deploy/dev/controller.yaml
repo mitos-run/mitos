@@ -112,6 +112,14 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Bind the mitos-pool-secrets ClusterRole per org namespace. The controller
+  # does not itself hold every verb that role grants (it lacks secrets
+  # delete/watch), so it needs the bind verb on that specific ClusterRole or the
+  # RBAC escalation check refuses the RoleBinding create.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["mitos-pool-secrets"]
+    verbs: ["bind"]
   # Leader election: the controller binary acquires a Lease at startup (the same
   # code runs in mock mode), so the dev mock controller needs leases even at
   # replicas 1, or the manager blocks the reconcilers and claims never reconcile.
@@ -143,3 +151,19 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: mitos-controller
+---
+# The mitos-pool-secrets ClusterRole is a DEFINITION the OrgReconciler binds per
+# org namespace (and the per-pool secrets-narrowing binds per pool namespace).
+# The Helm chart ships it; the dev overlay needs its own copy so the org-tenancy
+# e2e can create the per-org RoleBinding that references it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-pool-secrets
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "get", "list", "update", "watch"]
