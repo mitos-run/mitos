@@ -43,6 +43,8 @@ export { ConnectClient } from "./connect.js";
 export type {
   SandboxOptions,
   Terminator,
+  Forker,
+  ForkOptions,
   TerminateOptions,
   TerminateOutput,
   RunCodeCallbacks,

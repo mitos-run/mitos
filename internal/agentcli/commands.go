@@ -150,6 +150,9 @@ func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, er
 	// flag parser stops at the first non-flag token, so split the id out first.
 	id, rest := splitFirstPositional(args)
 	fs := newFlagSet("sandbox fork", errw)
+	// --count is the documented flag (#311); --replicas is kept as a back-compat
+	// alias. --count wins when set (default 0 means "not set, use --replicas").
+	count := fs.Int("count", 0, "number of forks (alias of --replicas)")
 	replicas := fs.Int("replicas", 1, "number of forks")
 	if err := fs.Parse(rest); err != nil {
 		fmt.Fprint(errw, usage)
@@ -162,7 +165,11 @@ func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, er
 		fmt.Fprintf(errw, "sandbox fork: a sandbox id is required\n\n%s", usage)
 		return 2
 	}
-	ids, err := backend.Fork(ctx, id, *replicas)
+	n := *replicas
+	if *count > 0 {
+		n = *count
+	}
+	ids, err := backend.Fork(ctx, id, n)
 	if err != nil {
 		fmt.Fprintf(errw, "fork: %v\n", err)
 		return 1

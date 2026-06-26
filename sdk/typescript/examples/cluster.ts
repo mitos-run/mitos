@@ -44,6 +44,14 @@ async function main(): Promise<void> {
   const content = await sandbox.files.read("/tmp/data.txt");
   console.log("file content:", content.trim());
 
+  // Live fork-to-many: one call returns N independent copy-on-write children.
+  // Each child shares the parent's memory pages until it writes, so it lands in
+  // a warm, Ready environment. Branch one agent into many parallel attempts.
+  const [a, b] = await sandbox.fork(2);
+  await a.exec("echo conservative > /workspace/a.txt");
+  await b.exec("echo aggressive  > /workspace/a.txt");
+  console.log("forked children:", a.id, b.id);
+
   // List all sandboxes in the namespace, optionally filtered by pool.
   const all = await client.list("my-pool");
   console.log("active sandboxes:", all.map((s) => s.name));

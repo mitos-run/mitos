@@ -183,6 +183,37 @@ func TestSandboxForkDispatch(t *testing.T) {
 	}
 }
 
+func TestSandboxForkCountFlag(t *testing.T) {
+	// --count is the documented flag name (#311); it forks that many children.
+	fb := NewFakeBackend()
+	fb.ForkIDs = []string{"f1", "f2"}
+	code, _, _ := runCLI(t, fb, "sandbox", "fork", "sbx-1", "--count", "2")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	calls := fb.RecordedCalls()
+	if calls[0].Method != "fork" || calls[0].SandboxID != "sbx-1" || calls[0].Replicas != 2 {
+		t.Fatalf("calls = %v, want fork sbx-1 x2 via --count", calls)
+	}
+}
+
+func TestTopLevelForkDispatch(t *testing.T) {
+	// `mitos fork <id> --count N` is the homepage one-liner (#311).
+	fb := NewFakeBackend()
+	fb.ForkIDs = []string{"f1", "f2", "f3"}
+	code, out, _ := runCLI(t, fb, "fork", "sbx-1", "--count", "3")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	calls := fb.RecordedCalls()
+	if calls[0].Method != "fork" || calls[0].SandboxID != "sbx-1" || calls[0].Replicas != 3 {
+		t.Fatalf("calls = %v, want fork sbx-1 x3 via top-level fork", calls)
+	}
+	if !strings.Contains(out.String(), "f1") {
+		t.Fatalf("fork output = %q, want it to contain the child ids", out.String())
+	}
+}
+
 func TestSandboxTerminateDispatch(t *testing.T) {
 	fb := NewFakeBackend()
 	code, _, _ := runCLI(t, fb, "sandbox", "terminate", "sbx-1")

@@ -714,6 +714,22 @@ class Sandbox:
                 name=fork_name,
             )
             status = obj.get("status", {})
+
+            # A refused fork (secret inheritance, capacity, budget) is terminal:
+            # the controller sets a Rejected condition rather than ever producing
+            # children. Surface it as an LLM-legible error instead of timing out.
+            for c in status.get("conditions", []) or []:
+                if c.get("type") == "Rejected" and c.get("status") == "True":
+                    raise AgentRunError(
+                        f"fork {fork_name} was rejected",
+                        code="fork_rejected",
+                        cause=c.get("reason", "Rejected"),
+                        remediation=c.get(
+                            "message",
+                            "Inspect the fork's Rejected condition and adjust the request.",
+                        ),
+                    )
+
             forks = status.get("children", [])
 
             ready = [f for f in forks if f.get("phase") == "Ready"]
