@@ -1,0 +1,56 @@
+name: Security finding (non-sensitive)
+description: Track a known security surface, threat-model gap, or hardening task. NOT for exploitable vulnerabilities.
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## STOP if this is an exploitable vulnerability
+
+        If you can demonstrate an exploit, a privilege escalation, a sandbox escape, secret disclosure, or any other directly exploitable weakness, do NOT file it here.
+        Report it privately as described in [SECURITY.md](https://github.com/mitos-run/mitos/blob/main/SECURITY.md).
+
+        Use this form only for non-sensitive security work: a stale or missing row in docs/threat-model.md, a documented surface that lacks a control, a hardening task, or a fork-correctness hazard (docs/fork-correctness.md) that is not directly exploitable.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: This is NOT an exploitable vulnerability. I understand exploitable issues must be reported privately per SECURITY.md.
+          required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - internal/fork (snapshot/restore, CoW)
+        - internal/firecracker (VM lifecycle)
+        - internal/daemon (forkd gRPC and HTTP)
+        - guest/agent-rs (PID 1, vsock)
+        - Token / attenuation / auth
+        - Network / egress filtering
+        - Expose subsystem
+        - Other / cross-cutting
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Finding
+      description: What is the security surface or gap? Ground it in code, the threat model, or observed behavior. If you cannot ground it, respond with exactly `NOT_ENOUGH_INFO`.
+    validations:
+      required: true
+  - type: textarea
+    id: threat_model
+    attributes:
+      label: Threat-model delta
+      description: Which row of docs/threat-model.md does this touch, and how should its status change? Per the operating principles, a surface change and its threat-model update land in the same PR.
+    validations:
+      required: true
+  - type: textarea
+    id: remediation
+    attributes:
+      label: Proposed remediation
+      description: How should this be controlled or closed? Note any feature work it should block.
+    validations:
+      required: false

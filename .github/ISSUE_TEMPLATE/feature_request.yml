@@ -2,18 +2,22 @@ name: Feature request
 description: Propose a new capability or improvement
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us evaluate this with concrete use cases and tradeoffs. ROADMAP.md is the priority order for all work; check it before filing.
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What problem are you trying to solve? What is impossible or painful today?
+      description: What problem are you trying to solve? What is impossible or painful today? Ground this in a real use case, not a hypothetical.
     validations:
       required: true
   - type: textarea
     id: solution
     attributes:
       label: Proposed solution
-      description: How should it work? Sketch API shapes or CLI flags if relevant.
+      description: How should it work? Sketch API shapes, CRD fields, or CLI flags if relevant.
     validations:
       required: true
   - type: textarea
@@ -23,6 +27,13 @@ body:
       description: Other approaches you considered and why they fall short.
     validations:
       required: false
+  - type: textarea
+    id: breaking
+    attributes:
+      label: Breaking changes
+      description: Does this change any CRD field, API shape, or output that users or agents rely on? Describe what changes and how compatibility is kept. Write "None" only if you are certain.
+    validations:
+      required: true
   - type: textarea
     id: roadmap-fit
     attributes:
