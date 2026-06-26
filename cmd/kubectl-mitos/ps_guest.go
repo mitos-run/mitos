@@ -11,8 +11,11 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
+	"k8s.io/apimachinery/pkg/types"
+	v1 "mitos.run/mitos/api/v1"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // This file is the kubectl mitos ps consumer of the Layer 3 guest telemetry
@@ -40,11 +43,12 @@ type guestVitals struct {
 	Processes          []guestProcess
 }
 
-// labeledVitals is the guest snapshot the ps consumer renders, plus the host's
+// labeledVitals is the guest snapshot the ps consumer renders, plus the
 // claim/pool/workspace labels. The numeric sample (steal, memory vs balloon)
 // comes from the Connect Vitals RPC and the per-process table from the Connect
-// Processes RPC. The claim/pool/workspace labels are not carried by either RPC,
-// so they render empty until a future labeled RPC fills them.
+// Processes RPC. The claim/pool/workspace labels are Kubernetes control-plane
+// metadata the guest cannot know, so they are resolved from the Sandbox object
+// (sandboxLabels), not over the guest RPCs (#164 item 1).
 type labeledVitals struct {
 	Claim     string
 	Pool      string
@@ -151,6 +155,11 @@ func runPsProcesses(namespace, name string) error {
 	if err == nil && endpoint != "" {
 		v, ferr := fetchGuestVitals(ctx, http.DefaultClient, endpoint, token, ref)
 		if ferr == nil {
+			// Claim/pool/workspace are control-plane metadata on the Sandbox
+			// object; the guest cannot know them, so they are resolved from the
+			// CRD here rather than over the guest vitals RPC (#164 item 1).
+			v.Namespace = namespace
+			v.Claim, v.Pool, v.Workspace = sandboxLabels(ctx, c, namespace, name)
 			fmt.Print(renderGuestProcesses(v))
 			return nil
 		}
@@ -159,6 +168,27 @@ func runPsProcesses(namespace, name string) error {
 		fmt.Fprintf(os.Stderr, "note: %v; falling back to fork sandbox listing\n", err)
 	}
 	return runPs(namespace, false, name)
+}
+
+// sandboxLabels resolves the claim/pool/workspace labels for a sandbox from its
+// Sandbox object. These are Kubernetes control-plane metadata the guest cannot
+// know (the guest is just a VM), so they are read from the CRD here rather than
+// carried over the guest vitals RPC (#164 item 1). Best-effort: on a read error
+// the claim degrades to the requested name with empty pool/workspace, so the ps
+// table still renders something honest.
+func sandboxLabels(ctx context.Context, c client.Client, namespace, name string) (claim, pool, workspace string) {
+	claim = name
+	var sb v1.Sandbox
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sb); err != nil {
+		return claim, "", ""
+	}
+	if sb.Spec.Source.PoolRef != nil {
+		pool = sb.Spec.Source.PoolRef.Name
+	}
+	if sb.Spec.WorkspaceRef != nil {
+		workspace = sb.Spec.WorkspaceRef.Name
+	}
+	return claim, pool, workspace
 }
 
 // renderGuestProcesses formats the real in-guest process table as a column table

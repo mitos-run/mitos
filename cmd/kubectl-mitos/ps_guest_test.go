@@ -7,8 +7,44 @@ import (
 	"testing"
 
 	connect "connectrpc.com/connect"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "mitos.run/mitos/api/v1"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// TestSandboxLabelsFromCRD proves the claim/pool/workspace labels rendered by
+// `kubectl mitos ps --processes` come from the Sandbox object (control-plane
+// metadata the guest cannot know), not from the guest vitals RPC (#164 item 1).
+func TestSandboxLabelsFromCRD(t *testing.T) {
+	scheme := execScheme(t)
+	sandbox := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "team-a"},
+		Spec: v1.SandboxSpec{
+			Source:       v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python-pool"}},
+			WorkspaceRef: &v1.LocalObjectReference{Name: "ws-1"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
+
+	claim, pool, ws := sandboxLabels(context.Background(), c, "team-a", "sbx")
+	if claim != "sbx" || pool != "python-pool" || ws != "ws-1" {
+		t.Fatalf("got claim=%q pool=%q workspace=%q, want sbx/python-pool/ws-1", claim, pool, ws)
+	}
+}
+
+// TestSandboxLabelsMissingObjectDegrades proves the labels degrade gracefully
+// (claim = the requested name, empty pool/workspace) when the Sandbox object is
+// not readable, so the ps table still renders honestly.
+func TestSandboxLabelsMissingObjectDegrades(t *testing.T) {
+	scheme := execScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	claim, pool, ws := sandboxLabels(context.Background(), c, "default", "ghost")
+	if claim != "ghost" || pool != "" || ws != "" {
+		t.Fatalf("got claim=%q pool=%q workspace=%q, want ghost//", claim, pool, ws)
+	}
+}
 
 // TestFetchGuestVitals_FirstSampleAndProcesses verifies the ps --processes path
 // builds the snapshot from TWO Connect calls: it takes the FIRST GuestVitals
