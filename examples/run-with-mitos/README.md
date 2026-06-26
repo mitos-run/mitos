@@ -27,10 +27,20 @@ cold-starts in roughly 16 seconds; a fork lands a ready instance in fork latency
 
 ## What is in here
 
+The same mechanism (golden snapshot, CoW fork, durable Workspace, auto-update,
+expose ladder, per-fork secrets) across four app shapes, to show it is a primitive
+and not a one-off:
+
 - `openclaw/mitos.yaml`: the public flagship. A personal AI assistant, warm-forked.
-- `paperclip/mitos.yaml`: proof the very same mechanism (golden, CoW fork, durable
-  Workspace, auto-update, expose ladder, per-fork secrets) carries a stateful,
-  multi-service control plane with a database.
+- `paperclip/mitos.yaml`: a stateful, multi-service control plane with a database.
+  Proves the mechanism carries the DB-backed, multi-process end.
+- `deerflow/mitos.yaml`: a long-horizon multi-agent research harness
+  (bytedance/deer-flow). The dogfood for the fork-native subagent SDK (#340 piece 2):
+  its lead agent forks the warm golden to spawn each sub-agent instead of
+  cold-starting. Built from source (no published image).
+- `hermes-agent/mitos.yaml`: a self-improving personal agent
+  (NousResearch/hermes-agent). Showcases fork-your-evolved-state and auto-update, and
+  is a natural new fork-native backend alongside its existing Modal and Daytona ones.
 
 ## The four properties, on one mechanism
 
