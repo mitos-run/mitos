@@ -38,7 +38,15 @@ func (api *SandboxAPI) ProxyHTTP(sandboxID string, guestPort int, prefix string)
 		if err != nil {
 			return nil, fmt.Errorf("open guest port forward: %w", err)
 		}
-		return newPFConn(stream), nil
+		raw := newPFConn(stream)
+		// Track the conn so CloseExpose (called by UnregisterSandbox on terminate)
+		// can close it and no tunnel goroutine outlives the sandbox.
+		api.trackExposeConn(sandboxID, raw)
+		tc := &trackingConn{
+			Conn:    raw,
+			untrack: func() { api.untrackExposeConn(sandboxID, raw) },
+		}
+		return tc, nil
 	}
 
 	rp := &httputil.ReverseProxy{
