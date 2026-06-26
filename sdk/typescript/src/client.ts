@@ -7,7 +7,7 @@
 import { AgentRunError } from "./errors.js";
 import type { CustomObject, K8sApi } from "./k8s.js";
 import { Sandbox, toBaseUrl } from "./sandbox.js";
-import type { TerminateOptions } from "./sandbox.js";
+import type { ForkOptions, Forker, TerminateOptions } from "./sandbox.js";
 import type { SandboxInfo, SandboxPhase } from "./types.js";
 import { Workspace } from "./workspace.js";
 
@@ -86,6 +86,14 @@ function randomName(): string {
   globalThis.crypto.getRandomValues(bytes);
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   return `sandbox-${hex}`;
+}
+
+// Short random hex suffix (6 chars) for fork object names; mirrors the Python
+// SDK's uuid4().hex[:6].
+function randomSuffix(): string {
+  const bytes = new Uint8Array(3);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -171,6 +179,7 @@ export class AgentRun {
       endpoint: toBaseUrl(endpoint),
       token,
       terminator: this.makeTerminator(name),
+      forker: this.makeForker(name),
     });
   }
 
@@ -295,7 +304,98 @@ export class AgentRun {
       endpoint: toBaseUrl(resolved),
       token,
       terminator: this.makeTerminator(name),
+      forker: this.makeForker(name),
     });
+  }
+
+  /**
+   * Builds the fork capability for a sandbox: fork(n) creates a Sandbox with
+   * spec.source.fromSandbox + replicas=n (the controller fans out n indexed
+   * copy-on-write children), waits for all n to reach Ready, and returns each as
+   * a bound Sandbox (with its own token and a forker of its own). Mirrors the
+   * Python SDK Sandbox.fork. The live fork-to-many primitive, #311.
+   */
+  private makeForker(sourceName: string): Forker {
+    return async (n = 1, opts?: ForkOptions): Promise<Sandbox[]> => {
+      const forkName = `${sourceName}-fork-${randomSuffix()}`;
+      const forkObj: CustomObject = {
+        apiVersion: `${API_GROUP}/${API_VERSION}`,
+        kind: "Sandbox",
+        metadata: { name: forkName, namespace: this.namespace },
+        spec: {
+          source: { fromSandbox: { name: sourceName, pauseSource: opts?.pauseSource ?? false } },
+          replicas: n,
+        },
+      };
+      await this.k8s.createClaim(this.namespace, forkObj);
+      return this.waitForks(forkName, n, opts?.timeoutMs ?? this.pollTimeoutMs);
+    };
+  }
+
+  /**
+   * Polls a fork object's status.children until at least `expected` are Ready,
+   * then binds each to a Sandbox (reading its own per-child token Secret; the
+   * source's token does not open a child). LLM-legible on timeout.
+   */
+  private async waitForks(forkName: string, expected: number, timeoutMs: number): Promise<Sandbox[]> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const obj = await this.k8s.getClaim(this.namespace, forkName);
+      const status = obj.status ?? {};
+      // A refused fork (secret inheritance, capacity, budget) is terminal: the
+      // controller sets a Rejected condition rather than ever producing children.
+      // Surface it as an LLM-legible error instead of waiting out the timeout.
+      const conditions = (status["conditions"] as Array<Record<string, unknown>>) ?? [];
+      const rejected = conditions.find(
+        (c) => c["type"] === "Rejected" && c["status"] === "True",
+      );
+      if (rejected) {
+        throw new AgentRunError(`fork ${forkName} was rejected`, {
+          code: "fork_rejected",
+          cause: (rejected["reason"] as string) || "Rejected",
+          remediation:
+            (rejected["message"] as string) ||
+            "Inspect the fork's Rejected condition and adjust the request.",
+        });
+      }
+      const children = (status["children"] as Array<Record<string, unknown>>) ?? [];
+      const ready = children.filter((c) => c["phase"] === "Ready");
+      if (ready.length >= expected) {
+        const out: Sandbox[] = [];
+        for (const c of ready) {
+          const childName = (c["name"] as string) ?? "";
+          const childEndpoint = (c["endpoint"] as string) ?? "";
+          let token: string | undefined;
+          let secretEndpoint = "";
+          try {
+            const secret = await this.k8s.readSecret(this.namespace, childName + TOKEN_SECRET_SUFFIX);
+            token = secret["token"] || undefined;
+            secretEndpoint = secret["endpoint"] ?? "";
+          } catch {
+            // No token Secret for this child yet; proceed tokenless.
+          }
+          out.push(
+            new Sandbox({
+              id: childName,
+              endpoint: toBaseUrl(childEndpoint || secretEndpoint),
+              token,
+              terminator: this.makeTerminator(childName),
+              forker: this.makeForker(childName),
+            }),
+          );
+        }
+        return out;
+      }
+      if (Date.now() >= deadline) {
+        throw new AgentRunError(`forks not ready after ${timeoutMs}ms`, {
+          code: "ready_timeout",
+          cause: `fork ${forkName} did not produce ${expected} Ready children within ${timeoutMs}ms`,
+          remediation:
+            "Raise the timeout, or check the source is Ready and the pool/node has capacity.",
+        });
+      }
+      await this.sleep(POLL_INTERVAL_MS);
+    }
   }
 
   /**

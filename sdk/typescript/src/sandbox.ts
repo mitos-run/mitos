@@ -44,6 +44,21 @@ export interface TerminateOptions {
  */
 export type Terminator = (opts?: TerminateOptions) => Promise<string | undefined>;
 
+/** Options for fork(n). */
+export interface ForkOptions {
+  /** Pause the source VM during the fork checkpoint. Default false. */
+  pauseSource?: boolean;
+  /** Override the readiness poll timeout in ms. Defaults to the client's. */
+  timeoutMs?: number;
+}
+
+/**
+ * Forks the sandbox into n independent copy-on-write children and resolves once
+ * all are Ready. Supplied by the cluster client; a bare/server-mode Sandbox has
+ * none and fork() throws.
+ */
+export type Forker = (n: number, opts?: ForkOptions) => Promise<Sandbox[]>;
+
 export interface SandboxOptions {
   id: string;
   endpoint: string;
@@ -53,6 +68,8 @@ export interface SandboxOptions {
   /** Custom teardown. When omitted, terminate() is a no-op for the bare
    * Sandbox (the owning client supplies one). */
   terminator?: Terminator;
+  /** Fork capability. When omitted, fork() throws (server-mode/bare Sandbox). */
+  forker?: Forker;
 }
 
 // Proto-JSON wire shapes for the Connect sandbox.v1.Sandbox file RPCs. The
@@ -170,6 +187,7 @@ export class Sandbox {
   // (set_timeout, pause, resume) and the PTY WebSocket stay on http/ws.
   private readonly connect: ConnectClient;
   private readonly terminator?: Terminator;
+  private readonly forker?: Forker;
   // Retained so createPty can authenticate the WebSocket upgrade; the PTY
   // endpoint is gated by the same per-sandbox bearer token as the HTTP API.
   // Never logged.
@@ -193,6 +211,7 @@ export class Sandbox {
     // legacy /v1/* routes did (the endpoint is the server's own address).
     this.connect = new ConnectClient(toBaseUrl(opts.endpoint), opts.id, opts.token);
     this.terminator = opts.terminator;
+    this.forker = opts.forker;
     this.files = new SandboxFiles(this, this.connect);
   }
 
@@ -471,6 +490,29 @@ export class Sandbox {
       return this.terminator(opts);
     }
     return undefined;
+  }
+
+  /**
+   * Fork this running sandbox into n independent copy-on-write children and
+   * resolve once all are Ready. Children share the parent's memory pages until
+   * they write, so each lands in a warm, ready environment (the live fork-to-many
+   * primitive, #311). Returns the n child Sandboxes; each can fork again.
+   *
+   * Available on a cluster-bound Sandbox (one returned by the AgentRun cluster
+   * client). A bare or server-mode Sandbox has no fork capability and throws an
+   * LLM-legible error.
+   */
+  async fork(n = 1, opts?: ForkOptions): Promise<Sandbox[]> {
+    if (!this.forker) {
+      throw new AgentRunError("fork is not available on this sandbox", {
+        code: "fork_unsupported",
+        cause:
+          "this Sandbox was not created by the cluster client, so it carries no fork capability",
+        remediation:
+          "Create the sandbox via the cluster AgentRun client to use fork(n).",
+      });
+    }
+    return this.forker(n, opts);
   }
 }
 

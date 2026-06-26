@@ -136,6 +136,28 @@ def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     assert forks[1]._sandbox_id == "f2"
 
 
+def test_sandbox_fork_rejected_is_legible(ready_sandbox, mock_api):
+    # A refused fork (secret inheritance, capacity, budget) is terminal: the
+    # controller sets a Rejected condition. fork() must surface it as an
+    # LLM-legible error instead of waiting out the timeout (#311).
+    mock_api.get_namespaced_custom_object.return_value = {
+        "status": {
+            "conditions": [
+                {
+                    "type": "Rejected",
+                    "status": "True",
+                    "reason": "SecretInheritanceDenied",
+                    "message": "source sandbox holds secrets; recreate the fork with spec.secretInheritance=inherit to permit it",
+                },
+            ],
+        },
+    }
+    with pytest.raises(AgentRunError) as ei:
+        ready_sandbox.fork(2, timeout=0.5)
+    assert ei.value.code == "fork_rejected"
+    assert ei.value.cause == "SecretInheritanceDenied"
+
+
 def test_sandbox_fork_threads_timeout(ready_sandbox):
     """fork(timeout=...) must thread the value into _wait_forks so a wide
     single-node fan-out is not capped at the 30.0s default."""
