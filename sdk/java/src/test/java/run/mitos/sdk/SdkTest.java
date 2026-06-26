@@ -55,6 +55,12 @@ public final class SdkTest {
             System.exit(1);
         }
         System.out.println("ALL GREEN");
+        // A main-based runner must control its own exit. A test that leaves an
+        // HttpServer Stub open keeps a non-daemon dispatcher thread alive, which
+        // would otherwise hang the JVM here after every test has passed (seen in
+        // CI as a job that prints ALL GREEN then runs until canceled). Exit
+        // explicitly so a stray open stub can never wedge the run.
+        System.exit(0);
     }
 
     // ---- tests ----

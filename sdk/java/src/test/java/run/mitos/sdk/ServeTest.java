@@ -36,23 +36,6 @@ final class ServeTest {
     // serve() returns a ServedWorkspace whose url is
     // "https://<label>.<exposeDomain>/".
     private static void testServeReturnsUrl() throws Exception {
-        SdkTest.Stub stub = new SdkTest.Stub();
-        AtomicReference<String> sandboxName = new AtomicReference<>();
-
-        stub.handle("POST", "/apis/mitos.run/v1/namespaces/default/sandboxes", ex -> {
-            Map<String, Object> body = Json.parseObject(SdkTest.readBody(ex));
-            sandboxName.set(K8s.nestedString(body, "metadata", "name"));
-            SdkTest.json(ex, 201, "{\"metadata\":{\"name\":\"" + sandboxName.get() + "\"}}");
-        });
-        stub.handle("GET", "/apis/mitos.run/v1/namespaces/default/sandboxes/" + null, ex ->
-                SdkTest.json(ex, 200, "{\"status\":{\"phase\":\"Ready\"}}"));
-
-        // Register a dynamic GET handler for the sandbox that gets created.
-        // We intercept via a catch-all on the sandboxes path.
-        stub.handle("GET", "/apis/mitos.run/v1/namespaces/default/sandboxes/", ex ->
-                SdkTest.json(ex, 200, "{\"status\":{\"phase\":\"Ready\"}}"));
-
-        // Use a dedicated stub with a wildcard handler approach.
         SdkTest.Stub stub2 = stubWithReadyHandler();
         try (stub2) {
             ClusterWorkspace ws = workspaceFor(stub2, "ws-1");
