@@ -166,6 +166,11 @@ def test_e2b_style_script_runs_unchanged(monkeypatch):
     deadline = sandbox.set_timeout(300)
     assert deadline > 0
 
+    # get_host(port) -> a signed preview URL for a guest port (the "Done when":
+    # a real E2B sample runs unchanged INCLUDING a preview URL).
+    host = sandbox.get_host(3000)
+    assert host.startswith("https://") and "port=3000" in host
+
     # kill -> terminate
     sandbox.kill()
     # --- end verbatim E2B surface ---
