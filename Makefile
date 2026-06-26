@@ -49,6 +49,10 @@ generate:
 
 manifests:
 	controller-gen crd paths="./api/..." output:crd:artifacts:config=deploy/crds
+	# The Helm chart ships its own copy of the CRDs; keep it in sync with the
+	# generated set so a chart install is never missing a field (the Sandbox
+	# expose drift) or a whole CRD (orgs).
+	cp deploy/crds/*.yaml deploy/charts/mitos/crds/
 
 proto:
 	protoc \
