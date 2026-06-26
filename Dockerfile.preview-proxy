@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+# The Mitos Expose edge proxy (cmd/preview-proxy): terminates TLS for the
+# wildcard sandbox preview subdomains and proxies to the right sandbox guest
+# port. Built and published like the other components (publish.yaml matrix).
+FROM golang:1.26-bookworm AS builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o preview-proxy ./cmd/preview-proxy/
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /build/preview-proxy /preview-proxy
+ENTRYPOINT ["/preview-proxy"]
