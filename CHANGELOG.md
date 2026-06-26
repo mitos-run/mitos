@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.0](https://github.com/mitos-run/mitos/compare/v1.2.0...v1.3.0) (2026-06-26)
+
+
+### Features
+
+* **console:** B3d-2 per-project membership ([#406](https://github.com/mitos-run/mitos/issues/406)) ([4c9c521](https://github.com/mitos-run/mitos/commit/4c9c521f610746efec4764b891a58bf571140be3))
+* **console:** B3d-3 resource project tagging (sandboxes) ([#409](https://github.com/mitos-run/mitos/issues/409)) ([1542930](https://github.com/mitos-run/mitos/commit/15429303e199138d1d9337e78969aea81306a5fb))
+* **console:** B3d-4 per-project access enforcement on sandboxes ([#411](https://github.com/mitos-run/mitos/issues/411)) ([0994470](https://github.com/mitos-run/mitos/commit/0994470c9589579451eda65e9d931e5a08bc9fd7))
+* **controller:** per-org namespace tenancy provisioner ([#288](https://github.com/mitos-run/mitos/issues/288)) ([#410](https://github.com/mitos-run/mitos/issues/410)) ([ba36785](https://github.com/mitos-run/mitos/commit/ba36785b6f4ff4c6d4e81b25cfafee0c0ba7bee7))
+* **expose:** mitos workspace serve + Go SDK .url handle (slice 5a, [#312](https://github.com/mitos-run/mitos/issues/312)) ([#416](https://github.com/mitos-run/mitos/issues/416)) ([ee34eab](https://github.com/mitos-run/mitos/commit/ee34eabca547cd41aac6d564854f175ab865f8c5))
+* **expose:** the auth ladder with native OIDC (slice 4) ([#407](https://github.com/mitos-run/mitos/issues/407)) ([3d4bc14](https://github.com/mitos-run/mitos/commit/3d4bc142e3e56bed02f449dd7809157a0de3efe4))
+* **saas:** durable Postgres persistence + best-practice external-DB chart ([#412](https://github.com/mitos-run/mitos/issues/412)) ([74d0c18](https://github.com/mitos-run/mitos/commit/74d0c185f1c7aca6ca34d88340a108d752624c60))
+* **saas:** enforce real quota + abuse + kill-switch at the hosted gateway ([#341](https://github.com/mitos-run/mitos/issues/341)) ([#421](https://github.com/mitos-run/mitos/issues/421)) ([ca462ed](https://github.com/mitos-run/mitos/commit/ca462ed9fa1c15e2da91cc4c0b852197982410bd))
+* **saas:** mount onboarding HTTP + real SMTP email + tenant provisioning on signup ([#215](https://github.com/mitos-run/mitos/issues/215)) ([#420](https://github.com/mitos-run/mitos/issues/420)) ([ed9a143](https://github.com/mitos-run/mitos/commit/ed9a1430e5d38bcbd68b8980805425cea0766a08))
+* **saas:** privacy-first product telemetry pipeline ([#281](https://github.com/mitos-run/mitos/issues/281)) ([#422](https://github.com/mitos-run/mitos/issues/422)) ([79c6f18](https://github.com/mitos-run/mitos/commit/79c6f18d2f86a28eb3f309bc3f0b7516407a2ed7))
+* **saas:** real hosted control plane (gateway creates + proxies real sandboxes) ([#405](https://github.com/mitos-run/mitos/issues/405)) ([3e15ab4](https://github.com/mitos-run/mitos/commit/3e15ab45e074e38c225e458398f3ba840133b81a))
+* **saas:** real Paddle billing provider ([#212](https://github.com/mitos-run/mitos/issues/212)) ([#418](https://github.com/mitos-run/mitos/issues/418)) ([1c673f2](https://github.com/mitos-run/mitos/commit/1c673f2e0be001954cee86a03781fec97f94aa19))
+* **saas:** wire console usage instruments + fork-tree to real cluster data ([#417](https://github.com/mitos-run/mitos/issues/417)) ([34d800d](https://github.com/mitos-run/mitos/commit/34d800dd3594c6bd2511da5111c1db48e72c90a9))
+* **sdk:** workspace serve .url parity across Python, TypeScript, Ruby, Rust, Java (slice 5b, [#312](https://github.com/mitos-run/mitos/issues/312)) ([#419](https://github.com/mitos-run/mitos/issues/419)) ([ffa2ff5](https://github.com/mitos-run/mitos/commit/ffa2ff5a556659e5c61fce166e8e85816f15953b))
+
+
+### Bug Fixes
+
+* **daemon:** per-sandbox expose concurrency cap and force-close on terminate ([#413](https://github.com/mitos-run/mitos/issues/413)) ([17d2626](https://github.com/mitos-run/mitos/commit/17d2626978054eaee01d7bb67212cffbf64fc839))
+
 ## [1.2.0](https://github.com/mitos-run/mitos/compare/v1.1.0...v1.2.0) (2026-06-25)
 
 
