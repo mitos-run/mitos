@@ -1,0 +1,133 @@
+name: PR policy
+
+# Enforce the contribution guardrails that templates alone cannot: no em/en
+# dashes in the diff (CLAUDE.md punctuation rule), a conventional-commit PR
+# title, the agentic PR-body sections (Thinking Path, Model Used, Verification),
+# and no internal/instance-local references leaking into a public PR. These are
+# lightweight in-repo checks, matching the DCO workflow: no external app setup.
+# PR body and title are passed through env vars, never interpolated into a shell
+# script, to avoid template injection.
+
+on:
+  pull_request:
+    branches: [main]
+    # Include `edited` so the title and body checks re-run when a contributor
+    # fixes the PR title or body, instead of leaving a stale failure.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  no-dashes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Reject em and en dashes in added lines
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Only scan lines this PR ADDS, so pre-existing content never fails a PR.
+          # Exclude vendored and binary-ish paths the punctuation rule does not govern.
+          added=$(git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" -- \
+            ':(exclude)vendor/**' \
+            ':(exclude)**/*.svg' \
+            ':(exclude)**/*.png' \
+            ':(exclude)**/*.jpg' \
+            ':(exclude)go.sum' \
+            ':(exclude)**/pnpm-lock.yaml' \
+            | grep -E '^\+' | grep -v '^\+\+\+' || true)
+          if printf '%s' "${added}" | grep -nP '[\x{2014}\x{2013}]' >/dev/null 2>&1; then
+            echo "FAIL: an added line contains an em (U+2014) or en (U+2013) dash."
+            echo "CLAUDE.md bans them everywhere: source, comments, Markdown, YAML, CRDs, commit messages."
+            echo "Offending added lines:"
+            printf '%s\n' "${added}" | grep -nP '[\x{2014}\x{2013}]' || true
+            echo "Use only . , ; : as connectors. ASCII hyphen-minus (-) is fine for ranges."
+            exit 1
+          fi
+          echo "ok: no em or en dashes in added lines."
+
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a conventional-commit PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|docs|ci|chore|refactor|test)(\([a-z0-9,_/.-]+\))?!?: .+'
+          if printf '%s' "${TITLE}" | grep -qE "${pattern}"; then
+            echo "ok: \"${TITLE}\""
+          else
+            echo "FAIL: PR title is not a conventional commit."
+            echo "Got: \"${TITLE}\""
+            echo "Expected: type(scope): description"
+            echo "Types: feat, fix, docs, ci, chore, refactor, test. Scope optional."
+            exit 1
+          fi
+
+  body:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require agentic PR sections and reject internal references
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # Skip bot-authored PRs (dependabot, release-please): they use their own
+          # body. Done inside the step, not as a job-level `if`, so this required
+          # check always reports a conclusion instead of leaving the context
+          # pending and blocking merge.
+          # Brackets are escaped: in a case pattern, [bot] is a character class,
+          # not a literal, so an unescaped dependabot[bot] would never match.
+          case "${AUTHOR}" in
+            dependabot\[bot\]|github-actions\[bot\]|release-please\[bot\])
+              echo "ok: skipping body policy for bot author ${AUTHOR}."
+              exit 0
+              ;;
+          esac
+          python3 - <<'PY'
+          import os, re, sys
+
+          body = os.environ.get("BODY") or ""
+          # Drop HTML comments so template guidance does not count as filled content.
+          stripped = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+
+          fail = []
+
+          for header in ("## Thinking Path", "## Verification", "## Model Used"):
+              if header not in body:
+                  fail.append(f"missing required section: {header}")
+
+          # Model Used must carry real content, not an empty bullet.
+          m = re.search(r"## Model Used\s*(.*?)(?:\n## |\Z)", stripped, flags=re.DOTALL)
+          section = (m.group(1).strip() if m else "")
+          meaningful = [ln for ln in section.splitlines()
+                        if ln.strip() and ln.strip() not in ("-", "*")]
+          if not meaningful:
+              fail.append("Model Used is empty: name the AI model used, or write 'None, human-authored'.")
+
+          # No internal/instance-local references in a public PR.
+          patterns = {
+              r"\bPAPA?-\d+\b": "Paperclip ticket id (PAP-/PAPA-)",
+              r"agent://": "agent:// link",
+              r"https?://localhost": "localhost URL",
+              r"https?://[\w.-]+\.ts\.net": "tailnet URL",
+          }
+          for pat, label in patterns.items():
+              if re.search(pat, body, flags=re.IGNORECASE):
+                  fail.append(f"internal reference found ({label}); use only public #NNN or mitos-run/mitos URLs")
+
+          if fail:
+              print("FAIL: PR body policy violations:")
+              for f in fail:
+                  print(f"  - {f}")
+              print("See .github/pull_request_template.md and CONTRIBUTING.md.")
+              sys.exit(1)
+          print("ok: PR body sections present and clean.")
+          PY

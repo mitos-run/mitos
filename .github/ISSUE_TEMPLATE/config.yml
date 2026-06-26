@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
     url: https://github.com/mitos-run/mitos/blob/main/SECURITY.md
-    about: Do not file public issues for vulnerabilities; use private reporting as described in SECURITY.md.
+    about: Do not file public issues for exploitable vulnerabilities; use private reporting as described in SECURITY.md.
+  - name: Roadmap
+    url: https://github.com/mitos-run/mitos/blob/main/ROADMAP.md
+    about: ROADMAP.md is the priority order for all work. Check it before requesting a feature.

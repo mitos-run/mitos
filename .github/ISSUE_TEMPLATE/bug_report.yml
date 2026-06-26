@@ -2,21 +2,66 @@ name: Bug report
 description: Report a defect in the sandbox system
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing this report. Keep every answer concise, reproducible, and grounded in observed evidence.
+        Do not speculate or infer beyond the evidence. If a section cannot be answered from what you observed, respond with exactly `NOT_ENOUGH_INFO`.
+
+        Please report one defect per submission. Break multiple issues into separate reports.
+  - type: dropdown
+    id: bug_type
+    attributes:
+      label: Bug type
+      description: Choose the category that best matches this report.
+      options:
+        - Regression (worked before, now fails)
+        - Crash or hang (process exits, deadlocks, or wedges)
+        - Correctness (wrong output or state without a crash)
+        - Fork-correctness hazard (RNG, clocks, secret inheritance; see docs/fork-correctness.md)
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is at fault, as best you can tell.
+      options:
+        - controller
+        - forkd
+        - guest agent
+        - sandbox-server
+        - Python SDK
+        - Other SDK
+        - Unsure
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Fork engine
+      description: Real Firecracker engine (needs KVM) or the mock engine (kind e2e, envtest).
+      options:
+        - KVM (real Firecracker)
+        - Mock
+        - Not applicable
+    validations:
+      required: true
   - type: textarea
     id: description
     attributes:
       label: Description
-      description: What happened, and what did you expect instead?
+      description: One or two sentences on what is broken, based only on observed evidence. If the evidence is insufficient, respond with exactly `NOT_ENOUGH_INFO`.
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Reproduction steps
-      description: Minimal steps to reproduce the behavior (manifests, SDK calls, commands).
+      description: Shortest deterministic repro supported by direct observation (manifests, SDK calls, commands). If it cannot be grounded, respond with exactly `NOT_ENOUGH_INFO`.
       placeholder: |
         1. Apply this SandboxPool ...
-        2. Create this SandboxClaim ...
+        2. Create this Sandbox ...
         3. Observe ...
     validations:
       required: true
@@ -24,18 +69,26 @@ body:
     id: expected
     attributes:
       label: Expected behavior
+      description: State the expected result using a concrete reference (prior observed behavior, a known-good version, the docs). If no grounded reference exists, respond with exactly `NOT_ENOUGH_INFO`.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe only the observed result, including user-visible errors and cited evidence. If it cannot be grounded, respond with exactly `NOT_ENOUGH_INFO`.
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Kubernetes version, KVM or mock engine, deployment method (make install, kind, bare metal), component versions.
+      description: Kubernetes version, deployment method (make install, kind, bare metal), and component versions.
       placeholder: |
         - Kubernetes version:
-        - Engine: KVM / mock
         - Deployment method:
         - Component versions (controller, forkd, SDK):
+        - Node OS / kernel (for KVM issues):
     validations:
       required: true
   - type: textarea
