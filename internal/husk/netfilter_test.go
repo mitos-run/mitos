@@ -40,14 +40,18 @@ func (r *failingRunner) run(_ context.Context, argv []string, stdin string) erro
 	return nil
 }
 
-func sawTapDelete(calls []recordedCall, tap string) bool {
+// countTapDelete counts link-delete calls for the tap. applyEgressFilter issues
+// one up front (idempotent create), so success has exactly one and a failure
+// after tap creation has two (the up-front delete plus the teardown).
+func countTapDelete(calls []recordedCall, tap string) int {
 	want := strings.Join(netconf.LinkDelArgs(tap), " ")
+	n := 0
 	for _, c := range calls {
 		if strings.Join(c.argv, " ") == want {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
@@ -68,19 +72,19 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	if !forwardingEnabled {
 		t.Error("applyEgressFilter did not enable IPv4 forwarding")
 	}
-	// Expect: tap add, addr add, link up, resolver addr add, shared table apply,
-	// sandbox chain apply, masquerade apply, shared input table apply, sandbox
-	// input chain apply.
-	if len(rr.calls) != 9 {
-		t.Fatalf("got %d calls, want 9: %+v", len(rr.calls), rr.calls)
+	// Expect: idempotent tap delete, tap add, addr add, link up, resolver addr
+	// add, shared table apply, sandbox chain apply, masquerade apply, shared input
+	// table apply, sandbox input chain apply.
+	if len(rr.calls) != 10 {
+		t.Fatalf("got %d calls, want 10: %+v", len(rr.calls), rr.calls)
 	}
 	// The resolver IP is bound to the tap as a /32 so the per-pod DNS proxy can
 	// listen on it and the guest's queries are delivered locally.
-	resolverArgv := strings.Join(rr.calls[3].argv, " ")
+	resolverArgv := strings.Join(rr.calls[4].argv, " ")
 	if !strings.Contains(resolverArgv, "169.254.1.1/32") || !strings.Contains(resolverArgv, "sbtap0") {
-		t.Errorf("resolver IP not bound to tap as /32: %v", rr.calls[3].argv)
+		t.Errorf("resolver IP not bound to tap as /32: %v", rr.calls[4].argv)
 	}
-	chainStdin := rr.calls[5].stdin
+	chainStdin := rr.calls[6].stdin
 	if !strings.Contains(chainStdin, "ip daddr 169.254.169.254 drop") {
 		t.Errorf("chain missing metadata block:\n%s", chainStdin)
 	}
@@ -90,7 +94,7 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	if !strings.Contains(chainStdin, netconf.SandboxChainName("sbtap0")) {
 		t.Errorf("chain not named for tap:\n%s", chainStdin)
 	}
-	masqStdin := rr.calls[6].stdin
+	masqStdin := rr.calls[7].stdin
 	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
 		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
 	}
@@ -114,11 +118,11 @@ func TestApplyEgressFilterInstallsInputGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The last two applies are the shared input table and this tap's input chain.
-	inputTable := rr.calls[7].stdin
+	inputTable := rr.calls[8].stdin
 	if !strings.Contains(inputTable, "type filter hook input") {
 		t.Errorf("shared input table not applied:\n%s", inputTable)
 	}
-	inputChain := rr.calls[8].stdin
+	inputChain := rr.calls[9].stdin
 	if !strings.Contains(inputChain, "ip saddr 10.200.0.2 ip daddr 169.254.1.1 udp dport 53 accept") {
 		t.Errorf("input chain missing resolver allow:\n%s", inputChain)
 	}
@@ -174,9 +178,9 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 // retry fail at tap creation with EBUSY and masks the real first-attempt error.
 func TestApplyEgressFilterTearsDownTapOnPartialFailure(t *testing.T) {
 	stepErr := errors.New("RTNETLINK answers: operation not permitted")
-	// Call index 0 is the tap add; index 1 is the host-IP assignment, the first
-	// step after the tap exists. Fail there.
-	rr := &failingRunner{failAt: 1, err: stepErr}
+	// Call index 0 is the idempotent tap delete; index 1 is the tap add; index 2
+	// is the host-IP assignment, the first step after the tap exists. Fail there.
+	rr := &failingRunner{failAt: 2, err: stepErr}
 	cfg := NetfilterConfig{
 		Tap:     "sbtapdeadbeef",
 		GuestIP: net.ParseIP("10.200.0.2"),
@@ -191,15 +195,16 @@ func TestApplyEgressFilterTearsDownTapOnPartialFailure(t *testing.T) {
 	if !errors.Is(err, stepErr) {
 		t.Fatalf("want the underlying step error wrapped, got: %v", err)
 	}
-	// The tap was torn down: a link delete for this exact tap was issued on the
-	// failure path, so a retry will not hit EBUSY.
-	if !sawTapDelete(rr.calls, cfg.Tap) {
-		t.Fatalf("applyEgressFilter leaked tap %q on failure (no link del); calls: %+v", cfg.Tap, rr.calls)
+	// The tap was torn down on the failure path (in addition to the up-front
+	// idempotent delete), so a retry will not hit EBUSY: two deletes total.
+	if got := countTapDelete(rr.calls, cfg.Tap); got != 2 {
+		t.Fatalf("want 2 tap deletes (idempotent + teardown), got %d; calls: %+v", got, rr.calls)
 	}
 }
 
 // TestApplyEgressFilterDoesNotTearDownOnSuccess proves the happy path leaves the
-// tap in place (teardown is the stub's job on Close, not apply's on success).
+// tap in place: only the up-front idempotent delete runs (one delete), and no
+// teardown delete (teardown is the stub's job on Close, not apply's on success).
 func TestApplyEgressFilterDoesNotTearDownOnSuccess(t *testing.T) {
 	rr := &recordingRunner{}
 	cfg := NetfilterConfig{
@@ -211,7 +216,7 @@ func TestApplyEgressFilterDoesNotTearDownOnSuccess(t *testing.T) {
 	if err := applyEgressFilter(context.Background(), rr.run, nil, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if sawTapDelete(rr.calls, cfg.Tap) {
-		t.Fatalf("applyEgressFilter tore down the tap on success; calls: %+v", rr.calls)
+	if got := countTapDelete(rr.calls, cfg.Tap); got != 1 {
+		t.Fatalf("want exactly 1 tap delete (the idempotent pre-create delete), got %d; calls: %+v", got, rr.calls)
 	}
 }
