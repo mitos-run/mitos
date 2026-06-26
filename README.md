@@ -257,7 +257,7 @@ The husk pod-native path is the default. A few capabilities run today only on th
 | Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox. `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Verified create -> commit -> fork on a real KVM cluster | [docs/workspaces.md](docs/workspaces.md) |
 | Outputs and diff | `spec.lifetime.onTerminate.outputs` narrows the dehydrate to listed subtrees; `{diff: true}` records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
 | Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (the engine pushes; a human or CI merges). Best-effort on husk today | [docs/workspaces.md](docs/workspaces.md) |
-| Dev-environment URL | `mitos workspace serve <ws> --pool P` warm-claims a forked sandbox bound to the workspace and returns a ready `https://<label>.<expose-domain>/` URL; warm fork gives each session its own URL with sub-second claim | [docs/recipes/dev-environment.md](docs/recipes/dev-environment.md) |
+| Dev-environment URL | `mitos workspace serve <ws> --pool P` warm-claims a forked sandbox bound to the workspace and returns a ready `https://<label>.<expose-domain>/` URL; each forked session gets its own URL | [docs/recipes/dev-environment.md](docs/recipes/dev-environment.md) |
 
 ### Operable
 
