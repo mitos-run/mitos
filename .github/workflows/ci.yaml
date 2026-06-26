@@ -273,6 +273,26 @@ jobs:
       # pod-native default, issue #18). It is referenced by the controller
       # Deployment's --husk-stub-image, so it must build cleanly here.
       - run: docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
+      # The forkd and husk-stub images MUST ship the jailer alongside firecracker
+      # at a matching version: forkd launches every VM through the jailer, so an
+      # image with firecracker but no jailer fails every pool template build at
+      # runtime with `fork/exec /usr/local/bin/jailer: no such file or directory`
+      # (#425). The shared install script self-asserts at build time; this step
+      # re-checks the actual published images so the regression cannot return.
+      - name: Assert firecracker and jailer present and version-matched
+        run: |
+          set -euo pipefail
+          for img in mitos-forkd:ci mitos-husk-stub:ci; do
+            docker run --rm --entrypoint sh "$img" -c '
+              set -e
+              test -x /usr/local/bin/firecracker
+              test -x /usr/local/bin/jailer
+              fc=$(firecracker --version | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+              jl=$(jailer --version | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+              echo "firecracker=$fc jailer=$jl"
+              [ -n "$fc" ] && [ "$fc" = "$jl" ]
+            '
+          done
       # Mirror the full publish.yaml image matrix here so a release-only image
       # can never break unseen. console, facade, gateway, and kvm-device-plugin
       # were previously built only at tag time, so a broken Dockerfile (for
