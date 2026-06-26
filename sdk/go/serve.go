@@ -164,6 +164,14 @@ func (w *Workspace) Serve(ctx context.Context, opts ...ServeOption) (*ServedWork
 			Remediation: "Pass WithServePool(name) to select the SandboxPool to claim from.",
 		}
 	}
+	if cfg.port < 1 || cfg.port > 65535 {
+		return nil, &Error{
+			Code:        "invalid_serve_port",
+			Message:     "Serve port out of range",
+			Cause:       fmt.Sprintf("port %d is not in 1-65535", cfg.port),
+			Remediation: "Pass WithServePort(n) with a port in the range 1-65535.",
+		}
+	}
 
 	// Resolve expose domain: option first, then env var.
 	exposeDomain := cfg.exposeDomain

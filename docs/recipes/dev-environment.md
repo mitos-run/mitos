@@ -6,8 +6,9 @@ workspace so the filesystem state is hydrated on start, sets the expose route,
 and returns a URL your team (or an agent) can open immediately.
 
 This is the Mitos answer to Coder and Daytona: instead of managing long-running
-VMs, you snapshot the environment once, keep a pool of warm forks, and get a
-sub-second warm-claim each time someone needs a new session.
+VMs, you snapshot the environment once, keep a pool of warm forks, and claim a
+fresh fork each time someone needs a new session. The warm-claim latency is
+benchmarked in `bench/` (see the husk activation latency bench).
 
 ## What ships today
 
