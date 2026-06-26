@@ -33,13 +33,13 @@ const HuskTLSSecretName = "mitos-husk-tls"
 // namespace (where ca.key lives and never leaves) and issues/heals a
 // husk.<poolNamespace>.mitos leaf into a namespace-local mitos-husk-tls Secret
 // the husk pod mounts. Reuses the same ensureCA/ensureLeaf primitives as
-// EnsurePKI, so it is race-safe and self-healing. A pool that runs in the
-// controller namespace itself needs nothing extra (mitos-forkd-tls is already
-// there), so that case is a no-op.
+// EnsurePKI, so it is race-safe and self-healing. This holds for a pool that
+// runs in the controller namespace itself (the natural single-namespace
+// self-host install): the husk pod always mounts mitos-husk-tls regardless of
+// namespace, so the leaf must be issued there too, not skipped (#414). The husk
+// secret (mitos-husk-tls) is distinct from forkd's (mitos-forkd-tls), so there
+// is no collision when both live in the controller namespace.
 func EnsureHuskTLS(ctx context.Context, c client.Client, controllerNamespace, poolNamespace string) error {
-	if poolNamespace == controllerNamespace {
-		return nil
-	}
 	ca, err := ensureCA(ctx, c, controllerNamespace)
 	if err != nil {
 		return fmt.Errorf("load CA to issue husk leaf for %s: %w", poolNamespace, err)
