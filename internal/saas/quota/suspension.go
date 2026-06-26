@@ -114,6 +114,11 @@ type AbuseSignal interface {
 // emergency stop). It owns the DECISION; the VM-freeze and key-revoke effects are
 // driven through the gateway's existing key-verify path (a suspended org's keys
 // are rejected) and a documented freeze seam.
+//
+// Policy basis: a suspension under ReasonAbuseSignal or ReasonEmergencyStop
+// enforces the technical floor of the Acceptable Use Policy
+// (docs/legal/acceptable-use-policy.md). The AUP is the human-readable policy a
+// suspension acts on; this type is the runtime mechanism that makes it effective.
 type KillSwitch struct {
 	store SuspensionStore
 	now   func() time.Time

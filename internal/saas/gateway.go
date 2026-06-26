@@ -82,10 +82,17 @@ type Gateway struct {
 	quota QuotaEnforcer
 	cp    ControlPlane
 	log   *slog.Logger
+	// trustedHops is the number of trusted reverse-proxy hops in front of the
+	// gateway. It governs how the client IP is resolved for the per-IP rate-limit
+	// bucket: zero means X-Forwarded-For is never trusted (use RemoteAddr). See
+	// TrustedProxyHops.
+	trustedHops TrustedProxyHops
 }
 
 // NewGateway builds a gateway. A nil quota enforcer defaults to AllowAllQuota
-// (the #213 seam). A nil logger discards logs.
+// (the #213 seam). A nil logger discards logs. The client-IP trust model defaults
+// to zero trusted proxy hops (X-Forwarded-For is not trusted); use
+// WithTrustedProxyHops to configure it when the gateway sits behind an ingress.
 func NewGateway(keys *KeyService, quota QuotaEnforcer, cp ControlPlane, log *slog.Logger) *Gateway {
 	if quota == nil {
 		quota = AllowAllQuota{}
@@ -94,6 +101,18 @@ func NewGateway(keys *KeyService, quota QuotaEnforcer, cp ControlPlane, log *slo
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Gateway{keys: keys, quota: quota, cp: cp, log: log}
+}
+
+// WithTrustedProxyHops sets the number of trusted reverse-proxy hops in front of
+// the gateway for client-IP resolution. It returns the gateway for chaining. A
+// negative value is clamped to zero (X-Forwarded-For not trusted). See
+// TrustedProxyHops for the trust semantics.
+func (g *Gateway) WithTrustedProxyHops(hops TrustedProxyHops) *Gateway {
+	if hops < 0 {
+		hops = 0
+	}
+	g.trustedHops = hops
+	return g
 }
 
 // opFromPath derives the public operation name from the request path and method.
@@ -143,13 +162,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := res.Key.OrgID
 
+	// Resolve the trusted client IP and stash it in the request context so the
+	// quota enforcer can charge the per-IP rate-limit bucket against the real
+	// source address. The IP is taken from the connection RemoteAddr unless a
+	// trusted-proxy hop count is configured; a caller-set X-Forwarded-For can
+	// never move the bucket off the real source (see TrustedProxyHops).
+	ctx := withClientIP(r.Context(), clientIP(r, g.trustedHops))
+
 	// Quota is enforced AFTER authn and org-resolution, BEFORE forwarding, so a
 	// denied request never touches the control plane. The real enforcer (issue
 	// #213) distinguishes a quota cap (quota_exceeded) from a rate-limit denial
 	// (rate_limited) and a suspension (forbidden): when the enforcer error supplies
 	// its own envelope via the APIError seam, the gateway honors it; otherwise it
 	// falls back to the generic quota_exceeded envelope.
-	if qErr := g.quota.Check(r.Context(), orgID, op); qErr != nil {
+	if qErr := g.quota.Check(ctx, orgID, op); qErr != nil {
 		g.log.Info("gateway quota denied", "key_id", res.Key.ID, "org", orgID, "op", op)
 		g.fail(w, quotaEnvelope(qErr, op))
 		return
@@ -183,7 +209,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	g.log.Info("gateway forward", "key_id", res.Key.ID, "key_prefix", res.Key.Prefix, "org", orgID, "op", op)
 
-	resp, err := g.cp.Forward(r.Context(), fwd)
+	resp, err := g.cp.Forward(ctx, fwd)
 	if err != nil {
 		g.fail(w, apierr.Get(apierr.CodeInternal).
 			WithCause("the control plane could not service the request"))

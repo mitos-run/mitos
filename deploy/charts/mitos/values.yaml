@@ -371,6 +371,24 @@ gateway:
     tag: v0.13.0
     pullPolicy: IfNotPresent
   replicas: 2
+  # Abuse-control enforcement (quotas, rate limits, and the kill-switch). Default
+  # on for the hosted profile: a public multi-tenant front door must enforce
+  # per-org quotas, per-org and per-IP rate limits, the per-sandbox size cap, and
+  # the abuse/billing kill-switch before forwarding. Set enabled to false ONLY for
+  # a trusted single-tenant deployment; the bypass is logged at startup.
+  enforce:
+    enabled: true
+    # Number of trusted reverse-proxy hops in front of the gateway, used to resolve
+    # the client IP for the per-IP rate limit. 0 (the default) does NOT trust
+    # X-Forwarded-For and keys on the connection RemoteAddr. Set to the count of
+    # trusted proxies (for example 1 behind a single ingress) so the per-IP limit
+    # keys on the real client; a too-short or spoofed X-Forwarded-For fails closed
+    # to RemoteAddr.
+    trustedProxyHops: 0
+    # CAVEAT: the suspension (kill-switch) store is in-process for this slice, so a
+    # suspension does not survive a restart and is not shared across replicas. Run a
+    # single gateway replica for the kill-switch to be authoritative, or re-drive the
+    # abuse/billing signals after a restart, until the durable store follow-up lands.
   resources:
     requests:
       memory: "64Mi"
