@@ -182,6 +182,83 @@ describe("AgentRun.create", () => {
     expect(sandbox.endpoint).toBe("http://10.0.0.5:9091");
   });
 
+  it("fork(n) creates a fork Sandbox with replicas=n and returns n Ready children (#311)", async () => {
+    const fake = new FakeK8s({
+      getResponses: [
+        // create() waitReady for the source sandbox.
+        { phase: "Ready", endpoint: "10.0.0.5:9091", sandboxID: "sbx-src" },
+        // fork() poll: the fork object's status.children, all Ready.
+        {
+          children: [
+            { name: "sbx-1-fork-aa-0", phase: "Ready", endpoint: "10.0.0.6:9091", sandboxID: "c0" },
+            { name: "sbx-1-fork-aa-1", phase: "Ready", endpoint: "10.0.0.7:9091", sandboxID: "c1" },
+          ],
+        },
+      ],
+      secret: { token: "tok", endpoint: "10.0.0.5:9091" },
+    });
+    const run = new AgentRun({ k8s: fake, namespace: "team-a", sleep: noSleep });
+    const sb = await run.create("python-pool", { name: "sbx-1" });
+
+    const children = await sb.fork(2);
+
+    // Returns N live children.
+    expect(children).toHaveLength(2);
+    expect(children.map((c) => c.endpoint).sort()).toEqual([
+      "http://10.0.0.6:9091",
+      "http://10.0.0.7:9091",
+    ]);
+
+    // The fork object is a Sandbox with replicas=2 and source.fromSandbox.
+    const forkClaim = fake.createdClaims[1];
+    expect(forkClaim.kind).toBe("Sandbox");
+    const spec = forkClaim.spec as Record<string, unknown>;
+    expect(spec["replicas"]).toBe(2);
+    expect(spec["source"]).toEqual({ fromSandbox: { name: "sbx-1", pauseSource: false } });
+
+    // Children can fork again (the forker is injected into each child).
+    expect(typeof children[0].fork).toBe("function");
+  });
+
+  it("fork(n) raises an LLM-legible error when children are not ready in time (#311)", async () => {
+    const fake = new FakeK8s({
+      getResponses: [
+        { phase: "Ready", endpoint: "10.0.0.5:9091" },
+        { children: [] }, // never enough Ready children
+      ],
+      secret: { token: "tok" },
+    });
+    const run = new AgentRun({ k8s: fake, pollTimeoutMs: 5, sleep: noSleep });
+    const sb = await run.create("p", { name: "sbx-1" });
+    await expect(sb.fork(2)).rejects.toMatchObject({ code: "ready_timeout" });
+  });
+
+  it("fork(n) surfaces a rejected fork as an LLM-legible error, not a timeout (#311)", async () => {
+    const fake = new FakeK8s({
+      getResponses: [
+        { phase: "Ready", endpoint: "10.0.0.5:9091" },
+        {
+          conditions: [
+            {
+              type: "Rejected",
+              status: "True",
+              reason: "SecretInheritanceDenied",
+              message:
+                "source sandbox holds secrets; recreate the fork with spec.secretInheritance=inherit to permit it",
+            },
+          ],
+        },
+      ],
+      secret: { token: "tok" },
+    });
+    const run = new AgentRun({ k8s: fake, pollTimeoutMs: 50, sleep: noSleep });
+    const sb = await run.create("p", { name: "sbx-1" });
+    await expect(sb.fork(2)).rejects.toMatchObject({
+      code: "fork_rejected",
+      errorCause: "SecretInheritanceDenied",
+    });
+  });
+
   it("times out with a clear error when the sandbox never becomes Ready", async () => {
     const fake = new FakeK8s({ getResponses: [{ phase: "Pending" }] });
     const run = new AgentRun({ k8s: fake, pollTimeoutMs: 5, sleep: noSleep });

@@ -15,7 +15,9 @@ Usage:
   mitos sandbox create [--pool P]                create a sandbox, print its id
   mitos sandbox ls [-n namespace] [-A]           list sandboxes
   mitos sandbox exec <id> <command...>           run a command in a sandbox
-  mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
+  mitos fork <id> [--count N]                    fork a running sandbox into N
+                                                    live children, print new ids
+  mitos sandbox fork <id> [--count N]            alias of the above
   mitos sandbox terminate <id>                   destroy a sandbox
   mitos ws create|ls|log|diff|fork|revert|rm     workspace lifecycle (git verbs)
   mitos ws bind <id> <workspace>                 bind a sandbox to a workspace
@@ -34,7 +36,7 @@ Flags:
   --timeout int      exec timeout in seconds (0 = backend default)
   -n string          namespace (ls)
   -A                 all namespaces (ls)
-  --replicas int     number of forks (fork)
+  --count int        number of children to fork (fork; alias --replicas)
   -h, --help         print this help
 `
 
@@ -62,6 +64,10 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 		return cmdRun(ctx, args[1:], backend, out, errw)
 	case "sandbox":
 		return cmdSandbox(ctx, args[1:], backend, out, errw)
+	case "fork":
+		// Top-level alias for `sandbox fork` so the homepage one-liner
+		// `mitos fork <id> --count N` works verbatim (#311).
+		return cmdSandboxFork(ctx, args[1:], backend, out, errw)
 	case "ws":
 		if backend == nil || backend.Workspace() == nil {
 			fmt.Fprint(errw, "ws: this backend does not support workspaces\n")

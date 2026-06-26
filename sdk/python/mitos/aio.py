@@ -367,7 +367,21 @@ class AsyncSandbox:
                 group=API_GROUP, version=API_VERSION, namespace=self.namespace,
                 plural="sandboxes", name=fork_name,
             )
-            ready = [f for f in obj.get("status", {}).get("children", []) if f.get("phase") == "Ready"]
+            status = obj.get("status", {})
+            # A refused fork (secret inheritance, capacity, budget) is terminal:
+            # surface the Rejected condition as an LLM-legible error (#311).
+            for c in status.get("conditions", []) or []:
+                if c.get("type") == "Rejected" and c.get("status") == "True":
+                    raise AgentRunError(
+                        f"fork {fork_name} was rejected",
+                        code="fork_rejected",
+                        cause=c.get("reason", "Rejected"),
+                        remediation=c.get(
+                            "message",
+                            "Inspect the fork's Rejected condition and adjust the request.",
+                        ),
+                    )
+            ready = [f for f in status.get("children", []) if f.get("phase") == "Ready"]
             if len(ready) >= n:
                 out = []
                 for f in ready:

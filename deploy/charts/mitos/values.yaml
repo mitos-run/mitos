@@ -279,8 +279,12 @@ console:
     repository: mitos-console
     tag: v0.13.0
     pullPolicy: IfNotPresent
-  # Console replicas. The BFF is stateless; run more than one for HA.
-  replicas: 2
+  # Console replicas. The OIDC login flow keeps session and OIDC-state per-pod in
+  # memory with no shared backing, so multiple replicas behind one Service break
+  # login: /auth/login and /auth/callback can land on different pods and the state
+  # no longer matches (#427). Default to 1; running more than one for HA requires a
+  # shared session store first (sticky sessions or a backed store).
+  replicas: 1
   resources:
     requests:
       memory: "64Mi"
