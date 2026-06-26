@@ -30,9 +30,9 @@ func (g *GitHubFetcher) base() string {
 	return "https://raw.githubusercontent.com"
 }
 
-// manifestURL builds the raw mitos.yaml URL for a src like
-// "github.com/owner/repo" (a leading scheme and a trailing .git are tolerated).
-func manifestURL(base, src string) (string, error) {
+// splitRepo parses a src like "github.com/owner/repo" into owner and repo,
+// tolerating a leading scheme, a "github.com/" prefix, and a trailing ".git".
+func splitRepo(src string) (owner, repo string, err error) {
 	s := strings.TrimSpace(src)
 	for _, p := range []string{"https://", "http://", "github.com/"} {
 		s = strings.TrimPrefix(s, p)
@@ -41,9 +41,18 @@ func manifestURL(base, src string) (string, error) {
 	s = strings.Trim(s, "/")
 	parts := strings.Split(s, "/")
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("src %q must look like github.com/owner/repo", src)
+		return "", "", fmt.Errorf("src %q must look like github.com/owner/repo", src)
 	}
-	return fmt.Sprintf("%s/%s/%s/HEAD/mitos.yaml", base, parts[0], parts[1]), nil
+	return parts[0], parts[1], nil
+}
+
+// manifestURL builds the raw mitos.yaml URL for a src.
+func manifestURL(base, src string) (string, error) {
+	owner, repo, err := splitRepo(src)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%s/%s/HEAD/mitos.yaml", base, owner, repo), nil
 }
 
 // Fetch retrieves and parses the repo's mitos.yaml.
