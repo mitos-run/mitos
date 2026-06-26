@@ -11,6 +11,9 @@ name: PR policy
 on:
   pull_request:
     branches: [main]
+    # Include `edited` so the title and body checks re-run when a contributor
+    # fixes the PR title or body, instead of leaving a stale failure.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
