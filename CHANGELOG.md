@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.0](https://github.com/mitos-run/mitos/compare/v1.3.1...v1.4.0) (2026-06-26)
+
+
+### Features
+
+* **controller:** Run with Mitos auto-update reconciler [DRAFT, needs review] ([#340](https://github.com/mitos-run/mitos/issues/340)/[#440](https://github.com/mitos-run/mitos/issues/440)) ([#447](https://github.com/mitos-run/mitos/issues/447)) ([753c87a](https://github.com/mitos-run/mitos/commit/753c87a01694518bbc23ccf1bf9a6cf1686926f7))
+* **kubectl-mitos:** label guest ps with claim/pool/workspace from the Sandbox CRD ([#164](https://github.com/mitos-run/mitos/issues/164)) ([#448](https://github.com/mitos-run/mitos/issues/448)) ([cd91763](https://github.com/mitos-run/mitos/commit/cd91763a03e1b38bf0b474e1bb7960f23f706250))
+* **runmanifest:** mitos.yaml -&gt; golden pool + per-fork provisioner (Run with Mitos, slices 1-2) ([#442](https://github.com/mitos-run/mitos/issues/442)) ([c8d1fef](https://github.com/mitos-run/mitos/commit/c8d1fef88688dcbebe71b9098dfa4ff5c22e4fa6))
+* **runservice:** click-to-provision run service + HTTP endpoints (Run with Mitos, slice 4) ([#443](https://github.com/mitos-run/mitos/issues/443)) ([ead7f99](https://github.com/mitos-run/mitos/commit/ead7f99a5b5475a0a7ba0664cb08d79d18c85b45))
+* **sdk:** fork(n) ergonomics across the TypeScript SDK and CLI ([#311](https://github.com/mitos-run/mitos/issues/311)) ([#444](https://github.com/mitos-run/mitos/issues/444)) ([6b35073](https://github.com/mitos-run/mitos/commit/6b3507393f019543aeb5c4793a9bf163e1efd2ad))
+
+
+### Bug Fixes
+
+* **chart:** default console.replicas to 1 so OIDC login works ([#427](https://github.com/mitos-run/mitos/issues/427)) ([#438](https://github.com/mitos-run/mitos/issues/438)) ([b21a15d](https://github.com/mitos-run/mitos/commit/b21a15df5cf254069551e3b4a39522ebf66d17c0))
+* **controller:** issue the husk TLS leaf in the controller namespace too ([#414](https://github.com/mitos-run/mitos/issues/414)) ([#437](https://github.com/mitos-run/mitos/issues/437)) ([3667975](https://github.com/mitos-run/mitos/commit/36679759d32271c4213ce0fdb2b4e10417413f5a))
+* **forkd:** grant CAP_DAC_OVERRIDE so the builder can rebuild its own rootfs ([#426](https://github.com/mitos-run/mitos/issues/426)) ([#435](https://github.com/mitos-run/mitos/issues/435)) ([9070360](https://github.com/mitos-run/mitos/commit/9070360565c4b3c446e460e981ce0c855fae15a8))
+* **forkd:** ship the jailer binary in the forkd and husk-stub images ([#425](https://github.com/mitos-run/mitos/issues/425)) ([#433](https://github.com/mitos-run/mitos/issues/433)) ([a6177bb](https://github.com/mitos-run/mitos/commit/a6177bbe7e66f7262c983f9ec08e7c7ab16f7349))
+* **ociroot:** tolerate unreadable subtrees when measuring rootfs size ([#415](https://github.com/mitos-run/mitos/issues/415)) ([#436](https://github.com/mitos-run/mitos/issues/436)) ([9f2f7ef](https://github.com/mitos-run/mitos/commit/9f2f7efa28abf3266b033d3cdf8cfa445c325550))
+* **release:** auto-publish signed images on release and track the version in the chart ([#450](https://github.com/mitos-run/mitos/issues/450)) ([196928c](https://github.com/mitos-run/mitos/commit/196928ceaf33127c022702407346a3e8e1345c50))
+
 ## [1.3.1](https://github.com/mitos-run/mitos/compare/v1.3.0...v1.3.1) (2026-06-26)
 
 
