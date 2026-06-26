@@ -500,7 +500,8 @@ func (w *ClusterWorkspaceBackend) Bind(ctx context.Context, sandboxID, workspace
 }
 
 // waitSandboxReady polls the sandbox until its phase is Ready (success),
-// Failed (error), or the timeout elapses. It mirrors ClusterBackend.waitSandboxReady.
+// Failed (error), or the timeout elapses.
+// Note: this poll loop mirrors ClusterBackend.waitSandboxReady; refactor to a shared helper in a follow-up.
 func (w *ClusterWorkspaceBackend) waitSandboxReady(ctx context.Context, name string) error {
 	pollInterval := w.pollInterval
 	if pollInterval == 0 {

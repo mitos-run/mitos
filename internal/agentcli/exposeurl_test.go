@@ -1,7 +1,6 @@
 package agentcli
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -113,7 +112,7 @@ func TestDefaultExposeDomain(t *testing.T) {
 	})
 
 	t.Run("env unset", func(t *testing.T) {
-		os.Unsetenv("MITOS_EXPOSE_DOMAIN")
+		t.Setenv("MITOS_EXPOSE_DOMAIN", "")
 		if got := DefaultExposeDomain(); got != "" {
 			t.Fatalf("DefaultExposeDomain() = %q, want empty", got)
 		}

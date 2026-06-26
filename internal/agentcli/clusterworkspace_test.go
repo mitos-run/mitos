@@ -100,6 +100,12 @@ func TestServeCreatesExposedSandbox(t *testing.T) {
 	if sbx.Spec.Expose.Sharing != "private" {
 		t.Fatalf("expose.Sharing = %q, want private", sbx.Spec.Expose.Sharing)
 	}
+	if sbx.Spec.Source.PoolRef == nil || sbx.Spec.Source.PoolRef.Name != "p" {
+		t.Fatalf("source.poolRef = %v, want {Name: p}", sbx.Spec.Source.PoolRef)
+	}
+	if sbx.Spec.Expose.Label == "" {
+		t.Fatalf("expose.Label is empty, want non-empty (defaults to sandbox name)")
+	}
 
 	if !strings.HasPrefix(res.URL, "https://") {
 		t.Fatalf("URL = %q, want https:// prefix", res.URL)
