@@ -142,12 +142,18 @@ func (h *UsageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	totals := rollUp(records)
-	resp := UsageResponse{
+	writeUsageJSON(w, UsageResponse{
 		OrgID:   orgID,
 		Records: records,
 		Totals:  totals,
 		Cost:    h.prices.cost(totals),
-	}
+	})
+}
+
+// writeUsageJSON writes a UsageResponse as a 200 JSON body. It is shared by the
+// public usage API and the internal M2M usage API so both emit the identical
+// shape the console decodes.
+func writeUsageJSON(w http.ResponseWriter, resp UsageResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)

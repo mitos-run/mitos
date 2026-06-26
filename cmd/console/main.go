@@ -36,7 +36,6 @@ import (
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/pgstore"
-	"mitos.run/mitos/internal/usage"
 )
 
 func main() {
@@ -72,7 +71,13 @@ func main() {
 
 	con := console.New(console.Deps{
 		Accounts: accounts,
-		Usage:    usage.NewMemUsageStore(),
+		// The usage store the console reads: the controller's internal usage API
+		// (the SAME usage the collector recorded) when configured, in-memory in dev.
+		Usage: buildUsageStore(logger),
+		// The proof-snapshot and fork-tree sources: org-scoped cluster queries when
+		// in a cluster, in-memory otherwise.
+		Instruments: buildInstruments(logger),
+		ForkTree:    buildForkTree(logger),
 		Billing: console.BillingReader{
 			Ledger: billing.NewMemCreditLedger(),
 			Status: statusStore,

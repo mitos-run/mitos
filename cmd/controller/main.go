@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/eventfeed"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/observability"
+	"mitos.run/mitos/internal/usage"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -68,6 +69,7 @@ func main() {
 	var enablePrincipalWebhook bool
 	var usageCollector bool
 	var usageCollectorInterval time.Duration
+	var usageAPIAddr string
 	var vitalsSampler bool
 	var vitalsSamplerInterval time.Duration
 	var exposeProxyAdminURL string
@@ -96,6 +98,7 @@ func main() {
 	flag.BoolVar(&workspaceMemorySnapshots, "workspace-memory-snapshots", false, "Bind the workspace memory-snapshot seams (checkpoint-on-terminate, resume-on-activate, principal-bound existence) to the husk live-VM snapshot path so a checkpointed workspace head becomes RESUMABLE: a later claim with the SAME principal resumes the VM memory image paired with the workspace content. A memory image carries secrets-in-RAM and is bound to the capturing claim's ServiceAccount; it is NEVER served across principals (fail-closed refusal). Off by default: a checkpoint-on-terminate then fails loud rather than producing a falsely-resumable revision. The real bare-metal VM-memory image requires a KVM-capable kubelet and is cluster-gated; see docs/workspaces.md.")
 	flag.BoolVar(&usageCollector, "usage-collector", false, "Run the live multi-node metering scraper: on a fixed interval, scrape every forkd node's GET /v1/metering, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, integrate idempotently into per-(org, sandbox, window) usage records, and publish the per-org mitos_usage_*_total Prometheus series. OFF by default so a self-host deployment that does not want metering is unaffected; turn it on for hosted/multi-tenant. The records land in an in-memory store for now (a durable store is a follow-up); the per-org metric is always published on /metrics. The path carries only ids, byte counts, and seconds, never secret values.")
 	flag.DurationVar(&usageCollectorInterval, "usage-collector-interval", 60*time.Second, "Interval between usage metering scrapes when --usage-collector is set. Defaults to the usage window (60s). Only used when --usage-collector is on.")
+	flag.StringVar(&usageAPIAddr, "usage-api-address", "", "Serve the INTERNAL usage API (GET /internal/usage) on this address (for example :8092) so the hosted console can read the SAME per-org usage the collector recorded, without a shared database. Bearer-gated by the MITOS_USAGE_API_TOKEN environment variable (empty token fails closed: every request is refused). Empty address disables the listener. Only meaningful with --usage-collector on. The endpoint is machine-to-machine: the org is taken from the X-Mitos-Org header the console sets after it verified the session, and the store still scopes every read to that org. The path carries only ids, byte counts, and seconds, never secret values.")
 	flag.BoolVar(&vitalsSampler, "vitals-sampler", false, "Run the guest vitals sampler: on a fixed interval, scrape every forkd node's GET /v1/vitals/node, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, aggregate per (org, pool), and publish the mitos_guest_cpu_steal_percent, mitos_guest_mem_balloon_bytes, mitos_guest_mem_used_bytes, and mitos_guest_process_count Prometheus gauges. cpu_steal is the MAX across the bucket (the worst-starved sandbox); memory and process_count are SUMs (the fleet footprint). OFF by default so a self-host deployment without guest telemetry is unaffected; turn it on for hosted/multi-tenant. The path carries only ids (for org resolution), pool names, and numeric vitals plus the process-list length, never argv, env, process command lines, pids, or secret values.")
 	flag.DurationVar(&vitalsSamplerInterval, "vitals-sampler-interval", 60*time.Second, "Interval between guest vitals samples when --vitals-sampler is set. Defaults to the usage window (60s). Only used when --vitals-sampler is on.")
 	flag.StringVar(&exposeProxyAdminURL, "expose-proxy-admin-url", "", "Expose proxy admin endpoint base URL for route-sync (POST /internal/routes); empty disables")
@@ -434,16 +437,41 @@ func main() {
 	// same access class as /metrics and /healthz), so the scraper uses the http
 	// scheme; an https operational mux is a documented follow-up.
 	if usageCollector {
+		// One shared store: the collector writes per-org usage records into it, and
+		// the internal usage API serves reads of the SAME store to the console, so
+		// the console shows exactly what was collected without a shared database.
+		usageStore := usage.NewMemUsageStore()
 		if err := mgr.Add(&controller.UsageCollectorRunnable{
 			Registry:   nodeRegistry,
 			Client:     mgr.GetClient(),
 			Cadence:    usageCollectorInterval,
 			HTTPScheme: "http",
+			Store:      usageStore,
 		}); err != nil {
 			logger.Error(err, "unable to add usage collector")
 			os.Exit(1)
 		}
 		logger.Info("usage collector: enabled", "interval", usageCollectorInterval.String())
+
+		// Internal usage API (machine-to-machine, bearer-gated) so the hosted
+		// console can read the collected per-org usage. The token is read from the
+		// environment and never logged; an empty token makes the handler fail closed.
+		if usageAPIAddr != "" {
+			usageAPIToken := os.Getenv("MITOS_USAGE_API_TOKEN")
+			if usageAPIToken == "" {
+				logger.Info("WARNING: --usage-api-address is set but MITOS_USAGE_API_TOKEN is empty; the internal usage API will refuse every request (fail closed)")
+			}
+			if err := mgr.Add(&controller.UsageAPIRunnable{
+				Store:  usageStore,
+				Prices: usage.DefaultPriceList(),
+				Addr:   usageAPIAddr,
+				Token:  usageAPIToken,
+			}); err != nil {
+				logger.Error(err, "unable to add internal usage API")
+				os.Exit(1)
+			}
+			logger.Info("internal usage API: enabled", "addr", usageAPIAddr, "tokenConfigured", usageAPIToken != "")
+		}
 	}
 
 	// Guest vitals sampler (issue #164 Phase 1.a), OFF by default. When enabled it
