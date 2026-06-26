@@ -52,6 +52,35 @@ func (t *TenantResolver) Resolve(r *http.Request, src string) (Identity, error) 
 	return Identity{Namespace: ns, InstanceLabel: label}, nil
 }
 
+// ContextResolver resolves identity from a verified org already attached to the
+// request context by an upstream session middleware (the console/gateway pattern,
+// where org and account come from a verified session, never a client header). It
+// is the resolver the console mounts.
+type ContextResolver struct {
+	// OrgFromRequest returns the verified org id for the request, or ok=false when
+	// the request is unauthenticated.
+	OrgFromRequest func(r *http.Request) (orgID string, ok bool)
+	// NamespaceForOrg maps an org id to its provisioned namespace (orgprovision).
+	NamespaceForOrg func(orgID string) string
+}
+
+// Resolve implements IdentityResolver.
+func (c *ContextResolver) Resolve(r *http.Request, src string) (Identity, error) {
+	orgID, ok := c.OrgFromRequest(r)
+	if !ok || strings.TrimSpace(orgID) == "" {
+		return Identity{}, fmt.Errorf("not signed in")
+	}
+	ns := c.NamespaceForOrg(orgID)
+	if ns == "" {
+		return Identity{}, fmt.Errorf("no namespace provisioned for org %q", orgID)
+	}
+	label, err := instanceLabel(src, orgID)
+	if err != nil {
+		return Identity{}, err
+	}
+	return Identity{Namespace: ns, InstanceLabel: label}, nil
+}
+
 // instanceLabel builds a deterministic, globally unique DNS label: the repo name
 // plus a short hash of the org id. Deterministic so a repeat run reconciles the
 // same instance; the org-scoped hash means labels never collide across tenants

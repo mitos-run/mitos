@@ -136,8 +136,12 @@ func main() {
 		// binary serves the BFF and the UI. The login flow and the middleware share
 		// ONE session store so a session issued at /auth/callback resolves here.
 		sessions := saas.NewSessionService(sessionStore, accounts)
-		mux.Handle("/console/", console.SessionMiddleware(sessions)(con))
+		sessionMW := console.SessionMiddleware(sessions)
+		mux.Handle("/console/", sessionMW(con))
 		mux.Handle("/", spa.Handler())
+		// Run with Mitos endpoints sit behind the same session auth so each call
+		// carries the verified org. Opt-in via MITOS_CONSOLE_RUN_WITH_MITOS.
+		mountRunWithMitos(mux, sessionMW, logger)
 		if issuer := os.Getenv("MITOS_CONSOLE_OIDC_ISSUER"); issuer != "" {
 			mountAuth(mux, logger, accounts, sessionStore, issuer)
 		} else {

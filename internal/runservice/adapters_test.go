@@ -129,6 +129,25 @@ func TestTenantResolve(t *testing.T) {
 	}
 }
 
+func TestContextResolver(t *testing.T) {
+	cr := &ContextResolver{
+		OrgFromRequest:  func(*http.Request) (string, bool) { return "org-abc", true },
+		NamespaceForOrg: func(orgID string) string { return "tenant-" + orgID },
+	}
+	id, err := cr.Resolve(httptest.NewRequest("POST", "/run", nil), "github.com/openclaw/openclaw")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if id.Namespace != "tenant-org-abc" || !strings.HasPrefix(id.InstanceLabel, "openclaw-") {
+		t.Errorf("identity = %+v", id)
+	}
+	// Unauthenticated -> fail closed.
+	cr.OrgFromRequest = func(*http.Request) (string, bool) { return "", false }
+	if _, err := cr.Resolve(httptest.NewRequest("POST", "/run", nil), "github.com/o/r"); err == nil {
+		t.Fatal("unauthenticated request should fail closed")
+	}
+}
+
 func TestTenantResolveNotSignedIn(t *testing.T) {
 	tr := &TenantResolver{
 		CurrentEmail:    func(_ *http.Request) (string, error) { return "", errors.New("no session") },
