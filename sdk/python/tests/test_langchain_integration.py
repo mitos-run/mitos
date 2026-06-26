@@ -37,6 +37,10 @@ class _FakeFiles:
     def read(self, path: str):
         return self.store[path]
 
+    def read_bytes(self, path: str) -> bytes:
+        v = self.store[path]
+        return v if isinstance(v, bytes) else str(v).encode("utf-8")
+
     def write(self, path: str, content, mode: int = 0o644):
         self.store[path] = content
         self.writes.append((path, content))
@@ -306,3 +310,51 @@ def test_fork_against_mock_server(mock_server):
             c.close()
     finally:
         sb.close()
+
+
+# --------------------------------------------------------------------------
+# deepagents backend conformance (#319): the adapter must satisfy the real
+# deepagents SandboxBackendProtocol (subclass BaseSandbox, execute() ->
+# ExecuteResponse with .output/.exit_code, plus upload_files/download_files/id),
+# not a guessed dict-returning shape. Skipped when deepagents is not installed
+# (it ships in the mitos-run[langchain] extra; CI installs it).
+# --------------------------------------------------------------------------
+
+
+def test_as_deepagents_backend_conforms_to_protocol():
+    pytest.importorskip("deepagents")
+    from deepagents.backends.protocol import ExecuteResponse
+    from deepagents.backends.sandbox import BaseSandbox
+
+    from mitos.integrations.langchain import as_deepagents_backend
+
+    backend = as_deepagents_backend(MitosSandbox(_FakeSandbox(id="sb-deep")))
+
+    # It IS a deepagents backend, so create_deep_agent(backend=...) accepts it.
+    assert isinstance(backend, BaseSandbox)
+    assert backend.id == "sb-deep"
+
+    # execute() returns an ExecuteResponse (object with .output/.exit_code), not
+    # a dict; output is the combined stdout+stderr.
+    res = backend.execute("echo hi")
+    assert isinstance(res, ExecuteResponse)
+    assert res.exit_code == 0
+    assert res.output == "ran:echo hi"
+
+    # upload/download round-trip through the required protocol methods.
+    ups = backend.upload_files([("/workspace/a.txt", b"data")])
+    assert ups[0].path == "/workspace/a.txt" and ups[0].error is None
+    downs = backend.download_files(["/workspace/a.txt"])
+    assert downs[0].content == b"data" and downs[0].error is None
+
+    # A relative path is rejected per-file without failing the batch.
+    bad = backend.download_files(["relative.txt"])
+    assert bad[0].error == "invalid_path" and bad[0].content is None
+
+
+def test_as_deepagents_backend_importable_without_deepagents():
+    # The module must import and the factory must be referenceable even when
+    # deepagents is absent (no hard dependency); only CALLING it needs deepagents.
+    from mitos.integrations.langchain import as_deepagents_backend
+
+    assert callable(as_deepagents_backend)

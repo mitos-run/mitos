@@ -34,8 +34,11 @@ OPTIONAL DEPENDENCY: this module imports mitos ALWAYS and imports langchain
 NEVER at runtime. LangChain types are referenced only under ``TYPE_CHECKING``.
 ``MitosSandbox`` does not subclass any langchain base class, so it is fully
 usable and testable with langchain absent. ``as_langchain_backend()`` is the
-opt-in seam for code that does have langchain installed and wants the backend
-registered against an upstream base class.
+opt-in seam for the duck-typed surface. For LangChain's deepagents, which
+requires a concrete ``deepagents.backends.sandbox.BaseSandbox`` subclass whose
+``execute()`` returns an ``ExecuteResponse``, ``as_deepagents_backend()`` builds
+exactly that (importing deepagents lazily); pass it to
+``create_deep_agent(backend=...)``.
 
 CODE EXECUTION: a code snippet (vs a shell command) maps to ``run_code``, which
 returns a native ``Execution`` carrying MIME ``Result`` artifacts (image/png,
@@ -214,13 +217,90 @@ class MitosSandbox:
 
 
 def as_langchain_backend(sandbox: MitosSandbox) -> MitosSandbox:
-    """Opt-in seam for code that DOES have langchain installed.
+    """Opt-in seam for the duck-typed LangChain backend surface.
 
-    Today ``MitosSandbox`` already implements the duck-typed backend surface, so
-    this returns it unchanged. It exists as the single place to adapt to an
-    upstream langchain base class or registry call IF one is required, keeping
-    that import lazy and out of the module top level so the SDK never hard-depends
-    on langchain.
+    ``MitosSandbox`` already exposes ``execute`` / ``read_file`` / ``write_file``
+    / ``list_files`` directly, so this returns it unchanged. For LangChain's
+    deepagents, which requires a concrete ``BaseSandbox`` subclass with an
+    ``ExecuteResponse``-returning ``execute``, use ``as_deepagents_backend``
+    instead (this passthrough does NOT satisfy that protocol).
     """
-    # Intentionally lazy: only reach for langchain here, never at import time.
     return sandbox
+
+
+def as_deepagents_backend(sandbox: "MitosSandbox | DirectSandbox") -> Any:
+    """Adapt a Mitos sandbox to a deepagents sandbox backend.
+
+    deepagents (LangChain) runs an agent's shell and filesystem tools through a
+    pluggable ``backend=`` object that subclasses
+    ``deepagents.backends.sandbox.BaseSandbox`` and implements
+    ``execute(command) -> ExecuteResponse`` (plus ``id`` / ``upload_files`` /
+    ``download_files``); BaseSandbox builds ls/read/write/grep/glob/edit on top of
+    ``execute``. Pass the result straight to::
+
+        from deepagents import create_deep_agent
+        agent = create_deep_agent(
+            model=...,
+            backend=as_deepagents_backend(MitosSandbox.create("python", base_url=...)),
+        )
+
+    deepagents is imported HERE, never at module top level, so the SDK keeps no
+    hard dependency on it; ``pip install "mitos-run[langchain]"`` brings it in.
+    Accepts a ``MitosSandbox`` or a raw ``DirectSandbox``.
+    """
+    from deepagents.backends.protocol import (
+        ExecuteResponse,
+        FileDownloadResponse,
+        FileUploadResponse,
+    )
+    from deepagents.backends.sandbox import BaseSandbox
+
+    direct = sandbox.sandbox if isinstance(sandbox, MitosSandbox) else sandbox
+
+    class _MitosDeepAgentsBackend(BaseSandbox):
+        """Mitos-backed deepagents SandboxBackendProtocol implementation."""
+
+        def __init__(self, sb: DirectSandbox) -> None:
+            self._sb = sb
+
+        @property
+        def id(self) -> str:
+            return self._sb.id
+
+        def execute(self, command: str, *, timeout: Optional[int] = None) -> ExecuteResponse:
+            # deepagents passes timeout=None for the backend default; map to the
+            # SDK's default exec timeout. ExecuteResponse.output is the COMBINED
+            # stdout+stderr stream.
+            res = self._sb.exec(command, timeout=timeout if timeout is not None else 60)
+            return ExecuteResponse(
+                output=(res.stdout or "") + (res.stderr or ""),
+                exit_code=res.exit_code,
+            )
+
+        def upload_files(self, files: List[tuple]) -> List[Any]:
+            out: List[Any] = []
+            for path, content in files:
+                if not path.startswith("/"):
+                    out.append(FileUploadResponse(path=path, error="invalid_path"))
+                    continue
+                try:
+                    self._sb.files.write(path, content)
+                    out.append(FileUploadResponse(path=path, error=None))
+                except Exception as exc:  # per-file failure, never fail the batch
+                    out.append(FileUploadResponse(path=path, error=str(exc)))
+            return out
+
+        def download_files(self, paths: List[str]) -> List[Any]:
+            out: List[Any] = []
+            for path in paths:
+                if not path.startswith("/"):
+                    out.append(FileDownloadResponse(path=path, content=None, error="invalid_path"))
+                    continue
+                try:
+                    data = self._sb.files.read_bytes(path)
+                    out.append(FileDownloadResponse(path=path, content=data, error=None))
+                except Exception as exc:
+                    out.append(FileDownloadResponse(path=path, content=None, error=str(exc)))
+            return out
+
+    return _MitosDeepAgentsBackend(direct)

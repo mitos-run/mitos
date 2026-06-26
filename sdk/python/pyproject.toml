@@ -43,6 +43,9 @@ dev = [
 # test suite run without them. Install only if you use the integration.
 langchain = [
     "langchain>=0.3",
+    # deepagents' pluggable sandbox backend (as_deepagents_backend); the adapter
+    # imports it lazily so the base SDK never hard-depends on it.
+    "deepagents>=0.6",
 ]
 openai-agents = [
     "openai-agents>=0.1",

@@ -320,6 +320,29 @@ langchain type and is fully usable without langchain installed. Fork is a Mitos
 op the LangChain backend interface does not expose, so it is reached through the
 adapter's native `fork`, which returns sibling `MitosSandbox` backends.
 
+For LangChain's **deepagents**, which takes a pluggable `backend=` (the same slot
+as `E2BSandbox` / `DaytonaSandbox`), wrap a Mitos sandbox with
+`as_deepagents_backend(...)`. It returns a real `deepagents` `BaseSandbox`
+subclass whose `execute()` returns an `ExecuteResponse`, so the agent's shell and
+file tools run in a Mitos sandbox, swap providers by swapping this one object:
+
+```python
+from deepagents import create_deep_agent
+from langchain_anthropic import ChatAnthropic
+from mitos.integrations.langchain import MitosSandbox, as_deepagents_backend
+
+backend = as_deepagents_backend(MitosSandbox.create("python", base_url="http://localhost:8080"))
+
+agent = create_deep_agent(
+    model=ChatAnthropic(model="claude-sonnet-4-6"),
+    system_prompt="You are a Python coding assistant with sandbox access.",
+    backend=backend,
+)
+```
+
+`as_deepagents_backend` imports `deepagents` lazily, so the base SDK keeps no hard
+dependency on it; the `[langchain]` extra pulls it in.
+
 ### OpenAI Agents SDK
 
 `MitosSandboxTools` binds `run_command` / `read_file` / `write_file` /
