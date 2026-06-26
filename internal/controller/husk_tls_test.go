@@ -112,3 +112,30 @@ func TestEnsureHuskTLSIsIdempotent(t *testing.T) {
 		t.Error("husk tls leaf changed on a second EnsureHuskTLS call; it must be idempotent")
 	}
 }
+
+// TestEnsureHuskTLSWritesLeafInControllerNamespace proves a pool that shares the
+// controller namespace (the natural single-namespace self-host install: controller
+// and pool both in "mitos") still gets a mitos-husk-tls Secret. The husk pod
+// always mounts that Secret, so skipping it for the controller namespace left
+// husk pods stuck in ContainerCreating forever (#414).
+func TestEnsureHuskTLSWritesLeafInControllerNamespace(t *testing.T) {
+	c := newCoreClient(t)
+	ns := newPKINamespace(t, c)
+	if _, err := controller.EnsurePKI(ctx, c, ns); err != nil {
+		t.Fatalf("EnsurePKI: %v", err)
+	}
+
+	// Pool namespace == controller namespace.
+	if err := controller.EnsureHuskTLS(ctx, c, ns, ns); err != nil {
+		t.Fatalf("EnsureHuskTLS: %v", err)
+	}
+
+	sec := getSecret(t, c, ns, controller.HuskTLSSecretName)
+	for _, key := range []string{"tls.crt", "tls.key"} {
+		if len(sec.Data[key]) == 0 {
+			t.Fatalf("husk tls secret missing key %s in the controller namespace", key)
+		}
+	}
+	ca := getSecret(t, c, ns, controller.CASecretName)
+	verifyLeaf(t, sec.Data["tls.crt"], ca.Data["ca.crt"], pki.HuskServerName(ns), x509.ExtKeyUsageServerAuth)
+}
