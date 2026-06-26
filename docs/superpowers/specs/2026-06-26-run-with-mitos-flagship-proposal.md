@@ -211,7 +211,54 @@ OpenClaw is the public billboard; Paperclip is the dogfood proving it is load-be
 for real, complex, stateful software. Same primitive, every app. That generality is
 the no-brainer.
 
-## 9. Phasing (dogfood-first, public gated on #341)
+## 9. Production funnel: the cold-click to live-instance flow (tracked in #440)
+
+The badge must be production-ready for non-users: a logged-out stranger clicks it and
+must reach a live, isolated, metered instance. This is where most run buttons quietly
+fail. The funnel runs on SaaS machinery already landing on main, state to real
+surface:
+
+1. Anonymous click to `mitos.run/run?src=...` reads the repo `mitos.yaml`, then the
+   public onboarding funnel (`internal/saas/onboarding/`, #215; `mountOnboarding` is
+   public and unauthenticated by design, server-gated by `caps.Signup`).
+2. Identity: OAuth (GitHub or Google via the console OIDC) for provenance and
+   throwaway-resistance; `account.FindOrCreateByEmail`.
+3. ToS and AUP acceptance recorded at signup (#341).
+4. Tenant provisioning: `internal/saas/orgprovision` (#410) provisions the per-org
+   namespace; a brand-new signup lands on the most restricted quota tier by default
+   (`internal/saas/quota/tier.go`, Daytona-style), so abuse and cost are bounded out
+   of the box.
+5. Consent and secrets: the per-fork secret screen (keys go only to your VM), scoped,
+   encrypted, never logged, injected per-fork, never baked into the golden.
+6. Provision and fork: fork the warm golden into the org namespace (pre-warmed org
+   pools keep it instant), expose via the preview-proxy auth ladder
+   (`internal/preview/proxy.go`: identity and tier routing).
+7. Live and metered: usage on the billing ledger (`internal/saas/billing`); free tier
+   is restricted quota plus pause-on-idle plus inactivity TTL; one-click upgrade.
+
+The only latency a cold visitor pays over a returning user is one-time OAuth plus
+secret paste; provisioning is fast (pre-warm plus the instant fork), so
+stranger-to-live-instance is seconds of active time.
+
+Two trust tiers with different gating:
+
+- First-party flagships (OpenClaw, Paperclip): our trusted images, the user brings
+  their keys. Nearer-term; needs identity, billing, quota, and per-org isolation, but
+  not the full arbitrary-repo #341 gate (the code is vetted by us).
+- Public arbitrary repos: untrusted code execution. Full #341 gate (AUP and ToS,
+  abuse detection plus kill switch, DMCA and DSA, sanctions, public-open-source-only
+  initial scope).
+
+Production launch checklist for the public funnel: OAuth identity plus ToS recorded;
+restricted-tier-by-default quota with per-org budget, rate, and resource ceilings
+(#421, #341); abuse detection plus terminate-and-quarantine kill switch (#341); secret
+consent plus encrypted scoped storage, never logged, per-fork injection (#341); billing
+ledger plus free-tier limits plus pause-on-idle plus inactivity TTL; per-org isolation
+(#410) over Firecracker microVMs with default-deny egress; DMCA designated agent, EU
+DSA notice-and-action, and sanctions and geo screening on paid (counsel-led, #341); an
+incident runbook (terminate, preserve evidence, notify).
+
+## 10. Phasing (dogfood-first, public gated on #341)
 
 1. Golden plus fork plus preview for OpenClaw (first-party, trusted): the
    `mitos.yaml`, the `ready`-gated snapshot, the expose URL. This is roughly two PRs
@@ -223,7 +270,7 @@ the no-brainer.
    piece 2).
 5. `awesome-mitos` curated repo as the distribution layer.
 
-## 10. Acceptance
+## 11. Acceptance
 
 A real repo with a `mitos.yaml` runs from a badge into a warm sandbox with a working
 preview URL in roughly fork latency; secrets are injected per-fork and never appear
