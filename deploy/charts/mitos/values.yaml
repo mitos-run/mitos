@@ -432,6 +432,54 @@ gateway:
     host: ""
     annotations: {}
 
+# Product telemetry: a privacy-first, OPT-IN, OFF-BY-DEFAULT pipeline that emits
+# a small set of non-PII product-usage events (sandbox.created, signup.started,
+# signup.verified) from the gateway and console. See docs/telemetry.md for the
+# exact event list, the no-PII guarantee, and the DO_NOT_TRACK behavior.
+#
+# Privacy contract enforced here:
+#   - Disabled unless enabled=true AND endpoint is set. With either missing the
+#     binary fails closed to a no-op emitter.
+#   - DO_NOT_TRACK is honored by the binary: a DO_NOT_TRACK=1 env (or
+#     telemetry.optOut=true here) force-disables telemetry regardless of the rest.
+#   - The org id is sent ONLY as a salted hash; with no salt the id is dropped.
+#     The salt and any endpoint token are SECRETS, injected via secretKeyRef ONLY,
+#     never as plaintext in the rendered manifests.
+telemetry:
+  # Opt-in switch. Default false: no telemetry env is rendered and the binaries
+  # run with a no-op emitter.
+  enabled: false
+  # Force-disable even if enabled=true (an explicit per-deploy opt-out). The
+  # binary also honors a DO_NOT_TRACK=1 env independently of this.
+  optOut: false
+  # The collector endpoint the network sink POSTs JSON to (for example a PostHog,
+  # Segment-compatible, or custom ingest URL). REQUIRED when enabled; an empty
+  # endpoint keeps telemetry disabled (fail closed).
+  endpoint: ""
+  # The HMAC salt used to hash the org id, sourced from a Secret. With no salt the
+  # org id is DROPPED from every event. Create the Secret out of band, for
+  # example:
+  #
+  #   kubectl create secret generic mitos-telemetry \
+  #     --namespace mitos-system \
+  #     --from-literal=salt='<random-32-bytes>' \
+  #     --from-literal=token='<optional-collector-token>'
+  #
+  # then set saltSecretRef.name=mitos-telemetry below.
+  saltSecretRef:
+    # Name of the Secret in the release namespace. Empty omits the salt env, so
+    # the org id is dropped (fail closed).
+    name: ""
+    # Key within that Secret holding the salt.
+    key: "salt"
+  # Optional bearer token for the collector, sourced from a Secret. Empty omits
+  # the Authorization header.
+  tokenSecretRef:
+    # Name of the Secret in the release namespace. Empty omits the token env.
+    name: ""
+    # Key within that Secret holding the token.
+    key: "token"
+
 # Expose proxy (Deployment): cmd/preview-proxy terminates TLS for wildcard
 # sandbox preview URLs and proxies traffic to the correct sandbox. Gated by
 # expose.enabled (default false). Requires expose.domain when enabled.

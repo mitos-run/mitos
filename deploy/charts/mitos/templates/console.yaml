@@ -228,6 +228,7 @@ spec:
                   key: resolve-token
             {{- end }}
             {{- include "mitos.database.env" . | nindent 12 }}
+            {{- include "mitos.telemetry.env" . | nindent 12 }}
             {{- with .Values.console.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

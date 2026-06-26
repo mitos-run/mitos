@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
@@ -36,6 +37,7 @@ import (
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/telemetry"
 )
 
 func main() {
@@ -45,6 +47,20 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Product telemetry is OPT-IN and OFF by default. FromEnv returns a no-op
+	// emitter unless MITOS_TELEMETRY_ENABLED is truthy AND an endpoint is set, and
+	// is force-disabled by DO_NOT_TRACK. The salt and any token are secrets and are
+	// never logged. The onboarding funnel forwards signup.started / signup.verified
+	// to it via onboarding.NewTelemetryRecorder once the self-serve funnel is wired
+	// (it is a tested core today); the emitter is constructed here so the startup
+	// log line and shutdown flush exist in the one place the binary owns lifecycle.
+	tel := telemetry.FromEnv(logger)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tel.Shutdown(ctx)
+	}()
 
 	// Durable Postgres when a DSN is configured (flag or MITOS_DATABASE_DSN),
 	// in-memory otherwise (dev only). The DSN value is never logged. The real

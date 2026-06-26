@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/telemetry"
 )
 
 // maxBodyBytes bounds a forwarded request body so a customer cannot exhaust the
@@ -87,20 +88,38 @@ type Gateway struct {
 	// bucket: zero means X-Forwarded-For is never trusted (use RemoteAddr). See
 	// TrustedProxyHops.
 	trustedHops TrustedProxyHops
+	tel         *telemetry.Emitter
 }
 
 // NewGateway builds a gateway. A nil quota enforcer defaults to AllowAllQuota
-// (the #213 seam). A nil logger discards logs. The client-IP trust model defaults
-// to zero trusted proxy hops (X-Forwarded-For is not trusted); use
-// WithTrustedProxyHops to configure it when the gateway sits behind an ingress.
-func NewGateway(keys *KeyService, quota QuotaEnforcer, cp ControlPlane, log *slog.Logger) *Gateway {
+// (the #213 seam). A nil logger discards logs. A nil telemetry emitter is a
+// no-op (telemetry is opt-in and off by default); when supplied and enabled, the
+// gateway emits a sandbox.created product event on a successful create. The
+// emitter never receives a raw org id (it hashes it) and the gateway attaches
+// only non-PII properties. The client-IP trust model defaults to zero trusted
+// proxy hops (X-Forwarded-For is not trusted); use WithTrustedProxyHops to
+// configure it when the gateway sits behind an ingress.
+func NewGateway(keys *KeyService, quota QuotaEnforcer, cp ControlPlane, log *slog.Logger, opts ...GatewayOption) *Gateway {
 	if quota == nil {
 		quota = AllowAllQuota{}
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Gateway{keys: keys, quota: quota, cp: cp, log: log}
+	g := &Gateway{keys: keys, quota: quota, cp: cp, log: log}
+	for _, o := range opts {
+		o(g)
+	}
+	return g
+}
+
+// GatewayOption configures a Gateway.
+type GatewayOption func(*Gateway)
+
+// WithTelemetry wires a product-telemetry emitter into the gateway. When the
+// emitter is disabled (the default) the create path stays a no-op.
+func WithTelemetry(t *telemetry.Emitter) GatewayOption {
+	return func(g *Gateway) { g.tel = t }
 }
 
 // WithTrustedProxyHops sets the number of trusted reverse-proxy hops in front of
@@ -218,6 +237,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status := resp.Status
 	if status == 0 {
 		status = http.StatusOK
+	}
+
+	// Product telemetry: a successful create emits a sandbox.created event. This is
+	// a no-op when telemetry is disabled (the default). The event carries ONLY
+	// non-PII properties (a success flag and, when present, the non-identifying
+	// pool name the control plane echoes via the X-Mitos-Pool response header); the
+	// org id is hashed by the emitter and never sent raw. No body, image content,
+	// or customer payload is inspected.
+	if op == "sandbox.create" && status >= 200 && status < 300 && g.tel.Enabled() {
+		props := map[string]any{"success": true}
+		if pool := resp.Header.Get("X-Mitos-Pool"); pool != "" {
+			props["pool"] = pool
+		}
+		g.tel.Emit(r.Context(), telemetry.Event{
+			Name:       "sandbox.created",
+			OrgID:      orgID,
+			Properties: props,
+		})
 	}
 	// A control-plane response may carry its own headers (the runtime proxy sets
 	// Content-Type so a streamed Connect body is decodable). Default to JSON for
