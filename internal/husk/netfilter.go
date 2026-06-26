@@ -75,6 +75,14 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 			return fmt.Errorf("husk netfilter: enable ipv4 forwarding: %w", err)
 		}
 	}
+	// The tap name is deterministic per template, so a claimed warm husk may
+	// already hold a tap with this name (its dormant VM's NIC), and a prior
+	// attempt may have leaked one. Either makes the create below fail with EBUSY
+	// (Device or resource busy), which masks the real first-attempt error and
+	// permanently poisons the warm pod (issue #428). Remove any pre-existing tap
+	// first so creation is idempotent; best-effort, since "not found" is the
+	// normal case on a clean activation.
+	_ = run(ctx, netconf.LinkDelArgs(cfg.Tap), "")
 	if err := run(ctx, netconf.TapAddArgs(cfg.Tap), ""); err != nil {
 		return fmt.Errorf("husk netfilter: create tap %s: %w", cfg.Tap, err)
 	}
