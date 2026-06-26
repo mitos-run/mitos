@@ -23,18 +23,16 @@ RUN apt-get update -qq && \
 # `nft -f` to install the default-deny + metadata-block chain in the pod netns.
 # Without them activation fails with `exec: "ip": executable file not found`.
 
-# Install Firecracker, mirroring Dockerfile.forkd: the stub spawns a dormant
-# Firecracker VMM, so the firecracker binary ships in the image at the same
-# path forkd uses (/usr/local/bin/firecracker), which is the default the stub
-# and the controller-built pod spec point at.
+# Install Firecracker AND the matching jailer, mirroring Dockerfile.forkd via the
+# shared hack/install-firecracker.sh: the stub spawns a dormant Firecracker VMM
+# through the jailer, so both binaries ship at the same paths forkd uses
+# (/usr/local/bin/{firecracker,jailer}), which the stub and the controller-built
+# pod spec point at. The script fails the build if either is missing (#425).
 ARG FC_VERSION=v1.15.0
+COPY hack/install-firecracker.sh /usr/local/bin/install-firecracker.sh
 RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
-    curl -fsSL -o /tmp/fc.tgz \
-        "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" && \
-    tar -xzf /tmp/fc.tgz -C /tmp && \
-    mv "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker && \
-    chmod +x /usr/local/bin/firecracker && \
-    rm -rf /tmp/fc.tgz /tmp/release-* && \
+    chmod +x /usr/local/bin/install-firecracker.sh && \
+    FC_VERSION="${FC_VERSION}" /usr/local/bin/install-firecracker.sh && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/husk-stub /usr/local/bin/husk-stub
