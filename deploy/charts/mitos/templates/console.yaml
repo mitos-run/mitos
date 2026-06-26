@@ -112,6 +112,38 @@ spec:
               value: {{ .Values.console.signup | quote }}
             - name: MITOS_CONSOLE_BILLING
               value: {{ .Values.console.billing.enabled | quote }}
+            {{- /*
+            Paddle (Merchant of Record) selection. The provider switches to Paddle
+            only when BOTH the API key and the webhook signing secret are present;
+            otherwise the binary keeps the Stripe default. Both are SECRETS,
+            injected via secretKeyRef ONLY: their values never appear in the
+            rendered manifests. Gated by billing.enabled so the env is inert when
+            billing is off.
+            */}}
+            {{- if .Values.console.billing.enabled }}
+            {{- with .Values.console.billing.paddle.apiKeySecretRef }}
+            {{- if .name }}
+            - name: MITOS_CONSOLE_PADDLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "api-key" | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.console.billing.paddle.webhookSecretRef }}
+            {{- if .name }}
+            - name: MITOS_CONSOLE_PADDLE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "webhook-secret" | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.console.billing.paddle.baseURL }}
+            - name: MITOS_CONSOLE_PADDLE_BASE_URL
+              value: {{ .Values.console.billing.paddle.baseURL | quote }}
+            {{- end }}
+            {{- end }}
             - name: MITOS_CONSOLE_OIDC_ISSUER
               value: {{ .Values.console.oidc.issuerURL | quote }}
             - name: MITOS_CONSOLE_OIDC_CLIENT_ID

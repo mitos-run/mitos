@@ -321,9 +321,40 @@ console:
       # "namespace" (one OpenBao namespace per org).
       perOrg: path
   billing:
-    # Stripe billing surface. Hosted sets true; community keeps it off so the
-    # billing routes never mount.
+    # Billing surface. Hosted sets true; community keeps it off so the billing
+    # routes never mount. The provider is selected by configuration: Paddle (our
+    # Merchant of Record, which is the legal seller and handles global
+    # sales-tax/VAT) is used when paddle.apiKeySecretRef and
+    # paddle.webhookSecretRef are both set; otherwise the Stripe default applies.
     enabled: false
+    # Paddle (Merchant of Record) configuration. The API key and webhook signing
+    # secret are SECRETS and are injected ONLY via secretKeyRef (env valueFrom),
+    # never as plaintext values in the rendered manifests. Create the Secret out
+    # of band, for example:
+    #
+    #   kubectl create secret generic mitos-paddle \
+    #     --namespace mitos-system \
+    #     --from-literal=api-key='pdl_live_...' \
+    #     --from-literal=webhook-secret='pdl_ntfset_...'
+    #
+    # then set both refs below to name=mitos-paddle. When either ref is unset the
+    # Paddle env is not rendered and the billing default (Stripe) applies.
+    paddle:
+      # Reference an existing Secret holding the Paddle Billing API key.
+      apiKeySecretRef:
+        # Name of the Secret in the release namespace. Empty omits the env.
+        name: ""
+        # Key within that Secret holding the Paddle API key.
+        key: "api-key"
+      # Reference an existing Secret holding the Paddle webhook signing secret.
+      webhookSecretRef:
+        # Name of the Secret in the release namespace. Empty omits the env.
+        name: ""
+        # Key within that Secret holding the webhook signing secret.
+        key: "webhook-secret"
+      # Paddle API host. Default is live; set to https://sandbox-api.paddle.com
+      # for the sandbox. Empty uses the binary's built-in live default.
+      baseURL: ""
   ingress:
     enabled: false
     className: ""

@@ -115,6 +115,54 @@ func TestConsoleOIDCRedirectURLOmittedByDefault(t *testing.T) {
 	}
 }
 
+// TestPaddleAbsentByDefault asserts the Paddle env is not rendered in the default
+// community install (billing off), so no billing provider config leaks in.
+func TestPaddleAbsentByDefault(t *testing.T) {
+	out := render(t)
+	if strings.Contains(out, "MITOS_CONSOLE_PADDLE_API_KEY") {
+		t.Fatal("Paddle API key env rendered by default; billing must be opt-in")
+	}
+	if strings.Contains(out, "MITOS_CONSOLE_PADDLE_WEBHOOK_SECRET") {
+		t.Fatal("Paddle webhook secret env rendered by default")
+	}
+}
+
+// TestPaddleSecretRefWiring asserts that when billing is enabled and the Paddle
+// secret refs are set, the API key and webhook secret are injected via
+// secretKeyRef ONLY (never as plaintext values), and the base URL passes through.
+func TestPaddleSecretRefWiring(t *testing.T) {
+	out := render(t,
+		"console.billing.enabled=true",
+		"console.billing.paddle.apiKeySecretRef.name=mitos-paddle",
+		"console.billing.paddle.webhookSecretRef.name=mitos-paddle",
+		"console.billing.paddle.baseURL=https://sandbox-api.paddle.com",
+	)
+	mustNamedSecretKeyRef(t, out, "MITOS_CONSOLE_PADDLE_API_KEY", "mitos-paddle", "api-key")
+	mustNamedSecretKeyRef(t, out, "MITOS_CONSOLE_PADDLE_WEBHOOK_SECRET", "mitos-paddle", "webhook-secret")
+	mustEnv(t, out, "MITOS_CONSOLE_PADDLE_BASE_URL", "https://sandbox-api.paddle.com")
+}
+
+// TestPaddleSecretValuesNeverPlaintext asserts the chart NEVER renders a Paddle
+// secret as a plaintext env value: only the secretKeyRef indirection is allowed.
+func TestPaddleSecretValuesNeverPlaintext(t *testing.T) {
+	out := render(t,
+		"console.billing.enabled=true",
+		"console.billing.paddle.apiKeySecretRef.name=mitos-paddle",
+		"console.billing.paddle.webhookSecretRef.name=mitos-paddle",
+	)
+	lines := strings.Split(out, "\n")
+	for i, ln := range lines {
+		for _, name := range []string{"MITOS_CONSOLE_PADDLE_API_KEY", "MITOS_CONSOLE_PADDLE_WEBHOOK_SECRET"} {
+			if strings.TrimSpace(ln) == "- name: "+name && i+1 < len(lines) {
+				next := strings.TrimSpace(lines[i+1])
+				if strings.HasPrefix(next, "value:") {
+					t.Fatalf("%s rendered as plaintext value; must use secretKeyRef", name)
+				}
+			}
+		}
+	}
+}
+
 // TestConsoleExtraEnv asserts arbitrary console.extraEnv entries pass through, so
 // operators can inject env the chart does not model.
 func TestConsoleExtraEnv(t *testing.T) {
@@ -187,6 +235,35 @@ func controllerClusterRole(t *testing.T, out string) string {
 	}
 	t.Fatal("mitos-controller ClusterRole not found in rendered manifests")
 	return ""
+}
+
+// mustNamedSecretKeyRef asserts an env var with the given name is sourced from a
+// secretKeyRef pointing at secretName/key, and never carries a plaintext value.
+func mustNamedSecretKeyRef(t *testing.T, out, name, secretName, key string) {
+	t.Helper()
+	needle := "- name: " + name
+	lines := strings.Split(out, "\n")
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) != needle {
+			continue
+		}
+		end := i + 6
+		if end > len(lines) {
+			end = len(lines)
+		}
+		block := strings.Join(lines[i:end], "\n")
+		if !strings.Contains(block, "secretKeyRef:") {
+			t.Fatalf("env %s is not sourced from a secretKeyRef", name)
+		}
+		if !strings.Contains(block, `name: "`+secretName+`"`) {
+			t.Fatalf("env %s secretKeyRef does not reference secret %q", name, secretName)
+		}
+		if !strings.Contains(block, `key: "`+key+`"`) {
+			t.Fatalf("env %s secretKeyRef does not use key %q", name, key)
+		}
+		return
+	}
+	t.Fatalf("env %s not found in rendered manifests", name)
 }
 
 func mustContain(t *testing.T, out, want string) {
