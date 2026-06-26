@@ -12,6 +12,36 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 )
 
+// Annotation keys that carry the manifest auto-update (track) policy onto the
+// golden pool, so the auto-update reconciler can read it without re-fetching the
+// manifest. AnnResolvedImage is the concrete image the golden currently runs; the
+// reconciler compares it against the latest upstream reference.
+const (
+	AnnTrackWatch    = "mitos.run/track-watch"
+	AnnTrackChannel  = "mitos.run/track-channel"
+	AnnTrackAction   = "mitos.run/track-action"
+	AnnResolvedImage = "mitos.run/resolved-image"
+)
+
+// trackAnnotations renders the source.track policy as pool annotations. Nil when
+// the manifest declares no track (auto-update off).
+func (m *Manifest) trackAnnotations() map[string]string {
+	if m.Source.Track == nil {
+		return nil
+	}
+	ann := map[string]string{AnnTrackWatch: m.Source.Track.Watch}
+	if m.Source.Image != "" {
+		ann[AnnResolvedImage] = m.Source.Image
+	}
+	if m.Source.Track.Channel != "" {
+		ann[AnnTrackChannel] = m.Source.Track.Channel
+	}
+	if m.Source.Track.OnNewRelease != "" {
+		ann[AnnTrackAction] = string(m.Source.Track.OnNewRelease)
+	}
+	return ann
+}
+
 // PoolName is the SandboxPool name for this manifest (resources.pool override, or
 // the manifest name).
 func (m *Manifest) PoolName() string {
@@ -48,6 +78,7 @@ func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
 				"app.kubernetes.io/managed-by": "run-with-mitos",
 				"mitos.run/run-manifest":       m.Name,
 			},
+			Annotations: m.trackAnnotations(),
 		},
 		Spec: v1.SandboxPoolSpec{
 			Template: &v1.PoolTemplateSpec{
