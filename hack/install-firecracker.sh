@@ -9,15 +9,29 @@
 # (#425). This is the single install path shared by Dockerfile.forkd and
 # Dockerfile.husk-stub so the two cannot drift.
 #
-# Requires curl and ca-certificates to be present already (the caller installs them).
+# Requires curl, ca-certificates, and coreutils (sha256sum) to be present already
+# (the caller installs them).
 set -euo pipefail
 
 FC_VERSION="${FC_VERSION:-v1.15.0}"
 
+# uname -m returns the kernel arch (x86_64 / aarch64 on Linux), not the Go/Docker
+# platform names (amd64 / arm64), so only these two are matched.
 case "$(uname -m)" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
+    x86_64) arch="x86_64" ;;
+    aarch64) arch="aarch64" ;;
     *) echo "install-firecracker: unsupported arch $(uname -m)" >&2; exit 1 ;;
+esac
+
+# Pinned tarball SHA256 per arch (supply-chain defense): a compromised CDN or a
+# network substitution cannot install a different binary that would still pass the
+# version-match check. These digests are tied to FC_VERSION; bumping the version
+# REQUIRES updating both, taken from the official firecracker release
+# `firecracker-<v>-<arch>.tgz.sha256.txt` asset.
+case "${FC_VERSION}_${arch}" in
+    v1.15.0_x86_64)  sha="00cadf7f21e709e939dc0c8d16e2d2ce7b975a62bec6c50f74b421cc8ab3cab4" ;;
+    v1.15.0_aarch64) sha="58325e6c3c539482a412ec0b60e6f539c3320adebcf8179c7629d06736aee0bd" ;;
+    *) echo "install-firecracker: no pinned sha256 for ${FC_VERSION} ${arch}; add it from the firecracker release .sha256.txt before building" >&2; exit 1 ;;
 esac
 
 tgz="$(mktemp)"
@@ -26,6 +40,8 @@ trap 'rm -rf "$tgz" "$dir"' EXIT
 
 curl -fsSL -o "$tgz" \
     "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${arch}.tgz"
+# Verify the download against the pinned digest before extracting anything.
+echo "${sha}  ${tgz}" | sha256sum -c -
 tar -xzf "$tgz" -C "$dir"
 
 rel="${dir}/release-${FC_VERSION}-${arch}"
