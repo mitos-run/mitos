@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -19,6 +20,8 @@ Usage:
   mitos ws revert <workspace> <revision>  set the workspace head to a past revision
   mitos ws rm <name>                      delete a workspace and its revisions
   mitos ws bind <sandbox-id> <workspace>  bind a running sandbox to a workspace
+  mitos ws serve <workspace> --pool P [--port N] [--sharing S] [--as L] [--expose-domain D]
+                                          expose a workspace over the Mitos edge proxy
 `
 
 // cmdWorkspace is the production entry: it is wired from Run with a cluster
@@ -124,6 +127,8 @@ func runWs(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.
 			return 1
 		}
 		return 0
+	case "serve":
+		return cmdServe(ctx, args[1:], b, out, errw)
 	default:
 		fmt.Fprintf(errw, "unknown ws subcommand %q\n\n%s", args[0], wsUsage)
 		return 2
@@ -162,6 +167,69 @@ func formatRevisionLog(revs []RevisionInfo) string {
 		fmt.Fprintf(&sb, "%-24s %-10s %-9t %s\n", r.Name, r.Phase, r.Resumable, r.Lineage)
 	}
 	return sb.String()
+}
+
+// cmdServe handles the `mitos ws serve` subcommand.
+func cmdServe(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.Writer) int {
+	// Extract the workspace name: it is the first non-flag argument. The Go
+	// flag package stops at the first non-flag arg, so we pull the workspace
+	// name out before flag parsing when args[0] is not a flag.
+	var workspace string
+	flagArgs := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		workspace = args[0]
+		flagArgs = args[1:]
+	}
+
+	fs := flag.NewFlagSet("ws serve", flag.ContinueOnError)
+	fs.SetOutput(errw)
+	pool := fs.String("pool", "", "SandboxPool to start the sandbox from (required)")
+	port := fs.Int("port", 8080, "guest TCP port to expose")
+	sharing := fs.String("sharing", "private", "access tier: private, link, org, authenticated, or public")
+	label := fs.String("as", "", "subdomain label (defaults to the sandbox name)")
+	exposeDomain := fs.String("expose-domain", DefaultExposeDomain(), "base domain for the expose URL (or set MITOS_EXPOSE_DOMAIN)")
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+
+	if workspace == "" {
+		// Workspace may also appear after flags (e.g., mitos ws serve --pool P myws).
+		if len(fs.Args()) > 0 {
+			workspace = fs.Args()[0]
+		}
+	}
+
+	if workspace == "" {
+		fmt.Fprintf(errw, "ws serve: a workspace name is required\n\n%s", wsUsage)
+		return 2
+	}
+	if *pool == "" {
+		fmt.Fprintf(errw, "ws serve: --pool is required\n\n%s", wsUsage)
+		return 2
+	}
+	if *exposeDomain == "" {
+		fmt.Fprintf(errw, "ws serve: --expose-domain is required (or set MITOS_EXPOSE_DOMAIN)\n")
+		return 2
+	}
+
+	res, err := b.Serve(ctx, workspace, *exposeDomain, ServeOptions{
+		Pool:    *pool,
+		Port:    *port,
+		Sharing: *sharing,
+		Label:   *label,
+	})
+	if err != nil {
+		fmt.Fprintf(errw, "ws serve: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(out, res.URL)
+	fmt.Fprintln(out, "Note: this URL is reachable once the expose proxy is deployed and *."+*exposeDomain+" DNS resolves to it.")
+	if res.Sharing == "private" {
+		fmt.Fprintln(out, "Access requires OIDC login (private sharing).")
+	}
+	return 0
 }
 
 func formatDiff(d DiffInfo) string {

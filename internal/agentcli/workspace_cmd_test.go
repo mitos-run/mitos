@@ -51,3 +51,46 @@ func TestWsUnknownSubcommandUsageError(t *testing.T) {
 		t.Fatalf("exit %d, want 2", code)
 	}
 }
+
+func TestCmdServeSuccess(t *testing.T) {
+	fb := NewFakeWorkspaceBackend()
+	fb.ServeResult = ServeResult{
+		SandboxName: "sbx-abc123",
+		Label:       "myws",
+		URL:         "https://myws.mitos.app/",
+		Sharing:     "private",
+	}
+	var out, errw bytes.Buffer
+	code := runWs(context.Background(), []string{"serve", "myws", "--pool", "python", "--expose-domain", "mitos.app"}, fb, &out, &errw)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr=%s", code, errw.String())
+	}
+	if !strings.Contains(out.String(), "https://myws.mitos.app/") {
+		t.Fatalf("output does not contain URL: %s", out.String())
+	}
+}
+
+func TestCmdServeMissingPool(t *testing.T) {
+	fb := NewFakeWorkspaceBackend()
+	var out, errw bytes.Buffer
+	code := runWs(context.Background(), []string{"serve", "myws", "--expose-domain", "mitos.app"}, fb, &out, &errw)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errw.String(), "pool") {
+		t.Fatalf("errw = %q, want containing 'pool'", errw.String())
+	}
+}
+
+func TestCmdServeMissingDomain(t *testing.T) {
+	t.Setenv("MITOS_EXPOSE_DOMAIN", "")
+	fb := NewFakeWorkspaceBackend()
+	var out, errw bytes.Buffer
+	code := runWs(context.Background(), []string{"serve", "myws", "--pool", "python"}, fb, &out, &errw)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errw.String(), "expose-domain") {
+		t.Fatalf("errw = %q, want containing 'expose-domain'", errw.String())
+	}
+}

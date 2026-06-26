@@ -32,6 +32,22 @@ type WorkspaceInfo struct {
 	Age       time.Duration
 }
 
+// ServeOptions are the options for the Serve workspace backend call.
+type ServeOptions struct {
+	Pool    string
+	Port    int
+	Sharing string
+	Label   string
+}
+
+// ServeResult is returned by a successful Serve call.
+type ServeResult struct {
+	SandboxName string
+	Label       string
+	URL         string
+	Sharing     string
+}
+
 // WorkspaceBackend is the workspace lifecycle surface the `mitos ws` commands
 // dispatch to. It is narrow on purpose, mirroring the sandbox Backend, so tests
 // supply a FakeWorkspaceBackend and the cluster backend wraps the client.
@@ -44,17 +60,19 @@ type WorkspaceBackend interface {
 	Revert(ctx context.Context, workspace, revision string) (newRevision string, err error)
 	RemoveWorkspace(ctx context.Context, name string) error
 	Bind(ctx context.Context, sandboxID, workspace string) error
+	Serve(ctx context.Context, workspace, exposeDomain string, opts ServeOptions) (ServeResult, error)
 }
 
 // FakeWorkspaceBackend records calls and returns canned data for CLI tests.
 type FakeWorkspaceBackend struct {
-	mu         sync.Mutex
-	Calls      []FakeCall
-	Revisions  []RevisionInfo
-	DiffV      DiffInfo
-	Workspaces []WorkspaceInfo
-	NewRev     string
-	Errors     map[string]error
+	mu          sync.Mutex
+	Calls       []FakeCall
+	Revisions   []RevisionInfo
+	DiffV       DiffInfo
+	Workspaces  []WorkspaceInfo
+	NewRev      string
+	Errors      map[string]error
+	ServeResult ServeResult
 }
 
 // NewFakeWorkspaceBackend returns a FakeWorkspaceBackend with a default canned
@@ -145,4 +163,13 @@ func (f *FakeWorkspaceBackend) RemoveWorkspace(_ context.Context, name string) e
 func (f *FakeWorkspaceBackend) Bind(_ context.Context, sb, ws string) error {
 	f.record(FakeCall{Method: "ws_bind", SandboxID: sb, Content: ws})
 	return f.err("ws_bind")
+}
+
+// Serve implements WorkspaceBackend.
+func (f *FakeWorkspaceBackend) Serve(_ context.Context, ws, _ string, _ ServeOptions) (ServeResult, error) {
+	f.record(FakeCall{Method: "ws_serve", SandboxID: ws})
+	if e := f.err("ws_serve"); e != nil {
+		return ServeResult{}, e
+	}
+	return f.ServeResult, nil
 }
