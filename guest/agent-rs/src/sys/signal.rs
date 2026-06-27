@@ -58,6 +58,31 @@ pub fn read_session(proc_path: &str, pid: i32) -> Option<i32> {
     after.split_whitespace().nth(3)?.parse().ok()
 }
 
+/// process_catches_sigusr2 reports whether `pid` installed a SIGUSR2 handler,
+/// read from the SigCgt (caught-signals) bitmask in `<proc_path>/<pid>/status`.
+/// SIGUSR2's default disposition is terminate, so the fork broadcast signals ONLY
+/// confirmed handlers (issue #467); a process that caught no SIGUSR2 could not act
+/// on the reseed notification anyway, it could only die. Fail-safe: any read or
+/// parse failure returns false, so a process we cannot confirm is never signaled
+/// (and so never killed by the broadcast).
+pub fn process_catches_sigusr2(proc_path: &str, pid: i32) -> bool {
+    let status = match fs::read_to_string(format!("{proc_path}/{pid}/status")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("SigCgt:") {
+            let Ok(mask) = u64::from_str_radix(rest.trim(), 16) else {
+                return false;
+            };
+            // SigCgt bit (signo - 1) is set when a handler is installed for signo.
+            let bit = 1u64 << ((libc::SIGUSR2 - 1) as u32);
+            return mask & bit != 0;
+        }
+    }
+    false
+}
+
 /// select_targets enumerates the pids under `proc_path` that should receive the
 /// userspace reset signal: every numeric /proc/<pid> directory except PID 1, the
 /// caller, and any pid whose session id is in `exclude_sids`. The exclusion is
@@ -175,6 +200,35 @@ mod tests {
         // With no exclusions every non-self, non-init pid is a target.
         let all = select_targets(proc, &HashSet::new());
         assert!(all.contains(&100) && all.contains(&101) && all.contains(&200));
+    }
+
+    #[test]
+    fn process_catches_sigusr2_reads_sigcgt() {
+        let dir = tempfile::tempdir().unwrap();
+        // bit (SIGUSR2 - 1) = bit 11 = 0x800.
+        let with_handler = dir.path().join("10");
+        std::fs::create_dir(&with_handler).unwrap();
+        std::fs::write(
+            with_handler.join("status"),
+            "Name:\tapp\nState:\tS\nSigCgt:\t0000000000000800\n",
+        )
+        .unwrap();
+        let no_handler = dir.path().join("11");
+        std::fs::create_dir(&no_handler).unwrap();
+        std::fs::write(
+            no_handler.join("status"),
+            "Name:\tapp\nState:\tS\nSigCgt:\t0000000000000000\n",
+        )
+        .unwrap();
+        let malformed = dir.path().join("12");
+        std::fs::create_dir(&malformed).unwrap();
+        std::fs::write(malformed.join("status"), "SigCgt:\tnothex\n").unwrap();
+
+        let proc = dir.path().to_str().unwrap();
+        assert!(process_catches_sigusr2(proc, 10), "SIGUSR2 bit set => handler");
+        assert!(!process_catches_sigusr2(proc, 11), "no bit => no handler");
+        assert!(!process_catches_sigusr2(proc, 12), "malformed => fail-safe false");
+        assert!(!process_catches_sigusr2(proc, 99), "missing file => fail-safe false");
     }
 
     #[test]
