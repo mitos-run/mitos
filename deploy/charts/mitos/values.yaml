@@ -629,3 +629,74 @@ dex:
   # the console read key "client-secret" from this Secret, so one Secret with
   # one key satisfies both sides. Create out of band (see comment block above).
   consoleClientSecret: ""
+
+# Front-door reverse proxy (Deployment + Service): single-origin entry point at
+# mitos.run. Routes / to the marketing static site and /app + auth paths to the
+# console. Gated by frontdoor.enabled (default false). Requires the expose
+# Secret (expose.secretName) to be present in the cluster with a resolve-token
+# key before enabling, because MITOS_IDENTITY_RESOLVE_TOKEN is sourced from it.
+frontdoor:
+  # Gate the frontdoor Deployment and Service. Default false (opt-in).
+  enabled: false
+  # Number of frontdoor replicas.
+  replicas: 2
+  image:
+    # Image repository for the front-door (appended to image.registry).
+    # Set to the frontdoor binary OCI repository before enabling.
+    repository: ""
+    # Image tag. Defaults to the chart appVersion via mitos.image when empty.
+    tag: ""
+    # Image pull policy for the frontdoor container.
+    pullPolicy: IfNotPresent
+  # In-cluster URL of the marketing static-site Service. Defaults to the
+  # mitos-marketing Service constructed from the release namespace.
+  marketingURL: ""
+  # In-cluster URL of the console Service. Defaults to the mitos-console
+  # Service constructed from the release namespace.
+  consoleURL: ""
+  # In-cluster URL of the console session-resolve endpoint. Defaults to the
+  # mitos-console Service path /internal/session/resolve.
+  sessionResolveURL: ""
+  # Frontdoor container resource requests and limits.
+  resources: {}
+
+# Cilium Gateway-API edge resources for mitos.run (Gateway, Certificate,
+# HTTPRoutes, CiliumNetworkPolicy). Uses the "edge" values key to avoid
+# collision with the existing gateway.yaml (cmd/gateway API front door,
+# gated by gateway.enabled). Gated by edge.enabled (default false).
+# Live gateway, DNS, and TLS are verified on the cluster via the paperclip
+# deploy, not by local helm template lint.
+edge:
+  # Gate all edge-gateway resources. Default false (opt-in).
+  enabled: false
+  # GatewayClass name used by the Cilium Gateway-API integration.
+  gatewayClassName: cilium
+  # Primary hostname for the edge gateway and certificate.
+  hostname: mitos.run
+  tls:
+    # Name of the TLS Secret created by cert-manager and referenced by the
+    # Gateway listener.
+    secretName: mitos-run-tls
+    issuerRef:
+      # Name of the cert-manager ClusterIssuer or Issuer.
+      name: letsencrypt-prod
+      # Kind of the issuer reference: ClusterIssuer or Issuer.
+      kind: ClusterIssuer
+
+# Marketing static site (Deployment + Service): serves the Astro-built public
+# marketing pages at the root path forwarded by the front-door. Gated by
+# marketing.enabled (default false). The production OCI image is built from
+# github.com/mitos-run/website; wiring that build into this field is a
+# follow-up integration task.
+marketing:
+  # Gate the marketing Deployment and Service. Default false (opt-in).
+  enabled: false
+  # Number of marketing replicas.
+  replicas: 1
+  # Full OCI image reference for the marketing static site. Required when
+  # marketing.enabled is true. Use "nginxinc/nginx-unprivileged:latest" as a
+  # staging placeholder; replace with the production Astro dist image from the
+  # website repo CI once available.
+  image: ""
+  # Marketing container resource requests and limits.
+  resources: {}
