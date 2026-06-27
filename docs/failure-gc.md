@@ -170,6 +170,30 @@ disk, #464). Two pieces close the loop the eviction primitive previously lacked:
   watermark math and trigger), `fork.TestDeleteTemplateUnpinsManifest` (delete
   unpins), and the existing `cas.TestEvictToFitRespectsPinAndLRU` (pinned chunks
   protected, LRU order).
+### Build-time orphan reap: an interrupted template build leaves no stray VM
+
+forkd already journals and reaps FORK VMs on a crash; template BUILDS are now
+covered too (#469). A template build runs a Firecracker under the jailer and (when
+networking is on) a host placeholder tap; both are torn down by a deferred Kill,
+which never runs if forkd dies ungracefully mid-build (kubelet eviction, OOM,
+SIGKILL). forkd now writes a build-journal record (pid + jailer chroot +
+placeholder-tap flag) for the duration of each build
+(`internal/fork/buildjournal.go`, via the `CreateTemplate` `onStarted` hook), and
+drops it when the build returns. On restart, `reconcileBuilds` (called after the
+sandbox reconcile) reaps any leaked build: it kills a still-running build VM
+(PID-recycle-guarded, same guard as the fork reaper) because an interrupted build
+has no resumable state and is never adopted, removes the jailer chroot, tears down
+the placeholder tap, and releases the jailer uid. It never touches
+`<dataDir>/templates/<id>`: an interrupted snapshot dir is simply overwritten on
+the next build.
+
+- Bound: after an ungraceful mid-build death, a restarted forkd leaves no orphan
+  build Firecracker, placeholder tap, jailer chroot, or build-journal record.
+- Proving tests: `TestReconcileBuildsReapsDeadOrphan` (dead/recycled pid: artifacts
+  reaped, pid not signalled), `TestReconcileBuildsKillsLiveOrphan` (live orphan
+  killed), `TestJournalBuildRoundTrip` (the per-build record). An end-to-end
+  mid-build-SIGKILL KVM smoke (a `crash-reap-smoke` build-reap mode) is a tracked
+  follow-up.
 
 ### Controller-restart reconciliation: desired state is rebuilt from CRDs
 
