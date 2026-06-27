@@ -41,13 +41,13 @@ spec:
         namespaces:
           from: Same
     # HTTPS listener: TLS-terminate with the cert-manager-issued certificate.
-    # The Certificate covers both mitos.run and www.mitos.run so TLS handshakes
-    # succeed for both hostnames. Route-level hostname matching handles the
-    # www -> apex redirect after TLS.
+    # No hostname pin here: the listener accepts TLS for any SNI covered by the
+    # certificate (mitos.run and www.mitos.run). A listener hostname would filter
+    # at the SNI level and refuse www connections before the HTTPRoute is consulted.
+    # The HTTPRoute hostnames field governs which requests receive a response.
     - name: https
       protocol: HTTPS
       port: 443
-      hostname: {{ $hostname | quote }}
       tls:
         mode: Terminate
         certificateRefs:
