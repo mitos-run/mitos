@@ -346,3 +346,7 @@ export function fmtBytes(n: number): string {
   const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
   return `${(n / Math.pow(1024, i)).toFixed(1)} ${u[i]}`
 }
+
+export function fmtDollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`
+}

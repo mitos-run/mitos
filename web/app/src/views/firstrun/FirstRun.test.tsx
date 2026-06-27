@@ -118,6 +118,37 @@ describe('FirstRun with uc="rollouts"', () => {
     )
   })
 
+  it('shows failure feedback when clipboard write rejects', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('clipboard denied'))
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    render(<FirstRun uc="rollouts" />)
+    const btn = await screen.findByRole('button', { name: /copy snippet/i })
+    await userEvent.click(btn)
+
+    expect(writeText).toHaveBeenCalled()
+    await waitFor(() =>
+      expect(screen.getByText(/Clipboard unavailable/i)).toBeInTheDocument(),
+    )
+  })
+
+  it('shows failure feedback when clipboard is unavailable', async () => {
+    // Simulate environments where navigator.clipboard is undefined.
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+
+    render(<FirstRun uc="rollouts" />)
+    const btn = await screen.findByRole('button', { name: /copy snippet/i })
+    await userEvent.click(btn)
+
+    await waitFor(() =>
+      expect(screen.getByText(/Clipboard unavailable/i)).toBeInTheDocument(),
+    )
+
+    // Restore clipboard for subsequent tests.
+    Object.defineProperty(navigator, 'clipboard', { value: originalClipboard, configurable: true })
+  })
+
   it('shows the free credit line with balance and spend', async () => {
     mockUseBilling.mockReturnValue({ data: billingWithSpend, isLoading: false, error: null })
     render(<FirstRun uc="rollouts" />)

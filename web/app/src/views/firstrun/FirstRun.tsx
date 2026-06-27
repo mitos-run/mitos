@@ -13,6 +13,7 @@ import { Link } from '@tanstack/react-router'
 import { Card } from '@mitos/brand'
 import { useBilling } from '../../data/account'
 import { getFirstRun } from './content'
+import { fmtDollars } from '../../api'
 import type { Instruments, SandboxView } from '../../api'
 
 // ---- Page-specific styles ---------------------------------------------------
@@ -129,12 +130,6 @@ export function isFirstRun(
   return forksServed === 0 && !hasLive
 }
 
-// ---- Local helper -----------------------------------------------------------
-
-function fmtDollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`
-}
-
 // ---- FirstRun component -----------------------------------------------------
 
 export type FirstRunProps = {
@@ -226,15 +221,14 @@ export function FirstRun({ uc }: FirstRunProps) {
         {/* Free credit + spend line */}
         {billing ? (
           <p className="firstrun-billing-line">
-            You have{' '}
             <span className="firstrun-billing-accent">
               {fmtDollars(billing.balance_cents)}
             </span>{' '}
-            in free credit. Spent so far:{' '}
+            free credit remaining. Spent so far:{' '}
             <span className="firstrun-billing-accent">
               {fmtDollars(billing.spend_cents)}
             </span>
-            . Watch it grow as you fork.
+            . Watch your spend grow as you fork.
           </p>
         ) : billingLoading ? null : (
           <p className="firstrun-billing-line">

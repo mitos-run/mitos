@@ -10,17 +10,13 @@ import { useBilling, useAudit } from '../data/account'
 import { useCapabilities } from '../data/query'
 import { StatTile } from '../ui/StatTile'
 import { Skeleton } from '../ui/Skeleton'
-import { fmtBytes } from '../api'
+import { fmtBytes, fmtDollars } from '../api'
 import { PageHeader } from '../ui/PageHeader'
 import { Card } from '@mitos/brand'
 import type { AuditEvent } from '../api'
 import { FirstRun, isFirstRun } from './firstrun/FirstRun'
 
 const BENCH = 'bench/husk-activate-latency.sh'
-
-function fmtDollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`
-}
 
 function fmtRelative(isoAt: string): string {
   // Short human-readable timestamp; real value from the event record.
@@ -193,7 +189,7 @@ export function Instruments() {
       ? (new URLSearchParams(window.location.search).get('uc') ?? undefined)
       : undefined
 
-  const showFirstRun = isFirstRun(instruments.data, sandboxes.data)
+  const showFirstRun = !instruments.isLoading && !sandboxes.isLoading && isFirstRun(instruments.data, sandboxes.data)
 
   return (
     <section>
