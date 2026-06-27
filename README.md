@@ -167,16 +167,20 @@ Blocking `exec` works on the husk default. Streaming exec (`/v1/exec/stream`) an
 
 ### Integrations
 
-Drop a Mitos sandbox into the agent framework you already use. Each adapter is a thin shim over the same native ops (`exec`, `run_code`, `files`), with no hard dependency on the framework package.
+Drop a Mitos sandbox into the coding agent or agent framework you already use. Each adapter is a thin shim over the same native ops (`exec`, `run_code`, `files`, `fork`), with no hard dependency on the framework package. The [integrations hub](docs/integrations/README.md) indexes every path.
 
-| Framework | Import | Status |
+| Surface | How | Doc |
 |---|---|---|
-| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | Planned |
-| OpenAI / Claude Agent SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | Planned |
-| VibeKit / ZenML | `from mitos.integrations.vibekit import MitosVibeKitProvider` | Planned |
+| Claude Code | MCP server + agent skill | [docs/integrations/claude-code.md](docs/integrations/claude-code.md) |
+| opencode | MCP server or harness-in-sandbox | [docs/integrations/opencode.md](docs/integrations/opencode.md) |
+| OpenAI Agents SDK | `from mitos.integrations.openai_agents import MitosSandboxTools` | [docs/integrations/openai-agents.md](docs/integrations/openai-agents.md) |
+| LangChain / deepagents | `from mitos.integrations.langchain import MitosSandbox` | [sdk/python/README.md](sdk/python/README.md) |
+| Claude Agent SDK | `from mitos.integrations.claude_agent import MitosSandboxTools` | [sdk/python/README.md](sdk/python/README.md) |
+| Vercel AI SDK / Pydantic AI / AutoGen / LlamaIndex | standard MCP server | [docs/integrations/mcp-frameworks.md](docs/integrations/mcp-frameworks.md) |
+| VibeKit / ZenML | `from mitos.integrations.vibekit import MitosVibeKitProvider` | [sdk/python/README.md](sdk/python/README.md) |
 | E2B (migration) | `from mitos.e2b import Sandbox` | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 
-The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface over the standalone sandbox-server. `get_host(port)` returns a signed, expiring preview URL once the per-sandbox preview proxy is deployed.
+The Codex CLI is closed and its sandbox is not swappable; the supported path into the OpenAI ecosystem is the OpenAI Agents SDK above. The E2B shim is a "change one import" bridge for self-hosted, regulated, or air-gapped teams leaving E2B's cloud: it presents E2B's `Sandbox` surface over the standalone sandbox-server. `get_host(port)` returns a signed, expiring preview URL once the per-sandbox preview proxy is deployed.
 
 ### On a cluster
 

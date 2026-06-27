@@ -49,22 +49,18 @@ Warm one base, fan out, run attempts in parallel, keep the winner, discard the r
 ```python
 import mitos
 
-# Warm base, bound to a durable workspace so the winner can be committed.
-base = mitos.create("python", workspace="refactor-task")
+# Warm one base sandbox (hosted endpoint or a standalone sandbox-server;
+# resolves MITOS_BASE_URL and the credential file).
+base = mitos.create("python")
 
-# Fan out 8 independent attempts. Each child is a full microVM that must
-# activate; raise the timeout for a wide fan-out (each child is ~10-15s).
-children = base.fork(8, timeout=180)
+# Fan out 8 independent attempts. Each child is a full microVM restored from
+# the base snapshot, isolated from its siblings.
+children = base.fork(8)
 
 # Run one attempt per child IN PARALLEL (threads/async), then score them.
 # Each child is isolated: a crash or rm -rf in one cannot touch the others.
 results = run_attempts_in_parallel(children)   # your scoring
 winner = pick_best(results)
-
-# Commit the winner: terminating a workspace-bound sandbox dehydrates
-# /workspace into a new committed revision. checkpoint=True also snapshots VM
-# memory for a resumable head. It returns the workspace name.
-winner.terminate(checkpoint=True)
 
 # Discard the losers. You only paid for the pages each one dirtied.
 for c in children:
@@ -75,13 +71,37 @@ for c in children:
 The same shape works over MCP: `sandbox_create` -> `sandbox_fork` ->
 `sandbox_exec`/`sandbox_read_file` per child -> `sandbox_terminate`.
 
-## Lineage and workspaces
+## Lineage and workspaces (Kubernetes cluster mode)
 
-A Workspace is the durable, forkable filesystem behind sandboxes. Each commit is
-a revision; revisions form a lineage you can inspect (`workspace.log()`) and
-resume from (start a new sandbox `from_revision`). Use a workspace when work must
-survive the sandbox: the best-of-N winner above is kept because the base was
-bound to one. Ephemeral, throwaway exploration needs no workspace.
+A Workspace is the durable, forkable filesystem behind sandboxes: bind a base to
+one so the best-of-N winner is committed instead of discarded. Workspaces are a
+Kubernetes cluster feature, driven by the `AgentRun` surface (not the direct
+`mitos.create` one):
+
+```python
+import mitos
+
+run = mitos.AgentRun(namespace="default")           # k8s mode
+
+# Bind the base to a durable workspace by name.
+base = run.create("python", workspace="refactor-task")
+children = base.fork(8, timeout=180)                 # seconds to activate
+
+results = run_attempts_in_parallel(children)
+winner = pick_best(results)
+
+# Commit the winner: terminating a workspace-bound sandbox dehydrates
+# /workspace into a new committed revision. checkpoint=True also snapshots VM
+# memory for a resumable head. It returns the workspace name.
+winner.terminate(checkpoint=True)
+for c in children:
+    if c is not winner:
+        c.terminate()
+```
+
+Each commit is a revision; revisions form a lineage you can inspect
+(`run.workspace("refactor-task").log()`) and resume from. Ephemeral, throwaway
+exploration needs no workspace; use the direct `mitos.create` loop above.
 
 ## Cost-awareness
 
