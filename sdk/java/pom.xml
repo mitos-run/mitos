@@ -9,7 +9,7 @@
   <version>0.1.0</version>
   <packaging>jar</packaging>
 
-  <name>mitos Java SDK</name>
+  <name>Mitos Java SDK</name>
   <description>A thin, dependency-free Java client for Mitos snapshot-fork sandboxes. Direct mode talks to the standalone and hosted sandbox-server REST API (create templates, fork sandboxes, run exec, terminate); cluster mode (AgentRun) drives the mitos.run/v1 Kubernetes CRDs (SandboxPool, Sandbox, Workspace) with in-cluster or kubeconfig auth. Built on the JDK standard library alone, with no runtime dependencies.</description>
   <url>https://mitos.run</url>
 

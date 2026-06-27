@@ -86,7 +86,7 @@ asyncio.run(main())
 `mitos.create` / `Sandbox.create` returns a `DirectSandbox`.
 
 The runtime calls (exec, run_code, files) ride the Connect `sandbox.v1.Sandbox`
-service at `/sandbox.v1.Sandbox/<Method>` (issue #24); the control-plane calls
+service at `/sandbox.v1.Sandbox/<Method>`; the control-plane calls
 (templates, fork, sandboxes) and the interactive PTY keep their `/v1/*`
 transports. The sandbox is addressed by id via the `X-Sandbox-Id` header.
 
