@@ -571,3 +571,58 @@ expose:
     resolveURL: ""
   # Proxy container resource requests and limits.
   resources: {}
+
+# Dex in-cluster OIDC federator: federates GitHub and Google into a single
+# OIDC issuer the console trusts. Gated by dex.enabled (default false).
+#
+# When dex.enabled is true, wire the console by setting:
+#   console.oidc.issuerURL    = <dex.issuer>
+#   console.oidc.clientID     = <dex.console.clientID>
+#   console.oidc.clientSecretRef = <dex.consoleClientSecret>
+#     (the console reads key "client-secret" from that Secret)
+#
+# Required Secrets (create out of band before enabling):
+#
+#   kubectl create secret generic <dex.connectorsSecret> \
+#     --namespace <release-namespace> \
+#     --from-literal=github-client-id='...' \
+#     --from-literal=github-client-secret='...' \
+#     --from-literal=google-client-id='...' \
+#     --from-literal=google-client-secret='...'
+#
+#   kubectl create secret generic <dex.consoleClientSecret> \
+#     --namespace <release-namespace> \
+#     --from-literal=console-client-secret='<shared-random-secret>'
+#
+# The console.oidc.clientSecretRef must name the same Secret as
+# dex.consoleClientSecret so both sides share the same value.
+# Secret VALUES are NEVER inlined in this chart; all are sourced via
+# secretKeyRef and Dex's native $VAR expansion in the config file.
+dex:
+  # Gate the Dex ConfigMap, Deployment, and Service. Default false (opt-in).
+  enabled: false
+  # Pinned Dex image. Dex v2.35+ supports $VAR expansion in config.yaml;
+  # v2.41.1 is the version validated for this chart.
+  image: ghcr.io/dexidp/dex:v2.41.1
+  # OIDC issuer URL Dex advertises. Must match the ingress path Dex is
+  # reachable at. The console trusts this as console.oidc.issuerURL.
+  issuer: https://mitos.run/dex
+  # Static OIDC client registered in Dex for the console.
+  console:
+    # OIDC client ID. Set console.oidc.clientID to the same value.
+    clientID: mitos-console
+    # The OAuth redirect_uri Dex registers for the console. Must match
+    # console.oidc.redirectURL and be registered in your GitHub/Google OAuth
+    # apps as an authorized redirect URI.
+    redirectURL: https://mitos.run/auth/callback
+  # Name of an existing Secret holding the GitHub and Google OAuth credentials.
+  # Required keys: github-client-id, github-client-secret,
+  #                google-client-id, google-client-secret.
+  # Create this Secret out of band (see comment block above). Empty string
+  # is not valid when dex.enabled is true.
+  connectorsSecret: ""
+  # Name of an existing Secret holding the console static-client secret.
+  # Required key: console-client-secret.
+  # Set console.oidc.clientSecretRef to this same Secret name so both sides
+  # share the value. Create this Secret out of band (see comment block above).
+  consoleClientSecret: ""
