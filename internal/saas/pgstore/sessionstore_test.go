@@ -38,6 +38,9 @@ func TestPgSessionStore(t *testing.T) {
 	if got := s.ListByAccount("acct1"); len(got) != 1 {
 		t.Fatalf("list = %d, want 1", len(got))
 	}
+	if err := s.Revoke("acct1", "no-such-session"); !errors.Is(err, saas.ErrNotFound) {
+		t.Fatalf("revoke unknown session err = %v, want ErrNotFound", err)
+	}
 	if err := s.Revoke("acct1", id); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}

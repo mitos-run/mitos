@@ -88,16 +88,23 @@ func (s *PgSessionStore) ListByAccount(accountID string) []saas.Session {
 		}
 		out = append(out, ss)
 	}
+	if rows.Err() != nil {
+		return nil
+	}
 	return out
 }
 
 // Revoke removes the session identified by sessionID from accountID's session
-// set. If the session does not exist or belongs to a different account, the
-// DELETE is a no-op (account-scoped WHERE clause).
+// set. If the session does not exist or belongs to a different account,
+// saas.ErrNotFound is returned, matching the in-memory SessionStore.Revoke.
 func (s *PgSessionStore) Revoke(accountID, sessionID string) error {
 	const q = `DELETE FROM sessions WHERE account_id = $1 AND id = $2`
-	if _, err := s.pool.Exec(context.Background(), q, accountID, sessionID); err != nil {
+	tag, err := s.pool.Exec(context.Background(), q, accountID, sessionID)
+	if err != nil {
 		return fmt.Errorf("revoke session: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return saas.ErrNotFound
 	}
 	return nil
 }
