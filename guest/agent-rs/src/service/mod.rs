@@ -59,6 +59,13 @@ pub mod runcode;
 /// as SandboxService (AGENT_GRPC_PORT = 53), matching Go's newGuestGRPCServer.
 pub mod control;
 
+/// Serving-workload supervisor (issue #460): spawns a declared workload in its
+/// own session so it survives the build's exec and the fork SIGUSR2 broadcast,
+/// with an HTTP ready gate. unsafe is permitted for the setsid pre-exec hook,
+/// confined to spawn_detached (mirrors `init`/`sys`).
+#[allow(unsafe_code)]
+pub mod workload;
+
 // Type alias used for all server-streaming RPC associated types.
 // Pin<Box<dyn Stream<...> + Send + 'static>> satisfies the tonic trait bound
 // and lets each Phase 2 task substitute any stream implementation.

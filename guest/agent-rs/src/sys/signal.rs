@@ -103,12 +103,10 @@ pub fn select_targets(proc_path: &str, exclude_sids: &HashSet<i32>) -> Vec<i32> 
         }
         // Exclude a registered workload's whole session so its serving process
         // survives the fork. Unknown-session pids are never excluded.
-        if !exclude_sids.is_empty() {
-            if let Some(sid) = read_session(proc_path, pid) {
-                if exclude_sids.contains(&sid) {
-                    continue;
-                }
-            }
+        if !exclude_sids.is_empty()
+            && read_session(proc_path, pid).is_some_and(|sid| exclude_sids.contains(&sid))
+        {
+            continue;
         }
         targets.push(pid);
     }
