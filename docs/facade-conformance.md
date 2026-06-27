@@ -319,10 +319,10 @@ maps.
      `Spec.TTLSecondsAfterFinished`; `lifecycle.shutdownTime` (an absolute
      expiry) is recorded on our claim via `mitos.run/shutdown-time` so it is
      not silently dropped. JUSTIFIED-EXCEPTION: `lifecycle.shutdownPolicy`
-     (Delete / Retain) governs the UPSTREAM claim object only; our facade enforces
-     deletion via the owner-reference cascade (deleting their claim GCs ours) and
-     does not separately implement the Retain-vs-Delete distinction at the
-     our-claim level.
+     (Delete / DeleteForeground / Retain) governs the UPSTREAM claim object only;
+     our facade enforces deletion via the owner-reference cascade (deleting their
+     claim GCs ours) and does not separately implement the Retain-vs-Delete
+     distinction at the our-claim level.
 
 6. deletion fidelity. Each extension object owns its mapped our-object via a
    controller owner reference, so deleting their `SandboxTemplate` /

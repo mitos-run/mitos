@@ -249,9 +249,9 @@ func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1beta1.S
 // (Suspended, pending, error) they are CLEARED so a suspended or not-ready
 // Sandbox never advertises a stale endpoint.
 type statusUpdate struct {
-	status   metav1.ConditionStatus
-	reason   string
-	message  string
+	status    metav1.ConditionStatus
+	reason    string
+	message   string
 	suspended bool
 	// endpoint is the husk run-path endpoint (host:port) when Ready, used to
 	// derive podIPs. Empty on every not-serving path.
