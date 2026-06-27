@@ -6,3 +6,6 @@ contact_links:
   - name: Roadmap
     url: https://github.com/mitos-run/mitos/blob/main/ROADMAP.md
     about: ROADMAP.md is the priority order for all work. Check it before requesting a feature.
+  - name: Discord community
+    url: https://discord.gg/zddgd2pgab
+    about: Usage questions, help, and general discussion. Use the support forums for how-do-I questions instead of opening an issue.

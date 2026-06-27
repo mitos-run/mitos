@@ -2,6 +2,13 @@
 
 Thanks for your interest in contributing.
 
+## Talk to us
+
+Coordinate in the [Discord](https://discord.gg/zddgd2pgab) `#dev` channel:
+architecture questions, picking up an issue, or sanity-checking an approach
+before you open a PR. Bugs and feature requests still go through GitHub issues;
+design discussion can also live in GitHub Discussions.
+
 ## Build and test
 
 See the Commands section of [CLAUDE.md](CLAUDE.md) for the full list. The short version:

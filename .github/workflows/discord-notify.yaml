@@ -1,0 +1,47 @@
+name: Discord notify
+
+# Posts release announcements and good-first-issue alerts to Discord via webhooks.
+# Webhook URLs are stored as repo secrets (DISCORD_WEBHOOK_ANNOUNCE,
+# DISCORD_WEBHOOK_GFI). User-controlled text (release name, issue title) is passed
+# through env vars rather than inline ${{ }} expansion to avoid script injection.
+
+on:
+  release:
+    types: [published]
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release to #announcements
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_ANNOUNCE }}
+          NAME: ${{ github.event.release.name }}
+          TAG: ${{ github.event.release.tag_name }}
+          URL: ${{ github.event.release.html_url }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_ANNOUNCE not set, skipping"; exit 0; fi
+          title=":rocket: **${NAME:-$TAG}** is out"
+          jq -nc --arg t "$title" --arg u "$URL" '{content: ($t + "\n" + $u)}' \
+            | curl -sf -H "Content-Type: application/json" -d @- "$WEBHOOK"
+
+  good-first-issue:
+    if: github.event_name == 'issues' && github.event.label.name == 'good first issue'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post good first issue to #good-first-issues
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_GFI }}
+          TITLE: ${{ github.event.issue.title }}
+          URL: ${{ github.event.issue.html_url }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_GFI not set, skipping"; exit 0; fi
+          jq -nc --arg t ":green_circle: **good first issue:** $TITLE" --arg u "$URL" \
+            '{content: ($t + "\n" + $u)}' \
+            | curl -sf -H "Content-Type: application/json" -d @- "$WEBHOOK"
