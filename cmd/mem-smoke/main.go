@@ -91,7 +91,7 @@ func run(o opts) error {
 
 	templateID := "mem-tmpl"
 	fmt.Printf("mem-smoke: building template %q from %q\n", templateID, o.image)
-	if err := engine.CreateTemplate(templateID, o.image, nil, nil, nil); err != nil {
+	if err := engine.CreateTemplate(templateID, o.image, nil, nil, nil, nil); err != nil {
 		return setupErr(fmt.Errorf("create template: %w", err))
 	}
 

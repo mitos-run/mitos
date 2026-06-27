@@ -236,7 +236,7 @@ func mockMountTable(specs []volume.Spec) []vsock.VolumeMountEntry {
 	return volumeMountTable(prepared)
 }
 
-func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, _ *firecracker.WorkloadSpec) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

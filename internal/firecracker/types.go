@@ -87,6 +87,16 @@ func DefaultVMConfig() VMConfig {
 	}
 }
 
+// VMResources carries the per-pool guest VM sizing the build VM (and thus the
+// snapshot and every fork) should use. A zero field keeps the DefaultVMConfig
+// value. This lets a pool's resources.cpu/memory reach the VM, not just the husk
+// pod, so a serving workload (issue #460) has the memory it needs to run during
+// the build.
+type VMResources struct {
+	VcpuCount  int32
+	MemSizeMib int64
+}
+
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
 	BootArgs        string `json:"boot_args,omitempty"`

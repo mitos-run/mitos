@@ -154,7 +154,7 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 		g.srv.keyProvider.SetWrappedKey(req.TemplateId, req.EncryptionKey, req.KekId)
 		defer g.srv.keyProvider.ForgetKey(req.TemplateId)
 	}
-	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols, toFirecrackerWorkload(req.Workload)); err != nil {
+	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols, toFirecrackerWorkload(req.Workload), vmResources(req.Resources)); err != nil {
 		return nil, grpcError(err)
 	}
 	// Report the content-addressed digest the engine just recorded so the
@@ -282,4 +282,14 @@ func toFirecrackerWorkload(w *forkdpb.WorkloadSpec) *firecracker.WorkloadSpec {
 		}
 	}
 	return out
+}
+
+// vmResources maps a forkd CreateTemplate ResourceSpec to the build VM sizing so
+// the pool's cpu/memory size the snapshot VM (not just the husk pod), which a
+// serving workload (issue #460) needs to run during the build. Nil means default.
+func vmResources(r *forkdpb.ResourceSpec) *firecracker.VMResources {
+	if r == nil {
+		return nil
+	}
+	return &firecracker.VMResources{VcpuCount: r.Vcpus, MemSizeMib: r.MemoryMb}
 }

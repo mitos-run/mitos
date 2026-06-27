@@ -295,7 +295,7 @@ func TestCreateTemplateBakesReadOnlyForShare(t *testing.T) {
 		// Fresh writable: must bake writable.
 		{Name: "scratch", SizeMB: 32, MountPath: "/scratch", Policy: volume.ForkPolicyFresh},
 	}
-	_ = e.CreateTemplate("tmpl", rootfs, nil, vols, nil)
+	_ = e.CreateTemplate("tmpl", rootfs, nil, vols, nil, nil)
 
 	if len(gotDrives) != 2 {
 		t.Fatalf("expected 2 placeholder drives, got %d", len(gotDrives))
@@ -350,7 +350,7 @@ func TestCreateTemplateBakesPlaceholderDrives(t *testing.T) {
 	}
 	// recordTemplateDigest fails (no real snapshot), but the build seam must have
 	// been reached with the placeholder drives in order.
-	_ = e.CreateTemplate("tmpl", rootfs, nil, vols, nil)
+	_ = e.CreateTemplate("tmpl", rootfs, nil, vols, nil, nil)
 
 	if len(gotDrives) != 2 {
 		t.Fatalf("expected 2 placeholder drives, got %d: %+v", len(gotDrives), gotDrives)

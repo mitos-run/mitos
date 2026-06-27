@@ -1987,7 +1987,7 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec) (retErr error) {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources) (retErr error) {
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.
@@ -1999,6 +1999,19 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	}
 
 	cfg := firecracker.DefaultVMConfig()
+	// Size the build VM from the pool's resources so the snapshot (and every fork)
+	// has the pool's memory and vCPUs, not the 512 MiB / 1 vCPU default. A serving
+	// workload (issue #460) runs IN the build VM, so it must have the pool's memory
+	// to start; without this openclaw (2 GiB) cannot boot in the build VM.
+	if vmRes != nil {
+		if vmRes.VcpuCount > 0 {
+			cfg.VcpuCount = int(vmRes.VcpuCount)
+		}
+		if vmRes.MemSizeMib > 0 {
+			cfg.MemSizeMib = int(vmRes.MemSizeMib)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "forkd: template %s build VM sized %d vCPU, %d MiB (workload=%t)\n", id, cfg.VcpuCount, cfg.MemSizeMib, workload != nil)
 	// Bake the configured guest-memory page granularity into this template's
 	// snapshot (issue #167). "" leaves the Firecracker default (4 KiB); "2M"
 	// records 2 MiB hugetlbfs backing so every fork restores hugepage-backed.

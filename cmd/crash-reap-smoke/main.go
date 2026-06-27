@@ -78,7 +78,7 @@ func run(o opts) error {
 		return setupErr(fmt.Errorf("new engine 1: %w", err))
 	}
 	templateID := "crash-tmpl"
-	if err := engine1.CreateTemplate(templateID, o.image, nil, nil, nil); err != nil {
+	if err := engine1.CreateTemplate(templateID, o.image, nil, nil, nil, nil); err != nil {
 		return setupErr(fmt.Errorf("create template: %w", err))
 	}
 	sandboxID := "crash-fork-1"

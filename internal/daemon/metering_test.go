@@ -50,7 +50,7 @@ func (f *fakeMeteringEngine) GetCapacity() fork.Capacity {
 func (f *fakeMeteringEngine) ListSandboxes() []fork.SandboxRecord { return nil }
 func (f *fakeMeteringEngine) ListVolumes() []fork.VolumeRecord    { return nil }
 func (f *fakeMeteringEngine) ReclaimVolume(string) error          { panic("not used") }
-func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec, *firecracker.WorkloadSpec) error {
+func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec, *firecracker.WorkloadSpec, *firecracker.VMResources) error {
 	panic("not used")
 }
 func (f *fakeMeteringEngine) PullTemplate(context.Context, string, string, string, string) error {

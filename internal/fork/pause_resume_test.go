@@ -10,7 +10,7 @@ import "testing"
 // KVM acceptance bar in TestEnginePauseResumePreservesStateKVM.
 func TestMockPauseResumeRepeatedCycles(t *testing.T) {
 	e := NewMockEngine()
-	if err := e.CreateTemplate("py", "py", nil, nil, nil); err != nil {
+	if err := e.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	e.ForkDelay = 0

@@ -518,7 +518,7 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	// InitCommands flattens the declarative BuildSteps (issue #220) into the
 	// in-VM init commands, falling back to the legacy Init list when no
 	// BuildSteps are set, so a template authored either way builds identically.
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, deficit, nodeFilter, forkdWorkload(template.Workload)); err != nil {
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, deficit, nodeFilter, forkdWorkload(template.Workload), forkdResources(template.Resources)); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil
@@ -550,6 +550,24 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 // healthy node, preserving the unplaced behavior. The pull SOURCE is not
 // constrained: the digest is content-addressed, so pulling from any holder into
 // a dedicated node is safe.
+// forkdResources maps a pool template's resources to the forkd build VM sizing so
+// the snapshot VM (and every fork) has the pool's cpu/memory, not the 512 MiB / 1
+// vCPU default. A serving workload (issue #460) runs in the build VM, so it needs
+// the pool's memory there. Nil when the pool sets no resources (keeps the default).
+func forkdResources(r v1.SandboxResources) *forkdpb.ResourceSpec {
+	out := &forkdpb.ResourceSpec{}
+	if cpu := r.CPU.Value(); cpu > 0 {
+		out.Vcpus = int32(cpu)
+	}
+	if mem := r.Memory.Value(); mem > 0 {
+		out.MemoryMb = mem / (1024 * 1024)
+	}
+	if out.Vcpus == 0 && out.MemoryMb == 0 {
+		return nil
+	}
+	return out
+}
+
 // forkdWorkload maps a pool template's serving workload (issue #460) to the
 // forkd build request. Nil (or no command) means the template has no serving
 // workload, so the node builds it exec-only as before. Env values are non-secret
@@ -576,7 +594,7 @@ func forkdWorkload(w *v1.WorkloadSpec) *forkdpb.WorkloadSpec {
 	return out
 }
 
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool, workload *forkdpb.WorkloadSpec) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec) (int32, error) {
 	var added int32
 	var errs []error
 
@@ -647,6 +665,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			Image:        image,
 			InitCommands: initCommands,
 			Workload:     workload,
+			Resources:    resources,
 			Volumes:      volumeMounts(templateVolumes, nil),
 			// EncryptionKey carries the WRAPPED DEK for an Encrypted template,
 			// delivered over mTLS; KekId names the KEK that wrapped it (non-secret)
@@ -654,7 +673,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			// plaintext template. The wrapped DEK is never logged.
 			EncryptionKey: wrappedDEK,
 			KekId:         kekID,
-		})
+		}, nil)
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
