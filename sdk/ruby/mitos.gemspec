@@ -5,8 +5,8 @@ require_relative "lib/mitos/version"
 Gem::Specification.new do |spec|
   spec.name = "mitos"
   spec.version = Mitos::VERSION
-  spec.authors = ["mitos"]
-  spec.summary = "Ruby SDK for mitos snapshot-fork sandboxes (direct and Kubernetes cluster mode)."
+  spec.authors = ["Mitos maintainers"]
+  spec.summary = "Ruby SDK for Mitos: snapshot-fork sandboxes for AI agents on Kubernetes."
   spec.description =
     "A thin, dependency-free Ruby client for mitos. Direct mode talks to the " \
     "standalone and hosted sandbox-server REST API (create templates, fork " \

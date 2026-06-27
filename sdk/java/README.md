@@ -254,7 +254,7 @@ can drive the sandbox HTTP API directly.
 Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
 1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python,
-TypeScript, and Java, for full parity (#296).
+TypeScript, and Java, for full parity.
 
 | Language | Install | Covers |
 | --- | --- | --- |

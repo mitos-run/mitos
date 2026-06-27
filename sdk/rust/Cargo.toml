@@ -1,15 +1,15 @@
 [package]
 name = "mitos"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.74"
-description = "Thin direct-mode Rust client for the mitos standalone and hosted sandbox-server REST API."
+description = "Rust SDK for Mitos: snapshot-fork sandboxes for AI agents on Kubernetes (direct and cluster modes)."
 license = "Apache-2.0"
 homepage = "https://mitos.run"
 documentation = "https://mitos.run/docs"
 repository = "https://github.com/mitos-run/mitos"
 readme = "README.md"
-keywords = ["mitos", "sandbox", "firecracker", "agents"]
+keywords = ["mitos", "sandbox", "firecracker", "microvm", "ai-agents"]
 categories = ["api-bindings"]
 
 [dependencies]

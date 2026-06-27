@@ -11,6 +11,14 @@ RUN CGO_ENABLED=0 go build -o husk-stub ./cmd/husk-stub/
 
 FROM ubuntu:22.04
 
+LABEL org.opencontainers.image.title="mitos-husk-stub" \
+      org.opencontainers.image.description="Mitos husk-stub: pod-native warm sandbox runner." \
+      org.opencontainers.image.source="https://github.com/mitos-run/mitos" \
+      org.opencontainers.image.url="https://mitos.run" \
+      org.opencontainers.image.documentation="https://mitos.run/docs" \
+      org.opencontainers.image.vendor="Mitos" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \

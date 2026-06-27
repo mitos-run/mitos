@@ -220,21 +220,28 @@ namespace:
   # admission labels (enforce=privileged) forkd and the device plugin require.
   create: true
 
-# Image pull secret for the mitos-* images.
+# Image pull secret for the mitos-* images. The published images on
+# ghcr.io/mitos-run are PUBLIC, so a default install needs no credential and the
+# knobs below stay off. They exist only for a private mirror or a private
+# re-publish of the images: point image.registry at your mirror, then either set
+# imagePullSecret.create=true with a real dockerconfigjson, or pre-create the
+# secret out of band and list it under imagePullSecrets below.
 imagePullSecret:
-  # When true, the chart renders the ghcr-pull dockerconfigjson Secret. When
-  # false, the Secret is assumed to already exist (create it out of band).
+  # When true, the chart renders the dockerconfigjson Secret named below. When
+  # false (the default), no Secret is rendered; public images need none.
   create: false
-  # The Secret name referenced by the workloads.
+  # The Secret name rendered when create=true. Add the same name to
+  # imagePullSecrets below for the workloads to use it.
   name: ghcr-pull
   # The base64-encoded dockerconfigjson value. Defaults to {"auths":{}}. Provide
-  # a real credential to enable image pulls.
+  # a real credential when create=true to enable pulls from a private mirror.
   dockerconfigjson: eyJhdXRocyI6e319
 
-# Image pull secret names referenced by every workload pod spec. Defaults to the
-# managed ghcr-pull secret name.
-imagePullSecrets:
-  - name: ghcr-pull
+# Image pull secret names attached to every workload pod spec. Empty by default:
+# the published images are public, so no secret is referenced and a fresh install
+# emits no "Unable to retrieve some image pull secrets" warning event. Populate
+# this only for a private mirror, for example: [{name: ghcr-pull}].
+imagePullSecrets: []
 
 # Extra labels merged onto every resource the chart renders.
 commonLabels: {}

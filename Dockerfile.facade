@@ -8,5 +8,13 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o facade ./cmd/facade/
 
 FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="mitos-facade" \
+      org.opencontainers.image.description="Mitos facade: the agents.x-k8s.io conformance API in front of Mitos sandboxes." \
+      org.opencontainers.image.source="https://github.com/mitos-run/mitos" \
+      org.opencontainers.image.url="https://mitos.run" \
+      org.opencontainers.image.documentation="https://mitos.run/docs" \
+      org.opencontainers.image.vendor="Mitos" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=builder /build/facade /facade
 ENTRYPOINT ["/facade"]

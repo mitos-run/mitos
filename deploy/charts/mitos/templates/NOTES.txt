@@ -22,18 +22,22 @@ kernel-stage DaemonSets stay Pending by design. Label a KVM-capable node:
 
   kubectl label node <node-name> mitos.run/kvm=true
 
-{{- if not .Values.imagePullSecret.create }}
+{{- if not .Values.imagePullSecrets }}
 
-The chart did NOT render the {{ .Values.imagePullSecret.name }} pull secret
-(imagePullSecret.create is false). Create it in the {{ include "mitos.namespace" . }}
-namespace before the images can pull, or set imagePullSecret.create=true with a
-real imagePullSecret.dockerconfigjson:
+The published mitos-* images on ghcr.io/mitos-run are public, so this install
+pulls them with no registry credential and attaches no pull secret.
 
-  kubectl create secret docker-registry {{ .Values.imagePullSecret.name }} \
+If you mirrored the images to a private registry, set image.registry to it and
+attach a pull secret. Otherwise an ImagePullBackOff here points at the registry,
+not a missing credential:
+
+  kubectl create secret docker-registry ghcr-pull \
     --namespace {{ include "mitos.namespace" . }} \
-    --docker-server=ghcr.io \
-    --docker-username=<github-username> \
-    --docker-password=<ghcr-read-packages-PAT>
+    --docker-server=<your-registry> \
+    --docker-username=<username> \
+    --docker-password=<read-packages-token>
+
+then reinstall with --set 'imagePullSecrets[0].name=ghcr-pull'.
 {{- end }}
 
 Verify the control plane:

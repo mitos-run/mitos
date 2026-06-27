@@ -1,7 +1,8 @@
 {
   "name": "@mitos/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for the mitos sandbox runtime: direct sandbox-server mode and Kubernetes cluster mode.",
+  "description": "TypeScript SDK for Mitos: snapshot-fork sandboxes for AI agents on Kubernetes (direct and cluster modes).",
+  "author": "Mitos maintainers <maintainers@mitos.run>",
   "homepage": "https://mitos.run",
   "repository": { "type": "git", "url": "git+https://github.com/mitos-run/mitos.git", "directory": "sdk/typescript" },
   "bugs": { "url": "https://github.com/mitos-run/mitos/issues" },
