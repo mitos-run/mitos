@@ -33,7 +33,7 @@ on:
         required: false
         default: mitos-e2e
       suite:
-        description: "Which cluster e2e suite to run: husk, husk-network, workspace, or all"
+        description: "Which cluster e2e suite to run: husk, husk-network, workspace, facade, or all"
         required: false
         default: all
         type: choice
@@ -42,6 +42,7 @@ on:
           - husk
           - husk-network
           - workspace
+          - facade
   # OPT-IN labeled-same-repo-PR path. The `pull_request` event fires for forks
   # too, but the job-level `if:` below excludes forks AND requires the label, so
   # a labeled fork PR still cannot run here.
@@ -110,12 +111,14 @@ jobs:
             dockerfile: Dockerfile.husk-stub
           - name: mitos-forkd
             dockerfile: Dockerfile.forkd
+          - name: mitos-facade
+            dockerfile: Dockerfile.facade
     env:
       IMAGE: ghcr.io/mitos-run/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ghcr.io
           # Prefer a maintainer PAT with write:packages (repo secret
@@ -126,7 +129,7 @@ jobs:
           username: ${{ secrets.GHCR_WRITE_USER || github.actor }}
           password: ${{ secrets.GHCR_WRITE_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Build and push the e2e image for this commit
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -183,7 +186,7 @@ jobs:
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Show context (no secrets)
         run: |
@@ -315,6 +318,164 @@ jobs:
           exit 0
 
   # ---------------------------------------------------------------------------
+  # The real-cluster PREDICATE-LEVEL agents.x-k8s.io facade conformance (issue
+  # #357). The object-level facade-conformance kind job proves the facade bridges
+  # the upstream Sandbox object-level, but cannot prove the upstream Ready
+  # predicate ("Pod is Ready; Service Exists") because no Firecracker VMM boots on
+  # a plain kind runner. This job closes that gap on the real KVM cluster: it
+  # deploys the facade under test, applies the UPSTREAM Sandbox UNCHANGED, and
+  # asserts the upstream Sandbox reaches the in-VM Ready predicate on a real booted
+  # microVM, plus exec-through liveness and the operatingMode resume tail. Gated
+  # IDENTICALLY to cluster-husk-e2e.
+  # ---------------------------------------------------------------------------
+  cluster-facade-conformance-e2e:
+    needs: build-images
+    runs-on: [self-hosted, mitos-cluster]
+    if: >-
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+        )
+      ) &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.suite == 'all' || inputs.suite == 'facade'
+      )
+    environment: cluster
+    timeout-minutes: 25
+    env:
+      E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
+      MITOS_NAMESPACE: mitos
+      IMAGE_REGISTRY: ghcr.io/mitos-run
+      IMAGE_TAG: e2e-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show context (no secrets)
+        run: |
+          set -euo pipefail
+          echo "event: ${{ github.event_name }}"
+          echo "sha: ${{ github.sha }}"
+          echo "e2e namespace: ${E2E_NAMESPACE}"
+          kubectl version --client
+          kubectl get nodes -l 'mitos.run/kvm=true' -o wide
+
+      - name: Deploy images under test (controller, forkd, husk-stub)
+        id: deploy
+        run: |
+          set -euo pipefail
+          CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${IMAGE_TAG}"
+          HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${IMAGE_TAG}"
+          FORKD_IMG="${IMAGE_REGISTRY}/mitos-forkd:${IMAGE_TAG}"
+
+          # forkd is the BUILDER; update it first so the e2e template is built with
+          # the guest agent under test (same ordering as cluster-husk-e2e).
+          PREV_FORKD_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get daemonset/mitos-forkd \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_forkd_image=${PREV_FORKD_IMG}" >> "$GITHUB_OUTPUT"
+          kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd forkd="${FORKD_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
+
+          PREV_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_controller_image=${PREV_IMG}" >> "$GITHUB_OUTPUT"
+          kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
+            controller="${CONTROLLER_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+            -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--husk-stub-image=${HUSK_IMG}\"}]"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=300s
+
+      - name: Install the upstream agents.x-k8s.io CRDs (vendored, unchanged) and deploy the facade
+        run: |
+          set -euo pipefail
+          FACADE_IMG="${IMAGE_REGISTRY}/mitos-facade:${IMAGE_TAG}"
+
+          # Install the vendored upstream CRDs unchanged.
+          kubectl apply -f third_party/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml
+          kubectl wait --for=condition=Established --timeout=60s crd/sandboxes.agents.x-k8s.io
+          for c in sandboxtemplates sandboxwarmpools sandboxclaims; do
+            kubectl wait --for=condition=Established --timeout=60s "crd/${c}.extensions.agents.x-k8s.io"
+          done
+          # v1beta1 is the storage version with a conversion.strategy: Webhook
+          # targeting upstream's controller, which we do not run. We exercise only
+          # the v1beta1 stable version, so pin conversion to None (clearing the
+          # webhook block) on the LIVE CRDs. The vendored files on disk are
+          # unchanged (apply-unchanged preserved). See docs/facade-conformance.md.
+          for crd in sandboxes.agents.x-k8s.io \
+                     sandboxtemplates.extensions.agents.x-k8s.io \
+                     sandboxwarmpools.extensions.agents.x-k8s.io \
+                     sandboxclaims.extensions.agents.x-k8s.io; do
+            kubectl patch crd "$crd" --type=merge \
+              -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
+          done
+
+          # Deploy the facade under test with --default-pool=default (the script
+          # creates a warm pool of that name in the e2e namespace).
+          kubectl apply -f deploy/facade/facade.yaml
+          kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-facade facade="${FACADE_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-facade --timeout=180s
+
+      - name: Run the predicate-level facade conformance e2e
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/facade-conformance-kvm.sh
+          READY_TIMEOUT=300 FACADE_DEFAULT_POOL=default \
+            test/cluster-e2e/facade-conformance-kvm.sh "${E2E_NAMESPACE}"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "=== facade deployment ==="
+          kubectl -n "${MITOS_NAMESPACE}" describe deployment/mitos-facade
+          echo "=== facade logs ==="
+          kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-facade --tail=200
+          echo "=== upstream + bridged objects ==="
+          kubectl -n "${E2E_NAMESPACE}" get sandbox.agents.x-k8s.io,sandboxpools.mitos.run,sandbox.mitos.run,pods -o wide
+          exit 0
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          echo "=== teardown: remove e2e objects ==="
+          kubectl -n "${E2E_NAMESPACE}" delete sandbox.agents.x-k8s.io --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxes.mitos.run --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxpools.mitos.run --all --wait=false
+          echo "=== teardown: remove the facade deployment ==="
+          kubectl delete -f deploy/facade/facade.yaml --ignore-not-found --wait=false
+
+          echo "=== teardown: restore the controller image ==="
+          PREV="${{ steps.deploy.outputs.prev_controller_image }}"
+          if [ -n "${PREV}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller controller="${PREV}"
+            LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+              -o jsonpath='{.spec.template.spec.containers[0].args}' \
+              | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
+            if [ -n "${LAST_IDX}" ]; then
+              kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+                -p="[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/${LAST_IDX}\"}]" || true
+            fi
+            kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=180s
+          fi
+
+          echo "=== teardown: restore the forkd DaemonSet image ==="
+          PREV_FORKD="${{ steps.deploy.outputs.prev_forkd_image }}"
+          if [ -n "${PREV_FORKD}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd forkd="${PREV_FORKD}"
+            kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
+          fi
+          echo "teardown done"
+          exit 0
+
+  # ---------------------------------------------------------------------------
   # The real-cluster WORKSPACE e2e (EPIC W4, issue #21). Gated IDENTICALLY to
   # cluster-husk-e2e: same self-hosted-in-cluster runner, same KVM node, the
   # SAME trusted-trigger `if:` (push / workflow_dispatch / labeled-same-repo-PR;
@@ -352,7 +513,7 @@ jobs:
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Show context (no secrets)
         run: |
@@ -489,7 +650,7 @@ jobs:
       IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Show context (no secrets)
         run: |

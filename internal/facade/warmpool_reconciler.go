@@ -10,13 +10,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	runv1 "mitos.run/mitos/api/v1"
 )
 
 // SandboxWarmPoolReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our consolidated
+// extensions.agents.x-k8s.io/v1beta1 SandboxWarmPool onto our consolidated
 // mitos.run/v1 SandboxPool. It owns exactly one of our SandboxPool objects per
 // upstream warm pool (same name + namespace, owner-referenced for GC), setting
 // spec.warm.min from their spec.replicas (re-read EVERY reconcile so an HPA that
@@ -47,7 +47,7 @@ type SandboxWarmPoolReconciler struct {
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var src extv1alpha1.SandboxWarmPool
+	var src extv1beta1.SandboxWarmPool
 	if err := r.Get(ctx, req.NamespacedName, &src); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -72,7 +72,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // requested warm-slot count under spec.warm.min. The warm-slot count is read
 // EVERY reconcile so an HPA-controlled change to their spec.replicas is
 // propagated.
-func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1alpha1.SandboxWarmPool) (*runv1.SandboxPool, error) {
+func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1beta1.SandboxWarmPool) (*runv1.SandboxPool, error) {
 	pool := &runv1.SandboxPool{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
@@ -112,7 +112,7 @@ const (
 // we mirror ReadySnapshots into readyReplicas and the desired warm-slot count
 // (spec.warm.min) into replicas, matching the upstream scale subresource
 // contract.
-func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1alpha1.SandboxWarmPool, pool *runv1.SandboxPool) error {
+func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1beta1.SandboxWarmPool, pool *runv1.SandboxPool) error {
 	wantReplicas := poolWarmMin(pool)
 	wantReady := pool.Status.ReadySnapshots
 	// The scale-subresource selector must match the pool's husk pods, NOT a
@@ -148,7 +148,7 @@ func poolWarmMin(pool *runv1.SandboxPool) int32 {
 // own our SandboxPool objects so a pool status change re-queues the warm pool.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extv1alpha1.SandboxWarmPool{}).
+		For(&extv1beta1.SandboxWarmPool{}).
 		Owns(&runv1.SandboxPool{}).
 		Complete(r)
 }

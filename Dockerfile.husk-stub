@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b AS builder
 
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -9,7 +9,7 @@ COPY . .
 # linux/amd64 binary; CGO is off for a static binary like forkd.
 RUN CGO_ENABLED=0 go build -o husk-stub ./cmd/husk-stub/
 
-FROM ubuntu:22.04
+FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
 
 LABEL org.opencontainers.image.title="mitos-husk-stub" \
       org.opencontainers.image.description="Mitos husk-stub: pod-native warm sandbox runner." \

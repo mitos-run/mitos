@@ -1110,6 +1110,18 @@ func (e *Engine) releaseReservation() {
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
 // This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
+	// Path-traversal guard (CodeQL go/path-injection): both ids are joined into
+	// host paths (templates/<snapshotID>/..., sandboxes/<sandboxID>/...). The
+	// forkd gRPC boundary validates them, but the standalone sandbox-server REST
+	// handler does not, so this engine entry point is the chokepoint both callers
+	// traverse. Reject anything that is not a single safe path segment before any
+	// filesystem access.
+	if !safeSandboxIDComponent(snapshotID) {
+		return nil, fmt.Errorf("invalid snapshot id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", snapshotID)
+	}
+	if !safeSandboxIDComponent(sandboxID) {
+		return nil, fmt.Errorf("invalid sandbox id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", sandboxID)
+	}
 	// Host-DoS ceiling (production-blocker #2): atomically check the ceiling and
 	// reserve a slot BEFORE any verify, allocation, or Firecracker boot. This is
 	// an O(1) check-and-increment under the engine lock; an admitted fork (the
@@ -1179,6 +1191,14 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 // false (ForkRunning), fork takes its own reservation first so the live-fork
 // path is also bounded by MaxSandboxes; when true, it must not reserve again.
 func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, reserved bool) (*ForkResult, error) {
+	// Path-traversal guard for the new sandbox id, which is joined into
+	// sandboxes/<sandboxID>/... below. This covers both callers: Fork (already
+	// validated) and ForkRunning. snapshotID is intentionally not pattern-checked
+	// here because ForkRunning passes a derived "<source>-live" id that is safe
+	// but may exceed the single-segment length bound.
+	if !safeSandboxIDComponent(sandboxID) {
+		return nil, fmt.Errorf("invalid sandbox id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", sandboxID)
+	}
 	if !reserved {
 		if aerr := e.admitFork(); aerr != nil {
 			return nil, aerr
@@ -1607,6 +1627,12 @@ func (e *Engine) Resume(sandboxID string) error {
 
 // Terminate kills a sandbox and releases its resources.
 func (e *Engine) Terminate(sandboxID string) error {
+	// Path-traversal guard: sandboxID is joined into the RemoveAll target below
+	// (sandboxes/<sandboxID>). Mirror the Pause guard so a crafted id from the
+	// unvalidated sandbox-server boundary cannot escape the data dir.
+	if !safeSandboxIDComponent(sandboxID) {
+		return fmt.Errorf("invalid sandbox id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", sandboxID)
+	}
 	e.mu.Lock()
 	sandbox, ok := e.sandboxes[sandboxID]
 	if !ok {
@@ -2003,6 +2029,13 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 }
 
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources) (retErr error) {
+	// Path-traversal guard (CodeQL go/path-injection): id becomes a host path
+	// component (templates/<id>/...) through recordTemplateDigest and verify. The
+	// gRPC boundary validates it, but the sandbox-server REST handler does not, so
+	// reject anything that is not a single safe path segment here.
+	if !safeSandboxIDComponent(id) {
+		return fmt.Errorf("invalid template id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", id)
+	}
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.

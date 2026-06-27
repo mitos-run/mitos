@@ -8,8 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
@@ -18,11 +18,11 @@ import (
 // newExtTemplate builds a minimal valid upstream extension SandboxTemplate: the
 // podTemplate is required, so it carries a single container with the mapped
 // fields (image, command, env).
-func newExtTemplate(name string) *extv1alpha1.SandboxTemplate {
-	return &extv1alpha1.SandboxTemplate{
+func newExtTemplate(name string) *extv1beta1.SandboxTemplate {
+	return &extv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: extv1alpha1.SandboxTemplateSpec{
-			PodTemplate: agentsv1alpha1.PodTemplate{
+		Spec: extv1beta1.SandboxTemplateSpec{
+			PodTemplate: agentsv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -107,12 +107,12 @@ func TestFacadeMapsExtSandboxTemplate(t *testing.T) {
 
 // newExtWarmPool builds an upstream extension SandboxWarmPool referencing a
 // template by name at the requested replicas.
-func newExtWarmPool(name, templateName string, replicas int32) *extv1alpha1.SandboxWarmPool {
-	return &extv1alpha1.SandboxWarmPool{
+func newExtWarmPool(name, templateName string, replicas int32) *extv1beta1.SandboxWarmPool {
+	return &extv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: extv1alpha1.SandboxWarmPoolSpec{
+		Spec: extv1beta1.SandboxWarmPoolSpec{
 			Replicas:    replicas,
-			TemplateRef: extv1alpha1.SandboxTemplateRef{Name: templateName},
+			TemplateRef: extv1beta1.SandboxTemplateRef{Name: templateName},
 		},
 	}
 }
@@ -135,7 +135,7 @@ func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	})
 
 	// The warm-slot count re-homes onto spec.warm.min (ADR 0007 folded the
-	// v1alpha1 spec.replicas onto warm.min).
+	// v1beta1 spec.replicas onto warm.min).
 	if pool.Spec.Warm == nil || pool.Spec.Warm.Min != 3 {
 		t.Fatalf("our pool warm.min = %+v, want 3", pool.Spec.Warm)
 	}
@@ -155,7 +155,7 @@ func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	// finds the real husk pods. The pool and warm pool share the same name.
 	wantSelector := "mitos.run/pool=ext-warmpool,mitos.run/husk=true"
 	eventually(t, "the facade mirrors a husk-pod-matching status.selector", func() bool {
-		var cur extv1alpha1.SandboxWarmPool
+		var cur extv1beta1.SandboxWarmPool
 		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "ext-warmpool", Namespace: "default"}, &cur); err != nil {
 			return false
 		}
@@ -179,7 +179,7 @@ func TestFacadeWarmPoolReplicasFollowUpstream(t *testing.T) {
 	})
 
 	// Simulate an HPA scaling their warm pool to 5.
-	var cur extv1alpha1.SandboxWarmPool
+	var cur extv1beta1.SandboxWarmPool
 	updateWithRetry(t, types.NamespacedName{Name: "ext-warmpool-hpa", Namespace: "default"}, &cur, func() {
 		cur.Spec.Replicas = 5
 	})
@@ -190,123 +190,81 @@ func TestFacadeWarmPoolReplicasFollowUpstream(t *testing.T) {
 	})
 }
 
-// mkOurPool creates one of our SandboxPools bound to a template name, so the
-// claim reconciler's default/named resolution has a pool to bind to.
-func mkOurPool(t *testing.T, name, templateName string) *runv1.SandboxPool {
-	t.Helper()
-	pool := &runv1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: runv1.SandboxPoolSpec{
-			TemplateRef: &runv1.LocalObjectReference{Name: templateName},
-			Warm:        &runv1.PoolWarm{Min: 1},
-		},
-	}
-	if err := k8sClient.Create(testCtx, pool); err != nil {
-		t.Fatalf("create our pool %s: %v", name, err)
-	}
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, pool) })
-	return pool
-}
-
-// newExtClaim builds an upstream extension SandboxClaim referencing a template
-// with an optional warmpool policy.
-func newExtClaim(name, templateName string, policy *extv1alpha1.WarmPoolPolicy) *extv1alpha1.SandboxClaim {
-	return &extv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: extv1alpha1.SandboxClaimSpec{
-			TemplateRef: extv1alpha1.SandboxTemplateRef{Name: templateName},
-			WarmPool:    policy,
-		},
-	}
-}
-
 func getOurClaimT(t *testing.T, name string) (*runv1.Sandbox, bool) {
 	t.Helper()
 	return getClaim(t, name)
 }
 
-// TestFacadeClaimDefaultBindsMatchingPool: an upstream SandboxClaim with the
-// default warmpool policy binds our claim from any of our pools whose templateRef
-// matches the resolved template.
-func TestFacadeClaimDefaultBindsMatchingPool(t *testing.T) {
-	mkOurPool(t, "claim-default-pool", "claim-default-template")
-	policy := extv1alpha1.WarmPoolPolicyDefault
-	src := newExtClaim("ext-claim-default", "claim-default-template", &policy)
+// newExtClaim builds an upstream extension SandboxClaim referencing a warm pool
+// by name directly (v1beta1: no policy, direct WarmPoolRef).
+func newExtClaim(name, poolName string) *extv1beta1.SandboxClaim {
+	return &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: extv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: poolName},
+		},
+	}
+}
+
+// TestFacadeClaimWarmPoolRefBindsPool: an upstream SandboxClaim with
+// spec.warmPoolRef.name binds our run-path Sandbox to that exact pool and
+// stamps the mitos.run/pool bridge annotation.
+func TestFacadeClaimWarmPoolRefBindsPool(t *testing.T) {
+	src := newExtClaim("ext-claim-warmref", "claim-target-pool")
 	if err := k8sClient.Create(testCtx, src); err != nil {
 		t.Fatalf("create ext claim: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
 	var claim *runv1.Sandbox
-	eventually(t, "default policy binds our claim from a matching pool", func() bool {
-		c, ok := getOurClaimT(t, "ext-claim-default")
+	eventually(t, "facade creates our run-path Sandbox bound to the warm pool ref", func() bool {
+		c, ok := getOurClaimT(t, "ext-claim-warmref")
 		claim = c
-		return ok && c.Spec.Source.PoolRef.Name == "claim-default-pool"
+		return ok && c.Spec.Source.PoolRef != nil && c.Spec.Source.PoolRef.Name == "claim-target-pool"
 	})
-	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "default" {
-		t.Fatalf("claim warmpool-policy annotation = %q, want default", claim.Annotations[facade.WarmPoolPolicyAnnotation])
+	if claim.Annotations[facade.PoolAnnotation] != "claim-target-pool" {
+		t.Fatalf("claim mitos.run/pool annotation = %q, want claim-target-pool", claim.Annotations[facade.PoolAnnotation])
 	}
-	if !hasControllerOwner2(claim, "ext-claim-default") {
+	if !hasControllerOwner2(claim, "ext-claim-warmref") {
 		t.Fatalf("claim missing controller owner reference to the upstream SandboxClaim: %+v", claim.OwnerReferences)
 	}
 }
 
-// TestFacadeClaimNamedBindsNamedPool: an upstream SandboxClaim with a named
-// warmpool policy binds our claim from that specific named pool (the bridge).
-func TestFacadeClaimNamedBindsNamedPool(t *testing.T) {
-	// Two pools for the same template; the named policy must pick the named one,
-	// not the default match.
-	mkOurPool(t, "claim-other-pool", "claim-named-template")
-	mkOurPool(t, "claim-fast-pool", "claim-named-template")
-	named := extv1alpha1.WarmPoolPolicy("claim-fast-pool")
-	src := newExtClaim("ext-claim-named", "claim-named-template", &named)
+// TestFacadeClaimEnvMapped: a SandboxClaim with spec.env maps the env vars onto
+// our run-path Sandbox's spec.env (the husk run path applies them into the guest).
+func TestFacadeClaimEnvMapped(t *testing.T) {
+	src := &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "ext-claim-env", Namespace: "default"},
+		Spec: extv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: "env-test-pool"},
+			Env: []extv1beta1.EnvVar{
+				{Name: "MYKEY", Value: "myvalue"},
+				{Name: "OTHER", Value: "thing"},
+			},
+		},
+	}
 	if err := k8sClient.Create(testCtx, src); err != nil {
-		t.Fatalf("create ext claim: %v", err)
+		t.Fatalf("create ext claim with env: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
 
-	var claim *runv1.Sandbox
-	eventually(t, "named policy binds the named pool", func() bool {
-		c, ok := getOurClaimT(t, "ext-claim-named")
-		claim = c
-		return ok && c.Spec.Source.PoolRef.Name == "claim-fast-pool"
+	eventually(t, "facade maps claim env onto our run-path Sandbox", func() bool {
+		c, ok := getOurClaimT(t, "ext-claim-env")
+		if !ok {
+			return false
+		}
+		return len(c.Spec.Env) == 2 &&
+			c.Spec.Env[0].Name == "MYKEY" && c.Spec.Env[0].Value == "myvalue" &&
+			c.Spec.Env[1].Name == "OTHER" && c.Spec.Env[1].Value == "thing"
 	})
-	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "claim-fast-pool" {
-		t.Fatalf("claim warmpool-policy annotation = %q, want claim-fast-pool", claim.Annotations[facade.WarmPoolPolicyAnnotation])
-	}
-}
-
-// TestFacadeClaimNonePolicy: an upstream SandboxClaim with the none warmpool
-// policy is still forked from the resolved template's pool (our engine has no
-// pool-less path, a documented exception) and records the none policy.
-func TestFacadeClaimNonePolicy(t *testing.T) {
-	mkOurPool(t, "claim-none-pool", "claim-none-template")
-	none := extv1alpha1.WarmPoolPolicyNone
-	src := newExtClaim("ext-claim-none", "claim-none-template", &none)
-	if err := k8sClient.Create(testCtx, src); err != nil {
-		t.Fatalf("create ext claim: %v", err)
-	}
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, src) })
-
-	var claim *runv1.Sandbox
-	eventually(t, "none policy forks from the template pool (documented exception)", func() bool {
-		c, ok := getOurClaimT(t, "ext-claim-none")
-		claim = c
-		return ok && c.Spec.Source.PoolRef.Name == "claim-none-pool"
-	})
-	if claim.Annotations[facade.WarmPoolPolicyAnnotation] != "none" {
-		t.Fatalf("claim warmpool-policy annotation = %q, want none", claim.Annotations[facade.WarmPoolPolicyAnnotation])
-	}
 }
 
 // TestFacadeClaimMirrorsStatusAndGCs: when our claim reaches Ready, the facade
 // mirrors a Ready=True condition + the bound sandbox name into the upstream
-// claim status; deleting the upstream claim leaves our claim owner-referenced for
-// GC.
+// claim status; deleting the upstream claim leaves our claim owner-referenced
+// for GC.
 func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
-	mkOurPool(t, "claim-status-pool", "claim-status-template")
-	policy := extv1alpha1.WarmPoolPolicyDefault
-	src := newExtClaim("ext-claim-status", "claim-status-template", &policy)
+	src := newExtClaim("ext-claim-status", "claim-status-pool")
 	if err := k8sClient.Create(testCtx, src); err != nil {
 		t.Fatalf("create ext claim: %v", err)
 	}
@@ -325,7 +283,7 @@ func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
 	})
 
 	eventually(t, "upstream claim status mirrors Bound/Ready + sandbox name", func() bool {
-		var got extv1alpha1.SandboxClaim
+		var got extv1beta1.SandboxClaim
 		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "ext-claim-status", Namespace: "default"}, &got); err != nil {
 			return false
 		}

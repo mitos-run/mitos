@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -417,6 +418,17 @@ type createTemplateReq struct {
 	Network      *networkConfig `json:"network,omitempty"`
 }
 
+// idPattern constrains every caller-supplied id (template, sandbox) that the
+// engine later embeds in host filesystem paths (templates/<id>/...,
+// sandboxes/<id>/...). No dots and no separators, so a validated id can never
+// introduce a `..` segment or an extra path element. This is the REST-boundary
+// half of the C1 traversal defense, mirroring the forkd gRPC validateSandboxID
+// guard; the engine re-validates as defense in depth.
+var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// safeIDComponent reports whether id is a safe single host-path segment.
+func safeIDComponent(id string) bool { return idPattern.MatchString(id) }
+
 func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	var req createTemplateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -425,6 +437,10 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ID == "" {
 		errResp(w, "id is required", 400)
+		return
+	}
+	if !safeIDComponent(req.ID) {
+		errResp(w, "invalid id: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", 400)
 		return
 	}
 	if req.InitWaitSecs == 0 {
@@ -572,6 +588,17 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	var req forkReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errResp(w, "invalid json", 400)
+		return
+	}
+	// Path-traversal guard: both the new sandbox id and the source template id
+	// become host path components in the engine. Reject unsafe ids at the
+	// boundary with a 400 (CodeQL go/path-injection).
+	if !safeIDComponent(req.ID) {
+		errResp(w, "invalid id: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", 400)
+		return
+	}
+	if !safeIDComponent(req.Template) {
+		errResp(w, "invalid template: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", 400)
 		return
 	}
 

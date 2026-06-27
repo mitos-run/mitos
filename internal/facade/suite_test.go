@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,10 +46,10 @@ func TestMain(m *testing.M) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
-	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
-	if err := extv1alpha1.AddToScheme(scheme); err != nil {
+	if err := extv1beta1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
 	if err := runv1.AddToScheme(scheme); err != nil {
