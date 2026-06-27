@@ -62,6 +62,14 @@ pub fn init_system() {
     if let Err(e) = crate::sys::netlink::link_up("lo") {
         error!("bring up loopback: {}", e);
     }
+    // Seed the guest CRNG so getrandom() does not block. Without this a serving
+    // workload (issue #460) that does crypto at startup hangs in
+    // wait_for_random_bytes during the build (the guest kernel lacks
+    // CONFIG_RANDOM_TRUST_CPU). Best-effort: a workload that does no early crypto
+    // is unaffected if seeding fails.
+    if !crate::sys::entropy::seed_crng_at_boot() {
+        error!("seed CRNG at boot: no hardware entropy source (hwrng/rdrand) available");
+    }
     tracing::info!("init complete");
 }
 
