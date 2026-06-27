@@ -48,6 +48,8 @@ jobs:
             dockerfile: Dockerfile.console
           - name: mitos-gateway
             dockerfile: Dockerfile.gateway
+          - name: mitos-frontdoor
+            dockerfile: Dockerfile.frontdoor
           - name: mitos-computer-use
             dockerfile: images/computer-use/Dockerfile
     env:
