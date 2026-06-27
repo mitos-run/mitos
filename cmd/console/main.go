@@ -67,7 +67,8 @@ func main() {
 	// in-memory otherwise (dev only). The DSN value is never logged. The real
 	// billing service, control-plane live-sandbox query, and SandboxTemplate
 	// lister remain documented follow-ups (docs/saas/console.md).
-	store, closeStore, err := pgstore.ResolveStore(context.Background(), *databaseDSN, logger)
+	// pool is non-nil when durable Postgres is configured; nil means in-memory.
+	store, pool, closeStore, err := pgstore.ResolveStoreWithPool(context.Background(), *databaseDSN, logger)
 	if err != nil {
 		log.Fatalf("persistence: %v", err)
 	}
@@ -82,9 +83,15 @@ func main() {
 	bill := setupBilling(logger, statusStore)
 
 	// sessionStore is created before console.New so it can be passed into
-	// Deps.Sessions in the production branch. In dev mode it is unused (the
-	// console's noopSessionLister default is fine for local smoke testing).
-	sessionStore := saas.NewSessionStore()
+	// Deps.Sessions in the production branch. When pool is non-nil (durable
+	// Postgres configured) the durable PgSessionStore is used; otherwise the
+	// in-memory SessionStore is the dev fallback.
+	var sessionStore saas.Sessions
+	if pool != nil {
+		sessionStore = pgstore.NewPgSessionStore(pool)
+	} else {
+		sessionStore = saas.NewSessionStore()
+	}
 
 	con := console.New(console.Deps{
 		Accounts: accounts,
@@ -154,7 +161,7 @@ func main() {
 	// server-controlled signup flag (caps.Signup, the #208 gate); when off, nothing
 	// is mounted and the funnel stays in waitlist mode. The SMTP password and the
 	// verify token are never logged.
-	mountOnboarding(mux, logger, accounts, store, capsGate{signup: caps.Signup})
+	mountOnboarding(mux, logger, accounts, store, pool, capsGate{signup: caps.Signup})
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session
@@ -187,10 +194,10 @@ func main() {
 	}
 }
 
-// sessionStoreAdapter bridges *saas.SessionStore to the console.SessionLister
+// sessionStoreAdapter bridges saas.Sessions to the console.SessionLister
 // seam. It translates saas.Session to console.SessionRecord so the console
 // package does not import the production store directly.
-type sessionStoreAdapter struct{ s *saas.SessionStore }
+type sessionStoreAdapter struct{ s saas.Sessions }
 
 func (a sessionStoreAdapter) ListByAccount(accountID string) []console.SessionRecord {
 	recs := a.s.ListByAccount(accountID)
@@ -228,7 +235,7 @@ func oidcScopes() []string {
 // and /auth/logout. The LoginManager issues sessions into the SAME store the
 // SessionMiddleware reads. If issuer discovery fails the console still serves
 // (the operator can fix the issuer and restart); login is simply unavailable.
-func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store *saas.SessionStore, issuer string) {
+func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Sessions, issuer string) {
 	verifier, exch, err := oidcauth.NewProvider(context.Background(), oidcauth.ProviderConfig{
 		IssuerURL:    issuer,
 		ClientID:     os.Getenv("MITOS_CONSOLE_OIDC_CLIENT_ID"),
