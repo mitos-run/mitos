@@ -305,16 +305,16 @@ activation latency is not stated.
 
 This section frames the resume-latency comparison between our `agents.x-k8s.io`
 facade and the upstream reference controller, for the upstream
-pause/resume contract (the Sandbox `spec.replicas` 0<->1 toggle; upstream v0.4.6
-has no stateful hibernate field, so pause/resume IS that toggle). The harness is
+pause/resume contract (the Sandbox `spec.operatingMode` Running<->Suspended toggle; upstream v0.5.0
+named `operatingMode` as the explicit pause/resume lever). The harness is
 `bench/facade/` (see [`bench/facade/README.md`](bench/facade/README.md)).
 
 ### The two resume paths
 
-| system | resume = replicas 0 -> 1 does | dominant cost |
+| system | resume = operatingMode Suspended -> Running does | dominant cost |
 | --- | --- | --- |
 | our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `Sandbox`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
-| upstream reference (v0.4.6) | COLD-CREATES a pod: delete the pod on 0, create a fresh one on 1 | pod schedule + admission + image + container start + app boot, on the order of seconds |
+| upstream reference (v0.5.0) | COLD-CREATES a pod: delete the pod on Suspended, create a fresh one on Running | pod schedule + admission + image + container start + app boot, on the order of seconds |
 
 The facade resume re-activates a warm dormant VM; the upstream resume cold-creates
 a pod. The **order-of-magnitude resume advantage is the DESIGN claim**: a
@@ -330,7 +330,7 @@ head-to-head number here.
   on kind, ours cannot). `bench/facade/` therefore measures only the
   OBJECT-LEVEL resume latency on kind (the facade re-creating the bridged claim),
   and the `facade-conformance` kind job asserts the object-level resume
-  (replicas 1->0->1 releases then re-creates the claim).
+  (operatingMode Running->Suspended->Running releases then re-creates the claim).
 - The **same-cluster in-VM head-to-head number** (our warm husk re-activation vs
   the upstream cold pod create, both timed to a serving endpoint) is a
   **bare-metal-reference-node TARGET (#16)**. It cannot be measured on kind; it
