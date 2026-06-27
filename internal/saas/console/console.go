@@ -440,18 +440,29 @@ func (c *Console) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 // --- Billing (over #212) ---
 
+// ledgerEntryView is the snake_case JSON view of a billing.LedgerEntry sent to
+// the SPA. The underlying LedgerEntry struct has no json tags (PascalCase by
+// default), so this view model maps the fields the SPA actually reads:
+// ts (At), cents (Amount as int64), reason (Note). OrgID and Key are internal
+// fields and must not appear on the wire.
+type ledgerEntryView struct {
+	Ts     time.Time `json:"ts"`
+	Cents  int64     `json:"cents"`
+	Reason string    `json:"reason"`
+}
+
 // BillingView is the console billing summary: the plan/dunning status, the
 // current period spend, the credit balance, the dunning status, and the credit
 // ledger entries (the closest thing to invoices in this slice; real Stripe
 // invoices are a documented follow-up).
 type BillingView struct {
-	OrgID         string                `json:"org_id"`
+	OrgID         string              `json:"org_id"`
 	Status        billing.BillingStatus `json:"status"`
-	BalanceCents  int64                 `json:"balance_cents"`
-	SpendCents    int64                 `json:"spend_cents"`
-	SoftCapCents  int64                 `json:"soft_cap_cents"`
-	HardCapCents  int64                 `json:"hard_cap_cents"`
-	LedgerEntries []billing.LedgerEntry `json:"ledger_entries"`
+	BalanceCents  int64               `json:"balance_cents"`
+	SpendCents    int64               `json:"spend_cents"`
+	SoftCapCents  int64               `json:"soft_cap_cents"`
+	HardCapCents  int64               `json:"hard_cap_cents"`
+	LedgerEntries []ledgerEntryView   `json:"ledger_entries"`
 }
 
 func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
@@ -481,10 +492,14 @@ func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view.BalanceCents = int64(bal)
-		view.LedgerEntries = entries
+		views := make([]ledgerEntryView, len(entries))
+		for i, e := range entries {
+			views[i] = ledgerEntryView{Ts: e.At, Cents: int64(e.Amount), Reason: e.Note}
+		}
+		view.LedgerEntries = views
 	}
 	if view.LedgerEntries == nil {
-		view.LedgerEntries = []billing.LedgerEntry{}
+		view.LedgerEntries = []ledgerEntryView{}
 	}
 	if c.deps.Billing.Caps != nil {
 		cap, has, err := c.deps.Billing.Caps.Get(r.Context(), orgID)
