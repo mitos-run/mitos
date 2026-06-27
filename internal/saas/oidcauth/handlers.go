@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"net/http"
 
+	"golang.org/x/oauth2"
+
 	"mitos.run/mitos/internal/saas"
 )
 
@@ -22,7 +24,7 @@ const stateCookie = "mitos_oidc_state"
 // exchange an authorization code for a raw OIDC ID token. The real
 // implementation wraps golang.org/x/oauth2 + go-oidc (see verifier.go).
 type Exchanger interface {
-	AuthCodeURL(state string) string
+	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
 	Exchange(ctx context.Context, code string) (rawIDToken string, err error)
 }
 
@@ -46,8 +48,18 @@ func NewHandlers(cfg Config) *Handlers {
 	return &Handlers{cfg: cfg}
 }
 
+// allowedConnectors is the set of connector IDs the SPA is permitted to hint.
+// Anything outside this set is silently ignored so Dex shows its own chooser.
+var allowedConnectors = map[string]bool{
+	"github": true,
+	"google": true,
+}
+
 // Login starts the authorization-code flow: it mints a CSRF state, stores it in
-// a short-lived cookie, and redirects to the provider.
+// a short-lived cookie, and redirects to the provider. An optional
+// ?connector=github|google query param is forwarded to Dex as connector_id so
+// the provider-specific OAuth screen is shown immediately, skipping Dex's
+// built-in chooser.
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	state := randToken()
 	http.SetCookie(w, &http.Cookie{
@@ -59,7 +71,11 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
-	http.Redirect(w, r, h.cfg.Exchanger.AuthCodeURL(state), http.StatusFound)
+	var opts []oauth2.AuthCodeOption
+	if connector := r.URL.Query().Get("connector"); allowedConnectors[connector] {
+		opts = append(opts, oauth2.SetAuthURLParam("connector_id", connector))
+	}
+	http.Redirect(w, r, h.cfg.Exchanger.AuthCodeURL(state, opts...), http.StatusFound)
 }
 
 // Callback validates the state, exchanges the code, signs the identity in via

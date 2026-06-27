@@ -4,21 +4,32 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/oauth2"
 
 	"mitos.run/mitos/internal/saas"
 )
 
-// fakeExchanger stands in for the oauth2/go-oidc transport: it echoes a fixed
-// auth URL and returns a fixed raw id_token, so the handler flow is tested
-// without a live provider.
+// fakeExchanger stands in for the oauth2/go-oidc transport: it builds a real
+// URL via a dummy oauth2.Config so that any opts (e.g. connector_id) are
+// reflected in the redirect, and returns a fixed raw id_token.
 type fakeExchanger struct {
 	rawIDToken string
 	err        error
 }
 
-func (f fakeExchanger) AuthCodeURL(state string) string { return "https://idp.example/auth?state=" + state }
+func (f fakeExchanger) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string {
+	cfg := &oauth2.Config{
+		ClientID:    "fake",
+		RedirectURL: "https://idp.example/callback",
+		Endpoint:    oauth2.Endpoint{AuthURL: "https://idp.example/auth"},
+	}
+	return cfg.AuthCodeURL(state, opts...)
+}
+
 func (f fakeExchanger) Exchange(_ context.Context, _ string) (string, error) {
 	return f.rawIDToken, f.err
 }
@@ -103,5 +114,48 @@ func TestLogoutClearsSessionCookie(t *testing.T) {
 	cookies := strings.Join(w.Header().Values("Set-Cookie"), " ; ")
 	if !strings.Contains(cookies, "mitos_session=") || !strings.Contains(cookies, "Max-Age=0") {
 		t.Fatalf("logout did not clear the session cookie: %q", cookies)
+	}
+}
+
+// TestLoginConnectorHint asserts that ?connector=github or ?connector=google
+// adds connector_id to the provider redirect URL, while an absent or unknown
+// connector value omits connector_id so Dex shows its own chooser.
+func TestLoginConnectorHint(t *testing.T) {
+	cases := []struct {
+		name        string
+		path        string
+		wantPresent bool
+		wantValue   string
+	}{
+		{"github connector", "/auth/login?connector=github", true, "github"},
+		{"google connector", "/auth/login?connector=google", true, "google"},
+		{"no connector", "/auth/login", false, ""},
+		{"unknown connector rejected", "/auth/login?connector=evil", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandlers(t, fakeExchanger{rawIDToken: "raw"}, fakeVerifier{})
+			r := httptest.NewRequest("GET", tc.path, nil)
+			w := httptest.NewRecorder()
+			h.Login(w, r)
+			if w.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302", w.Code)
+			}
+			loc := w.Header().Get("Location")
+			parsed, err := url.Parse(loc)
+			if err != nil {
+				t.Fatalf("parse location %q: %v", loc, err)
+			}
+			got := parsed.Query().Get("connector_id")
+			if tc.wantPresent {
+				if got != tc.wantValue {
+					t.Fatalf("connector_id = %q, want %q; location: %s", got, tc.wantValue, loc)
+				}
+			} else {
+				if got != "" {
+					t.Fatalf("connector_id should be absent, got %q; location: %s", got, loc)
+				}
+			}
+		})
 	}
 }
