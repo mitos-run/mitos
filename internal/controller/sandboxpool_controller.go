@@ -673,7 +673,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			// plaintext template. The wrapped DEK is never logged.
 			EncryptionKey: wrappedDEK,
 			KekId:         kekID,
-		}, nil)
+		})
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
