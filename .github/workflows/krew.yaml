@@ -91,4 +91,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Update the krew-index PR
+        # The bot reads GITHUB_REF and requires a tag ref. On a release event that
+        # is already refs/tags/<tag>; on a manual workflow_dispatch backfill it is
+        # refs/heads/<branch>, which the bot rejects, so synthesize the tag ref
+        # from the dispatch input.
+        env:
+          GITHUB_REF: refs/tags/${{ github.event.release.tag_name || github.event.inputs.tag }}
         uses: rajatjindal/krew-release-bot@v0.0.46
