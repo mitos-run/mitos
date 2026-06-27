@@ -5,7 +5,7 @@
 # (--no-sandbox); see docs/threat-model.md.
 #
 # Chromium binds CDP on an internal loopback port (9223); the relay owns the
-# exposed port (9222). The relay sends Host: localhost upstream so Chromium's
+# exposed port (9222). The relay sends the upstream host:port as Host so Chromium's
 # DevTools host-header check passes behind the named-URL expose proxy, and
 # rewrites the discovery webSocketDebuggerUrl to the external origin.
 set -eu

@@ -5,7 +5,7 @@
 #   docker build -f images/computer-use/Dockerfile -t mitos-computer-use .
 
 # Builder: compile the CDP relay (standard library only) from source. The relay
-# presents CDP on the exposed port, sends Host: localhost upstream so Chromium's
+# presents CDP on the exposed port, sends the upstream host:port as Host so Chromium's
 # DevTools host-header check passes behind the named-URL expose proxy, and
 # rewrites the discovery webSocketDebuggerUrl to the external origin.
 FROM golang:1.26-bookworm AS relay-build

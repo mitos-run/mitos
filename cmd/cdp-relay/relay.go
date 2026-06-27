@@ -37,9 +37,11 @@ func rewriteDiscovery(body []byte, upstreamHostPort, scheme, externalHost string
 }
 
 // newRelayHandler returns an http.Handler that reverse-proxies all traffic to
-// the Chromium CDP endpoint at upstream (e.g. "127.0.0.1:9223"), setting
-// Host: localhost on every upstream request so Chromium's DevTools host-header
-// check passes. For /json* paths it rewrites webSocketDebuggerUrl and
+// the Chromium CDP endpoint at upstream (e.g. "127.0.0.1:9223"), setting the
+// upstream host:port as the Host on every upstream request so Chromium's
+// DevTools host-header check passes (it accepts an IP literal) and the host it
+// reflects into the discovery URL is one rewriteDiscovery can match. For /json*
+// paths it rewrites webSocketDebuggerUrl and
 // devtoolsFrontendUrl in the response body from the loopback address to the
 // external origin (read from X-Forwarded-Host and X-Forwarded-Proto). WebSocket
 // upgrade requests on /devtools/... are proxied transparently by

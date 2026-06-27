@@ -70,7 +70,8 @@ CDP is HTTP plus a WebSocket upgrade. Two ways to reach guest port 9222:
   against any standalone server with no extra setup.
 - **Named URL over the preview proxy** (authenticated, shareable): the in-image
   CDP relay makes this work. Chromium's DevTools server rejects any `Host` that is
-  not an IP or `localhost`, so the relay sends `Host: localhost` upstream and
+  not an IP literal or `localhost`, so the relay sends the upstream `host:port`
+  (an IP literal Chromium accepts) as the Host upstream and
   rewrites the discovery `webSocketDebuggerUrl` to the external origin (from the
   `X-Forwarded-Host` the expose proxy now sets). Reach it with
   `sandbox.get_host(9222)` (a signed, expiring URL) and point your CDP client at

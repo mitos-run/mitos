@@ -307,7 +307,7 @@ jobs:
       # #314). Build context is the repository root because the relay is compiled
       # from source. Smoke that the multi-stage build works, the launcher brings
       # up Chromium, and the relay answers CDP on the published port (curl's
-      # Host: localhost:9222 also exercises the relay's host-header rewrite). This
+      # Host: 127.0.0.1:9222 also exercises the relay's host-header path). This
       # is the cheap proportional check; the warm-fork snapshot and the named-URL
       # relay path are verified on real KVM
       # (docs/superpowers/specs/2026-06-27-computer-use-cdp-spike-notes.md), not

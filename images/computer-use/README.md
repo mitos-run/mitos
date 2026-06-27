@@ -18,7 +18,7 @@ The image runs Chromium with `--no-sandbox` because the Firecracker microVM is t
 This image is designed to run as a Mitos serving workload, captured in a template snapshot and forked warm on demand. The guest exposes port 9222 via the Mitos expose proxy (authenticated, never public):
 
 ```bash
-mitos workspace serve <workspace> --pool <pool> --expose 9222
+mitos workspace serve <workspace> --pool <pool> --port 9222 --expose-domain <domain>
 ```
 
 Access the CDP endpoint via the authenticated expose URL at `/json/version`.
