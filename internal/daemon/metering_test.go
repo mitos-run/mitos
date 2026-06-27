@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/volume"
@@ -49,7 +50,7 @@ func (f *fakeMeteringEngine) GetCapacity() fork.Capacity {
 func (f *fakeMeteringEngine) ListSandboxes() []fork.SandboxRecord { return nil }
 func (f *fakeMeteringEngine) ListVolumes() []fork.VolumeRecord    { return nil }
 func (f *fakeMeteringEngine) ReclaimVolume(string) error          { panic("not used") }
-func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec) error {
+func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec, *firecracker.WorkloadSpec) error {
 	panic("not used")
 }
 func (f *fakeMeteringEngine) PullTemplate(context.Context, string, string, string, string) error {

@@ -29,7 +29,7 @@ import (
 func TestForkRecordsVitalsLabels(t *testing.T) {
 	engine := fork.NewMockEngine() // KVMAvailable=false
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())

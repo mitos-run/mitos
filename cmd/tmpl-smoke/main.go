@@ -110,7 +110,7 @@ func run(o opts) error {
 	}
 	fmt.Printf("tmpl-smoke: building template %q from image %q (init=%v, huge_pages=%q)\n", templateID, o.image, initCommands, o.hugePages)
 	buildStart := time.Now()
-	if err := engine.CreateTemplate(templateID, o.image, initCommands, nil); err != nil {
+	if err := engine.CreateTemplate(templateID, o.image, initCommands, nil, nil); err != nil {
 		return fmt.Errorf("create template from image: %w", err)
 	}
 	fmt.Printf("tmpl-smoke: template built in %s\n", time.Since(buildStart).Round(time.Millisecond))

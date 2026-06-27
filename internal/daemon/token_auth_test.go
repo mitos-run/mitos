@@ -231,7 +231,7 @@ func TestUnregisterSandboxClearsToken(t *testing.T) {
 func TestForkRegistersTokenOnServer(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())
@@ -264,7 +264,7 @@ func TestForkRegistersTokenOnServer(t *testing.T) {
 func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())
@@ -288,7 +288,7 @@ func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 func TestForkRunningRegistersToken(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())

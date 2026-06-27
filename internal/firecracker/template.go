@@ -12,6 +12,7 @@ import (
 
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/vsock"
+	controlv1 "mitos.run/mitos/proto/sandbox/controlv1"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 )
 
@@ -143,6 +144,51 @@ func execOverGRPC(ctx context.Context, client *guestgrpc.Client, command string)
 	}, nil
 }
 
+// startWorkloadGRPC is the production startWorkload (issue #460). It connects to
+// the guest Control service (the same vsock gRPC port 53 used for init exec) and
+// calls StartWorkload, which spawns the workload in its own session and, when a
+// ready gate is set, blocks until it is listening. Secret hygiene: no command
+// argv or env values are logged.
+func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) error {
+	waitReady := tm.waitReady
+	if waitReady == nil {
+		waitReady = guestgrpc.WaitReady
+	}
+	ctx := context.Background()
+	client, err := waitReady(ctx, vsockPath, initReadyTimeout)
+	if err != nil {
+		return fmt.Errorf("connect to guest agent for workload: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req := &controlv1.StartWorkloadRequest{
+		Command: w.Command,
+		Env:     w.Env,
+	}
+	// The agent blocks on the ready gate up to ready.timeout_seconds; allow that
+	// plus a margin for the connection and round trip.
+	timeout := initReadyTimeout
+	if w.Ready != nil {
+		req.Ready = &controlv1.HttpReady{
+			Port:           w.Ready.Port,
+			Path:           w.Ready.Path,
+			Expect:         w.Ready.Expect,
+			TimeoutSeconds: w.Ready.TimeoutSeconds,
+		}
+		secs := w.Ready.TimeoutSeconds
+		if secs == 0 {
+			secs = 120
+		}
+		timeout = time.Duration(secs)*time.Second + 30*time.Second
+	}
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if _, err := client.Control.StartWorkload(wctx, req); err != nil {
+		return fmt.Errorf("guest StartWorkload: %w", err)
+	}
+	return nil
+}
+
 // VsockRelPath is the vsock uds_path configured before snapshot and thus
 // baked into every template snapshot. It is deliberately RELATIVE so that
 // each restored Firecracker process binds it against its own working
@@ -187,6 +233,29 @@ type TemplateManager struct {
 	// performs the wait. Both are fields so tests do not actually sleep.
 	fallbackWait time.Duration
 	sleep        func(time.Duration)
+
+	// startWorkload starts a declared serving workload in the booted VM after
+	// init and before snapshot, so the snapshot captures it running (issue #460).
+	// Injectable seam: nil uses the production gRPC Control.StartWorkload path
+	// (startWorkloadGRPC). A workload that never becomes ready fails the build.
+	startWorkload func(vsockPath string, w *WorkloadSpec) error
+}
+
+// WorkloadSpec is the serving workload the build starts and snapshots while it is
+// running (issue #460). It mirrors the forkd CreateTemplateRequest.WorkloadSpec
+// and is forwarded to the guest Control StartWorkload RPC.
+type WorkloadSpec struct {
+	Command []string
+	Env     map[string]string
+	Ready   *WorkloadHTTPReady
+}
+
+// WorkloadHTTPReady is the HTTP readiness gate the build waits on before snapshot.
+type WorkloadHTTPReady struct {
+	Port           uint32
+	Path           string
+	Expect         uint32
+	TimeoutSeconds uint32
 }
 
 // NewTemplateManager builds a template manager. A zero jailer config
@@ -248,7 +317,7 @@ type TemplateResult struct {
 // fails and nothing is snapshotted, so a broken template (e.g. a failed
 // `pip install`) is never served. With no init commands the VM is snapshotted
 // as soon as it has booted. The VM is killed after snapshot.
-func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string) (*TemplateResult, error) {
+func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string, workload *WorkloadSpec) (*TemplateResult, error) {
 	// Re-assert the allowlist barrier locally: the id is validated at the forkd
 	// gRPC boundary (validateSandboxID), but a defense-in-depth check here keeps
 	// every path that joins the id provably free of separators and traversal,
@@ -385,6 +454,22 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 	vsockPath := client.VsockHostPath(VsockRelPath)
 	if err := tm.awaitReadyAndRunInit(id, vsockPath, initCommands); err != nil {
 		return nil, err
+	}
+
+	// Start the declared serving workload (issue #460) AFTER init and BEFORE the
+	// snapshot, so the snapshot captures it running and a fork wakes already
+	// serving. The guest starts it in its own session (surviving the fork SIGUSR2
+	// reset) and, when a ready gate is set, blocks until it is listening. A
+	// workload that never becomes ready fails the build (it must NOT be snapshotted
+	// half started), mirroring the init-failure contract.
+	if workload != nil && len(workload.Command) > 0 {
+		start := tm.startWorkload
+		if start == nil {
+			start = tm.startWorkloadGRPC
+		}
+		if err := start(vsockPath, workload); err != nil {
+			return nil, fmt.Errorf("start serving workload: %w", err)
+		}
 	}
 
 	// Pause the VM before snapshot

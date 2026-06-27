@@ -129,7 +129,7 @@ func TestCreateTemplateEncryptedCreatesContainerAndWritesInside(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
 
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		// The container is mounted at the template dir; write the snapshot there.
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
@@ -140,7 +140,7 @@ func TestCreateTemplateEncryptedCreatesContainerAndWritesInside(t *testing.T) {
 		t.Fatalf("seed rootfs: %v", err)
 	}
 
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestCreateTemplateEncryptedCreatesContainerAndWritesInside(t *testing.T) {
 func TestForkEncryptedOpensContainerWhenNotOpen(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -175,7 +175,7 @@ func TestForkEncryptedOpensContainerWhenNotOpen(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -210,7 +210,7 @@ func TestForkEncryptedOpensContainerWhenNotOpen(t *testing.T) {
 func TestDeleteTemplateShredsContainer(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -218,7 +218,7 @@ func TestDeleteTemplateShredsContainer(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestDeleteTemplateShredsContainer(t *testing.T) {
 // container is created and no encrypted marker is written.
 func TestEncryptionDisabledCreatesNoContainer(t *testing.T) {
 	e := newTestEngine(t)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -242,7 +242,7 @@ func TestEncryptionDisabledCreatesNoContainer(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 	if e.crypt != nil {
@@ -271,10 +271,10 @@ func TestCreateTemplateFailedBuildRollsBackContainer(t *testing.T) {
 	}
 
 	// First build fails AFTER the container was created+mounted.
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		return fmt.Errorf("boom: build failed")
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err == nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err == nil {
 		t.Fatal("expected CreateTemplate to fail when the build step fails")
 	}
 
@@ -300,11 +300,11 @@ func TestCreateTemplateFailedBuildRollsBackContainer(t *testing.T) {
 	}
 
 	// A retry for the SAME id now succeeds: the container recreates cleanly.
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("retry CreateTemplate after rollback: %v", err)
 	}
 	if len(fake.creates) != 2 {
@@ -321,7 +321,7 @@ func TestCreateTemplateFailedBuildRollsBackContainer(t *testing.T) {
 func TestDeleteTemplateForgetsAndZeroizesKey(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -329,7 +329,7 @@ func TestDeleteTemplateForgetsAndZeroizesKey(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -372,7 +372,7 @@ func TestDeleteTemplateForgetsAndZeroizesKey(t *testing.T) {
 func TestEnsureTemplateOpenSerializesConcurrentForks(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -380,7 +380,7 @@ func TestEnsureTemplateOpenSerializesConcurrentForks(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -425,7 +425,7 @@ func TestEnsureTemplateOpenSerializesConcurrentForks(t *testing.T) {
 func TestTerminateDoesNotShredSharedTemplateContainer(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -433,7 +433,7 @@ func TestTerminateDoesNotShredSharedTemplateContainer(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -477,7 +477,7 @@ func TestCreateTemplateFailsClosedWithoutKey(t *testing.T) {
 	// provider with nothing stashed: the scope has no key.
 	kekA, _ := kms.NewLocalKEK(make([]byte, 32))
 	e.keyProvider = NewRequestKeyProvider(kekA)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		t.Fatal("build must not run when no key is available (fail closed)")
 		return nil
 	}
@@ -485,7 +485,7 @@ func TestCreateTemplateFailsClosedWithoutKey(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err == nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err == nil {
 		t.Fatal("CreateTemplate must fail closed when encryption is on but no key is available")
 	}
 	if len(fake.creates) != 0 {
@@ -514,7 +514,7 @@ func TestCreateTemplateUsesRequestKey(t *testing.T) {
 		t.Fatalf("Wrap: %v", err)
 	}
 	prov.SetWrappedKey("tmpl1", wrapped.Ciphertext, wrapped.KEKID)
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil
 	}
@@ -522,7 +522,7 @@ func TestCreateTemplateUsesRequestKey(t *testing.T) {
 	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed rootfs: %v", err)
 	}
-	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil, nil); err != nil {
 		t.Fatalf("CreateTemplate with request key: %v", err)
 	}
 	if len(fake.creates) != 1 || fake.creates[0] != "tmpl1" {

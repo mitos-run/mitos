@@ -190,7 +190,7 @@ type Engine struct {
 	// runTemplateBuild boots the VM, runs init in it, and snapshots it. It is a
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
-	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
+	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error
 
 	// captureGuestReady waits for the guest agent gRPC Control service to answer
 	// Ping and returns the ready client. It is the seam used by
@@ -873,8 +873,8 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if e.networkEnabled() {
 		e.egressBytes = readEgressCounterBytes
 	}
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
-		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload)
 		return err
 	}
 	e.captureGuestReady = guestgrpc.WaitReady
@@ -1987,7 +1987,7 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec) (retErr error) {
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.
@@ -2125,7 +2125,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		cfg.VolumeDrives = drives
 	}
 
-	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
+	if err := e.runTemplateBuild(id, cfg, initCommands, workload); err != nil {
 		return err
 	}
 	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))

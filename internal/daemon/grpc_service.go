@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/observability"
 	forkdpb "mitos.run/mitos/proto/forkd"
@@ -153,7 +154,7 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 		g.srv.keyProvider.SetWrappedKey(req.TemplateId, req.EncryptionKey, req.KekId)
 		defer g.srv.keyProvider.ForgetKey(req.TemplateId)
 	}
-	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols); err != nil {
+	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols, toFirecrackerWorkload(req.Workload)); err != nil {
 		return nil, grpcError(err)
 	}
 	// Report the content-addressed digest the engine just recorded so the
@@ -262,4 +263,23 @@ func grpcError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	}
 	return status.Error(codes.Internal, err.Error())
+}
+
+// toFirecrackerWorkload maps a forkd CreateTemplate workload spec (issue #460) to
+// the firecracker build's WorkloadSpec the node starts during the build. Nil (or
+// no command) means the template is exec-only.
+func toFirecrackerWorkload(w *forkdpb.WorkloadSpec) *firecracker.WorkloadSpec {
+	if w == nil || len(w.Command) == 0 {
+		return nil
+	}
+	out := &firecracker.WorkloadSpec{Command: w.Command, Env: w.Env}
+	if w.Ready != nil {
+		out.Ready = &firecracker.WorkloadHTTPReady{
+			Port:           w.Ready.Port,
+			Path:           w.Ready.Path,
+			Expect:         w.Ready.Expect,
+			TimeoutSeconds: w.Ready.TimeoutSeconds,
+		}
+	}
+	return out
 }

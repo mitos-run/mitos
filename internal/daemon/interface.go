@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/volume"
@@ -37,7 +38,7 @@ type ForkEngine interface {
 	// CreateTemplate builds a template snapshot. volumes are the template's
 	// declared volumes; the engine bakes one placeholder drive per volume into
 	// the snapshot. Nil leaves the template drive-less (only the rootfs).
-	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error
+	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec) error
 	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over
 	// the peer's token-gated TLS surface, materializes it, verifies it, and
 	// records the digest. token is a credential and must never be logged.

@@ -16,7 +16,7 @@ import (
 func TestServerListSandboxesMergesActivity(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
