@@ -54,6 +54,14 @@ pub fn init_system() {
     if let Err(e) = sethostname("sandbox") {
         error!("sethostname: {}", e);
     }
+    // Bring up the loopback interface. The kernel assigns 127.0.0.1 to lo but
+    // leaves the link DOWN; a serving workload (issue #460) binds 127.0.0.1 and
+    // the StartWorkload HTTP ready gate polls 127.0.0.1, so without this the
+    // workload is unreachable during the template build and the ready gate times
+    // out. eth0 is brought up per-fork by the NotifyForked network path.
+    if let Err(e) = crate::sys::netlink::link_up("lo") {
+        error!("bring up loopback: {}", e);
+    }
     tracing::info!("init complete");
 }
 

@@ -640,6 +640,21 @@ pub fn if_nametoindex(iface_name: &str) -> io::Result<u32> {
     }
 }
 
+/// Bring a link UP by name without touching its addresses. The loopback (lo)
+/// interface needs this at boot: the kernel assigns 127.0.0.1 to lo but leaves
+/// the link DOWN, so a workload bound to 127.0.0.1 and the StartWorkload HTTP
+/// ready gate (issue #460) cannot reach it until lo is up. eth0 gets its link-up
+/// via configure() on each fork; lo has no addresses to manage, so this is the
+/// minimal link-up-only path.
+pub fn link_up(iface: &str) -> io::Result<()> {
+    let idx_i32 = if_nametoindex(iface)? as i32;
+    let sock = NetlinkSocket::open()
+        .map_err(|e| io::Error::new(e.kind(), format!("netlink: open socket: {e}")))?;
+    sock.request(&build_link_up(1, idx_i32))
+        .map_err(|e| io::Error::new(e.kind(), format!("netlink: link up {iface}: {e}")))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // High-level configure: mirrors guestnet.Configure in Go exactly.
 // ---------------------------------------------------------------------------
