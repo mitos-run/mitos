@@ -12,12 +12,12 @@ import (
 
 func TestPgCreditLedger(t *testing.T) {
 	dsn := testDSN(t)
-	truncateTables(t, dsn, "credit_ledger")
 	pg, err := pgstore.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(pg.Close)
+	truncateTables(t, dsn, "credit_ledger")
 	l := pgstore.NewPgCreditLedger(pg.Pool())
 	ctx := context.Background()
 	now := time.Unix(1700000000, 0).UTC()

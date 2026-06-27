@@ -11,12 +11,12 @@ import (
 
 func TestPgSessionStore(t *testing.T) {
 	dsn := testDSN(t)
-	truncateTables(t, dsn, "sessions")
 	pg, err := pgstore.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(pg.Close)
+	truncateTables(t, dsn, "sessions")
 	var s saas.Sessions = pgstore.NewPgSessionStore(pg.Pool())
 	ctx := context.Background()
 	_ = ctx

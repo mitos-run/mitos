@@ -12,12 +12,12 @@ import (
 
 func TestPgPendingStore(t *testing.T) {
 	dsn := testDSN(t)
-	truncateTables(t, dsn, "pending_signups", "waitlist_entries")
 	pg, err := pgstore.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(pg.Close)
+	truncateTables(t, dsn, "pending_signups", "waitlist_entries")
 	s := pgstore.NewPgPendingStore(pg.Pool())
 	ctx := context.Background()
 	now := time.Unix(1700000000, 0).UTC()
