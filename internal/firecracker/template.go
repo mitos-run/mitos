@@ -569,12 +569,18 @@ func fileChunk0Digest(path string) (string, error) {
 // VMM can interrupt the in-flight write, which is why kill-then-fsync did not fix
 // it). A nonexistent or short file (chunk 0 not yet written) counts as not-yet
 // stable and keeps polling until it appears.
+// chunk0Digest is the chunk-0 digest reader waitForStableFile polls. It is a
+// package var so a test can drive the stability logic deterministically (a stub
+// that reports a changing vs constant digest) instead of racing a real writer
+// against the poll interval, which the scheduler makes flaky under load.
+var chunk0Digest = fileChunk0Digest
+
 func waitForStableFile(path string, interval, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	prev := ""
 	prevOK := false
 	for {
-		cur, err := fileChunk0Digest(path)
+		cur, err := chunk0Digest(path)
 		if err == nil && prevOK && cur == prev {
 			return nil
 		}

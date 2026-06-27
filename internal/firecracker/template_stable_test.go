@@ -3,7 +3,7 @@ package firecracker
 import (
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -40,33 +40,28 @@ func TestWaitForStableFileReturnsWhenSettled(t *testing.T) {
 // returns only once the writes stop. This is the #461 race: forkd must not hash
 // the mem until Firecracker's write has settled.
 func TestWaitForStableFileWaitsForChange(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "mem")
-	writeChunk0(t, p, 0x00)
+	// Drive the digest reader deterministically instead of racing a real writer
+	// against the poll interval (a runnable writer can still be descheduled past a
+	// whole interval under CI load, making the file briefly look stable and flaking
+	// the assertion). The stub guarantees the property under test.
+	orig := chunk0Digest
+	t.Cleanup(func() { chunk0Digest = orig })
 
-	var stop atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var b byte
-		for !stop.Load() {
-			b++
-			writeChunk0(t, p, b)
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-
-	// While the writer churns, the file must not be declared stable.
-	if err := waitForStableFile(p, 10*time.Millisecond, 200*time.Millisecond); err == nil {
-		stop.Store(true)
-		<-done
-		t.Fatal("waitForStableFile returned stable while the file was still changing")
+	// While the digest keeps changing on every read, it must never be declared
+	// stable: it polls until the timeout and returns an error.
+	var n uint64
+	chunk0Digest = func(string) (string, error) {
+		n++
+		return strconv.FormatUint(n, 10), nil
+	}
+	if err := waitForStableFile("mem", time.Millisecond, 50*time.Millisecond); err == nil {
+		t.Fatal("waitForStableFile returned stable while the digest was still changing")
 	}
 
-	// Stop the writer; the file settles and waitForStableFile must now succeed.
-	stop.Store(true)
-	<-done
-	if err := waitForStableFile(p, 10*time.Millisecond, 2*time.Second); err != nil {
-		t.Fatalf("file did not settle after writes stopped: %v", err)
+	// Once the digest is constant, two consecutive reads agree and it settles.
+	chunk0Digest = func(string) (string, error) { return "stable", nil }
+	if err := waitForStableFile("mem", time.Millisecond, 2*time.Second); err != nil {
+		t.Fatalf("digest constant but waitForStableFile did not settle: %v", err)
 	}
 }
 
