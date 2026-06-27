@@ -1,0 +1,106 @@
+// Package frontdoor implements the routing decision and reverse-proxy core for
+// the Mitos front-door. It decides, per request, which upstream to use
+// (marketing or console), whether a session is required, and whether the
+// request is for the root path that requires special fork logic.
+package frontdoor
+
+import "strings"
+
+// Decision is the result of routing a single request path.
+type Decision struct {
+	// Upstream is either "marketing" or "console".
+	Upstream string
+	// RequireSession is true when the request must be authenticated.
+	RequireSession bool
+	// IsRoot is true when the path is exactly "/". The proxy forks on session
+	// presence: authed -> console, anon -> marketing.
+	IsRoot bool
+}
+
+// marketingSegments are the first-segment values that map to the marketing
+// upstream with no session requirement.
+var marketingSegments = map[string]bool{
+	"pricing":   true,
+	"docs":      true,
+	"use-cases": true,
+	"compare":   true,
+	"blog":      true,
+	"about":     true,
+	"assets":    true,
+}
+
+// authSegments are the first-segment values that map to the console upstream
+// but do NOT require a session (login, signup, verification, and onboarding
+// are all public-facing flows).
+var authSegments = map[string]bool{
+	"login":      true,
+	"signup":     true,
+	"verify":     true,
+	"auth":       true,
+	"onboarding": true,
+}
+
+// appSegments are the first-segment values that map to the console upstream
+// and DO require an active session.
+var appSegments = map[string]bool{
+	"console":  true,
+	"app":      true,
+	"api":      true,
+	"settings": true,
+	"new":      true,
+}
+
+// DefaultReserved returns a map of all first-path-segment values that are
+// reserved by the platform. A segment present in this set is never treated as
+// an org slug, regardless of which subset it belongs to. Callers may pass
+// this map to Decide to enforce the reservation.
+func DefaultReserved() map[string]bool {
+	reserved := make(map[string]bool, len(marketingSegments)+len(authSegments)+len(appSegments))
+	for k := range marketingSegments {
+		reserved[k] = true
+	}
+	for k := range authSegments {
+		reserved[k] = true
+	}
+	for k := range appSegments {
+		reserved[k] = true
+	}
+	return reserved
+}
+
+// Decide returns the routing Decision for path. reserved is the set of
+// first-segment values that are platform-reserved and must never be treated
+// as org slugs; pass DefaultReserved() for production use.
+//
+// Precedence (reserved always beats slug):
+//  1. Exact "/" -> marketing, IsRoot=true, RequireSession=false.
+//  2. First segment in the marketing set -> marketing, RequireSession=false.
+//  3. First segment in the auth/public-console set -> console, RequireSession=false.
+//  4. First segment in the app set -> console, RequireSession=true.
+//  5. Otherwise (non-reserved first segment) -> org slug: console, RequireSession=true.
+func Decide(path string, reserved map[string]bool) Decision {
+	if path == "/" || path == "" {
+		return Decision{Upstream: "marketing", IsRoot: true}
+	}
+
+	// Extract the first path segment: strip the leading slash, then take
+	// everything up to the next slash.
+	stripped := strings.TrimPrefix(path, "/")
+	seg := stripped
+	if idx := strings.IndexByte(stripped, '/'); idx >= 0 {
+		seg = stripped[:idx]
+	}
+
+	if marketingSegments[seg] {
+		return Decision{Upstream: "marketing"}
+	}
+	if authSegments[seg] {
+		return Decision{Upstream: "console"}
+	}
+	if appSegments[seg] {
+		return Decision{Upstream: "console", RequireSession: true}
+	}
+
+	// Non-reserved segment: treat as an org slug. Session required.
+	return Decision{Upstream: "console", RequireSession: true}
+}
