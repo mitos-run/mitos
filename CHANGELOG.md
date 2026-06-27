@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.6.0](https://github.com/mitos-run/mitos/compare/v1.5.0...v1.6.0) (2026-06-27)
+
+
+### Features
+
+* **computer-use:** headless Chromium + CDP browser-automation template ([#314](https://github.com/mitos-run/mitos/issues/314)) ([#510](https://github.com/mitos-run/mitos/issues/510)) ([cf5ec56](https://github.com/mitos-run/mitos/commit/cf5ec567b17efda6e2ec1cce2db70195ff801ee9))
+* **console:** internal session-resolve endpoint for the front door ([32213a4](https://github.com/mitos-run/mitos/commit/32213a4b7bbba841258762fed98b408d9727a84a))
+* **console:** mount pre-auth router (login/signup/verify) on unauthenticated state ([77ffc95](https://github.com/mitos-run/mitos/commit/77ffc957870199e470daf7f8cb1632ddbd757ec5))
+* **console:** native Login page with GitHub/Google connector hints and email ([9351f0a](https://github.com/mitos-run/mitos/commit/9351f0ad60b5ce6f3ce1cac3848a3ec7f2d3c874))
+* **console:** native Signup page wired to /onboarding/signup ([156c82e](https://github.com/mitos-run/mitos/commit/156c82ef8f4dc3ca6933aec513b12b72faefeaa0))
+* **console:** native Verify page showing the first API key once ([36a66f1](https://github.com/mitos-run/mitos/commit/36a66f14ebf611db3ba8cbf8d5be0ab64090f6bc))
+* **console:** set mitos_session cookie on fresh email verify ([106a7c0](https://github.com/mitos-run/mitos/commit/106a7c04a820a227d9e4b4cc099504ce4fb48c5a))
+* **console:** use durable Postgres stores for credit, pending signups, sessions when DSN is set ([03fb243](https://github.com/mitos-run/mitos/commit/03fb243faf5ceb586cce8c30daa9b74cc43ce993))
+* **deploy:** Cilium edge gateway, front-door, and marketing for single-origin mitos.run (cluster-verified) ([28de02a](https://github.com/mitos-run/mitos/commit/28de02ad026e72732dd2622eac36fa54fa20bb72))
+* **deploy:** Dex federation for GitHub and Google (cluster-verified) ([b8a97f8](https://github.com/mitos-run/mitos/commit/b8a97f8d53a707f29fbe94b1fad5cfd4f4a8be67))
+* **facade:** migrate agents.x-k8s.io conformance to v0.5.0/v1beta1 and prove predicate-level KVM conformance ([#508](https://github.com/mitos-run/mitos/issues/508)) ([4414409](https://github.com/mitos-run/mitos/commit/44144090f1603d76317ca4931ce9d30d195eed15))
+* **frontdoor:** auth+slug routing reverse proxy with session fork and header injection ([fe252e8](https://github.com/mitos-run/mitos/commit/fe252e836572868aeef4a6e7fa6c50bdd27fb91b))
+* **frontdoor:** binary, HTTP session resolver, and image ([a0df52f](https://github.com/mitos-run/mitos/commit/a0df52f76684a16437f60122126149028bc89b91))
+* hosted launch spine (durable stores, native auth, front-door, Dex) ([7783645](https://github.com/mitos-run/mitos/commit/77836453f44b8efc4625bb9da2363cae8e627110))
+* **oidcauth:** pass connector_id hint so GitHub/Google skip the Dex chooser ([a932f6e](https://github.com/mitos-run/mitos/commit/a932f6efddf8087997b2d7c13174bb793724f922))
+* **pgstore:** durable PgCreditLedger ([ac535de](https://github.com/mitos-run/mitos/commit/ac535de04cb0320ed33714513a1a6b3648cb8fa6))
+* **pgstore:** durable PgPendingStore ([40af883](https://github.com/mitos-run/mitos/commit/40af8837c7b3828baf10dfeaefc6e8df15686f19))
+* **pgstore:** migration 0002 for sessions, credit ledger, pending signups ([37f1224](https://github.com/mitos-run/mitos/commit/37f12242a9f7c3328bab9806320b956304384c4b))
+* **saas:** Sessions interface and durable PgSessionStore ([2393ef4](https://github.com/mitos-run/mitos/commit/2393ef4debc3c68d2d3ca8e84e1fcca97435fa02))
+
+
+### Bug Fixes
+
+* **chart:** stop fresh installs referencing a phantom pull secret ([#399](https://github.com/mitos-run/mitos/issues/399)) ([#500](https://github.com/mitos-run/mitos/issues/500)) ([2dba7fe](https://github.com/mitos-run/mitos/commit/2dba7fe7b200d5f36d862325c2110fc992b91b0c))
+* **console:** Login propagates next on email path, robust focus ring, a11y polish ([dd29de4](https://github.com/mitos-run/mitos/commit/dd29de4d753992d912d59d2ef6ce30033ac85b63))
+* **console:** magenta keyboard-focus ring on auth inputs per brand ([e2088ad](https://github.com/mitos-run/mitos/commit/e2088ad4ea752308dd3cf1e54281017ae95f47d5))
+* **console:** pre-auth router skips 401 retry and redirects unmatched paths to login ([a7406be](https://github.com/mitos-run/mitos/commit/a7406be952f1643adf7539f6a207ddd74e05360f))
+* **console:** share one credit ledger between onboarding grant and billing view ([5ced231](https://github.com/mitos-run/mitos/commit/5ced231ed1954f1cd2c5862d23ad35af7269d8b8))
+* **console:** Verify guards one-time POST, stops aria re-reading the key, handles clipboard failure ([fd6e79f](https://github.com/mitos-run/mitos/commit/fd6e79f7ad9481ab5b0cf047156aa9465424c384))
+* **deploy:** Dex and console share one client-secret key so the console pod starts ([ee185ca](https://github.com/mitos-run/mitos/commit/ee185ca3cafa671dac710dd0c719bd83ed678962))
+* **deploy:** edge HTTPS listener accepts www SNI (drop listener hostname pin) ([9448375](https://github.com/mitos-run/mitos/commit/9448375fdc97717b09df24a13ba1e6bdcb4789e6))
+* **frontdoor:** remove dead reserved param, normalize path in Decide, strengthen tests ([959001c](https://github.com/mitos-run/mitos/commit/959001c3c6bcdefa122227020631eefd901dd52a))
+* **pgstore:** open (run migrations) before truncating so fresh-DB CI passes ([02e38cd](https://github.com/mitos-run/mitos/commit/02e38cd87717b77c06c5b986b6dd0f8a3977b93c))
+* **pgstore:** PgSessionStore lists sessions most-recent-first with UTC parity ([b01a32d](https://github.com/mitos-run/mitos/commit/b01a32d0d30f0ef810857f6cb983ca144146eda2))
+* **pgstore:** PgSessionStore Revoke returns ErrNotFound and ListByAccount checks rows.Err for parity ([f8cc1c0](https://github.com/mitos-run/mitos/commit/f8cc1c02b626097ca19484d3fcb616078d0133ba))
+* **security:** resolve CodeQL path-injection and harden the supply chain ([#503](https://github.com/mitos-run/mitos/issues/503)) ([17ac93b](https://github.com/mitos-run/mitos/commit/17ac93b5db4b96512882ec0b8b6706ce1af9a0f7))
+
 ## [1.5.0](https://github.com/mitos-run/mitos/compare/v1.4.0...v1.5.0) (2026-06-27)
 
 
