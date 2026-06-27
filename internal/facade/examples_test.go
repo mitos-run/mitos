@@ -26,7 +26,7 @@ import (
 const exampleImage = "registry.test/example:ci"
 
 // vendoredExampleRoots are the vendored upstream example trees we walk for core
-// agents.x-k8s.io/v1alpha1 Sandbox manifests. These are upstream artifacts
+// agents.x-k8s.io/v1beta1 Sandbox manifests. These are upstream artifacts
 // vendored verbatim under third_party/agent-sandbox; we apply them UNCHANGED
 // (modulo the ${IMAGE} placeholder) against the facade. See
 // docs/facade-conformance.md.
@@ -39,11 +39,11 @@ var vendoredExampleRoots = []string{
 // example file, tagged with the source path for diagnostics.
 type coreSandboxExample struct {
 	sourcePath string
-	sandbox    *agentsv1alpha1.Sandbox
+	sandbox    *agentsv1beta1.Sandbox
 }
 
 // loadCoreSandboxExamples walks the vendored example trees, decodes every YAML
-// document, and returns each that is a core agents.x-k8s.io/v1alpha1 Sandbox
+// document, and returns each that is a core agents.x-k8s.io/v1beta1 Sandbox
 // carrying a podTemplate (skipping kustomize strategic-merge patch fragments
 // that omit the full spec). The ${IMAGE} placeholder is substituted with the
 // test image so the upstream manifest applies unchanged otherwise.
@@ -76,7 +76,7 @@ func loadCoreSandboxExamples(t *testing.T) []coreSandboxExample {
 				if u.Object == nil {
 					continue
 				}
-				if u.GetAPIVersion() != "agents.x-k8s.io/v1alpha1" || u.GetKind() != "Sandbox" {
+				if u.GetAPIVersion() != "agents.x-k8s.io/v1beta1" || u.GetKind() != "Sandbox" {
 					continue
 				}
 				// Skip kustomize strategic-merge patch fragments (overlays): they
@@ -88,7 +88,7 @@ func loadCoreSandboxExamples(t *testing.T) []coreSandboxExample {
 				if !found || len(containers) == 0 {
 					continue
 				}
-				sb := &agentsv1alpha1.Sandbox{}
+				sb := &agentsv1beta1.Sandbox{}
 				if convErr := convertUnstructured(&u, sb); convErr != nil {
 					t.Fatalf("decode core Sandbox from %s: %v", path, convErr)
 				}
@@ -101,19 +101,19 @@ func loadCoreSandboxExamples(t *testing.T) []coreSandboxExample {
 		}
 	}
 	if len(out) == 0 {
-		t.Fatalf("found no core agents.x-k8s.io Sandbox examples under %v", vendoredExampleRoots)
+		t.Fatalf("found no core agents.x-k8s.io/v1beta1 Sandbox examples under %v", vendoredExampleRoots)
 	}
 	return out
 }
 
-// convertUnstructured converts an unstructured object into a typed object using
-// the runtime scheme registered for the test.
-func convertUnstructured(u *unstructured.Unstructured, into *agentsv1alpha1.Sandbox) error {
+// convertUnstructured converts an unstructured object into a typed v1beta1
+// Sandbox object using the runtime scheme registered for the test.
+func convertUnstructured(u *unstructured.Unstructured, into *agentsv1beta1.Sandbox) error {
 	return scheme.Convert(u, into, nil)
 }
 
 // TestFacadeReconcilesVendoredExamples is the apply-unchanged conformance check
-// at the envtest level: for every core agents.x-k8s.io/v1alpha1 Sandbox manifest
+// at the envtest level: for every core agents.x-k8s.io/v1beta1 Sandbox manifest
 // vendored verbatim under third_party/agent-sandbox/examples (and
 // extensions/examples), the facade reconciles it WITHOUT error and creates the
 // bridged husk-backed run-path Sandbox (the consolidated v1 Sandbox with
@@ -202,7 +202,7 @@ func uniqueExampleName(sourcePath string) string {
 	return "ex-" + strings.Trim(b.String(), "-")
 }
 
-func firstContainerEnv(sb *agentsv1alpha1.Sandbox) []corev1.EnvVar {
+func firstContainerEnv(sb *agentsv1beta1.Sandbox) []corev1.EnvVar {
 	cs := sb.Spec.PodTemplate.Spec.Containers
 	if len(cs) == 0 {
 		return nil
