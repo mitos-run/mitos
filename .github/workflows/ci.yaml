@@ -307,6 +307,31 @@ jobs:
       - run: docker build -f Dockerfile.facade -t mitos-facade:ci .
       - run: docker build -f Dockerfile.console -t mitos-console:ci .
       - run: docker build -f Dockerfile.gateway -t mitos-gateway:ci .
+      # The computer-use template image (headless Chromium + CDP relay, issue
+      # #314). Build context is the repository root because the relay is compiled
+      # from source. Smoke that the multi-stage build works, the launcher brings
+      # up Chromium, and the relay answers CDP on the published port (curl's
+      # Host: 127.0.0.1:9222 also exercises the relay's host-header path). This
+      # is the cheap proportional check; the warm-fork snapshot and the named-URL
+      # relay path are verified on real KVM
+      # (docs/superpowers/specs/2026-06-27-computer-use-cdp-spike-notes.md), not
+      # in this container-only job.
+      - name: Build the computer-use image and smoke CDP
+        run: |
+          set -euo pipefail
+          docker build -f images/computer-use/Dockerfile -t mitos-computer-use:ci .
+          docker run -d -p 9222:9222 --name cu \
+            --entrypoint /usr/local/bin/start-chromium.sh mitos-computer-use:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9222/json/version 2>/dev/null | grep -q webSocketDebuggerUrl; then
+              ok=1; echo "CDP answered after ${i}s"; break
+            fi
+            sleep 1
+          done
+          docker logs cu 2>&1 | tail -5 || true
+          docker rm -f cu >/dev/null 2>&1 || true
+          [ "$ok" = 1 ] || { echo "FAIL: CDP /json/version did not return webSocketDebuggerUrl"; exit 1; }
       # Trivy scans each locally built image for known OS/library CVEs (CVE
       # pipeline, issue #35). Installed directly from a pinned release (the
       # marketplace action's binary installer proved flaky in CI). Phased in as
@@ -328,7 +353,7 @@ jobs:
             exit 0
           fi
           trivy --version || { echo "::warning::Trivy not runnable; skipping advisory image scan"; exit 0; }
-          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci mitos-kvm-device-plugin:ci mitos-facade:ci mitos-console:ci mitos-gateway:ci; do
+          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci mitos-kvm-device-plugin:ci mitos-facade:ci mitos-console:ci mitos-gateway:ci mitos-computer-use:ci; do
             echo "=== Trivy scan ${img} (HIGH,CRITICAL, fixable) ==="
             trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
               --ignorefile .trivyignore "${img}" \

@@ -390,6 +390,7 @@ Per-topic docs live in [`docs/`](docs/). Start with the [quickstart](docs/quicks
 | `mitos` CLI, MCP server, Agent Skill | [docs/cli.md](docs/cli.md), [docs/mcp.md](docs/mcp.md), [skills/mitos/SKILL.md](skills/mitos/SKILL.md) |
 | Guest port forwarding | [docs/ports.md](docs/ports.md) |
 | Recipe: host an agent harness over HTTP | [docs/recipes/agent-harness.md](docs/recipes/agent-harness.md) |
+| Recipe: headless Chromium / CDP for browser-automation agents | [docs/recipes/browser-automation.md](docs/recipes/browser-automation.md) |
 | Migrating from E2B | [docs/migrating-from-e2b.md](docs/migrating-from-e2b.md) |
 | Talos + Hetzner reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 | Target API surface (v2 spec) | [docs/api/v2-spec.md](docs/api/v2-spec.md) |

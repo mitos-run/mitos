@@ -48,6 +48,8 @@ jobs:
             dockerfile: Dockerfile.console
           - name: mitos-gateway
             dockerfile: Dockerfile.gateway
+          - name: mitos-computer-use
+            dockerfile: images/computer-use/Dockerfile
     env:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/mitos-run/${{ matrix.name }}

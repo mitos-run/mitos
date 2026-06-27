@@ -412,10 +412,62 @@ type networkConfig struct {
 	InboundCIDRs []string `json:"inbound_cidrs,omitempty"`
 }
 
+type workloadReadyReq struct {
+	Port           uint32 `json:"port"`
+	Path           string `json:"path,omitempty"`
+	Expect         uint32 `json:"expect,omitempty"`
+	TimeoutSeconds uint32 `json:"timeout_seconds,omitempty"`
+}
+
+type workloadReq struct {
+	Command []string          `json:"command,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Ready   *workloadReadyReq `json:"ready,omitempty"`
+}
+
+type resourcesReq struct {
+	VcpuCount  int32 `json:"vcpu_count,omitempty"`
+	MemSizeMib int64 `json:"mem_size_mib,omitempty"`
+}
+
 type createTemplateReq struct {
 	ID           string         `json:"id"`
 	InitWaitSecs int            `json:"init_wait_seconds"`
 	Network      *networkConfig `json:"network,omitempty"`
+	// Workload starts a long-running process during template build so the
+	// snapshot captures it already serving and a fork wakes warm (issue #460).
+	// The engine already supports this; the cluster path wires it via forkd.
+	Workload *workloadReq `json:"workload,omitempty"`
+	// Resources sizes the build VM. Omitted leaves the engine default (512 MiB,
+	// 1 vCPU); a Chromium template needs more.
+	Resources *resourcesReq `json:"resources,omitempty"`
+}
+
+// workloadFromReq maps the JSON workload to the engine's firecracker.WorkloadSpec.
+// nil maps to nil so the engine keeps its no-workload default.
+func workloadFromReq(w *workloadReq) *firecracker.WorkloadSpec {
+	if w == nil || len(w.Command) == 0 {
+		return nil
+	}
+	spec := &firecracker.WorkloadSpec{Command: w.Command, Env: w.Env}
+	if w.Ready != nil {
+		spec.Ready = &firecracker.WorkloadHTTPReady{
+			Port:           w.Ready.Port,
+			Path:           w.Ready.Path,
+			Expect:         w.Ready.Expect,
+			TimeoutSeconds: w.Ready.TimeoutSeconds,
+		}
+	}
+	return spec
+}
+
+// vmResFromReq maps the JSON resources to the engine's firecracker.VMResources.
+// nil maps to nil so the engine keeps its default sizing.
+func vmResFromReq(r *resourcesReq) *firecracker.VMResources {
+	if r == nil || (r.VcpuCount == 0 && r.MemSizeMib == 0) {
+		return nil
+	}
+	return &firecracker.VMResources{VcpuCount: r.VcpuCount, MemSizeMib: r.MemSizeMib}
 }
 
 // idPattern constrains every caller-supplied id (template, sandbox) that the
@@ -489,7 +541,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		// and appends init=/init to the boot args, which the prior
 		// TemplateManager-direct path did not, so an agent-at-/init rootfs no
 		// longer panics with "no working init found".
-		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, nil, nil); err != nil {
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workloadFromReq(req.Workload), vmResFromReq(req.Resources)); err != nil {
 			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return
