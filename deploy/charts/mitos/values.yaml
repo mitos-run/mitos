@@ -592,10 +592,12 @@ expose:
 #
 #   kubectl create secret generic <dex.consoleClientSecret> \
 #     --namespace <release-namespace> \
-#     --from-literal=console-client-secret='<shared-random-secret>'
+#     --from-literal=client-secret='<shared-random-secret>'
 #
-# The console.oidc.clientSecretRef must name the same Secret as
-# dex.consoleClientSecret so both sides share the same value.
+# Set console.oidc.clientSecretRef to this same Secret name. Both Dex
+# (as the static-client secret) and the console (as its OIDC client secret)
+# read key "client-secret" from that Secret, so one Secret with one key
+# satisfies both sides. No secret value is ever inlined in this chart.
 # Secret VALUES are NEVER inlined in this chart; all are sourced via
 # secretKeyRef and Dex's native $VAR expansion in the config file.
 dex:
@@ -622,7 +624,8 @@ dex:
   # is not valid when dex.enabled is true.
   connectorsSecret: ""
   # Name of an existing Secret holding the console static-client secret.
-  # Required key: console-client-secret.
-  # Set console.oidc.clientSecretRef to this same Secret name so both sides
-  # share the value. Create this Secret out of band (see comment block above).
+  # Required key: client-secret.
+  # Set console.oidc.clientSecretRef to this same Secret name. Both Dex and
+  # the console read key "client-secret" from this Secret, so one Secret with
+  # one key satisfies both sides. Create out of band (see comment block above).
   consoleClientSecret: ""

@@ -10,7 +10,7 @@ expands the $VARIABLE references in config.yaml at startup using os.ExpandEnv
 (supported since Dex v2.35; v2.41.1 used here confirms this behavior).
 
 The console static-client secret is sourced from the Secret named by
-dex.consoleClientSecret (expected key: console-client-secret) the same way,
+dex.consoleClientSecret (expected key: client-secret) the same way,
 and referenced in config.yaml as $DEX_CONSOLE_CLIENT_SECRET.
 
 Storage: memory (correct for a single replica). Kubernetes CRD storage is the
@@ -21,7 +21,7 @@ which is acceptable for the initial hosted deployment.
 Wire-up note: when dex.enabled, set:
   console.oidc.issuerURL    = dex.issuer
   console.oidc.clientID     = dex.console.clientID
-  console.oidc.clientSecretRef = dex.consoleClientSecret (key: console-client-secret)
+  console.oidc.clientSecretRef = dex.consoleClientSecret (key: client-secret)
 */}}
 {{- if .Values.dex.enabled }}
 apiVersion: v1
@@ -51,8 +51,8 @@ data:
     # Static OIDC client for the Mitos console.
     # The client secret is NOT inlined: Dex expands $DEX_CONSOLE_CLIENT_SECRET
     # from the env var injected via secretKeyRef (dex.consoleClientSecret Secret,
-    # key: console-client-secret). Set console.oidc.clientSecretRef to the same
-    # Secret so the console reads the matching secret.
+    # key: client-secret). Set console.oidc.clientSecretRef to the same Secret
+    # so the console reads the matching value (it also uses key: client-secret).
     staticClients:
       - id: {{ .Values.dex.console.clientID }}
         secret: $DEX_CONSOLE_CLIENT_SECRET
@@ -143,12 +143,13 @@ spec:
                   name: {{ .Values.dex.connectorsSecret | quote }}
                   key: google-client-secret
             # Console static-client secret from dex.consoleClientSecret.
-            # Shared with console.oidc.clientSecretRef (key: console-client-secret).
+            # Shared with console.oidc.clientSecretRef: both read key client-secret
+            # from the same Secret, so one Secret with one key satisfies both sides.
             - name: DEX_CONSOLE_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.dex.consoleClientSecret | quote }}
-                  key: console-client-secret
+                  key: client-secret
           ports:
             - name: http
               containerPort: 5556
