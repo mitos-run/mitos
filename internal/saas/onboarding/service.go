@@ -102,6 +102,56 @@ func (f *FakeEmailSender) LastToken(email string) string {
 	return f.sent[email]
 }
 
+// E2ETokenSink captures raw verify tokens at signup time so a QA harness can
+// retrieve them without a real mailbox. It is a pure in-memory seam; raw tokens
+// are NEVER written to durable storage and NEVER logged.
+//
+// The no-op implementation (noopE2ETokenSink) is used when MITOS_CONSOLE_E2E is
+// off; MemE2ETokenSink is the QA default when the flag is on.
+type E2ETokenSink interface {
+	// Record stores the raw token for email. Called by the onboarding Service at
+	// signup time, immediately after the email is dispatched. Implementations MUST
+	// NOT log the raw token.
+	Record(email, rawToken string)
+	// Last returns the most recent raw token stored for email, and true. Returns
+	// ("", false) when no token has been recorded for email.
+	Last(email string) (string, bool)
+}
+
+// noopE2ETokenSink is the default E2ETokenSink used when MITOS_CONSOLE_E2E is
+// off. All operations are no-ops so no allocation occurs in production.
+type noopE2ETokenSink struct{}
+
+func (noopE2ETokenSink) Record(_, _ string)           {}
+func (noopE2ETokenSink) Last(_ string) (string, bool) { return "", false }
+
+// MemE2ETokenSink is the in-memory E2ETokenSink for QA use. It stores the most
+// recent raw token per email in process memory only. Safe for concurrent use.
+type MemE2ETokenSink struct {
+	mu   sync.Mutex
+	last map[string]string // email -> last rawToken; never persisted
+}
+
+// NewMemE2ETokenSink returns an empty MemE2ETokenSink.
+func NewMemE2ETokenSink() *MemE2ETokenSink {
+	return &MemE2ETokenSink{last: map[string]string{}}
+}
+
+// Record stores rawToken for email. The raw token is never logged.
+func (s *MemE2ETokenSink) Record(email, rawToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.last[email] = rawToken
+}
+
+// Last returns the most recent raw token stored for email.
+func (s *MemE2ETokenSink) Last(email string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.last[email]
+	return t, ok
+}
+
 // PendingSignup is an unverified signup awaiting email verification. It holds the
 // email and the HASH of the verify token (never the raw token). Verified marks an
 // already-completed signup so re-verification is idempotent rather than a second
@@ -227,6 +277,7 @@ type Service struct {
 	tokengen  func() (string, error)
 	tokenTTL  time.Duration
 	keyScopes []string
+	sink      E2ETokenSink // QA seam; no-op when MITOS_CONSOLE_E2E is off
 }
 
 // Option configures a Service.
@@ -256,6 +307,17 @@ func WithTokenTTL(d time.Duration) Option { return func(s *Service) { s.tokenTTL
 
 // WithEventRecorder sets the funnel instrumentation sink.
 func WithEventRecorder(r EventRecorder) Option { return func(s *Service) { s.events = r } }
+
+// WithE2ETokenSink sets the QA token sink so a test harness can retrieve the
+// raw verify token without a mailbox. When nil or unset, a no-op sink is used.
+// This option MUST only be called when MITOS_CONSOLE_E2E is truthy.
+func WithE2ETokenSink(sink E2ETokenSink) Option {
+	return func(s *Service) {
+		if sink != nil {
+			s.sink = sink
+		}
+	}
+}
 
 // WithOrgProvisioner sets the tenant Org-CR provisioner. When unset, a verified
 // signup creates the account and org in the store but provisions no Kubernetes
@@ -291,6 +353,7 @@ func NewService(accounts *saas.AccountService, store saas.Store, pending Pending
 		tokengen:  randomToken,
 		tokenTTL:  24 * time.Hour,
 		keyScopes: []string{saas.ScopeSandboxes},
+		sink:      noopE2ETokenSink{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -358,6 +421,10 @@ func (s *Service) SignUp(ctx context.Context, email string) (SignupResult, error
 	if err := s.email.SendVerification(ctx, email, rawToken); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: send verification: %w", err)
 	}
+	// QA seam: record the raw token in the E2E sink so a test harness can
+	// retrieve it via the gated endpoint. The no-op sink makes this a zero-cost
+	// call in production. The raw token is NEVER logged here.
+	s.sink.Record(email, rawToken)
 	s.events.Record(ctx, Event{Subject: pendingID, Name: EventSignupStarted, At: now})
 	return SignupResult{PendingID: pendingID}, nil
 }
