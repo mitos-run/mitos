@@ -9,6 +9,7 @@ import {
   Navigate,
 } from '@tanstack/react-router'
 import { Login } from './Login'
+import { Signup } from './Signup'
 
 function PreAuthShell() {
   return (
@@ -28,13 +29,6 @@ function PreAuthShell() {
   )
 }
 
-function SignupPlaceholder() {
-  return (
-    <div style={{ textAlign: 'center' }}>
-      <h1>Create your account</h1>
-    </div>
-  )
-}
 
 function VerifyPlaceholder() {
   return (
@@ -56,7 +50,7 @@ export function createPreAuthRouter(initialPath?: string) {
   const signupRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/signup',
-    component: SignupPlaceholder,
+    component: Signup,
   })
 
   const verifyRoute = createRoute({
