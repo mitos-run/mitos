@@ -26,6 +26,17 @@ type Session struct {
 	Label     string
 }
 
+// Sessions is the browser-session backend. The in-memory SessionStore and the
+// durable pgstore.PgSessionStore both implement it.
+type Sessions interface {
+	IssueSession(accountID, token, label string) string
+	Issue(accountID, token string)
+	Resolve(token string) (string, error)
+	ListByAccount(accountID string) []Session
+	Revoke(accountID, sessionID string) error
+	RevokeAll(accountID string)
+}
+
 // SessionStore maps an opaque session token to the account behind it. Like API
 // keys, session tokens are stored hashed, never in the clear, and resolved in
 // constant time. This is the seam the browser OAuth login flow (a documented
@@ -38,6 +49,9 @@ type SessionStore struct {
 	hashByID map[string]string  // session id -> token hash
 	nextID   uint64             // counter for deterministic, test-safe session ids
 }
+
+// compile-time assertion that SessionStore satisfies Sessions.
+var _ Sessions = (*SessionStore)(nil)
 
 // NewSessionStore returns an empty in-memory session store.
 func NewSessionStore() *SessionStore {
@@ -153,17 +167,17 @@ func hashSession(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SessionService ties a SessionStore to an AccountService so a session token
+// SessionService ties a Sessions store to an AccountService so a session token
 // can be resolved to its account and that account's organizations. It is the
 // object the CLI bridge (cmd/mitos) and the future web console (issue #214)
 // use to back the token-based auth surface.
 type SessionService struct {
-	sessions *SessionStore
+	sessions Sessions
 	accounts *AccountService
 }
 
 // NewSessionService builds a session service.
-func NewSessionService(sessions *SessionStore, accounts *AccountService) *SessionService {
+func NewSessionService(sessions Sessions, accounts *AccountService) *SessionService {
 	return &SessionService{sessions: sessions, accounts: accounts}
 }
 
