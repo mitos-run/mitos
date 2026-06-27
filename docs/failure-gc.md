@@ -146,6 +146,31 @@ missed left the VM's backing files behind after the VM itself was reaped.
 - Proving test: `TestGCSweepsOrphanVolumes` (volume orphan past grace reclaimed;
   backed and fresh backings left alone).
 
+### CAS disk exhaustion: orphaned chunks are evicted before DiskPressure
+
+forkd's content-addressed store evicts least-recently-used UNPINNED chunks so a
+node's data dir cannot fill with debris from deleted templates and trip the
+kubelet's DiskPressure eviction (the capacity-exhaustion answer for forkd's local
+disk, #464). Two pieces close the loop the eviction primitive previously lacked:
+
+- `DeleteTemplate` now unpins the template's CAS manifest
+  (`internal/fork/engine.go`), so a deleted template's chunks stop being pinned
+  and become eligible for eviction. Previously they stayed pinned forever and the
+  CAS grew unbounded (observed: 13 GB with zero active pools).
+- A periodic GC (`internal/casgc`, started in `cmd/forkd`) checks the data-dir
+  filesystem each `--cas-gc-interval` and, when usage crosses
+  `--cas-disk-high-watermark`, calls `cas.EvictToFit` to bring the CAS down toward
+  `--cas-disk-low-watermark`. Pinned (active-template) chunks are never evicted,
+  so a node fills back off via the capacity heartbeat rather than losing data it
+  still needs.
+
+- Bound: with GC enabled, unpinned CAS bytes are reclaimed within one
+  `--cas-gc-interval` once the data-dir filesystem crosses the high watermark.
+- Proving tests: `casgc.TestTarget` and `TestTickEvictsOnlyAboveWatermark` (the
+  watermark math and trigger), `fork.TestDeleteTemplateUnpinsManifest` (delete
+  unpins), and the existing `cas.TestEvictToFitRespectsPinAndLRU` (pinned chunks
+  protected, LRU order).
+
 ### Controller-restart reconciliation: desired state is rebuilt from CRDs
 
 The GC holds no in-memory desired state. Each pass rebuilds the desired-alive and
