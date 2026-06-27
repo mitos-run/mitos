@@ -24,9 +24,9 @@ type Config struct {
 	Signer      *Signer
 	Routes      *RouteTable
 	Logger      *slog.Logger
-	AuthOrigin  *AuthOrigin  // optional; required for OIDC-backed tiers
+	AuthOrigin  *AuthOrigin   // optional; required for OIDC-backed tiers
 	Sessions    *SessionCodec // optional; required to mint/decode per-app session cookies
-	GrantSigner *GrantSigner // optional; required to redeem grants from AuthOrigin
+	GrantSigner *GrantSigner  // optional; required to redeem grants from AuthOrigin
 }
 
 // Proxy is the per-sandbox preview reverse proxy. For each request it runs the
@@ -79,13 +79,13 @@ func NewProxy(cfg Config) *Proxy {
 //     clientIP from RemoteAddr.
 //  5. Look up the route. Evaluate identity and apply the tier:
 //     - ForwardAuthURL set: perform the forwardAuth subrequest; on non-2xx
-//       return that status; on 2xx copy identity headers and use the forwardAuth
-//       identity.
+//     return that status; on 2xx copy identity headers and use the forwardAuth
+//     identity.
 //     - private/org/authenticated: read the __Host- session cookie; if
-//       absent/expired 302 to auth.<domain>/start (or 401 if no AuthOrigin).
+//     absent/expired 302 to auth.<domain>/start (or 401 if no AuthOrigin).
 //     - link: verify the signed query token; on success set the app session
-//       cookie and 302 to a clean URL (cookie exchange); on cookie hit skip
-//       the token.
+//     cookie and 302 to a clean URL (cookie exchange); on cookie hit skip
+//     the token.
 //     - public: id stays nil.
 //  6. Authorize(route, id, clientIP). On Allow: reverse-proxy to forkd.
 //     DenyForbidden: 403. DenyUnauthenticated: 302 to login or 401.
@@ -380,6 +380,22 @@ func (p *Proxy) reverseProxy(w http.ResponseWriter, r *http.Request, route Route
 		req.URL.Path = prefix + sub
 		req.URL.RawPath = ""
 		req.Host = nodeEndpoint
+		// Tell forkd (and the exposed guest app) the real public front-door host and
+		// scheme. Without this the backend only ever sees the internal node endpoint
+		// (and forkd's "guest" placeholder), so a reverse-proxy-aware app cannot
+		// reconstruct its origin for local-vs-remote / origin / CSRF checks (#476).
+		// The edge terminates TLS, so the public scheme is https unless an upstream
+		// already set it.
+		if req.Header.Get("X-Forwarded-Host") == "" {
+			req.Header.Set("X-Forwarded-Host", r.Host)
+		}
+		if req.Header.Get("X-Forwarded-Proto") == "" {
+			if r.TLS != nil {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				req.Header.Set("X-Forwarded-Proto", "http")
+			}
+		}
 		// Defense in depth: drop any client-supplied Authorization before
 		// conditionally setting the per-sandbox bearer, so an empty-Token route
 		// never forwards a client credential to forkd.
