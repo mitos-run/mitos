@@ -22,6 +22,12 @@ RUN apt-get update -qq && \
 WORKDIR /build
 COPY . .
 WORKDIR /build/guest/agent-rs
+# Harden the crate downloads against transient crates.io failures (the recurring
+# "Send failure: Broken pipe" / "curl failed" flake that fails kind-e2e-husk):
+# retry transient network errors, and disable HTTP/2 multiplexing, which is the
+# known trigger for the broken-pipe on some CI networks.
+ENV CARGO_NET_RETRY=10 \
+    CARGO_HTTP_MULTIPLEXING=false
 RUN rustup target add x86_64-unknown-linux-musl && \
     cargo build --release --target x86_64-unknown-linux-musl --features vsock
 
