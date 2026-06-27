@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -152,6 +153,22 @@ func (s *MemE2ETokenSink) Last(email string) (string, bool) {
 	return t, ok
 }
 
+// ucPattern is the compile-time-compiled regex for use-case slugs. A valid slug
+// is lowercase alphanumeric words joined by single hyphens, up to 40 characters.
+// Examples: "ai-coding", "data-pipelines", "research". Invalid slugs (wrong
+// case, spaces, special chars) are silently dropped to "" rather than erroring,
+// so a bad client parameter never blocks onboarding.
+var ucPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// validateUseCase returns s if it matches the use-case slug format (lowercase
+// alphanum words joined by hyphens, max 40 chars). Returns "" otherwise.
+func validateUseCase(s string) string {
+	if s == "" || len(s) > 40 || !ucPattern.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
 // PendingSignup is an unverified signup awaiting email verification. It holds the
 // email and the HASH of the verify token (never the raw token). Verified marks an
 // already-completed signup so re-verification is idempotent rather than a second
@@ -169,6 +186,11 @@ type PendingSignup struct {
 	Verified bool
 	// AccountID is the provisioned account id, set on first successful verify.
 	AccountID string
+	// UseCase is the marketing use-case slug carried from the signup page (e.g.
+	// "ai-coding"). It is optional: an absent or invalid slug is stored as "".
+	// The value is validated and normalised before storage; the console uses it
+	// to pre-seed the welcome flow. It is never treated as a secret.
+	UseCase string
 }
 
 // WaitlistEntry records a signup captured while the funnel is in waitlist mode.
@@ -376,11 +398,13 @@ type SignupResult struct {
 	PendingID string
 }
 
-// SignUp begins onboarding for an email. In waitlist mode it records a waitlist
-// entry and records the waitlisted event, provisioning nothing. In open mode it
-// creates a pending signup, sends a verify token by email, and records the
-// signup_started event. It NEVER logs the email or the token.
-func (s *Service) SignUp(ctx context.Context, email string) (SignupResult, error) {
+// SignUp begins onboarding for an email and an optional use-case slug. In
+// waitlist mode it records a waitlist entry and records the waitlisted event,
+// provisioning nothing. In open mode it creates a pending signup (carrying the
+// validated use-case slug), sends a verify token by email, and records the
+// signup_started event. It NEVER logs the email or the token. An invalid or
+// absent useCase is stored as "".
+func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResult, error) {
 	if email == "" {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: email is required")
 	}
@@ -414,6 +438,7 @@ func (s *Service) SignUp(ctx context.Context, email string) (SignupResult, error
 		TokenHash: hashString(rawToken),
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.tokenTTL),
+		UseCase:   validateUseCase(useCase),
 	}
 	if err := s.pending.PutPending(ctx, pending); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: store pending: %w", err)
@@ -439,6 +464,10 @@ type VerifyResult struct {
 	FirstKey      saas.CreatedKey
 	AlreadyDone   bool
 	GrantedCredit billing.Money
+	// UseCase is the marketing use-case slug carried from the pending signup (e.g.
+	// "ai-coding"). It is "" when none was provided. The console uses it to route
+	// the user to the relevant getting-started flow after verification.
+	UseCase string
 }
 
 // Verify accepts a raw verify token and, if valid and unexpired, provisions the
@@ -472,7 +501,7 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		if oerr != nil {
 			return VerifyResult{}, fmt.Errorf("onboarding verify: load verified org: %w", oerr)
 		}
-		return VerifyResult{Account: acct, Org: org, AlreadyDone: true}, nil
+		return VerifyResult{Account: acct, Org: org, AlreadyDone: true, UseCase: pending.UseCase}, nil
 	}
 
 	now := s.now()
@@ -549,6 +578,7 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		Org:           org,
 		FirstKey:      created,
 		GrantedCredit: s.credit,
+		UseCase:       pending.UseCase,
 	}, nil
 }
 

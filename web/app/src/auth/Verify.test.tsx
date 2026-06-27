@@ -64,6 +64,34 @@ describe('Verify page', () => {
     expect(signupLink).toHaveAttribute('href', '/signup')
   })
 
+  it('(e) continue link includes ?uc= when the response carries a useCase', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            accountId: 'a',
+            orgId: 'o',
+            email: 'e@x.com',
+            alreadyDone: false,
+            apiKey: 'mitos_live_abc123',
+            apiKeyId: 'k1',
+            useCase: 'ai-coding',
+          }),
+      }),
+    )
+    render(<Verify token="t" />)
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: /continue to console/i })).toHaveAttribute(
+        'href',
+        '/?uc=ai-coding',
+      ),
+    )
+    vi.unstubAllGlobals()
+  })
+
   it('(c) shows invalid-link message and /signup link on 400 error', async () => {
     vi.stubGlobal(
       'fetch',

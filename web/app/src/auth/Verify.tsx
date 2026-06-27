@@ -134,12 +134,14 @@ type VerifyResponse = {
   alreadyDone: boolean
   apiKey?: string
   apiKeyId?: string
+  /** Use-case slug carried from signup (e.g. "ai-coding"). Empty string when absent. */
+  useCase?: string
 }
 
 type VerifyState =
   | { kind: 'loading' }
-  | { kind: 'success-with-key'; email: string; apiKey: string }
-  | { kind: 'success-already-done'; email: string }
+  | { kind: 'success-with-key'; email: string; apiKey: string; useCase?: string }
+  | { kind: 'success-already-done'; email: string; useCase?: string }
   | { kind: 'error' }
   | { kind: 'no-token' }
 
@@ -172,9 +174,9 @@ export function Verify({ token: tokenProp }: VerifyProps) {
       .then((res) => {
         if (cancelled || !res) return
         if (res.alreadyDone || !res.apiKey) {
-          setState({ kind: 'success-already-done', email: res.email })
+          setState({ kind: 'success-already-done', email: res.email, useCase: res.useCase })
         } else {
-          setState({ kind: 'success-with-key', email: res.email, apiKey: res.apiKey })
+          setState({ kind: 'success-with-key', email: res.email, apiKey: res.apiKey, useCase: res.useCase })
         }
       })
       .catch(() => {
@@ -283,7 +285,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
             </p>
             <code className="verify-snippet">pip install mitos-run</code>
 
-            <a href="/" className="verify-continue-link">
+            <a href={state.useCase ? `/?uc=${state.useCase}` : '/'} className="verify-continue-link">
               Continue to console
             </a>
           </>
@@ -303,7 +305,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
             >
               You are already verified.
             </p>
-            <a href="/" className="verify-continue-link">
+            <a href={state.useCase ? `/?uc=${state.useCase}` : '/'} className="verify-continue-link">
               Continue to console
             </a>
           </>

@@ -60,7 +60,7 @@ func TestSignupVerifyProvisionsOrgCreditAndKey(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
 
-	res, err := h.svc.SignUp(ctx, "dev@example.com")
+	res, err := h.svc.SignUp(ctx, "dev@example.com", "")
 	if err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSignupVerifyProvisionsOrgCreditAndKey(t *testing.T) {
 func TestVerifyRejectsInvalidToken(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	_, err := h.svc.Verify(ctx, "tok-not-a-real-token")
@@ -139,7 +139,7 @@ func TestVerifyRejectsInvalidToken(t *testing.T) {
 func TestVerifyRejectsExpiredToken(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -155,7 +155,7 @@ func TestVerifyRejectsExpiredToken(t *testing.T) {
 func TestReVerifyIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -202,7 +202,7 @@ func TestWaitlistModeRecordsEntryAndDoesNotProvision(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeWaitlist)
 
-	res, err := h.svc.SignUp(ctx, "dev@example.com")
+	res, err := h.svc.SignUp(ctx, "dev@example.com", "")
 	if err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestWaitlistModeRecordsEntryAndDoesNotProvision(t *testing.T) {
 func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -246,7 +246,7 @@ func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 	// A second signup for the now-provisioned email is a conflict.
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); !errors.Is(err, saas.ErrConflict) {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); !errors.Is(err, saas.ErrConflict) {
 		t.Fatalf("duplicate signup: %v, want ErrConflict", err)
 	}
 }
@@ -254,7 +254,7 @@ func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 func TestVerifyErrorsNeverLeakTokenOrEmail(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "secret@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "secret@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	_, err := h.svc.Verify(ctx, "tok-leaky-raw-token")
@@ -281,7 +281,7 @@ func TestCustomSignupCreditAmount(t *testing.T) {
 	svc := NewService(accounts, store, NewMemPendingStore(), ledger, email,
 		WithMode(ModeOpen), WithClock(clock), WithSignupCredit(billing.USD(200)))
 
-	if _, err := svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := email.LastToken("dev@example.com")
@@ -305,6 +305,62 @@ func TestDefaultModeIsWaitlist(t *testing.T) {
 	}
 }
 
+// TestSignUpPersistsUseCase asserts that a valid use-case slug passed to SignUp
+// is stored on the pending signup and surfaced in VerifyResult.UseCase.
+func TestSignUpPersistsUseCase(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	_, err := h.svc.SignUp(ctx, "dev@example.com", "ai-coding")
+	if err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if pending.UseCase != "ai-coding" {
+		t.Fatalf("pending.UseCase = %q, want %q", pending.UseCase, "ai-coding")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.UseCase != "ai-coding" {
+		t.Fatalf("VerifyResult.UseCase = %q, want %q", vr.UseCase, "ai-coding")
+	}
+}
+
+// TestSignUpDropsInvalidUseCase asserts that an invalid use-case slug is silently
+// replaced with "" rather than causing an error or being stored as-is.
+func TestSignUpDropsInvalidUseCase(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	_, err := h.svc.SignUp(ctx, "dev@example.com", "INVALID UC!")
+	if err != nil {
+		t.Fatalf("sign up must not error on an invalid uc: %v", err)
+	}
+
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if pending.UseCase != "" {
+		t.Fatalf("pending.UseCase = %q, want empty string for invalid input", pending.UseCase)
+	}
+}
+
 // TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
 // when a PRIOR verify attempt provisioned the account but crashed before marking
 // the pending signup verified (e.g. the credit grant or key issue errored). The
@@ -315,7 +371,7 @@ func TestVerifyRecoversFromHalfProvisionedAccount(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
 
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")

@@ -78,11 +78,14 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 }
 
 // signUp handles POST /onboarding/signup. It validates and normalizes the email,
-// calls the service, and ALWAYS returns the same accepted response regardless of
-// whether the email already exists, so no account enumeration is possible.
+// reads the optional use-case slug (uc), calls the service, and ALWAYS returns
+// the same accepted response regardless of whether the email already exists, so
+// no account enumeration is possible. An absent or invalid uc is silently
+// dropped to ""; it never causes a request failure.
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
+		UC    string `json:"uc"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		return // decodeJSON already wrote the error
@@ -94,7 +97,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.svc.SignUp(r.Context(), email)
+	_, err := h.svc.SignUp(r.Context(), email, req.UC)
 	// Account enumeration guard: a duplicate email (ErrConflict) returns the SAME
 	// accepted response as a fresh signup. Any OTHER error is a genuine server
 	// fault and is surfaced (without the email) so it is not silently swallowed.
@@ -172,11 +175,13 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 
 	// The raw first key is shown EXACTLY ONCE here (empty on an idempotent
 	// re-verify). The account email is the caller's own, returned to confirm.
+	// useCase is always included (empty string when none was provided at signup).
 	out := map[string]any{
 		"accountId":   res.Account.ID,
 		"orgId":       res.Org.ID,
 		"email":       res.Account.Email,
 		"alreadyDone": res.AlreadyDone,
+		"useCase":     res.UseCase,
 	}
 	if res.FirstKey.RawKey != "" {
 		out["apiKey"] = res.FirstKey.RawKey

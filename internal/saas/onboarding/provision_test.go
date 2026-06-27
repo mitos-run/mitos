@@ -38,7 +38,7 @@ func (c *captureProvisioner) count() int {
 func signUpAndVerify(t *testing.T, h *harness, email string) VerifyResult {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := h.svc.SignUp(ctx, email); err != nil {
+	if _, err := h.svc.SignUp(ctx, email, ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	tok := h.email.LastToken(email)
@@ -101,7 +101,7 @@ func TestVerifyProvisionerErrorFailsVerify(t *testing.T) {
 	h.svc.provision = &captureProvisioner{err: errors.New("apiserver down")}
 
 	ctx := context.Background()
-	if _, err := h.svc.SignUp(ctx, "fail@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "fail@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	tok := h.email.LastToken("fail@example.com")
@@ -123,7 +123,7 @@ func TestReVerifyDoesNotReprovision(t *testing.T) {
 	h.svc.provision = prov
 
 	ctx := context.Background()
-	if _, err := h.svc.SignUp(ctx, "again@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "again@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	tok := h.email.LastToken("again@example.com")

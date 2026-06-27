@@ -181,6 +181,37 @@ describe('Signup page', () => {
     vi.unstubAllGlobals()
   })
 
+  it('includes uc in POST body when ?uc=ai-coding is in the URL', async () => {
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, search: '?uc=ai-coding' },
+      writable: true,
+      configurable: true,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 202, text: async () => '' }),
+    )
+    render(<Signup />)
+    const input = screen.getByRole('textbox', { name: /email/i })
+    fireEvent.change(input, { target: { value: 'user@example.com' } })
+    fireEvent.submit(input.closest('form')!)
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        '/onboarding/signup',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ email: 'user@example.com', uc: 'ai-coding' }),
+        }),
+      ),
+    )
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, search: '' },
+      writable: true,
+      configurable: true,
+    })
+    vi.unstubAllGlobals()
+  })
+
   it('clicking "Use a different email" resets back to the form', async () => {
     mockFetch({ signupStatus: 202 })
     render(<Signup />)
