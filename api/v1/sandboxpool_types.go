@@ -145,6 +145,53 @@ type PoolTemplateSpec struct {
 	// enforcement is issue #25.
 	// +optional
 	DefaultBudget *SandboxBudget `json:"defaultBudget,omitempty"`
+
+	// Workload declares a long-running process the build starts AFTER init and
+	// keeps running while it takes the snapshot, so a fork wakes with the app
+	// already serving on its port (issue #460). The build gates the snapshot on
+	// the workload's ready probe, and the workload is excluded from the per-fork
+	// userspace reset signal so it survives forks. Distinct from Command (an
+	// exec-time entrypoint default that is never started during the build).
+	// +optional
+	Workload *WorkloadSpec `json:"workload,omitempty"`
+}
+
+// WorkloadSpec declares a serving workload captured running in the template
+// snapshot (issue #460). The build starts Command in its own session so it
+// outlives the build's exec, waits for Ready, then snapshots.
+type WorkloadSpec struct {
+	// Command is the serving process, run through the shell inside the guest.
+	Command []string `json:"command"`
+
+	// Env are environment variables for the workload process. Non-secret only;
+	// secret values are injected per fork, never baked into the snapshot.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Ready is the HTTP gate the build waits on before snapshotting; without it
+	// the build snapshots as soon as the workload is started.
+	// +optional
+	Ready *HTTPReadyProbe `json:"ready,omitempty"`
+}
+
+// HTTPReadyProbe is the HTTP check the build polls inside the guest until the
+// workload is listening, so the snapshot captures a serving app (issue #460).
+type HTTPReadyProbe struct {
+	// Port is the guest TCP port the workload listens on.
+	Port int32 `json:"port"`
+
+	// Path is the request path; defaults to "/".
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Expect is the HTTP status that counts as ready; defaults to 200.
+	// +optional
+	Expect int32 `json:"expect,omitempty"`
+
+	// TimeoutSeconds bounds the readiness wait before the build fails; defaults
+	// to 120.
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // PoolSnapshots is the per-node snapshot fan-out configuration. It folds the
