@@ -14,6 +14,7 @@ import { fmtBytes } from '../api'
 import { PageHeader } from '../ui/PageHeader'
 import { Card } from '@mitos/brand'
 import type { AuditEvent } from '../api'
+import { FirstRun, isFirstRun } from './firstrun/FirstRun'
 
 const BENCH = 'bench/husk-activate-latency.sh'
 
@@ -182,9 +183,22 @@ function OperationalPanels() {
 // ---- Overview (Instruments) ------------------------------------------------
 
 export function Instruments() {
+  const instruments = useInstruments()
+  const sandboxes = useSandboxes()
+
+  // Read ?uc from the URL for intent-shaped first-run content.
+  // Falls back to undefined when the param is absent or SSR context.
+  const uc =
+    typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('uc') ?? undefined)
+      : undefined
+
+  const showFirstRun = isFirstRun(instruments.data, sandboxes.data)
+
   return (
     <section>
       <PageHeader title="Overview" lede="This organization's measured signal, and what's happening right now." />
+      {showFirstRun && <FirstRun uc={uc} />}
       <ProofHero />
       <OperationalPanels />
     </section>
