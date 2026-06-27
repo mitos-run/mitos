@@ -4,7 +4,9 @@
 Protocol](https://modelcontextprotocol.io) tools. Any MCP-speaking agent
 (Claude Desktop, an MCP client library, an agent framework with MCP support)
 can create sandboxes, run commands, read and write files, fork, and terminate,
-with no SDK integration.
+with no SDK integration. For copy-paste recipes wiring specific frameworks
+(Vercel AI SDK, Pydantic AI, AutoGen, LlamaIndex) to this server, see
+[integrations/mcp-frameworks.md](integrations/mcp-frameworks.md).
 
 It speaks MCP over a stdio JSON-RPC 2.0 transport: stdin and stdout are the
 protocol channel, and all logging goes to stderr. The protocol subset
