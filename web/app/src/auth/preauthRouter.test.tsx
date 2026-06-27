@@ -9,4 +9,10 @@ describe('pre-auth router', () => {
     render(<RouterProvider router={router} />)
     expect(await screen.findByText(/Continue with GitHub/i)).toBeInTheDocument()
   })
+
+  it('redirects unmatched paths to the login affordance', async () => {
+    const router = createPreAuthRouter('/sandboxes')
+    render(<RouterProvider router={router} />)
+    expect(await screen.findByText(/Continue with GitHub/i)).toBeInTheDocument()
+  })
 })

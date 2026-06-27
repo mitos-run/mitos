@@ -85,6 +85,7 @@ export function createPreAuthRouter(initialPath?: string) {
     routeTree,
     defaultPreload: 'intent',
     defaultPreloadStaleTime: 0,
+    defaultNotFoundComponent: () => <Navigate to="/login" />,
   })
 
   if (initialPath) {
