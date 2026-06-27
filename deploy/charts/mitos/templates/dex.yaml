@@ -1,0 +1,205 @@
+{{- /*
+Dex in-cluster OIDC federator: federates GitHub and Google connectors into a
+single OIDC issuer the console trusts. Gated by dex.enabled.
+
+Connector client IDs and secrets are NEVER inlined in this template. They are
+sourced from the Kubernetes Secret named by dex.connectorsSecret (expected keys:
+github-client-id, github-client-secret, google-client-id, google-client-secret)
+and injected into the Dex container as env vars via secretKeyRef. Dex then
+expands the $VARIABLE references in config.yaml at startup using os.ExpandEnv
+(supported since Dex v2.35; v2.41.1 used here confirms this behavior).
+
+The console static-client secret is sourced from the Secret named by
+dex.consoleClientSecret (expected key: client-secret) the same way,
+and referenced in config.yaml as $DEX_CONSOLE_CLIENT_SECRET.
+
+Storage: memory (correct for a single replica). Kubernetes CRD storage is the
+production follow-up for multi-replica HA and is tracked separately. Memory
+storage means Dex state (refresh tokens, auth codes) is lost on pod restart,
+which is acceptable for the initial hosted deployment.
+
+Wire-up note: when dex.enabled, set:
+  console.oidc.issuerURL    = dex.issuer
+  console.oidc.clientID     = dex.console.clientID
+  console.oidc.clientSecretRef = dex.consoleClientSecret (key: client-secret)
+*/}}
+{{- if .Values.dex.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mitos-dex-config
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dex
+data:
+  config.yaml: |
+    issuer: {{ .Values.dex.issuer }}
+
+    # storage: memory is suitable for a single Dex replica.
+    # For multi-replica HA, migrate to storage.type: kubernetes with the Dex
+    # CRDs installed. That is tracked as a production follow-up.
+    storage:
+      type: memory
+
+    web:
+      http: 0.0.0.0:5556
+
+    oauth2:
+      skipApprovalScreen: true
+
+    # Static OIDC client for the Mitos console.
+    # The client secret is NOT inlined: Dex expands $DEX_CONSOLE_CLIENT_SECRET
+    # from the env var injected via secretKeyRef (dex.consoleClientSecret Secret,
+    # key: client-secret). Set console.oidc.clientSecretRef to the same Secret
+    # so the console reads the matching value (it also uses key: client-secret).
+    staticClients:
+      - id: {{ .Values.dex.console.clientID }}
+        secret: $DEX_CONSOLE_CLIENT_SECRET
+        name: Mitos Console
+        redirectURIs:
+          - {{ .Values.dex.console.redirectURL }}
+
+    connectors:
+      # GitHub connector.
+      # clientID and clientSecret are NOT inlined: Dex expands $GITHUB_CLIENT_ID
+      # and $GITHUB_CLIENT_SECRET from env vars injected via secretKeyRef from
+      # dex.connectorsSecret (keys: github-client-id, github-client-secret).
+      - type: github
+        id: github
+        name: GitHub
+        config:
+          clientID: $GITHUB_CLIENT_ID
+          clientSecret: $GITHUB_CLIENT_SECRET
+          redirectURI: {{ .Values.dex.issuer }}/callback
+
+      # Google connector.
+      # clientID and clientSecret are NOT inlined: Dex expands $GOOGLE_CLIENT_ID
+      # and $GOOGLE_CLIENT_SECRET from env vars injected via secretKeyRef from
+      # dex.connectorsSecret (keys: google-client-id, google-client-secret).
+      - type: google
+        id: google
+        name: Google
+        config:
+          clientID: $GOOGLE_CLIENT_ID
+          clientSecret: $GOOGLE_CLIENT_SECRET
+          redirectURI: {{ .Values.dex.issuer }}/callback
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-dex
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "dex") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "dex") | nindent 8 }}
+    spec:
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dex
+          image: {{ .Values.dex.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/dex
+          args:
+            - serve
+            - /etc/dex/config.yaml
+          env:
+            # Connector secrets from dex.connectorsSecret.
+            # Values are sourced via secretKeyRef and NEVER inlined.
+            # Dex reads $GITHUB_CLIENT_ID and $GITHUB_CLIENT_SECRET from the
+            # config.yaml and expands them from these env vars at startup.
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dex.connectorsSecret | quote }}
+                  key: github-client-id
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dex.connectorsSecret | quote }}
+                  key: github-client-secret
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dex.connectorsSecret | quote }}
+                  key: google-client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dex.connectorsSecret | quote }}
+                  key: google-client-secret
+            # Console static-client secret from dex.consoleClientSecret.
+            # Shared with console.oidc.clientSecretRef: both read key client-secret
+            # from the same Secret, so one Secret with one key satisfies both sides.
+            - name: DEX_CONSOLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dex.consoleClientSecret | quote }}
+                  key: client-secret
+          ports:
+            - name: http
+              containerPort: 5556
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: mitos-dex-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-dex
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dex
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "dex") | nindent 4 }}
+  ports:
+    - name: http
+      port: 5556
+      targetPort: http
+{{- end }}

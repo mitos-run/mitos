@@ -142,3 +142,13 @@ documented behavioral difference measured in bench/facade later, not asserted
 here); the SandboxWarmPool -> our pool and SandboxClaim -> our
 fork-from-snapshot extension mappings; full podTemplate fidelity; executing the
 deferred rename with API v2.
+
+## Addendum 2026-06-27: migration to agents.x-k8s.io/v1beta1 (upstream v0.5.0)
+
+Upstream agent-sandbox graduated the API to v1beta1 in v0.5.0; the facade now imports and serves `agents.x-k8s.io/v1beta1` (and `extensions.agents.x-k8s.io/v1beta1`).
+
+The toolchain path actually taken: the straightforward `go get sigs.k8s.io/agent-sandbox@v0.5.0` plus the import/field migration compiled and linted clean on go 1.26.2 (both `golangci-lint run` and `GOOS=linux golangci-lint run` exit 0), so the ADR's hand-rolled `internal/facade/apis` fallback was NOT needed.
+
+The two breaking field changes the facade adapted: core Sandbox `spec.replicas` (0/1) -> `spec.operatingMode` (Running/Suspended) with a `Suspended` status condition; SandboxClaim `templateRef`+policy -> `spec.warmPoolRef`.
+
+A test-infra note: v1beta1 is the storage version and the vendored CRD ships `conversion.strategy: Webhook` pointing at upstream's controller (which we do not run). Our envtest and kind conformance exercise only the v1beta1 stable/storage version; the kind facade-conformance job pins the live CRD's conversion to None at install time (the vendored file is unchanged).

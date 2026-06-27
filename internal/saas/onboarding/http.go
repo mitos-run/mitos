@@ -10,11 +10,31 @@ import (
 	"strings"
 
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/console"
 )
 
 // maxSignupBody bounds the SignUp request body to defeat a slow-loris / oversize
 // body abuse vector on this PUBLIC endpoint.
 const maxSignupBody = 1 << 14 // 16 KiB
+
+// HandlerOption configures a Handler.
+type HandlerOption func(*Handler)
+
+// WithHandlerSessions enables browser session issuance on a successful fresh
+// verify. When set, a verify that provisions a new account (AlreadyDone false)
+// mints a session token via sessions.IssueSession and sets the mitos_session
+// cookie on the response so the new user is logged in without a second sign-in.
+// The cookie flags match what the OIDC callback sets: HttpOnly, SameSite=Lax,
+// and Secure driven by the same secure argument the OIDC handler receives.
+// If sessions or newToken are nil this option is a no-op; the JSON response is
+// still written normally. The raw session token is never logged.
+func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure bool) HandlerOption {
+	return func(h *Handler) {
+		h.sessions = sessions
+		h.newToken = newToken
+		h.secure = secure
+	}
+}
 
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
@@ -28,18 +48,25 @@ const maxSignupBody = 1 << 14 // 16 KiB
 // is never returned by SignUp and never logged. Verify is the only place a token
 // is accepted, and a bad / expired / used token yields a generic failure.
 type Handler struct {
-	svc *Service
-	log *slog.Logger
+	svc      *Service
+	log      *slog.Logger
+	sessions saas.Sessions // optional; nil skips session cookie
+	newToken func() string // optional; nil skips session cookie
+	secure   bool
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
 // discarding logger is used. The handler logs counts and non-secret status only,
 // never an email or a token.
-func NewHandler(svc *Service, log *slog.Logger) *Handler {
+func NewHandler(svc *Service, log *slog.Logger, opts ...HandlerOption) *Handler {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Handler{svc: svc, log: log}
+	h := &Handler{svc: svc, log: log}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 // Routes registers the onboarding routes on mux. It is the single place a binary
@@ -123,6 +150,24 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("onboarding verify", "err", err)
 		writeJSONError(w, http.StatusInternalServerError, "could not complete verification; please try again")
 		return
+	}
+
+	// Mint a browser session for a freshly provisioned account so the new user
+	// lands in the console without a second sign-in. The raw token is never
+	// logged. The cookie is set before WriteHeader so the header is flushed
+	// together with the JSON body. For an idempotent re-verify (AlreadyDone),
+	// no new session is issued: the existing session (if any) remains valid.
+	if !res.AlreadyDone && h.sessions != nil && h.newToken != nil {
+		sessToken := h.newToken()
+		h.sessions.IssueSession(res.Account.ID, sessToken, "browser")
+		http.SetCookie(w, &http.Cookie{
+			Name:     console.SessionCookieName,
+			Value:    sessToken,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   h.secure,
+			SameSite: http.SameSiteLaxMode,
+		})
 	}
 
 	// The raw first key is shown EXACTLY ONCE here (empty on an idempotent

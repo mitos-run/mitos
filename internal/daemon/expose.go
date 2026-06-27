@@ -51,6 +51,29 @@ func (api *SandboxAPI) ProxyHTTP(sandboxID string, guestPort int, prefix string)
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
+			// Propagate X-Forwarded-Host and X-Forwarded-Proto so that upstreams
+			// (e.g. the CDP relay) can learn the external origin. When the Rewrite
+			// hook is used, httputil.ReverseProxy strips incoming X-Forwarded-*
+			// headers before calling Rewrite, so we must re-propagate them
+			// explicitly from pr.In (the original, unmodified request). An edge
+			// proxy that already set these headers takes precedence; otherwise we
+			// derive the values from the request itself.
+			xfh := pr.In.Header.Get("X-Forwarded-Host")
+			if xfh == "" && pr.In.Host != "" {
+				xfh = pr.In.Host
+			}
+			if xfh != "" {
+				pr.Out.Header.Set("X-Forwarded-Host", xfh)
+			}
+			xfp := pr.In.Header.Get("X-Forwarded-Proto")
+			if xfp == "" {
+				if pr.In.TLS != nil {
+					xfp = "https"
+				} else {
+					xfp = "http"
+				}
+			}
+			pr.Out.Header.Set("X-Forwarded-Proto", xfp)
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = "guest" // ignored: DialContext returns the tunnel
 			pr.Out.Host = "guest"

@@ -187,6 +187,19 @@ The stub FAILS CLOSED: a snapshot-load or guest-readiness failure returns
 reports a usable VM it could not verify over vsock. One stub owns exactly one
 VM, so a successful activate is terminal for that stub.
 
+### Snapshot rebuild under the same pool name (#461)
+
+A template snapshot is stored by templateID (the pool name), so rebuilding a pool
+under the same name overwrites its mem in place and produces a new content-
+addressed digest. A warm husk pod records the digest and node it verifies against
+(annotations `mitos.run/template-digest` and `mitos.run/snapshot-node`). On
+reconcile the controller reaps any DORMANT pod whose stamped digest no longer
+matches its node's current recorded digest, and the warm-pool deficit logic
+refills the slot against the fresh snapshot. Claimed (activating or active) pods
+are never reaped. This does not trigger the rebuild itself (a content change
+re-triggering a build is #475); it ensures that once a rebuild has happened, warm
+husks converge instead of CrashLoopBackOff on a stale digest.
+
 ### Measured activation latency (CI husk-stub phase)
 
 The KVM integration workflow runs a `husk-stub` phase that proves the split and

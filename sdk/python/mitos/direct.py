@@ -240,6 +240,8 @@ class DirectSandbox:
         id: Optional[str] = None,
         network: Optional[Network] = None,
         idempotency_key: Optional[str] = None,
+        workload: Optional[dict] = None,
+        resources: Optional[dict] = None,
     ) -> "DirectSandbox":
         """Flat one-liner: return a READY sandbox handle for image.
 
@@ -254,9 +256,12 @@ class DirectSandbox:
         or CIDR rules. The SECURE DEFAULT when network is omitted is
         deny-by-default in both directions (the server applies it), so an
         untrusted sandbox cannot reach out or be dialed into unless you opt in.
+
+        workload and resources (issue #314) are forwarded to ensure_template when
+        set, so a caller can request a workload-backed warm template end to end.
         """
         server = SandboxServer.from_auth(api_key=api_key, base_url=base_url)
-        server.ensure_template(image, network=network)
+        server.ensure_template(image, network=network, workload=workload, resources=resources)
         return server.fork(image, id=id, idempotency_key=idempotency_key)
 
     def _auth_headers(self) -> dict[str, str]:
@@ -566,17 +571,30 @@ class SandboxServer:
         init_wait_seconds: int = 5,
         network: Optional[Network] = None,
         idempotency_key: Optional[str] = None,
+        workload: Optional[dict] = None,
+        resources: Optional[dict] = None,
     ) -> dict:
         """Create the template for id, optionally attaching a per-sandbox network
         posture (issue #219). The network applies to every sandbox forked from
         the template. Omit it for the secure default (deny-by-default both ways,
         applied server-side).
 
+        workload: optional serving-workload spec forwarded verbatim to the server
+        (issue #314). When set, the server starts the workload process inside the
+        VM before snapshotting so every fork inherits a warm serving process.
+
+        resources: optional VM resource overrides forwarded verbatim to the server
+        (issue #314). Omit to accept the server-side defaults.
+
         idempotency_key (issue #22): when set, a retried create with the same key
         returns the template the first call created instead of a duplicate."""
         body: dict = {"id": id, "init_wait_seconds": init_wait_seconds}
         if network is not None:
             body["network"] = network.to_dict()
+        if workload is not None:
+            body["workload"] = workload
+        if resources is not None:
+            body["resources"] = resources
         resp = self._http.post(
             f"{self.url}/v1/templates",
             json=body,
@@ -591,10 +609,14 @@ class SandboxServer:
         init_wait_seconds: int = 5,
         network: Optional[Network] = None,
         idempotency_key: Optional[str] = None,
+        workload: Optional[dict] = None,
+        resources: Optional[dict] = None,
     ) -> dict:
         """get-or-create the template for id. A 409 (already exists) is treated
         as success so the flat create path is idempotent across calls. network
         is the per-sandbox posture attached at create time (issue #219).
+        workload and resources (issue #314) are forwarded to create_template when
+        set; omit them to accept server-side defaults.
         idempotency_key (issue #22) makes a retried create safe server-side."""
         try:
             return self.create_template(
@@ -602,6 +624,8 @@ class SandboxServer:
                 init_wait_seconds=init_wait_seconds,
                 network=network,
                 idempotency_key=idempotency_key,
+                workload=workload,
+                resources=resources,
             )
         except AgentRunError as exc:
             if exc.status == 409:
@@ -651,6 +675,8 @@ def create(
     id: Optional[str] = None,
     network: Optional[Network] = None,
     idempotency_key: Optional[str] = None,
+    workload: Optional[dict] = None,
+    resources: Optional[dict] = None,
 ) -> DirectSandbox:
     """Flat one-liner native onboarding: return a READY sandbox handle.
 
@@ -667,6 +693,9 @@ def create(
     the fork step auto-generates one, so even a transparently retried create is
     safe; pass your own to make a retry across processes idempotent.
 
+    workload and resources (issue #314) are forwarded to ensure_template when
+    set, so a caller can request a workload-backed warm template end to end.
+
     The k8s operator path stays available as AgentRun(...).sandbox(...).
     """
     return DirectSandbox.create(
@@ -676,4 +705,6 @@ def create(
         id=id,
         network=network,
         idempotency_key=idempotency_key,
+        workload=workload,
+        resources=resources,
     )

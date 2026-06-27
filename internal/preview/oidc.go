@@ -6,10 +6,10 @@ package preview
 // against the live route table) and CSRF (signed state cookie, constant-time
 // compare).
 //
-// PKCE note: the existing Exchanger.AuthCodeURL(state) does not accept a code
-// challenge parameter. PKCE is a desirable follow-up if the Exchanger gains
-// challenge support. For now, the signed CSRF state cookie (HMAC, binding rd
-// and path) provides the primary protection.
+// PKCE note: the Exchanger.AuthCodeURL accepts variadic oauth2.AuthCodeOption,
+// so PKCE can be wired in as a follow-up by passing a code-challenge option.
+// For now, the signed CSRF state cookie (HMAC, binding rd and path) provides
+// the primary CSRF protection.
 
 import (
 	"context"
@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/oidcauth"
@@ -54,7 +56,7 @@ type stateCookiePayload struct {
 // exchange an authorization code for a raw OIDC ID token. It matches
 // oidcauth.Exchanger exactly so the real implementation is a drop-in.
 type Exchanger interface {
-	AuthCodeURL(state string) string
+	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
 	Exchange(ctx context.Context, code string) (rawIDToken string, err error)
 }
 

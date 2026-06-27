@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default: jobs get read-only GITHUB_TOKEN (Scorecard TokenPermissions).
+permissions:
+  contents: read
+
 jobs:
   go-test:
     runs-on: ubuntu-latest
@@ -30,8 +34,8 @@ jobs:
     env:
       MITOS_TEST_DATABASE_DSN: postgres://postgres:postgres@localhost:5432/mitos_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - run: go build ./...
@@ -43,8 +47,8 @@ jobs:
   go-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: golangci-lint
@@ -73,8 +77,8 @@ jobs:
     # or, only for a provably unreachable advisory, a documented exclusion.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: govulncheck
@@ -92,7 +96,7 @@ jobs:
     # definitions themselves (kind: CustomResourceDefinition) ARE validated.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install kubeconform
         run: |
           set -euo pipefail
@@ -140,7 +144,7 @@ jobs:
     # in either patch fails the merge or the validate.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install talosctl
         run: |
           set -euo pipefail
@@ -171,8 +175,8 @@ jobs:
       run:
         working-directory: sdk/python
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
@@ -184,8 +188,8 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
       - run: npm ci
@@ -206,14 +210,14 @@ jobs:
     # typescript-sdk jobs plus Go to build and run the server.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
       - name: Build the standalone sandbox-server
@@ -266,7 +270,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - run: docker build -f Dockerfile.controller -t mitos-controller:ci .
       - run: docker build -f Dockerfile.forkd -t mitos-forkd:ci .
       # The husk-stub image runs the dormant VMM inside each husk pod (the
@@ -303,6 +307,31 @@ jobs:
       - run: docker build -f Dockerfile.facade -t mitos-facade:ci .
       - run: docker build -f Dockerfile.console -t mitos-console:ci .
       - run: docker build -f Dockerfile.gateway -t mitos-gateway:ci .
+      # The computer-use template image (headless Chromium + CDP relay, issue
+      # #314). Build context is the repository root because the relay is compiled
+      # from source. Smoke that the multi-stage build works, the launcher brings
+      # up Chromium, and the relay answers CDP on the published port (curl's
+      # Host: 127.0.0.1:9222 also exercises the relay's host-header path). This
+      # is the cheap proportional check; the warm-fork snapshot and the named-URL
+      # relay path are verified on real KVM
+      # (docs/superpowers/specs/2026-06-27-computer-use-cdp-spike-notes.md), not
+      # in this container-only job.
+      - name: Build the computer-use image and smoke CDP
+        run: |
+          set -euo pipefail
+          docker build -f images/computer-use/Dockerfile -t mitos-computer-use:ci .
+          docker run -d -p 9222:9222 --name cu \
+            --entrypoint /usr/local/bin/start-chromium.sh mitos-computer-use:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9222/json/version 2>/dev/null | grep -q webSocketDebuggerUrl; then
+              ok=1; echo "CDP answered after ${i}s"; break
+            fi
+            sleep 1
+          done
+          docker logs cu 2>&1 | tail -5 || true
+          docker rm -f cu >/dev/null 2>&1 || true
+          [ "$ok" = 1 ] || { echo "FAIL: CDP /json/version did not return webSocketDebuggerUrl"; exit 1; }
       # Trivy scans each locally built image for known OS/library CVEs (CVE
       # pipeline, issue #35). Installed directly from a pinned release (the
       # marketplace action's binary installer proved flaky in CI). Phased in as
@@ -324,7 +353,7 @@ jobs:
             exit 0
           fi
           trivy --version || { echo "::warning::Trivy not runnable; skipping advisory image scan"; exit 0; }
-          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci mitos-kvm-device-plugin:ci mitos-facade:ci mitos-console:ci mitos-gateway:ci; do
+          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci mitos-kvm-device-plugin:ci mitos-facade:ci mitos-console:ci mitos-gateway:ci mitos-computer-use:ci; do
             echo "=== Trivy scan ${img} (HIGH,CRITICAL, fixable) ==="
             trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
               --ignorefile .trivyignore "${img}" \
@@ -336,11 +365,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-ci
           config: hack/kind-config.yaml
@@ -612,8 +641,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: Check KVM availability on the runner
@@ -627,7 +656,7 @@ jobs:
           ls -la /dev/kvm || { echo "HUSK-SETUP: no /dev/kvm on this runner"; exit 1; }
           grep -cE '(vmx|svm)' /proc/cpuinfo || true
           sudo chmod 666 /dev/kvm || true
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-husk
           config: hack/kind-config.yaml
@@ -1766,11 +1795,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-tenancy
           config: hack/kind-config.yaml
@@ -1829,8 +1858,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: Check KVM availability on the runner
@@ -1838,7 +1867,7 @@ jobs:
           set -euo pipefail
           ls -la /dev/kvm || { echo "PLACEMENT-SETUP: no /dev/kvm on this runner"; exit 1; }
           sudo chmod 666 /dev/kvm || true
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-placement
           config: hack/kind-config-placement.yaml
@@ -1957,13 +1986,14 @@ jobs:
     #     status with a Ready condition reflecting the run-path state achievable
     #     on kind (Ready=False while the husk claim is Pending, since no VMM
     #     boots here); deleting the Sandbox leaves the claim owner-referenced for
-    #     GC and a replicas-0 Sandbox terminates the run-path object.
-    #   - NOT asserted here (the #18 nested-VMM boundary): the in-VM Ready tail.
+    #     GC and an operatingMode=Suspended Sandbox terminates the run-path object.
+    #   - NOT asserted here (proven on cluster-facade-conformance-e2e): the in-VM Ready tail.
     #     Upstream conformance predicates (PodReady / ChromeReady, the
     #     "Pod is Ready; Service Exists" status) require a RUNNING sandbox. Our
     #     run path reaches Ready only when a dormant Firecracker VMM boots inside
-    #     the husk pod, which needs a KVM-capable kubelet (proven in
-    #     kvm-test.yaml, not on this shared runner). Their Go e2e suite also
+    #     the husk pod, which needs a KVM-capable kubelet (proven on the
+    #     cluster-facade-conformance-e2e job, not on this object-level run). Their Go e2e
+    #     suite also
     #     imports their in-tree controller and asserts upstream-controller pods /
     #     services, so it is bare-metal-gated and is NOT run here; see the matrix
     #     in docs/facade-conformance.md.
@@ -1974,11 +2004,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-facade
           config: hack/kind-config.yaml
@@ -2010,6 +2040,23 @@ jobs:
           for c in sandboxtemplates sandboxwarmpools sandboxclaims; do
             kubectl wait --for=condition=Established --timeout=60s \
               "crd/${c}.extensions.agents.x-k8s.io"
+          done
+          # v0.5.0 graduated the API to v1beta1 (the storage version) and ships
+          # the CRD with a v1alpha1<->v1beta1 conversion.strategy: Webhook whose
+          # clientConfig points at agent-sandbox-system/agent-sandbox-webhook-service
+          # (upstream's controller) with no caBundle. We do NOT run upstream's
+          # controller or its conversion webhook, and we exercise conformance only
+          # at the v1beta1 storage/stable version. Pin conversion to None at install
+          # time so the kind apiserver serves v1beta1 without the absent webhook.
+          # This patches the LIVE CRD only; the vendored file on disk is unchanged
+          # (apply-unchanged is preserved). Documented in docs/facade-conformance.md.
+          for crd in sandboxes.agents.x-k8s.io \
+                     sandboxtemplates.extensions.agents.x-k8s.io \
+                     sandboxwarmpools.extensions.agents.x-k8s.io \
+                     sandboxclaims.extensions.agents.x-k8s.io; do
+            # strategy None requires conversion.webhook to be nil; clear it too.
+            kubectl patch crd "$crd" --type=merge \
+              -p '{"spec":{"conversion":{"strategy":"None","webhook":null}}}'
           done
       - name: Deploy our CRDs, controller, and the facade (default-pool=default)
         # Apply our production base (CRDs + controller + RBAC + namespace), then
@@ -2184,10 +2231,12 @@ jobs:
           fi
           echo "PASS (d): deleting the Sandbox GCs the bridged claim"
 
-          # (e) a replicas-0 Sandbox terminates the run-path object: re-create the
-          # Sandbox, wait for the claim, then scale to replicas 0 and assert the
-          # facade deletes the claim.
-          sed 's#^spec:#spec:\n  replicas: 1#' /tmp/hello-world.yaml | kubectl -n default apply -f -
+          # (e) an operatingMode=Suspended Sandbox terminates the run-path object:
+          # re-create the Sandbox (v1beta1 defaults operatingMode=Running), wait for
+          # the claim, then set operatingMode=Suspended and assert the facade deletes
+          # the claim. v0.5.0 replaced spec.replicas (0/1) with the named enum
+          # spec.operatingMode (Running/Suspended).
+          kubectl -n default apply -f /tmp/hello-world.yaml
           for i in $(seq 1 30); do
             if kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               break
@@ -2195,41 +2244,41 @@ jobs:
             sleep 2
           done
           kubectl -n default patch sandbox.agents.x-k8s.io hello-world --type=merge \
-            -p '{"spec":{"replicas":0}}'
+            -p '{"spec":{"operatingMode":"Suspended"}}'
           term=0
           for i in $(seq 1 30); do
             if ! kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               term=1
               break
             fi
-            echo "  [${i}/30] waiting for replicas-0 to terminate the run-path object"
+            echo "  [${i}/30] waiting for operatingMode=Suspended to terminate the run-path object"
             sleep 2
           done
           if [ "$term" -ne 1 ]; then
-            echo "FACADE-CONFORMANCE: replicas-0 Sandbox did not terminate the bridged claim"
+            echo "FACADE-CONFORMANCE: operatingMode=Suspended Sandbox did not terminate the bridged claim"
             exit 1
           fi
-          echo "PASS (e): replicas-0 Sandbox releases the run-path object (pause = warm-pool release)"
+          echo "PASS (e): operatingMode=Suspended Sandbox releases the run-path object (pause = warm-pool release)"
 
-          # (f) replicas 1->0->1 is an OBJECT-LEVEL resume: the Sandbox is now at
-          # replicas 0 with the claim released (from (e)). Scaling back to
-          # replicas 1 RE-ACTIVATES it: the facade re-creates the bridged claim
-          # via the same warm-pool fast path as create. The in-VM resume tail
-          # (snapshot load + resume + guest-ready) is the #18 bare-metal boundary
-          # and is NOT asserted here.
+          # (f) operatingMode Running->Suspended->Running is an OBJECT-LEVEL resume:
+          # the Sandbox is now Suspended with the claim released (from (e)). Setting
+          # operatingMode back to Running RE-ACTIVATES it: the facade re-creates the
+          # bridged claim via the same warm-pool fast path as create. The in-VM
+          # resume tail (snapshot load + resume + guest-ready) is proven on the
+          # cluster-facade-conformance-e2e job, not here.
           kubectl -n default patch sandbox.agents.x-k8s.io hello-world --type=merge \
-            -p '{"spec":{"replicas":1}}'
+            -p '{"spec":{"operatingMode":"Running"}}'
           resumed=0
           for i in $(seq 1 30); do
             if kubectl -n default get sandbox.mitos.run hello-world >/dev/null 2>&1; then
               resumed=1
               break
             fi
-            echo "  [${i}/30] waiting for the replicas-1 resume to re-activate the bridged claim"
+            echo "  [${i}/30] waiting for the operatingMode=Running resume to re-activate the bridged claim"
             sleep 2
           done
           if [ "$resumed" -ne 1 ]; then
-            echo "FACADE-CONFORMANCE: replicas 1->0->1 did not re-activate the bridged claim"
+            echo "FACADE-CONFORMANCE: operatingMode Running->Suspended->Running did not re-activate the bridged claim"
             exit 1
           fi
           owner=$(kubectl -n default get sandbox.mitos.run hello-world \
@@ -2238,19 +2287,19 @@ jobs:
             echo "FACADE-CONFORMANCE: re-activated claim owner = '$owner', want Sandbox/hello-world"
             exit 1
           fi
-          echo "PASS (f): replicas 1->0->1 re-activates the run-path object (object-level resume; in-VM tail is the #18 bare-metal boundary)"
-          echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is the #18 bare-metal boundary"
+          echo "PASS (f): operatingMode Running->Suspended->Running re-activates the run-path object (object-level resume; in-VM tail proven on cluster-facade-conformance-e2e)"
+          echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is proven on cluster-facade-conformance-e2e"
       - name: Apply the upstream extension example manifests UNCHANGED
         # Apply their extension examples verbatim: a SandboxTemplate, a
         # SandboxWarmPool (replicas 1, referencing that template), and a
-        # SandboxClaim (default warmpool policy, referencing that template). A
+        # SandboxClaim (v1beta1 warmPoolRef pointing at that warm pool). A
         # rejection here is a CONFORMANCE failure (their manifest is not admitted
         # by the upstream extension CRDs we installed).
         run: |
           set -euo pipefail
           kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxtemplate.yaml
           kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxwarmpool.yaml
-          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxclaim.yaml
+          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandbox-claim.yaml
           echo "extension examples applied unchanged"
       - name: Extension conformance assertions (object level)
         # Object-level facts for the extension mappings: their SandboxTemplate
@@ -2311,9 +2360,10 @@ jobs:
           fi
           echo "PASS (h): their SandboxWarmPool maps to our pool at replicas 1 (template $tref)"
 
-          # (i) their SandboxClaim binds our Sandbox from the template-matching pool
-          # (default warmpool policy), with the owner reference + the bridge
-          # annotations.
+          # (i) their SandboxClaim binds our Sandbox from the pool named by
+          # spec.warmPoolRef (v0.5.0 dropped the v1alpha1 warmpool policy; a claim
+          # now references a SandboxWarmPool by name directly), with the owner
+          # reference + the mitos.run/pool bridge annotation.
           got_claim=0
           for i in $(seq 1 30); do
             if kubectl -n default get sandbox.mitos.run my-secure-sandbox >/dev/null 2>&1; then
@@ -2329,17 +2379,11 @@ jobs:
           fi
           bound_pool=$(kubectl -n default get sandbox.mitos.run my-secure-sandbox \
             -o jsonpath='{.spec.source.poolRef.name}')
-          policy=$(kubectl -n default get sandbox.mitos.run my-secure-sandbox \
-            -o jsonpath='{.metadata.annotations.mitos\.run/warmpool-policy}')
           if [ "$bound_pool" != "sandboxwarmpool-example" ]; then
             echo "FACADE-CONFORMANCE: our claim poolRef = '$bound_pool', want sandboxwarmpool-example"
             exit 1
           fi
-          if [ "$policy" != "default" ]; then
-            echo "FACADE-CONFORMANCE: our claim warmpool-policy = '$policy', want default"
-            exit 1
-          fi
-          echo "PASS (i): their SandboxClaim binds our Sandbox from the template-matching pool (policy=$policy pool=$bound_pool)"
+          echo "PASS (i): their SandboxClaim binds our Sandbox from the warmPoolRef pool (pool=$bound_pool)"
 
           # (j) deleting their SandboxClaim GCs our Sandbox (owner-reference cascade).
           kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox

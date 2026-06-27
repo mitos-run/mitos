@@ -66,3 +66,69 @@ updates:
         update-types:
           - minor
           - patch
+  # Go SDK is its own module (github.com/mitos-run/mitos/sdk/go); the root gomod
+  # entry above does not see it.
+  - package-ecosystem: gomod
+    directory: /sdk/go
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+    groups:
+      go-sdk-minor-patch:
+        update-types:
+          - minor
+          - patch
+  # Rust guest agent: PID 1 inside the VM and a security-sensitive path per
+  # docs/threat-model.md, so its crates must stay watched.
+  - package-ecosystem: cargo
+    directory: /guest/agent-rs
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+    groups:
+      guest-agent-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: cargo
+    directory: /sdk/rust
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+    groups:
+      rust-sdk-minor-patch:
+        update-types:
+          - minor
+          - patch
+  # Console SPA pnpm workspace; the lockfile and workspace root are at /web, so
+  # this one entry covers web/app and web/packages/*.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+    groups:
+      console-web-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: maven
+    directory: /sdk/java
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+    groups:
+      java-sdk-minor-patch:
+        update-types:
+          - minor
+          - patch

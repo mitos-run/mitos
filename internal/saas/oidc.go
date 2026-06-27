@@ -36,13 +36,13 @@ type IDTokenVerifier interface {
 type LoginManager struct {
 	verifier IDTokenVerifier
 	accounts *AccountService
-	sessions *SessionStore
+	sessions Sessions
 	newToken func() string
 }
 
 // NewLoginManager builds a LoginManager. newToken mints an opaque session token
 // (random in production; deterministic in tests).
-func NewLoginManager(v IDTokenVerifier, accounts *AccountService, sessions *SessionStore, newToken func() string) *LoginManager {
+func NewLoginManager(v IDTokenVerifier, accounts *AccountService, sessions Sessions, newToken func() string) *LoginManager {
 	return &LoginManager{verifier: v, accounts: accounts, sessions: sessions, newToken: newToken}
 }
 
