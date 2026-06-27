@@ -15,7 +15,9 @@ skips with a clear log.
 | Artifact | Registry | Workflow | Trigger |
 | --- | --- | --- | --- |
 | Container images (controller, forkd, husk-stub, kvm-device-plugin) | ghcr.io/mitos-run, cosign-signed, SBOM-attested | `.github/workflows/publish.yaml` | `v*` tag push, or manual dispatch with a tag input |
-| CLI (`mitos`): binaries, archives, checksums, deb/rpm, Homebrew cask | GitHub Releases plus the Homebrew tap | `.github/workflows/release.yaml` (goreleaser) | `v*` tag push |
+| CLI (`mitos`): binaries, archives, checksums, deb/rpm, Homebrew cask | GitHub Releases plus the Homebrew tap | `.github/workflows/release.yaml` (goreleaser) | `v*` tag push, or manual dispatch with a `ref` input |
+| kubectl plugin (`kubectl mitos`) | krew-index | `.github/workflows/krew.yaml` (`.krew.yaml` template) | `release: published`, or manual dispatch ON the tag ref |
+| OLM operator bundle | OperatorHub.io (`k8s-operatorhub/community-operators`) | `.github/workflows/operator-release.yaml` | `release: published`, or manual dispatch with `version`/`previous` inputs |
 | Python SDK (dist `mitos-run`, import `mitos`) | PyPI | `.github/workflows/publish-sdks.yaml` | version bump in `sdk/python/pyproject.toml` merged to main |
 | TypeScript SDK (`@mitos/sdk`) | npm | `.github/workflows/publish-sdks.yaml` | version bump in `sdk/typescript/package.json` merged to main |
 | Ruby SDK (`mitos`) | RubyGems | `.github/workflows/publish-sdks.yaml` | version bump in `sdk/ruby/lib/mitos/version.rb` merged to main |
@@ -148,18 +150,59 @@ a short-lived token (its `token` output is passed to `cargo publish` via
 `CARGO_REGISTRY_TOKEN`) and revokes it after the job. No `CARGO_REGISTRY_TOKEN`
 secret is stored.
 
-## Cutting an image or CLI release
+## Cutting a release (images, CLI, krew, operator)
 
-Image and CLI releases follow the release-please flow:
+release-please opens and lands a `chore(main): release X` PR, then tags the
+commit `vX` and publishes a GitHub release for it. From there the four
+release-driven channels publish.
 
-1. release-please opens and lands a `chore(main): release X` PR and tags the
-   commit `vX`.
-2. The `v*` tag drives `release.yaml` (goreleaser builds the CLI binaries,
-   archives, checksums, deb/rpm, and, when `HOMEBREW_TAP_TOKEN` is present, the
-   Homebrew cask).
-3. The signed images are published by dispatching `publish.yaml` with the tag
-   input (the release-please tag push does not auto-trigger `on: push: tags`).
+### The `RELEASE_PLEASE_TOKEN` is what makes the cascade work
 
-The image and CLI maintainer setup (the `HOMEBREW_TAP_TOKEN` and the GHCR write
-token) is documented inline in those two workflows and in
-[docs/install.md](install.md).
+GitHub deliberately blocks events created with the default `GITHUB_TOKEN` (a tag
+push, a published release) from triggering other workflows, to avoid recursive
+runs. release-please uses whatever token it is given:
+
+- With `RELEASE_PLEASE_TOKEN` set (a PAT or GitHub App token with `contents:write`
+  and `workflow`), the tag and release events release-please creates DO cascade,
+  so `publish.yaml` (images, on the `v*` tag), `release.yaml` (CLI, on the `v*`
+  tag), `krew.yaml` and `operator-release.yaml` (both on `release: published`) all
+  fire automatically. This is the intended path.
+- Without it, release-please falls back to `GITHUB_TOKEN`, none of those
+  downstream workflows fire on their own, and only the explicit dispatch step
+  inside `release-please.yml` publishes the images. The CLI, krew, and operator
+  then never publish until dispatched by hand. Set the token.
+
+### Required release secrets
+
+| Secret | Needed for | Scopes / notes |
+| --- | --- | --- |
+| `RELEASE_PLEASE_TOKEN` | the whole release cascade (images, CLI, krew, operator) | classic PAT `repo` + `workflow`, or a GitHub App token with `contents:write` + `workflow`. Without it nothing downstream auto-publishes. |
+| `COMMUNITY_OPERATORS_TOKEN` | the OperatorHub PR to `k8s-operatorhub/community-operators` | classic PAT `repo` AND `workflow`. The `workflow` scope is REQUIRED: the PR branch is based on community-operators `main`, which carries `.github/workflows/*`, and GitHub refuses a PAT push touching workflow files without it. The token's account owns the fork the PR comes from. |
+| `HOMEBREW_TAP_TOKEN` | the Homebrew cask in `release.yaml` | token scoped to `mitos-run/homebrew-tap`. Optional: when absent the CLI release still succeeds and skips the cask. |
+| GHCR write token | image push in `publish.yaml` | documented inline in that workflow; falls back to `GITHUB_TOKEN`. |
+
+OperatorHub also needs a one-time fork of `k8s-operatorhub/community-operators`
+under the `COMMUNITY_OPERATORS_TOKEN` account; the workflow creates it on first
+run. New images push to GHCR private by default, so making each new image package
+public is a one-time manual step. See [docs/distribution.md](distribution.md),
+[docs/operatorhub.md](operatorhub.md), and [docs/krew.md](krew.md) for the
+per-channel runbooks, and [docs/install.md](install.md) for the install side.
+
+### Manual backfill
+
+When a release was cut before a channel was wired up (or a channel run failed),
+backfill an existing tag with these dispatches:
+
+| Channel | Command |
+| --- | --- |
+| Images | `gh workflow run publish.yaml -f tag=vX.Y.Z -f ref=vX.Y.Z` |
+| CLI | `gh workflow run release.yaml -f ref=vX.Y.Z` |
+| krew | `gh workflow run krew.yaml --ref vX.Y.Z -f tag=vX.Y.Z` |
+| OperatorHub | `gh workflow run operator-release.yaml -f version=X.Y.Z -f previous=<last published>` |
+
+The krew backfill MUST dispatch ON the tag ref (`--ref vX.Y.Z`), not just pass the
+tag input: the krew-release-bot reads `GITHUB_REF` and requires a `refs/tags/...`
+ref, and a step-level env override does not reach the container action. Because
+the bot reads `.krew.yaml` from the dispatched ref, a krew template fix only takes
+effect for tags that carry it; krew-index tracks the latest version, so an older
+tag that cannot be backfilled is superseded by the next release.
