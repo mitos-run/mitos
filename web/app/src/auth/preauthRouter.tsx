@@ -1,6 +1,6 @@
 // Pre-auth route tree: mounted by App when capabilities returns 401.
 // No AppShell - each route uses a minimal centered layout instead.
-// /login, /signup, /verify are placeholders; real pages land in later tasks.
+// /login uses the real Login page; /signup and /verify are placeholders.
 import {
   createRootRoute,
   createRoute,
@@ -8,6 +8,7 @@ import {
   Outlet,
   Navigate,
 } from '@tanstack/react-router'
+import { Login } from './Login'
 
 function PreAuthShell() {
   return (
@@ -24,15 +25,6 @@ function PreAuthShell() {
     >
       <Outlet />
     </main>
-  )
-}
-
-function LoginPlaceholder() {
-  return (
-    <div style={{ textAlign: 'center' }}>
-      <h1 style={{ marginBottom: 'var(--space-4)' }}>Sign in to Mitos</h1>
-      <button type="button">Continue with GitHub</button>
-    </div>
   )
 }
 
@@ -58,7 +50,7 @@ export function createPreAuthRouter(initialPath?: string) {
   const loginRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/login',
-    component: LoginPlaceholder,
+    component: Login,
   })
 
   const signupRoute = createRoute({
