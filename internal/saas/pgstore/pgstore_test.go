@@ -25,6 +25,22 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
+// truncateTables truncates the named tables so each test starts from a clean
+// slate. It opens its own short-lived pool so callers need not have one yet.
+func truncateTables(t *testing.T, dsn string, tables ...string) {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	for _, tbl := range tables {
+		if _, err := pool.Exec(context.Background(), "TRUNCATE "+tbl+" RESTART IDENTITY CASCADE"); err != nil {
+			t.Fatalf("truncate %s: %v", tbl, err)
+		}
+	}
+}
+
 // truncateAll clears every data table so each contract subtest starts from a
 // clean slate, sharing one migrated database. schema_migrations is left intact.
 func truncateAll(t *testing.T, dsn string) {
