@@ -1,6 +1,7 @@
 // Command mitos is the command-line interface for snapshot-fork sandboxes.
 // It drives the sandbox lifecycle (create, exec, file IO, fork, terminate, list)
-// against a Kubernetes cluster, and brings a local kind dev cluster up or down.
+// against a Kubernetes cluster OR the hosted mitos.run gateway, and brings a
+// local kind dev cluster up or down.
 //
 // Usage:
 //
@@ -8,9 +9,13 @@
 //	mitos sandbox create|ls|exec|fork|terminate ...
 //	mitos dev up|down
 //
-// The cluster connection is resolved from the standard kubeconfig (KUBECONFIG,
-// --kubeconfig, or in-cluster). The sandbox API bearer token is read from the
-// per-sandbox Secret at request time and is never logged.
+// Hosted mode: set MITOS_API_KEY (or pass --api-key) to route sandbox verbs
+// to the hosted gateway instead of a cluster. MITOS_BASE_URL (or --server)
+// overrides the default endpoint. The api key value is NEVER logged.
+//
+// Cluster mode: the connection is resolved from the standard kubeconfig
+// (KUBECONFIG, --kubeconfig, or in-cluster). The sandbox API bearer token is
+// read from the per-sandbox Secret at request time and is never logged.
 package main
 
 import (
@@ -33,10 +38,11 @@ func main() {
 func run(args []string) int {
 	ctx := context.Background()
 
-	// Global flags may precede the subcommand: --namespace and --pool. Parse
-	// them out manually so they can appear before the subcommand without the
-	// stdlib flag parser swallowing the subcommand's own flags.
-	namespace, pool, rest := parseGlobalFlags(args)
+	// Global flags may precede the subcommand: --namespace, --pool, --api-key,
+	// and --server. Parse them out manually so they can appear before the
+	// subcommand without the stdlib flag parser swallowing the subcommand's own
+	// flags.
+	namespace, pool, apiKey, serverURL, rest := parseGlobalFlags(args)
 
 	if len(rest) == 0 {
 		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
@@ -75,6 +81,17 @@ func run(args []string) int {
 		return agentcli.Run(ctx, rest, withLocalAuth(nil), os.Stdout, os.Stderr)
 	}
 
+	// Hosted-mode detection: if an API key is present (flag or env) route sandbox
+	// verbs to the hosted gateway. A --server / MITOS_BASE_URL pointing at a
+	// non-local URL is also enough to trigger hosted mode (e.g. targeting a
+	// self-hosted sandbox-server at a public hostname without a kubeconfig).
+	// The api key VALUE is never logged.
+	if resolvedKey, resolvedURL := resolveHostedCreds(apiKey, serverURL); resolvedKey != "" || resolvedURL != "" {
+		backend := agentcli.NewHostedBackend(resolvedURL, resolvedKey, nil)
+		rest = applyDefaultPool(rest, pool)
+		return agentcli.Run(ctx, rest, backend, os.Stdout, os.Stderr)
+	}
+
 	backend, err := buildBackend(namespace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -90,10 +107,38 @@ func run(args []string) int {
 	return agentcli.Run(ctx, rest, backend, os.Stdout, os.Stderr)
 }
 
-// parseGlobalFlags extracts a leading --namespace/-n and --pool from args,
-// returning them plus the remaining args (the subcommand and its arguments).
-// Only flags that appear before the first non-flag token are consumed.
-func parseGlobalFlags(args []string) (namespace, pool string, rest []string) {
+// resolveHostedCreds returns the effective api key and base URL for hosted mode,
+// applying the precedence: flag > env. A blank apiKey and blank serverURL from
+// flags means fall back to the environment. The function returns ("", "") when
+// neither an api key nor a non-local server URL is present, signaling that the
+// caller should fall through to cluster mode. The key VALUE is never logged.
+func resolveHostedCreds(flagKey, flagURL string) (apiKey, baseURL string) {
+	// Resolve base URL: flag wins over env.
+	baseURL = flagURL
+	if baseURL == "" {
+		baseURL = os.Getenv("MITOS_BASE_URL")
+	}
+
+	// Resolve api key: flag wins over env.
+	apiKey = flagKey
+	if apiKey == "" {
+		apiKey = os.Getenv("MITOS_API_KEY")
+	}
+
+	// No key and no (non-local) server URL: cluster mode.
+	if apiKey == "" && !agentcli.IsHostedURL(baseURL) {
+		return "", ""
+	}
+
+	return apiKey, baseURL
+}
+
+// parseGlobalFlags extracts leading --namespace/-n, --pool, --api-key, and
+// --server from args, returning them plus the remaining args (the subcommand and
+// its arguments). Only flags that appear before the first non-flag token are
+// consumed. The api key value is returned as-is and MUST NOT be logged by the
+// caller.
+func parseGlobalFlags(args []string) (namespace, pool, apiKey, serverURL string, rest []string) {
 	i := 0
 	for i < len(args) {
 		switch args[i] {
@@ -111,11 +156,25 @@ func parseGlobalFlags(args []string) (namespace, pool string, rest []string) {
 				continue
 			}
 			i++
+		case "--api-key":
+			if i+1 < len(args) {
+				apiKey = args[i+1]
+				i += 2
+				continue
+			}
+			i++
+		case "--server":
+			if i+1 < len(args) {
+				serverURL = args[i+1]
+				i += 2
+				continue
+			}
+			i++
 		default:
-			return namespace, pool, args[i:]
+			return namespace, pool, apiKey, serverURL, args[i:]
 		}
 	}
-	return namespace, pool, args[i:]
+	return namespace, pool, apiKey, serverURL, args[i:]
 }
 
 // applyDefaultPool injects a --pool flag for the create-style subcommands when a
