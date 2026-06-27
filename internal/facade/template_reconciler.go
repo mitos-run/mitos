@@ -36,7 +36,7 @@ const (
 )
 
 // SandboxTemplateReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate onto our consolidated
+// extensions.agents.x-k8s.io/v1beta1 SandboxTemplate onto our consolidated
 // mitos.run/v1 SandboxPool with an inline spec.template (ADR 0007 folded the
 // standalone mitos.run SandboxTemplate kind into the pool's inline template). It
 // owns exactly one of our SandboxPool objects per upstream template (same name +

@@ -152,6 +152,10 @@ func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
 	if got.Status.ServiceFQDN != "facade-ready.default.svc.cluster.local" {
 		t.Fatalf("serviceFQDN = %q, want facade-ready.default.svc.cluster.local", got.Status.ServiceFQDN)
 	}
+	// A Running, Ready sandbox must NOT report Suspended=True.
+	if susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended)); susp != nil && susp.Status == metav1.ConditionTrue {
+		t.Fatalf("Suspended condition = True on a Running/Ready sandbox, want False/absent")
+	}
 }
 
 // TestFacadeSuspendedTerminatesClaim: setting a Sandbox to operatingMode
@@ -203,7 +207,9 @@ func driveClaimReady(t *testing.T, name string) {
 	eventually(t, "facade mirrors Ready + endpoint for "+name, func() bool {
 		got := getSandbox(t, name)
 		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionReady))
+		susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
 		return cond != nil && cond.Status == metav1.ConditionTrue &&
+			(susp == nil || susp.Status == metav1.ConditionFalse) &&
 			got.Status.ServiceFQDN != "" && len(got.Status.PodIPs) == 1
 	})
 }

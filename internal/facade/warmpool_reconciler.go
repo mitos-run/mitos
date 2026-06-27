@@ -16,7 +16,7 @@ import (
 )
 
 // SandboxWarmPoolReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our consolidated
+// extensions.agents.x-k8s.io/v1beta1 SandboxWarmPool onto our consolidated
 // mitos.run/v1 SandboxPool. It owns exactly one of our SandboxPool objects per
 // upstream warm pool (same name + namespace, owner-referenced for GC), setting
 // spec.warm.min from their spec.replicas (re-read EVERY reconcile so an HPA that
