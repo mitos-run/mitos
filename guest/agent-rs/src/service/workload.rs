@@ -90,7 +90,12 @@ pub async fn await_http_ready(
 ) -> Result<(), String> {
     let expect = if expect == 0 { 200 } else { expect };
     let path = if path.is_empty() { "/" } else { path };
-    let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    // HTTP/1.1, not 1.0: some servers (for example Chromium's DevTools endpoint,
+    // the readiness target for a headless-browser workload) reject HTTP/1.0 with
+    // "Cannot handle request with protocol: HTTP/1.0" and never return 200, so an
+    // HTTP/1.0 probe would time out against a workload that is in fact listening.
+    // Connection: close keeps the single-read response handling below valid.
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     let want = format!(" {expect} ");
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -164,6 +169,32 @@ mod tests {
         });
         let r = await_http_ready(port, "/", 200, Duration::from_secs(5)).await;
         assert!(r.is_ok(), "ready gate should pass once the server listens: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn await_http_ready_probes_with_http_1_1() {
+        // The probe must speak HTTP/1.1: servers like Chromium's DevTools endpoint
+        // reject HTTP/1.0 and never return 200, so an HTTP/1.0 probe would time out
+        // against a workload that is genuinely listening. This server returns 200
+        // only for an HTTP/1.1 request line and closes (mimicking that contract).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                use std::io::{Read, Write};
+                let mut s = s.unwrap();
+                let mut scratch = [0u8; 256];
+                let n = s.read(&mut scratch).unwrap_or(0);
+                let req = String::from_utf8_lossy(&scratch[..n]);
+                if req.contains("HTTP/1.1") {
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                } else {
+                    let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                }
+            }
+        });
+        let r = await_http_ready(port, "/", 200, Duration::from_secs(5)).await;
+        assert!(r.is_ok(), "ready gate must use HTTP/1.1 so a 1.1-only server returns 200: {r:?}");
     }
 
     #[tokio::test]

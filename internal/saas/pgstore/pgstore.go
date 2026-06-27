@@ -65,6 +65,10 @@ func (s *PgStore) Close() {
 	}
 }
 
+// Pool returns the underlying connection pool. Other stores constructed from
+// the same Postgres connection (e.g. PgCreditLedger) use it to share the pool.
+func (s *PgStore) Pool() *pgxpool.Pool { return s.pool }
+
 // redact guards against a driver error ever carrying the DSN. pgx errors do not
 // embed the DSN, but this keeps the guarantee explicit and is covered by a test.
 func redact(err error) error {

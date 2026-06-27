@@ -1,6 +1,15 @@
 // Thin typed client over the org-scoped BFF (cmd/console). The server enforces
 // org isolation and capability gating; this client is a dumb fetch wrapper.
 
+// Thrown when the server returns HTTP 401 (no session). Callers that need to
+// distinguish unauthenticated from other errors can check instanceof.
+export class UnauthorizedError extends Error {
+  constructor(path: string) {
+    super(`${path}: 401 Unauthorized`)
+    this.name = 'UnauthorizedError'
+  }
+}
+
 export type Capabilities = {
   edition: 'community' | 'hosted'
   billing: boolean
@@ -119,8 +128,24 @@ export type SessionView = {
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
+  if (r.status === 401) throw new UnauthorizedError(path)
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
   return (await r.json()) as T
+}
+
+// Generic POST helper mirroring get<T>. Returns the parsed JSON body, or null
+// when the server replies with no content (e.g. 202 Accepted with empty body).
+export async function post<T>(path: string, body: unknown): Promise<T | null> {
+  const r = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (r.status === 401) throw new UnauthorizedError(path)
+  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  const text = await r.text()
+  return text ? (JSON.parse(text) as T) : null
 }
 
 export const api = {

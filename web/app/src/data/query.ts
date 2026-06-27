@@ -2,7 +2,7 @@
 // gating decision reads from. Stale-while-revalidate by default so navigation
 // feels instant; the server remains the source of truth for capabilities.
 import { QueryClient, useQuery } from '@tanstack/react-query'
-import { api, type Capabilities } from '../api'
+import { api, type Capabilities, UnauthorizedError } from '../api'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -19,5 +19,6 @@ export function useCapabilities() {
     queryKey: ['capabilities'],
     queryFn: () => api.capabilities(),
     staleTime: Infinity, // capabilities change only on redeploy
+    retry: (_count, err) => !(err instanceof UnauthorizedError),
   })
 }

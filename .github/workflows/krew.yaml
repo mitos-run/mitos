@@ -50,10 +50,10 @@ jobs:
       # workflow_dispatch input on a manual run.
       TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: Build and package
@@ -89,7 +89,7 @@ jobs:
     needs: release-assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Update the krew-index PR
         # The bot requires GITHUB_REF to be a tag ref. A release event already
         # satisfies that; to backfill an existing tag, dispatch this workflow ON
@@ -97,4 +97,4 @@ jobs:
         #   gh workflow run krew.yaml --ref <tag> -f tag=<tag>
         # A step-level env override does NOT work here: the runner injects the
         # reserved GITHUB_REF into the container action with its own value.
-        uses: rajatjindal/krew-release-bot@v0.0.46
+        uses: rajatjindal/krew-release-bot@df3eb197549e3568be8b4767eec31c5e8e8e6ad8 # v0.0.46

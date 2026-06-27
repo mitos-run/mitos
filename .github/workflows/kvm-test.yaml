@@ -45,11 +45,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least-privilege default: jobs get read-only GITHUB_TOKEN (Scorecard TokenPermissions).
+permissions:
+  contents: read
+
 jobs:
   firecracker-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Check KVM availability
         run: |
@@ -115,7 +119,7 @@ jobs:
 
           ls -lh /tmp/mitos-test/
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
 
@@ -1831,7 +1835,7 @@ jobs:
       # artifact for the regenerated-every-run distributions.
       - name: Upload bench JSON artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bench-results
           path: |
@@ -1989,7 +1993,7 @@ jobs:
 
       - name: Upload metering report artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: metering-report
           path: /tmp/metering.json
@@ -2185,7 +2189,7 @@ jobs:
 
       - name: Upload husk-probe report artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: husk-probe-report
           path: /tmp/husk.json
@@ -2393,7 +2397,7 @@ jobs:
 
       - name: Upload husk-stub activation results artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: husk-stub-activation
           path: |
@@ -2643,7 +2647,7 @@ jobs:
 
       - name: Upload husk activate-correctness artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: husk-activate-correctness
           path: |
@@ -3008,7 +3012,7 @@ jobs:
 
       - name: Upload husk network-activation artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: husk-net-activation
           path: |

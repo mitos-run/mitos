@@ -3,7 +3,7 @@ package facade_test
 import (
 	"testing"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,17 +18,17 @@ import (
 
 // newSandbox builds a minimal valid upstream Sandbox: podTemplate is required,
 // so it carries a single container. The optional annotations let a test set the
-// mitos.run/pool bridge annotation.
-func newSandbox(name string, annotations map[string]string, replicas *int32) *agentsv1alpha1.Sandbox {
-	return &agentsv1alpha1.Sandbox{
+// mitos.run/pool bridge annotation. operatingMode defaults to Running (empty).
+func newSandbox(name string, annotations map[string]string, mode agentsv1beta1.SandboxOperatingMode) *agentsv1beta1.Sandbox {
+	return &agentsv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   "default",
 			Annotations: annotations,
 		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			Replicas: replicas,
-			PodTemplate: agentsv1alpha1.PodTemplate{
+		Spec: agentsv1beta1.SandboxSpec{
+			OperatingMode: mode,
+			PodTemplate: agentsv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -56,9 +56,9 @@ func getClaim(t *testing.T, name string) (*runv1.Sandbox, bool) {
 	return &claim, true
 }
 
-func getSandbox(t *testing.T, name string) *agentsv1alpha1.Sandbox {
+func getSandbox(t *testing.T, name string) *agentsv1beta1.Sandbox {
 	t.Helper()
-	var sb agentsv1alpha1.Sandbox
+	var sb agentsv1beta1.Sandbox
 	if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, &sb); err != nil {
 		t.Fatalf("get sandbox %s: %v", name, err)
 	}
@@ -69,7 +69,7 @@ func getSandbox(t *testing.T, name string) *agentsv1alpha1.Sandbox {
 // mitos.run/pool annotation drives the facade to create our SandboxClaim,
 // bound to the annotated pool, owner-referenced to the Sandbox.
 func TestFacadeCreatesClaimWithBridgeAnnotation(t *testing.T) {
-	sb := newSandbox("facade-annotated", map[string]string{facade.PoolAnnotation: "my-pool"}, nil)
+	sb := newSandbox("facade-annotated", map[string]string{facade.PoolAnnotation: "my-pool"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestFacadeCreatesClaimWithBridgeAnnotation(t *testing.T) {
 // TestFacadeUsesDefaultPoolWhenUnannotated: a Sandbox with no bridge annotation
 // binds to the facade's configured --default-pool.
 func TestFacadeUsesDefaultPoolWhenUnannotated(t *testing.T) {
-	sb := newSandbox("facade-default", nil, nil)
+	sb := newSandbox("facade-default", nil, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -119,10 +119,10 @@ func TestFacadeUsesDefaultPoolWhenUnannotated(t *testing.T) {
 }
 
 // TestFacadeMirrorsReadyIntoSandboxStatus: when our SandboxClaim reaches phase
-// Ready, the facade mirrors a Ready=True condition + replicas + serviceFQDN
+// Ready, the facade mirrors a Ready=True condition + serviceFQDN
 // into the upstream Sandbox status.
 func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
-	sb := newSandbox("facade-ready", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	sb := newSandbox("facade-ready", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -144,20 +144,25 @@ func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
 
 	eventually(t, "sandbox status mirrors Ready=True", func() bool {
 		got := getSandbox(t, "facade-ready")
-		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
-		return cond != nil && cond.Status == metav1.ConditionTrue && got.Status.Replicas == 1
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionReady))
+		return cond != nil && cond.Status == metav1.ConditionTrue
 	})
 
 	got := getSandbox(t, "facade-ready")
 	if got.Status.ServiceFQDN != "facade-ready.default.svc.cluster.local" {
 		t.Fatalf("serviceFQDN = %q, want facade-ready.default.svc.cluster.local", got.Status.ServiceFQDN)
 	}
+	// A Running, Ready sandbox must NOT report Suspended=True.
+	if susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended)); susp != nil && susp.Status == metav1.ConditionTrue {
+		t.Fatalf("Suspended condition = True on a Running/Ready sandbox, want False/absent")
+	}
 }
 
-// TestFacadeReplicasZeroTerminatesClaim: scaling a Sandbox to replicas 0
-// terminates our run-path object (deletes the SandboxClaim).
-func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
-	sb := newSandbox("facade-scale", map[string]string{facade.PoolAnnotation: "p"}, nil)
+// TestFacadeSuspendedTerminatesClaim: setting a Sandbox to operatingMode
+// Suspended terminates our run-path object (deletes the SandboxClaim) and
+// sets the Suspended condition.
+func TestFacadeSuspendedTerminatesClaim(t *testing.T) {
+	sb := newSandbox("facade-scale", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -168,22 +173,23 @@ func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
 		return ok
 	})
 
-	// Scale to zero.
-	var cur agentsv1alpha1.Sandbox
-	zero := int32(0)
+	// Set operatingMode to Suspended.
+	var cur agentsv1beta1.Sandbox
 	updateWithRetry(t, types.NamespacedName{Name: "facade-scale", Namespace: "default"}, &cur, func() {
-		cur.Spec.Replicas = &zero
+		cur.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeSuspended
 	})
 
-	eventually(t, "claim terminated on replicas 0", func() bool {
+	eventually(t, "claim terminated on Suspended", func() bool {
 		_, ok := getClaim(t, "facade-scale")
 		return !ok
 	})
 
-	eventually(t, "sandbox status reports scaled to zero", func() bool {
+	eventually(t, "sandbox status reports Suspended and Ready=False", func() bool {
 		got := getSandbox(t, "facade-scale")
-		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
-		return cond != nil && cond.Status == metav1.ConditionFalse && got.Status.Replicas == 0
+		ready := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionReady))
+		susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
+		return ready != nil && ready.Status == metav1.ConditionFalse &&
+			susp != nil && susp.Status == metav1.ConditionTrue
 	})
 }
 
@@ -200,18 +206,21 @@ func driveClaimReady(t *testing.T, name string) {
 	})
 	eventually(t, "facade mirrors Ready + endpoint for "+name, func() bool {
 		got := getSandbox(t, name)
-		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionReady))
+		susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
 		return cond != nil && cond.Status == metav1.ConditionTrue &&
-			got.Status.Replicas == 1 && got.Status.ServiceFQDN != "" && len(got.Status.PodIPs) == 1
+			(susp == nil || susp.Status == metav1.ConditionFalse) &&
+			got.Status.ServiceFQDN != "" && len(got.Status.PodIPs) == 1
 	})
 }
 
-// TestFacadePauseReleasesEndpointObservables: scaling a Sandbox to replicas 0
-// (pause) RELEASES the run path to the warm pool (deletes the bridged claim so
-// the husk pod returns dormant) and clears the conformant serving observables:
-// Status.Replicas 0, Ready False, serviceFQDN cleared, podIPs cleared.
+// TestFacadePauseReleasesEndpointObservables: setting a Sandbox to
+// operatingMode Suspended (pause) RELEASES the run path to the warm pool
+// (deletes the bridged claim so the husk pod returns dormant) and clears the
+// conformant serving observables: Ready False, serviceFQDN cleared, podIPs
+// cleared. Suspended=True is set on the status.
 func TestFacadePauseReleasesEndpointObservables(t *testing.T) {
-	sb := newSandbox("facade-pause", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	sb := newSandbox("facade-pause", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -225,11 +234,10 @@ func TestFacadePauseReleasesEndpointObservables(t *testing.T) {
 	// podIPs populated).
 	driveClaimReady(t, "facade-pause")
 
-	// Pause: replicas 0.
-	var cur agentsv1alpha1.Sandbox
-	zero := int32(0)
+	// Pause: operatingMode Suspended.
+	var cur agentsv1beta1.Sandbox
 	updateWithRetry(t, types.NamespacedName{Name: "facade-pause", Namespace: "default"}, &cur, func() {
-		cur.Spec.Replicas = &zero
+		cur.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeSuspended
 	})
 
 	eventually(t, "claim released to the warm pool on pause", func() bool {
@@ -238,18 +246,20 @@ func TestFacadePauseReleasesEndpointObservables(t *testing.T) {
 	})
 	eventually(t, "paused sandbox clears the serving observables", func() bool {
 		got := getSandbox(t, "facade-pause")
-		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
-		return cond != nil && cond.Status == metav1.ConditionFalse &&
-			got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
+		ready := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionReady))
+		susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
+		return ready != nil && ready.Status == metav1.ConditionFalse &&
+			susp != nil && susp.Status == metav1.ConditionTrue &&
+			got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
 	})
 }
 
-// TestFacadeResumeReactivates: resuming a paused Sandbox (replicas 1 after a 0)
-// RE-ACTIVATES via the warm-pool fast path: the facade re-creates the bridged
-// husk-backed claim (the same activation as create), and once the run path is
-// Ready it re-populates the serving observables.
+// TestFacadeResumeReactivates: resuming a paused Sandbox (operatingMode Running
+// after Suspended) RE-ACTIVATES via the warm-pool fast path: the facade
+// re-creates the bridged husk-backed claim (the same activation as create), and
+// once the run path is Ready it re-populates the serving observables.
 func TestFacadeResumeReactivates(t *testing.T) {
-	sb := newSandbox("facade-resume", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	sb := newSandbox("facade-resume", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
@@ -262,20 +272,18 @@ func TestFacadeResumeReactivates(t *testing.T) {
 	driveClaimReady(t, "facade-resume")
 
 	// Pause.
-	var cur agentsv1alpha1.Sandbox
-	zero := int32(0)
+	var cur agentsv1beta1.Sandbox
 	updateWithRetry(t, types.NamespacedName{Name: "facade-resume", Namespace: "default"}, &cur, func() {
-		cur.Spec.Replicas = &zero
+		cur.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeSuspended
 	})
 	eventually(t, "claim released on pause", func() bool {
 		_, ok := getClaim(t, "facade-resume")
 		return !ok
 	})
 
-	// Resume: replicas 1.
-	one := int32(1)
+	// Resume: operatingMode Running.
 	updateWithRetry(t, types.NamespacedName{Name: "facade-resume", Namespace: "default"}, &cur, func() {
-		cur.Spec.Replicas = &one
+		cur.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeRunning
 	})
 	eventually(t, "claim re-activated on resume", func() bool {
 		_, ok := getClaim(t, "facade-resume")
@@ -285,20 +293,21 @@ func TestFacadeResumeReactivates(t *testing.T) {
 	driveClaimReady(t, "facade-resume")
 }
 
-// TestFacadePauseResumeToggleStable: a 1->0->1->0 toggle is stable and
-// idempotent: each pause releases the claim + clears the observables, each
-// resume re-activates the claim, and a re-applied identical state is a no-op.
+// TestFacadePauseResumeToggleStable: a Running->Suspended->Running->Suspended
+// toggle is stable and idempotent: each Suspended releases the claim + clears
+// the observables, each Running re-activates the claim, and a re-applied
+// identical state is a no-op.
 func TestFacadePauseResumeToggleStable(t *testing.T) {
-	sb := newSandbox("facade-toggle", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	sb := newSandbox("facade-toggle", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
-	setReplicas := func(n int32) {
-		var cur agentsv1alpha1.Sandbox
+	setMode := func(mode agentsv1beta1.SandboxOperatingMode) {
+		var cur agentsv1beta1.Sandbox
 		updateWithRetry(t, types.NamespacedName{Name: "facade-toggle", Namespace: "default"}, &cur, func() {
-			cur.Spec.Replicas = &n
+			cur.Spec.OperatingMode = mode
 		})
 	}
 	claimPresent := func() bool {
@@ -309,53 +318,55 @@ func TestFacadePauseResumeToggleStable(t *testing.T) {
 		_, ok := getClaim(t, "facade-toggle")
 		return !ok
 	}
+	isSuspended := func() bool {
+		got := getSandbox(t, "facade-toggle")
+		susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
+		return susp != nil && susp.Status == metav1.ConditionTrue &&
+			got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
+	}
 
-	// 1 (create) -> claim present + Ready.
+	// Running (create) -> claim present + Ready.
 	eventually(t, "initial activation creates the claim", claimPresent)
 	driveClaimReady(t, "facade-toggle")
 
-	// -> 0 (pause): released + observables cleared.
-	setReplicas(0)
+	// -> Suspended (pause): released + observables cleared.
+	setMode(agentsv1beta1.SandboxOperatingModeSuspended)
 	eventually(t, "first pause releases the claim", claimAbsent)
-	eventually(t, "first pause clears the observables", func() bool {
-		got := getSandbox(t, "facade-toggle")
-		return got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
-	})
+	eventually(t, "first pause clears the observables", isSuspended)
 
-	// -> 1 (resume): re-activated.
-	setReplicas(1)
+	// -> Running (resume): re-activated.
+	setMode(agentsv1beta1.SandboxOperatingModeRunning)
 	eventually(t, "resume re-activates the claim", claimPresent)
 	driveClaimReady(t, "facade-toggle")
 
-	// -> 0 (pause again): released again, stable.
-	setReplicas(0)
+	// -> Suspended (pause again): released again, stable.
+	setMode(agentsv1beta1.SandboxOperatingModeSuspended)
 	eventually(t, "second pause releases the claim", claimAbsent)
-	eventually(t, "second pause clears the observables", func() bool {
-		got := getSandbox(t, "facade-toggle")
-		return got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
-	})
+	eventually(t, "second pause clears the observables", isSuspended)
 
-	// Idempotent: re-applying replicas 0 (no spec change but a forced reconcile
+	// Idempotent: re-applying Suspended (no spec change but a forced reconcile
 	// via an annotation bump) keeps the released state; the claim stays absent.
-	var nudge agentsv1alpha1.Sandbox
+	var nudge agentsv1beta1.Sandbox
 	updateWithRetry(t, types.NamespacedName{Name: "facade-toggle", Namespace: "default"}, &nudge, func() {
 		if nudge.Annotations == nil {
 			nudge.Annotations = map[string]string{}
 		}
 		nudge.Annotations["test.mitos.run/nudge"] = "1"
 	})
-	// Give the reconcile a moment, then assert the claim is still absent.
+	// Give the reconcile a moment, then assert the claim is still absent and
+	// the Suspended condition is True.
 	eventually(t, "idempotent re-reconcile keeps the claim released", claimAbsent)
 	got := getSandbox(t, "facade-toggle")
-	if got.Status.Replicas != 0 {
-		t.Fatalf("idempotent pause: Status.Replicas = %d, want 0", got.Status.Replicas)
+	susp := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1beta1.SandboxConditionSuspended))
+	if susp == nil || susp.Status != metav1.ConditionTrue {
+		t.Fatalf("idempotent pause: Suspended condition absent or not True, want True")
 	}
 }
 
 // TestFacadeDeleteTerminatesClaim: deleting a Sandbox garbage-collects our
 // SandboxClaim via the owner reference.
 func TestFacadeDeleteTerminatesClaim(t *testing.T) {
-	sb := newSandbox("facade-delete", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	sb := newSandbox("facade-delete", map[string]string{facade.PoolAnnotation: "p"}, "")
 	if err := k8sClient.Create(testCtx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}

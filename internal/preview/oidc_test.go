@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"mitos.run/mitos/internal/saas"
 )
 
@@ -32,7 +34,7 @@ type fakeOIDCExchanger struct {
 	err        error
 }
 
-func (f fakeOIDCExchanger) AuthCodeURL(state string) string {
+func (f fakeOIDCExchanger) AuthCodeURL(state string, _ ...oauth2.AuthCodeOption) string {
 	return f.authURL + "?state=" + state
 }
 

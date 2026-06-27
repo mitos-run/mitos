@@ -474,3 +474,50 @@ func TestIdempotencyReleaseAllowsRetryAfterFailure(t *testing.T) {
 		t.Fatalf("after release a retry must proceed, not stay in-flight, got %v", st)
 	}
 }
+
+func TestWorkloadFromReq(t *testing.T) {
+	if got := workloadFromReq(nil); got != nil {
+		t.Fatalf("nil req should map to nil, got %v", got)
+	}
+	w := &workloadReq{
+		Command: []string{"/usr/local/bin/start-chromium.sh"},
+		Env:     map[string]string{"FOO": "bar"},
+		Ready:   &workloadReadyReq{Port: 9222, Path: "/json/version", Expect: 200, TimeoutSeconds: 90},
+	}
+	got := workloadFromReq(w)
+	if got == nil || len(got.Command) != 1 || got.Command[0] != "/usr/local/bin/start-chromium.sh" {
+		t.Fatalf("command not mapped: %+v", got)
+	}
+	if got.Env["FOO"] != "bar" {
+		t.Fatalf("env not mapped: %+v", got.Env)
+	}
+	if got.Ready == nil || got.Ready.Port != 9222 || got.Ready.Path != "/json/version" || got.Ready.Expect != 200 || got.Ready.TimeoutSeconds != 90 {
+		t.Fatalf("ready not mapped: %+v", got.Ready)
+	}
+}
+
+func TestVMResFromReq(t *testing.T) {
+	if got := vmResFromReq(nil); got != nil {
+		t.Fatalf("nil req should map to nil, got %v", got)
+	}
+	got := vmResFromReq(&resourcesReq{VcpuCount: 2, MemSizeMib: 1024})
+	if got == nil || got.VcpuCount != 2 || got.MemSizeMib != 1024 {
+		t.Fatalf("resources not mapped: %+v", got)
+	}
+}
+
+func TestCreateTemplateReqDecodesWorkloadAndResources(t *testing.T) {
+	body := `{"id":"chrome","workload":{"command":["/usr/local/bin/start-chromium.sh"],` +
+		`"ready":{"port":9222,"path":"/json/version","expect":200,"timeout_seconds":90}},` +
+		`"resources":{"vcpu_count":2,"mem_size_mib":1024}}`
+	var req createTemplateReq
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.Workload == nil || len(req.Workload.Command) != 1 {
+		t.Fatalf("workload not decoded: %+v", req.Workload)
+	}
+	if req.Resources == nil || req.Resources.MemSizeMib != 1024 {
+		t.Fatalf("resources not decoded: %+v", req.Resources)
+	}
+}

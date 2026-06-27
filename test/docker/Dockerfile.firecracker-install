@@ -3,7 +3,7 @@
 # that Dockerfile.forkd and Dockerfile.husk-stub use, in a minimal image so the
 # test runs without the Go/Rust toolchain build. Guards #425: the image must ship
 # the jailer alongside firecracker, with matching versions.
-FROM ubuntu:22.04
+FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
 
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends ca-certificates curl && \

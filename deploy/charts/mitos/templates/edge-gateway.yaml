@@ -1,0 +1,198 @@
+{{- /*
+Cilium Gateway-API edge resources for mitos.run (WS2 front-door, issue #WS2).
+Gated by edge.enabled (default false). Uses the NEW values key "edge" to avoid
+collision with the existing gateway.yaml (cmd/gateway API front door, gated by
+gateway.enabled).
+
+Resources rendered when edge.enabled is true:
+  Gateway               - cilium GatewayClass, HTTP (:80) + HTTPS (:443) listeners
+  Certificate           - cert-manager Certificate for mitos.run + www.mitos.run
+  HTTPRoute (redirect)  - HTTP -> HTTPS 301 for mitos.run + www.mitos.run
+  HTTPRoute (main)      - HTTPS -> mitos-frontdoor with security response headers
+  CiliumNetworkPolicy   - default-deny on frontdoor pods; ingress from Cilium
+                          ingress entity; egress to DNS, marketing, console
+
+Route and Service are in the same namespace; no ReferenceGrant is needed.
+The live Gateway, DNS delegation, and TLS handshake are verified on the cluster
+via the paperclip deploy, NOT by this local helm template lint.
+*/}}
+{{- if .Values.edge.enabled }}
+{{- $hostname := .Values.edge.hostname | default "mitos.run" }}
+{{- $tlsSecret := .Values.edge.tls.secretName | default "mitos-run-tls" }}
+{{- $issuerName := .Values.edge.tls.issuerRef.name | default "letsencrypt-prod" }}
+{{- $issuerKind := .Values.edge.tls.issuerRef.kind | default "ClusterIssuer" }}
+{{- $ns := include "mitos.namespace" . }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mitos-edge
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  gatewayClassName: {{ .Values.edge.gatewayClassName | default "cilium" }}
+  listeners:
+    # HTTP listener: accepts plain HTTP for the redirect route only.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # HTTPS listener: TLS-terminate with the cert-manager-issued certificate.
+    # No hostname pin here: the listener accepts TLS for any SNI covered by the
+    # certificate (mitos.run and www.mitos.run). A listener hostname would filter
+    # at the SNI level and refuse www connections before the HTTPRoute is consulted.
+    # The HTTPRoute hostnames field governs which requests receive a response.
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ $tlsSecret | quote }}
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# cert-manager Certificate: issued via letsencrypt-prod ClusterIssuer (HTTP01
+# solver routed through the Cilium Gateway). Covers both apex and www so a
+# single TLS secret satisfies both hostnames at the listener.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mitos-run-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  secretName: {{ $tlsSecret | quote }}
+  dnsNames:
+    - {{ $hostname | quote }}
+    - {{ printf "www.%s" $hostname | quote }}
+  issuerRef:
+    name: {{ $issuerName | quote }}
+    kind: {{ $issuerKind | quote }}
+---
+# HTTPRoute: redirect all plain-HTTP traffic on mitos.run and www.mitos.run to
+# HTTPS before any content is served. This route binds to the HTTP listener
+# only (sectionName: http) so it never receives TLS-terminated traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mitos-edge-redirect
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  parentRefs:
+    - name: mitos-edge
+      sectionName: http
+  hostnames:
+    - {{ $hostname | quote }}
+    - {{ printf "www.%s" $hostname | quote }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# HTTPRoute: HTTPS traffic from mitos.run and www.mitos.run -> mitos-frontdoor.
+# Security response headers are injected via ResponseHeaderModifier:
+#   HSTS: max-age 1 year, subdomains included.
+#   Content-Security-Policy: frame-ancestors 'none' (no embedding).
+#   X-Frame-Options: DENY (legacy clickjacking defense).
+# external-dns watches this HTTPRoute to provision the DNS records.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mitos-edge-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  parentRefs:
+    - name: mitos-edge
+      sectionName: https
+  hostnames:
+    - {{ $hostname | quote }}
+    - {{ printf "www.%s" $hostname | quote }}
+  rules:
+    - backendRefs:
+        - name: mitos-frontdoor
+          port: 80
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+              - name: Content-Security-Policy
+                value: "frame-ancestors 'none'"
+              - name: X-Frame-Options
+                value: "DENY"
+---
+# CiliumNetworkPolicy: default-deny on mitos-frontdoor pods.
+# Ingress: only the Cilium Gateway (the "ingress" Cilium entity) may reach
+# the frontdoor on port 8080. No other pod can initiate a connection to it.
+# Egress: scoped to kube-dns (UDP+TCP 53), the marketing pod (port 80), and
+# the console pod (port 8080 - its containerPort). Route and Service are in
+# the same namespace so no ReferenceGrant is required.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mitos-frontdoor
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "frontdoor") | nindent 6 }}
+  ingress:
+    # Allow traffic sourced by the Cilium Gateway BPF datapath (the "ingress"
+    # reserved entity). This is the correct Cilium primitive for Gateway-API
+    # traffic; it does NOT mean Kubernetes Ingress resources.
+    - fromEntities:
+        - ingress
+  egress:
+    # DNS: kube-dns in kube-system on both UDP and TCP 53.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Marketing static site (port 80 - nginx containerPort).
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: {{ $ns }}
+            app.kubernetes.io/name: {{ include "mitos.name" . }}
+            app.kubernetes.io/component: marketing
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    # Console service (port 8080 - console containerPort; session resolve +
+    # page serving).
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: {{ $ns }}
+            app.kubernetes.io/name: {{ include "mitos.name" . }}
+            app.kubernetes.io/component: console
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}

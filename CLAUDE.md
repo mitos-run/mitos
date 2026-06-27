@@ -23,6 +23,9 @@ These outrank convenience:
 3. **Honest Kubernetes semantics.** Sandboxes are not pods; never imply pod-scoped mechanisms (NetworkPolicy, ResourceQuota, PSA) govern them.
 4. **Boring failure behavior.** Every component defines what happens on crash, node loss, slow etcd, and capacity exhaustion.
 5. **Bare metal is a first-class target.**
+6. **Experience is DNA.** Every user-facing surface follows the journey rules:
+   no dead ends, simple surface with depth one click down, intent-shaped aha.
+   See docs/superpowers/specs/2026-06-27-hosted-launch-journey-design.md.
 
 ## Commands
 
@@ -100,6 +103,8 @@ Jobs:
 - **firecracker-test** (kvm-test.yaml): real Firecracker snapshot/restore plus guest agent exec over vsock on KVM runners.
 
 All eight are required checks on main; main requires branches to be up to date.
+
+The self-hosted real-KVM-cluster workflow (cluster-e2e.yaml, push / `ci-cluster`-labeled-PR triggered, not one of the eight required checks) carries the predicate-level e2e suites: `cluster-husk-e2e`, `cluster-workspace-e2e`, `cluster-husk-network-e2e`, and `cluster-facade-conformance-e2e` (the agents.x-k8s.io facade Ready predicate on a real booted VMM, issue #357). The object-level `facade-conformance` kind job in ci.yaml proves the facade bridge object-level on kind.
 
 ## Security Practices
 

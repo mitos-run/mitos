@@ -69,7 +69,9 @@ type exchanger struct {
 	idtv  *verifier
 }
 
-func (e *exchanger) AuthCodeURL(state string) string { return e.oauth.AuthCodeURL(state) }
+func (e *exchanger) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string {
+	return e.oauth.AuthCodeURL(state, opts...)
+}
 
 func (e *exchanger) Exchange(ctx context.Context, code string) (string, error) {
 	tok, err := e.oauth.Exchange(ctx, code)

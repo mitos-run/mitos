@@ -1,0 +1,105 @@
+{{- /*
+Front-door reverse proxy (cmd/frontdoor, WS2): single-origin entry point at
+mitos.run. Routes / to the marketing static site and /app + auth paths to the
+console. Resolves the active session before forwarding and injects forge-proof
+identity headers. Gated by frontdoor.enabled (default false).
+
+The resolve token (MITOS_IDENTITY_RESOLVE_TOKEN) is the shared bearer between
+this proxy and the console POST /internal/session/resolve endpoint. Its value
+is sourced from the same Secret key (resolve-token) as the expose proxy and the
+console. Secret VALUES are NEVER inlined; always via secretKeyRef.
+*/}}
+{{- if .Values.frontdoor.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-frontdoor
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontdoor
+spec:
+  replicas: {{ .Values.frontdoor.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "frontdoor") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "frontdoor") | nindent 8 }}
+    spec:
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontdoor
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.frontdoor.image) }}
+          imagePullPolicy: {{ .Values.frontdoor.image.pullPolicy }}
+          env:
+            - name: MITOS_FRONTDOOR_ADDR
+              value: ":8080"
+            {{- /*
+            In-cluster service URLs. Defaults are constructed from the release
+            namespace so single-namespace installs work without any override.
+            Override via frontdoor.marketingURL / consoleURL / sessionResolveURL
+            when the components live in a different namespace or port.
+            */}}
+            - name: MITOS_FRONTDOOR_MARKETING_URL
+              value: {{ .Values.frontdoor.marketingURL | default (printf "http://mitos-marketing.%s.svc" (include "mitos.namespace" .)) | quote }}
+            - name: MITOS_FRONTDOOR_CONSOLE_URL
+              value: {{ .Values.frontdoor.consoleURL | default (printf "http://mitos-console.%s.svc" (include "mitos.namespace" .)) | quote }}
+            - name: MITOS_FRONTDOOR_SESSION_RESOLVE_URL
+              value: {{ .Values.frontdoor.sessionResolveURL | default (printf "http://mitos-console.%s.svc/internal/session/resolve" (include "mitos.namespace" .)) | quote }}
+            {{- /*
+            Shared bearer token for POST /internal/session/resolve. Sourced from
+            the same Secret key (resolve-token) used by the expose proxy and the
+            console, so one Secret satisfies all three consumers. The value is
+            NEVER inlined; secretKeyRef ONLY.
+            */}}
+            - name: MITOS_IDENTITY_RESOLVE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.expose.secretName }}
+                  key: resolve-token
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.frontdoor.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-frontdoor
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontdoor
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "frontdoor") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

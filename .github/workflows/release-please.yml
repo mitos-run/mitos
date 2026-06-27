@@ -4,23 +4,28 @@ on:
   push:
     branches: [main]
 
+# Least-privilege default: the workflow token is read-only at the top level; the
+# release-please job below is granted only the writes it needs (Scorecard
+# TokenPermissions).
 permissions:
-  contents: write
-  pull-requests: write
-  # actions:write lets the cascade step below dispatch publish.yaml when a
-  # release is cut without a PAT configured.
-  actions: write
+  contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # actions:write lets the cascade step below dispatch publish.yaml when a
+      # release is cut without a PAT configured.
+      actions: write
     env:
       # When RELEASE_PLEASE_TOKEN (a PAT or GitHub App token) is set, the tag
       # release-please pushes triggers publish.yaml naturally, so the explicit
       # dispatch below is skipped to avoid a duplicate publish run.
       HAS_RP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN != '' }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         with:
           # A release or tag created with the default GITHUB_TOKEN does NOT

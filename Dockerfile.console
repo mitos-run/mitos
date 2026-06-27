@@ -2,7 +2,7 @@
 # Go binary, ship one static distroless image. No Node at runtime.
 
 # 1) Build the SPA bundle from the web/ pnpm workspace.
-FROM node:22-bookworm AS spa
+FROM node:22-bookworm@sha256:c601a46abb4d2ab80a9dc3da208d50d1122642d53f17a101926ace71e5a9bf1c AS spa
 WORKDIR /web
 # Corepack provisions pnpm from the "packageManager" field in web/package.json,
 # so the build uses the exact pinned pnpm (and matching lockfile semantics)
@@ -19,7 +19,7 @@ COPY web/app ./app
 RUN pnpm install --frozen-lockfile && pnpm -C app build
 
 # 2) Build the Go binary, embedding the freshly built SPA over the placeholder.
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
@@ -31,7 +31,7 @@ COPY --from=spa /web/app/dist ./cmd/console/spa/dist
 RUN CGO_ENABLED=0 go build -o console ./cmd/console/
 
 # 3) Minimal runtime.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 
 LABEL org.opencontainers.image.title="mitos-console" \
       org.opencontainers.image.description="Mitos console: the web dashboard for Mitos." \
