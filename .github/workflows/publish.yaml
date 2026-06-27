@@ -52,7 +52,7 @@ jobs:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/mitos-run/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           # On a tag push this is the tag ref; on manual workflow_dispatch check
           # out the requested tag so the build matches it. release-please pushes
@@ -61,7 +61,7 @@ jobs:
           # with the tag input.
           ref: ${{ github.event.inputs.ref || github.event.inputs.tag || github.ref }}
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ghcr.io
           # Prefer a maintainer PAT with write:packages (repo secret
@@ -73,7 +73,7 @@ jobs:
           password: ${{ secrets.GHCR_WRITE_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Image metadata (tags and labels)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -82,7 +82,7 @@ jobs:
             type=sha
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -90,7 +90,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Cosign keyless sign by digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${DIGEST}"
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: spdx-json
@@ -113,7 +113,7 @@ jobs:
             --type spdxjson \
             "${IMAGE}@${DIGEST}"
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom-${{ matrix.name }}
           path: sbom-${{ matrix.name }}.spdx.json
@@ -131,7 +131,7 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Every chart-referenced image is public and pullable
         run: |
           set -euo pipefail
