@@ -57,4 +57,4 @@ jobs:
             exit 1
           fi
           echo "Release ${TAG} cut with GITHUB_TOKEN; dispatching the signed-image publish workflow for it."
-          gh workflow run publish.yaml -f tag="${TAG}" -f ref="${TAG}"
+          gh workflow run publish.yaml --repo "${{ github.repository }}" -f tag="${TAG}" -f ref="${TAG}"
