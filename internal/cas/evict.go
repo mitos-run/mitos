@@ -29,6 +29,25 @@ func (s *Store) pinPath(d Digest) string {
 	return filepath.Join(s.root, "pins", string(d))
 }
 
+// IsPinned reports whether a manifest currently has a pin marker.
+func (s *Store) IsPinned(manifestDigest Digest) (bool, error) {
+	_, err := os.Stat(s.pinPath(manifestDigest))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat pin %s: %w", manifestDigest, err)
+}
+
+// TotalBytes returns the total on-disk size of all chunks in the store. It is
+// the exported accessor the periodic GC (internal/casgc) uses to decide how far
+// to evict.
+func (s *Store) TotalBytes() (int64, error) {
+	return s.totalChunkBytes()
+}
+
 // pinnedChunks returns the union of all chunk digests referenced by any
 // currently pinned manifest. A chunk in this set is never evicted.
 func (s *Store) pinnedChunks() (map[Digest]struct{}, error) {

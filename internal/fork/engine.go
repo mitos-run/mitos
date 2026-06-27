@@ -231,6 +231,10 @@ type Engine struct {
 	// nil disables journaling (the mock engine and the legacy test paths leave it
 	// unset; journalSandbox/unjournalSandbox are no-ops then).
 	journal *journal
+	// buildJournal records in-flight template builds so a restarted forkd can reap
+	// build-time orphans (build Firecracker + placeholder tap) leaked on an
+	// ungraceful death (#469).
+	buildJournal *buildJournal
 	// verifyPID is the PID-recycle guard startup reconcile uses to decide whether
 	// a journaled pid is still our live Firecracker (adopt) or dead/recycled
 	// (reap). nil falls back to procfsVerifier; reconcile tests inject a fake on
@@ -852,6 +856,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		memReserveBytes:      opts.MemoryReserveBytes,
 		meminfoReader:        opts.MeminfoReader,
 		journal:              newJournal(dataDir),
+		buildJournal:         newBuildJournal(dataDir),
 		verifyPID:            procfsVerifier,
 		// Per-fork rootfs CoW: clone the template rootfs to each fork's own backing
 		// through the SAME reflink owner the husk rootfs CoW uses, so a raw-forkd
@@ -874,7 +879,14 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		e.egressBytes = readEgressCounterBytes
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
-		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload)
+		// Journal the build for its duration so a forkd that dies mid-build can
+		// reap the leaked build Firecracker + placeholder tap on restart (#469);
+		// drop the record once the build returns (the deferred Kill has run).
+		defer e.unjournalBuild(id)
+		onStarted := func(pid int, js firecracker.JailerState) {
+			e.journalBuild(id, pid, js, cfg.Network != nil)
+		}
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, onStarted)
 		return err
 	}
 	e.captureGuestReady = guestgrpc.WaitReady
@@ -884,6 +896,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	// reap dead VMs' leaked artifacts and drop their records. Fail-open: a bad
 	// record never blocks startup.
 	e.reconcile()
+	// Reap build-time orphans (build Firecracker + placeholder tap) leaked by an
+	// ungraceful mid-build death; builds are never adopted (#469).
+	e.reconcileBuilds()
 	return e, nil
 }
 
@@ -2064,12 +2079,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	// in but is irrelevant: forks restore the same MAC, and each fork sits on
 	// its own /30 tap, so the MAC need not be unique on the host bridge.
 	if e.networkEnabled() {
-		placeholderID := netconf.Identity{
-			TapName:  firecracker.PlaceholderTapName,
-			GuestMAC: placeholderMAC,
-			HostIP:   placeholderHostIP,
-			GuestIP:  placeholderGuestIP,
-		}
+		placeholderID := placeholderNetIdentity()
 		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
@@ -2180,6 +2190,26 @@ func (e *Engine) DeleteTemplate(id string) error {
 	if e.encryptionEnabled() {
 		if err := e.shredTemplateContainer(id); err != nil {
 			return err
+		}
+	}
+	// Unpin the template's CAS manifest so its chunks become eligible for
+	// eviction by the GC; otherwise a deleted template's chunks stay pinned
+	// forever and the CAS grows unbounded (#464). Prefer the in-memory digest,
+	// fall back to the persisted digest file so a post-restart delete still
+	// unpins. Best-effort: a failed unpin must not block the delete.
+	if e.casStore != nil {
+		e.mu.Lock()
+		d, ok := e.templateDigests[id]
+		e.mu.Unlock()
+		if !ok {
+			if fileD, ferr := readDigestFile(e.dataDir, id); ferr == nil {
+				d, ok = fileD, true
+			}
+		}
+		if ok {
+			if err := e.casStore.Unpin(d); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: WARNING unpin template %s manifest for GC: %v\n", id, err)
+			}
 		}
 	}
 	if err := e.templateMgr.DeleteTemplate(id); err != nil {

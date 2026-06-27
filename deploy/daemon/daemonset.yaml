@@ -28,6 +28,10 @@ spec:
       # forkd makes no Kubernetes API calls (it imports no client); do not mount
       # a SA token on this high-value pod.
       automountServiceAccountToken: false
+      # forkd owns every VM, warm pool, and snapshot on its node; a kubelet
+      # eviction (e.g. node DiskPressure) drops the whole node's fork capability.
+      # Run it node-critical so it is never the pod the kubelet sheds.
+      priorityClassName: system-node-critical
       # ghcr-pull so the kubelet can pull ghcr.io/mitos-run/mitos-forkd.
       imagePullSecrets:
         - name: ghcr-pull
