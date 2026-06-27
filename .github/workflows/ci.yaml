@@ -1958,12 +1958,12 @@ jobs:
     #     on kind (Ready=False while the husk claim is Pending, since no VMM
     #     boots here); deleting the Sandbox leaves the claim owner-referenced for
     #     GC and an operatingMode=Suspended Sandbox terminates the run-path object.
-    #   - NOT asserted here (proven on facade-conformance-kvm): the in-VM Ready tail.
+    #   - NOT asserted here (proven on cluster-facade-conformance-e2e): the in-VM Ready tail.
     #     Upstream conformance predicates (PodReady / ChromeReady, the
     #     "Pod is Ready; Service Exists" status) require a RUNNING sandbox. Our
     #     run path reaches Ready only when a dormant Firecracker VMM boots inside
     #     the husk pod, which needs a KVM-capable kubelet (proven on the
-    #     facade-conformance-kvm job, not on this object-level run). Their Go e2e
+    #     cluster-facade-conformance-e2e job, not on this object-level run). Their Go e2e
     #     suite also
     #     imports their in-tree controller and asserts upstream-controller pods /
     #     services, so it is bare-metal-gated and is NOT run here; see the matrix
@@ -2236,7 +2236,7 @@ jobs:
           # operatingMode back to Running RE-ACTIVATES it: the facade re-creates the
           # bridged claim via the same warm-pool fast path as create. The in-VM
           # resume tail (snapshot load + resume + guest-ready) is proven on the
-          # facade-conformance-kvm job, not here.
+          # cluster-facade-conformance-e2e job, not here.
           kubectl -n default patch sandbox.agents.x-k8s.io hello-world --type=merge \
             -p '{"spec":{"operatingMode":"Running"}}'
           resumed=0
@@ -2258,8 +2258,8 @@ jobs:
             echo "FACADE-CONFORMANCE: re-activated claim owner = '$owner', want Sandbox/hello-world"
             exit 1
           fi
-          echo "PASS (f): operatingMode Running->Suspended->Running re-activates the run-path object (object-level resume; in-VM tail proven on facade-conformance-kvm)"
-          echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is proven on facade-conformance-kvm"
+          echo "PASS (f): operatingMode Running->Suspended->Running re-activates the run-path object (object-level resume; in-VM tail proven on cluster-facade-conformance-e2e)"
+          echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is proven on cluster-facade-conformance-e2e"
       - name: Apply the upstream extension example manifests UNCHANGED
         # Apply their extension examples verbatim: a SandboxTemplate, a
         # SandboxWarmPool (replicas 1, referencing that template), and a

@@ -100,7 +100,7 @@ trap:
   resume: after the pause releases the claim, setting `operatingMode` back to
   Running RE-ACTIVATES it (the facade re-creates the bridged sandbox). This is the
   object-level half of the pause/resume mapping; the in-VM resume tail (snapshot
-  load + resume + guest-ready) is proven on the `facade-conformance-kvm` job, not
+  load + resume + guest-ready) is proven on the `cluster-facade-conformance-e2e` job, not
   asserted here.
 
 The job then applies their three extension example manifests UNCHANGED
