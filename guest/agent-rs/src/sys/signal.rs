@@ -58,6 +58,31 @@ pub fn read_session(proc_path: &str, pid: i32) -> Option<i32> {
     after.split_whitespace().nth(3)?.parse().ok()
 }
 
+/// process_catches_sigusr2 reports whether `pid` installed a SIGUSR2 handler,
+/// read from the SigCgt (caught-signals) bitmask in `<proc_path>/<pid>/status`.
+/// SIGUSR2's default disposition is terminate, so the fork broadcast signals ONLY
+/// confirmed handlers (issue #467); a process that caught no SIGUSR2 could not act
+/// on the reseed notification anyway, it could only die. Fail-safe: any read or
+/// parse failure returns false, so a process we cannot confirm is never signaled
+/// (and so never killed by the broadcast).
+pub fn process_catches_sigusr2(proc_path: &str, pid: i32) -> bool {
+    let status = match fs::read_to_string(format!("{proc_path}/{pid}/status")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("SigCgt:") {
+            let Ok(mask) = u64::from_str_radix(rest.trim(), 16) else {
+                return false;
+            };
+            // SigCgt bit (signo - 1) is set when a handler is installed for signo.
+            let bit = 1u64 << ((libc::SIGUSR2 - 1) as u32);
+            return mask & bit != 0;
+        }
+    }
+    false
+}
+
 /// select_targets enumerates the pids under `proc_path` that should receive the
 /// userspace reset signal: every numeric /proc/<pid> directory except PID 1, the
 /// caller, and any pid whose session id is in `exclude_sids`. The exclusion is
@@ -106,6 +131,15 @@ pub fn select_targets(proc_path: &str, exclude_sids: &HashSet<i32>) -> Vec<i32> 
         if !exclude_sids.is_empty()
             && read_session(proc_path, pid).is_some_and(|sid| exclude_sids.contains(&sid))
         {
+            continue;
+        }
+        // Issue #467: SIGUSR2's default disposition is terminate, so signal ONLY
+        // processes that installed a SIGUSR2 handler (opt-in by handler presence).
+        // Fail-safe: a process whose handler we cannot confirm is skipped, never
+        // killed. This is layered UNDER the session exclusion above so a registered
+        // serving workload (e.g. nginx, which traps SIGUSR2 for binary upgrade) is
+        // left entirely alone rather than triggered.
+        if !process_catches_sigusr2(proc_path, pid) {
             continue;
         }
         targets.push(pid);
@@ -160,6 +194,7 @@ mod tests {
                 format!("{pid} (my proc) S 1 {pid} {sid} 0 0 0 0 0 0 0"),
             )
             .unwrap();
+            std::fs::write(p.join("status"), "SigCgt:\t0000000000000800\n").unwrap();
         }
         let proc = dir.path().to_str().unwrap();
         assert_eq!(read_session(proc, 200), Some(200));
@@ -170,7 +205,10 @@ mod tests {
         let selected = select_targets(proc, &exclude);
         assert!(selected.contains(&200), "unrelated pid must be signaled");
         assert!(!selected.contains(&100), "workload leader must be excluded");
-        assert!(!selected.contains(&101), "workload child (same session) must be excluded");
+        assert!(
+            !selected.contains(&101),
+            "workload child (same session) must be excluded"
+        );
 
         // With no exclusions every non-self, non-init pid is a target.
         let all = select_targets(proc, &HashSet::new());
@@ -178,8 +216,71 @@ mod tests {
     }
 
     #[test]
+    fn process_catches_sigusr2_reads_sigcgt() {
+        let dir = tempfile::tempdir().unwrap();
+        // bit (SIGUSR2 - 1) = bit 11 = 0x800.
+        let with_handler = dir.path().join("10");
+        std::fs::create_dir(&with_handler).unwrap();
+        std::fs::write(
+            with_handler.join("status"),
+            "Name:\tapp\nState:\tS\nSigCgt:\t0000000000000800\n",
+        )
+        .unwrap();
+        let no_handler = dir.path().join("11");
+        std::fs::create_dir(&no_handler).unwrap();
+        std::fs::write(
+            no_handler.join("status"),
+            "Name:\tapp\nState:\tS\nSigCgt:\t0000000000000000\n",
+        )
+        .unwrap();
+        let malformed = dir.path().join("12");
+        std::fs::create_dir(&malformed).unwrap();
+        std::fs::write(malformed.join("status"), "SigCgt:\tnothex\n").unwrap();
+
+        let proc = dir.path().to_str().unwrap();
+        assert!(
+            process_catches_sigusr2(proc, 10),
+            "SIGUSR2 bit set => handler"
+        );
+        assert!(!process_catches_sigusr2(proc, 11), "no bit => no handler");
+        assert!(
+            !process_catches_sigusr2(proc, 12),
+            "malformed => fail-safe false"
+        );
+        assert!(
+            !process_catches_sigusr2(proc, 99),
+            "missing file => fail-safe false"
+        );
+    }
+
+    #[test]
+    fn targets_only_processes_that_catch_sigusr2() {
+        let dir = tempfile::tempdir().unwrap();
+        // pid 300 installs a SIGUSR2 handler (SigCgt bit 11 set); pid 301 does not.
+        for (pid, sigcgt) in [(300, "0000000000000800"), (301, "0000000000000000")] {
+            let p = dir.path().join(pid.to_string());
+            std::fs::create_dir(&p).unwrap();
+            std::fs::write(p.join("stat"), format!("{pid} (app) S 1 {pid} {pid} 0 0")).unwrap();
+            std::fs::write(p.join("status"), format!("SigCgt:\t{sigcgt}\n")).unwrap();
+        }
+        let proc = dir.path().to_str().unwrap();
+        let selected = select_targets(proc, &HashSet::new());
+        assert!(
+            selected.contains(&300),
+            "a SIGUSR2 handler must be a target"
+        );
+        assert!(
+            !selected.contains(&301),
+            "a non-handler must never be a target"
+        );
+    }
+
+    #[test]
     fn signal_userspace_at_nonexistent_proc_returns_zero() {
-        let count = signal_userspace_at("/nonexistent/proc/path/that/does/not/exist", &HashSet::new());
+        let count = signal_userspace_at(
+            "/nonexistent/proc/path/that/does/not/exist",
+            &HashSet::new(),
+        );
         assert_eq!(count, 0);
     }
 
@@ -233,7 +334,11 @@ mod tests {
         // SAFETY: fork() is always safe to call; the child path is restricted
         // to async-signal-safe syscalls (write, pause) followed by _exit.
         let child_pid = unsafe { libc::fork() };
-        assert!(child_pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        assert!(
+            child_pid >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
 
         if child_pid == 0 {
             // Child: close the read end (we only write).
@@ -270,6 +375,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let child_dir = tmp.path().join(child_pid.to_string());
         std::fs::create_dir_all(&child_dir).expect("create synthetic pid dir");
+        // The child installs a SIGUSR2 handler; expose it via SigCgt so the
+        // handler-detection gate (issue #467) signals it.
+        std::fs::write(child_dir.join("status"), "SigCgt:\t0000000000000800\n")
+            .expect("write synthetic status");
 
         let count = signal_userspace_at(tmp.path().to_str().expect("utf8 path"), &HashSet::new());
 
