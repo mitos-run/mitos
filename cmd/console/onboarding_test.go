@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/billing"
 )
 
 // TestMountOnboardingGatedBySignup asserts the public signup endpoint is mounted
@@ -24,7 +25,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Disabled: no route. Pass nil pool to use the in-memory fallback stores.
 	muxOff := http.NewServeMux()
-	mountOnboarding(muxOff, logger, accounts, store, nil, capsGate{signup: false})
+	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false})
 	roff := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	rroff := httptest.NewRecorder()
 	muxOff.ServeHTTP(rroff, roff)
@@ -34,7 +35,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Enabled: route is mounted and accepts. Pass nil pool to use the in-memory fallback stores.
 	muxOn := http.NewServeMux()
-	mountOnboarding(muxOn, logger, accounts, store, nil, capsGate{signup: true})
+	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true})
 	ron := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	ron.Header.Set("Content-Type", "application/json")
 	rron := httptest.NewRecorder()

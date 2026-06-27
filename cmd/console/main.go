@@ -93,6 +93,16 @@ func main() {
 		sessionStore = saas.NewSessionStore()
 	}
 
+	// creditLedger is the single shared instance used by both the onboarding
+	// grant path and the billing view. Constructing it once here ensures a
+	// credit granted at signup is visible in the console billing endpoint.
+	var creditLedger billing.CreditLedger
+	if pool != nil {
+		creditLedger = pgstore.NewPgCreditLedger(pool)
+	} else {
+		creditLedger = billing.NewMemCreditLedger()
+	}
+
 	con := console.New(console.Deps{
 		Accounts: accounts,
 		// The usage store the console reads: the controller's internal usage API
@@ -103,7 +113,7 @@ func main() {
 		Instruments: buildInstruments(logger),
 		ForkTree:    buildForkTree(logger),
 		Billing: console.BillingReader{
-			Ledger: billing.NewMemCreditLedger(),
+			Ledger: creditLedger,
 			Status: statusStore,
 			Caps:   billing.NewMemSpendCapStore(),
 			Rates:  billing.DefaultRates(),
@@ -161,7 +171,7 @@ func main() {
 	// server-controlled signup flag (caps.Signup, the #208 gate); when off, nothing
 	// is mounted and the funnel stays in waitlist mode. The SMTP password and the
 	// verify token are never logged.
-	mountOnboarding(mux, logger, accounts, store, pool, capsGate{signup: caps.Signup})
+	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup})
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session

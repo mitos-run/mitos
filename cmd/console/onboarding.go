@@ -41,7 +41,7 @@ import (
 // When pool is nil (dev / in-memory mode) the in-memory fallbacks are used; a
 // pending unverified signup is cheap to lose on restart (the user re-signs up).
 // Provisioned accounts/orgs always live in the durable saas.Store.
-func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, caps signupGate) {
+func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate) {
 	if !caps.signupEnabled() {
 		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
 		return
@@ -58,14 +58,14 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
 	}
 
-	// Select durable stores when a Postgres pool is available; fall back to
-	// the in-memory implementations in dev mode (no DSN configured).
-	var ledger billing.CreditLedger
+	// Select the durable pending store when a Postgres pool is available; fall
+	// back to the in-memory implementation in dev mode (no DSN configured).
+	// The credit ledger is the single shared instance passed in from main so
+	// onboarding grants are visible in the billing view.
 	var pending onboarding.PendingStore
 	if pool != nil {
-		ledger, pending, _ = pgstore.OnboardingStores(pool)
+		pending = pgstore.NewPgPendingStore(pool)
 	} else {
-		ledger = billing.NewMemCreditLedger()
 		pending = onboarding.NewMemPendingStore()
 	}
 
@@ -73,7 +73,7 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		accounts,
 		store,
 		pending,
-		ledger,
+		creditLedger,
 		email,
 		opts...,
 	)
