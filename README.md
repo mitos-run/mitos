@@ -119,13 +119,31 @@ sb.terminate()
 
 **CLI and MCP.**
 
+The `mitos` CLI works against the hosted gateway (no cluster needed) or your own
+Kubernetes cluster:
+
 ```bash
-go install mitos.run/mitos/cmd/mitos@latest      # works today (needs a Go toolchain)
+go install mitos.run/mitos/cmd/mitos@latest      # requires a Go toolchain
+
+# Hosted mode: set MITOS_API_KEY, no kubeconfig required.
+export MITOS_API_KEY=sk-...
+mitos sandbox create --pool python               # create from the python template
+mitos sandbox exec <id> "python3 -c 'print(42)'"
+mitos fork <id> --count 2                        # fork into 2 independent siblings
+mitos sandbox ls
+mitos sandbox terminate <id>
+
+# Cluster mode (kubeconfig): target your own Kubernetes nodes.
 mitos sandbox create --pool dev-default
 mitos run echo hello --pool dev-default
 ```
 
-`mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools for any MCP-speaking agent, and an [Agent Skill](skills/mitos/SKILL.md) teaches skill-aware agents the workflow. The full install matrix (script, Homebrew, deb/rpm, scoop/winget, checksums) is in [mitos.run/docs/install](https://mitos.run/docs/install).
+`mitos dev up` brings up a one-command local control plane on a mock engine for
+cluster-mode development. An MCP server (`mitos-mcp`) exposes sandboxes as MCP
+tools for any MCP-speaking agent, and an [Agent Skill](skills/mitos/SKILL.md)
+teaches skill-aware agents the workflow. The full install matrix (script,
+Homebrew, deb/rpm, scoop/winget, checksums) is in
+[mitos.run/docs/install](https://mitos.run/docs/install).
 
 **Drop into the agent you already use.** Each adapter is a thin shim over the same native ops (`exec`, `run_code`, `files`, `fork`), with no hard dependency on the framework package: Claude Code and opencode (MCP server + agent skill), the OpenAI Agents SDK, the Claude Agent SDK, LangChain / deepagents, Vercel AI SDK / Pydantic AI / AutoGen / LlamaIndex (standard MCP), and a "change one import" [E2B migration shim](https://mitos.run/docs/migrating-from-e2b) for teams leaving E2B's cloud. The [integrations hub](docs/integrations/README.md) indexes every path.
 

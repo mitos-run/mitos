@@ -68,6 +68,45 @@ The async client mirrors the flat path: `await mitos.aio.create("python")`
 returns an async handle with the same `exec` / `run_code` / `files` / `fork` /
 `terminate` surface.
 
+## CLI quickstart
+
+The `mitos` CLI speaks the same hosted gateway as the SDKs. Set `MITOS_API_KEY`
+and run the same lifecycle in a shell:
+
+```bash
+# Install (requires a Go toolchain).
+go install mitos.run/mitos/cmd/mitos@latest
+
+export MITOS_API_KEY=sk-...   # from https://mitos.run
+
+# Create a sandbox (--pool names a template in hosted mode).
+ID=$(mitos sandbox create --pool python)
+echo "sandbox: $ID"
+
+# Run a command.
+mitos sandbox exec "$ID" "python3 -c 'print(1 + 1)'"
+
+# Fork into 2 independent siblings.
+mitos fork "$ID" --count 2
+
+# List live sandboxes.
+mitos sandbox ls
+
+# Terminate.
+mitos sandbox terminate "$ID"
+```
+
+The api key value is never logged or echoed in any error. Pass `--api-key` and
+`--server` inline to override the environment:
+
+```bash
+mitos --api-key sk-... --server https://mitos.run sandbox ls
+```
+
+Workspace verbs (`mitos ws *`) and template build/push require a Kubernetes
+cluster with KVM nodes. See [docs/cli.md](cli.md) for the full hosted vs cluster
+verb matrix.
+
 ## Where the key comes from
 
 The hosted endpoint is the default, so the headline quickstart needs only an API
