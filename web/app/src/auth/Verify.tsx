@@ -9,7 +9,7 @@
 //   copy button is a real <button> with a focus ring; 44px tap targets;
 //   keyboard operable; prefers-reduced-motion respected.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { post } from '../api'
 import { AuthShell } from './authCommon'
 
@@ -102,7 +102,7 @@ const styles = `
   transition: box-shadow var(--dur) var(--ease);
 }
 .verify-continue-link:hover {
-  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px rgba(255, 69, 200, 0.5);
+  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px color-mix(in srgb, var(--magenta) 50%, transparent);
 }
 .verify-continue-link:focus-visible {
   outline: 2px solid var(--magenta);
@@ -161,9 +161,12 @@ export function Verify({ token: tokenProp }: VerifyProps) {
     token ? { kind: 'loading' } : { kind: 'no-token' },
   )
   const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
 
+  const didPost = useRef(false)
   useEffect(() => {
-    if (!token) return
+    if (!token || didPost.current) return
+    didPost.current = true
     let cancelled = false
     post<VerifyResponse>('/onboarding/verify', { token })
       .then((res) => {
@@ -183,12 +186,18 @@ export function Verify({ token: tokenProp }: VerifyProps) {
   }, [token])
 
   async function handleCopy(key: string) {
+    if (!navigator.clipboard) {
+      setCopyFailed(true)
+      setTimeout(() => setCopyFailed(false), 3000)
+      return
+    }
     try {
       await navigator.clipboard.writeText(key)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      // Clipboard API unavailable; user can select the text manually.
+      setCopyFailed(true)
+      setTimeout(() => setCopyFailed(false), 3000)
     }
   }
 
@@ -243,10 +252,21 @@ export function Verify({ token: tokenProp }: VerifyProps) {
                 type="button"
                 className="verify-copy-btn"
                 onClick={() => void handleCopy(state.apiKey)}
-                aria-label="Copy API key to clipboard"
+                aria-label={copied ? 'Copied to clipboard' : 'Copy API key to clipboard'}
               >
-                {copied ? 'Copied' : 'Copy key'}
+                {copyFailed ? 'Copy failed, select the key' : copied ? 'Copied' : 'Copy key'}
               </button>
+              {copyFailed && (
+                <p
+                  style={{
+                    margin: 'var(--space-2) 0 0',
+                    fontSize: 'var(--step--1)',
+                    color: 'var(--ink-3)',
+                  }}
+                >
+                  Clipboard unavailable. Select the key above.
+                </p>
+              )}
               <p className="verify-warning">
                 Save this key now. For your security it is shown only once.
               </p>
@@ -329,7 +349,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
       {/* Status region: always in the DOM so screen readers observe content
           changes rather than a region appearing. All state transitions render
           here; the region is announced without re-reading the entire card. */}
-      <div aria-live="polite" aria-atomic="true">
+      <div aria-live="polite">
         {renderState()}
       </div>
 
@@ -343,7 +363,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
           width: 1,
           height: 1,
           overflow: 'hidden',
-          clip: 'rect(0 0 0 0)',
+          clipPath: 'inset(50%)',
           whiteSpace: 'nowrap',
         }}
       >

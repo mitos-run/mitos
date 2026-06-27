@@ -57,6 +57,13 @@ describe('Verify page', () => {
     vi.unstubAllGlobals()
   })
 
+  it('(d) shows invalid-link message and /signup link when no token is provided', () => {
+    render(<Verify />)
+    expect(screen.getByText(/invalid or has expired/i)).toBeInTheDocument()
+    const signupLink = screen.getByRole('link', { name: /start over/i })
+    expect(signupLink).toHaveAttribute('href', '/signup')
+  })
+
   it('(c) shows invalid-link message and /signup link on 400 error', async () => {
     vi.stubGlobal(
       'fetch',
