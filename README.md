@@ -127,7 +127,7 @@ mitos run echo hello --pool dev-default
 
 `mitos dev up` brings up a one-command local control plane on a mock engine. An MCP server (`mitos-mcp`) exposes sandboxes as MCP tools for any MCP-speaking agent, and an [Agent Skill](skills/mitos/SKILL.md) teaches skill-aware agents the workflow. The full install matrix (script, Homebrew, deb/rpm, scoop/winget, checksums) is in [mitos.run/docs/install](https://mitos.run/docs/install).
 
-**Drop into the agent you already use.** Each adapter is a thin shim over the same native ops (`exec`, `run_code`, `files`, `fork`), with no hard dependency on the framework package: Claude Code and opencode (MCP server + agent skill), the OpenAI Agents SDK, the Claude Agent SDK, LangChain / deepagents, Vercel AI SDK / Pydantic AI / AutoGen / LlamaIndex (standard MCP), and a "change one import" [E2B migration shim](https://mitos.run/docs/migrating-from-e2b) for teams leaving E2B's cloud. The [integrations hub](docs/integrations/README.md) indexes every path.
+**Drop into the agent you already use.** Each adapter is a thin shim over the same native ops (`exec`, `run_code`, `files`, `fork`), with no hard dependency on the framework package: Claude Code and opencode (MCP server + agent skill), the OpenAI Agents SDK, the Claude Agent SDK, LangChain / deepagents, Vercel AI SDK / Pydantic AI / AutoGen / LlamaIndex (standard MCP), and "change one import" migration shims for teams leaving the [E2B](https://mitos.run/docs/migrating-from-e2b) or [Daytona](https://mitos.run/docs/migrating-from-daytona) clouds. The [integrations hub](docs/integrations/README.md) indexes every path.
 
 **Install the operator.**
 
@@ -258,6 +258,25 @@ What is comparable and real today is the qualitative pareto map: the combination
 SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast, but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability. Morph built the right state model (branch/restore) as a proprietary cloud; our Workspace primitive targets the same semantics, open source, at fork(2) speeds. Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we ship a conformance facade (`cmd/facade`) to be its fastest backend rather than fight it ([docs/facade-conformance.md](docs/facade-conformance.md)). Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
 
 If an alternative beats us on an axis you care about and we have no roadmap line that closes it, that is a bug in our strategy: open an issue.
+
+## Architecture
+
+Mitos boots Firecracker microVMs, forks them through copy-on-write snapshots, and exposes the whole lifecycle through declarative CRDs (`SandboxPool`, `Sandbox`, `Workspace`) in the `mitos.run/v1` API group. A sandbox is a microVM, not a pod: it gets hardware isolation through KVM, and pod-scoped mechanisms (NetworkPolicy, ResourceQuota, PSA) do not govern it.
+
+The pieces:
+
+- **controller** (Deployment): reconciles the CRDs, selects a node, and drives `forkd`. It tracks the available fork nodes through a registry fed by per-node capacity heartbeats.
+- **forkd** (DaemonSet): the per-node daemon that owns the VMs. It serves gRPC on `:9090` for the controller (fork, prepare-pool, heartbeat) and an HTTP sandbox API on `:9091` for exec and file traffic. It needs `/dev/kvm`, so it runs only on KVM-capable nodes.
+- **guest agent**: PID 1 inside each microVM. It speaks a vsock protocol for exec, files, environment, and fork notifications.
+- **sandbox-server**: the same fork engine behind a plain REST API, with no Kubernetes required, for local loops and single-host use.
+- **SDKs** (`sdk/python`, `sdk/typescript`, `sdk/go`, and more): clients for the hosted service, a cluster, or `sandbox-server`.
+
+Two hot paths carry the system:
+
+- **Claim path**: the controller picks a warm node from the registry and calls `forkd` `Fork` over gRPC; the resulting sandbox reports Ready through `forkd`'s HTTP API on that node.
+- **Exec path**: the SDK or CLI talks to `forkd` on `:9091`, which bridges over vsock to the guest agent inside the VM.
+
+Fork is the core primitive: a source VM is snapshotted once and N children restore from that snapshot through copy-on-write, so each sibling lands warm and independent while the shared template pages are stored and metered once. Because Firecracker needs hardware virtualization, bare metal (Talos on Hetzner is the reference platform) is a first-class target; the cloud control plane stays on ordinary nodes while execution lands on KVM-capable machines.
 
 ## Project status
 
