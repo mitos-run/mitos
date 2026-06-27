@@ -3,7 +3,7 @@
 `bench/facade` is the reproducible source behind the "Facade vs upstream
 reference: resume latency" section of [`../../BENCHMARKS.md`](../../BENCHMARKS.md).
 It measures how our `agents.x-k8s.io` facade (issue #19) handles the upstream
-Sandbox pause/resume contract (the `spec.replicas` 0<->1 toggle) and frames the
+Sandbox pause/resume contract (the `spec.operatingMode` Running<->Suspended toggle) and frames the
 honest comparison against the upstream reference controller.
 
 No result numbers are committed here. The harness produces them; what is and is
@@ -13,22 +13,22 @@ not measurable on a given cluster is spelled out below.
 
 The harness, given a cluster (`--kubeconfig`):
 
-1. Applies an upstream `agents.x-k8s.io/v1alpha1` Sandbox bound to one of our
+1. Applies an upstream `agents.x-k8s.io/v1beta1` Sandbox bound to one of our
    pools via the `mitos.run/pool` bridge annotation.
 2. Times the **initial claim latency**: apply -> the facade bridges the
    husk-backed `Sandbox`.
-3. Toggles `spec.replicas` `1 -> 0 -> 1` for `--iterations` rounds, timing the
-   **object-level resume latency** each round: wall-clock from the replicas-1
+3. Toggles `spec.operatingMode` `Running -> Suspended -> Running` for `--iterations` rounds, timing the
+   **object-level resume latency** each round: wall-clock from the operatingMode=Running
    patch to the facade re-creating the bridged claim.
 4. Prints a nearest-rank P50/P90/P99 distribution (via `internal/benchstat`, the
    same summarizer `cmd/bench` uses).
 
 ## The two systems being compared
 
-| system | how it handles resume (replicas 0 -> 1) |
+| system | how it handles resume (operatingMode Suspended -> Running) |
 | --- | --- |
 | our facade | RE-ACTIVATES a dormant warm husk pod: the bridged `Sandbox` is re-created and the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready, the ~42ms husk activation datapoint, #66). No pod schedule, no image pull, no container start, no app boot on the hot path. |
-| upstream reference controller (v0.4.6) | COLD-CREATES a pod: their controller deletes the pod on replicas 0 and creates a fresh one on replicas 1 (pod schedule + admission + image + container start + app boot). |
+| upstream reference controller (v0.5.0) | COLD-CREATES a pod: their controller deletes the pod on Suspended and creates a fresh one on Running (pod schedule + admission + image + container start + app boot). |
 
 The order-of-magnitude resume advantage is the **design** claim: re-activating a
 warm dormant VM is fundamentally cheaper than cold-creating a pod. The full
@@ -94,8 +94,8 @@ For the head-to-head, on the reference node:
 
 1. Deploy the upstream controller from `third_party/agent-sandbox` (their helm
    chart / manifests, applied unchanged) into its own namespace.
-2. Apply an equivalent upstream Sandbox there (same podTemplate, same replicas
-   toggle) and time `replicas 1 -> 0 -> 1` to their Pod Ready, with the same
+2. Apply an equivalent upstream Sandbox there (same podTemplate, same operatingMode
+   toggle) and time `operatingMode Running -> Suspended -> Running` to their Pod Ready, with the same
    timing method.
 3. Record both distributions side by side, plus the host (CPU, kernel,
    Firecracker version, image) so the numbers are reproducible and auditable.

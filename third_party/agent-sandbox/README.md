@@ -1,7 +1,7 @@
 # Vendored upstream: sigs.k8s.io/agent-sandbox
 
 These are vendored upstream artifacts from the SIG agent-sandbox project,
-copied VERBATIM from the module cache for `sigs.k8s.io/agent-sandbox@v0.4.6`.
+copied VERBATIM from the module cache for `sigs.k8s.io/agent-sandbox@v0.5.0`.
 They are NOT our work; the upstream Apache 2.0 `LICENSE` is preserved alongside
 them. We do NOT edit these manifests or tests: applying them unchanged is the
 whole point of the conformance harness (issue #19). If you need to update them,
@@ -22,7 +22,7 @@ See docs/adr/0001-facade-and-naming.md and docs/facade-conformance.md.
 ## Version
 
 - Module: `sigs.k8s.io/agent-sandbox`
-- Version: `v0.4.6` (pinned)
+- Version: `v0.5.0` (pinned)
 - API: group `agents.x-k8s.io`, version `v1alpha1` (core `Sandbox`); group
   `extensions.agents.x-k8s.io`, version `v1alpha1` (the extension kinds:
   `SandboxWarmPool`, `SandboxTemplate`, `SandboxClaim`).

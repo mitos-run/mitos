@@ -101,6 +101,8 @@ Jobs:
 
 All eight are required checks on main; main requires branches to be up to date.
 
+The self-hosted real-KVM-cluster workflow (cluster-e2e.yaml, push / `ci-cluster`-labeled-PR triggered, not one of the eight required checks) carries the predicate-level e2e suites: `cluster-husk-e2e`, `cluster-workspace-e2e`, `cluster-husk-network-e2e`, and `cluster-facade-conformance-e2e` (the agents.x-k8s.io facade Ready predicate on a real booted VMM, issue #357). The object-level `facade-conformance` kind job in ci.yaml proves the facade bridge object-level on kind.
+
 ## Security Practices
 
 - The forkd threat surface is documented in docs/threat-model.md with per-row status; keep it current in the same PR as any surface change.
