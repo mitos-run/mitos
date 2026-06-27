@@ -203,9 +203,55 @@ impl Control for ControlService {
             let port = u16::try_from(h.port)
                 .map_err(|_| Status::invalid_argument("start_workload: ready.port out of range"))?;
             let expect = u16::try_from(h.expect).unwrap_or(0);
+            // Belt-and-suspenders: ensure the loopback link is up before gating on
+            // a 127.0.0.1 workload. init brings lo up at boot; re-assert here so a
+            // boot-order or timing issue cannot leave the gate polling a down lo.
+            if let Err(e) = crate::sys::netlink::link_up("lo") {
+                tracing::warn!("start_workload: bring up lo: {e}");
+            }
             workload::await_http_ready(port, &h.path, expect, timeout)
                 .await
-                .map_err(|e| Status::deadline_exceeded(format!("start_workload: {e}")))?;
+                .map_err(|e| {
+                    // lo link flags (IFF_UP is bit 0) and whether anything is
+                    // LISTENing on the port, to tell a down loopback apart from a
+                    // workload that never bound. /proc/net/tcp lists the local port
+                    // in uppercase hex; 0A is the LISTEN state.
+                    let lo_flags = std::fs::read_to_string("/sys/class/net/lo/flags")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|_| "?".to_string());
+                    let hexport = format!(":{port:04X}");
+                    let listening = std::fs::read_to_string("/proc/net/tcp")
+                        .map(|t| t.lines().any(|l| l.contains(&hexport)))
+                        .unwrap_or(false);
+                    // Surface why the workload never became ready: whether its
+                    // process is still alive and the tail of its own stdout/stderr
+                    // (the build VM is ephemeral, so this is the only window into a
+                    // workload that failed to start or listen). The build env is
+                    // non-secret pool config; per-fork secrets are injected later.
+                    let alive = std::path::Path::new(&format!("/proc/{sid}")).exists();
+                    let tail = std::fs::read_to_string("/tmp/mitos-workload.log")
+                        .map(|s| {
+                            s.lines()
+                                .rev()
+                                .take(12)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        })
+                        .unwrap_or_else(|_| "<no workload log>".to_string());
+                    // wchan names the kernel function the process is sleeping in,
+                    // so a workload that is alive but never listens (blocked on a
+                    // syscall: getrandom, futex, a file read) is distinguishable
+                    // from one still doing CPU-bound startup.
+                    let wchan = std::fs::read_to_string(format!("/proc/{sid}/wchan"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    Status::deadline_exceeded(format!(
+                        "start_workload: {e}; workload pid {sid} alive={alive} listening={listening} lo_flags={lo_flags} wchan={wchan}; log tail: {tail}"
+                    ))
+                })?;
             ready = true;
         }
         Ok(Response::new(StartWorkloadResponse { sid, ready }))
