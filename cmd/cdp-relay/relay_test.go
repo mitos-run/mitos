@@ -104,3 +104,43 @@ func TestRelayEndToEnd(t *testing.T) {
 		t.Errorf("body: got %q, want it to contain %q", body, want)
 	}
 }
+
+// TestRelayDirectForwardUsesRequestHost proves the host-forward path: with no
+// X-Forwarded-Host (a raw TCP forward sets none), the relay rewrites the
+// discovery URL to the client's own request Host, which is the reachable origin.
+// Without this the body would keep the guest-internal upstream port, unreachable
+// to the client.
+func TestRelayDirectForwardUsesRequestHost(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	upstreamHostPort := "127.0.0.1:" + port
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/json/version" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"webSocketDebuggerUrl":"ws://`+upstreamHostPort+`/devtools/browser/ABC"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	upstream.Listener = listener
+	upstream.Start()
+	defer upstream.Close()
+
+	handler := newRelayHandler(upstreamHostPort)
+	req := httptest.NewRequest(http.MethodGet, "/json/version", nil)
+	req.Host = "127.0.0.1:42999" // the client's forward address; no X-Forwarded-Host
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200\nbody: %s", rec.Code, rec.Body.String())
+	}
+	want := "ws://127.0.0.1:42999/devtools/browser/ABC"
+	if body := rec.Body.String(); !strings.Contains(body, want) {
+		t.Errorf("body: got %q, want it to contain %q", body, want)
+	}
+}

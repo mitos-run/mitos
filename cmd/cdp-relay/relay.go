@@ -60,10 +60,19 @@ func newRelayHandler(upstream string) http.Handler {
 			// which the port-qualified rewrite would miss.
 			pr.Out.Host = upstream
 			// The ReverseProxy strips incoming X-Forwarded-* headers before
-			// calling Rewrite when the Rewrite hook is used. Re-propagate them
-			// from pr.In (the original, unmodified request) so ModifyResponse
-			// can read them from resp.Request.Header.
-			if xfh := pr.In.Header.Get("X-Forwarded-Host"); xfh != "" {
+			// calling Rewrite when the Rewrite hook is used, and it rewrites the
+			// outbound Host above, so resp.Request in ModifyResponse no longer
+			// carries the client's origin. Re-propagate it. Prefer an
+			// edge-proxy-set X-Forwarded-Host; otherwise fall back to the client's
+			// own Host, which is the reachable origin on the direct host-forward
+			// path (Chromium's internal upstream port is not reachable by the
+			// client). This is what makes the discovery URL point somewhere the
+			// client can actually connect to.
+			xfh := pr.In.Header.Get("X-Forwarded-Host")
+			if xfh == "" {
+				xfh = pr.In.Host
+			}
+			if xfh != "" {
 				pr.Out.Header.Set("X-Forwarded-Host", xfh)
 			}
 			if xfp := pr.In.Header.Get("X-Forwarded-Proto"); xfp != "" {
