@@ -607,7 +607,13 @@ A tenant exec cannot call it, so it cannot start arbitrary detached processes th
 escape the exec process-group kill or the per-fork SIGUSR2 reset outside its own
 budget. The workload command and env are non-secret build-time config (env values
 are non-secret; secrets are still injected per fork via `Configure`); the agent
-logs only the workload session id and env-key count, never argv or values.
+logs only the workload session id and env-key count, never argv or values. The
+per-fork SIGUSR2 reset no longer default-terminates a non-handler process: the
+broadcast delivers only to confirmed SIGUSR2 handlers (the `SigCgt` bit in
+`/proc/<pid>/status`), so a captured serving workload that installs no handler
+survives the fork rather than being silently killed (issue #467). This closes a
+self-DoS/availability hazard on the fork path; it adds no new escape surface (the
+signal set only shrinks).
 
 **Surface 7: the ENCRYPTION KEY (#31 PR2).** When `--enable-encryption` is on,
 the per-template 256-bit key reaches the node ONLY over the mTLS control channel
