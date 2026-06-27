@@ -175,7 +175,12 @@ func main() {
 	// server-controlled signup flag (caps.Signup, the #208 gate); when off, nothing
 	// is mounted and the funnel stays in waitlist mode. The SMTP password and the
 	// verify token are never logged.
-	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup})
+	// Pass the SAME session store and token generator the OIDC callback uses so
+	// a verified signup issues a session cookie with the same contract.
+	// Secure mirrors mountAuth (hardcoded true: the console is always TLS in
+	// production; -dev runs without cookies anyway since no session middleware
+	// is active in that branch).
+	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true)
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session

@@ -23,9 +23,12 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 	keys := saas.NewKeyService(store)
 	accounts := saas.NewAccountService(store, keys)
 
+	sessions := saas.NewSessionStore()
+	newTok := func() string { return "test-session-token" }
+
 	// Disabled: no route. Pass nil pool to use the in-memory fallback stores.
 	muxOff := http.NewServeMux()
-	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false})
+	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false)
 	roff := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	rroff := httptest.NewRecorder()
 	muxOff.ServeHTTP(rroff, roff)
@@ -35,7 +38,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Enabled: route is mounted and accepts. Pass nil pool to use the in-memory fallback stores.
 	muxOn := http.NewServeMux()
-	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true})
+	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
 	ron := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	ron.Header.Set("Content-Type", "application/json")
 	rron := httptest.NewRecorder()

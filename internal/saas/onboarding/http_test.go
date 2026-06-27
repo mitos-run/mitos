@@ -3,10 +3,13 @@ package onboarding
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"mitos.run/mitos/internal/saas"
 )
 
 func newHandler(t *testing.T, mode Mode) (*Handler, *harness) {
@@ -160,5 +163,92 @@ func TestVerifyTokenIsSingleUse(t *testing.T) {
 	}
 	if _, ok := out2["apiKey"]; ok {
 		t.Fatal("re-verify must not issue a second api key")
+	}
+}
+
+// TestVerifySetsCookieOnFreshVerify asserts that a successful first-time verify
+// response includes a mitos_session Set-Cookie header with HttpOnly and
+// SameSite=Lax, and that the session token is registered in the session store.
+func TestVerifySetsCookieOnFreshVerify(t *testing.T) {
+	sessions := saas.NewSessionStore()
+	tok := 0
+	newTok := func() string {
+		tok++
+		return fmt.Sprintf("sess-%d", tok)
+	}
+
+	hr := newHarness(t, ModeOpen)
+	h := NewHandler(hr.svc, nil, WithHandlerSessions(sessions, newTok, false))
+
+	postJSON(t, h, "/onboarding/signup", `{"email":"cookie@example.com"}`)
+	verifyTok := hr.email.LastToken("cookie@example.com")
+
+	rr := postJSON(t, h, "/onboarding/verify", `{"token":"`+verifyTok+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body %s", rr.Code, rr.Body.String())
+	}
+
+	var found *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "mitos_session" {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("fresh verify did not set the mitos_session cookie")
+	}
+	if found.Value == "" {
+		t.Error("mitos_session cookie value must not be empty")
+	}
+	if !found.HttpOnly {
+		t.Error("mitos_session cookie must have HttpOnly set")
+	}
+	if found.SameSite != http.SameSiteLaxMode {
+		t.Errorf("mitos_session cookie SameSite=%v, want Lax", found.SameSite)
+	}
+	// Confirm the token was registered in the session store and resolves.
+	if accountID, err := sessions.Resolve(found.Value); err != nil || accountID == "" {
+		t.Errorf("session token in cookie does not resolve to an account: %v", err)
+	}
+}
+
+// TestVerifyNoSessionCookieOnReVerify asserts that an idempotent re-verify
+// (AlreadyDone true) does NOT set a new mitos_session cookie. The existing
+// browser session (if any) must remain the user's only session.
+func TestVerifyNoSessionCookieOnReVerify(t *testing.T) {
+	sessions := saas.NewSessionStore()
+	tok := 0
+	newTok := func() string {
+		tok++
+		return fmt.Sprintf("sess-%d", tok)
+	}
+
+	hr := newHarness(t, ModeOpen)
+	h := NewHandler(hr.svc, nil, WithHandlerSessions(sessions, newTok, false))
+
+	postJSON(t, h, "/onboarding/signup", `{"email":"reverify@example.com"}`)
+	verifyTok := hr.email.LastToken("reverify@example.com")
+
+	// First verify: provisions the account and sets the cookie.
+	first := postJSON(t, h, "/onboarding/verify", `{"token":"`+verifyTok+`"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first verify status %d, want 200", first.Code)
+	}
+
+	// Second verify: idempotent re-verify must NOT set a new cookie.
+	second := postJSON(t, h, "/onboarding/verify", `{"token":"`+verifyTok+`"}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second verify status %d, want 200", second.Code)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(second.Body.Bytes(), &out)
+	if out["alreadyDone"] != true {
+		t.Fatalf("second verify alreadyDone=%v, want true", out["alreadyDone"])
+	}
+	for _, c := range second.Result().Cookies() {
+		if c.Name == "mitos_session" {
+			t.Fatal("re-verify must NOT set a mitos_session cookie")
+		}
 	}
 }
