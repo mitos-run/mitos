@@ -1037,6 +1037,28 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 		owned = append(owned, p)
 	}
 
+	// Issue #461: a warm husk pod bakes the snapshot digest it verifies against.
+	// If the pool's snapshot is rebuilt under the same name (same templateID, new
+	// mem + new digest), an existing dormant pod re-hashes the NEW mem against its
+	// OLD manifest and CrashLoopBackOffs forever. Reap dormant pods whose stamped
+	// digest no longer matches their node's current recorded digest so the scale-up
+	// below refills them against the fresh snapshot. Claimed pods (a tenant VM) are
+	// never reaped.
+	templateID := poolTemplateID(pool)
+	kept := owned[:0:0]
+	for i := range owned {
+		p := owned[i]
+		if r.huskPodHasStaleDigest(&p, templateID) {
+			if err := r.Delete(ctx, &p); err != nil && !apierrors.IsNotFound(err) {
+				return huskReconcileResult{}, fmt.Errorf("delete stale husk pod %s/%s: %w", p.Namespace, p.Name, err)
+			}
+			logger.Info("reaped husk pod with stale snapshot digest", "pod", p.Name, "node", p.Annotations[huskSnapshotNodeAnnotation])
+			continue
+		}
+		kept = append(kept, p)
+	}
+	owned = kept
+
 	// Record refill latency (create -> first Ready dormant) for any warm pod not
 	// yet observed, then mark it so it is counted exactly once.
 	r.observeRefillForReadyPods(ctx, owned)
@@ -1271,6 +1293,28 @@ func (r *SandboxPoolReconciler) nodesMatchingSelector(ctx context.Context, sel m
 // far below 5min so a real node loss fails an active claim over and refills the
 // warm pool in ~a minute (#177).
 const huskNodeLossTolerationSeconds int64 = 60
+
+// huskPodHasStaleDigest reports whether a husk pod's stamped snapshot digest no
+// longer matches its pinned node's current recorded digest for the template
+// (issue #461). A claimed (activating/active) pod is never stale here: it holds a
+// tenant VM and must not be reaped. A pod with no stamped digest/node (the
+// pre-digest fallback or a fork child) or a node with no currently known digest
+// is treated as NOT stale, so steady state never churns.
+func (r *SandboxPoolReconciler) huskPodHasStaleDigest(p *corev1.Pod, templateID string) bool {
+	if p.Labels[huskClaimLabel] != "" {
+		return false
+	}
+	stamped := p.Annotations[huskTemplateDigestAnnotation]
+	node := p.Annotations[huskSnapshotNodeAnnotation]
+	if stamped == "" || node == "" || r.NodeRegistry == nil {
+		return false
+	}
+	current, known := r.NodeRegistry.TemplateDigestOnNode(node, templateID)
+	if !known {
+		return false
+	}
+	return current != stamped
+}
 
 // refillObservedAnnotation marks a husk pod whose create-to-Ready refill latency
 // has already been recorded, so the histogram counts each pod exactly once.
