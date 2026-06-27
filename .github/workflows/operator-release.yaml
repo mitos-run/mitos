@@ -169,8 +169,14 @@ jobs:
           git add "operators/mitos/${VERSION}"
           # community-operators requires a DCO sign-off.
           git commit -s -q -m "operator mitos (${VERSION})"
-          git push -q origin "$branch"
+          # Force-update the contribution branch so a re-dispatch refreshes an
+          # already-open PR in place instead of failing on a non-fast-forward.
+          git push -q --force origin "$branch"
+          # Create the PR if none is open yet; on a re-dispatch the PR already
+          # exists and the force-push above has updated it, so tolerate the
+          # "already exists" error rather than failing the run.
           gh pr create --repo k8s-operatorhub/community-operators \
             --base main --head "${owner}:${branch}" \
             --title "operator mitos (${VERSION})" \
-            --body "Adds mitos ${VERSION}. Snapshot-fork sandboxes for AI agents on Kubernetes. https://mitos.run"
+            --body "Adds mitos ${VERSION}. Snapshot-fork sandboxes for AI agents on Kubernetes. https://mitos.run" \
+            || echo "community-operators PR for ${branch} already open; updated it via the force-push."
