@@ -42,9 +42,16 @@ func TestPgPendingStore(t *testing.T) {
 	if err := s.MarkVerified(ctx, "h1", "acct1"); err != nil {
 		t.Fatalf("markverified: %v", err)
 	}
-	got2, _ := s.GetPendingByTokenHash(ctx, "h1")
+	got2, err := s.GetPendingByTokenHash(ctx, "h1")
+	if err != nil {
+		t.Fatalf("get after verify: %v", err)
+	}
 	if !got2.Verified || got2.AccountID != "acct1" {
 		t.Fatalf("after verify = %+v", got2)
+	}
+
+	if err := s.MarkVerified(ctx, "no-such-hash", "x"); !errors.Is(err, onboarding.ErrPendingNotFound) {
+		t.Fatalf("MarkVerified unknown hash err = %v, want ErrPendingNotFound", err)
 	}
 
 	if err := s.AddWaitlist(ctx, onboarding.WaitlistEntry{Email: "w@b.com", CreatedAt: now}); err != nil {
