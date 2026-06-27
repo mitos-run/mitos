@@ -248,7 +248,11 @@ type TemplateResult struct {
 // fails and nothing is snapshotted, so a broken template (e.g. a failed
 // `pip install`) is never served. With no init commands the VM is snapshotted
 // as soon as it has booted. The VM is killed after snapshot.
-func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string) (*TemplateResult, error) {
+// onStarted, when non-nil, is invoked once the build Firecracker has started,
+// with its pid and jailer artifacts, so the caller can journal the in-flight
+// build and reap it if forkd dies ungracefully before the deferred Kill runs
+// (#469). It is called synchronously, before the long boot/init/snapshot steps.
+func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string, onStarted func(pid int, js JailerState)) (*TemplateResult, error) {
 	// Re-assert the allowlist barrier locally: the id is validated at the forkd
 	// gRPC boundary (validateSandboxID), but a defense-in-depth check here keeps
 	// every path that joins the id provably free of separators and traversal,
@@ -296,6 +300,13 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		return nil, fmt.Errorf("start VM: %w", err)
 	}
 	defer func() { _ = client.Kill() }()
+
+	// Journal the in-flight build (pid + jailer artifacts) so a restarted forkd
+	// can reap this Firecracker if we die ungracefully before the deferred Kill
+	// (#469). Done immediately after start, before the long build steps.
+	if onStarted != nil {
+		onStarted(client.PID(), client.JailerState())
+	}
 
 	// Configure the VM
 	if err := client.SetBootSource(tm.kernelPath, cfg.BootArgs); err != nil {
