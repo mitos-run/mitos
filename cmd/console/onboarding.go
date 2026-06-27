@@ -64,6 +64,16 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
 	}
 
+	// E2E QA seam: capture raw tokens in-process when MITOS_CONSOLE_E2E is set.
+	// The sink is NEVER created and the endpoint is NEVER mounted when the flag
+	// is off, so there is no path to the seam in production deployments.
+	var e2eSink *onboarding.MemE2ETokenSink
+	if envBool("MITOS_CONSOLE_E2E") {
+		e2eSink = onboarding.NewMemE2ETokenSink()
+		opts = append(opts, onboarding.WithE2ETokenSink(e2eSink))
+		logger.Info("onboarding E2E token sink enabled (QA only; NEVER enable in production)")
+	}
+
 	// Select the durable pending store when a Postgres pool is available; fall
 	// back to the in-memory implementation in dev mode (no DSN configured).
 	// The credit ledger is the single shared instance passed in from main so
@@ -92,6 +102,23 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		"org_provisioner", prov != nil,
 		"session_cookie", sessions != nil,
 	)
+
+	// Mount the E2E token retrieval endpoint ONLY when all three conditions hold:
+	// the flag is on, a bearer token is configured, and a domain suffix is configured.
+	// Bearer and domain values are read from env but never logged.
+	if e2eSink != nil {
+		bearer := os.Getenv("MITOS_CONSOLE_E2E_TOKEN")
+		domain := os.Getenv("MITOS_CONSOLE_E2E_DOMAIN")
+		switch {
+		case bearer == "":
+			logger.Warn("MITOS_CONSOLE_E2E set but MITOS_CONSOLE_E2E_TOKEN is empty; E2E endpoint NOT mounted")
+		case domain == "":
+			logger.Warn("MITOS_CONSOLE_E2E set but MITOS_CONSOLE_E2E_DOMAIN is empty; E2E endpoint NOT mounted")
+		default:
+			onboarding.NewE2EHandler(bearer, domain, e2eSink).Routes(mux)
+			logger.Info("onboarding E2E token endpoint mounted (QA only; bearer and domain gates active)")
+		}
+	}
 }
 
 // signupGate is the minimal capability surface mountOnboarding reads, so the

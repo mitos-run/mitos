@@ -85,3 +85,56 @@ func TestBuildOrgProvisionerNilWhenTenancyOff(t *testing.T) {
 		t.Fatal("expected nil provisioner when org tenancy is off")
 	}
 }
+
+// TestE2EEndpointNotMountedWhenFlagOff asserts GET /onboarding/e2e/token
+// returns 404 when MITOS_CONSOLE_E2E is unset, regardless of signup state.
+func TestE2EEndpointNotMountedWhenFlagOff(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_E2E", "")
+	t.Setenv("MITOS_SMTP_HOST", "")
+	t.Setenv("MITOS_CONSOLE_ORG_TENANCY", "")
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	sessions := saas.NewSessionStore()
+	newTok := func() string { return "test-session-token" }
+
+	mux := http.NewServeMux()
+	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)
+	req.Header.Set("Authorization", "Bearer any-bearer")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("E2E endpoint: status %d, want 404 (not mounted when flag off)", rr.Code)
+	}
+}
+
+// TestE2EEndpointMountedWhenFlagOn asserts GET /onboarding/e2e/token is reachable
+// (401 for missing bearer) when MITOS_CONSOLE_E2E is truthy.
+func TestE2EEndpointMountedWhenFlagOn(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_E2E", "1")
+	t.Setenv("MITOS_CONSOLE_E2E_TOKEN", "my-qa-bearer")
+	t.Setenv("MITOS_CONSOLE_E2E_DOMAIN", "e2e.mitos.run")
+	t.Setenv("MITOS_SMTP_HOST", "")
+	t.Setenv("MITOS_CONSOLE_ORG_TENANCY", "")
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	sessions := saas.NewSessionStore()
+	newTok := func() string { return "test-session-token" }
+
+	mux := http.NewServeMux()
+	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
+
+	// Route is mounted; wrong bearer returns 401 (not 404).
+	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)
+	req.Header.Set("Authorization", "Bearer wrong-bearer")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("E2E endpoint mounted but wrong bearer: status %d, want 401", rr.Code)
+	}
+}
