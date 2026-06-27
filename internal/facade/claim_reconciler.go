@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	runv1 "mitos.run/mitos/api/v1"
 )
@@ -82,7 +82,7 @@ type SandboxClaimReconciler struct {
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var src extv1alpha1.SandboxClaim
+	var src extv1beta1.SandboxClaim
 	if err := r.Get(ctx, req.NamespacedName, &src); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -135,9 +135,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 // warmPoolPolicy returns the effective upstream warmpool policy, applying the
 // upstream default (default) when unset.
-func warmPoolPolicy(src *extv1alpha1.SandboxClaim) extv1alpha1.WarmPoolPolicy {
+func warmPoolPolicy(src *extv1beta1.SandboxClaim) extv1beta1.WarmPoolPolicy {
 	if src.Spec.WarmPool == nil || *src.Spec.WarmPool == "" {
-		return extv1alpha1.WarmPoolPolicyDefault
+		return extv1beta1.WarmPoolPolicyDefault
 	}
 	return *src.Spec.WarmPool
 }
@@ -151,7 +151,7 @@ func warmPoolPolicy(src *extv1alpha1.SandboxClaim) extv1alpha1.WarmPoolPolicy {
 //     template (deterministic: lowest pool name). none has no pool-less path in
 //     our engine, so it resolves the same as default; the distinction is recorded
 //     in the claim annotation and documented as a justified exception.
-func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alpha1.SandboxClaim, policy extv1alpha1.WarmPoolPolicy) (string, error) {
+func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1beta1.SandboxClaim, policy extv1beta1.WarmPoolPolicy) (string, error) {
 	if policy.IsSpecificPool() {
 		// Named pool: our pool of that name (created by the warm pool reconciler).
 		var pool runv1.SandboxPool
@@ -196,7 +196,7 @@ func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alph
 // the mitos.run/shutdown-time annotation (not mapped to a Timeout).
 // additionalPodMetadata annotations are propagated where our object supports
 // them.
-func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alpha1.SandboxClaim, pool string, policy extv1alpha1.WarmPoolPolicy) (*runv1.Sandbox, error) {
+func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1beta1.SandboxClaim, pool string, policy extv1beta1.WarmPoolPolicy) (*runv1.Sandbox, error) {
 	claim := &runv1.Sandbox{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
@@ -229,7 +229,7 @@ func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alph
 // claimEnv maps the upstream claim's env list (the extension EnvVar shape) onto
 // our claim's corev1 env list. The upstream containerName targeting is a
 // documented exception: our run path applies env globally into the guest.
-func claimEnv(src *extv1alpha1.SandboxClaim) []corev1.EnvVar {
+func claimEnv(src *extv1beta1.SandboxClaim) []corev1.EnvVar {
 	if len(src.Spec.Env) == 0 {
 		return nil
 	}
@@ -247,7 +247,7 @@ func claimEnv(src *extv1alpha1.SandboxClaim) []corev1.EnvVar {
 // object only and is enforced by the owner-reference cascade (deleting their
 // claim GCs ours); it is a documented exception that our engine does not
 // separately honor the Retain vs Delete distinction at the our-object level.
-func applyLifecycle(claim *runv1.Sandbox, lc *extv1alpha1.Lifecycle) {
+func applyLifecycle(claim *runv1.Sandbox, lc *extv1beta1.Lifecycle) {
 	if lc == nil {
 		return
 	}
@@ -285,7 +285,7 @@ type claimStatusUpdate struct {
 // subresource, idempotently (no write when nothing changed). The bound sandbox
 // name + podIPs are set only on a Ready-with-endpoint path and cleared
 // otherwise, so a not-bound claim never advertises a stale sandbox.
-func (r *SandboxClaimReconciler) mirror(ctx context.Context, src *extv1alpha1.SandboxClaim, u claimStatusUpdate) error {
+func (r *SandboxClaimReconciler) mirror(ctx context.Context, src *extv1beta1.SandboxClaim, u claimStatusUpdate) error {
 	cond := metav1.Condition{
 		Type:               claimReadyConditionType,
 		Status:             u.status,
@@ -320,7 +320,7 @@ func (r *SandboxClaimReconciler) mirror(ctx context.Context, src *extv1alpha1.Sa
 // our run-path Sandbox objects so a status change re-queues the upstream claim.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extv1alpha1.SandboxClaim{}).
+		For(&extv1beta1.SandboxClaim{}).
 		Owns(&runv1.Sandbox{}).
 		Complete(r)
 }

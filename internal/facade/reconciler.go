@@ -1,11 +1,11 @@
 // Package facade implements the agents.x-k8s.io conformance facade (issue #19).
 //
 // It presents sandboxes via the upstream SIG agent-sandbox API
-// (agents.x-k8s.io/v1alpha1 Sandbox) and fulfils them on our fork engine by
+// (agents.x-k8s.io/v1beta1 Sandbox) and fulfils them on our fork engine by
 // mapping each upstream Sandbox onto our husk-backed run path: a mitos.run/v1
 // Sandbox with source.poolRef, bound to one of our pools. After the API v1
 // consolidation (ADR 0007) the run-path object is the consolidated v1 Sandbox
-// (source.poolRef, replicas 1), which folded the former SandboxClaim and
+// (source.poolRef), which folded the former SandboxClaim and
 // SandboxFork into one kind.
 //
 // Toolchain note (ADR 0001): we vendor the upstream Go types
@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"net"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,16 +50,16 @@ const (
 
 	// SandboxConditionType is the upstream Ready condition the facade mirrors
 	// our SandboxClaim readiness into.
-	SandboxConditionType = string(agentsv1alpha1.SandboxConditionReady)
+	SandboxConditionType = string(agentsv1beta1.SandboxConditionReady)
 )
 
-// SandboxReconciler reconciles an upstream agents.x-k8s.io/v1alpha1 Sandbox
+// SandboxReconciler reconciles an upstream agents.x-k8s.io/v1beta1 Sandbox
 // onto our husk-backed run path. It owns exactly one of our consolidated
 // mitos.run/v1 Sandbox objects per upstream Sandbox (same name + namespace,
 // owner-referenced for GC), mirrors the run-path object's readiness into the
 // upstream Sandbox status, and terminates the run-path object when the upstream
-// Sandbox is deleted or scaled to replicas 0. The run-path object is a v1
-// Sandbox with source.poolRef (the consolidated successor to the old
+// Sandbox is deleted or set to operatingMode Suspended. The run-path object is a
+// v1 Sandbox with source.poolRef (the consolidated successor to the old
 // SandboxClaim, ADR 0007).
 type SandboxReconciler struct {
 	client.Client
@@ -78,7 +78,7 @@ type SandboxReconciler struct {
 
 // desiredReplicas returns the effective replica count for a Sandbox, applying
 // the upstream default of 1 when spec.replicas is unset.
-func desiredReplicas(sb *agentsv1alpha1.Sandbox) int32 {
+func desiredReplicas(sb *agentsv1beta1.Sandbox) int32 {
 	if sb.Spec.Replicas == nil {
 		return 1
 	}
@@ -87,7 +87,7 @@ func desiredReplicas(sb *agentsv1alpha1.Sandbox) int32 {
 
 // poolFor resolves the mitos.run pool a Sandbox binds to: the bridge
 // annotation mitos.run/pool if present, else the configured default pool.
-func (r *SandboxReconciler) poolFor(sb *agentsv1alpha1.Sandbox) string {
+func (r *SandboxReconciler) poolFor(sb *agentsv1beta1.Sandbox) string {
 	if p := sb.Annotations[PoolAnnotation]; p != "" {
 		return p
 	}
@@ -116,7 +116,7 @@ func (r *SandboxReconciler) poolFor(sb *agentsv1alpha1.Sandbox) string {
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var sb agentsv1alpha1.Sandbox
+	var sb agentsv1beta1.Sandbox
 	if err := r.Get(ctx, req.NamespacedName, &sb); err != nil {
 		// Not found: the Sandbox is gone; owner-ref GC removes our claim.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -192,7 +192,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // context) are a documented conformance exception for a later slice; see
 // docs/facade-conformance.md. The husk pool already pins the image + resources
 // at pool build time, so the per-Sandbox podTemplate image is not yet honored.
-func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1alpha1.Sandbox, pool string) (*runv1.Sandbox, error) {
+func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1beta1.Sandbox, pool string) (*runv1.Sandbox, error) {
 	claim := &runv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sb.Name,
@@ -222,7 +222,7 @@ func (r *SandboxReconciler) ensureClaim(ctx context.Context, sb *agentsv1alpha1.
 // Sandbox podTemplate. The husk run path applies these into the guest. We take
 // the first container's env as the canonical set (sandboxes are single-workload
 // by construction); additional containers are a later-slice exception.
-func podTemplateEnv(sb *agentsv1alpha1.Sandbox) []corev1.EnvVar {
+func podTemplateEnv(sb *agentsv1beta1.Sandbox) []corev1.EnvVar {
 	containers := sb.Spec.PodTemplate.Spec.Containers
 	if len(containers) == 0 {
 		return nil
@@ -232,7 +232,7 @@ func podTemplateEnv(sb *agentsv1alpha1.Sandbox) []corev1.EnvVar {
 
 // deleteClaim terminates our run-path Sandbox for an upstream Sandbox (replicas
 // 0 path). It is a no-op when the run-path object is already gone.
-func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1alpha1.Sandbox) error {
+func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1beta1.Sandbox) error {
 	claim := &runv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: sb.Namespace},
 	}
@@ -262,7 +262,7 @@ type statusUpdate struct {
 // It is idempotent (no write when nothing changed) and is the single place the
 // serving observables (serviceFQDN, podIPs) are set or cleared, so pause always
 // clears them and resume always re-populates them.
-func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1alpha1.Sandbox, u statusUpdate) error {
+func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1beta1.Sandbox, u statusUpdate) error {
 	cond := metav1.Condition{
 		Type:               SandboxConditionType,
 		Status:             u.status,
@@ -327,7 +327,7 @@ func equalStrings(a, b []string) bool {
 // configured cluster domain, matching the upstream headless-Service naming
 // (<name>.<namespace>.svc.<cluster-domain>). Empty when no cluster domain is
 // configured.
-func (r *SandboxReconciler) serviceFQDN(sb *agentsv1alpha1.Sandbox) string {
+func (r *SandboxReconciler) serviceFQDN(sb *agentsv1beta1.Sandbox) string {
 	if r.ClusterDomain == "" {
 		return ""
 	}
@@ -339,7 +339,7 @@ func (r *SandboxReconciler) serviceFQDN(sb *agentsv1alpha1.Sandbox) string {
 // Sandbox.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.Sandbox{}).
+		For(&agentsv1beta1.Sandbox{}).
 		Owns(&runv1.Sandbox{}).
 		Complete(r)
 }

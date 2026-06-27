@@ -1,7 +1,7 @@
 // Command facade runs the agents.x-k8s.io conformance facade controller
 // (issue #19). It is a SEPARATE binary from cmd/controller so the facade is
 // opt-in and does not entangle our core controller: deploy it only when you
-// want upstream agents.x-k8s.io/v1alpha1 Sandbox objects fulfilled on our fork
+// want upstream agents.x-k8s.io/v1beta1 Sandbox objects fulfilled on our fork
 // engine.
 //
 // The facade watches upstream Sandbox objects and maps each onto our
@@ -23,8 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	runv1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/facade"
@@ -39,8 +39,8 @@ func init() {
 	// scheme (the consolidated Sandbox and SandboxPool objects we create), plus
 	// core/v1.
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(extv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(agentsv1beta1.AddToScheme(scheme))
+	utilruntime.Must(extv1beta1.AddToScheme(scheme))
 	utilruntime.Must(runv1.AddToScheme(scheme))
 }
 

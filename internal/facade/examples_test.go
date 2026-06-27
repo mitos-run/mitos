@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

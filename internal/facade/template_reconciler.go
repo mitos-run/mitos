@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	runv1 "mitos.run/mitos/api/v1"
 )
@@ -68,7 +68,7 @@ type SandboxTemplateReconciler struct {
 func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var src extv1alpha1.SandboxTemplate
+	var src extv1beta1.SandboxTemplate
 	if err := r.Get(ctx, req.NamespacedName, &src); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -88,7 +88,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // upstream SandboxTemplate. Our pool is named after the upstream template, lives
 // in the same namespace, and is owner-referenced to it (for GC + the watch
 // back-link).
-func (r *SandboxTemplateReconciler) ensureTemplate(ctx context.Context, src *extv1alpha1.SandboxTemplate) error {
+func (r *SandboxTemplateReconciler) ensureTemplate(ctx context.Context, src *extv1beta1.SandboxTemplate) error {
 	pool := &runv1.SandboxPool{
 		ObjectMeta: metaName(src.Name, src.Namespace),
 	}
@@ -126,7 +126,7 @@ func metaName(name, namespace string) metav1.ObjectMeta {
 // podTemplate, or nil when the template carries none. Sandboxes are
 // single-workload by construction; additional containers are a documented
 // exception (docs/facade-conformance.md).
-func firstTemplateContainer(src *extv1alpha1.SandboxTemplate) *corev1.Container {
+func firstTemplateContainer(src *extv1beta1.SandboxTemplate) *corev1.Container {
 	containers := src.Spec.PodTemplate.Spec.Containers
 	if len(containers) == 0 {
 		return nil
@@ -138,7 +138,7 @@ func firstTemplateContainer(src *extv1alpha1.SandboxTemplate) *corev1.Container 
 // own our SandboxPool objects.
 func (r *SandboxTemplateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extv1alpha1.SandboxTemplate{}).
+		For(&extv1beta1.SandboxTemplate{}).
 		Owns(&runv1.SandboxPool{}).
 		Complete(r)
 }
