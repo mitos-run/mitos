@@ -33,6 +33,14 @@ RUN rustup target add x86_64-unknown-linux-musl && \
 
 FROM ubuntu:22.04
 
+LABEL org.opencontainers.image.title="mitos-forkd" \
+      org.opencontainers.image.description="Mitos forkd: per-node daemon that boots and copy-on-write forks Firecracker microVM sandboxes." \
+      org.opencontainers.image.source="https://github.com/mitos-run/mitos" \
+      org.opencontainers.image.url="https://mitos.run" \
+      org.opencontainers.image.documentation="https://mitos.run/docs" \
+      org.opencontainers.image.vendor="Mitos" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \

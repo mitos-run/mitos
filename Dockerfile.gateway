@@ -8,5 +8,13 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o gateway ./cmd/gateway/
 
 FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="mitos-gateway" \
+      org.opencontainers.image.description="Mitos gateway: the hosted API gateway for Mitos." \
+      org.opencontainers.image.source="https://github.com/mitos-run/mitos" \
+      org.opencontainers.image.url="https://mitos.run" \
+      org.opencontainers.image.documentation="https://mitos.run/docs" \
+      org.opencontainers.image.vendor="Mitos" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=builder /build/gateway /gateway
 ENTRYPOINT ["/gateway"]

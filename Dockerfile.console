@@ -32,5 +32,13 @@ RUN CGO_ENABLED=0 go build -o console ./cmd/console/
 
 # 3) Minimal runtime.
 FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="mitos-console" \
+      org.opencontainers.image.description="Mitos console: the web dashboard for Mitos." \
+      org.opencontainers.image.source="https://github.com/mitos-run/mitos" \
+      org.opencontainers.image.url="https://mitos.run" \
+      org.opencontainers.image.documentation="https://mitos.run/docs" \
+      org.opencontainers.image.vendor="Mitos" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=builder /build/console /console
 ENTRYPOINT ["/console"]

@@ -110,7 +110,7 @@ Value types:
 
 ## Streaming exec
 
-`Exec` runs over the Connect `sandbox.v1.Sandbox` runtime protocol (issue #24) and
+`Exec` runs over the Connect `sandbox.v1.Sandbox` runtime protocol and
 returns the buffered result. For live output, `ExecStream` yields stdout/stderr
 chunks as they are produced. The Go SDK speaks Connect over the standard library
 alone (no gRPC runtime, no codegen), so it stays dependency-free.
@@ -276,7 +276,7 @@ of this module: the files API (`/v1/files/*`), interactive PTY (`/v1/pty`),
 Mitos ships native clients in six languages. All of them share the same
 direct-mode surface (create a template, fork, exec, terminate), so the API maps
 1:1 across languages; cluster mode (driving the Kubernetes CRDs) ships in Python,
-TypeScript, and Go today and is planned for the rest, for full parity (#296).
+TypeScript, and Go today and is planned for the rest, for full parity.
 
 | Language | Install | Covers |
 | --- | --- | --- |

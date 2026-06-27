@@ -20,6 +20,9 @@ Direct mode uses `net/http`, `json`, `uri`, and `securerandom`; cluster mode add
 
 ## Install
 
+The gem is not yet on RubyGems; until then, vendor it from source (clone the
+repo and point your Gemfile at `sdk/ruby`). Once published:
+
 ```bash
 gem install mitos
 ```
