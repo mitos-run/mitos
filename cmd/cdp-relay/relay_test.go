@@ -47,8 +47,9 @@ func TestRewriteDiscoveryDevtoolsFrontendUrl(t *testing.T) {
 }
 
 // TestRelayEndToEnd proves two things in a single httptest pass:
-//  1. The relay sets Host: localhost on the upstream request (the fake
-//     upstream returns 403 for any other Host, so a 200 proves the rewrite).
+//  1. The relay sets a Host the Chromium DevTools check accepts (an IP literal
+//     or localhost) on the upstream request. The fake upstream mimics that check
+//     and returns 403 for any other Host, so a 200 proves the rewrite.
 //  2. The relay rewrites webSocketDebuggerUrl in /json* responses from the
 //     upstream loopback address to the external origin from X-Forwarded-Host.
 func TestRelayEndToEnd(t *testing.T) {
@@ -62,8 +63,14 @@ func TestRelayEndToEnd(t *testing.T) {
 	upstreamHostPort := "127.0.0.1:" + port
 
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Reject any Host that is not "localhost" to prove the relay sets it.
-		if r.Host != "localhost" {
+		// Mimic Chromium's DevTools host-header check: accept only an IP-literal
+		// or localhost host-part. This proves the relay sends such a Host (it
+		// sends the upstream host:port, e.g. 127.0.0.1:PORT).
+		host := r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		}
+		if host != "localhost" && net.ParseIP(host) == nil {
 			http.Error(w, "forbidden: bad Host "+r.Host, http.StatusForbidden)
 			return
 		}

@@ -52,8 +52,13 @@ func newRelayHandler(upstream string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			// Chromium rejects any Host that is not an IP or "localhost".
-			pr.Out.Host = "localhost"
+			// Chromium rejects any Host that is not an IP literal or "localhost".
+			// Send the upstream host:port (an IP literal like 127.0.0.1:9223): it
+			// passes the check AND is reflected verbatim into the discovery
+			// webSocketDebuggerUrl, so rewriteDiscovery can match and rewrite it.
+			// "localhost" alone would be reflected portless (ws://localhost/...),
+			// which the port-qualified rewrite would miss.
+			pr.Out.Host = upstream
 			// The ReverseProxy strips incoming X-Forwarded-* headers before
 			// calling Rewrite when the Rewrite hook is used. Re-propagate them
 			// from pr.In (the original, unmodified request) so ModifyResponse
