@@ -38,9 +38,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_NotifyForked_FullMethodName = "/sandbox.internal.v1.Control/NotifyForked"
-	Control_Configure_FullMethodName    = "/sandbox.internal.v1.Control/Configure"
-	Control_Ping_FullMethodName         = "/sandbox.internal.v1.Control/Ping"
+	Control_NotifyForked_FullMethodName  = "/sandbox.internal.v1.Control/NotifyForked"
+	Control_Configure_FullMethodName     = "/sandbox.internal.v1.Control/Configure"
+	Control_Ping_FullMethodName          = "/sandbox.internal.v1.Control/Ping"
+	Control_StartWorkload_FullMethodName = "/sandbox.internal.v1.Control/StartWorkload"
 )
 
 // ControlClient is the client API for Control service.
@@ -67,6 +68,14 @@ type ControlClient interface {
 	// Ping checks that the guest agent is alive and returns its uptime. Carries no
 	// secrets; safe to log.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// StartWorkload starts a declared serving workload during the template build
+	// and keeps it running for the snapshot, so a fork wakes with the app already
+	// listening (issue #460). The guest spawns the command in its OWN session so it
+	// survives the build's exec process-group kill and the fork SIGUSR2 reset, and
+	// when Ready is set blocks until the workload answers its port. Host-trusted
+	// (build time only); INTENTIONALLY ABSENT from the public Sandbox surface, so a
+	// tenant cannot start arbitrary detached processes outside its exec budget.
+	StartWorkload(ctx context.Context, in *StartWorkloadRequest, opts ...grpc.CallOption) (*StartWorkloadResponse, error)
 }
 
 type controlClient struct {
@@ -107,6 +116,16 @@ func (c *controlClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.
 	return out, nil
 }
 
+func (c *controlClient) StartWorkload(ctx context.Context, in *StartWorkloadRequest, opts ...grpc.CallOption) (*StartWorkloadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartWorkloadResponse)
+	err := c.cc.Invoke(ctx, Control_StartWorkload_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlServer is the server API for Control service.
 // All implementations must embed UnimplementedControlServer
 // for forward compatibility.
@@ -131,6 +150,14 @@ type ControlServer interface {
 	// Ping checks that the guest agent is alive and returns its uptime. Carries no
 	// secrets; safe to log.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// StartWorkload starts a declared serving workload during the template build
+	// and keeps it running for the snapshot, so a fork wakes with the app already
+	// listening (issue #460). The guest spawns the command in its OWN session so it
+	// survives the build's exec process-group kill and the fork SIGUSR2 reset, and
+	// when Ready is set blocks until the workload answers its port. Host-trusted
+	// (build time only); INTENTIONALLY ABSENT from the public Sandbox surface, so a
+	// tenant cannot start arbitrary detached processes outside its exec budget.
+	StartWorkload(context.Context, *StartWorkloadRequest) (*StartWorkloadResponse, error)
 	mustEmbedUnimplementedControlServer()
 }
 
@@ -149,6 +176,9 @@ func (UnimplementedControlServer) Configure(context.Context, *ConfigureRequest) 
 }
 func (UnimplementedControlServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedControlServer) StartWorkload(context.Context, *StartWorkloadRequest) (*StartWorkloadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartWorkload not implemented")
 }
 func (UnimplementedControlServer) mustEmbedUnimplementedControlServer() {}
 func (UnimplementedControlServer) testEmbeddedByValue()                 {}
@@ -225,6 +255,24 @@ func _Control_Ping_Handler(srv interface{}, ctx context.Context, dec func(interf
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_StartWorkload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartWorkloadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).StartWorkload(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_StartWorkload_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).StartWorkload(ctx, req.(*StartWorkloadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Control_ServiceDesc is the grpc.ServiceDesc for Control service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -243,6 +291,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _Control_Ping_Handler,
+		},
+		{
+			MethodName: "StartWorkload",
+			Handler:    _Control_StartWorkload_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

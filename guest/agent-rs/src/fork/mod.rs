@@ -136,7 +136,9 @@ fn write_fork_generation_file(path: &str, data: &str) -> std::io::Result<()> {
 ///   reseeded_rng             <- reseeded (from step 1)
 ///   signaled_processes       <- signaled (from step 6)
 pub fn handle_notify_forked(req: &NotifyForkedRequest) -> NotifyForkedResponse {
-    handle_notify_forked_inner(req, signal::signal_userspace)
+    handle_notify_forked_inner(req, || {
+        signal::signal_userspace(&std::collections::HashSet::new())
+    })
 }
 
 /// Inner orchestrator with an injectable signal function. Keeps tests
@@ -149,7 +151,7 @@ pub fn handle_notify_forked(req: &NotifyForkedRequest) -> NotifyForkedResponse {
 #[doc(hidden)]
 pub fn handle_notify_forked_inner(
     req: &NotifyForkedRequest,
-    do_signal: fn() -> i32,
+    do_signal: impl FnOnce() -> i32,
 ) -> NotifyForkedResponse {
     // Step 1: reseed kernel CRNG.
     let reseeded = reseed::reseed(&req.entropy);

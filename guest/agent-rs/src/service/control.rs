@@ -15,14 +15,15 @@
 //   - env and secrets VALUES are NEVER logged; only key counts are logged.
 //   - Ping carries no secrets and is safe to log.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 
 use crate::control_v1::control_server::Control;
 use crate::control_v1::{
     ConfigureRequest, ConfigureResponse, NotifyForkedRequest, NotifyForkedResponse, PingRequest,
-    PingResponse,
+    PingResponse, StartWorkloadRequest, StartWorkloadResponse,
 };
 use crate::env::ConfiguredEnv;
 use crate::fork::{
@@ -30,6 +31,7 @@ use crate::fork::{
     network::NetworkConfig,
     volumes::VolumeMountEntry,
 };
+use crate::service::workload::{self, WorkloadRegistry};
 
 /// The tonic Control service for the sandbox.internal.v1.Control gRPC service.
 ///
@@ -49,7 +51,11 @@ pub struct ControlService {
     /// `#[doc(hidden)]`: public for the integration test harness in `tests/`;
     /// not part of the stable API.
     #[doc(hidden)]
-    pub signal_fn: fn() -> i32,
+    pub signal_fn: fn(&HashSet<i32>) -> i32,
+    /// Registered serving-workload sessions (issue #460). StartWorkload records a
+    /// started workload's session here; NotifyForked passes the set to signal_fn
+    /// so the broadcast excludes the workload and it survives the fork.
+    pub workload: Arc<WorkloadRegistry>,
 }
 
 impl ControlService {
@@ -61,6 +67,7 @@ impl ControlService {
             start_time,
             env,
             signal_fn: fork::signal::signal_userspace,
+            workload: Arc::new(WorkloadRegistry::default()),
         }
     }
 }
@@ -148,13 +155,59 @@ impl Control for ControlService {
         };
 
         // Delegate to the inner orchestrator with the injectable signal function.
-        // In production signal_fn = signal_userspace; in tests it is a no-op.
-        let resp = fork::handle_notify_forked_inner(&typed_req, self.signal_fn);
+        // In production signal_fn = signal_userspace; in tests it is a no-op. The
+        // registered workload sessions are excluded so a captured-running serving
+        // workload survives the fork (#460).
+        let exclude = self.workload.excluded_sids();
+        let signal_fn = self.signal_fn;
+        let resp = fork::handle_notify_forked_inner(&typed_req, move || signal_fn(&exclude));
 
         Ok(Response::new(NotifyForkedResponse {
             applied_clock_step_nanos: resp.applied_clock_step_nanos,
             reseeded_rng: resp.reseeded_rng,
             signaled_processes: resp.signaled_processes,
         }))
+    }
+
+    // StartWorkload: starts a declared serving workload in its own session so it
+    // outlives the build's exec and the fork SIGUSR2 reset, records its session
+    // for the fork exclusion, and (when Ready is set) waits until it is listening
+    // so the snapshot captures a serving app (issue #460). Host-trusted, build
+    // time only. Never logs command argv or env values.
+    async fn start_workload(
+        &self,
+        request: Request<StartWorkloadRequest>,
+    ) -> Result<Response<StartWorkloadResponse>, Status> {
+        let req = request.into_inner();
+        if req.command.is_empty() {
+            return Err(Status::invalid_argument("start_workload: empty command"));
+        }
+        // Build a single shell command line from argv (the supervisor runs it via
+        // `sh -lc`, matching how the build's exec path runs commands).
+        let command = req.command.join(" ");
+        let env: Vec<(String, String)> = req.env.into_iter().collect();
+        let cwd = if req.cwd.is_empty() { "/" } else { &req.cwd };
+
+        let sid = workload::spawn_detached(&command, &env, cwd)
+            .map_err(|e| Status::internal(format!("start_workload: spawn: {e}")))?;
+        self.workload.register(sid);
+        tracing::info!(sid, env_keys = env.len(), "control: StartWorkload started");
+
+        let mut ready = true;
+        if let Some(h) = req.ready {
+            let timeout = if h.timeout_seconds == 0 {
+                Duration::from_secs(120)
+            } else {
+                Duration::from_secs(u64::from(h.timeout_seconds))
+            };
+            let port = u16::try_from(h.port)
+                .map_err(|_| Status::invalid_argument("start_workload: ready.port out of range"))?;
+            let expect = u16::try_from(h.expect).unwrap_or(0);
+            workload::await_http_ready(port, &h.path, expect, timeout)
+                .await
+                .map_err(|e| Status::deadline_exceeded(format!("start_workload: {e}")))?;
+            ready = true;
+        }
+        Ok(Response::new(StartWorkloadResponse { sid, ready }))
     }
 }

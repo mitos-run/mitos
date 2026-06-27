@@ -40,6 +40,213 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// StartWorkloadRequest declares the serving workload the build starts and
+// snapshots while it is running (issue #460).
+type StartWorkloadRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// command is the serving process argv, run through the shell in the guest.
+	Command []string `protobuf:"bytes,1,rep,name=command,proto3" json:"command,omitempty"`
+	// env are NON-secret environment variables for the workload. Secret values are
+	// delivered per fork via Configure and never baked into the snapshot. Keys are
+	// safe to log; values are not.
+	Env map[string]string `protobuf:"bytes,2,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// cwd is the working directory; empty means the guest default.
+	Cwd string `protobuf:"bytes,3,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	// ready, when set, is the HTTP gate the guest waits on before returning, so the
+	// snapshot captures a listening app. Absent means snapshot as soon as started.
+	Ready         *HttpReady `protobuf:"bytes,4,opt,name=ready,proto3" json:"ready,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartWorkloadRequest) Reset() {
+	*x = StartWorkloadRequest{}
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartWorkloadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartWorkloadRequest) ProtoMessage() {}
+
+func (x *StartWorkloadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartWorkloadRequest.ProtoReflect.Descriptor instead.
+func (*StartWorkloadRequest) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *StartWorkloadRequest) GetCommand() []string {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *StartWorkloadRequest) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *StartWorkloadRequest) GetCwd() string {
+	if x != nil {
+		return x.Cwd
+	}
+	return ""
+}
+
+func (x *StartWorkloadRequest) GetReady() *HttpReady {
+	if x != nil {
+		return x.Ready
+	}
+	return nil
+}
+
+// HttpReady is the in-guest HTTP readiness gate for a serving workload. All
+// fields are plain values and safe to log.
+type HttpReady struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// port is the guest TCP port the workload listens on.
+	Port uint32 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	// path is the request path; empty defaults to "/".
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// expect is the HTTP status that counts as ready; 0 defaults to 200.
+	Expect uint32 `protobuf:"varint,3,opt,name=expect,proto3" json:"expect,omitempty"`
+	// timeout_seconds bounds the readiness wait; 0 defaults to 120.
+	TimeoutSeconds uint32 `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *HttpReady) Reset() {
+	*x = HttpReady{}
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HttpReady) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HttpReady) ProtoMessage() {}
+
+func (x *HttpReady) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HttpReady.ProtoReflect.Descriptor instead.
+func (*HttpReady) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *HttpReady) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *HttpReady) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *HttpReady) GetExpect() uint32 {
+	if x != nil {
+		return x.Expect
+	}
+	return 0
+}
+
+func (x *HttpReady) GetTimeoutSeconds() uint32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+// StartWorkloadResponse reports the started workload. Safe to log.
+type StartWorkloadResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// sid is the workload's session id, which the guest records so the per-fork
+	// SIGUSR2 reset broadcast excludes the workload's session.
+	Sid int32 `protobuf:"varint,1,opt,name=sid,proto3" json:"sid,omitempty"`
+	// ready is true when the readiness gate passed, or when no gate was requested.
+	Ready         bool `protobuf:"varint,2,opt,name=ready,proto3" json:"ready,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartWorkloadResponse) Reset() {
+	*x = StartWorkloadResponse{}
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartWorkloadResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartWorkloadResponse) ProtoMessage() {}
+
+func (x *StartWorkloadResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartWorkloadResponse.ProtoReflect.Descriptor instead.
+func (*StartWorkloadResponse) Descriptor() ([]byte, []int) {
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *StartWorkloadResponse) GetSid() int32 {
+	if x != nil {
+		return x.Sid
+	}
+	return 0
+}
+
+func (x *StartWorkloadResponse) GetReady() bool {
+	if x != nil {
+		return x.Ready
+	}
+	return false
+}
+
 // NotifyForkedRequest mirrors internal/vsock.NotifyForkedRequest field-for-field.
 //
 // Entropy and host_wall_clock_nanos are SENSITIVE: Entropy is raw CRNG seed
@@ -75,7 +282,7 @@ type NotifyForkedRequest struct {
 
 func (x *NotifyForkedRequest) Reset() {
 	*x = NotifyForkedRequest{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -87,7 +294,7 @@ func (x *NotifyForkedRequest) String() string {
 func (*NotifyForkedRequest) ProtoMessage() {}
 
 func (x *NotifyForkedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[0]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -100,7 +307,7 @@ func (x *NotifyForkedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedRequest.ProtoReflect.Descriptor instead.
 func (*NotifyForkedRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{0}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *NotifyForkedRequest) GetGeneration() uint64 {
@@ -165,7 +372,7 @@ type NotifyForkedNetwork struct {
 
 func (x *NotifyForkedNetwork) Reset() {
 	*x = NotifyForkedNetwork{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -177,7 +384,7 @@ func (x *NotifyForkedNetwork) String() string {
 func (*NotifyForkedNetwork) ProtoMessage() {}
 
 func (x *NotifyForkedNetwork) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[1]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -190,7 +397,7 @@ func (x *NotifyForkedNetwork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedNetwork.ProtoReflect.Descriptor instead.
 func (*NotifyForkedNetwork) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{1}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *NotifyForkedNetwork) GetGuestIp() string {
@@ -246,7 +453,7 @@ type VolumeMountEntry struct {
 
 func (x *VolumeMountEntry) Reset() {
 	*x = VolumeMountEntry{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -258,7 +465,7 @@ func (x *VolumeMountEntry) String() string {
 func (*VolumeMountEntry) ProtoMessage() {}
 
 func (x *VolumeMountEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[2]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -271,7 +478,7 @@ func (x *VolumeMountEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeMountEntry.ProtoReflect.Descriptor instead.
 func (*VolumeMountEntry) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{2}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *VolumeMountEntry) GetDevice() string {
@@ -314,7 +521,7 @@ type NotifyForkedResponse struct {
 
 func (x *NotifyForkedResponse) Reset() {
 	*x = NotifyForkedResponse{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -326,7 +533,7 @@ func (x *NotifyForkedResponse) String() string {
 func (*NotifyForkedResponse) ProtoMessage() {}
 
 func (x *NotifyForkedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[3]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -339,7 +546,7 @@ func (x *NotifyForkedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyForkedResponse.ProtoReflect.Descriptor instead.
 func (*NotifyForkedResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{3}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *NotifyForkedResponse) GetAppliedClockStepNanos() int64 {
@@ -383,7 +590,7 @@ type ConfigureRequest struct {
 
 func (x *ConfigureRequest) Reset() {
 	*x = ConfigureRequest{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -395,7 +602,7 @@ func (x *ConfigureRequest) String() string {
 func (*ConfigureRequest) ProtoMessage() {}
 
 func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[4]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -408,7 +615,7 @@ func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{4}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ConfigureRequest) GetEnv() map[string]string {
@@ -435,7 +642,7 @@ type ConfigureResponse struct {
 
 func (x *ConfigureResponse) Reset() {
 	*x = ConfigureResponse{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +654,7 @@ func (x *ConfigureResponse) String() string {
 func (*ConfigureResponse) ProtoMessage() {}
 
 func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[5]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +667,7 @@ func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{5}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{8}
 }
 
 // PingRequest carries no fields; it is a struct so future knobs can be added
@@ -473,7 +680,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +692,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[6]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +705,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{6}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{9}
 }
 
 // PingResponse mirrors internal/vsock.PingResponse field-for-field.
@@ -514,7 +721,7 @@ type PingResponse struct {
 
 func (x *PingResponse) Reset() {
 	*x = PingResponse{}
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -526,7 +733,7 @@ func (x *PingResponse) String() string {
 func (*PingResponse) ProtoMessage() {}
 
 func (x *PingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[7]
+	mi := &file_proto_sandbox_controlv1_internal_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -539,7 +746,7 @@ func (x *PingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResponse.ProtoReflect.Descriptor instead.
 func (*PingResponse) Descriptor() ([]byte, []int) {
-	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{7}
+	return file_proto_sandbox_controlv1_internal_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PingResponse) GetUptimeSeconds() float64 {
@@ -553,7 +760,23 @@ var File_proto_sandbox_controlv1_internal_proto protoreflect.FileDescriptor
 
 const file_proto_sandbox_controlv1_internal_proto_rawDesc = "" +
 	"\n" +
-	"&proto/sandbox/controlv1/internal.proto\x12\x13sandbox.internal.v1\"\x87\x02\n" +
+	"&proto/sandbox/controlv1/internal.proto\x12\x13sandbox.internal.v1\"\xf6\x01\n" +
+	"\x14StartWorkloadRequest\x12\x18\n" +
+	"\acommand\x18\x01 \x03(\tR\acommand\x12D\n" +
+	"\x03env\x18\x02 \x03(\v22.sandbox.internal.v1.StartWorkloadRequest.EnvEntryR\x03env\x12\x10\n" +
+	"\x03cwd\x18\x03 \x01(\tR\x03cwd\x124\n" +
+	"\x05ready\x18\x04 \x01(\v2\x1e.sandbox.internal.v1.HttpReadyR\x05ready\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"t\n" +
+	"\tHttpReady\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\rR\x04port\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x16\n" +
+	"\x06expect\x18\x03 \x01(\rR\x06expect\x12'\n" +
+	"\x0ftimeout_seconds\x18\x04 \x01(\rR\x0etimeoutSeconds\"?\n" +
+	"\x15StartWorkloadResponse\x12\x10\n" +
+	"\x03sid\x18\x01 \x01(\x05R\x03sid\x12\x14\n" +
+	"\x05ready\x18\x02 \x01(\bR\x05ready\"\x87\x02\n" +
 	"\x13NotifyForkedRequest\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x01 \x01(\x04R\n" +
@@ -592,11 +815,12 @@ const file_proto_sandbox_controlv1_internal_proto_rawDesc = "" +
 	"\x11ConfigureResponse\"\r\n" +
 	"\vPingRequest\"5\n" +
 	"\fPingResponse\x12%\n" +
-	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds2\x97\x02\n" +
+	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds2\xff\x02\n" +
 	"\aControl\x12c\n" +
 	"\fNotifyForked\x12(.sandbox.internal.v1.NotifyForkedRequest\x1a).sandbox.internal.v1.NotifyForkedResponse\x12Z\n" +
 	"\tConfigure\x12%.sandbox.internal.v1.ConfigureRequest\x1a&.sandbox.internal.v1.ConfigureResponse\x12K\n" +
-	"\x04Ping\x12 .sandbox.internal.v1.PingRequest\x1a!.sandbox.internal.v1.PingResponseB;Z9mitos.run/mitos/proto/sandbox/controlv1;sandboxinternalv1b\x06proto3"
+	"\x04Ping\x12 .sandbox.internal.v1.PingRequest\x1a!.sandbox.internal.v1.PingResponse\x12f\n" +
+	"\rStartWorkload\x12).sandbox.internal.v1.StartWorkloadRequest\x1a*.sandbox.internal.v1.StartWorkloadResponseB;Z9mitos.run/mitos/proto/sandbox/controlv1;sandboxinternalv1b\x06proto3"
 
 var (
 	file_proto_sandbox_controlv1_internal_proto_rawDescOnce sync.Once
@@ -610,35 +834,43 @@ func file_proto_sandbox_controlv1_internal_proto_rawDescGZIP() []byte {
 	return file_proto_sandbox_controlv1_internal_proto_rawDescData
 }
 
-var file_proto_sandbox_controlv1_internal_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_proto_sandbox_controlv1_internal_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_proto_sandbox_controlv1_internal_proto_goTypes = []any{
-	(*NotifyForkedRequest)(nil),  // 0: sandbox.internal.v1.NotifyForkedRequest
-	(*NotifyForkedNetwork)(nil),  // 1: sandbox.internal.v1.NotifyForkedNetwork
-	(*VolumeMountEntry)(nil),     // 2: sandbox.internal.v1.VolumeMountEntry
-	(*NotifyForkedResponse)(nil), // 3: sandbox.internal.v1.NotifyForkedResponse
-	(*ConfigureRequest)(nil),     // 4: sandbox.internal.v1.ConfigureRequest
-	(*ConfigureResponse)(nil),    // 5: sandbox.internal.v1.ConfigureResponse
-	(*PingRequest)(nil),          // 6: sandbox.internal.v1.PingRequest
-	(*PingResponse)(nil),         // 7: sandbox.internal.v1.PingResponse
-	nil,                          // 8: sandbox.internal.v1.ConfigureRequest.EnvEntry
-	nil,                          // 9: sandbox.internal.v1.ConfigureRequest.SecretsEntry
+	(*StartWorkloadRequest)(nil),  // 0: sandbox.internal.v1.StartWorkloadRequest
+	(*HttpReady)(nil),             // 1: sandbox.internal.v1.HttpReady
+	(*StartWorkloadResponse)(nil), // 2: sandbox.internal.v1.StartWorkloadResponse
+	(*NotifyForkedRequest)(nil),   // 3: sandbox.internal.v1.NotifyForkedRequest
+	(*NotifyForkedNetwork)(nil),   // 4: sandbox.internal.v1.NotifyForkedNetwork
+	(*VolumeMountEntry)(nil),      // 5: sandbox.internal.v1.VolumeMountEntry
+	(*NotifyForkedResponse)(nil),  // 6: sandbox.internal.v1.NotifyForkedResponse
+	(*ConfigureRequest)(nil),      // 7: sandbox.internal.v1.ConfigureRequest
+	(*ConfigureResponse)(nil),     // 8: sandbox.internal.v1.ConfigureResponse
+	(*PingRequest)(nil),           // 9: sandbox.internal.v1.PingRequest
+	(*PingResponse)(nil),          // 10: sandbox.internal.v1.PingResponse
+	nil,                           // 11: sandbox.internal.v1.StartWorkloadRequest.EnvEntry
+	nil,                           // 12: sandbox.internal.v1.ConfigureRequest.EnvEntry
+	nil,                           // 13: sandbox.internal.v1.ConfigureRequest.SecretsEntry
 }
 var file_proto_sandbox_controlv1_internal_proto_depIdxs = []int32{
-	1, // 0: sandbox.internal.v1.NotifyForkedRequest.network:type_name -> sandbox.internal.v1.NotifyForkedNetwork
-	2, // 1: sandbox.internal.v1.NotifyForkedRequest.volumes:type_name -> sandbox.internal.v1.VolumeMountEntry
-	8, // 2: sandbox.internal.v1.ConfigureRequest.env:type_name -> sandbox.internal.v1.ConfigureRequest.EnvEntry
-	9, // 3: sandbox.internal.v1.ConfigureRequest.secrets:type_name -> sandbox.internal.v1.ConfigureRequest.SecretsEntry
-	0, // 4: sandbox.internal.v1.Control.NotifyForked:input_type -> sandbox.internal.v1.NotifyForkedRequest
-	4, // 5: sandbox.internal.v1.Control.Configure:input_type -> sandbox.internal.v1.ConfigureRequest
-	6, // 6: sandbox.internal.v1.Control.Ping:input_type -> sandbox.internal.v1.PingRequest
-	3, // 7: sandbox.internal.v1.Control.NotifyForked:output_type -> sandbox.internal.v1.NotifyForkedResponse
-	5, // 8: sandbox.internal.v1.Control.Configure:output_type -> sandbox.internal.v1.ConfigureResponse
-	7, // 9: sandbox.internal.v1.Control.Ping:output_type -> sandbox.internal.v1.PingResponse
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	11, // 0: sandbox.internal.v1.StartWorkloadRequest.env:type_name -> sandbox.internal.v1.StartWorkloadRequest.EnvEntry
+	1,  // 1: sandbox.internal.v1.StartWorkloadRequest.ready:type_name -> sandbox.internal.v1.HttpReady
+	4,  // 2: sandbox.internal.v1.NotifyForkedRequest.network:type_name -> sandbox.internal.v1.NotifyForkedNetwork
+	5,  // 3: sandbox.internal.v1.NotifyForkedRequest.volumes:type_name -> sandbox.internal.v1.VolumeMountEntry
+	12, // 4: sandbox.internal.v1.ConfigureRequest.env:type_name -> sandbox.internal.v1.ConfigureRequest.EnvEntry
+	13, // 5: sandbox.internal.v1.ConfigureRequest.secrets:type_name -> sandbox.internal.v1.ConfigureRequest.SecretsEntry
+	3,  // 6: sandbox.internal.v1.Control.NotifyForked:input_type -> sandbox.internal.v1.NotifyForkedRequest
+	7,  // 7: sandbox.internal.v1.Control.Configure:input_type -> sandbox.internal.v1.ConfigureRequest
+	9,  // 8: sandbox.internal.v1.Control.Ping:input_type -> sandbox.internal.v1.PingRequest
+	0,  // 9: sandbox.internal.v1.Control.StartWorkload:input_type -> sandbox.internal.v1.StartWorkloadRequest
+	6,  // 10: sandbox.internal.v1.Control.NotifyForked:output_type -> sandbox.internal.v1.NotifyForkedResponse
+	8,  // 11: sandbox.internal.v1.Control.Configure:output_type -> sandbox.internal.v1.ConfigureResponse
+	10, // 12: sandbox.internal.v1.Control.Ping:output_type -> sandbox.internal.v1.PingResponse
+	2,  // 13: sandbox.internal.v1.Control.StartWorkload:output_type -> sandbox.internal.v1.StartWorkloadResponse
+	10, // [10:14] is the sub-list for method output_type
+	6,  // [6:10] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_sandbox_controlv1_internal_proto_init() }
@@ -652,7 +884,7 @@ func file_proto_sandbox_controlv1_internal_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_sandbox_controlv1_internal_proto_rawDesc), len(file_proto_sandbox_controlv1_internal_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
