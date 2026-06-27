@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.5.0](https://github.com/mitos-run/mitos/compare/v1.4.0...v1.5.0) (2026-06-27)
+
+
+### Features
+
+* **serving:** first-class serving workload started during build and surviving forks ([#460](https://github.com/mitos-run/mitos/issues/460)) ([#468](https://github.com/mitos-run/mitos/issues/468)) ([255da9b](https://github.com/mitos-run/mitos/commit/255da9bef2d3c97edae37aa7f9d9ae63184aeec4))
+
+
+### Bug Fixes
+
+* **build:** add the preview-proxy Dockerfile and publish it (expose proxy was never deployable) ([#457](https://github.com/mitos-run/mitos/issues/457)) ([a072fee](https://github.com/mitos-run/mitos/commit/a072fee4a7a965e057d4c5af64d9f5c5f8ba0549))
+* **cas:** unpin deleted templates and drive periodic CAS GC ([#464](https://github.com/mitos-run/mitos/issues/464)) ([#470](https://github.com/mitos-run/mitos/issues/470)) ([30fa68a](https://github.com/mitos-run/mitos/commit/30fa68a96608cd0ce1a2e8e6503dc9995c5ba548))
+* **chart:** sync the chart CRDs with the generated set (Sandbox expose, orgs) ([#454](https://github.com/mitos-run/mitos/issues/454)) ([f2ce17c](https://github.com/mitos-run/mitos/commit/f2ce17cb46fb7b86f19a15fa82b3c6e8ee3f00c1))
+* **forkd:** journal and reap build-time orphans on ungraceful death ([#469](https://github.com/mitos-run/mitos/issues/469)) ([#471](https://github.com/mitos-run/mitos/issues/471)) ([86d542f](https://github.com/mitos-run/mitos/commit/86d542f746467bc0494ffe269f7ce8c7e30afe52))
+* **forkd:** run forkd at system-node-critical so DiskPressure cannot evict it ([#466](https://github.com/mitos-run/mitos/issues/466)) ([fac5236](https://github.com/mitos-run/mitos/commit/fac5236c1f0936f7dd2cffcec6c810d91296b721))
+* **husk:** make tap creation idempotent so warm-pod re-activation never EBUSYs ([#428](https://github.com/mitos-run/mitos/issues/428)) ([#458](https://github.com/mitos-run/mitos/issues/458)) ([a2674f7](https://github.com/mitos-run/mitos/commit/a2674f7a3416a422a5221070f91c1e270b2f5d90))
+* **release:** resolve the publish tag from the latest release, not a flaky action output ([#452](https://github.com/mitos-run/mitos/issues/452)) ([ce394e2](https://github.com/mitos-run/mitos/commit/ce394e21d570d11b758e070b2bc1fe269754d0d7))
+* **snapshot:** fsync template snapshot files before recording the digest ([#461](https://github.com/mitos-run/mitos/issues/461)) ([#462](https://github.com/mitos-run/mitos/issues/462)) ([c79b139](https://github.com/mitos-run/mitos/commit/c79b1394bf246dd727f33ee3e3a17361fe3321cc))
+
 ## [1.4.0](https://github.com/mitos-run/mitos/compare/v1.3.1...v1.4.0) (2026-06-26)
 
 
