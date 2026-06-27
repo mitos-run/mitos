@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default: jobs get read-only GITHUB_TOKEN (Scorecard TokenPermissions).
+permissions:
+  contents: read
+
 jobs:
   go-test:
     runs-on: ubuntu-latest
@@ -30,8 +34,8 @@ jobs:
     env:
       MITOS_TEST_DATABASE_DSN: postgres://postgres:postgres@localhost:5432/mitos_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - run: go build ./...
@@ -43,8 +47,8 @@ jobs:
   go-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: golangci-lint
@@ -73,8 +77,8 @@ jobs:
     # or, only for a provably unreachable advisory, a documented exclusion.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: govulncheck
@@ -92,7 +96,7 @@ jobs:
     # definitions themselves (kind: CustomResourceDefinition) ARE validated.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install kubeconform
         run: |
           set -euo pipefail
@@ -140,7 +144,7 @@ jobs:
     # in either patch fails the merge or the validate.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install talosctl
         run: |
           set -euo pipefail
@@ -171,8 +175,8 @@ jobs:
       run:
         working-directory: sdk/python
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
@@ -184,8 +188,8 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
       - run: npm ci
@@ -206,14 +210,14 @@ jobs:
     # typescript-sdk jobs plus Go to build and run the server.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
       - name: Build the standalone sandbox-server
@@ -266,7 +270,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - run: docker build -f Dockerfile.controller -t mitos-controller:ci .
       - run: docker build -f Dockerfile.forkd -t mitos-forkd:ci .
       # The husk-stub image runs the dormant VMM inside each husk pod (the
@@ -336,11 +340,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-ci
           config: hack/kind-config.yaml
@@ -612,8 +616,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: Check KVM availability on the runner
@@ -627,7 +631,7 @@ jobs:
           ls -la /dev/kvm || { echo "HUSK-SETUP: no /dev/kvm on this runner"; exit 1; }
           grep -cE '(vmx|svm)' /proc/cpuinfo || true
           sudo chmod 666 /dev/kvm || true
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-husk
           config: hack/kind-config.yaml
@@ -1766,11 +1770,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-tenancy
           config: hack/kind-config.yaml
@@ -1829,8 +1833,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
       - name: Check KVM availability on the runner
@@ -1838,7 +1842,7 @@ jobs:
           set -euo pipefail
           ls -la /dev/kvm || { echo "PLACEMENT-SETUP: no /dev/kvm on this runner"; exit 1; }
           sudo chmod 666 /dev/kvm || true
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-placement
           config: hack/kind-config-placement.yaml
@@ -1974,11 +1978,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.26"
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-facade
           config: hack/kind-config.yaml
