@@ -393,7 +393,7 @@ a { color: var(--cyan); }
   }
 }
 
-/* Form controls: field-1 background, hairline border, cyan focus ring, 44px
+/* Form controls: field-1 background, hairline border, magenta focus ring, 44px
    min-height to meet touch-target requirements. Radius matches .card tight. */
 input:not([type="checkbox"]):not([type="radio"]),
 select,
@@ -412,7 +412,7 @@ textarea {
 input:not([type="checkbox"]):not([type="radio"]):focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid var(--cyan);
+  outline: 2px solid var(--magenta);
   outline-offset: 2px;
   border-color: transparent;
 }

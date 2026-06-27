@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -15,6 +16,7 @@ import (
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/orgprovision"
+	"mitos.run/mitos/internal/saas/pgstore"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -34,11 +36,18 @@ import (
 //     signup provisions the per-org namespace. With no client it is skipped with a
 //     warning rather than failing signup.
 //
-// The pending-signup store is the in-memory MemPendingStore: a pending,
-// unverified signup is short-lived (token TTL) and cheap to lose on a console
-// restart (the user simply signs up again), so it does not need the durable store.
-// Provisioned accounts/orgs DO live in the durable saas.Store.
-func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, caps signupGate) {
+// When pool is non-nil (durable Postgres configured), the pending-signup store
+// and credit ledger are backed by Postgres so they survive console restarts.
+// When pool is nil (dev / in-memory mode) the in-memory fallbacks are used; a
+// pending unverified signup is cheap to lose on restart (the user re-signs up).
+// Provisioned accounts/orgs always live in the durable saas.Store.
+//
+// sessions is the SAME store the session middleware reads; when non-nil a
+// successful fresh verify mints a session and sets the mitos_session cookie so
+// the new user arrives at the console already authenticated. newToken is the
+// SAME generator used by the OIDC callback; the raw token is never logged.
+// secure is the Secure cookie flag, matching the OIDC handler's value.
+func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool) {
 	if !caps.signupEnabled() {
 		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
 		return
@@ -55,18 +64,33 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
 	}
 
+	// Select the durable pending store when a Postgres pool is available; fall
+	// back to the in-memory implementation in dev mode (no DSN configured).
+	// The credit ledger is the single shared instance passed in from main so
+	// onboarding grants are visible in the billing view.
+	var pending onboarding.PendingStore
+	if pool != nil {
+		pending = pgstore.NewPgPendingStore(pool)
+	} else {
+		pending = onboarding.NewMemPendingStore()
+	}
+
 	svc := onboarding.NewService(
 		accounts,
 		store,
-		onboarding.NewMemPendingStore(),
-		billing.NewMemCreditLedger(),
+		pending,
+		creditLedger,
 		email,
 		opts...,
 	)
-	onboarding.NewHandler(svc, logger).Routes(mux)
+	h := onboarding.NewHandler(svc, logger,
+		onboarding.WithHandlerSessions(sessions, newToken, secure),
+	)
+	h.Routes(mux)
 	logger.Info("onboarding signup endpoints mounted",
 		"mode", "open",
 		"org_provisioner", prov != nil,
+		"session_cookie", sessions != nil,
 	)
 }
 

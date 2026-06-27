@@ -578,3 +578,132 @@ expose:
     resolveURL: ""
   # Proxy container resource requests and limits.
   resources: {}
+
+# Dex in-cluster OIDC federator: federates GitHub and Google into a single
+# OIDC issuer the console trusts. Gated by dex.enabled (default false).
+#
+# When dex.enabled is true, wire the console by setting:
+#   console.oidc.issuerURL    = <dex.issuer>
+#   console.oidc.clientID     = <dex.console.clientID>
+#   console.oidc.clientSecretRef = <dex.consoleClientSecret>
+#     (the console reads key "client-secret" from that Secret)
+#
+# Required Secrets (create out of band before enabling):
+#
+#   kubectl create secret generic <dex.connectorsSecret> \
+#     --namespace <release-namespace> \
+#     --from-literal=github-client-id='...' \
+#     --from-literal=github-client-secret='...' \
+#     --from-literal=google-client-id='...' \
+#     --from-literal=google-client-secret='...'
+#
+#   kubectl create secret generic <dex.consoleClientSecret> \
+#     --namespace <release-namespace> \
+#     --from-literal=client-secret='<shared-random-secret>'
+#
+# Set console.oidc.clientSecretRef to this same Secret name. Both Dex
+# (as the static-client secret) and the console (as its OIDC client secret)
+# read key "client-secret" from that Secret, so one Secret with one key
+# satisfies both sides. No secret value is ever inlined in this chart.
+# Secret VALUES are NEVER inlined in this chart; all are sourced via
+# secretKeyRef and Dex's native $VAR expansion in the config file.
+dex:
+  # Gate the Dex ConfigMap, Deployment, and Service. Default false (opt-in).
+  enabled: false
+  # Pinned Dex image. Dex v2.35+ supports $VAR expansion in config.yaml;
+  # v2.41.1 is the version validated for this chart.
+  image: ghcr.io/dexidp/dex:v2.41.1
+  # OIDC issuer URL Dex advertises. Must match the ingress path Dex is
+  # reachable at. The console trusts this as console.oidc.issuerURL.
+  issuer: https://mitos.run/dex
+  # Static OIDC client registered in Dex for the console.
+  console:
+    # OIDC client ID. Set console.oidc.clientID to the same value.
+    clientID: mitos-console
+    # The OAuth redirect_uri Dex registers for the console. Must match
+    # console.oidc.redirectURL and be registered in your GitHub/Google OAuth
+    # apps as an authorized redirect URI.
+    redirectURL: https://mitos.run/auth/callback
+  # Name of an existing Secret holding the GitHub and Google OAuth credentials.
+  # Required keys: github-client-id, github-client-secret,
+  #                google-client-id, google-client-secret.
+  # Create this Secret out of band (see comment block above). Empty string
+  # is not valid when dex.enabled is true.
+  connectorsSecret: ""
+  # Name of an existing Secret holding the console static-client secret.
+  # Required key: client-secret.
+  # Set console.oidc.clientSecretRef to this same Secret name. Both Dex and
+  # the console read key "client-secret" from this Secret, so one Secret with
+  # one key satisfies both sides. Create out of band (see comment block above).
+  consoleClientSecret: ""
+
+# Front-door reverse proxy (Deployment + Service): single-origin entry point at
+# mitos.run. Routes / to the marketing static site and /app + auth paths to the
+# console. Gated by frontdoor.enabled (default false). Requires the expose
+# Secret (expose.secretName) to be present in the cluster with a resolve-token
+# key before enabling, because MITOS_IDENTITY_RESOLVE_TOKEN is sourced from it.
+frontdoor:
+  # Gate the frontdoor Deployment and Service. Default false (opt-in).
+  enabled: false
+  # Number of frontdoor replicas.
+  replicas: 2
+  image:
+    # Image repository for the front-door (appended to image.registry).
+    # Set to the frontdoor binary OCI repository before enabling.
+    repository: ""
+    # Image tag. Defaults to the chart appVersion via mitos.image when empty.
+    tag: ""
+    # Image pull policy for the frontdoor container.
+    pullPolicy: IfNotPresent
+  # In-cluster URL of the marketing static-site Service. Defaults to the
+  # mitos-marketing Service constructed from the release namespace.
+  marketingURL: ""
+  # In-cluster URL of the console Service. Defaults to the mitos-console
+  # Service constructed from the release namespace.
+  consoleURL: ""
+  # In-cluster URL of the console session-resolve endpoint. Defaults to the
+  # mitos-console Service path /internal/session/resolve.
+  sessionResolveURL: ""
+  # Frontdoor container resource requests and limits.
+  resources: {}
+
+# Cilium Gateway-API edge resources for mitos.run (Gateway, Certificate,
+# HTTPRoutes, CiliumNetworkPolicy). Uses the "edge" values key to avoid
+# collision with the existing gateway.yaml (cmd/gateway API front door,
+# gated by gateway.enabled). Gated by edge.enabled (default false).
+# Live gateway, DNS, and TLS are verified on the cluster via the paperclip
+# deploy, not by local helm template lint.
+edge:
+  # Gate all edge-gateway resources. Default false (opt-in).
+  enabled: false
+  # GatewayClass name used by the Cilium Gateway-API integration.
+  gatewayClassName: cilium
+  # Primary hostname for the edge gateway and certificate.
+  hostname: mitos.run
+  tls:
+    # Name of the TLS Secret created by cert-manager and referenced by the
+    # Gateway listener.
+    secretName: mitos-run-tls
+    issuerRef:
+      # Name of the cert-manager ClusterIssuer or Issuer.
+      name: letsencrypt-prod
+      # Kind of the issuer reference: ClusterIssuer or Issuer.
+      kind: ClusterIssuer
+
+# Marketing static site (Deployment + Service): serves the Astro-built public
+# marketing pages at the root path forwarded by the front-door. Gated by
+# marketing.enabled (default false). The production OCI image is built from
+# github.com/mitos-run/website; wiring that build into this field is a
+# follow-up integration task.
+marketing:
+  # Gate the marketing Deployment and Service. Default false (opt-in).
+  enabled: false
+  # Number of marketing replicas.
+  replicas: 1
+  # Full OCI image reference for the marketing static site. Required when
+  # marketing.enabled is true. Use "nginxinc/nginx-unprivileged:latest" as a
+  # staging placeholder; replace with the production Astro dist image from the
+  # website repo CI once available.
+  image: ""
+  # Marketing container resource requests and limits.
+  resources: {}
