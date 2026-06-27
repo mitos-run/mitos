@@ -75,7 +75,13 @@ func (api *SandboxAPI) handleExpose(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	prefix := "/v1/sandboxes/" + id + "/expose/" + portStr
-	rp, err := api.ProxyHTTP(id, port, prefix)
+	// Resolve the requested id to the id the API operates on before proxying. In a
+	// husk pod (singleSandbox mode) the cluster addresses the sandbox by its
+	// cluster id while the pod registered it under the husk's single id; exec and
+	// the bearer check already resolve, so the expose port-forward must too or
+	// ProxyHTTP's registration lookup misses and every request 502s with
+	// "no route to guest port".
+	rp, err := api.ProxyHTTP(api.resolveSandboxID(id), port, prefix)
 	if err != nil {
 		http.Error(w, "no route to guest port", http.StatusBadGateway)
 		return

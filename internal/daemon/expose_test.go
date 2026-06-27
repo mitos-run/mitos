@@ -220,3 +220,26 @@ func (r *streamRecorder) WriteHeader(code int)        { r.mu.Lock(); r.code = co
 func (r *streamRecorder) Flush()                      {}
 func (r *streamRecorder) Read(p []byte) (int, error)  { return r.pr.Read(p) }
 func (r *streamRecorder) Close() error                { r.pr.Close(); r.pw.Close(); return nil }
+
+// TestExposeResolvesSingleSandboxID guards the husk single-sandbox expose fix: in
+// single-sandbox mode the cluster addresses the sandbox by its cluster id, but the
+// husk-stub registered it under the husk's single id. handleExpose must resolve the
+// requested id before proxying, exactly as exec and the bearer check do, or the
+// port-forward lookup misses and every request 502s with "no route to guest port".
+func TestExposeResolvesSingleSandboxID(t *testing.T) {
+	api := newExposeTestAPI(t, "127.0.0.1:1") // registers sb1 (ProxyHTTP does not dial)
+	api.SetSingleSandbox("sb1")
+
+	if got := api.resolveSandboxID("cluster-xyz"); got != "sb1" {
+		t.Fatalf("resolveSandboxID(cluster-xyz) = %q, want sb1", got)
+	}
+	// The fix: proxy via the RESOLVED id, which is the registered one.
+	if _, err := api.ProxyHTTP(api.resolveSandboxID("cluster-xyz"), 8000, "/x"); err != nil {
+		t.Fatalf("ProxyHTTP with resolved id: %v", err)
+	}
+	// Regression guard: the RAW cluster id is not registered, so proxying it (the
+	// pre-fix handleExpose behavior) fails. The handler must resolve first.
+	if _, err := api.ProxyHTTP("cluster-xyz", 8000, "/x"); err == nil {
+		t.Fatal("raw cluster id must not be registered; handleExpose must resolve it")
+	}
+}
