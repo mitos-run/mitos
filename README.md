@@ -27,7 +27,6 @@
   <a href="#quickstart">Quickstart</a> .
   <a href="https://mitos.run/docs">Documentation</a> .
   <a href="#features">Features</a> .
-  <a href="#architecture">Architecture</a> .
   <a href="#comparison">Comparison</a> .
   <a href="CONTRIBUTING.md">Contributing</a> .
   <a href="https://discord.gg/zddgd2pgab">Community</a>
@@ -168,6 +167,8 @@ Two ways to run it:
 
 > Two engine paths exist. The **husk pod-native path is the default**: each VM runs in its own unprivileged pod, and the source husk pod snapshots its running VM so N child pods restore it via CoW. The **raw-forkd path** runs forks in forkd's in-process engine. Everything here runs on the husk default unless explicitly marked `engine path`.
 
+Sandboxes are not pods. Pod-scoped Kubernetes mechanisms (NetworkPolicy, ResourceQuota, PSA) govern the husk pod, not the workload inside the microVM; the sandbox is the VM, not the husk pod, and where we provide an equivalent it is documented as ours. The full claim and exec data paths and the component diagram are at [mitos.run/docs/architecture](https://mitos.run/docs/architecture).
+
 ## Features
 
 The husk pod-native path is the default. A few capabilities run today only on the raw-forkd `engine path` and are marked, with a link to the tracking issue.
@@ -227,42 +228,6 @@ The husk pod-native path is the default. A few capabilities run today only on th
 | Operator tooling | `kubectl mitos` plugin (`ls` / `ps`) and the operational `GET /v1/metering` report | [mitos.run/docs/observability](https://mitos.run/docs/observability) |
 | Bare metal first-class | Talos + Hetzner is the reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
 
-## Architecture
-
-```mermaid
-flowchart TB
-  subgraph SDKs["SDKs and surfaces"]
-    PY["Python SDK"]
-    TS["TypeScript SDK / @mitos/sdk"]
-    OTH["Go / Ruby / Rust / Java (direct)"]
-    CLI["mitos CLI / mitos-mcp"]
-  end
-
-  subgraph CP["Kubernetes control plane"]
-    CRD["SandboxPool -> Sandbox / Workspace (mitos.run/v1)"]
-    CTRL["controller (Deployment): reconciles CRDs, picks nodes, calls forkd over gRPC"]
-    CRD --> CTRL
-  end
-
-  subgraph NODE["KVM-capable node"]
-    FORKD["forkd (DaemonSet): builds snapshots, forks via CoW restore, bridges exec/files to the guest over vsock"]
-    subgraph PODS["husk pods (DEFAULT): one unprivileged pod per VM"]
-      VM1["VM + guest agent (PID 1)"]
-      VM2["VM + guest agent (PID 1)"]
-      VM3["VM + guest agent (PID 1)"]
-    end
-    FORKD --> PODS
-  end
-
-  SDKs -->|HTTP /v1| FORKD
-  CTRL -->|gRPC| FORKD
-```
-
-- **Claim path:** the controller selects a node and calls forkd `Fork` over gRPC; the claim status endpoint is forkd's HTTP API on that node.
-- **Exec path:** SDK -> forkd HTTP API -> vsock -> guest agent (PID 1 inside the VM).
-
-Sandboxes are not pods. Pod-scoped Kubernetes mechanisms (NetworkPolicy, ResourceQuota, PSA) govern the husk pod, not the workload inside the microVM; where we provide an equivalent, it is documented as ours. The sandbox is the VM, not the husk pod. Full walkthrough: [mitos.run/docs/architecture](https://mitos.run/docs/architecture).
-
 ## Comparison
 
 A head-to-head numbers table belongs here only when our harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo. That harness is [#15](https://github.com/mitos-run/mitos/issues/15). The figures below are **other vendors' published numbers, for different operations, on different hardware, with different methodology**: they are not measured by us and are not a head-to-head claim.
@@ -310,7 +275,7 @@ Early development, pre-1.0 (latest release `v0.3.0`). Do not run untrusted code 
 
 ## Documentation
 
-Full documentation lives at **[mitos.run/docs](https://mitos.run/docs)**: quickstart, SDK and CLI reference, sandbox lifecycle, workspaces, networking, and the threat model, all rendered from this repository.
+Full documentation lives at **[mitos.run/docs](https://mitos.run/docs)**: quickstart, architecture, SDK and CLI reference, sandbox lifecycle, workspaces, networking, and the threat model, all rendered from this repository.
 
 The complete long tail (templates, snapshot format and distribution, encryption and secrets, scheduling and density, failure and GC, fork-engine correctness, recipes, and the target v2 API spec) lives in [`docs/`](docs/) in this repo. Benchmark methodology is in [BENCHMARKS.md](BENCHMARKS.md).
 
