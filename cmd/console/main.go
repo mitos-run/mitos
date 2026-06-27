@@ -139,6 +139,11 @@ func main() {
 		Log:      logger,
 	})
 
+	// sessionSvc is constructed before the dev/prod branch so the internal
+	// machine-to-machine endpoints (mounted unconditionally below) can share it
+	// with the production session middleware without re-allocating.
+	sessionSvc := saas.NewSessionService(sessionStore, accounts)
+
 	mux := http.NewServeMux()
 	// The BFF API. In production it is mounted behind the session middleware that
 	// resolves the OIDC session cookie to the verified org context; here the dev
@@ -152,8 +157,7 @@ func main() {
 		// OIDC session cookie, and the embedded SPA is served at the root. ONE
 		// binary serves the BFF and the UI. The login flow and the middleware share
 		// ONE session store so a session issued at /auth/callback resolves here.
-		sessions := saas.NewSessionService(sessionStore, accounts)
-		sessionMW := console.SessionMiddleware(sessions)
+		sessionMW := console.SessionMiddleware(sessionSvc)
 		mux.Handle("/console/", sessionMW(con))
 		mux.Handle("/", spa.Handler())
 		// Run with Mitos endpoints sit behind the same session auth so each call
@@ -189,8 +193,11 @@ func main() {
 	if token := os.Getenv("MITOS_IDENTITY_RESOLVE_TOKEN"); token != "" {
 		mux.Handle("POST /internal/identity/resolve", saas.NewIdentityResolveHandler(accounts, token, logger))
 		logger.Info("identity resolve endpoint mounted")
+		mux.Handle("POST /internal/session/resolve", saas.NewSessionResolveHandler(sessionSvc, token, logger))
+		logger.Info("session resolve endpoint mounted")
 	} else {
 		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/identity/resolve not mounted")
+		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/session/resolve not mounted")
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
