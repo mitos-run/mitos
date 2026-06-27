@@ -10,6 +10,13 @@ on:
   push:
     tags:
       - "v*"
+  # Manual backfill: (re)build the CLI assets for an existing tag, for example
+  # when a release was cut before the publish cascade was wired up.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Existing release tag to (re)build CLI assets for (for example v1.5.0)"
+        required: true
 
 permissions:
   contents: read
@@ -24,6 +31,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # On a manual backfill, check out the requested tag so goreleaser
+          # computes that release version; on a tag push this resolves to the
+          # pushed tag ref.
+          ref: ${{ github.event.inputs.ref || github.ref }}
           # goreleaser needs full history and tags to compute the version and
           # changelog context.
           fetch-depth: 0
