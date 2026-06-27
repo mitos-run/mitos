@@ -56,6 +56,16 @@ const (
 	// Selection skips any pod carrying it: one claim activates one husk pod.
 	huskClaimLabel = "mitos.run/claim"
 
+	// huskTemplateDigestAnnotation records the content-addressed snapshot digest a
+	// warm husk pod was built to verify against, so the reconcile can reap a pod
+	// whose snapshot was rebuilt under it (issue #461). An annotation, not a label:
+	// a digest contains ':' and exceeds 63 chars, both invalid in a label value.
+	huskTemplateDigestAnnotation = "mitos.run/template-digest"
+	// huskSnapshotNodeAnnotation records the single snapshot node a warm husk pod
+	// is pinned to, so the reconcile compares the pod's stamped digest against THAT
+	// node's current recorded digest (per-node digests differ, issue #175).
+	huskSnapshotNodeAnnotation = "mitos.run/snapshot-node"
+
 	// huskForkLabel marks a husk pod as a fork CHILD and carries the owning
 	// SandboxFork name, so a reconcile can list exactly this fork's children and
 	// they are never counted as warm-pool slots (the pool selector requires
@@ -685,6 +695,16 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		}
 	}
 
+	// Stamp the per-node digest + node on a warm pod pinned to exactly one snapshot
+	// node, so a later reconcile can reap it if that node's snapshot is rebuilt
+	// under a new digest (issue #461). The fallback path (no single pinned node) and
+	// fork children (no SnapshotNodes) get no stamp and are never reaped.
+	annotations := map[string]string{}
+	if len(opts.SnapshotNodes) == 1 && opts.ExpectedDigest != "" {
+		annotations[huskTemplateDigestAnnotation] = opts.ExpectedDigest
+		annotations[huskSnapshotNodeAnnotation] = opts.SnapshotNodes[0]
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
@@ -693,6 +713,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 				huskPoolLabel: pool.Name,
 				huskLabel:     "true",
 			},
+			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
