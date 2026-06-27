@@ -1213,6 +1213,24 @@ with `spec.expose` set and `Status.Phase==Ready` is reachable at
 | Authorization pipeline: fail-closed tier, network, audience | mitigated (unit-tested) | The `Authorize` function in `internal/preview/authz.go` applies three layers in sequence: (1) NETWORK: `route.Network` is a CIDR allowlist (`Route.Network []string`); if non-empty the client IP must fall within at least one listed CIDR (`NetworkAllows`). A nil or out-of-range IP against a non-empty allowlist is denied. Malformed CIDRs are skipped (fail closed: no match returns `DenyForbidden`). (2) TIER: `route.Sharing` selects the tier. `public` always allows (but `DenyForbidden` if audience fields are set, because audience evaluation requires an identity). `authenticated` requires a non-nil identity. `org`/`private` require a non-nil identity AND `route.OrgID` present in `identity.OrgIDs`. `link` requires a non-nil identity (the proxy decodes the link cookie before calling `Authorize`). Unknown or empty `Sharing` is `DenyForbidden` (fail closed; no default-deny coercion to a different tier). (3) AUDIENCE: `AllowedPrincipals` uses case-folded exact email match; `AllowedEmailDomains` requires `identity.EmailVerified == true` and an EXACT case-folded domain match (`containsDomainFolded`); a suffix like `evilacme.com` does NOT match an entry `acme.com`. Empty allowlist entries are skipped. `internal/preview/authz.go`. Unit-tested across all tier/network/audience combinations; CIDR gate; suffix-trick rejected; case-insensitive; empty entries guarded. |
 | OIDC live-IdP path: honest CI scope | partial | The OIDC authorization code flow (discovery, redirect to provider, callback with state validation, code exchange, ID token verify) is tested with a fake token verifier (`oidcauth.FakeVerifier`) in unit CI so the flow handlers can be exercised without a live issuer. The live-IdP path (a real `/.well-known/openid-configuration` discovery, a real code exchange) is maintainer-verified only; it is not covered by an automated CI job. PKCE is a documented follow-up. SAML and SCIM are deferred. This surface stays gated behind the external security review (issue #194) and the abuse-control envelope (issue #213). |
 
+### Headless-browser CDP exposure (issue #314)
+
+The computer-use template (`images/computer-use`) exposes a Chrome DevTools
+Protocol (CDP) endpoint over the section-7c expose ingress. CDP is FULL remote
+control of the browser: a CDP client can navigate `file://`, read local files, and
+execute arbitrary JavaScript in pages. The exposed CDP endpoint is therefore
+treated as a privileged control surface and inherits the section-7c PRODUCTION
+GATE: it is not cleared for untrusted tenants until the #194 external review and
+the #213 abuse-control envelope land, and it MUST stay behind the expose access
+ladder, private by default; the recipe never demonstrates the `public` tier for
+CDP.
+
+| Boundary | Status | Mechanism |
+|---|---|---|
+| In-guest CDP relay is unprivileged | mitigated | `cmd/cdp-relay` runs INSIDE the sandbox guest as part of the serving workload; it owns the exposed guest port and reverse-proxies to Chromium on an internal loopback port. It is an in-guest userspace proxy with no host, control-plane, or sibling-sandbox access; it is in the same untrusted-guest trust domain as the workload it fronts (section: Guest workload, untrusted). It exists only to satisfy Chromium's DevTools host-header check (Chromium rejects any `Host` that is not an IP literal or `localhost`): the relay sends the upstream loopback host:port as `Host` and rewrites the discovery `webSocketDebuggerUrl` to the external origin. |
+| Spoofable X-Forwarded-Host has no privileged effect | mitigated | The relay derives the rewritten discovery host from `X-Forwarded-Host` (set by the expose proxy from the client's Host) or, absent it, the client's own request Host. An authenticated client that spoofs `X-Forwarded-Host` only changes the host in the `webSocketDebuggerUrl` it gets back, an unreachable or self-chosen value: a self-inflicted bad URL. It does NOT steer the upstream (the expose proxy derives the forkd upstream solely from the route table, section 7c) and grants no cross-sandbox or cross-tenant access. |
+| Chromium `--no-sandbox`: the microVM is the boundary | mitigated | Chromium runs with `--no-sandbox`, disabling its in-process seccomp/namespace sandbox, the same posture as E2B Desktop and Browserbase. The containment boundary is the Firecracker microVM (sections 1 and 2): a hostile page or malicious script is confined to the one sandbox and cannot reach the host, the control plane, or sibling sandboxes. Rendering untrusted web content is the intended isolation use case. |
+
 ## 8. What we explicitly do NOT claim
 
 - No pod-scoped Kubernetes mechanism (NetworkPolicy, PodSecurity, pod quotas)
