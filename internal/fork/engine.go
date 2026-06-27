@@ -2169,6 +2169,26 @@ func (e *Engine) DeleteTemplate(id string) error {
 			return err
 		}
 	}
+	// Unpin the template's CAS manifest so its chunks become eligible for
+	// eviction by the GC; otherwise a deleted template's chunks stay pinned
+	// forever and the CAS grows unbounded (#464). Prefer the in-memory digest,
+	// fall back to the persisted digest file so a post-restart delete still
+	// unpins. Best-effort: a failed unpin must not block the delete.
+	if e.casStore != nil {
+		e.mu.Lock()
+		d, ok := e.templateDigests[id]
+		e.mu.Unlock()
+		if !ok {
+			if fileD, ferr := readDigestFile(e.dataDir, id); ferr == nil {
+				d, ok = fileD, true
+			}
+		}
+		if ok {
+			if err := e.casStore.Unpin(d); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: WARNING unpin template %s manifest for GC: %v\n", id, err)
+			}
+		}
+	}
 	if err := e.templateMgr.DeleteTemplate(id); err != nil {
 		return fmt.Errorf("delete template %s: %w", id, err)
 	}

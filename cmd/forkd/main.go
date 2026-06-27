@@ -18,6 +18,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"mitos.run/mitos/internal/casgc"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/fork"
@@ -64,6 +65,9 @@ func main() {
 		maxExecTimeoutSecs   int
 		casListen            string
 		allowInsecureGRPC    bool
+		casGCInterval        time.Duration
+		casDiskHigh          float64
+		casDiskLow           float64
 	)
 	// peerToken is read from the environment, NOT a flag: a flag is visible in
 	// /proc/<pid>/cmdline, and the token is a credential. The controller already
@@ -84,6 +88,9 @@ func main() {
 	flag.StringVar(&chrootBase, "chroot-base", "/srv/jailer", "Jailer chroot base directory; must share a filesystem with --data-dir")
 	flag.StringVar(&uidRange, "uid-range", "64000-64999", "Inclusive uid/gid range for per-VM jailer users, formatted low-high")
 	flag.StringVar(&casDir, "cas-dir", "", "Content-addressed store directory for snapshot integrity and transfer. Empty means <data-dir>/cas")
+	flag.DurationVar(&casGCInterval, "cas-gc-interval", 5*time.Minute, "How often forkd evicts unpinned CAS chunks when the data-dir filesystem crosses --cas-disk-high-watermark; 0 disables CAS GC. Pinned (active-template) chunks are never evicted (#464)")
+	flag.Float64Var(&casDiskHigh, "cas-disk-high-watermark", 0.85, "Data-dir filesystem used fraction at or above which CAS GC evicts; prevents un-GC'd CAS from tripping node DiskPressure (#464)")
+	flag.Float64Var(&casDiskLow, "cas-disk-low-watermark", 0.70, "Data-dir filesystem used fraction the CAS GC evicts down toward when triggered")
 	flag.BoolVar(&allowUnverified, "allow-unverified-snapshots", false, "Allow forking snapshots that fail or skip integrity verification (development only; refused by default)")
 	flag.BoolVar(&allowIncompatible, "allow-incompatible-snapshots", false, "Allow forking snapshots whose recorded environment (Firecracker version, CPU model, or snapshot format) is incompatible with this host (development only; refused by default)")
 	flag.BoolVar(&enableNet, "enable-networking", false, "Enable per-sandbox guest networking (tap device, egress nftables, NIC attach). Default false until proven on KVM CI")
@@ -158,6 +165,9 @@ func main() {
 	// template distribution. Set only on the real engine when mTLS and a peer
 	// token are both configured. Nil leaves the HTTP server plaintext as before.
 	var casServing *daemon.CASServing
+	// casGCStore is the real engine's CAS store, captured for the periodic GC
+	// (#464). nil in mock mode (no real CAS to evict).
+	var casGCStore casgc.Store
 
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
@@ -290,6 +300,7 @@ func main() {
 			os.Exit(1)
 		}
 		engine = real
+		casGCStore = real.CASStore()
 
 		// Raw-forkd multi-tenant gate (security blocker 5): the raw-forkd engine
 		// path (this non-husk forkd DaemonSet) runs the daemon privileged and, when
@@ -367,6 +378,16 @@ func main() {
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	defer metricsCancel()
 	go server.SampleMetrics(metricsCtx, 0)
+
+	// Periodic CAS garbage collection (#464): the content-addressed store evicts
+	// unpinned (deleted-template) chunks down to a low watermark whenever the
+	// data-dir filesystem crosses the high watermark, so orphaned chunks cannot
+	// grow unbounded and trip node DiskPressure. Pinned active-template chunks are
+	// never evicted. Cancelled on shutdown via metricsCtx.
+	if casGCStore != nil && casGCInterval > 0 {
+		go casgc.Run(metricsCtx, casGCStore, dataDir, casGCInterval, casDiskHigh, casDiskLow, casgc.DiskUsage,
+			func(format string, args ...any) { fmt.Fprintf(os.Stderr, "forkd: "+format+"\n", args...) })
+	}
 
 	// Start the controlled DNS resolver (node-level Runnable) when enabled. It
 	// binds the resolver IP on port 53 (udp + tcp); a listen failure is fatal
