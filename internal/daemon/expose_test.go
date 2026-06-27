@@ -183,6 +183,98 @@ func TestHandleExposeStreamsSSEEndToEnd(t *testing.T) {
 	}
 }
 
+// TestProxyHTTPForwardsXForwardedHeaders asserts that a request routed through
+// ProxyHTTP reaches the upstream with X-Forwarded-Host set to the incoming
+// request Host and X-Forwarded-Proto set based on TLS state.
+func TestProxyHTTPForwardsXForwardedHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var gotHost, gotProto string
+	var backendHit bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotHost = r.Header.Get("X-Forwarded-Host")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		backendHit = true
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := portOf(t, backend)
+	api := newExposeTestAPI(t, backend.Listener.Addr().String())
+	prefix := "/v1/sandboxes/sb1/expose/" + itoa(port)
+	rp, err := api.ProxyHTTP("sb1", port, prefix)
+	if err != nil {
+		t.Fatalf("ProxyHTTP: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, prefix+"/check", nil)
+	req.Host = "example.test"
+	rec := httptest.NewRecorder()
+	rp.ServeHTTP(rec, req)
+
+	mu.Lock()
+	hit, host, proto := backendHit, gotHost, gotProto
+	mu.Unlock()
+
+	if !hit {
+		t.Fatal("backend handler was not called")
+	}
+	if host != "example.test" {
+		t.Errorf("X-Forwarded-Host: got %q, want %q", host, "example.test")
+	}
+	if proto != "http" {
+		t.Errorf("X-Forwarded-Proto: got %q, want %q", proto, "http")
+	}
+}
+
+// TestProxyHTTPPreservesExistingXForwardedHeaders asserts that an already-set
+// X-Forwarded-Host (from an edge proxy) is preserved and not overwritten with
+// the inner request Host.
+func TestProxyHTTPPreservesExistingXForwardedHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var gotHost, gotProto string
+	var backendHit bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotHost = r.Header.Get("X-Forwarded-Host")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		backendHit = true
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := portOf(t, backend)
+	api := newExposeTestAPI(t, backend.Listener.Addr().String())
+	prefix := "/v1/sandboxes/sb1/expose/" + itoa(port)
+	rp, err := api.ProxyHTTP("sb1", port, prefix)
+	if err != nil {
+		t.Fatalf("ProxyHTTP: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, prefix+"/check", nil)
+	req.Host = "inner.host"
+	req.Header.Set("X-Forwarded-Host", "edge.proxy.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	rp.ServeHTTP(rec, req)
+
+	mu.Lock()
+	hit, host, proto := backendHit, gotHost, gotProto
+	mu.Unlock()
+
+	if !hit {
+		t.Fatal("backend handler was not called")
+	}
+	if host != "edge.proxy.example" {
+		t.Errorf("X-Forwarded-Host: got %q, want %q", host, "edge.proxy.example")
+	}
+	if proto != "https" {
+		t.Errorf("X-Forwarded-Proto: got %q, want %q", proto, "https")
+	}
+}
+
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func portOf(t *testing.T, s *httptest.Server) int {
