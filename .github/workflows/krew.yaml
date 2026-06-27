@@ -91,10 +91,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Update the krew-index PR
-        # The bot reads GITHUB_REF and requires a tag ref. On a release event that
-        # is already refs/tags/<tag>; on a manual workflow_dispatch backfill it is
-        # refs/heads/<branch>, which the bot rejects, so synthesize the tag ref
-        # from the dispatch input.
-        env:
-          GITHUB_REF: refs/tags/${{ github.event.release.tag_name || github.event.inputs.tag }}
+        # The bot requires GITHUB_REF to be a tag ref. A release event already
+        # satisfies that; to backfill an existing tag, dispatch this workflow ON
+        # the tag ref so GITHUB_REF is refs/tags/<tag>:
+        #   gh workflow run krew.yaml --ref <tag> -f tag=<tag>
+        # A step-level env override does NOT work here: the runner injects the
+        # reserved GITHUB_REF into the container action with its own value.
         uses: rajatjindal/krew-release-bot@v0.0.46
