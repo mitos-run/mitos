@@ -23,6 +23,9 @@ These outrank convenience:
 3. **Honest Kubernetes semantics.** Sandboxes are not pods; never imply pod-scoped mechanisms (NetworkPolicy, ResourceQuota, PSA) govern them.
 4. **Boring failure behavior.** Every component defines what happens on crash, node loss, slow etcd, and capacity exhaustion.
 5. **Bare metal is a first-class target.**
+6. **Experience is DNA.** Every user-facing surface follows the journey rules:
+   no dead ends, simple surface with depth one click down, intent-shaped aha.
+   See docs/superpowers/specs/2026-06-27-hosted-launch-journey-design.md.
 
 ## Commands
 
