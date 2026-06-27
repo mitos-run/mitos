@@ -22,8 +22,13 @@ expose:
   sharing:  authenticated      # WHO may reach it (the auth ladder, #407 - already built)
                                #   public | link | authenticated | org | private
   tenancy:  per-user           # WHICH instance they reach (NEW)
-                               #   per-user | shared
+                               #   per-user | per-org | shared
+  forwardIdentity: true        # NEW: inject a trusted identity assertion into the app (SSO)
 ```
+
+> **Resolved (review 2026-06-27):** (1) support BOTH per-user and per-org tenancy -
+> the identity key is configurable; (2) the auth bridge FORWARDS a trusted identity
+> assertion into the app (deep SSO), not just gating the URL.
 
 - **`sharing` (auth) - already built (#407).** The edge proxy gates the URL by
   verified mitos identity (email -> org), with the public/link/authenticated/org/
@@ -102,14 +107,43 @@ expose:
   label: openclaw
   sharing: authenticated        # or org / private - gates by mitos identity
   tenancy:
-    mode: per-user              # or: shared
-    idleTTL: 30m                # reap a user's instance after this idle window
+    mode: per-user              # per-user | per-org | shared
+    idleTTL: 30m                # reap an instance after this idle window
     warm: 2                     # pre-forked unclaimed instances for instant cold start
+  forwardIdentity: true         # inject the trusted identity assertion into the app (SSO)
 # secrets stay per-fork (already modelled): injected via Configure, never baked
 ```
 
-`shared` collapses to today's single-route behavior. `per-user` requires a gated
-`sharing` tier (validation error otherwise).
+`shared` collapses to today's single-route behavior. `per-user` keys the instance
+by the verified subject; `per-org` keys it by the verified org (one shared instance
+per org). Both require a gated `sharing` tier (validation error otherwise) since
+there is no identity to key on under `public`.
+
+## Auth bridge: forward a trusted identity assertion (SSO)
+
+`forwardIdentity: true` makes mitos a true SSO front-door, not just a gated door:
+after the auth ladder verifies the caller, the edge injects a **trusted identity
+assertion** into the upstream request so the app can authenticate the user WITHOUT
+running its own login. Concretely the edge sets, on the request to forkd's expose
+handler (which forwards them to the guest):
+
+- `X-Mitos-User` (subject), `X-Mitos-Email` (verified email), `X-Mitos-Org`,
+  `X-Mitos-Groups` - the identity the ladder already resolved.
+
+Security (this is an auth surface; the threat model moves with it):
+
+- **Anti-spoofing:** the edge already strips inbound `X-Auth-Request-*` /
+  `X-Mitos-*` from the client before evaluating identity (`StripForwardAuthHeaders`),
+  so a client can never inject its own identity; the app trusts these headers ONLY
+  because mitos is the sole network path to the guest (the expose tunnel), and the
+  guest port is never directly reachable.
+- **Signed assertion option:** for apps that want to verify rather than trust the
+  hop, the edge can additionally mint a short-lived signed assertion (a JWT in
+  `X-Mitos-Assertion`) the app verifies against a published mitos JWKS - the same
+  key material as the expose grants. `forwardIdentity` defaults to header-only;
+  `forwardIdentity: signed` adds the JWT.
+- The assertion is per-request, carries no secret values, and is logged by key/count
+  only (never the email value), consistent with the secrets rule.
 
 ## What is built vs missing
 
@@ -118,14 +152,19 @@ capture-running (#460); per-fork secret injection and fork-correctness; the warm
 pool and residual GC (#163); per-org namespaces (#288); the expose route-sync.
 
 **Missing (this slice):**
-1. `tenancy` field on `mitos.yaml` / `Sandbox.spec.expose` (API + validation:
-   `per-user` requires a gated tier).
-2. Controller **resolve-or-create-by-identity**: the `(label, identity) -> Sandbox`
-   map, fork-on-demand keyed by the edge-forwarded identity, and the per-user warm
-   pool.
+1. `tenancy` + `forwardIdentity` fields on `mitos.yaml` / `Sandbox.spec.expose`
+   (API + validation: `per-user`/`per-org` require a gated tier).
+2. Controller **resolve-or-create-by-identity**: the `(label, identityKey) ->
+   Sandbox` map (identityKey = subject for per-user, org for per-org),
+   fork-on-demand keyed by the edge-forwarded identity, and the per-key warm pool.
 3. Edge -> controller **identity hand-off** on the request path (the edge already
    has the verified identity; it must pass it to the route resolution).
-4. Per-user **idle reaping** wired to `idleTTL`.
+4. Per-instance **idle reaping** wired to `idleTTL`.
+5. **Auth bridge:** the edge injects the trusted `X-Mitos-*` identity headers (and
+   optional signed `X-Mitos-Assertion` JWT) into the upstream; forkd's expose
+   forwards them to the guest. Requires a **threat-model delta** (a new trusted
+   identity surface) in the same PR, per CLAUDE.md security practice, and a named
+   human reviewer.
 
 ## Dependencies / related fixes this demo surfaced
 
@@ -137,17 +176,19 @@ pool and residual GC (#163); per-org namespaces (#288); the expose route-sync.
   stale recorded digest on same-name rebuild. Both are the controller rebuild path
   and bite the iterate-on-config loop a `mitos.yaml` author lives in.
 
-## Open questions for review
+## Open questions
 
-1. **Identity key granularity:** per-user (`sub`) vs per-org vs per-(user,device)?
-   OpenClaw wants per-user; some apps may want per-org shared.
-2. **Cold-start UX when warm pool is empty:** block ~the fork+boot time, or show an
+RESOLVED (review 2026-06-27):
+- **Identity key granularity:** support BOTH `per-user` (subject) and `per-org`
+  (one shared instance per org); configurable via `tenancy.mode`.
+- **Auth bridge depth:** FORWARD a trusted identity assertion (deep SSO) - see the
+  Auth bridge section. Header-only by default, signed-JWT opt-in.
+
+Still open:
+1. **Cold-start UX when warm pool is empty:** block ~the fork+boot time, or show an
    interstitial? Fork is ~86 ms but a cold golden (not yet built) is minutes.
-3. **Cost ceilings:** cap concurrent per-user instances per org (quota), and the
+2. **Cost ceilings:** cap concurrent per-user instances per org (quota), and the
    reap TTL defaults.
-4. **State persistence across reap:** per-user instance is ephemeral; if a user's
+3. **State persistence across reap:** a per-user instance is ephemeral; if a user's
    app has durable state, does it bind a per-user Workspace/volume that survives the
    reap, or is the snapshot the only state? (Likely: opt-in per-user volume.)
-5. **Auth bridge depth (#476):** does mitos only gate the URL, or also forward a
-   trusted identity assertion the app consumes (forward-auth headers) so the app
-   need not run its own login?
