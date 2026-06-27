@@ -46,6 +46,10 @@ Goals:
    recipe doc with the honest "which path it runs on" note.
 5. A README documentation-table entry and a threat-model delta for the new
    CDP-exposure surface.
+6. Standalone parity: the standalone `sandbox-server` template endpoint accepts a
+   `workload` and `resources` (memory / vcpu) so the warm-fork browser model runs
+   on the no-Kubernetes path, not only on a cluster. The engine already supports
+   both; only the standalone HTTP handler currently drops them.
 
 Non-goals:
 
@@ -128,7 +132,32 @@ Decision rule: prefer (a); fall back to (b) only if the spike shows a standard
 normalization. The recipe and example only ever describe the path that is proven
 to work.
 
-### 3.4 Example and recipe
+### 3.4 Standalone sandbox-server workload + resources passthrough
+
+The serving-workload primitive (#460) and per-template memory sizing are wired on
+the cluster path only: `cmd/sandbox-server`'s `POST /v1/templates` decodes just
+`{id, init_wait_seconds, network}` (`main.go:414`) and calls
+`engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, nil, nil)` (`main.go:476`),
+dropping the `workload` and `vmRes` parameters the engine already accepts
+(`engine.go:2005`). The standalone build is therefore hardcoded to 512 MiB / 1
+vCPU with no running workload, which is too small for Chromium and cannot
+snapshot it live.
+
+This task extends the standalone handler to parity with the engine:
+
+- Add `workload` and `resources` to the `createTemplateReq` struct, mapping JSON
+  to `firecracker.WorkloadSpec` (command, env, ready probe) and
+  `firecracker.VMResources` (vcpu, mem MiB).
+- Pass them through:
+  `engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workload, vmRes)`.
+- The Python SDK `DirectSandbox` template-create path gains optional `workload`
+  and `resources` arguments so the example and recipe can drive it.
+
+This unlocks the warm-fork browser model on the no-Kubernetes self-host path and
+makes the whole feature verifiable end to end on a single KVM host (box1) with the
+standalone server, the same harness used for the #316/#318/#320 verification.
+
+### 3.5 Example and recipe
 
 - `sdk/python/examples/browser_cdp.py`:
   `playwright.chromium.connect_over_cdp(<exposed-cdp-url>)`, then `goto`, `click`,
@@ -141,7 +170,7 @@ to work.
   sandbox-server; ~1 GiB RAM; CDP-over-WebSocket only; VNC desktop is a future
   variant). Parallels `docs/recipes/agent-harness.md`.
 
-### 3.5 README and threat-model
+### 3.6 README and threat-model
 
 - README documentation table: a row "Recipe: headless Chromium / CDP for
   browser-automation agents" linking the recipe, satisfying the issue comment's
@@ -209,12 +238,15 @@ auth-gating requirement, and the microVM-as-sandbox rationale, in the same PR.
    normalization (3.3a) lets `connect_over_cdp` work, or whether the relay (3.3b)
    is needed. This decides the image and proxy surface before anything is written
    down. Also validates that Chromium survives snapshot/restore across a fork.
-2. Image + launcher, built and pushed to GHCR.
-3. Pool / template wiring with the workload and resources.
-4. Exposure path finalized per the spike outcome.
-5. Example + recipe, verified end to end on box1 (navigate, click, screenshot).
-6. README row + threat-model delta.
-7. CI: a `firecracker-test`-style step if affordable (the Chromium image build is
+2. Standalone workload + resources passthrough (section 3.4): the engine already
+   supports them; this wires the standalone handler and the SDK so box1 can
+   verify the warm-fork model without a cluster.
+3. Image + launcher, built and pushed to GHCR.
+4. Pool / template wiring with the workload and resources.
+5. Exposure path finalized per the spike outcome.
+6. Example + recipe, verified end to end on box1 (navigate, click, screenshot).
+7. README row + threat-model delta.
+8. CI: a `firecracker-test`-style step if affordable (the Chromium image build is
    heavy); otherwise the box1 run is the authoritative end-to-end proof and the
    doc is explicit about what is CI-gated versus box1-verified, honoring the
    no-unverified-claims rule.
