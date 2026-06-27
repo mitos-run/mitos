@@ -14,7 +14,10 @@ It is a faithful translation of the kustomize manifests under `deploy/`.
   DaemonSets stay Pending until a matching node joins. PodSecurity admission must
   permit privileged pods in the install namespace; the chart sets
   `pod-security.kubernetes.io/enforce: privileged` on the namespace it creates.
-- A registry pull credential for the mitos-* images (see Image pull secret below).
+
+The published mitos-* images are public on GHCR, so no registry credential is
+needed for a default install. A pull secret is only required for a private mirror
+(see Image pull secret below).
 
 Label a KVM node:
 
@@ -78,20 +81,33 @@ CRDs and any data they own are left in place by design.
 
 ## Image pull secret
 
-The mitos-* images live in a private registry. By default the chart does NOT
-render a pull secret (`imagePullSecret.create=false`); create one out of band:
+The published mitos-* images on `ghcr.io/mitos-run` are public, so the default
+install pulls them with no credential and attaches no pull secret
+(`imagePullSecrets: []`). A release guard (`verify-public-images` in
+`.github/workflows/publish.yaml`) fails the release if any chart-referenced image
+is private or missing, so this stays true across releases.
+
+You only need a pull secret for a private mirror or a private re-publish of the
+images. In that case point `image.registry` at your mirror, then create the
+secret and reference it:
 
 ```
 kubectl create secret docker-registry ghcr-pull \
   --namespace mitos \
-  --docker-server=ghcr.io \
-  --docker-username=<github-username> \
-  --docker-password=<ghcr-read-packages-PAT>
+  --docker-server=<your-registry> \
+  --docker-username=<username> \
+  --docker-password=<read-packages-token>
+helm install mitos deploy/charts/mitos -n mitos --set namespace.create=false \
+  --set 'imagePullSecrets[0].name=ghcr-pull'
 ```
 
-Or set `imagePullSecret.create=true` and pass a real
-`imagePullSecret.dockerconfigjson`. Both the controller ServiceAccount and the
-forkd DaemonSet reference the secret named by `imagePullSecret.name`.
+Or let the chart render the secret: set `imagePullSecret.create=true`, pass a
+real base64 `imagePullSecret.dockerconfigjson`, and add `imagePullSecret.name` to
+`imagePullSecrets`.
+
+If a pod reports `ImagePullBackOff`, you are almost certainly on a private mirror
+without one of the above. The forkd DaemonSet's registry-credential mount is
+already optional, so a missing secret never blocks forkd from starting.
 
 ## Values
 
@@ -141,10 +157,10 @@ forkd DaemonSet reference the secret named by `imagePullSecret.name`.
 | `monitoring.prometheusRuleRelease` | `prometheus` | `release` label the Prometheus Operator selects on. |
 | `namespace.name` | `mitos` | Install namespace. |
 | `namespace.create` | `true` | Render the Namespace with PodSecurity labels. |
-| `imagePullSecret.create` | `false` | Render the pull-secret Secret. |
-| `imagePullSecret.name` | `ghcr-pull` | Pull-secret name referenced by the workloads. |
-| `imagePullSecret.dockerconfigjson` | `{"auths":{}}` base64 | Base64 dockerconfigjson value. |
-| `imagePullSecrets` | `[{name: ghcr-pull}]` | Pull-secret names attached to every workload pod. |
+| `imagePullSecret.create` | `false` | Render the dockerconfigjson Secret named below. Public images need none; set true only for a private mirror. |
+| `imagePullSecret.name` | `ghcr-pull` | Name of the Secret rendered when `create=true`. |
+| `imagePullSecret.dockerconfigjson` | `{"auths":{}}` base64 | Base64 dockerconfigjson value used when `create=true`. |
+| `imagePullSecrets` | `[]` | Pull-secret names attached to every workload pod. Empty by default (public images); populate for a private mirror. |
 | `commonLabels` | `{}` | Extra labels merged onto every resource. |
 
 ## Security notes
