@@ -20,6 +20,7 @@
   <a href="https://github.com/mitos-run/mitos"><img alt="Go" src="https://img.shields.io/github/go-mod/go-version/mitos-run/mitos?label=go"></a>
   <a href="https://goreportcard.com/report/mitos.run/mitos"><img alt="Go Report Card" src="https://goreportcard.com/badge/mitos.run/mitos"></a>
   <a href="docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-mitos-blue"></a>
+  <a href="https://discord.gg/zddgd2pgab"><img alt="Discord" src="https://img.shields.io/discord/1518722949295771759?label=discord&logo=discord&logoColor=white&color=5865F2"></a>
 </p>
 
 <p align="center">
@@ -28,7 +29,8 @@
   <a href="#features">Features</a> .
   <a href="#architecture">Architecture</a> .
   <a href="#comparison">Comparison</a> .
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> .
+  <a href="https://discord.gg/zddgd2pgab">Community</a>
 </p>
 
 <p align="center">
