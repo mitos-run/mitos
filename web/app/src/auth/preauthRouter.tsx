@@ -10,6 +10,7 @@ import {
 } from '@tanstack/react-router'
 import { Login } from './Login'
 import { Signup } from './Signup'
+import { Verify } from './Verify'
 
 function PreAuthShell() {
   return (
@@ -30,14 +31,6 @@ function PreAuthShell() {
 }
 
 
-function VerifyPlaceholder() {
-  return (
-    <div style={{ textAlign: 'center' }}>
-      <h1>Check your email</h1>
-    </div>
-  )
-}
-
 export function createPreAuthRouter(initialPath?: string) {
   const rootRoute = createRootRoute({ component: PreAuthShell })
 
@@ -56,7 +49,7 @@ export function createPreAuthRouter(initialPath?: string) {
   const verifyRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/verify',
-    component: VerifyPlaceholder,
+    component: Verify,
   })
 
   const indexRoute = createRoute({
