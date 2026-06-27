@@ -122,6 +122,8 @@ const styles = `
   min-height: 44px;
   margin-top: var(--space-2);
 }
+/* base.css does not define a .btn:focus-visible ring; this scoped rule is the
+   sole focus surface for the submit button. Revisit if brand adds one globally. */
 .login-email-form .btn:focus-visible {
   outline: 2px solid var(--magenta);
   outline-offset: 2px;
@@ -156,6 +158,7 @@ export function Login({ next }: LoginProps) {
     e.preventDefault()
     const params = new URLSearchParams()
     if (email.trim()) params.set('email', email.trim())
+    if (resolvedNext) params.set('next', resolvedNext)
     const dest = `/signup${params.size > 0 ? `?${params.toString()}` : ''}`
     window.location.assign(dest)
   }
@@ -235,7 +238,6 @@ export function Login({ next }: LoginProps) {
             <a
               href={connectorHref('github')}
               className="login-link-btn"
-              aria-label="Continue with GitHub"
             >
               <GitHubGlyph />
               Continue with GitHub
@@ -244,7 +246,6 @@ export function Login({ next }: LoginProps) {
             <a
               href={connectorHref('google')}
               className="login-link-btn"
-              aria-label="Continue with Google"
             >
               <GoogleGlyph />
               Continue with Google
@@ -252,7 +253,7 @@ export function Login({ next }: LoginProps) {
           </div>
 
           {/* ---- Hairline divider ---- */}
-          <div className="login-divider" role="separator" aria-hidden>
+          <div className="login-divider" aria-hidden>
             <hr className="login-divider-line" />
             <span className="login-divider-label">or</span>
             <hr className="login-divider-line" />
@@ -269,6 +270,7 @@ export function Login({ next }: LoginProps) {
               <input
                 id="login-email"
                 type="email"
+                name="email"
                 autoComplete="email"
                 autoFocus
                 placeholder="you@example.com"
