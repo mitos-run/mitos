@@ -57,6 +57,8 @@ const (
 	ControlConfigureProcedure = "/sandbox.internal.v1.Control/Configure"
 	// ControlPingProcedure is the fully-qualified name of the Control's Ping RPC.
 	ControlPingProcedure = "/sandbox.internal.v1.Control/Ping"
+	// ControlStartWorkloadProcedure is the fully-qualified name of the Control's StartWorkload RPC.
+	ControlStartWorkloadProcedure = "/sandbox.internal.v1.Control/StartWorkload"
 )
 
 // ControlClient is a client for the sandbox.internal.v1.Control service.
@@ -76,6 +78,14 @@ type ControlClient interface {
 	// Ping checks that the guest agent is alive and returns its uptime. Carries no
 	// secrets; safe to log.
 	Ping(context.Context, *connect.Request[controlv1.PingRequest]) (*connect.Response[controlv1.PingResponse], error)
+	// StartWorkload starts a declared serving workload during the template build
+	// and keeps it running for the snapshot, so a fork wakes with the app already
+	// listening (issue #460). The guest spawns the command in its OWN session so it
+	// survives the build's exec process-group kill and the fork SIGUSR2 reset, and
+	// when Ready is set blocks until the workload answers its port. Host-trusted
+	// (build time only); INTENTIONALLY ABSENT from the public Sandbox surface, so a
+	// tenant cannot start arbitrary detached processes outside its exec budget.
+	StartWorkload(context.Context, *connect.Request[controlv1.StartWorkloadRequest]) (*connect.Response[controlv1.StartWorkloadResponse], error)
 }
 
 // NewControlClient constructs a client for the sandbox.internal.v1.Control service. By default, it
@@ -107,14 +117,21 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("Ping")),
 			connect.WithClientOptions(opts...),
 		),
+		startWorkload: connect.NewClient[controlv1.StartWorkloadRequest, controlv1.StartWorkloadResponse](
+			httpClient,
+			baseURL+ControlStartWorkloadProcedure,
+			connect.WithSchema(controlMethods.ByName("StartWorkload")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	notifyForked *connect.Client[controlv1.NotifyForkedRequest, controlv1.NotifyForkedResponse]
-	configure    *connect.Client[controlv1.ConfigureRequest, controlv1.ConfigureResponse]
-	ping         *connect.Client[controlv1.PingRequest, controlv1.PingResponse]
+	notifyForked  *connect.Client[controlv1.NotifyForkedRequest, controlv1.NotifyForkedResponse]
+	configure     *connect.Client[controlv1.ConfigureRequest, controlv1.ConfigureResponse]
+	ping          *connect.Client[controlv1.PingRequest, controlv1.PingResponse]
+	startWorkload *connect.Client[controlv1.StartWorkloadRequest, controlv1.StartWorkloadResponse]
 }
 
 // NotifyForked calls sandbox.internal.v1.Control.NotifyForked.
@@ -130,6 +147,11 @@ func (c *controlClient) Configure(ctx context.Context, req *connect.Request[cont
 // Ping calls sandbox.internal.v1.Control.Ping.
 func (c *controlClient) Ping(ctx context.Context, req *connect.Request[controlv1.PingRequest]) (*connect.Response[controlv1.PingResponse], error) {
 	return c.ping.CallUnary(ctx, req)
+}
+
+// StartWorkload calls sandbox.internal.v1.Control.StartWorkload.
+func (c *controlClient) StartWorkload(ctx context.Context, req *connect.Request[controlv1.StartWorkloadRequest]) (*connect.Response[controlv1.StartWorkloadResponse], error) {
+	return c.startWorkload.CallUnary(ctx, req)
 }
 
 // ControlHandler is an implementation of the sandbox.internal.v1.Control service.
@@ -149,6 +171,14 @@ type ControlHandler interface {
 	// Ping checks that the guest agent is alive and returns its uptime. Carries no
 	// secrets; safe to log.
 	Ping(context.Context, *connect.Request[controlv1.PingRequest]) (*connect.Response[controlv1.PingResponse], error)
+	// StartWorkload starts a declared serving workload during the template build
+	// and keeps it running for the snapshot, so a fork wakes with the app already
+	// listening (issue #460). The guest spawns the command in its OWN session so it
+	// survives the build's exec process-group kill and the fork SIGUSR2 reset, and
+	// when Ready is set blocks until the workload answers its port. Host-trusted
+	// (build time only); INTENTIONALLY ABSENT from the public Sandbox surface, so a
+	// tenant cannot start arbitrary detached processes outside its exec budget.
+	StartWorkload(context.Context, *connect.Request[controlv1.StartWorkloadRequest]) (*connect.Response[controlv1.StartWorkloadResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -176,6 +206,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("Ping")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlStartWorkloadHandler := connect.NewUnaryHandler(
+		ControlStartWorkloadProcedure,
+		svc.StartWorkload,
+		connect.WithSchema(controlMethods.ByName("StartWorkload")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/sandbox.internal.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlNotifyForkedProcedure:
@@ -184,6 +220,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlConfigureHandler.ServeHTTP(w, r)
 		case ControlPingProcedure:
 			controlPingHandler.ServeHTTP(w, r)
+		case ControlStartWorkloadProcedure:
+			controlStartWorkloadHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -203,4 +241,8 @@ func (UnimplementedControlHandler) Configure(context.Context, *connect.Request[c
 
 func (UnimplementedControlHandler) Ping(context.Context, *connect.Request[controlv1.PingRequest]) (*connect.Response[controlv1.PingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.internal.v1.Control.Ping is not implemented"))
+}
+
+func (UnimplementedControlHandler) StartWorkload(context.Context, *connect.Request[controlv1.StartWorkloadRequest]) (*connect.Response[controlv1.StartWorkloadResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sandbox.internal.v1.Control.StartWorkload is not implemented"))
 }

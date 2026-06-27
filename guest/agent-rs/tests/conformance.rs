@@ -2476,7 +2476,7 @@ async fn runcode_grpc_unsupported_language_returns_kernel_unavailable() {
 /// SIGUSR2. Using this in all ControlService tests keeps box2 safe: the real
 /// signal_userspace broadcasts SIGUSR2 to all /proc processes, which would kill
 /// k3s and other daemons on box2 during plain `cargo test`.
-fn noop_signal_fn() -> i32 { 0 }
+fn noop_signal_fn(_exclude: &std::collections::HashSet<i32>) -> i32 { 0 }
 
 /// Helper: build a ControlService (with no-op signal) and start a tonic server
 /// and client on a Unix domain socket. Returns a connected ControlClient. The
@@ -2498,6 +2498,7 @@ async fn start_control_server_and_client(
         start_time: std::time::Instant::now(),
         env: Arc::new(ConfiguredEnv::new()),
         signal_fn: noop_signal_fn,
+        workload: Arc::new(sandbox_agent::service::workload::WorkloadRegistry::default()),
     };
 
     tokio::spawn(async move {
@@ -2602,6 +2603,7 @@ async fn control_configure_env_merge_updates_key_count() {
         start_time: std::time::Instant::now(),
         env: Arc::clone(&shared_env),
         signal_fn: noop_signal_fn,
+        workload: Arc::new(sandbox_agent::service::workload::WorkloadRegistry::default()),
     };
 
     tokio::spawn(async move {

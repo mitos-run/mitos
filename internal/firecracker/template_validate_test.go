@@ -18,7 +18,7 @@ func TestTemplateManagerRejectsTraversalIDs(t *testing.T) {
 	bad := []string{"../escape", "a/b", "..", "../../etc", "with space", "", "/abs"}
 
 	for _, id := range bad {
-		if _, err := tm.CreateTemplate(id, VMConfig{}, nil, nil); err == nil {
+		if _, err := tm.CreateTemplate(id, VMConfig{}, nil, nil, nil); err == nil {
 			t.Errorf("CreateTemplate(%q) returned nil error; expected validation rejection", id)
 		}
 		if err := tm.DeleteTemplate(id); err == nil {

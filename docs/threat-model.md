@@ -599,6 +599,16 @@ network-activation phase over the real endpoint; section 3 row below). Residual:
 tokens are static per sandbox (no rotation or expiry); anyone with namespace-wide
 Secret read can take them (section 3).
 
+**Serving-workload start is host-trusted only (issue #460).** `StartWorkload` (the
+serving-workload RPC the build uses to start a long-running app in its own session,
+captured running in the snapshot) is on the host-trusted `Control` service (vsock,
+reached only by forkd during the template build), NOT the public `Sandbox` service.
+A tenant exec cannot call it, so it cannot start arbitrary detached processes that
+escape the exec process-group kill or the per-fork SIGUSR2 reset outside its own
+budget. The workload command and env are non-secret build-time config (env values
+are non-secret; secrets are still injected per fork via `Configure`); the agent
+logs only the workload session id and env-key count, never argv or values.
+
 **Surface 7: the ENCRYPTION KEY (#31 PR2).** When `--enable-encryption` is on,
 the per-template 256-bit key reaches the node ONLY over the mTLS control channel
 (the `CreateTemplate`/`Fork` gRPC requests; the controller refuses to deliver the

@@ -79,12 +79,29 @@ func DefaultVMConfig() VMConfig {
 		FirecrackerBin: "/usr/local/bin/firecracker",
 		VcpuCount:      1,
 		MemSizeMib:     512,
-		BootArgs:       "console=ttyS0 reboot=k panic=1 pci=off",
+		// random.trust_cpu=on credits the CPU RDRAND instruction so the guest
+		// kernel CRNG initializes at boot instead of stalling at "fast init done".
+		// Without it a serving workload (issue #460) that does crypto at startup,
+		// like openclaw resolving authentication, blocks in getrandom() and never
+		// binds its port, so the build's HTTP ready gate times out. Forks still get
+		// fresh per-fork entropy from the NotifyForked CRNG reseed; this only lets
+		// the build VM initialize its CRNG so the workload can start.
+		BootArgs: "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on",
 		// On by default: every template snapshot bakes a virtio-rng device so
 		// each fork inherits a continuous host entropy source (fork-correctness
 		// row 1). See VMConfig.EntropyDevice.
 		EntropyDevice: true,
 	}
+}
+
+// VMResources carries the per-pool guest VM sizing the build VM (and thus the
+// snapshot and every fork) should use. A zero field keeps the DefaultVMConfig
+// value. This lets a pool's resources.cpu/memory reach the VM, not just the husk
+// pod, so a serving workload (issue #460) has the memory it needs to run during
+// the build.
+type VMResources struct {
+	VcpuCount  int32
+	MemSizeMib int64
 }
 
 type BootSource struct {

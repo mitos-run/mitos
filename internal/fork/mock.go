@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/volume"
 	"mitos.run/mitos/internal/vsock"
@@ -235,7 +236,7 @@ func mockMountTable(specs []volume.Spec) []vsock.VolumeMountEntry {
 	return volumeMountTable(prepared)
 }
 
-func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

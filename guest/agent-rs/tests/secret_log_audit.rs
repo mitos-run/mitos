@@ -245,7 +245,8 @@ async fn start_control_client(
     let svc = ControlService {
         start_time: Instant::now(),
         env: StdArc::new(ConfiguredEnv::new()),
-        signal_fn: || 0, // no-op: must not broadcast SIGUSR2 on box2
+        signal_fn: |_| 0, // no-op: must not broadcast SIGUSR2 on box2
+        workload: StdArc::new(sandbox_agent::service::workload::WorkloadRegistry::default()),
     };
 
     tokio::spawn(async move {

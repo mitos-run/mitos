@@ -84,6 +84,81 @@ pub fn reseed_crng(entropy: &[u8]) -> bool {
     reseed_crng_at(entropy, "/dev/urandom")
 }
 
+/// Seed the kernel CRNG at boot so `getrandom()` does not block.
+///
+/// The guest kernel lacks CONFIG_RANDOM_TRUST_CPU, so the CRNG stays
+/// uninitialized at boot and the kernel does not credit the virtio-rng fast
+/// enough. A serving workload (issue #460) that does crypto at startup, like
+/// openclaw resolving authentication, then blocks forever in
+/// `wait_for_random_bytes` during the template build and never binds its port,
+/// so the build's HTTP ready gate times out. Pull hardware entropy from
+/// `/dev/hwrng` (the firecracker virtio-rng, independent of the CRNG) or, if it
+/// is absent, the CPU RDRAND instruction, and credit it via RNDADDENTROPY so the
+/// CRNG initializes. Per-fork uniqueness still comes from the NotifyForked
+/// reseed; this only unblocks the CRNG so the workload can start. Returns true if
+/// the CRNG was credited.
+pub fn seed_crng_at_boot() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(seed) = read_hwrng(64) {
+            if reseed_crng(&seed) {
+                return true;
+            }
+        }
+        if let Some(seed) = rdrand_bytes(64) {
+            if reseed_crng(&seed) {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Read exactly `n` bytes from the virtio-rng character device. Returns None if
+/// the device is absent (kernel without virtio-rng) or the read fails.
+#[cfg(target_os = "linux")]
+fn read_hwrng(n: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/hwrng").ok()?;
+    let mut buf = vec![0u8; n];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Fill `n` bytes from the CPU RDRAND instruction, when present. RDRAND is a
+/// NIST SP800-90 hardware DRBG; crediting it as full entropy is what
+/// random.trust_cpu would do, and it does not depend on any kernel config.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn rdrand_bytes(n: usize) -> Option<Vec<u8>> {
+    if !std::is_x86_feature_detected!("rdrand") {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n + 8);
+    while out.len() < n {
+        let mut v: u64 = 0;
+        // SAFETY: rdrand is feature-detected immediately above. _rdrand64_step
+        // writes the random value into v and returns 1 on success; it reads no
+        // memory, only fills a CPU register, so there are no pointer or aliasing
+        // preconditions.
+        let ok = unsafe { core::arch::x86_64::_rdrand64_step(&mut v) };
+        if ok != 1 {
+            return None;
+        }
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.truncate(n);
+    Some(out)
+}
+
+#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+fn rdrand_bytes(_n: usize) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn reseed_crng_linux(entropy: &[u8], path: &str) -> bool {
     // Build the kernel buffer: header (8 bytes) followed by the entropy bytes.

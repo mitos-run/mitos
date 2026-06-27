@@ -473,7 +473,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		// and appends init=/init to the boot args, which the prior
 		// TemplateManager-direct path did not, so an agent-at-/init rootfs no
 		// longer panics with "no working init found".
-		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil); err != nil {
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, nil, nil); err != nil {
 			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return

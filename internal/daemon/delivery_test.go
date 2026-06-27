@@ -47,7 +47,7 @@ func (e *kvmReportingEngine) Terminate(id string) error {
 func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 	engine := &kvmReportingEngine{MockEngine: fork.NewMockEngine()}
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
@@ -72,7 +72,7 @@ func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 func TestForkFailsWhenAgentUnreachableEvenEnvOnly(t *testing.T) {
 	engine := &kvmReportingEngine{MockEngine: fork.NewMockEngine()}
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
@@ -90,7 +90,7 @@ func TestForkFailsWhenAgentUnreachableEvenEnvOnly(t *testing.T) {
 func TestForkMockEngineSkipsDelivery(t *testing.T) {
 	engine := fork.NewMockEngine() // KVMAvailable=false
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
@@ -179,7 +179,7 @@ func kvmEngineWithTemplate(t *testing.T, dir string) *kvmReportingEngine {
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
 	engine := &kvmReportingEngine{MockEngine: mock}
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return engine
@@ -206,7 +206,7 @@ func TestForkDeliversConfigureToAgent(t *testing.T) {
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
 	engine := &kvmReportingEngine{MockEngine: mock}
-	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The mock will report this exact path for sandbox "sb-ok".
@@ -385,7 +385,7 @@ func TestForkMockEngineSendsNoNotify(t *testing.T) {
 	mock := fork.NewMockEngine() // KVMAvailable=false
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
-	if err := mock.CreateTemplate("py", "py", nil, nil); err != nil {
+	if err := mock.CreateTemplate("py", "py", nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-mock", "vsock.sock"))

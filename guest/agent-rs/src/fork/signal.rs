@@ -15,8 +15,10 @@
 ///
 /// Delegates to sys::signal::signal_userspace (production: walks real /proc).
 /// Mirrors signalUserspace in notifyforked.go:299-328.
-pub fn signal_userspace() -> i32 {
-    crate::sys::signal::signal_userspace()
+pub fn signal_userspace(exclude_sids: &std::collections::HashSet<i32>) -> i32 {
+    // exclude_sids are the sessions of registered serving workloads; excluding
+    // them keeps a captured-running workload alive across the fork (#460).
+    crate::sys::signal::signal_userspace(exclude_sids)
 }
 
 // ---------------------------------------------------------------------------

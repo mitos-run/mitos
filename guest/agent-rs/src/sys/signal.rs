@@ -9,6 +9,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::collections::HashSet;
 use std::fs;
 
 /// Returns the PID of the calling process (getpid(2)).
@@ -45,19 +46,34 @@ pub fn getpid() -> i32 {
 ///     and ignores errors. We do the same: ESRCH/EPERM from kernel threads
 ///     is silently discarded; only successful delivers are counted.
 ///
-/// Returns the count of processes that received SIGUSR2.
-pub fn signal_userspace_at(proc_path: &str) -> i32 {
-    let self_pid = getpid();
+/// read_session returns the session id of `pid` from `proc_path/<pid>/stat`
+/// (field 6, 1-indexed). The comm field (field 2) is wrapped in parentheses and
+/// may itself contain spaces, so we split AFTER the last ')' and count the
+/// whitespace tokens of the remainder: state(1) ppid(2) pgrp(3) session(4). None
+/// when the file is unreadable or malformed (the pid is then treated as having no
+/// known session, so it is never excluded by accident).
+pub fn read_session(proc_path: &str, pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("{proc_path}/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(3)?.parse().ok()
+}
 
+/// select_targets enumerates the pids under `proc_path` that should receive the
+/// userspace reset signal: every numeric /proc/<pid> directory except PID 1, the
+/// caller, and any pid whose session id is in `exclude_sids`. The exclusion is
+/// what keeps a registered serving workload (and its children, which share its
+/// session) alive across a fork, since SIGUSR2 default-terminates a process that
+/// does not handle it (issue #460).
+pub fn select_targets(proc_path: &str, exclude_sids: &HashSet<i32>) -> Vec<i32> {
+    let self_pid = getpid();
     let entries = match fs::read_dir(proc_path) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("sandbox-agent: read {proc_path}: {err}");
-            return 0;
+            return Vec::new();
         }
     };
-
-    let mut signaled: i32 = 0;
+    let mut targets = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -85,6 +101,22 @@ pub fn signal_userspace_at(proc_path: &str) -> i32 {
         if pid == 1 || pid == self_pid {
             continue;
         }
+        // Exclude a registered workload's whole session so its serving process
+        // survives the fork. Unknown-session pids are never excluded.
+        if !exclude_sids.is_empty()
+            && read_session(proc_path, pid).is_some_and(|sid| exclude_sids.contains(&sid))
+        {
+            continue;
+        }
+        targets.push(pid);
+    }
+    targets
+}
+
+/// Returns the count of processes that received SIGUSR2.
+pub fn signal_userspace_at(proc_path: &str, exclude_sids: &HashSet<i32>) -> i32 {
+    let mut signaled: i32 = 0;
+    for pid in select_targets(proc_path, exclude_sids) {
         if crate::sys::kill(pid, libc::SIGUSR2).is_ok() {
             signaled += 1;
         }
@@ -92,13 +124,14 @@ pub fn signal_userspace_at(proc_path: &str) -> i32 {
     signaled
 }
 
-/// Sends SIGUSR2 to all userspace processes except PID 1 and the current
-/// process. Returns the count of processes that received the signal.
+/// Sends SIGUSR2 to all userspace processes except PID 1, the current process,
+/// and any process in an excluded session (a registered serving workload).
+/// Returns the count of processes that received the signal.
 ///
 /// Production entry point: walks real /proc. Mirrors signalUserspace in
 /// guest/agent/notifyforked.go:299-328.
-pub fn signal_userspace() -> i32 {
-    signal_userspace_at("/proc")
+pub fn signal_userspace(exclude_sids: &HashSet<i32>) -> i32 {
+    signal_userspace_at("/proc", exclude_sids)
 }
 
 #[cfg(test)]
@@ -113,8 +146,40 @@ mod tests {
     }
 
     #[test]
+    fn excludes_pids_in_an_excluded_session() {
+        let dir = tempfile::tempdir().unwrap();
+        // pid 100 leads session 100 (the workload), pid 101 is its child in the
+        // same session, pid 200 is an unrelated process in session 200.
+        for (pid, sid) in [(100, 100), (101, 100), (200, 200)] {
+            let p = dir.path().join(pid.to_string());
+            std::fs::create_dir(&p).unwrap();
+            // /proc/<pid>/stat: "pid (comm) state ppid pgrp session ..."; a comm
+            // with a space exercises the rsplit-on-')' parse.
+            std::fs::write(
+                p.join("stat"),
+                format!("{pid} (my proc) S 1 {pid} {sid} 0 0 0 0 0 0 0"),
+            )
+            .unwrap();
+        }
+        let proc = dir.path().to_str().unwrap();
+        assert_eq!(read_session(proc, 200), Some(200));
+        assert_eq!(read_session(proc, 101), Some(100));
+
+        let mut exclude = HashSet::new();
+        exclude.insert(100);
+        let selected = select_targets(proc, &exclude);
+        assert!(selected.contains(&200), "unrelated pid must be signaled");
+        assert!(!selected.contains(&100), "workload leader must be excluded");
+        assert!(!selected.contains(&101), "workload child (same session) must be excluded");
+
+        // With no exclusions every non-self, non-init pid is a target.
+        let all = select_targets(proc, &HashSet::new());
+        assert!(all.contains(&100) && all.contains(&101) && all.contains(&200));
+    }
+
+    #[test]
     fn signal_userspace_at_nonexistent_proc_returns_zero() {
-        let count = signal_userspace_at("/nonexistent/proc/path/that/does/not/exist");
+        let count = signal_userspace_at("/nonexistent/proc/path/that/does/not/exist", &HashSet::new());
         assert_eq!(count, 0);
     }
 
@@ -206,7 +271,7 @@ mod tests {
         let child_dir = tmp.path().join(child_pid.to_string());
         std::fs::create_dir_all(&child_dir).expect("create synthetic pid dir");
 
-        let count = signal_userspace_at(tmp.path().to_str().expect("utf8 path"));
+        let count = signal_userspace_at(tmp.path().to_str().expect("utf8 path"), &HashSet::new());
 
         // Reap the child.
         let mut status: libc::c_int = 0;

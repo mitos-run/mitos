@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/volume"
@@ -29,7 +30,7 @@ type keyProbeEngine struct {
 	forkKeyErr   error
 }
 
-func (e *keyProbeEngine) CreateTemplate(id, _ string, _ []string, _ []volume.Spec) error {
+func (e *keyProbeEngine) CreateTemplate(id, _ string, _ []string, _ []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources) error {
 	k, err := e.prov.KeyFor(id)
 	if err != nil {
 		e.createKeyErr = err

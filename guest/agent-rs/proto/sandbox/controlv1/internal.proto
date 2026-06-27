@@ -53,6 +53,60 @@ service Control {
   // Ping checks that the guest agent is alive and returns its uptime. Carries no
   // secrets; safe to log.
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // StartWorkload starts a declared serving workload during the template build
+  // and keeps it running for the snapshot, so a fork wakes with the app already
+  // listening (issue #460). The guest spawns the command in its OWN session so it
+  // survives the build's exec process-group kill and the fork SIGUSR2 reset, and
+  // when Ready is set blocks until the workload answers its port. Host-trusted
+  // (build time only); INTENTIONALLY ABSENT from the public Sandbox surface, so a
+  // tenant cannot start arbitrary detached processes outside its exec budget.
+  rpc StartWorkload(StartWorkloadRequest) returns (StartWorkloadResponse);
+}
+
+// StartWorkloadRequest declares the serving workload the build starts and
+// snapshots while it is running (issue #460).
+message StartWorkloadRequest {
+  // command is the serving process argv, run through the shell in the guest.
+  repeated string command = 1;
+
+  // env are NON-secret environment variables for the workload. Secret values are
+  // delivered per fork via Configure and never baked into the snapshot. Keys are
+  // safe to log; values are not.
+  map<string, string> env = 2;
+
+  // cwd is the working directory; empty means the guest default.
+  string cwd = 3;
+
+  // ready, when set, is the HTTP gate the guest waits on before returning, so the
+  // snapshot captures a listening app. Absent means snapshot as soon as started.
+  HttpReady ready = 4;
+}
+
+// HttpReady is the in-guest HTTP readiness gate for a serving workload. All
+// fields are plain values and safe to log.
+message HttpReady {
+  // port is the guest TCP port the workload listens on.
+  uint32 port = 1;
+
+  // path is the request path; empty defaults to "/".
+  string path = 2;
+
+  // expect is the HTTP status that counts as ready; 0 defaults to 200.
+  uint32 expect = 3;
+
+  // timeout_seconds bounds the readiness wait; 0 defaults to 120.
+  uint32 timeout_seconds = 4;
+}
+
+// StartWorkloadResponse reports the started workload. Safe to log.
+message StartWorkloadResponse {
+  // sid is the workload's session id, which the guest records so the per-fork
+  // SIGUSR2 reset broadcast excludes the workload's session.
+  int32 sid = 1;
+
+  // ready is true when the readiness gate passed, or when no gate was requested.
+  bool ready = 2;
 }
 
 // NotifyForkedRequest mirrors internal/vsock.NotifyForkedRequest field-for-field.

@@ -190,7 +190,7 @@ type Engine struct {
 	// runTemplateBuild boots the VM, runs init in it, and snapshots it. It is a
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
-	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
+	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error
 
 	// captureGuestReady waits for the guest agent gRPC Control service to answer
 	// Ping and returns the ready client. It is the seam used by
@@ -878,7 +878,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if e.networkEnabled() {
 		e.egressBytes = readEgressCounterBytes
 	}
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
 		// Journal the build for its duration so a forkd that dies mid-build can
 		// reap the leaked build Firecracker + placeholder tap on restart (#469);
 		// drop the record once the build returns (the deferred Kill has run).
@@ -886,7 +886,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		onStarted := func(pid int, js firecracker.JailerState) {
 			e.journalBuild(id, pid, js, cfg.Network != nil)
 		}
-		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, onStarted)
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, onStarted)
 		return err
 	}
 	e.captureGuestReady = guestgrpc.WaitReady
@@ -2002,7 +2002,7 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources) (retErr error) {
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.
@@ -2014,6 +2014,19 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	}
 
 	cfg := firecracker.DefaultVMConfig()
+	// Size the build VM from the pool's resources so the snapshot (and every fork)
+	// has the pool's memory and vCPUs, not the 512 MiB / 1 vCPU default. A serving
+	// workload (issue #460) runs IN the build VM, so it must have the pool's memory
+	// to start; without this openclaw (2 GiB) cannot boot in the build VM.
+	if vmRes != nil {
+		if vmRes.VcpuCount > 0 {
+			cfg.VcpuCount = int(vmRes.VcpuCount)
+		}
+		if vmRes.MemSizeMib > 0 {
+			cfg.MemSizeMib = int(vmRes.MemSizeMib)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "forkd: template %s build VM sized %d vCPU, %d MiB (workload=%t)\n", id, cfg.VcpuCount, cfg.MemSizeMib, workload != nil)
 	// Bake the configured guest-memory page granularity into this template's
 	// snapshot (issue #167). "" leaves the Firecracker default (4 KiB); "2M"
 	// records 2 MiB hugetlbfs backing so every fork restores hugepage-backed.
@@ -2135,7 +2148,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		cfg.VolumeDrives = drives
 	}
 
-	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
+	if err := e.runTemplateBuild(id, cfg, initCommands, workload); err != nil {
 		return err
 	}
 	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))

@@ -70,6 +70,33 @@ message CreateTemplateRequest {
   // select the matching KEK to unwrap. It is NOT secret and may be logged.
   // Empty when the template is not encrypted.
   string kek_id = 8;
+  // workload, when set, is a serving process the node starts AFTER init and
+  // keeps running while it snapshots, so a fork wakes with the app already
+  // listening (issue #460). The node drives it via the guest Control
+  // StartWorkload RPC and gates the snapshot on its readiness. Empty means the
+  // template has no serving workload (exec-only).
+  WorkloadSpec workload = 9;
+}
+
+// WorkloadSpec is the serving workload the controller declares for a template
+// build (issue #460); the node forwards it to the guest Control StartWorkload.
+message WorkloadSpec {
+  // command is the serving process argv, run through the shell in the guest.
+  repeated string command = 1;
+  // env are NON-secret environment variables for the workload. Keys are safe to
+  // log; values are not.
+  map<string, string> env = 2;
+  // ready, when set, is the HTTP gate the build waits on before snapshotting.
+  WorkloadHttpReady ready = 3;
+}
+
+// WorkloadHttpReady is the HTTP readiness gate for a serving workload. All
+// fields are plain values and safe to log.
+message WorkloadHttpReady {
+  uint32 port = 1;
+  string path = 2;
+  uint32 expect = 3;
+  uint32 timeout_seconds = 4;
 }
 
 message CreateTemplateResponse {

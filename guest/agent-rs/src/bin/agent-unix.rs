@@ -59,11 +59,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // No-op signal_fn: the harness does not call NotifyForked with real
     // entropy, and broadcasting SIGUSR2 to host processes on box2 is unsafe.
     // The real signal_userspace is used only in production (main.rs).
-    fn noop_signal() -> i32 { 0 }
+    fn noop_signal(_exclude: &std::collections::HashSet<i32>) -> i32 { 0 }
     let ctrl_service = ControlService {
         start_time,
         env,
         signal_fn: noop_signal,
+        workload: std::sync::Arc::new(sandbox_agent::service::workload::WorkloadRegistry::default()),
     };
 
     // Signal readiness to the harness before starting to accept.
