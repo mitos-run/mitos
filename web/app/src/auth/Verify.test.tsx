@@ -78,7 +78,7 @@ describe('Verify page', () => {
             alreadyDone: false,
             apiKey: 'mitos_live_abc123',
             apiKeyId: 'k1',
-            useCase: 'ai-coding',
+            useCase: 'rollouts',
           }),
       }),
     )
@@ -86,8 +86,33 @@ describe('Verify page', () => {
     await waitFor(() =>
       expect(screen.getByRole('link', { name: /continue to console/i })).toHaveAttribute(
         'href',
-        '/?uc=ai-coding',
+        '/?uc=rollouts',
       ),
+    )
+    vi.unstubAllGlobals()
+  })
+
+  it('(f) already-done + useCase: continue link carries ?uc', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            accountId: 'a',
+            orgId: 'o',
+            email: 'e@x.com',
+            alreadyDone: true,
+            useCase: 'rollouts',
+          }),
+      }),
+    )
+    render(<Verify token="t" />)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('link', { name: /continue to console/i }),
+      ).toHaveAttribute('href', '/?uc=rollouts'),
     )
     vi.unstubAllGlobals()
   })

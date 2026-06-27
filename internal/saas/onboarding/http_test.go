@@ -217,7 +217,7 @@ func TestVerifySetsCookieOnFreshVerify(t *testing.T) {
 // includes a "useCase" field reflecting the slug provided at signup.
 func TestVerifyResponseIncludesUseCase(t *testing.T) {
 	h, hr := newHandler(t, ModeOpen)
-	postJSON(t, h, "/onboarding/signup", `{"email":"uc@example.com","uc":"ai-coding"}`)
+	postJSON(t, h, "/onboarding/signup", `{"email":"uc@example.com","uc":"rollouts"}`)
 	tok := hr.email.LastToken("uc@example.com")
 	if tok == "" {
 		t.Fatal("no verification token")
@@ -231,8 +231,8 @@ func TestVerifyResponseIncludesUseCase(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out["useCase"] != "ai-coding" {
-		t.Fatalf("useCase = %v, want %q", out["useCase"], "ai-coding")
+	if out["useCase"] != "rollouts" {
+		t.Fatalf("useCase = %v, want %q", out["useCase"], "rollouts")
 	}
 }
 

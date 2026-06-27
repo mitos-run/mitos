@@ -311,7 +311,7 @@ func TestSignUpPersistsUseCase(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
 
-	_, err := h.svc.SignUp(ctx, "dev@example.com", "ai-coding")
+	_, err := h.svc.SignUp(ctx, "dev@example.com", "rollouts")
 	if err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
@@ -324,16 +324,16 @@ func TestSignUpPersistsUseCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get pending: %v", err)
 	}
-	if pending.UseCase != "ai-coding" {
-		t.Fatalf("pending.UseCase = %q, want %q", pending.UseCase, "ai-coding")
+	if pending.UseCase != "rollouts" {
+		t.Fatalf("pending.UseCase = %q, want %q", pending.UseCase, "rollouts")
 	}
 
 	vr, err := h.svc.Verify(ctx, token)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if vr.UseCase != "ai-coding" {
-		t.Fatalf("VerifyResult.UseCase = %q, want %q", vr.UseCase, "ai-coding")
+	if vr.UseCase != "rollouts" {
+		t.Fatalf("VerifyResult.UseCase = %q, want %q", vr.UseCase, "rollouts")
 	}
 }
 

@@ -181,35 +181,39 @@ describe('Signup page', () => {
     vi.unstubAllGlobals()
   })
 
-  it('includes uc in POST body when ?uc=ai-coding is in the URL', async () => {
+  it('includes uc in POST body when ?uc=rollouts is in the URL', async () => {
+    const originalSearch = window.location.search
     Object.defineProperty(window, 'location', {
-      value: { ...window.location, search: '?uc=ai-coding' },
-      writable: true,
+      value: { ...window.location, search: '?uc=rollouts' },
       configurable: true,
+      writable: true,
     })
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, status: 202, text: async () => '' }),
     )
-    render(<Signup />)
-    const input = screen.getByRole('textbox', { name: /email/i })
-    fireEvent.change(input, { target: { value: 'user@example.com' } })
-    fireEvent.submit(input.closest('form')!)
-    await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        '/onboarding/signup',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ email: 'user@example.com', uc: 'ai-coding' }),
-        }),
-      ),
-    )
-    Object.defineProperty(window, 'location', {
-      value: { ...window.location, search: '' },
-      writable: true,
-      configurable: true,
-    })
-    vi.unstubAllGlobals()
+    try {
+      render(<Signup />)
+      const input = screen.getByRole('textbox', { name: /email/i })
+      fireEvent.change(input, { target: { value: 'user@example.com' } })
+      fireEvent.submit(input.closest('form')!)
+      await waitFor(() =>
+        expect(fetch).toHaveBeenCalledWith(
+          '/onboarding/signup',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ email: 'user@example.com', uc: 'rollouts' }),
+          }),
+        ),
+      )
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: { ...window.location, search: originalSearch },
+        configurable: true,
+        writable: true,
+      })
+      vi.unstubAllGlobals()
+    }
   })
 
   it('clicking "Use a different email" resets back to the form', async () => {
