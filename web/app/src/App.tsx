@@ -5,16 +5,21 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { useMemo } from 'react'
+import { UnauthorizedError } from './api'
 import { queryClient, useCapabilities } from './data/query'
+import { createPreAuthRouter } from './auth/preauthRouter'
 import { createConsoleRouter } from './router'
 import { ToastProvider } from './ui/Toast'
 
 function RoutedConsole() {
   const { data: caps, error } = useCapabilities()
-  const router = useMemo(() => (caps ? createConsoleRouter(caps) : null), [caps])
+  // Memoize both routers so they are not recreated on every render.
+  const preAuthRouter = useMemo(() => createPreAuthRouter(), [])
+  const consoleRouter = useMemo(() => (caps ? createConsoleRouter(caps) : null), [caps])
+  if (error instanceof UnauthorizedError) return <RouterProvider router={preAuthRouter} />
   if (error) return <main style={{ padding: 32 }}><div className="t-dim">console unavailable: {String(error)}</div></main>
-  if (!caps || !router) return <main style={{ padding: 32 }}><div className="t-dim">loading...</div></main>
-  return <RouterProvider router={router} />
+  if (!caps || !consoleRouter) return <main style={{ padding: 32 }}><div className="t-dim">loading...</div></main>
+  return <RouterProvider router={consoleRouter} />
 }
 
 export function App() {
