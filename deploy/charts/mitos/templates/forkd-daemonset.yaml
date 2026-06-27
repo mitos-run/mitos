@@ -26,6 +26,15 @@ spec:
       # forkd makes no Kubernetes API calls (it imports no client); do not mount
       # a SA token on this high-value pod.
       automountServiceAccountToken: false
+      {{- with .Values.forkd.priorityClassName }}
+      # forkd owns every VM, warm pool, and snapshot on its node. If the kubelet
+      # evicts it (e.g. node DiskPressure), the node loses ALL fork capability at
+      # once, which is the opposite of boring failure behavior. Run it at a
+      # node-critical priority so it is never the pod the kubelet sheds; the node
+      # filling its data dir must back placement off (capacity heartbeat), not
+      # kill the daemon. The device plugin uses the same posture.
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- include "mitos.imagePullSecrets" . | nindent 6 }}
       {{- with .Values.forkd.nodeSelector }}
       nodeSelector:

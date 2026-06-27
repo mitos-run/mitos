@@ -101,6 +101,11 @@ forkd:
     repository: mitos-forkd
     tag: ""
     pullPolicy: IfNotPresent
+  # forkd owns all VMs, warm pools, and snapshots on its node; a kubelet eviction
+  # (e.g. node DiskPressure) takes the whole node's fork capability down. Run it at
+  # a node-critical priority so it is never evicted under resource pressure. Set to
+  # "" to disable (e.g. on clusters without this built-in PriorityClass).
+  priorityClassName: system-node-critical
   # forkd container resource requests and limits. mitos.run/kvm is the device
   # plugin resource that injects /dev/kvm and /dev/net/tun; it REPLACES
   # privileged: true for device access and must stay in both requests and limits

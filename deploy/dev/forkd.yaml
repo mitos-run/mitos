@@ -34,6 +34,10 @@ spec:
         prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
+      # forkd owns every VM, warm pool, and snapshot on its node; a kubelet
+      # eviction (e.g. node DiskPressure) drops the whole node's fork capability.
+      # system-node-critical is a built-in PriorityClass present in every cluster.
+      priorityClassName: system-node-critical
       containers:
         - name: forkd
           image: mitos-forkd:ci
