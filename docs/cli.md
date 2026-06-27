@@ -1,9 +1,9 @@
 # mitos CLI
 
 `mitos` is the command-line interface for snapshot-fork sandboxes. It drives
-the sandbox lifecycle (create, exec, file IO, fork, terminate, list) against a
-Kubernetes cluster, and brings a local kind dev cluster up or down for a
-one-command local-dev loop.
+the sandbox lifecycle (create, exec, file IO, fork, terminate, list) against the
+hosted mitos.run gateway OR a Kubernetes cluster, and brings a local kind dev
+cluster up or down for a one-command local-dev loop.
 
 ```bash
 go build -o mitos ./cmd/mitos/
@@ -117,6 +117,67 @@ Global flags `--namespace`/`-n` and `--pool` may appear before the subcommand.
 pipelines.
 
 ## Backends
+
+### Hosted backend (MITOS_API_KEY)
+
+Set `MITOS_API_KEY` to route all sandbox verbs to the hosted mitos.run gateway.
+No kubeconfig, no Kubernetes, no nodes to manage.
+
+```bash
+export MITOS_API_KEY=sk-...   # from https://mitos.run
+export MITOS_BASE_URL=https://mitos.run   # default; omit to use the default
+
+# Quickstart: create a sandbox, exec, fork, list, terminate.
+mitos sandbox create --pool python
+# prints: sbx-abc123
+
+mitos sandbox exec sbx-abc123 "echo hello"
+# prints: hello
+
+mitos fork sbx-abc123 --count 3
+# prints three new sandbox ids
+
+mitos sandbox ls
+# lists all live sandboxes under your api key
+
+mitos sandbox terminate sbx-abc123
+```
+
+Alternatively, pass flags inline instead of using environment variables:
+
+```bash
+mitos --api-key sk-... --server https://mitos.run sandbox create --pool python
+```
+
+Flag precedence (highest wins): `--api-key` flag, then `MITOS_API_KEY` env var.
+URL precedence: `--server` flag, then `MITOS_BASE_URL` env var, then
+`https://mitos.run`.
+
+The api key value is NEVER logged or placed in any error message.
+
+**What works in hosted mode:**
+
+| Verb | Hosted | Notes |
+|---|---|---|
+| `sandbox create --pool <template>` | yes | `--pool` names a template, not a pool |
+| `sandbox exec <id> <cmd>` | yes | Connect RPC via gateway |
+| `sandbox ls` | yes | GET /v1/sandboxes |
+| `sandbox fork <id> --count N` | yes | re-forks from the sandbox template |
+| `sandbox terminate <id>` | yes | DELETE /v1/sandboxes/{id} |
+| `run <cmd> --pool <template>` | yes | create + exec + terminate |
+| `ws *` (workspace verbs) | no | cluster-only, requires Kubernetes CRDs |
+| `template build/push` | no | cluster-only, requires a KVM node |
+| `dev up/down` | no | local kind cluster; no api key needed |
+| `doctor` | no | cluster node preflight |
+| `auth login/keys` | yes | always talks to the hosted account service |
+
+Fork semantics in hosted mode: `mitos fork <id> --count N` calls `POST /v1/fork`
+N times with `{"template": <id>}`. The gateway resolves the sandbox to its
+original template and forks from that snapshot. The source sandbox keeps running
+and each child is an independent sibling forked from the same template snapshot.
+This matches the Python SDK `DirectSandbox.fork()` and `mcp.HTTPBackend.Fork()`
+behavior. A true live memory fork of a running sandbox requires cluster mode with
+a KVM node (the `spec.source.fromSandbox` path).
 
 ### Cluster backend (kubeconfig)
 
