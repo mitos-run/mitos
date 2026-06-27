@@ -97,4 +97,37 @@ describe('Signup page', () => {
     render(<Signup />)
     expect(screen.getByRole('link', { name: /sign in/i })).toBeInTheDocument()
   })
+
+  it('disables the submit button while the POST is in flight', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockReturnValue(new Promise(() => {})), // never resolves
+    )
+    render(<Signup />)
+    const input = screen.getByRole('textbox', { name: /email/i })
+    fireEvent.change(input, { target: { value: 'test@example.com' } })
+    fireEvent.submit(input.closest('form')!)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sending/i })).toBeDisabled(),
+    )
+    vi.unstubAllGlobals()
+  })
+
+  it('clicking "Use a different email" resets back to the form', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 202, text: async () => '' }),
+    )
+    render(<Signup />)
+    const input = screen.getByRole('textbox', { name: /email/i })
+    fireEvent.change(input, { target: { value: 'user@example.com' } })
+    fireEvent.submit(input.closest('form')!)
+    await waitFor(() =>
+      expect(screen.getByText(/check your email/i)).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /use a different email/i }))
+    expect(screen.getByRole('textbox', { name: /email/i })).toBeInTheDocument()
+    expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
 })

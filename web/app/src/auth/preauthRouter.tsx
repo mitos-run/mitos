@@ -1,6 +1,6 @@
 // Pre-auth route tree: mounted by App when capabilities returns 401.
 // No AppShell - each route uses a minimal centered layout instead.
-// /login uses the real Login page; /signup and /verify are placeholders.
+// /login and /signup are real pages; /verify is a placeholder.
 import {
   createRootRoute,
   createRoute,
