@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -87,6 +88,7 @@ func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
 				Env:       m.nonSecretEnv(),
 				Resources: res,
 				Network:   m.egressPolicy(),
+				Workload:  m.workload(),
 			},
 			Snapshots: &v1.PoolSnapshots{
 				ReplicasPerNode: 1,
@@ -113,6 +115,33 @@ func (m *Manifest) effectiveCommand() []string {
 		quoted[i] = shellQuote(c)
 	}
 	return []string{"sh", "-c", fmt.Sprintf("cd %s && exec %s", shellQuote(m.Run.Workdir), strings.Join(quoted, " "))}
+}
+
+// workload maps run.command + run.ready onto a serving WorkloadSpec the build
+// captures running (issue #460). It is set only when the manifest declares a
+// ready gate (run.ready): the gate is the explicit "this is a server, snapshot it
+// while listening" signal, so a plain run.command (a batch job) stays an exec-time
+// default and is never started during the build. The workload command is the same
+// workdir-wrapped command effectiveCommand builds; env is non-secret only.
+func (m *Manifest) workload() *v1.WorkloadSpec {
+	if len(m.Run.Command) == 0 || m.Run.Ready == nil {
+		return nil
+	}
+	w := &v1.WorkloadSpec{
+		Command: m.effectiveCommand(),
+		Env:     m.nonSecretEnv(),
+	}
+	if h := m.Run.Ready.HTTP; h != nil {
+		w.Ready = &v1.HTTPReadyProbe{
+			Port:   int32(h.Port),
+			Path:   h.Path,
+			Expect: int32(h.Expect),
+		}
+		if d, err := time.ParseDuration(m.Run.Ready.Timeout); err == nil && d > 0 {
+			w.Ready.TimeoutSeconds = int32(d.Seconds())
+		}
+	}
+	return w
 }
 
 // nonSecretEnv maps run.env to a deterministically ordered []corev1.EnvVar. Secret

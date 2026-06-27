@@ -174,3 +174,52 @@ func TestValidateErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestGoldenPoolMapsWorkloadAndReady(t *testing.T) {
+	m, err := Parse([]byte(`
+name: srv
+source:
+  image: ghcr.io/x/y:latest
+run:
+  command: ["node", "server.js"]
+  ready:
+    http: { port: 8080, path: /healthz, expect: 200 }
+    timeout: 60s
+preview:
+  port: 8080
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pool, err := m.GoldenPool("inst")
+	if err != nil {
+		t.Fatalf("GoldenPool: %v", err)
+	}
+	w := pool.Spec.Template.Workload
+	if w == nil {
+		t.Fatal("expected Template.Workload to be set when run declares a ready gate")
+	}
+	if len(w.Command) == 0 {
+		t.Fatalf("workload command empty: %+v", w)
+	}
+	if w.Ready == nil || w.Ready.Port != 8080 || w.Ready.Path != "/healthz" || w.Ready.Expect != 200 {
+		t.Fatalf("ready probe = %+v", w.Ready)
+	}
+	if w.Ready.TimeoutSeconds != 60 {
+		t.Fatalf("timeout seconds = %d, want 60", w.Ready.TimeoutSeconds)
+	}
+}
+
+func TestGoldenPoolNoWorkloadWithoutReady(t *testing.T) {
+	m, err := Parse([]byte("name: batch\nsource:\n  image: ghcr.io/x/y:latest\nrun:\n  command: [\"./run-batch\"]\npreview:\n  port: 8080\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pool, err := m.GoldenPool("inst")
+	if err != nil {
+		t.Fatalf("GoldenPool: %v", err)
+	}
+	if pool.Spec.Template.Workload != nil {
+		t.Fatal("a run.command without a ready gate must NOT become a serving workload")
+	}
+}
