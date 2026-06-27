@@ -48,7 +48,6 @@ func newProxy(t *testing.T, mkt, con *httptest.Server) *frontdoor.Proxy {
 		MarketingURL: mkt.URL,
 		ConsoleURL:   con.URL,
 		Resolver:     fakeResolver{},
-		Reserved:     frontdoor.DefaultReserved(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy: %v", err)
@@ -153,9 +152,10 @@ func TestProxy_RootWithSession_GoesToConsole(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
-	// Console echoes account|org; marketing echoes "MKT".
-	if body := rr.Body.String(); body == "MKT" {
-		t.Error("authed root request went to marketing, want console")
+	// Console echoes "account|org"; verify the injected identity reached it.
+	const want = "acct-1|org-1"
+	if body := rr.Body.String(); body != want {
+		t.Errorf("authed root body = %q, want %q (console with injected identity)", body, want)
 	}
 }
 
@@ -197,7 +197,6 @@ func TestProxy_ForgeProtection_HeadersStripped(t *testing.T) {
 		MarketingURL: mkt.URL,
 		ConsoleURL:   loginCon.URL,
 		Resolver:     fakeResolver{},
-		Reserved:     frontdoor.DefaultReserved(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy: %v", err)

@@ -7,8 +7,6 @@ import (
 )
 
 func TestDecide(t *testing.T) {
-	reserved := frontdoor.DefaultReserved()
-
 	cases := []struct {
 		path               string
 		wantUpstream       string
@@ -58,11 +56,23 @@ func TestDecide(t *testing.T) {
 		// This is already covered above; add explicit check for slug-like names
 		// that happen to be in the reserved set.
 		{"/new/project", "console", true, false}, // "new" is reserved app path
+
+		// Path normalization: double-slash cannot bypass the session check.
+		// stdpath.Clean("//console/keys") -> "/console/keys" -> console, session required.
+		{"//console/keys", "console", true, false},
+
+		// Path traversal resolves correctly: no bypass of restricted paths.
+		// stdpath.Clean("/console/../pricing") -> "/pricing" -> marketing, no session.
+		{"/console/../pricing", "marketing", false, false},
+
+		// Trailing slash collapses to the bare segment: routes to marketing.
+		// stdpath.Clean("/pricing/") -> "/pricing" -> marketing, no session.
+		{"/pricing/", "marketing", false, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
-			got := frontdoor.Decide(tc.path, reserved)
+			got := frontdoor.Decide(tc.path)
 			if got.Upstream != tc.wantUpstream {
 				t.Errorf("Decide(%q).Upstream = %q, want %q", tc.path, got.Upstream, tc.wantUpstream)
 			}

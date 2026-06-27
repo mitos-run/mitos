@@ -4,7 +4,10 @@
 // request is for the root path that requires special fork logic.
 package frontdoor
 
-import "strings"
+import (
+	stdpath "path"
+	"strings"
+)
 
 // Decision is the result of routing a single request path.
 type Decision struct {
@@ -50,36 +53,25 @@ var appSegments = map[string]bool{
 	"new":      true,
 }
 
-// DefaultReserved returns a map of all first-path-segment values that are
-// reserved by the platform. A segment present in this set is never treated as
-// an org slug, regardless of which subset it belongs to. Callers may pass
-// this map to Decide to enforce the reservation.
-func DefaultReserved() map[string]bool {
-	reserved := make(map[string]bool, len(marketingSegments)+len(authSegments)+len(appSegments))
-	for k := range marketingSegments {
-		reserved[k] = true
-	}
-	for k := range authSegments {
-		reserved[k] = true
-	}
-	for k := range appSegments {
-		reserved[k] = true
-	}
-	return reserved
-}
-
-// Decide returns the routing Decision for path. reserved is the set of
-// first-segment values that are platform-reserved and must never be treated
-// as org slugs; pass DefaultReserved() for production use.
+// Decide returns the routing Decision for path. The package-level
+// marketingSegments, authSegments, and appSegments maps are the single source
+// of truth for routing.
 //
-// Precedence (reserved always beats slug):
+// Precedence:
 //  1. Exact "/" -> marketing, IsRoot=true, RequireSession=false.
 //  2. First segment in the marketing set -> marketing, RequireSession=false.
 //  3. First segment in the auth/public-console set -> console, RequireSession=false.
 //  4. First segment in the app set -> console, RequireSession=true.
 //  5. Otherwise (non-reserved first segment) -> org slug: console, RequireSession=true.
-func Decide(path string, reserved map[string]bool) Decision {
-	if path == "/" || path == "" {
+func Decide(path string) Decision {
+	// Normalize the path so Decide is safe even when called outside the
+	// net/http server context. stdpath.Clean("/") stays "/".
+	if path == "" {
+		path = "/"
+	}
+	path = stdpath.Clean(path)
+
+	if path == "/" {
 		return Decision{Upstream: "marketing", IsRoot: true}
 	}
 

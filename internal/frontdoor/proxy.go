@@ -42,9 +42,6 @@ type ProxyConfig struct {
 	ConsoleURL string
 	// Resolver resolves session tokens to identities. Required.
 	Resolver SessionResolver
-	// Reserved is the set of first-path-segments that are platform-reserved.
-	// Pass DefaultReserved(). Required.
-	Reserved map[string]bool
 	// Logger is optional; when nil, a discard logger is used so no token
 	// values can leak through a nil-pointer dereference on the logger.
 	Logger *slog.Logger
@@ -57,7 +54,6 @@ type Proxy struct {
 	marketing *httputil.ReverseProxy
 	console   *httputil.ReverseProxy
 	resolver  SessionResolver
-	reserved  map[string]bool
 	log       *slog.Logger
 }
 
@@ -72,9 +68,6 @@ func NewProxy(cfg ProxyConfig) (*Proxy, error) {
 	}
 	if cfg.Resolver == nil {
 		return nil, fmt.Errorf("frontdoor: Resolver is required")
-	}
-	if cfg.Reserved == nil {
-		return nil, fmt.Errorf("frontdoor: Reserved is required")
 	}
 
 	mktURL, err := url.Parse(cfg.MarketingURL)
@@ -98,7 +91,6 @@ func NewProxy(cfg ProxyConfig) (*Proxy, error) {
 		marketing: mkt,
 		console:   con,
 		resolver:  cfg.Resolver,
-		reserved:  cfg.Reserved,
 		log:       log,
 	}, nil
 }
@@ -131,7 +123,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cannot carry forged identity headers forward.
 	stripMitosHeaders(r.Header)
 
-	dec := Decide(r.URL.Path, p.reserved)
+	dec := Decide(r.URL.Path)
 
 	if dec.IsRoot {
 		id, authed := p.resolveSession(r)
