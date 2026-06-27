@@ -76,13 +76,11 @@ type SandboxReconciler struct {
 	ClusterDomain string
 }
 
-// desiredReplicas returns the effective replica count for a Sandbox, applying
-// the upstream default of 1 when spec.replicas is unset.
-func desiredReplicas(sb *agentsv1beta1.Sandbox) int32 {
-	if sb.Spec.Replicas == nil {
-		return 1
-	}
-	return *sb.Spec.Replicas
+// isSuspended reports whether the upstream Sandbox is in the Suspended
+// operating mode. Empty operatingMode defaults to Running (the upstream
+// +kubebuilder:default=Running semantics).
+func isSuspended(sb *agentsv1beta1.Sandbox) bool {
+	return sb.Spec.OperatingMode == agentsv1beta1.SandboxOperatingModeSuspended
 }
 
 // poolFor resolves the mitos.run pool a Sandbox binds to: the bridge
@@ -95,24 +93,25 @@ func (r *SandboxReconciler) poolFor(sb *agentsv1beta1.Sandbox) string {
 }
 
 // Reconcile drives the Sandbox -> husk run-path lifecycle. The upstream
-// pause/resume contract is the spec.replicas 0<->1 toggle (upstream v0.4.6 has
-// no stateful hibernate field; their controller deletes the pod on 0 and
-// cold-creates it on 1). We map it onto the husk warm pool:
+// pause/resume contract is the spec.operatingMode Running/Suspended toggle
+// (v1beta1 graduated the v1alpha1 spec.replicas 0/1 into a named enum). We map
+// it onto the husk warm pool:
 //
-//   - replicas >= 1 (default 1) and not deleting (create OR resume): ensure our
-//     SandboxClaim. On resume this re-activates a dormant warm husk pod via the
-//     same fast path as the initial create. Mirror the claim readiness, and on
-//     Ready set the serving observables (serviceFQDN, podIPs).
-//   - replicas 0 (pause): RELEASE the run path to the warm pool by deleting our
-//     SandboxClaim, so the bound husk pod returns dormant to the pool. Clear the
-//     serving observables (Status.Replicas 0, Ready False, serviceFQDN + podIPs
+//   - Running (default empty) and not deleting (create OR resume): ensure our
+//     run-path Sandbox. On resume this re-activates a dormant warm husk pod via
+//     the same fast path as the initial create. Mirror the claim readiness, and
+//     on Ready set the serving observables (serviceFQDN, podIPs).
+//   - Suspended (pause): RELEASE the run path to the warm pool by deleting our
+//     run-path Sandbox, so the bound husk pod returns dormant to the pool. Clear
+//     the serving observables (Ready False, Suspended True, serviceFQDN + podIPs
 //     cleared, no serving endpoint).
-//   - deletion: the owner reference garbage-collects our SandboxClaim; we just
-//     observe and return.
+//   - deletion: the owner reference garbage-collects our run-path Sandbox; we
+//     just observe and return.
 //
-// The mapping is idempotent and stable under 1->0->1->0 toggling: pause is a
-// no-op when the claim is already released, resume re-creates the same named
-// claim, and the status writes are conditional (no write when nothing changed).
+// The mapping is idempotent and stable under Running->Suspended->Running->Suspended
+// toggling: pause is a no-op when the claim is already released, resume
+// re-creates the same named claim, and the status writes are conditional (no
+// write when nothing changed).
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -122,8 +121,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Deletion: the SandboxClaim carries an owner reference to the Sandbox, so
-	// the apiserver garbage-collects it. Nothing for the facade to do.
+	// Deletion: the run-path Sandbox carries an owner reference to the upstream
+	// Sandbox, so the apiserver garbage-collects it. Nothing for the facade to do.
 	if !sb.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -140,23 +139,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 	}
 
-	// replicas 0 (pause): release the run path to the warm pool. Delete our
-	// SandboxClaim so the bound husk pod returns dormant to the pool, and clear
-	// the serving observables (serviceFQDN + podIPs).
-	if desiredReplicas(&sb) == 0 {
+	// Suspended (pause): release the run path to the warm pool. Delete our
+	// run-path Sandbox so the bound husk pod returns dormant to the pool, and
+	// set the Suspended condition + clear the serving observables (serviceFQDN
+	// + podIPs).
+	if isSuspended(&sb) {
 		if err := r.deleteClaim(ctx, &sb); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
-			status:  metav1.ConditionFalse,
-			reason:  "Paused",
-			message: "replicas is 0 (paused); the husk run-path object is released to the warm pool",
+			status:    metav1.ConditionFalse,
+			reason:    "Suspended",
+			message:   "operatingMode is Suspended; the husk run-path object is released to the warm pool",
+			suspended: true,
 		})
 	}
 
-	// replicas >= 1 (create or resume): ensure our SandboxClaim exists. On a
-	// resume after a pause this re-activates a dormant warm husk pod via the same
-	// fast path as create. Mirror the claim readiness.
+	// Running (create or resume): ensure our run-path Sandbox exists. On a
+	// resume after a Suspended this re-activates a dormant warm husk pod via
+	// the same fast path as create. Mirror the claim readiness.
 	claim, err := r.ensureClaim(ctx, &sb, pool)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -168,7 +169,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			status:   metav1.ConditionTrue,
 			reason:   "ClaimReady",
 			message:  fmt.Sprintf("husk run-path object %q is Ready", claim.Name),
-			replicas: 1,
 			endpoint: claim.Status.Endpoint,
 		})
 	}
@@ -230,8 +230,8 @@ func podTemplateEnv(sb *agentsv1beta1.Sandbox) []corev1.EnvVar {
 	return containers[0].Env
 }
 
-// deleteClaim terminates our run-path Sandbox for an upstream Sandbox (replicas
-// 0 path). It is a no-op when the run-path object is already gone.
+// deleteClaim terminates our run-path Sandbox for an upstream Sandbox
+// (Suspended path). It is a no-op when the run-path object is already gone.
 func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1beta1.Sandbox) error {
 	claim := &runv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: sb.Namespace},
@@ -243,16 +243,16 @@ func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1beta1.S
 }
 
 // statusUpdate is the set of upstream Sandbox status facts the facade mirrors in
-// one reconcile: the Ready condition, the actual replica count, and (when
-// running with a serving endpoint) the serviceFQDN + podIPs. The serving
-// observables are populated only when status is True with an endpoint; on every
-// other path (pause, pending, error) they are CLEARED so a paused or not-ready
+// one reconcile: the Ready condition, the Suspended condition, and (when running
+// with a serving endpoint) the serviceFQDN + podIPs. The serving observables are
+// populated only when status is True with an endpoint; on every other path
+// (Suspended, pending, error) they are CLEARED so a suspended or not-ready
 // Sandbox never advertises a stale endpoint.
 type statusUpdate struct {
 	status   metav1.ConditionStatus
 	reason   string
 	message  string
-	replicas int32
+	suspended bool
 	// endpoint is the husk run-path endpoint (host:port) when Ready, used to
 	// derive podIPs. Empty on every not-serving path.
 	endpoint string
@@ -260,8 +260,8 @@ type statusUpdate struct {
 
 // mirror writes one statusUpdate onto the upstream Sandbox status subresource.
 // It is idempotent (no write when nothing changed) and is the single place the
-// serving observables (serviceFQDN, podIPs) are set or cleared, so pause always
-// clears them and resume always re-populates them.
+// serving observables (serviceFQDN, podIPs) are set or cleared, so Suspended
+// always clears them and resume always re-populates them.
 func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1beta1.Sandbox, u statusUpdate) error {
 	cond := metav1.Condition{
 		Type:               SandboxConditionType,
@@ -273,7 +273,27 @@ func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1beta1.Sandbo
 
 	before := sb.DeepCopy()
 	changed := apimeta.SetStatusCondition(&sb.Status.Conditions, cond)
-	sb.Status.Replicas = u.replicas
+
+	// Mirror the Suspended condition (v1beta1 replaces the v1alpha1 Replicas
+	// field for tracking the suspended/running state).
+	suspStatus := metav1.ConditionFalse
+	suspReason := "Running"
+	suspMessage := "sandbox is in running operating mode"
+	if u.suspended {
+		suspStatus = metav1.ConditionTrue
+		suspReason = "Suspended"
+		suspMessage = "operatingMode is Suspended; the husk run-path object is released to the warm pool"
+	}
+	suspCond := metav1.Condition{
+		Type:               string(agentsv1beta1.SandboxConditionSuspended),
+		Status:             suspStatus,
+		Reason:             suspReason,
+		Message:            suspMessage,
+		ObservedGeneration: sb.Generation,
+	}
+	if apimeta.SetStatusCondition(&sb.Status.Conditions, suspCond) {
+		changed = true
+	}
 
 	// Serving observables: set on Ready-with-endpoint, cleared otherwise.
 	if u.status == metav1.ConditionTrue && u.endpoint != "" {
@@ -285,7 +305,6 @@ func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1beta1.Sandbo
 	}
 
 	if !changed &&
-		before.Status.Replicas == sb.Status.Replicas &&
 		before.Status.ServiceFQDN == sb.Status.ServiceFQDN &&
 		equalStrings(before.Status.PodIPs, sb.Status.PodIPs) {
 		return nil
