@@ -72,9 +72,9 @@ func (s *PgSessionStore) Resolve(token string) (string, error) {
 	return acct, nil
 }
 
-// ListByAccount returns all sessions for accountID, ordered by created_at.
+// ListByAccount returns all sessions for accountID, most-recent-first.
 func (s *PgSessionStore) ListByAccount(accountID string) []saas.Session {
-	const q = `SELECT id, account_id, created_at, label FROM sessions WHERE account_id = $1 ORDER BY created_at`
+	const q = `SELECT id, account_id, created_at, label FROM sessions WHERE account_id = $1 ORDER BY created_at DESC, id DESC`
 	rows, err := s.pool.Query(context.Background(), q, accountID)
 	if err != nil {
 		return nil
@@ -86,6 +86,7 @@ func (s *PgSessionStore) ListByAccount(accountID string) []saas.Session {
 		if err := rows.Scan(&ss.ID, &ss.AccountID, &ss.CreatedAt, &ss.Label); err != nil {
 			return out
 		}
+		ss.CreatedAt = ss.CreatedAt.UTC()
 		out = append(out, ss)
 	}
 	if rows.Err() != nil {

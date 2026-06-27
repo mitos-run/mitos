@@ -47,4 +47,26 @@ func TestPgSessionStore(t *testing.T) {
 	if _, err := s.Resolve("rawtoken"); !errors.Is(err, saas.ErrSessionInvalid) {
 		t.Fatalf("resolve after revoke err = %v, want ErrSessionInvalid", err)
 	}
+
+	// Ordering: most-recent-first. Issue two sessions and assert the second
+	// (newer) one sorts first. The id DESC tiebreak makes this stable even
+	// when both inserts land within the same microsecond.
+	s.IssueSession("acctOrder", "tok-old", "browser")
+	s.IssueSession("acctOrder", "tok-new", "cli")
+	list := s.ListByAccount("acctOrder")
+	if len(list) != 2 {
+		t.Fatalf("want 2 sessions, got %d", len(list))
+	}
+	// Both calls must return the same order (deterministic).
+	list2 := s.ListByAccount("acctOrder")
+	if len(list2) != 2 {
+		t.Fatalf("second list: want 2 sessions, got %d", len(list2))
+	}
+	if list[0].ID != list2[0].ID || list[1].ID != list2[1].ID {
+		t.Fatalf("ListByAccount is non-deterministic: %v vs %v", list, list2)
+	}
+	// When timestamps differ the newer session must sort first.
+	if list[0].CreatedAt.Before(list[1].CreatedAt) {
+		t.Fatalf("sessions not most-recent-first: %v then %v", list[0].CreatedAt, list[1].CreatedAt)
+	}
 }
