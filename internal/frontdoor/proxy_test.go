@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"mitos.run/mitos/internal/frontdoor"
@@ -221,9 +222,12 @@ func TestProxy_ForgeProtection_HeadersStripped(t *testing.T) {
 // the only mechanism that lets the request reach the local stub rather than the
 // real network host. InsecureSkipVerify is never set.
 func TestProxy_MarketingPagesDialOverride(t *testing.T) {
+	var mu sync.Mutex
 	var capturedHost string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		capturedHost = r.Host
+		mu.Unlock()
 		_, _ = io.WriteString(w, "PAGES")
 	}))
 	defer stub.Close()
@@ -256,7 +260,10 @@ func TestProxy_MarketingPagesDialOverride(t *testing.T) {
 	if body := rr.Body.String(); body != "PAGES" {
 		t.Errorf("body = %q, want %q (dial override did not reach stub)", body, "PAGES")
 	}
-	if capturedHost != fakeHost {
-		t.Errorf("upstream Host header = %q, want %q (Host not pinned by Director)", capturedHost, fakeHost)
+	mu.Lock()
+	got := capturedHost
+	mu.Unlock()
+	if got != fakeHost {
+		t.Errorf("upstream Host header = %q, want %q (Host not pinned by Director)", got, fakeHost)
 	}
 }

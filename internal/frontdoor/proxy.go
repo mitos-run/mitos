@@ -188,7 +188,7 @@ func buildPagesMarketingReverseProxy(target *url.URL, pagesAddrs []string, label
 	var counter atomic.Uint64
 	base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr == needle {
-			n := int(counter.Add(1)-1) % len(pagesAddrs)
+			n := counter.Add(1) % uint64(len(pagesAddrs))
 			return origDial(ctx, network, pagesAddrs[n])
 		}
 		return origDial(ctx, network, addr)
