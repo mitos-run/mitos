@@ -28,7 +28,9 @@ func TestPrepareChrootMountMakesPrivateMountPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := prepareChrootMount(base); err != nil {
+	// dataDir == chrootBase == base: the bind target is base, so the assertion
+	// (base becomes a private mount point) holds exactly as before.
+	if err := prepareChrootMount(base, base); err != nil {
 		t.Fatalf("prepareChrootMount: %v", err)
 	}
 	t.Cleanup(func() { _ = unix.Unmount(base, unix.MNT_DETACH) })
@@ -42,8 +44,53 @@ func TestPrepareChrootMountMakesPrivateMountPoint(t *testing.T) {
 	}
 
 	// Idempotent: a second call (forkd may re-run setup on restart) must not error.
-	if err := prepareChrootMount(base); err != nil {
+	if err := prepareChrootMount(base, base); err != nil {
 		t.Fatalf("prepareChrootMount second call: %v", err)
+	}
+}
+
+// TestPrepareChrootMountBindsDataDirForCoW proves that when chrootBase is UNDER
+// dataDir (the chart's co-located layout) forkd binds the DATA DIR private, so a
+// hard link from a template file under dataDir into a per-VM chroot under
+// chrootBase stays within one mount and remains CoW (issue #526). Without the fix
+// chrootBase was its own mount and the link crossed a boundary (EXDEV -> copy).
+func TestPrepareChrootMountBindsDataDirForCoW(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("prepareChrootMount needs CAP_SYS_ADMIN; verified in the KVM-CI forkd-jailer phase")
+	}
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	chrootBase := filepath.Join(dataDir, "jailer") // co-located under dataDir
+	templates := filepath.Join(dataDir, "templates")
+	for _, d := range []string{chrootBase, templates} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := prepareChrootMount(dataDir, chrootBase); err != nil {
+		t.Fatalf("prepareChrootMount: %v", err)
+	}
+	t.Cleanup(func() { _ = unix.Unmount(dataDir, unix.MNT_DETACH) })
+
+	// The DATA DIR (not the chroot base) is the private mount point.
+	info, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mountinfoHasPrivateMount(string(info), dataDir) {
+		t.Fatalf("data dir %q is not a private mount point after prepareChrootMount:\n%s", dataDir, info)
+	}
+
+	// The decisive property: a hard link from a template file into the chroot
+	// base now succeeds (one mount), so per-VM rootfs stays CoW.
+	src := filepath.Join(templates, "rootfs.ext4")
+	if err := os.WriteFile(src, []byte("rootfs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(chrootBase, "rootfs.ext4")
+	if err := os.Link(src, dst); err != nil {
+		t.Fatalf("hard link across the co-located layout still fails (no CoW): %v", err)
 	}
 }
 
