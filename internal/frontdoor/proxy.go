@@ -226,14 +226,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dec.RequireSession {
-		id, authed := p.resolveSession(r)
-		if !authed {
-			// 302 to /login?next=<escaped original path>
-			next := url.QueryEscape(r.URL.RequestURI())
-			http.Redirect(w, r, "/login?next="+next, http.StatusFound)
-			return
+		// Resolve the session so an authenticated request carries its account and
+		// org to the console (X-Mitos-Account / X-Mitos-Org). We do NOT redirect
+		// the anonymous case: the console owns auth. Its BFF (/console/*) returns
+		// 401 so the SPA detects the signed-out state, and it serves the SPA shell
+		// (which routes to login) for page loads. A frontdoor 302 here turned the
+		// SPA's /console/capabilities probe into a redirect and hung every console
+		// page on "loading".
+		if id, authed := p.resolveSession(r); authed {
+			p.injectIdentity(r, id)
 		}
-		p.injectIdentity(r, id)
 		p.console.ServeHTTP(w, r)
 		return
 	}

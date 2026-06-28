@@ -115,7 +115,11 @@ func TestProxy_ConsoleWithSession(t *testing.T) {
 	}
 }
 
-func TestProxy_ConsoleNoSession_Redirects(t *testing.T) {
+// An anonymous request to a session-required console path is PASSED THROUGH to
+// the console (which owns auth: it 401s its API and serves the SPA), not
+// 302-redirected by the frontdoor. A frontdoor redirect broke the SPA's
+// /console/capabilities probe (it expects a 401, not a 302 to /login).
+func TestProxy_ConsoleNoSession_PassesThrough(t *testing.T) {
 	mkt := mktServer(t)
 	defer mkt.Close()
 	con := consoleServer(t)
@@ -127,13 +131,16 @@ func TestProxy_ConsoleNoSession_Redirects(t *testing.T) {
 	rr := httptest.NewRecorder()
 	p.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusFound {
-		t.Fatalf("status = %d, want 302", rr.Code)
+	// No frontdoor redirect: the request reaches the console upstream.
+	if rr.Code == http.StatusFound {
+		t.Fatalf("frontdoor 302-redirected an anon console request; it must pass through to the console")
 	}
-	loc := rr.Header().Get("Location")
-	want := "/login?next=%2Fconsole%2Fkeys"
-	if loc != want {
-		t.Errorf("Location = %q, want %q", loc, want)
+	if loc := rr.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q, want empty (no frontdoor redirect)", loc)
+	}
+	if got := rr.Header().Get("X-Frontdoor-Upstream"); got != "console" && rr.Body.Len() == 0 {
+		// consoleServer marks responses; ensure the console actually served it.
+		t.Errorf("anon console request did not reach the console upstream")
 	}
 }
 
