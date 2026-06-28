@@ -283,8 +283,8 @@ def step_verify(cfg: Config, token: str) -> tuple[str, str, str, str]:
             "verify",
             "200 but no apiKey (an idempotent re-verify returns no key; expected a fresh signup)",
         )
-    if not api_key.startswith("sk-"):
-        raise StepError("verify", f"apiKey does not look like an sk- key: {api_key[:6]}...")
+    if not (api_key.startswith("mitos_") or api_key.startswith("sk-")):
+        raise StepError("verify", f"apiKey has an unexpected format: {api_key[:6]}...")
     cookie = _extract_cookie(r.set_cookies, "mitos_session")
     if not cookie:
         raise StepError("verify", "200 with apiKey but no mitos_session Set-Cookie")

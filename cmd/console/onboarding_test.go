@@ -111,6 +111,39 @@ func TestE2EEndpointNotMountedWhenFlagOff(t *testing.T) {
 	}
 }
 
+// TestSignupCreditFromEnv asserts that MITOS_CONSOLE_SIGNUP_CREDIT_CENTS=500
+// produces billing.Money(500) (500 cents = $5.00) and that invalid or unset
+// values return false so billing.DefaultSignupCredit applies.
+func TestSignupCreditFromEnv(t *testing.T) {
+	cases := []struct {
+		name      string
+		val       string
+		wantMoney billing.Money
+		wantOK    bool
+	}{
+		{"set to 500", "500", billing.Money(500), true},
+		{"set to 100", "100", billing.Money(100), true},
+		{"set to 10000", "10000", billing.Money(10000), true},
+		{"zero", "0", 0, false},
+		{"negative", "-1", 0, false},
+		{"invalid", "abc", 0, false},
+		{"empty", "", 0, false},
+		{"whitespace", "  500  ", billing.Money(500), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MITOS_CONSOLE_SIGNUP_CREDIT_CENTS", tc.val)
+			got, ok := signupCreditFromEnv()
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.wantMoney {
+				t.Fatalf("money = %v, want %v", got, tc.wantMoney)
+			}
+		})
+	}
+}
+
 // TestE2EEndpointMountedWhenFlagOn asserts GET /onboarding/e2e/token is reachable
 // (401 for missing bearer) when MITOS_CONSOLE_E2E is truthy.
 func TestE2EEndpointMountedWhenFlagOn(t *testing.T) {

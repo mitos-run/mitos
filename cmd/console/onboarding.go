@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +63,18 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 	}
 	if prov != nil {
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
+	}
+	// MITOS_CONSOLE_SIGNUP_CREDIT_CENTS overrides the signup credit for this
+	// deployment. When set to a positive integer it takes precedence over
+	// billing.DefaultSignupCredit; unset or non-positive values fall through
+	// to the default. Example: MITOS_CONSOLE_SIGNUP_CREDIT_CENTS=500 yields
+	// a $5.00 (500 cent) grant.
+	if m, ok := signupCreditFromEnv(); ok {
+		opts = append(opts, onboarding.WithSignupCredit(m))
+		logger.Info("onboarding signup credit overridden via env",
+			"env", "MITOS_CONSOLE_SIGNUP_CREDIT_CENTS",
+			"cents", int64(m),
+		)
 	}
 
 	// E2E QA seam: capture raw tokens in-process when MITOS_CONSOLE_E2E is set.
@@ -200,6 +213,25 @@ func onboardingScheme() *runtime.Scheme {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1.AddToScheme(scheme))
 	return scheme
+}
+
+// signupCreditFromEnv reads MITOS_CONSOLE_SIGNUP_CREDIT_CENTS and returns the
+// billing.Money value (minor-unit cents) and true when the env is set to a
+// positive integer. Invalid, zero, or negative values return 0, false so the
+// caller falls through to billing.DefaultSignupCredit.
+//
+// billing.Money is an int64 count of cents (100 = $1.00), so
+// MITOS_CONSOLE_SIGNUP_CREDIT_CENTS=500 yields billing.Money(500) = $5.00.
+func signupCreditFromEnv() (billing.Money, bool) {
+	s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_SIGNUP_CREDIT_CENTS"))
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return billing.Money(n), true
 }
 
 // devLogEmailSender is the development EmailSender: it logs that a verification
