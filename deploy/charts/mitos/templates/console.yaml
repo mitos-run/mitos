@@ -213,13 +213,14 @@ spec:
             - name: MITOS_CONSOLE_OPENBAO_PER_ORG
               value: {{ .Values.console.secrets.openbao.perOrg | quote }}
             {{- end }}
-            {{- if .Values.expose.enabled }}
+            {{- if or .Values.expose.enabled .Values.frontdoor.enabled }}
             {{- /*
-            Mount the shared resolve token so the console serves
-            POST /internal/identity/resolve for the expose proxy's org-resolution
-            hop. The token value is NEVER inlined; it is sourced from the same
-            Secret key (resolve-token) as the proxy's MITOS_EXPOSE_RESOLVE_TOKEN.
-            Gated by expose.enabled so the endpoint is inactive when expose is off.
+            Mount the shared resolve token so the console serves POST
+            /internal/session/resolve for the expose proxy or the frontdoor's
+            session-resolution hop. The token is NEVER inlined; it is sourced
+            from the same Secret key (resolve-token) in expose.secretName
+            (default: mitos-expose). Gated so the endpoint is inactive when
+            neither expose nor frontdoor is enabled.
             */}}
             - name: MITOS_IDENTITY_RESOLVE_TOKEN
               valueFrom:
