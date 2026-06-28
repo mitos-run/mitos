@@ -568,6 +568,82 @@ func TestStartVMJailedReleasesUIDOnLaunchFailure(t *testing.T) {
 	}
 }
 
+// TestStartVMJailedCleansStaleChroot verifies that startJailedVM removes any
+// stale per-vm jailer dir from a prior aborted launch before creating a fresh
+// chroot. The jailer binary creates <vmDir>/root/ (the chroot root) and then
+// mkdir <chroot>/old_root inside it for pivot_root(2). A leftover old_root from
+// a prior run causes MkdirOldRoot(EEXIST) and the jailer refuses to start. The
+// cleanup must be scoped strictly to THIS vm-id's directory; a sibling vm-id
+// dir must not be touched.
+func TestStartVMJailedCleansStaleChroot(t *testing.T) {
+	root := t.TempDir()
+	jailBase := filepath.Join(root, "jail")
+	dataDir := filepath.Join(root, "data")
+	vmID := "vm-clean"
+	siblingID := "vm-sibling"
+
+	// Pre-create the exact stale artifact the jailer's MkdirOldRoot trips over:
+	// <vmDir>/root/old_root left by a prior pivot_root setup.
+	staleOldRoot := filepath.Join(jailerChrootDir(jailBase, vmID), "old_root")
+	if err := os.MkdirAll(staleOldRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sibling vm's dir must survive untouched.
+	siblingDir := jailerVMDir(jailBase, siblingID)
+	if err := os.MkdirAll(siblingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultVMConfig()
+	cfg.ID = vmID
+	cfg.WorkDir = filepath.Join(dataDir, "sandboxes", vmID)
+	cfg.Jailer = testJailerConfig(jailBase, dataDir)
+	cfg.Jailer.JailerBin = filepath.Join(root, "no-such-jailer")
+	cfg.Jailer.UIDRange = [2]uint32{64000, 64000}
+	cfg.Jailer.Allocator = NewUIDAllocator(64000, 64000)
+
+	// StartVM fails (no jailer binary) but must clean the stale dir first.
+	if _, err := StartVM(cfg); err == nil {
+		t.Fatal("StartVM succeeded with a nonexistent jailer binary")
+	}
+
+	// The stale old_root must be gone: the cleanup removed the entire vmDir
+	// before MkdirAll re-created it fresh (without old_root inside it).
+	if _, err := os.Stat(staleOldRoot); !os.IsNotExist(err) {
+		t.Fatalf("stale old_root dir %s was not cleaned; stat err = %v", staleOldRoot, err)
+	}
+
+	// The sibling vm-id's dir must be untouched.
+	if _, err := os.Stat(siblingDir); err != nil {
+		t.Fatalf("sibling jailer dir %s was unexpectedly removed: %v", siblingDir, err)
+	}
+}
+
+// TestStartVMJailedStaleCleanIsNoop verifies that the stale-chroot cleanup is a
+// no-op when no leftover dir exists: StartVM must not fail or panic because the
+// per-vm jailer dir is absent before launch.
+func TestStartVMJailedStaleCleanIsNoop(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultVMConfig()
+	cfg.ID = "vm-noop"
+	cfg.WorkDir = filepath.Join(root, "data", "sandboxes", "vm-noop")
+	cfg.Jailer = testJailerConfig(filepath.Join(root, "jail"), filepath.Join(root, "data"))
+	cfg.Jailer.JailerBin = filepath.Join(root, "no-such-jailer")
+	cfg.Jailer.UIDRange = [2]uint32{64000, 64000}
+	cfg.Jailer.Allocator = NewUIDAllocator(64000, 64000)
+
+	// No stale dir exists. StartVM must fail only because the jailer binary is
+	// absent, not because the cleanup itself errored on a missing dir.
+	_, err := StartVM(cfg)
+	if err == nil {
+		t.Fatal("StartVM succeeded with a nonexistent jailer binary")
+	}
+	if strings.Contains(err.Error(), "remove stale jailer dir") {
+		t.Fatalf("StartVM reported a stale-dir removal error when no stale dir existed: %v", err)
+	}
+}
+
 func TestClientHostPath(t *testing.T) {
 	direct := &Client{}
 	if got := direct.HostPath("/var/lib/mitos/sandboxes/s1/vsock.sock"); got != "/var/lib/mitos/sandboxes/s1/vsock.sock" {

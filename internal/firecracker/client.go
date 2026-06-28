@@ -167,6 +167,24 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	}()
 
 	chrootDir := jailerChrootDir(cfg.Jailer.ChrootBaseDir, id)
+
+	// Before creating the fresh chroot tree, remove any stale per-vm dir left
+	// by a prior aborted launch of this vm-id. The jailer creates
+	// <vmDir>/root/ (the chroot root) and then mkdir <chroot>/old_root inside
+	// it for pivot_root(2); a leftover old_root from a prior failed run causes
+	// MkdirOldRoot(EEXIST) and the jailer refuses to start. Removing the entire
+	// per-vm dir (strictly within ChrootBaseDir, verified by guardJailerLayout
+	// above) starts fresh and lets the jailer succeed on a retry. Path only is
+	// logged; no secrets are involved. Mirrors the control-socket os.Remove in
+	// the direct-exec path.
+	vmDir := jailerVMDir(cfg.Jailer.ChrootBaseDir, id)
+	if _, statErr := os.Stat(vmDir); statErr == nil {
+		fmt.Fprintf(os.Stderr, "firecracker: removing stale jailer dir %s before launch\n", vmDir)
+		if err := os.RemoveAll(vmDir); err != nil {
+			return nil, fmt.Errorf("remove stale jailer dir %s before launch: %w", vmDir, err)
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Join(chrootDir, "run"), 0o755); err != nil {
 		return nil, fmt.Errorf("create chroot run dir: %w", err)
 	}
