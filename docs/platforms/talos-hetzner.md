@@ -474,6 +474,7 @@ References:
 
 | Topic | Document |
 |-------|---------|
+| forkd seccomp posture on Talos (the jailer `pivot_root` profile) | `docs/platforms/hardened-runtimes.md` |
 | Host/kernel prerequisites + the two minimal-kernel failure modes | `docs/platforms/host-prerequisites.md` |
 | Distro-neutral node + install checklist and the running-on matrix | `docs/platforms/prerequisites.md` |
 | Talos machine config patches and rationale | `deploy/talos/README.md` |

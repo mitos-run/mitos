@@ -36,3 +36,11 @@ jobs:
             --set facade.enabled=true \
             --set imagePullSecret.create=true \
             --set imagePullSecret.dockerconfigjson=e30= > /dev/null
+      - name: Render with the hardened-runtime (Talos) profile
+        run: |
+          # The values/talos.yaml profile must render, and its forkd delta
+          # (Unconfined seccomp + CAP_FOWNER) must reach the DaemonSet (#525).
+          out=$(helm template mitos deploy/charts/mitos --namespace mitos --kube-version 1.31.0 \
+            -f deploy/charts/mitos/values/talos.yaml)
+          echo "$out" | grep -q 'FOWNER' || { echo "talos profile did not add CAP_FOWNER"; exit 1; }
+          echo "$out" | grep -q 'type: Unconfined' || { echo "talos profile did not set Unconfined seccomp"; exit 1; }

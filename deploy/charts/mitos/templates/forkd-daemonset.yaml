@@ -101,9 +101,13 @@ spec:
           # the builder can reopen the template rootfs.ext4 it wrote after the
           # jailer chowned the shared inode to the per-VM uid, #426).
           # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
-          # not a privileged hostPath. allowPrivilegeEscalation: false and
-          # seccompProfile RuntimeDefault complete the hardening. See
-          # docs/threat-model.md and cmd/forkd/jailer.go jailerRequiredCapabilities.
+          # not a privileged hostPath. allowPrivilegeEscalation: false and the
+          # seccomp profile complete the hardening. The base capability set and
+          # privileged: false are fixed; forkd.seccompProfile and
+          # forkd.extraCapabilities are the only securityContext knobs, for
+          # hardened runtimes (Talos), and default to the CI-proven values. See
+          # docs/threat-model.md, docs/platforms/hardened-runtimes.md, and
+          # cmd/forkd/jailer.go forkdRequiredCapabilities (#525).
           securityContext:
             privileged: false
             allowPrivilegeEscalation: false
@@ -118,8 +122,11 @@ spec:
                 - MKNOD
                 - NET_ADMIN
                 - DAC_OVERRIDE
+                {{- range .Values.forkd.extraCapabilities }}
+                - {{ . }}
+                {{- end }}
             seccompProfile:
-              type: RuntimeDefault
+              {{- toYaml .Values.forkd.seccompProfile | nindent 14 }}
           resources:
             {{- toYaml .Values.forkd.resources | nindent 12 }}
           volumeMounts:
