@@ -215,6 +215,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A runtime call that is a WebSocket upgrade (the interactive PTY rides the
+	// Connect Exec RPC over a WebSocket) cannot go through the buffer-and-stream
+	// Forward seam: it is a connection upgrade the gateway must hijack and pipe.
+	// Auth, scope, and quota are already enforced above, so the org-scoped target
+	// is resolved and the upgrade proxied here.
+	if op == opRuntime && isWebSocketUpgrade(r) {
+		g.proxyRuntimeWebSocket(ctx, w, r, orgID)
+		return
+	}
+
 	// The OrgID forwarded is taken ONLY from the verified key. The request body
 	// and path cannot influence it, so a key for org A cannot address org B.
 	fwd := ForwardRequest{OrgID: orgID, Op: op, Path: r.URL.Path, Method: r.Method}
