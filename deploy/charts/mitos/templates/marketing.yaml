@@ -69,6 +69,20 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
+          # readOnlyRootFilesystem (above) blocks all writes to the image layer.
+          # nginxinc/nginx-unprivileged still needs a writable /tmp (it writes
+          # its pid and request temp files there) and /var/cache/nginx. Mount
+          # emptyDir on both so the pod runs read-only-root without crashlooping.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
