@@ -7,8 +7,11 @@ name: Release Helm chart
 #   2. an OCI registry artifact at oci://ghcr.io/mitos-run/charts (the modern
 #      `helm install oci://...` path, alongside the component images on GHCR).
 #
-# chart-releaser only publishes a chart version that does not already have a
-# release, so bump deploy/charts/mitos/Chart.yaml `version` for each change.
+# This fires on any deploy/charts change, but a release is only meaningful when
+# Chart.yaml `version` was bumped (release-please owns that bump). The "Gate"
+# step below short-circuits the publish steps when the mitos-<version> release
+# already exists, so charts-only edits that do not bump the version succeed as a
+# no-op instead of failing on a duplicate-tag 422.
 
 on:
   push:
@@ -44,14 +47,41 @@ jobs:
         with:
           version: v3.16.3
 
+      - name: Gate on a new chart version
+        # Publish only when the current Chart.yaml version has no release yet.
+        # When it already exists there is nothing new to ship, so the publish
+        # steps are skipped and the job stays green.
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(helm show chart deploy/charts/mitos | awk '/^version:/ {print $2}')"
+          if [ -z "$version" ]; then
+            echo "could not determine chart version" >&2
+            exit 1
+          fi
+          if gh release view "mitos-$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Chart release mitos-$version already exists; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Chart version mitos-$version is new; publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run chart-releaser
+        if: steps.gate.outputs.publish == 'true'
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           charts_dir: deploy/charts
+          # Defends the gap between the gate check and this upload: if a
+          # concurrent run published the version first, skip instead of failing.
+          skip_existing: true
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish chart to the GHCR OCI registry
+        if: steps.gate.outputs.publish == 'true'
         # Package the current chart and push it to oci://ghcr.io/mitos-run/charts
         # so `helm install oci://ghcr.io/mitos-run/charts/mitos --version <v>`
         # works. The package is created PRIVATE by default on GHCR; making it
@@ -68,6 +98,7 @@ jobs:
           helm registry logout ghcr.io || true
 
       - name: Publish Artifact Hub repository metadata to gh-pages
+        if: steps.gate.outputs.publish == 'true'
         # The repository ownership file must sit at the repo root next to
         # index.yaml so Artifact Hub can fetch it from https://mitos.run/charts.
         run: |
