@@ -53,7 +53,13 @@ spec:
             {{- toYaml .Values.marketing.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            # readOnlyRootFilesystem is intentionally OFF: the nginx-unprivileged
+            # image's docker-entrypoint scripts must write /etc/nginx/conf.d
+            # (10-listen-on-ipv6) and nginx writes temp dirs under /tmp, so a
+            # read-only root crashloops the pod. The pod still runs as the image's
+            # non-root uid 101 with all capabilities dropped and no privilege
+            # escalation; it serves only static files.
+            readOnlyRootFilesystem: false
             capabilities:
               drop:
                 - ALL
