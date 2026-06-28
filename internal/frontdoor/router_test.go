@@ -38,6 +38,11 @@ func TestDecide(t *testing.T) {
 		{"/onboarding", "console", false, false},
 		{"/onboarding/org", "console", false, false},
 
+		// Webhook paths: console, no session required. Billing providers POST
+		// without a session so this must be public, exactly like onboarding.
+		{"/webhooks/billing", "console", false, false},
+		{"/webhooks/anything", "console", false, false},
+
 		// App paths: console, session required.
 		{"/console", "console", true, false},
 		{"/console/keys", "console", true, false},
