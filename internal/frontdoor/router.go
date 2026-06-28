@@ -104,6 +104,20 @@ func Decide(path string) Decision {
 		return Decision{Upstream: "console", RequireSession: true}
 	}
 
-	// Non-reserved segment: treat as an org slug. Session required.
+	// A path whose final segment carries a file extension (a dot) is a static
+	// asset: marketing CSS/JS/images/fonts/sitemap/favicon, emitted at arbitrary
+	// root paths. Route it to marketing, public. The console's own Vite bundle
+	// lives under /assets (authSegments, matched above), and org slugs and SPA
+	// routes never contain a dot, so this does not steal app traffic.
+	last := path
+	if idx := strings.LastIndexByte(path, '/'); idx >= 0 {
+		last = path[idx+1:]
+	}
+	if strings.Contains(last, ".") {
+		return Decision{Upstream: "marketing"}
+	}
+
+	// Non-reserved, extension-less segment: treat as an org slug. Session
+	// required.
 	return Decision{Upstream: "console", RequireSession: true}
 }
