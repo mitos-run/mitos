@@ -10,7 +10,7 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button } from '@mitos/brand'
-import { AuthShell, ProviderButtons, resolveNext } from './authCommon'
+import { AuthShell, ProviderButtons, resolveNext, useAuthConnectors } from './authCommon'
 
 // ---- Page-specific styles --------------------------------------------------
 
@@ -32,6 +32,7 @@ export type LoginProps = {
 export function Login({ next }: LoginProps) {
   const [email, setEmail] = useState('')
   const resolvedNext = resolveNext(next)
+  const connectors = useAuthConnectors()
 
   function handleEmailSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -46,8 +47,9 @@ export function Login({ next }: LoginProps) {
     <AuthShell title="Sign in" subtitle="A computer for every agent.">
       <style>{styles}</style>
 
-      {/* Provider links: full navigations to the Go /auth/login endpoint */}
-      <ProviderButtons next={resolvedNext} />
+      {/* Provider links: full navigations to the Go /auth/login endpoint.
+          Only renders buttons for providers returned by /auth/connectors. */}
+      <ProviderButtons next={resolvedNext} connectors={connectors} />
 
       {/* Email to signup flow */}
       <form

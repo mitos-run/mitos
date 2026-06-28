@@ -94,3 +94,55 @@ func TestCapabilitiesHostedEditionVerbatim(t *testing.T) {
 		t.Errorf("secrets.providers = %v, want [kube openbao]", caps.Secrets.Providers)
 	}
 }
+
+// TestCapabilitiesAuthConnectorsInResponse asserts that the authConnectors
+// field is serialised into the capabilities response and reflects the value
+// set in Deps.Capabilities. An empty slice serialises as [] (not null) so the
+// SPA can safely iterate without a nil-guard.
+func TestCapabilitiesAuthConnectorsInResponse(t *testing.T) {
+	t.Run("github only", func(t *testing.T) {
+		c := New(Deps{Capabilities: Capabilities{
+			Edition:        "community",
+			Teams:          true,
+			IDP:            "oidc",
+			Proof:          true,
+			Ownership:      "self-hosted",
+			Secrets:        SecretsCapability{Providers: []string{"kube"}},
+			AuthConnectors: []string{"github"},
+		}})
+		_, caps := getCaps(t, c)
+		if len(caps.AuthConnectors) != 1 || caps.AuthConnectors[0] != "github" {
+			t.Errorf("authConnectors = %v, want [github]", caps.AuthConnectors)
+		}
+	})
+
+	t.Run("github and google", func(t *testing.T) {
+		c := New(Deps{Capabilities: Capabilities{
+			Edition:        "hosted",
+			Teams:          true,
+			IDP:            "oidc",
+			Proof:          true,
+			Ownership:      "hosted",
+			Secrets:        SecretsCapability{Providers: []string{"kube"}},
+			AuthConnectors: []string{"github", "google"},
+		}})
+		_, caps := getCaps(t, c)
+		if len(caps.AuthConnectors) != 2 {
+			t.Fatalf("authConnectors = %v, want [github google]", caps.AuthConnectors)
+		}
+		if caps.AuthConnectors[0] != "github" || caps.AuthConnectors[1] != "google" {
+			t.Errorf("authConnectors order wrong: %v", caps.AuthConnectors)
+		}
+	})
+
+	t.Run("empty serialises as array not null", func(t *testing.T) {
+		c := New(Deps{}) // defaultCapabilities() sets AuthConnectors: []string{}
+		_, caps := getCaps(t, c)
+		if caps.AuthConnectors == nil {
+			t.Error("authConnectors must be [] not null when no connectors configured")
+		}
+		if len(caps.AuthConnectors) != 0 {
+			t.Errorf("authConnectors = %v, want []", caps.AuthConnectors)
+		}
+	})
+}

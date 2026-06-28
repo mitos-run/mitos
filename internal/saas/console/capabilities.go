@@ -34,6 +34,14 @@ type Capabilities struct {
 	Proof bool `json:"proof"`
 	// Ownership is "self-hosted" or "hosted"; drives the chrome badge.
 	Ownership string `json:"ownership"`
+	// AuthConnectors is the sorted, deduplicated list of social-login providers
+	// that are actually configured (e.g. ["github"] or ["github","google"]).
+	// The SPA renders a social-login button ONLY for each entry. An empty list
+	// means no social buttons; the email magic-link form is always available.
+	// The value is set server-side from MITOS_CONSOLE_AUTH_CONNECTORS; the SPA
+	// cannot override it. Only "github" and "google" are recognised; unknown
+	// values are silently dropped.
+	AuthConnectors []string `json:"authConnectors"`
 }
 
 // SecretsCapability advertises which secret-store providers are enabled. The
@@ -47,15 +55,16 @@ type SecretsCapability struct {
 // off. It is applied when a Console is built without an explicit Capabilities.
 func defaultCapabilities() Capabilities {
 	return Capabilities{
-		Edition:     "community",
-		Billing:     false,
-		Signup:      false,
-		Teams:       true,
-		IDP:         "oidc",
-		OrgSwitcher: false,
-		Secrets:     SecretsCapability{Providers: []string{"kube"}},
-		Proof:       true,
-		Ownership:   "self-hosted",
+		Edition:        "community",
+		Billing:        false,
+		Signup:         false,
+		Teams:          true,
+		IDP:            "oidc",
+		OrgSwitcher:    false,
+		Secrets:        SecretsCapability{Providers: []string{"kube"}},
+		Proof:          true,
+		Ownership:      "self-hosted",
+		AuthConnectors: []string{},
 	}
 }
 
