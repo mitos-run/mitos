@@ -161,6 +161,13 @@ func opFromPath(method, path string) string {
 		return "template.ensure"
 	case p == "templates" && method == http.MethodGet:
 		return "template.list"
+	// Fork: the SDK calls POST /v1/fork (SandboxServer.fork, DirectSandbox._fork_one)
+	// to start a sandbox from a template. Both POST /v1/fork and POST /v1/sandboxes
+	// create a new sandbox, so both map to sandbox.create. The body shape differs:
+	// /v1/fork sends {"template":"<name>","id":"<id>"} while /v1/sandboxes sends
+	// {"pool":"<name>"} or {"image":"<name>"}. The create handler resolves all three.
+	case p == "fork" && method == http.MethodPost:
+		return "sandbox.create"
 	default:
 		return "sandbox." + strings.ToLower(method)
 	}

@@ -54,11 +54,20 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 	}
 }
 
-// createBody is the create request shape. Either pool or image selects the
-// origin pool; env, secrets, ttl/timeout, workspace, and replicas are optional.
+// createBody is the create request shape. The origin pool is resolved in priority
+// order: pool, then image, then template (the SDK fork body field), then the
+// server-configured default. env, secrets, ttl/timeout, workspace, and replicas
+// are optional.
+//
+// The template field matches the fork body sent by the Python SDK
+// (SandboxServer.fork, DirectSandbox._fork_one): POST /v1/fork carries
+// {"template":"<pool-name>","id":"<sandbox-id>"}. Accepting template here lets
+// both POST /v1/sandboxes and POST /v1/fork reach the same handler after
+// opFromPath maps them both to sandbox.create.
 type createBody struct {
 	Pool      string            `json:"pool,omitempty"`
 	Image     string            `json:"image,omitempty"`
+	Template  string            `json:"template,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	Secrets   []secretMountReq  `json:"secrets,omitempty"`
 	Timeout   string            `json:"timeout,omitempty"`
@@ -95,6 +104,9 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 	pool := body.Pool
 	if pool == "" {
 		pool = body.Image
+	}
+	if pool == "" {
+		pool = body.Template
 	}
 	if pool == "" {
 		pool = k.defaultPool
@@ -208,6 +220,11 @@ func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name, orgID string)
 
 // readyResponse reads the per-sandbox token Secret and returns the 201 create
 // payload. The token is returned ONLY here and is never logged.
+//
+// The response includes template_id (the pool name the sandbox was forked from)
+// and fork_time_ms so the Python SDK DirectSandbox constructor can parse it
+// without a KeyError: SandboxServer.fork and DirectSandbox._fork_one both read
+// data["template_id"] and data["fork_time_ms"] from the JSON body.
 func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox) (saas.ForwardResponse, error) {
 	endpoint := sb.Status.Endpoint
 	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
@@ -215,11 +232,17 @@ func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox) (sa
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the sandbox is ready but its access token secret could not be read")), nil
 	}
+	poolName := ""
+	if sb.Spec.Source.PoolRef != nil {
+		poolName = sb.Spec.Source.PoolRef.Name
+	}
 	payload := map[string]any{
-		"id":       sb.Name,
-		"endpoint": endpoint,
-		"token":    token,
-		"phase":    string(v1.SandboxReady),
+		"id":           sb.Name,
+		"endpoint":     endpoint,
+		"token":        token,
+		"phase":        string(v1.SandboxReady),
+		"template_id":  poolName,
+		"fork_time_ms": 0.0,
 	}
 	return jsonResp(http.StatusCreated, payload), nil
 }
