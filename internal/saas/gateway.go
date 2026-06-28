@@ -61,7 +61,7 @@ func runtimeMethod(path string) (string, bool) {
 // scope. An unknown op requires the sandbox scope (fail closed).
 func requiredScopeFor(op string) string {
 	switch op {
-	case "sandbox.list", "sandbox.status":
+	case "sandbox.list", "sandbox.status", "template.list":
 		return ScopeReadOnly
 	default:
 		return ScopeSandboxes
@@ -153,6 +153,14 @@ func opFromPath(method, path string) string {
 		return "sandbox.status"
 	case strings.HasPrefix(p, "sandboxes/") && method == http.MethodDelete:
 		return "sandbox.terminate"
+	// Template operations: the SDK calls POST /v1/templates (ensure_template) before
+	// forking, and GET /v1/templates (list_templates) to discover available pools.
+	// Without these cases both fall through to "sandbox.<method>", which the control
+	// plane does not handle, producing "unknown operation" and breaking SDK create().
+	case p == "templates" && method == http.MethodPost:
+		return "template.ensure"
+	case p == "templates" && method == http.MethodGet:
+		return "template.list"
 	default:
 		return "sandbox." + strings.ToLower(method)
 	}
