@@ -52,6 +52,11 @@ type fakeVMM struct {
 	// callOrder records the activate-time VMM call sequence ("load", "patch",
 	// "resume") so a test can assert load(resume=false) -> PatchDrive -> Resume.
 	callOrder []string
+
+	// ping, when set, supplies Ping's return value (nil = the VMM answers, an
+	// error = a dead/defunct Firecracker). Nil keeps the VMM alive, so existing
+	// tests need not care about liveness. It is called under f.mu.
+	ping func() error
 }
 
 // errSnap is a scripted CreateSnapshot failure used by the fork-snapshot
@@ -107,6 +112,15 @@ func (f *fakeVMM) Pause() error {
 	f.paused = true
 	f.callOrder = append(f.callOrder, "pause")
 	return f.pauseErr
+}
+
+func (f *fakeVMM) Ping() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ping != nil {
+		return f.ping()
+	}
+	return nil
 }
 
 func (f *fakeVMM) CreateSnapshot(memPath, snapshotPath string) error {

@@ -1,8 +1,13 @@
 # Default values for the mitos chart.
 # Every key below maps to a field in the deploy/ kustomize manifests this chart
-# translates. Only the knobs documented here are parameterized; security-critical
-# fields (privileged, securityContext, hostPath, KVM resource, NET_ADMIN) are
-# reproduced verbatim in the templates and are NOT configurable.
+# translates. Only the knobs documented here are parameterized; the security
+# posture is reproduced verbatim in the templates and is NOT loosely
+# configurable: privileged stays false, capabilities drop ALL and add back only
+# the fixed builder set, hostPath, the KVM resource, and NET_ADMIN are fixed. The
+# two NARROW exceptions, added for hardened container runtimes (issue #525), are
+# forkd.seccompProfile and forkd.extraCapabilities: the seccomp profile can be
+# swapped (RuntimeDefault by default) and capabilities can only be ADDED to the
+# base set. They default to the CI-proven hardened values; see values/talos.yaml.
 
 # Image settings. The full reference for each component is composed as
 # image.registry / <component>.image.repository : <tag>, where the tag is the
@@ -124,6 +129,26 @@ forkd:
   # When true, render --enable-networking so forkd bakes the eth0 placeholder
   # NIC into every husk template snapshot.
   enableNetworking: true
+  # forkd container seccomp profile. The default RuntimeDefault is validated
+  # against the Docker/containerd seccomp default, which permits the jailer's
+  # pivot_root(2) when CAP_SYS_ADMIN is held, so kind/containerd passes. Some
+  # hardened runtimes (Talos) deny pivot_root under their RuntimeDefault profile
+  # even with CAP_SYS_ADMIN; the jailer then fails with EPERM and forkd cannot
+  # build template snapshots. On those runtimes set this to Unconfined (or a
+  # tailored Localhost profile that allows pivot_root and the jailer mount
+  # syscalls). See values/talos.yaml and docs/platforms/hardened-runtimes.md (#525).
+  # This object is rendered verbatim into securityContext.seccompProfile, so a
+  # Localhost profile is also expressible:
+  #   seccompProfile:
+  #     type: Localhost
+  #     localhostProfile: profiles/mitos-forkd.json
+  seccompProfile:
+    type: RuntimeDefault
+  # Extra Linux capabilities ADDED to forkd's hardened base set (the base set is
+  # drop ALL plus the fixed builder capabilities and is NOT removable here). Empty
+  # by default. On hardened runtimes add FOWNER so the jailer's chmod of the
+  # per-VM chroot root does not fail with EPERM; values/talos.yaml sets this.
+  extraCapabilities: []
   # nodeSelector pinning forkd to KVM nodes. forkd stays Pending until a matching
   # node joins.
   nodeSelector:

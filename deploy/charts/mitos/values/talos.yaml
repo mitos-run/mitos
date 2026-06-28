@@ -1,0 +1,38 @@
+# Platform values profile for hardened container runtimes (Talos Linux, and any
+# runtime whose default seccomp profile denies the Firecracker jailer's
+# pivot_root(2) even when CAP_SYS_ADMIN is held). Issue #525.
+#
+# The chart's default forkd securityContext is validated on kind/containerd,
+# whose RuntimeDefault seccomp profile permits pivot_root when CAP_SYS_ADMIN is
+# held. Talos's default profile denies pivot_root regardless, so the jailer fails
+# with "Failed to pivot root: Operation not permitted (EPERM)" and forkd can
+# build no template snapshots. Once seccomp is relaxed, the jailer's subsequent
+# chmod of the per-VM chroot root needs CAP_FOWNER, which the base set omits.
+#
+# This profile applies the EXACT minimal delta proven on a bare-metal Intel KVM
+# node joined to a Talos v1.12.8 cluster (forkd then built a fresh pool's
+# template with no pivot_root or chmod errors). It keeps privileged: false,
+# capabilities.drop: [ALL], and the full base builder capability set; it does NOT
+# reach for privileged: true.
+#
+# Usage:
+#   helm install mitos deploy/charts/mitos -f deploy/charts/mitos/values/talos.yaml
+#
+# Prefer a tailored Localhost seccomp profile over blanket Unconfined where you
+# can deliver the JSON to every node's kubelet seccomp root: a profile that is
+# RuntimeDefault plus pivot_root and the jailer's mount syscalls keeps the
+# syscall filter for everything else. Set forkd.seccompProfile.type: Localhost
+# and forkd.seccompProfile.localhostProfile accordingly. See
+# docs/platforms/hardened-runtimes.md.
+forkd:
+  # Talos's default seccomp profile denies pivot_root even with CAP_SYS_ADMIN.
+  # Unconfined lets the jailer pivot_root; swap for a Localhost profile where the
+  # node ships one.
+  seccompProfile:
+    type: Unconfined
+  # The jailer chmods the per-VM chroot root; without CAP_FOWNER that is EPERM on
+  # a hardened runtime. FOWNER is negligible marginal authority next to the
+  # CAP_SYS_ADMIN the builder already holds (same argument the threat model makes
+  # for DAC_OVERRIDE).
+  extraCapabilities:
+    - FOWNER

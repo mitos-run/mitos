@@ -211,6 +211,7 @@ func (m *pathVMM) PatchDrive(_, _ string) error     { return nil }
 func (m *pathVMM) Resume() error                    { return nil }
 func (m *pathVMM) Pause() error                     { return nil }
 func (m *pathVMM) CreateSnapshot(_, _ string) error { return nil }
+func (m *pathVMM) Ping() error                      { return nil }
 func (m *pathVMM) Close() error                     { return nil }
 
 // huskExec runs "echo hi" over the Connect sandbox.v1.Sandbox/ExecStream RPC

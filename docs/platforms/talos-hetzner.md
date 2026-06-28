@@ -42,6 +42,12 @@ Hardware requirements:
   jailer chroot base all live on the forkd data volume
   (`/var/lib/mitos`). NVMe latency is on the critical path for fork
   restore time. Rotational disk is not recommended for worker nodes.
+  Keep the jailer chroot base (`--chroot-base`) UNDER the data volume (the chart
+  uses `<data-dir>/jailer`) and NOT on a separate mount: forkd hard-links the
+  template rootfs/snapshot into every VM chroot, and `link(2)` will not cross a
+  mount boundary even on one filesystem, so a separate mount silently degrades to
+  a full per-VM copy that defeats CoW. forkd logs a startup warning if it detects
+  this (issue #526).
 - **RAM**: forkd pins the template snapshot in memory (one copy per template
   shared across all forks via `MAP_PRIVATE` CoW). Plan for the template
   working set plus per-fork dirty pages. See §Capacity planning.
@@ -474,6 +480,7 @@ References:
 
 | Topic | Document |
 |-------|---------|
+| forkd seccomp posture on Talos (the jailer `pivot_root` profile) | `docs/platforms/hardened-runtimes.md` |
 | Host/kernel prerequisites + the two minimal-kernel failure modes | `docs/platforms/host-prerequisites.md` |
 | Distro-neutral node + install checklist and the running-on matrix | `docs/platforms/prerequisites.md` |
 | Talos machine config patches and rationale | `deploy/talos/README.md` |

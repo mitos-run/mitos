@@ -585,6 +585,22 @@ func (c *Client) PID() int {
 	return 0
 }
 
+// Ping reports whether the Firecracker VMM still answers its API socket (GET /
+// InstanceInfo). It returns an error when the process is gone or unresponsive:
+// a dead or defunct Firecracker refuses the socket connection, which is exactly
+// the connection-refused a husk claim hits when the VMM died after the pod went
+// Ready (issue #527). Reusing the API GET, rather than a kill -0 signal probe,
+// is deliberate: a defunct (zombie) process still owns its pid until reaped, so a
+// signal probe would call a dead VMM alive; the API socket does not lie. The
+// path carries no secret. The underlying http.Client has a bounded timeout, so
+// Ping cannot hang.
+func (c *Client) Ping() error {
+	if _, err := c.get("/"); err != nil {
+		return fmt.Errorf("firecracker API socket %s unresponsive: %w", c.socketPath, err)
+	}
+	return nil
+}
+
 // JailerState exposes the per-VM jailer artifacts a crash-recovery journal must
 // record so a restarted forkd can reap a dead VM's leaked chroot and return its
 // jailed uid. The values are zero for a direct-exec (non-jailed) client. They

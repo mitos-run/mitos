@@ -90,6 +90,10 @@ type vmm interface {
 	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
 	// restore independent copies of it.
 	CreateSnapshot(memPath, snapshotPath string) error
+	// Ping reports whether the VMM still answers its API socket. It returns an
+	// error once the Firecracker process is gone or defunct, which the husk
+	// liveness monitor uses to detect a dead warm slot (issue #527).
+	Ping() error
 	// Close tears the VMM down.
 	Close() error
 }
@@ -608,6 +612,21 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	// AllowUnverified / a pre-digest pool) we skip this and Activate verifies as
 	// before.
 	if s.prepareSnapshotDir != "" && s.prepareExpectedDigest != "" {
+		// Wait (bounded, ctx-aware) for the snapshot to be on disk before verifying
+		// it. The pool can schedule this husk pod a moment before forkd finishes
+		// writing the template snapshot to the shared node dir; without the wait the
+		// verify below fails on the absent mem/vmstate and the pod crashloops, and a
+		// pre-digest pool would instead load an absent snapshot at Activate into a
+		// VMM that then dies and lingers as a dead warm slot. Mirrors the rootfs
+		// wait below (issues #527, #73).
+		for _, name := range []string{"mem", "vmstate"} {
+			f := filepath.Join(s.prepareSnapshotDir, name)
+			if err := waitForFile(ctx, f, rootfsTemplateWait); err != nil {
+				_ = s.vm.Close()
+				s.vm = nil
+				return fmt.Errorf("husk: snapshot file %s not ready: %w", f, err)
+			}
+		}
 		if err := s.verify(ActivateRequest{
 			SnapshotDir:    s.prepareSnapshotDir,
 			ExpectedDigest: s.prepareExpectedDigest,
@@ -1205,6 +1224,63 @@ func (s *Stub) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
+}
+
+// ErrVMMDead is returned by MonitorVMM when the Firecracker VMM has been
+// unresponsive for the configured number of consecutive pings. The husk pod
+// treats it as fatal so the kubelet restarts the container.
+var ErrVMMDead = errors.New("husk: firecracker VMM is unresponsive")
+
+// pingVMM checks the prepared VMM's Firecracker API socket. It grabs the vmm
+// reference under the lock and pings OUTSIDE it so a slow ping never blocks
+// Activate/Close.
+func (s *Stub) pingVMM() error {
+	s.mu.Lock()
+	vm := s.vm
+	s.mu.Unlock()
+	if vm == nil {
+		return fmt.Errorf("husk: no VMM prepared")
+	}
+	return vm.Ping()
+}
+
+// MonitorVMM watches the dormant/active Firecracker VMM and returns ErrVMMDead
+// after failures consecutive ping failures spaced interval apart. It returns nil
+// when ctx is cancelled (a normal shutdown is not a death).
+//
+// The husk pod runs this after Prepare. A husk-stub pod that started before its
+// snapshot existed, or whose Firecracker died for any other reason, leaves a
+// defunct VMM while husk-stub (PID 1) keeps the TCP control listener open, so the
+// pod stays 1/1 Ready and the pool counts it a warm slot; every claim that lands
+// on it then fails connection-refused to the dead socket. By exiting on a dead
+// VMM the pod goes NotReady and the kubelet restarts it (RestartPolicy Always),
+// which re-runs Prepare and, once the snapshot is present, serves a healthy slot;
+// the pod self-heals instead of advertising a dead slot (issue #527).
+//
+// The consecutive-failure threshold tolerates a transient blip, for example a
+// slow API call while Activate drives the same socket, without flapping the pod.
+func (s *Stub) MonitorVMM(ctx context.Context, interval time.Duration, failures int) error {
+	if failures < 1 {
+		failures = 1
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	consecutive := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := s.pingVMM(); err != nil {
+				consecutive++
+				if consecutive >= failures {
+					return fmt.Errorf("%w after %d consecutive failed pings: %v", ErrVMMDead, consecutive, err)
+				}
+			} else {
+				consecutive = 0
+			}
+		}
+	}
 }
 
 // Close tears down the VMM if one was prepared. It is safe to call in any state.

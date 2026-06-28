@@ -173,6 +173,25 @@ privileged process and RUN many times by unprivileged pods.
   one-per-node (not one-per-sandbox), is not exposed to tenant traffic, and its
   build/raw-forkd VMMs run jailed under throwaway uids; husk pods, not forkd, are
   the tenant execution surface.
+- **The default `seccompProfile: RuntimeDefault` is validated against the
+  Docker/containerd seccomp default, not every runtime (#525).** containerd's
+  default profile permits the jailer's `pivot_root(2)` when `CAP_SYS_ADMIN` is
+  held; some hardened runtimes (Talos) deny `pivot_root` under their default
+  profile regardless, so the jailer fails closed (`EPERM`) and forkd builds no
+  snapshots there. The Helm chart exposes two NARROW securityContext knobs for
+  those runtimes, `forkd.seccompProfile` and `forkd.extraCapabilities`
+  (`deploy/charts/mitos/values/talos.yaml`): they keep `privileged: false`,
+  `drop: [ALL]`, and the full base capability set, and only swap the seccomp
+  profile (default `RuntimeDefault`; Talos uses `Unconfined`, or a tailored
+  `Localhost` profile that re-allows `pivot_root` plus the jailer's mount
+  syscalls) and ADD `CAP_FOWNER` (the jailer's `chmod` of the per-VM chroot root
+  is `EPERM` without it on a hardened runtime). `CAP_FOWNER` is negligible
+  marginal authority next to the `CAP_SYS_ADMIN` the builder already holds, the
+  same argument as `CAP_DAC_OVERRIDE` above. The base set and `privileged: false`
+  remain fixed in the templates; these knobs cannot remove a base capability or
+  enable privilege. Status: mitigated on hardened runtimes via the documented
+  profile; the default ships hardened and unchanged. See
+  docs/platforms/hardened-runtimes.md.
 - The per-VM Firecracker jailer is deliberately NOT run inside the husk pod.
   jailer-in-pod was implemented and VERIFIED achievable on real KVM (branch
   feat/jailer-in-pod, closed PR #96), but it requires the full 9-cap jailer set,
