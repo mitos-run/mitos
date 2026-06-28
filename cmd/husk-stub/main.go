@@ -63,6 +63,17 @@ import (
 // podIP:port, and the per-sandbox bearer token (not the id) is the auth gate.
 const huskSandboxID = "husk"
 
+// huskVMMPingInterval and huskVMMPingFailures tune the dormant/active VMM
+// liveness monitor (issue #527). A dead Firecracker is declared after
+// huskVMMPingFailures consecutive failed pings spaced huskVMMPingInterval apart
+// (about 6s), well inside the controller's readiness tolerance, while the
+// consecutive-failure threshold absorbs a transient blip (e.g. a slow API call
+// during Activate) without flapping the pod.
+const (
+	huskVMMPingInterval = 2 * time.Second
+	huskVMMPingFailures = 3
+)
+
 // huskVMIDPattern is the allowlist the --vm-id flag must satisfy before it is
 // joined into the per-activation rootfs CoW clone path (and handed to
 // firecracker.StartVM, which applies the same constraint). It forbids path
@@ -441,6 +452,28 @@ func run() error {
 		}
 	}()
 
+	// Liveness monitor: watch the dormant/active Firecracker VMM and, if it dies
+	// (for example a snapshot load failed and left it defunct), exit non-zero so
+	// the kubelet restarts the pod. Without this a dead VMM lingers behind a still
+	// Ready pod (husk-stub PID 1 keeps the control listener open), the pool counts
+	// it a warm slot, and every claim that lands on it fails connection-refused to
+	// the dead firecracker socket (issue #527). Serve runs under monCtx so a
+	// detected death also unblocks it; run() then returns monErr (exit 1) while the
+	// deferred Close still reaps the VMM, and the kubelet (RestartPolicy Always)
+	// restarts the container into a fresh Prepare that self-heals once the snapshot
+	// is present.
+	monCtx, monCancel := context.WithCancel(ctx)
+	defer monCancel()
+	var monErr error
+	var monOnce sync.Once
+	go func() {
+		if err := stub.MonitorVMM(monCtx, huskVMMPingInterval, huskVMMPingFailures); err != nil {
+			monOnce.Do(func() { monErr = err })
+			fmt.Fprintf(os.Stderr, "husk-stub: %v; exiting so the kubelet restarts this pod\n", err)
+			monCancel()
+		}
+	}()
+
 	// The husk pod uses the mTLS NETWORK control: when --control-listen is set
 	// (with TLS, enforced above), serve ServeTLS authorized to the controller
 	// identity. The unix --control-socket path remains for the in-CI driver and
@@ -453,8 +486,11 @@ func run() error {
 			return fmt.Errorf("listen on control address %s: %w", *controlListen, err)
 		}
 		fmt.Fprintf(os.Stderr, "husk-stub: serving mTLS network control %s\n", *controlListen)
-		if err := husk.ServeTLS(ctx, ln, stub, controlTLS, husk.AuthorizeControllerIdentity); err != nil {
+		if err := husk.ServeTLS(monCtx, ln, stub, controlTLS, husk.AuthorizeControllerIdentity); err != nil {
 			return fmt.Errorf("serve network control: %w", err)
+		}
+		if monErr != nil {
+			return monErr
 		}
 		fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
 		return nil
@@ -468,8 +504,11 @@ func run() error {
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: serving control socket %s\n", *controlSocket)
 
-	if err := stub.Serve(ctx, ln); err != nil {
+	if err := stub.Serve(monCtx, ln); err != nil {
 		return fmt.Errorf("serve control socket: %w", err)
+	}
+	if monErr != nil {
+		return monErr
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
 	return nil
