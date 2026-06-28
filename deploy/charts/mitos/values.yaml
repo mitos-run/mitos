@@ -698,6 +698,13 @@ frontdoor:
   # In-cluster URL of the console session-resolve endpoint. Defaults to the
   # mitos-console Service path /internal/session/resolve.
   sessionResolveURL: ""
+  # GitHub Pages anycast IP:port addresses for the marketing upstream. When
+  # non-empty, the frontdoor dials one of these IPs instead of resolving
+  # mitos.run via DNS; TLS SNI and the upstream Host header remain mitos.run.
+  # Default empty (in-cluster mode: DNS resolves to the marketing Deployment).
+  # Production (GitHub Pages hosting):
+  #   ["185.199.108.153:443","185.199.109.153:443","185.199.110.153:443","185.199.111.153:443"]
+  marketingPagesAddrs: []
   # Frontdoor container resource requests and limits.
   resources: {}
 
