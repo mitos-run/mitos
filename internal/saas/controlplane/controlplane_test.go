@@ -638,6 +638,154 @@ func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
 	}
 }
 
+// ----- single-tenant namespace override -----
+
+// TestSingleTenantNamespaceAllOpsUseMitosNS asserts that when
+// WithSingleTenantNamespace("mitos") is set, create/status/terminate all use
+// "mitos" as the namespace, not the per-org mitos-org-<id> namespace. This
+// unblocks hosted QA where a shared pool exists in "mitos" but per-org
+// namespaces are not provisioned.
+func TestSingleTenantNamespaceAllOpsUseMitosNS(t *testing.T) {
+	const ns = "mitos"
+	c := newFakeClient(t)
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond),
+		WithReadyTimeout(2*time.Second),
+		WithDefaultPool("python"),
+		WithSingleTenantNamespace(ns),
+	)
+
+	stop := flipToReadyWhenCreatedInNs(t, c, ns, "10.0.0.1:9091", "tok-single")
+	defer stop()
+
+	// create: must land in "mitos", not "mitos-org-alpha".
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"python"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward create: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("create: status = %d, body = %s", resp.Status, resp.Body)
+	}
+	m := decodeBody(t, resp.Body)
+	id, _ := m["id"].(string)
+	if id == "" {
+		t.Fatalf("create response missing id: %v", m)
+	}
+
+	// Sandbox must exist in "mitos".
+	var sb v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: id}, &sb); err != nil {
+		t.Fatalf("sandbox not found in namespace %q: %v", ns, err)
+	}
+	if sb.Namespace != ns {
+		t.Errorf("namespace = %q, want %q", sb.Namespace, ns)
+	}
+	// Org label must still be set for authz.
+	if sb.Labels[tenant.OrgLabelKey] != orgA {
+		t.Errorf("org label = %q, want %q", sb.Labels[tenant.OrgLabelKey], orgA)
+	}
+	// Must NOT exist in the per-org namespace.
+	var wrongSB v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: tenant.NamespaceForOrg(orgA), Name: id}, &wrongSB); err == nil {
+		t.Errorf("sandbox found in per-org namespace %q; it should only be in %q", tenant.NamespaceForOrg(orgA), ns)
+	}
+
+	// status: must find the sandbox in "mitos".
+	resp, _ = cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.status", Path: "/v1/sandboxes/" + id,
+	})
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status: status = %d, body = %s", resp.Status, resp.Body)
+	}
+
+	// terminate: must delete from "mitos".
+	resp, _ = cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.terminate", Path: "/v1/sandboxes/" + id,
+	})
+	if resp.Status != http.StatusNoContent {
+		t.Fatalf("terminate: status = %d, body = %s", resp.Status, resp.Body)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: id}, &sb); err == nil {
+		t.Error("sandbox still exists in mitos namespace after terminate")
+	}
+}
+
+// TestSingleTenantNamespaceCrossOrgAuthzPreserved asserts that single-tenant
+// mode does NOT weaken org-label authz: org A cannot read or delete org B's
+// sandbox even though both share the fixed namespace. The org-label check, not
+// the namespace, is the authz boundary in single-tenant mode.
+func TestSingleTenantNamespaceCrossOrgAuthzPreserved(t *testing.T) {
+	const ns = "mitos"
+	// Pre-seed a sandbox in "mitos" labeled for org B.
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb-orgb-shared",
+			Namespace: ns,
+			Labels:    tenant.OrgLabels(orgB),
+		},
+		Status: v1.SandboxStatus{Phase: v1.SandboxReady, Endpoint: "2.2.2.2:9091"},
+	}
+	c := newFakeClient(t, sb)
+	cp := New(c, WithSingleTenantNamespace(ns))
+
+	// org A must not read org B's sandbox.
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.status", Path: "/v1/sandboxes/sb-orgb-shared",
+	})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("cross-org status in single-tenant mode: status = %d, want 404 (org-label authz broken)", resp.Status)
+	}
+
+	// org A must not terminate org B's sandbox.
+	resp, _ = cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.terminate", Path: "/v1/sandboxes/sb-orgb-shared",
+	})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("cross-org terminate in single-tenant mode: status = %d, want 404 (org-label authz broken)", resp.Status)
+	}
+	// Sandbox must survive.
+	var got v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "sb-orgb-shared"}, &got); err != nil {
+		t.Fatalf("org B sandbox was deleted by org A in single-tenant mode: %v", err)
+	}
+}
+
+// TestSingleTenantNamespaceEmptyIsNoOp asserts WithSingleTenantNamespace("")
+// is a no-op: the per-org namespace is still used, preserving the
+// mitos-org-alpha default-mode behavior.
+func TestSingleTenantNamespaceEmptyIsNoOp(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond),
+		WithReadyTimeout(2*time.Second),
+		WithDefaultPool("default"),
+		WithSingleTenantNamespace(""),
+	)
+	stop := flipToReadyWhenCreated(t, c, orgA, "10.0.0.1:9091", "tok")
+	defer stop()
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	id, _ := decodeBody(t, resp.Body)["id"].(string)
+
+	var sb v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: tenant.NamespaceForOrg(orgA), Name: id}, &sb); err != nil {
+		t.Fatalf("sandbox not in per-org namespace (empty WithSingleTenantNamespace must be a no-op): %v", err)
+	}
+	if sb.Namespace != "mitos-org-alpha" {
+		t.Errorf("namespace = %q, want mitos-org-alpha", sb.Namespace)
+	}
+}
+
 // ----- test helpers -----
 
 // flipToReadyWhenCreated watches the org namespace for a newly created sandbox
@@ -662,6 +810,53 @@ func flipWhenCreated(t *testing.T, c client.Client, org string, mutate func(*v1.
 	var once sync.Once
 	go func() {
 		ns := tenant.NamespaceForOrg(org)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			var list v1.SandboxList
+			if err := c.List(context.Background(), &list, client.InNamespace(ns)); err == nil {
+				for i := range list.Items {
+					sb := &list.Items[i]
+					if sb.Status.Phase == "" {
+						mutate(sb)
+						_ = c.Status().Update(context.Background(), sb)
+						return
+					}
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// flipToReadyWhenCreatedInNs is the namespace-explicit counterpart to
+// flipToReadyWhenCreated, used by single-tenant tests where the sandbox lands
+// in a fixed namespace rather than a per-org namespace.
+func flipToReadyWhenCreatedInNs(t *testing.T, c client.Client, ns, endpoint, token string) (stop func()) {
+	t.Helper()
+	return flipWhenCreatedInNs(t, c, ns, func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxReady
+		sb.Status.Endpoint = endpoint
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: sb.Name + tokenSecretSuffix, Namespace: sb.Namespace},
+			Data:       map[string][]byte{"token": []byte(token), "endpoint": []byte(endpoint)},
+		}
+		_ = c.Create(context.Background(), secret)
+	})
+}
+
+// flipWhenCreatedInNs polls ns until a sandbox appears, then applies mutate to
+// its status. It is the namespace-explicit counterpart to flipWhenCreated.
+func flipWhenCreatedInNs(t *testing.T, c client.Client, ns string, mutate func(*v1.Sandbox)) (stop func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
 			select {

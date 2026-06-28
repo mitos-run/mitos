@@ -442,6 +442,15 @@ gateway:
     limits:
       memory: "256Mi"
       cpu: "500m"
+  # Single-tenant namespace override. When non-empty, the gateway pins all
+  # sandbox create/status/list/terminate/proxy operations to this fixed
+  # namespace instead of the per-org mitos-org-<id> namespace. Use for QA
+  # deployments where per-org namespaces are not provisioned and a shared
+  # SandboxPool already exists in this namespace (e.g. "mitos"). Default
+  # empty (per-org namespacing, the production path). Org-label authz is
+  # preserved regardless: a key for org B cannot read or mutate org A's
+  # sandbox even in a shared namespace.
+  singleTenantNamespace: ""
   ingress:
     enabled: false
     className: ""

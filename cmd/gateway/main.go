@@ -64,7 +64,7 @@ func newScheme() *runtime.Scheme {
 
 // newControlPlane builds the real control plane over an in-cluster
 // controller-runtime client.
-func newControlPlane(readyTimeout time.Duration, defaultPool string) (saas.ControlPlane, error) {
+func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -77,6 +77,7 @@ func newControlPlane(readyTimeout time.Duration, defaultPool string) (saas.Contr
 	if defaultPool != "" {
 		opts = append(opts, controlplane.WithDefaultPool(defaultPool))
 	}
+	opts = append(opts, controlplane.WithSingleTenantNamespace(singleTenantNS))
 	return controlplane.New(c, opts...), nil
 }
 
@@ -85,6 +86,7 @@ func main() {
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
+	singleTenantNS := flag.String("single-tenant-namespace", os.Getenv("MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE"), "pin all sandbox operations to this fixed namespace instead of the per-org mitos-org-<id> namespace; use for QA deployments where per-org namespaces are not provisioned and a shared SandboxPool exists in this namespace; empty (the default) keeps per-org namespacing; org-label authz is preserved regardless")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	enforceQuota := flag.Bool("enforce-quota", true, "enforce per-organization quotas, rate limits, and the abuse kill-switch before forwarding. Default on (the hosted profile). Set to false only for a trusted single-tenant deployment; the bypass is logged at startup.")
 	trustedProxyHops := flag.Int("trusted-proxy-hops", 0, "number of trusted reverse-proxy hops in front of the gateway for client-IP resolution. 0 (the default) does NOT trust X-Forwarded-For and uses the connection RemoteAddr. Set to the count of trusted proxies (for example 1 behind a single ingress) so the per-IP rate limit keys on the real client; a too-short or spoofed X-Forwarded-For fails closed to RemoteAddr.")
@@ -107,12 +109,16 @@ func main() {
 		logger.Warn("gateway running with the DEV stub control plane; no sandboxes are created (--allow-stub)")
 		cp = stubControlPlane{}
 	} else {
-		real, err := newControlPlane(*readyTimeout, *defaultPool)
+		real, err := newControlPlane(*readyTimeout, *defaultPool, *singleTenantNS)
 		if err != nil {
 			log.Fatalf("build control plane: %v", err)
 		}
 		cp = real
-		logger.Info("gateway using the real control plane", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool)
+		if *singleTenantNS != "" {
+			logger.Info("gateway using the real control plane in single-tenant mode", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool, "single_tenant_namespace", *singleTenantNS)
+		} else {
+			logger.Info("gateway using the real control plane", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool)
+		}
 	}
 
 	// Build the quota/abuse enforcement surface: the real quota.Enforcer wrapped in
