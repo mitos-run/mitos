@@ -1,5 +1,72 @@
 # Changelog
 
+## [1.6.0](https://github.com/mitos-run/mitos/compare/v1.5.0...v1.6.0) (2026-06-28)
+
+
+### Features
+
+* **chart:** hardened-runtime forkd profile (Talos seccomp + CAP_FOWNER) ([732a95f](https://github.com/mitos-run/mitos/commit/732a95fffd12c90878b500f8f92a4fdfe1572558))
+* **cli:** add HostedBackend for sandbox verbs against the hosted gateway ([103ad67](https://github.com/mitos-run/mitos/commit/103ad678ca6ba7dc5d1a9c3458e8d6a456affef9))
+* **cli:** hosted mode (API key + base URL) for sandbox create/exec/fork/ls/terminate ([794e950](https://github.com/mitos-run/mitos/commit/794e9501de09295d7f08f35cb107aa7f828a08b2))
+* **computer-use:** headless Chromium + CDP browser-automation template ([#314](https://github.com/mitos-run/mitos/issues/314)) ([#510](https://github.com/mitos-run/mitos/issues/510)) ([cf5ec56](https://github.com/mitos-run/mitos/commit/cf5ec567b17efda6e2ec1cce2db70195ff801ee9))
+* **console:** internal session-resolve endpoint for the front door ([32213a4](https://github.com/mitos-run/mitos/commit/32213a4b7bbba841258762fed98b408d9727a84a))
+* **console:** mount pre-auth router (login/signup/verify) on unauthenticated state ([77ffc95](https://github.com/mitos-run/mitos/commit/77ffc957870199e470daf7f8cb1632ddbd757ec5))
+* **console:** native Login page with GitHub/Google connector hints and email ([9351f0a](https://github.com/mitos-run/mitos/commit/9351f0ad60b5ce6f3ce1cac3848a3ec7f2d3c874))
+* **console:** native Signup page wired to /onboarding/signup ([156c82e](https://github.com/mitos-run/mitos/commit/156c82ef8f4dc3ca6933aec513b12b72faefeaa0))
+* **console:** native Verify page showing the first API key once ([36a66f1](https://github.com/mitos-run/mitos/commit/36a66f14ebf611db3ba8cbf8d5be0ab64090f6bc))
+* **console:** set mitos_session cookie on fresh email verify ([106a7c0](https://github.com/mitos-run/mitos/commit/106a7c04a820a227d9e4b4cc099504ce4fb48c5a))
+* **console:** use durable Postgres stores for credit, pending signups, sessions when DSN is set ([03fb243](https://github.com/mitos-run/mitos/commit/03fb243faf5ceb586cce8c30daa9b74cc43ce993))
+* **controller:** map sandbox cpu to the husk limit with a low request for node overcommit ([6749205](https://github.com/mitos-run/mitos/commit/6749205fe879c004c9f9d381fab4735ce93f74a9))
+* **controller:** map sandbox cpu to the husk limit with a low request for node overcommit ([10304f1](https://github.com/mitos-run/mitos/commit/10304f16a765f156bceb82170b96e82291648fda))
+* **deploy:** Cilium edge gateway, front-door, and marketing for single-origin mitos.run (cluster-verified) ([28de02a](https://github.com/mitos-run/mitos/commit/28de02ad026e72732dd2622eac36fa54fa20bb72))
+* **deploy:** Dex federation for GitHub and Google (cluster-verified) ([b8a97f8](https://github.com/mitos-run/mitos/commit/b8a97f8d53a707f29fbe94b1fad5cfd4f4a8be67))
+* **facade:** migrate agents.x-k8s.io conformance to v0.5.0/v1beta1 and prove predicate-level KVM conformance ([#508](https://github.com/mitos-run/mitos/issues/508)) ([4414409](https://github.com/mitos-run/mitos/commit/44144090f1603d76317ca4931ce9d30d195eed15))
+* **frontdoor:** auth+slug routing reverse proxy with session fork and header injection ([fe252e8](https://github.com/mitos-run/mitos/commit/fe252e836572868aeef4a6e7fa6c50bdd27fb91b))
+* **frontdoor:** binary, HTTP session resolver, and image ([a0df52f](https://github.com/mitos-run/mitos/commit/a0df52f76684a16437f60122126149028bc89b91))
+* **gateway:** single-tenant-namespace override for the control plane ([399bd85](https://github.com/mitos-run/mitos/commit/399bd85545f772f33ada2bb053d34dfc9d0d8741))
+* **gateway:** single-tenant-namespace override for the control plane ([6bb2773](https://github.com/mitos-run/mitos/commit/6bb2773ce7d0d2a28845f406f9775d1a2be0833e))
+* hosted launch spine (durable stores, native auth, front-door, Dex) ([7783645](https://github.com/mitos-run/mitos/commit/77836453f44b8efc4625bb9da2363cae8e627110))
+* **oidcauth:** pass connector_id hint so GitHub/Google skip the Dex chooser ([a932f6e](https://github.com/mitos-run/mitos/commit/a932f6efddf8087997b2d7c13174bb793724f922))
+* **onboarding:** add E2ETokenSink seam and MemE2ETokenSink ([62393e4](https://github.com/mitos-run/mitos/commit/62393e436c04fa956b7af7bff6e25f88b55ea1e3))
+* **onboarding:** E2EHandler with bearer + domain + sink gates ([514686b](https://github.com/mitos-run/mitos/commit/514686b44009b102dc971bc559830a94a7e95154))
+* **onboarding:** gated QA verify-token seam for hosted e2e ([55a8767](https://github.com/mitos-run/mitos/commit/55a8767a2880134e820be191f6ead3077acd3063))
+* **onboarding:** wire E2E sink and mount gated endpoint in console ([3ed8b56](https://github.com/mitos-run/mitos/commit/3ed8b569ed377ff312f65aaeec300ea6f09605aa))
+* **pgstore:** durable PgCreditLedger ([ac535de](https://github.com/mitos-run/mitos/commit/ac535de04cb0320ed33714513a1a6b3648cb8fa6))
+* **pgstore:** durable PgPendingStore ([40af883](https://github.com/mitos-run/mitos/commit/40af8837c7b3828baf10dfeaefc6e8df15686f19))
+* **pgstore:** migration 0002 for sessions, credit ledger, pending signups ([37f1224](https://github.com/mitos-run/mitos/commit/37f12242a9f7c3328bab9806320b956304384c4b))
+* **saas:** Sessions interface and durable PgSessionStore ([2393ef4](https://github.com/mitos-run/mitos/commit/2393ef4debc3c68d2d3ca8e84e1fcca97435fa02))
+
+
+### Bug Fixes
+
+* accept mitos_ keys in hosted harness; env-configurable signup credit ([6f24445](https://github.com/mitos-run/mitos/commit/6f244450f09523a1b3feb68f9f4c66f8984651d7))
+* accept mitos_ keys in hosted harness; env-configurable signup credit ([45bc82f](https://github.com/mitos-run/mitos/commit/45bc82f3edcacce3eaede930971f0295a48b41d2))
+* **chart:** stop fresh installs referencing a phantom pull secret ([#399](https://github.com/mitos-run/mitos/issues/399)) ([#500](https://github.com/mitos-run/mitos/issues/500)) ([2dba7fe](https://github.com/mitos-run/mitos/commit/2dba7fe7b200d5f36d862325c2110fc992b91b0c))
+* **console:** Login propagates next on email path, robust focus ring, a11y polish ([dd29de4](https://github.com/mitos-run/mitos/commit/dd29de4d753992d912d59d2ef6ce30033ac85b63))
+* **console:** magenta keyboard-focus ring on auth inputs per brand ([e2088ad](https://github.com/mitos-run/mitos/commit/e2088ad4ea752308dd3cf1e54281017ae95f47d5))
+* **console:** pre-auth router skips 401 retry and redirects unmatched paths to login ([a7406be](https://github.com/mitos-run/mitos/commit/a7406be952f1643adf7539f6a207ddd74e05360f))
+* **console:** share one credit ledger between onboarding grant and billing view ([5ced231](https://github.com/mitos-run/mitos/commit/5ced231ed1954f1cd2c5862d23ad35af7269d8b8))
+* **console:** Verify guards one-time POST, stops aria re-reading the key, handles clipboard failure ([fd6e79f](https://github.com/mitos-run/mitos/commit/fd6e79f7ad9481ab5b0cf047156aa9465424c384))
+* **deploy:** Dex and console share one client-secret key so the console pod starts ([ee185ca](https://github.com/mitos-run/mitos/commit/ee185ca3cafa671dac710dd0c719bd83ed678962))
+* **deploy:** edge HTTPS listener accepts www SNI (drop listener hostname pin) ([9448375](https://github.com/mitos-run/mitos/commit/9448375fdc97717b09df24a13ba1e6bdcb4789e6))
+* **forkd:** keep jailer template links CoW across the chroot mount ([#526](https://github.com/mitos-run/mitos/issues/526)) ([d79bd9d](https://github.com/mitos-run/mitos/commit/d79bd9d875157fe5cdb7134f2545ac142897bcf3))
+* **fork:** gate SIGUSR2 broadcast on a handler ([#467](https://github.com/mitos-run/mitos/issues/467)) and reap stale-digest husk pods ([#461](https://github.com/mitos-run/mitos/issues/461)) ([#509](https://github.com/mitos-run/mitos/issues/509)) ([fa5d6ad](https://github.com/mitos-run/mitos/commit/fa5d6ad37068842a3543489fc0384e9fbb7d160d))
+* **frontdoor:** remove dead reserved param, normalize path in Decide, strengthen tests ([959001c](https://github.com/mitos-run/mitos/commit/959001c3c6bcdefa122227020631eefd901dd52a))
+* **gateway:** handle POST/GET /v1/templates so hosted SDK create works ([e787c5e](https://github.com/mitos-run/mitos/commit/e787c5e6db3d2fcccae1ac808c38536bd8ea651f))
+* **gateway:** handle POST/GET /v1/templates so hosted SDK create works ([b1af307](https://github.com/mitos-run/mitos/commit/b1af307ed6debdc162c887dfb78951c0cc0820f5))
+* **gateway:** map POST /v1/fork to sandbox.create so hosted SDK create+fork works ([47a27f9](https://github.com/mitos-run/mitos/commit/47a27f991407213b2901a4967ad67a962ca4fac4))
+* **gateway:** map POST /v1/fork to sandbox.create so hosted SDK create+fork works ([d9dd45d](https://github.com/mitos-run/mitos/commit/d9dd45dbdac6e3babef98621575999a05b5496c5))
+* **husk-stub:** remove stale per-vm jailer chroot before start so retries do not fail MkdirOldRoot ([bc37fbb](https://github.com/mitos-run/mitos/commit/bc37fbb7572b2e3dfa1071905c2f5c8061a3e0b8))
+* **husk-stub:** remove stale per-vm jailer chroot before start so retries do not fail MkdirOldRoot ([b58340f](https://github.com/mitos-run/mitos/commit/b58340fecb008b716f31caaa4fdc4591e304422c))
+* **husk:** self-heal a dead Firecracker instead of advertising a dead slot ([72fc826](https://github.com/mitos-run/mitos/commit/72fc8261f46b7da15eece49a14cd8b02ffe8996e))
+* **kubectl-mitos:** register corev1 so exec can read the token Secret ([aff190f](https://github.com/mitos-run/mitos/commit/aff190f43180240eb83c480c59842ba529198633))
+* **onboarding:** align E2EHandler gate numbering in comments with docstring ([f5f27fc](https://github.com/mitos-run/mitos/commit/f5f27fc68b5bf04359dcd73873e97f411c681961))
+* **pgstore:** open (run migrations) before truncating so fresh-DB CI passes ([02e38cd](https://github.com/mitos-run/mitos/commit/02e38cd87717b77c06c5b986b6dd0f8a3977b93c))
+* **pgstore:** PgSessionStore lists sessions most-recent-first with UTC parity ([b01a32d](https://github.com/mitos-run/mitos/commit/b01a32d0d30f0ef810857f6cb983ca144146eda2))
+* **pgstore:** PgSessionStore Revoke returns ErrNotFound and ListByAccount checks rows.Err for parity ([f8cc1c0](https://github.com/mitos-run/mitos/commit/f8cc1c02b626097ca19484d3fcb616078d0133ba))
+* **security:** resolve CodeQL path-injection and harden the supply chain ([#503](https://github.com/mitos-run/mitos/issues/503)) ([17ac93b](https://github.com/mitos-run/mitos/commit/17ac93b5db4b96512882ec0b8b6706ce1af9a0f7))
+* Talos hardening batch ([#525](https://github.com/mitos-run/mitos/issues/525), [#526](https://github.com/mitos-run/mitos/issues/526), [#527](https://github.com/mitos-run/mitos/issues/527), [#528](https://github.com/mitos-run/mitos/issues/528)) ([25a2a81](https://github.com/mitos-run/mitos/commit/25a2a81dce575c708847e612b9183712917281c2))
+
 ## [1.5.0](https://github.com/mitos-run/mitos/compare/v1.4.0...v1.5.0) (2026-06-27)
 
 
