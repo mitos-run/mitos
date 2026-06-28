@@ -211,3 +211,52 @@ func TestProxy_ForgeProtection_HeadersStripped(t *testing.T) {
 		t.Errorf("forged X-Mitos-Account leaked to upstream: %q", body)
 	}
 }
+
+// TestProxy_MarketingPagesDialOverride verifies that when MarketingPagesAddrs
+// is non-empty, the marketing reverse proxy dials one of the listed addresses
+// instead of resolving the marketing host via DNS, and that the upstream Host
+// header is pinned to the marketing URL host (mitos.run in production).
+//
+// The test uses http:// so TLS is not in the path; the DialContext override is
+// the only mechanism that lets the request reach the local stub rather than the
+// real network host. InsecureSkipVerify is never set.
+func TestProxy_MarketingPagesDialOverride(t *testing.T) {
+	var capturedHost string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHost = r.Host
+		_, _ = io.WriteString(w, "PAGES")
+	}))
+	defer stub.Close()
+
+	con := consoleServer(t)
+	defer con.Close()
+
+	// Use a host whose DNS we do not control. The DialContext override in
+	// buildPagesMarketingReverseProxy must redirect dials to this host to the
+	// stub address instead.
+	const fakeHost = "mitos.run"
+	p, err := frontdoor.NewProxy(frontdoor.ProxyConfig{
+		MarketingURL:        "http://" + fakeHost,
+		MarketingPagesAddrs: []string{stub.Listener.Addr().String()},
+		ConsoleURL:          con.URL,
+		Resolver:            fakeResolver{},
+	})
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+
+	// Anonymous request to a marketing path; no session cookie.
+	req := httptest.NewRequest(http.MethodGet, "/pricing", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (dial override did not reach stub)", rr.Code)
+	}
+	if body := rr.Body.String(); body != "PAGES" {
+		t.Errorf("body = %q, want %q (dial override did not reach stub)", body, "PAGES")
+	}
+	if capturedHost != fakeHost {
+		t.Errorf("upstream Host header = %q, want %q (Host not pinned by Director)", capturedHost, fakeHost)
+	}
+}
