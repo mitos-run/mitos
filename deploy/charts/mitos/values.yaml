@@ -741,6 +741,9 @@ marketing:
   enabled: false
   # Number of marketing replicas.
   replicas: 1
+  # Container port the marketing image listens on. The default image
+  # (nginxinc/nginx-unprivileged) listens on 8080 as a non-root user.
+  containerPort: 8080
   # Full OCI image reference for the marketing static site. Required when
   # marketing.enabled is true. Use "nginxinc/nginx-unprivileged:latest" as a
   # staging placeholder; replace with the production Astro dist image from the

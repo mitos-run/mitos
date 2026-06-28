@@ -44,7 +44,11 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 80
+              # The marketing image is nginxinc/nginx-unprivileged, which runs as
+              # uid 101 and listens on 8080 (it cannot bind 80 as non-root). The
+              # Service targetPort and the probes reference this named port, so
+              # the Service still exposes 80 while the pod serves on 8080.
+              containerPort: {{ .Values.marketing.containerPort | default 8080 }}
           resources:
             {{- toYaml .Values.marketing.resources | nindent 12 }}
           securityContext:
