@@ -27,7 +27,8 @@ func TestDecide(t *testing.T) {
 		{"/blog", "marketing", false, false},
 		{"/blog/post-1", "marketing", false, false},
 		{"/about", "marketing", false, false},
-		{"/assets/x.js", "marketing", false, false},
+		{"/assets/x.js", "console", false, false},
+		{"/_astro/x.css", "marketing", false, false},
 
 		// Auth + onboarding paths: console, no session.
 		{"/login", "console", false, false},
