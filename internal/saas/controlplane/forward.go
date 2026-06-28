@@ -44,6 +44,10 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 		return k.terminate(ctx, req)
 	case "sandbox.runtime":
 		return k.proxy(ctx, req)
+	case "template.ensure":
+		return k.ensureTemplate(ctx, req)
+	case "template.list":
+		return k.listTemplates(ctx, req)
 	default:
 		return errResp(apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("unknown operation %q", req.Op))), nil

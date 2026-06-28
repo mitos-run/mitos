@@ -468,6 +468,112 @@ func TestTokenNeverAppearsInErrorOrNonCreateResponse(t *testing.T) {
 	}
 }
 
+// ----- template.ensure / template.list -----
+
+// TestEnsureTemplateReturnsReadyDescriptor asserts Forward("template.ensure") with
+// a valid id returns 200 with a descriptor that matches the SDK-expected shape:
+// id, ready (true), and created_at. This is the critical path broken by the bug:
+// POST /v1/templates previously fell through to "sandbox.post" -> unknown op ->
+// NotFound; this test proves it now returns 200+ready.
+func TestEnsureTemplateReturnsReadyDescriptor(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c)
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "template.ensure", Body: []byte(`{"id":"python"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s (want 200+ready, got error)", resp.Status, resp.Body)
+	}
+	m := decodeBody(t, resp.Body)
+	if m["id"] != "python" {
+		t.Errorf("id = %v, want python", m["id"])
+	}
+	if m["ready"] != true {
+		t.Errorf("ready = %v, want true", m["ready"])
+	}
+	if m["created_at"] == nil || m["created_at"] == "" {
+		t.Errorf("created_at missing from descriptor: %v", m)
+	}
+}
+
+// TestEnsureTemplateRejectsEmptyID asserts Forward("template.ensure") with an
+// empty or missing id field returns 400. A caller cannot ensure a nameless template.
+func TestEnsureTemplateRejectsEmptyID(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c)
+	for _, body := range []string{`{}`, `{"id":""}`} {
+		resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+			OrgID: orgA, Op: "template.ensure", Body: []byte(body),
+		})
+		if resp.Status != http.StatusBadRequest {
+			t.Errorf("body=%q: status = %d, want 400; body = %s", body, resp.Status, resp.Body)
+		}
+	}
+}
+
+// TestListTemplatesReturnsPoolDescriptors asserts Forward("template.list") maps
+// existing SandboxPools to template descriptors. A pool with ReadySnapshots > 0
+// returns ready: true; one with none returns ready: false.
+func TestListTemplatesReturnsPoolDescriptors(t *testing.T) {
+	readyPool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "mitos-system"},
+		Status:     v1.SandboxPoolStatus{ReadySnapshots: 3},
+	}
+	emptyPool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "mitos-system"},
+		Status:     v1.SandboxPoolStatus{ReadySnapshots: 0},
+	}
+	c := newFakeClient(t, readyPool, emptyPool)
+	cp := New(c)
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "template.list",
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(items))
+	}
+	byID := map[string]map[string]any{}
+	for _, it := range items {
+		id, _ := it["id"].(string)
+		byID[id] = it
+	}
+	if _, ok := byID["python"]; !ok {
+		t.Errorf("python pool missing from template list: %v", byID)
+	}
+	if byID["python"]["ready"] != true {
+		t.Errorf("python ready = %v, want true (ReadySnapshots=3)", byID["python"]["ready"])
+	}
+	if byID["node"]["ready"] != false {
+		t.Errorf("node ready = %v, want false (ReadySnapshots=0)", byID["node"]["ready"])
+	}
+}
+
+// TestForwardUnknownOpReturnsNotFound is a regression guard asserting the fallback
+// ("sandbox.post", "sandbox.delete", etc.) still returns not_found, not a panic or
+// silent success.
+func TestForwardUnknownOpReturnsNotFound(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c)
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.post",
+	})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for unknown op", resp.Status)
+	}
+}
+
 // ----- test helpers -----
 
 // flipToReadyWhenCreated watches the org namespace for a newly created sandbox

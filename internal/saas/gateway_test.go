@@ -338,6 +338,65 @@ func TestGatewayStreamsRuntimeResponse(t *testing.T) {
 	}
 }
 
+// TestGatewayTemplateEnsureRoutesAndForwards asserts POST /v1/templates is routed
+// as the "template.ensure" op, the org is correctly attached from the verified key
+// (not from the request body), and the control plane is reached exactly once.
+func TestGatewayTemplateEnsureRoutesAndForwards(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"id":"python","ready":true}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/templates", f.rawA, `{"id":"python"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "template.ensure" {
+		t.Errorf("op = %q, want template.ensure", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key, not the body)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayTemplateEnsureRequiresAuth asserts POST /v1/templates without a
+// bearer key is rejected 401 and never reaches the control plane.
+func TestGatewayTemplateEnsureRequiresAuth(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/templates", "", `{"id":"python"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if code := decodeErr(t, rec); code != "unauthorized" {
+		t.Errorf("error code = %q, want unauthorized", code)
+	}
+	if len(f.cp.got) != 0 {
+		t.Error("control plane reached despite missing auth")
+	}
+}
+
+// TestGatewayTemplateListRoutesAsReadOp asserts GET /v1/templates routes as
+// "template.list" and accepts a read-only key (it is a read op, not a mutating
+// one, so the sandbox scope is not required).
+func TestGatewayTemplateListRoutesAsReadOp(t *testing.T) {
+	store := NewMemStore()
+	newTestOrg(t, store, "org-a")
+	keys := NewKeyService(store)
+	created, err := keys.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Scopes: []string{ScopeReadOnly}})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	cp := &fakeControlPlane{respBody: []byte(`[]`)}
+	gw := NewGateway(keys, nil, cp, nil)
+	rec := doRequest(gw, http.MethodGet, "/v1/templates", created.RawKey, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(cp.got) != 1 || cp.got[0].Op != "template.list" {
+		t.Errorf("forwarded op = %+v, want template.list", cp.got)
+	}
+}
+
 // TestGatewayReadScopeAllowsList asserts a read-only key can list (a read op) but
 // the op is correctly classified so the read scope suffices.
 func TestGatewayReadScopeAllowsList(t *testing.T) {
