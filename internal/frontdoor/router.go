@@ -29,7 +29,11 @@ var marketingSegments = map[string]bool{
 	"compare":   true,
 	"blog":      true,
 	"about":     true,
-	"assets":    true,
+	// Astro emits its bundled CSS/JS under /_astro/ (the build.assets default).
+	// The console's Vite bundle lives under /assets/, so /assets is owned by the
+	// console (see authSegments), NOT marketing. Routing /assets to marketing
+	// black-holed the console SPA's JS/CSS and left every app page blank.
+	"_astro": true,
 }
 
 // authSegments are the first-segment values that map to the console upstream
@@ -43,6 +47,11 @@ var authSegments = map[string]bool{
 	"auth":       true,
 	"onboarding": true,
 	"webhooks":   true,
+	// The console SPA (Vite) emits its JS/CSS under /assets/. These are public
+	// (the login/signup pages load them before any session), so they belong on
+	// the console upstream with no session requirement. Marketing's bundle lives
+	// under /_astro/ (see marketingSegments), so there is no collision.
+	"assets": true,
 }
 
 // appSegments are the first-segment values that map to the console upstream
