@@ -243,18 +243,24 @@ const hostnameNodeLabel = "kubernetes.io/hostname"
 // --data-dir default).
 const defaultDataDir = "/var/lib/mitos"
 
-// defaultHuskCPU and defaultHuskMemory size a husk pod when the template
-// carries no Resources. They make the sandbox visible to the scheduler as
-// ordinary pod requests (scheduler truth). The CPU default is a small RESERVATION
-// (250m), not a cap: the husk container has NO CPU limit, so the microVM bursts
-// freely up to node capacity when the agent runs, while the modest request packs
-// many mostly-idle sandboxes per node (agent sandboxes spend most time waiting on
-// the model, not on CPU). The k8s CPU request is decoupled from the guest vCPU
-// count (firecracker.VMConfig.VcpuCount); a template can raise the request for a
-// CPU-heavy workload, or memory becomes the binding density constraint first.
+// defaultHuskCPU is the CPU burst cap (Limits[cpu]) used when the template
+// carries no Resources.CPU. It is the configured per-sandbox CPU ceiling: the
+// kubelet enforces cgroup cpu.max at this value. The matching Requests[cpu] is
+// defaultHuskCPURequestFloor (50m), intentionally much lower so many idle warm
+// husks pack onto one node (the scheduler packs by request); each VM can then
+// burst up to its cpu limit once active. Agent sandboxes spend most time waiting
+// on model replies, so the request reflects the dormant footprint while the limit
+// bounds burst (a CPU DoS cap per sandbox, new with this model). The k8s CPU
+// request is decoupled from the guest vCPU count (firecracker.VMConfig.VcpuCount).
+//
+// defaultHuskCPURequestFloor is the low floor applied to Requests[cpu]: the
+// scheduler places pods by sum-of-requests, so a small floor lets idle warm husks
+// pack densely. The floor is capped to the configured limit (request never exceeds
+// limit). Operators can raise the template cpu to widen the burst cap.
 var (
-	defaultHuskCPU    = resource.MustParse("250m")
-	defaultHuskMemory = resource.MustParse("512Mi")
+	defaultHuskCPU             = resource.MustParse("250m")
+	defaultHuskCPURequestFloor = resource.MustParse("50m")
+	defaultHuskMemory          = resource.MustParse("512Mi")
 )
 
 // Memory-limit headroom defaults (production-blocker #2, cap 1). The husk
@@ -305,14 +311,25 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		kvmResource = defaultKVMResourceName
 	}
 
-	// cpu/memory sized from the template when present, else the documented
-	// default. These are real pod requests so the scheduler accounts the
-	// sandbox like any other workload (scheduler truth: a husk pod shows up in
-	// kubectl describe node and counts against ResourceQuota/LimitRange).
-	cpuReq := defaultHuskCPU
+	// CPU: limit = configured per-sandbox cap (Limits[cpu] = cgroup cpu.max).
+	// Request = low floor so idle warm husks pack densely onto nodes; the scheduler
+	// places pods by sum-of-requests, so a small request (50m) lets many dormant
+	// husks share a node while each VM bursts to its limit when active. The floor is
+	// capped to the limit so request never exceeds limit (a k8s requirement for
+	// Burstable QoS). This is the OVERCOMMIT LEVER: operators declare the cap via the
+	// pool template; the floor is an internal density knob, not operator-visible.
+	cpuLimit := defaultHuskCPU
 	if !template.Resources.CPU.IsZero() {
-		cpuReq = template.Resources.CPU
+		cpuLimit = template.Resources.CPU
 	}
+	cpuFloor := defaultHuskCPURequestFloor
+	if cpuFloor.Cmp(cpuLimit) > 0 {
+		cpuFloor = cpuLimit
+	}
+	// Memory is left honest: Requests = configured, Limits = request + headroom.
+	// Memory is genuinely resident (Firecracker holds the guest RAM in the husk
+	// pod cgroup); overcommitting it would OOM-kill live sandboxes under node
+	// memory pressure. CPU is burstable and safe to overcommit; memory is not.
 	memReq := defaultHuskMemory
 	if !template.Resources.Memory.IsZero() {
 		memReq = template.Resources.Memory
@@ -816,15 +833,40 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 					VolumeMounts: mounts,
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
+							// KVM: request == limit == 1 (device-plugin semantics).
 							corev1.ResourceName(kvmResource): resource.MustParse("1"),
-							corev1.ResourceCPU:               cpuReq,
-							corev1.ResourceMemory:            memReq,
+							// CPU REQUEST: the low floor (default 50m) is the
+							// overcommit lever. The scheduler places pods by
+							// sum-of-requests, so a small request lets many idle
+							// warm husks pack densely onto one node. QoS stays
+							// Burstable (requests < limits). Request never exceeds
+							// the limit (capped to cpuLimit before this block).
+							corev1.ResourceCPU: cpuFloor,
+							// Memory: honest request (no overcommit). Firecracker
+							// holds the guest RAM as genuinely resident pages in
+							// this cgroup; overcommitting memory would OOM-kill
+							// live sandboxes under node pressure. CPU is burstable
+							// and safe to overcommit; memory is not.
+							corev1.ResourceMemory: memReq,
 						},
 						Limits: corev1.ResourceList{
 							// The KVM device is a countable device-plugin
 							// resource: request and limit must be equal and
 							// non-zero.
 							corev1.ResourceName(kvmResource): resource.MustParse("1"),
+							// CPU LIMIT: the configured per-sandbox burst cap,
+							// enforced as cgroup cpu.max by the kubelet. Users
+							// declare this cap via pool spec.template.resources.cpu;
+							// the low request (cpuFloor) enables overcommit while
+							// this limit bounds the burst of any one sandbox. This
+							// replaces the prior requests-only model: restore and
+							// activate now run up to this cap (a deliberate
+							// utilization-for-bounded-burst tradeoff; the cap is
+							// set generously by operators so a dormant-to-active
+							// transition is not throttled below the configured
+							// ceiling). QoS is Burstable, not BestEffort, because
+							// both cpu and memory limits are set.
+							corev1.ResourceCPU: cpuLimit,
 							// Memory LIMIT (production-blocker #2, cap 1): the
 							// host-DoS cap. Sized = request + headroom so a VM
 							// running normally at its configured RAM is NEVER
@@ -839,10 +881,6 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 							// activate latency, which is why the headroom is
 							// load-bearing and operator-tunable.
 							corev1.ResourceMemory: memLimit,
-							// cpu is deliberately left WITHOUT a limit: a cpu
-							// limit throttles the VM (cgroup cpu.max) and would
-							// hurt the activate latency. cpu stays requests-only
-							// for scheduler truth.
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
