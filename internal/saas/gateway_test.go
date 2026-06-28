@@ -417,3 +417,71 @@ func TestGatewayReadScopeAllowsList(t *testing.T) {
 		t.Errorf("forwarded op = %+v, want sandbox.list", cp.got)
 	}
 }
+
+// TestGatewayForkMapsToSandboxCreate asserts POST /v1/fork is routed as the
+// "sandbox.create" op: the SDK fork call and the /v1/sandboxes POST both create a
+// sandbox and must reach the same control-plane handler. The org is taken from the
+// verified key, never from the request body.
+func TestGatewayForkMapsToSandboxCreate(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"id":"sb-x","endpoint":"10.0.0.1:9091","token":"tok","phase":"Ready","template_id":"python","fork_time_ms":0}`)
+	f.cp.respCode = http.StatusCreated
+	rec := doRequest(f.gw, http.MethodPost, "/v1/fork", f.rawA, `{"template":"python","id":"sb-x"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "sandbox.create" {
+		t.Errorf("op = %q, want sandbox.create (POST /v1/fork must map to sandbox.create)", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key, not the body)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayForkRequiresAuth asserts POST /v1/fork without a bearer key returns
+// 401 and never reaches the control plane, matching the behavior of every other
+// authenticated op.
+func TestGatewayForkRequiresAuth(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/fork", "", `{"template":"python","id":"sb-x"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if code := decodeErr(t, rec); code != "unauthorized" {
+		t.Errorf("error code = %q, want unauthorized", code)
+	}
+	if len(f.cp.got) != 0 {
+		t.Error("control plane reached despite missing auth on /v1/fork")
+	}
+}
+
+// TestGatewayExistingSandboxesPathStillWorks is a regression guard: /v1/sandboxes
+// POST must still route as sandbox.create after the /v1/fork case is added.
+func TestGatewayExistingSandboxesPathStillWorks(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", f.rawA, `{"pool":"default"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 || f.cp.got[0].Op != "sandbox.create" {
+		t.Errorf("op = %+v, want sandbox.create", f.cp.got)
+	}
+}
+
+// TestGatewayTemplatesPathStillWorks is a regression guard: the /v1/templates POST
+// path added in #520 must still route as template.ensure after the /v1/fork case
+// is added.
+func TestGatewayTemplatesPathStillWorks(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"id":"python","ready":true}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/templates", f.rawA, `{"id":"python"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 || f.cp.got[0].Op != "template.ensure" {
+		t.Errorf("op = %+v, want template.ensure", f.cp.got)
+	}
+}

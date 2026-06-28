@@ -574,6 +574,70 @@ func TestForwardUnknownOpReturnsNotFound(t *testing.T) {
 	}
 }
 
+// TestForkBodyTemplateFieldResolvesPool asserts that a sandbox.create request
+// carrying a fork-style body ({"template":"python","id":"sb-x"}) resolves the
+// "python" pool from the template field. This is the path POST /v1/fork takes
+// after opFromPath maps it to sandbox.create: the SDK sends template, not pool
+// or image, so the create handler must check all three fields.
+func TestForkBodyTemplateFieldResolvesPool(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-fork")
+	defer stop()
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"template":"python","id":"sb-x"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s (template field must resolve the pool)", resp.Status, resp.Body)
+	}
+
+	name, _ := decodeBody(t, resp.Body)["id"].(string)
+	var sb v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: tenant.NamespaceForOrg(orgA), Name: name}, &sb); err != nil {
+		t.Fatalf("get created sandbox: %v", err)
+	}
+	if sb.Spec.Source.PoolRef == nil || sb.Spec.Source.PoolRef.Name != "python" {
+		t.Errorf("poolRef = %+v, want python (template field not wired into pool resolution)", sb.Spec.Source.PoolRef)
+	}
+}
+
+// TestCreateResponseIncludesTemplateIDAndForkTimeMs asserts the create (ready)
+// response includes the template_id and fork_time_ms fields the Python SDK
+// DirectSandbox constructor reads. Without them the SDK raises a KeyError even if
+// the gateway correctly routes the request.
+func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-shape")
+	defer stop()
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"template":"python"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	m := decodeBody(t, resp.Body)
+	if _, ok := m["template_id"]; !ok {
+		t.Errorf("template_id missing from create response: %v", m)
+	}
+	if _, ok := m["fork_time_ms"]; !ok {
+		t.Errorf("fork_time_ms missing from create response: %v", m)
+	}
+	if m["template_id"] != "python" {
+		t.Errorf("template_id = %v, want python", m["template_id"])
+	}
+}
+
 // ----- test helpers -----
 
 // flipToReadyWhenCreated watches the org namespace for a newly created sandbox
