@@ -89,10 +89,17 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if got := ctr.Resources.Limits[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("kvm limit = %s, want 1", got.String())
 	}
-	// cpu/memory requests sized from the template so the sandbox shows as
-	// ordinary pod requests (scheduler truth).
-	if got := ctr.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2")) != 0 {
-		t.Errorf("cpu request = %s, want 2 (from template)", got.String())
+	// CPU: limit = configured cap (burst ceiling enforced by cgroup cpu.max);
+	// request = low floor for node overcommit (scheduler packs by request, so idle
+	// warm husks pack densely; each VM bursts up to the limit when active).
+	// Memory: request = configured, limit = request + headroom (no overcommit; guest
+	// RAM is genuinely resident in Firecracker and overcommitting it would OOM-kill
+	// live sandboxes under node pressure).
+	if got := ctr.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("50m")) != 0 {
+		t.Errorf("cpu request = %s, want 50m (overcommit floor)", got.String())
+	}
+	if got := ctr.Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("cpu limit = %s, want 2 (configured cap from template)", got.String())
 	}
 	if got := ctr.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
 		t.Errorf("memory request = %s, want 1Gi (from template)", got.String())
@@ -104,10 +111,6 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	wantMemLimit.Add(resource.MustParse("256Mi"))
 	if got := ctr.Resources.Limits[corev1.ResourceMemory]; got.Cmp(wantMemLimit) != 0 {
 		t.Errorf("memory limit = %s, want %s (request + headroom)", got.String(), wantMemLimit.String())
-	}
-	// cpu stays requests-only: a cpu limit would throttle and hurt activate latency.
-	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
-		t.Error("cpu limit must NOT be set (throttling hurts activate latency)")
 	}
 
 	sc := ctr.SecurityContext
@@ -128,6 +131,61 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("SeccompProfile = %+v, want RuntimeDefault", sc.SeccompProfile)
+	}
+}
+
+// TestBuildHuskPodCPULimitOvercommit verifies the overcommit model: when
+// spec.template.resources.cpu is set the husk container has Limits[cpu] equal to
+// that value (the burst cap, enforced by cgroup cpu.max) and Requests[cpu] equal
+// to the low floor (50m), so idle warm husks pack densely while each VM can burst
+// to its declared cap. When cpu is unset the defaults apply: Limits[cpu] = 250m
+// and Requests[cpu] = 50m (floor < default, so floor wins). Memory is left
+// honest (request = configured, limit = request + headroom) with no overcommit.
+func TestBuildHuskPodCPULimitOvercommit(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+
+	// Case 1: explicit cpu in template (2 cores).
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Resources: v1.SandboxResources{
+					CPU:    resource.MustParse("2"),
+					Memory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	pod := r.BuildHuskPodForTest(pool, pool.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
+	ctr := pod.Spec.Containers[0]
+
+	if got := ctr.Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("case explicit cpu=2: Limits[cpu] = %s, want 2", got.String())
+	}
+	if got := ctr.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("50m")) != 0 {
+		t.Errorf("case explicit cpu=2: Requests[cpu] = %s, want 50m (floor)", got.String())
+	}
+	// Memory must stay honest: request equals configured, limit equals request + headroom.
+	if got := ctr.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Errorf("case explicit cpu=2: Requests[memory] = %s, want 1Gi", got.String())
+	}
+
+	// Case 2: no cpu in template; defaults kick in.
+	poolDefault := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "p2", Namespace: "ns"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "img"},
+		},
+	}
+	podDefault := r.BuildHuskPodForTest(poolDefault, poolDefault.Spec.Template, controller.HuskPodOptions{StubImage: "img"})
+	ctrDefault := podDefault.Spec.Containers[0]
+
+	// defaultHuskCPU = 250m; floor = 50m; 50m < 250m so Requests[cpu] = 50m.
+	if got := ctrDefault.Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("250m")) != 0 {
+		t.Errorf("case default cpu: Limits[cpu] = %s, want 250m (defaultHuskCPU)", got.String())
+	}
+	if got := ctrDefault.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("50m")) != 0 {
+		t.Errorf("case default cpu: Requests[cpu] = %s, want 50m (floor)", got.String())
 	}
 }
 
@@ -324,8 +382,11 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	if req := ctr.Resources.Requests[corev1.ResourceMemory]; lim.Cmp(req) <= 0 {
 		t.Errorf("memory limit %s must exceed request %s (headroom)", lim.String(), req.String())
 	}
-	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
-		t.Error("cpu limit must NOT be set (throttling hurts activate latency)")
+	// CPU LIMIT is now set (burst cap enforced by cgroup cpu.max); CPU REQUEST is
+	// the low floor (50m) for dense node packing. Setting a cpu limit does not
+	// affect PSA admission (PSA does not gate on resource limits or requests).
+	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; !ok {
+		t.Error("cpu limit must be set (burst cap for CPU DoS bound)")
 	}
 }
 
@@ -636,8 +697,12 @@ func TestBuildHuskPodDefaultSizing(t *testing.T) {
 	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("default kvm request = %s, want 1", got.String())
 	}
-	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("250m")) != 0 {
-		t.Errorf("default cpu request = %s, want 250m", got.String())
+	// CPU REQUEST is the low floor (50m); CPU LIMIT is the default cap (250m).
+	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("50m")) != 0 {
+		t.Errorf("default cpu request = %s, want 50m (overcommit floor)", got.String())
+	}
+	if got := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("250m")) != 0 {
+		t.Errorf("default cpu limit = %s, want 250m (defaultHuskCPU)", got.String())
 	}
 	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
 		t.Errorf("default memory request = %s, want 512Mi", got.String())
@@ -694,10 +759,11 @@ func TestBuildHuskPodMemoryLimitWithHeadroom(t *testing.T) {
 		t.Errorf("memory limit %s must exceed request %s (headroom for the VMM, stub, CoW slack)", lim.String(), req.String())
 	}
 
-	// cpu has NO limit (a cpu limit throttles and hurts activate latency); cpu
-	// stays requests-only for scheduler truth.
-	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
-		t.Errorf("cpu limit must NOT be set (cpu throttling hurts activate latency); limits = %+v", ctr.Resources.Limits)
+	// CPU LIMIT is set (burst cap, enforced by cgroup cpu.max); CPU REQUEST is the
+	// low floor (50m). Restore and activate run up to this limit (the configured
+	// per-sandbox cap). QoS stays Burstable (requests < limits for cpu and memory).
+	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; !ok {
+		t.Errorf("cpu limit must be set (burst cap for node CPU overcommit model); limits = %+v", ctr.Resources.Limits)
 	}
 }
 
