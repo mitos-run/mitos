@@ -37,10 +37,14 @@ spec:
             - --addr=:8080
             - --enforce-quota={{ .Values.gateway.enforce.enabled }}
             - --trusted-proxy-hops={{ int .Values.gateway.enforce.trustedProxyHops }}
-          {{- if or .Values.database.dsnSecretRef.name (and .Values.telemetry.enabled .Values.telemetry.endpoint) }}
+          {{- if or .Values.database.dsnSecretRef.name (and .Values.telemetry.enabled .Values.telemetry.endpoint) .Values.gateway.singleTenantNamespace }}
           env:
             {{- include "mitos.database.env" . | nindent 12 }}
             {{- include "mitos.telemetry.env" . | nindent 12 }}
+            {{- if .Values.gateway.singleTenantNamespace }}
+            - name: MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE
+              value: {{ .Values.gateway.singleTenantNamespace | quote }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http

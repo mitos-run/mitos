@@ -8,11 +8,16 @@
 // Security: this is the cross-tenant boundary. The org id is taken ONLY from
 // ForwardRequest.OrgID (the gateway verified it from the customer key); a
 // customer can never influence it. Every Get, List, Delete, and proxy is scoped
-// to NamespaceForOrg(orgID) AND re-checks the mitos.run/org label on the object,
+// to namespaceForOrg(orgID) AND re-checks the mitos.run/org label on the object,
 // so a request that names another org's sandbox id returns not_found and never
 // mutates or reaches it. The per-sandbox token is read from the controller-owned
 // Secret and is returned to the caller ONLY on create (so the SDK can address the
 // sandbox directly); it is never logged and never placed in an error.
+//
+// Single-tenant mode: when WithSingleTenantNamespace is set all namespace
+// derivation is pinned to one fixed namespace (the shared pool namespace).
+// Org-label authz is still enforced in that mode: a key for org B cannot read
+// or mutate a sandbox owned by org A, even though both share the namespace.
 package controlplane
 
 import (
@@ -20,6 +25,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"mitos.run/mitos/internal/tenant"
 )
 
 // Defaults for the readiness poll. A create call blocks until the sandbox is
@@ -39,7 +46,13 @@ type K8sControlPlane struct {
 	// defaultPool is the pool a create request falls back to when it names neither
 	// a pool nor an image. Empty means a create without a pool is rejected.
 	defaultPool string
-	now          func() time.Time
+	// singleTenantNamespace, when non-empty, pins all sandbox operations to this
+	// fixed namespace instead of the per-org mitos-org-<id> namespace. Use only
+	// for QA deployments where per-org namespaces are not provisioned. Org-label
+	// authz is still enforced: sandboxes still carry the org label and cross-org
+	// checks still apply.
+	singleTenantNamespace string
+	now                   func() time.Time
 }
 
 // Option configures a K8sControlPlane.
@@ -79,6 +92,32 @@ func WithHTTPClient(h *http.Client) Option {
 			k.httpClient = h
 		}
 	}
+}
+
+// WithSingleTenantNamespace pins all sandbox operations to ns instead of the
+// per-org mitos-org-<id> namespace. When ns is empty the option is a no-op
+// and per-org namespacing applies. Use this ONLY for single-tenant QA
+// deployments where per-org namespaces are not provisioned: the shared pool
+// namespace (e.g. "mitos") already contains the SandboxPool and forkd can
+// reach it. Org-label authz is preserved: sandboxes still carry the org label
+// and cross-org access checks still reject keys for the wrong org, so a key
+// for org B cannot read or mutate org A's sandbox even in a shared namespace.
+func WithSingleTenantNamespace(ns string) Option {
+	return func(k *K8sControlPlane) {
+		if ns != "" {
+			k.singleTenantNamespace = ns
+		}
+	}
+}
+
+// namespaceForOrg returns the sandbox namespace for orgID. In single-tenant
+// mode (WithSingleTenantNamespace set) it returns the fixed namespace for all
+// orgs. Otherwise it delegates to tenant.NamespaceForOrg.
+func (k *K8sControlPlane) namespaceForOrg(orgID string) string {
+	if k.singleTenantNamespace != "" {
+		return k.singleTenantNamespace
+	}
+	return tenant.NamespaceForOrg(orgID)
 }
 
 // New builds a K8sControlPlane over the given controller-runtime client. The

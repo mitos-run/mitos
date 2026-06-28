@@ -63,6 +63,27 @@ func TestGatewayEnforcementOverridable(t *testing.T) {
 	mustContain(t, deploy, "--trusted-proxy-hops=1")
 }
 
+// TestGatewaySingleTenantNamespaceAbsentByDefault asserts the default render
+// does NOT inject MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE: the default is
+// per-org namespace mode and the QA override must be an explicit opt-in.
+func TestGatewaySingleTenantNamespaceAbsentByDefault(t *testing.T) {
+	out := render(t)
+	if strings.Contains(out, "MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE") {
+		t.Fatal("default render contains MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE; single-tenant mode must be an explicit opt-in")
+	}
+}
+
+// TestGatewaySingleTenantNamespaceRendersWhenSet asserts that setting
+// gateway.singleTenantNamespace injects MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE
+// as a plain env var into the gateway Deployment. The value is a namespace
+// name, not a secret, so a direct value (not secretKeyRef) is correct.
+func TestGatewaySingleTenantNamespaceRendersWhenSet(t *testing.T) {
+	out := render(t, "gateway.singleTenantNamespace=mitos")
+	deploy := section(t, out, "kind: Deployment", "mitos-gateway")
+	mustContain(t, deploy, "MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE")
+	mustContain(t, deploy, `value: "mitos"`)
+}
+
 // section returns the YAML document containing both marker and name, to scope an
 // assertion to one rendered resource.
 func section(t *testing.T, out, marker, name string) string {

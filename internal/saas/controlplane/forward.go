@@ -116,7 +116,7 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 			WithCause("the create request names neither a pool nor an image and no default pool is configured")), nil
 	}
 
-	ns := tenant.NamespaceForOrg(req.OrgID)
+	ns := k.namespaceForOrg(req.OrgID)
 	name := generateName()
 
 	sb := &v1.Sandbox{
@@ -279,7 +279,7 @@ func (k *K8sControlPlane) status(ctx context.Context, req saas.ForwardRequest) (
 
 // list returns every sandbox in the org namespace carrying the org label.
 func (k *K8sControlPlane) list(ctx context.Context, req saas.ForwardRequest) (saas.ForwardResponse, error) {
-	ns := tenant.NamespaceForOrg(req.OrgID)
+	ns := k.namespaceForOrg(req.OrgID)
 	var sbs v1.SandboxList
 	err := k.c.List(ctx, &sbs,
 		client.InNamespace(ns),
@@ -328,7 +328,7 @@ func (k *K8sControlPlane) terminate(ctx context.Context, req saas.ForwardRequest
 // collapsing both to not_found so a cross-org probe cannot map ids. The org id is
 // taken ONLY from the verified request.
 func (k *K8sControlPlane) getOwned(ctx context.Context, orgID, name string) (*v1.Sandbox, bool) {
-	ns := tenant.NamespaceForOrg(orgID)
+	ns := k.namespaceForOrg(orgID)
 	var sb v1.Sandbox
 	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
 		return nil, false
