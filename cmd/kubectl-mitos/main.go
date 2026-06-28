@@ -24,6 +24,7 @@ import (
 	"os"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	v1 "mitos.run/mitos/api/v1"
@@ -36,6 +37,10 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(v1.AddToScheme(scheme))
+	// corev1 so the client can read the per-sandbox <name>-sandbox-token Secret
+	// the exec command needs for the bearer token; without it every exec fails
+	// with "no kind is registered for the type v1.Secret" (issue #528).
+	utilruntime.Must(corev1.AddToScheme(scheme))
 }
 
 const usage = `kubectl mitos: inspect and operate mitos.run sandbox objects
