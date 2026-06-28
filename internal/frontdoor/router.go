@@ -33,14 +33,16 @@ var marketingSegments = map[string]bool{
 }
 
 // authSegments are the first-segment values that map to the console upstream
-// but do NOT require a session (login, signup, verification, and onboarding
-// are all public-facing flows).
+// but do NOT require a session (login, signup, verification, onboarding, and
+// webhook ingress are all public-facing flows). Billing providers POST to
+// /webhooks/* without a session; the console handler is signature-gated.
 var authSegments = map[string]bool{
 	"login":      true,
 	"signup":     true,
 	"verify":     true,
 	"auth":       true,
 	"onboarding": true,
+	"webhooks":   true,
 }
 
 // appSegments are the first-segment values that map to the console upstream
