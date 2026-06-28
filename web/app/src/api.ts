@@ -20,6 +20,13 @@ export type Capabilities = {
   secrets: { providers: string[] }
   proof: boolean
   ownership: 'self-hosted' | 'hosted'
+  // authConnectors is the sorted list of configured social-login providers.
+  // Present when the server is new enough to return it; absent on old deploys.
+  authConnectors?: string[]
+}
+
+export type AuthConnectorsResponse = {
+  connectors: string[]
 }
 
 export type Instruments = {
@@ -150,6 +157,10 @@ export async function post<T>(path: string, body: unknown): Promise<T | null> {
 
 export const api = {
   capabilities: () => get<Capabilities>('/console/capabilities'),
+  // authConnectors fetches the public /auth/connectors endpoint which returns
+  // the configured social-login providers without requiring a session. The SPA
+  // reads this before login to decide which social buttons to render.
+  authConnectors: () => get<AuthConnectorsResponse>('/auth/connectors').then((r) => r.connectors ?? []),
   instruments: () => get<Instruments>('/console/instruments'),
   secrets: () => get<{ secrets: SecretView[] }>('/console/secrets').then((r) => r.secrets ?? []),
   createSecret: async (name: string, value: string) => {
