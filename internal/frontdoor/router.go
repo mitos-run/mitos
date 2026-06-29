@@ -29,7 +29,11 @@ var marketingSegments = map[string]bool{
 	"compare":   true,
 	"blog":      true,
 	"about":     true,
-	"assets":    true,
+	// Astro emits its bundled CSS/JS under /_astro/ (the build.assets default).
+	// The console's Vite bundle lives under /assets/, so /assets is owned by the
+	// console (see authSegments), NOT marketing. Routing /assets to marketing
+	// black-holed the console SPA's JS/CSS and left every app page blank.
+	"_astro": true,
 }
 
 // authSegments are the first-segment values that map to the console upstream
@@ -43,6 +47,11 @@ var authSegments = map[string]bool{
 	"auth":       true,
 	"onboarding": true,
 	"webhooks":   true,
+	// The console SPA (Vite) emits its JS/CSS under /assets/. These are public
+	// (the login/signup pages load them before any session), so they belong on
+	// the console upstream with no session requirement. Marketing's bundle lives
+	// under /_astro/ (see marketingSegments), so there is no collision.
+	"assets": true,
 }
 
 // appSegments are the first-segment values that map to the console upstream
@@ -95,6 +104,20 @@ func Decide(path string) Decision {
 		return Decision{Upstream: "console", RequireSession: true}
 	}
 
-	// Non-reserved segment: treat as an org slug. Session required.
+	// A path whose final segment carries a file extension (a dot) is a static
+	// asset: marketing CSS/JS/images/fonts/sitemap/favicon, emitted at arbitrary
+	// root paths. Route it to marketing, public. The console's own Vite bundle
+	// lives under /assets (authSegments, matched above), and org slugs and SPA
+	// routes never contain a dot, so this does not steal app traffic.
+	last := path
+	if idx := strings.LastIndexByte(path, '/'); idx >= 0 {
+		last = path[idx+1:]
+	}
+	if strings.Contains(last, ".") {
+		return Decision{Upstream: "marketing"}
+	}
+
+	// Non-reserved, extension-less segment: treat as an org slug. Session
+	// required.
 	return Decision{Upstream: "console", RequireSession: true}
 }

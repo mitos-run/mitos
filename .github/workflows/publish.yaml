@@ -3,7 +3,13 @@ name: Publish signed images
 on:
   push:
     tags:
+      # release-please cuts both the legacy v* tags and component-prefixed
+      # tags (mitos-X.Y.Z). Match both so every release publishes images; the
+      # mitos-* tags are mapped to v* image tags in the metadata step below so
+      # the chart (which references images by its appVersion, vX.Y.Z) can pull
+      # them.
       - "v*"
+      - "mitos-*"
   workflow_dispatch:
     inputs:
       tag:
@@ -81,7 +87,8 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=ref,event=tag
+            type=ref,event=tag,enable=${{ !startsWith(github.ref_name, 'mitos-') }}
+            type=match,pattern=mitos-(.*),group=1,prefix=v
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
             type=sha
       - name: Build and push by digest

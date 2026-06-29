@@ -52,6 +52,17 @@ spec:
               value: {{ .Values.frontdoor.consoleURL | default (printf "http://mitos-console.%s.svc" (include "mitos.namespace" .)) | quote }}
             - name: MITOS_FRONTDOOR_SESSION_RESOLVE_URL
               value: {{ .Values.frontdoor.sessionResolveURL | default (printf "http://mitos-console.%s.svc/internal/session/resolve" (include "mitos.namespace" .)) | quote }}
+            {{- if .Values.frontdoor.marketingPagesAddrs }}
+            {{- /*
+            GitHub Pages anycast IP:port list. When set, the frontdoor dials
+            one of these IPs directly for marketing traffic, bypassing DNS for
+            mitos.run (which points at our gateway). TLS SNI and the upstream
+            Host header remain mitos.run; InsecureSkipVerify is never set.
+            Default empty (in-cluster mode uses DNS to the marketing Service).
+            */}}
+            - name: MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS
+              value: {{ .Values.frontdoor.marketingPagesAddrs | join "," | quote }}
+            {{- end }}
             {{- /*
             Shared bearer token for POST /internal/session/resolve. Sourced from
             the same Secret key (resolve-token) used by the expose proxy and the

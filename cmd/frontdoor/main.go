@@ -7,11 +7,15 @@
 // Configuration is entirely via environment variables; no CLI flags are used so
 // that secrets never appear in process listings.
 //
-//	MITOS_FRONTDOOR_ADDR              listen address (default ":8080")
-//	MITOS_FRONTDOOR_MARKETING_URL     base URL of the marketing upstream (required)
-//	MITOS_FRONTDOOR_CONSOLE_URL       base URL of the console upstream (required)
-//	MITOS_FRONTDOOR_SESSION_RESOLVE_URL URL of POST /internal/session/resolve (required)
-//	MITOS_IDENTITY_RESOLVE_TOKEN      bearer token for the session-resolve endpoint (required)
+//	MITOS_FRONTDOOR_ADDR                      listen address (default ":8080")
+//	MITOS_FRONTDOOR_MARKETING_URL             base URL of the marketing upstream (required)
+//	MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS     comma-separated GitHub Pages IP:port list;
+//	                                          when set, DNS for the marketing host is bypassed
+//	                                          and one of these addresses is dialed instead.
+//	                                          Example: "185.199.108.153:443,185.199.109.153:443"
+//	MITOS_FRONTDOOR_CONSOLE_URL               base URL of the console upstream (required)
+//	MITOS_FRONTDOOR_SESSION_RESOLVE_URL        URL of POST /internal/session/resolve (required)
+//	MITOS_IDENTITY_RESOLVE_TOKEN              bearer token for the session-resolve endpoint (required)
 package main
 
 import (
@@ -23,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,13 +70,27 @@ func main() {
 		log.Fatalf("frontdoor: invalid MITOS_FRONTDOOR_SESSION_RESOLVE_URL: %v", err)
 	}
 
+	// Parse MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS (optional). When present the
+	// marketing proxy bypasses DNS and dials one of these IPs directly, keeping
+	// TLS SNI and Host as the marketing URL host. The values are not secrets
+	// (they are public GitHub Pages IPs) so logging the count is acceptable.
+	var marketingPagesAddrs []string
+	if raw := os.Getenv("MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS"); raw != "" {
+		for _, a := range strings.Split(raw, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				marketingPagesAddrs = append(marketingPagesAddrs, a)
+			}
+		}
+	}
+
 	resolver := frontdoor.NewHTTPSessionResolver(resolveURL, resolveToken, nil)
 
 	proxy, err := frontdoor.NewProxy(frontdoor.ProxyConfig{
-		MarketingURL: marketingRaw,
-		ConsoleURL:   consoleRaw,
-		Resolver:     resolver,
-		Logger:       logger,
+		MarketingURL:        marketingRaw,
+		MarketingPagesAddrs: marketingPagesAddrs,
+		ConsoleURL:          consoleRaw,
+		Resolver:            resolver,
+		Logger:              logger,
 	})
 	if err != nil {
 		log.Fatalf("frontdoor: build proxy: %v", err)
@@ -96,6 +115,7 @@ func main() {
 	logger.Info("frontdoor starting",
 		"addr", addr,
 		"marketing_url", marketingRaw,
+		"marketing_pages_addrs_count", len(marketingPagesAddrs),
 		"console_url", consoleRaw,
 		"resolve_url", resolveURL,
 	)

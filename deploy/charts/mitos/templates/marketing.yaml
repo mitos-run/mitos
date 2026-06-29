@@ -42,13 +42,30 @@ spec:
           # staging placeholder until the production image is available.
           image: {{ required "marketing.image is required when marketing.enabled is true; set it to the Astro dist OCI reference or a staging placeholder" .Values.marketing.image }}
           imagePullPolicy: IfNotPresent
+          # Run nginx directly, bypassing the nginx-unprivileged
+          # /docker-entrypoint.sh. Its startup scripts (10-listen-on-ipv6,
+          # 20-envsubst) write to /etc/nginx/conf.d, which readOnlyRootFilesystem
+          # forbids. The image ships a STATIC default.conf that already binds both
+          # 8080 and [::]:8080, so those scripts are no-ops; skipping them lets the
+          # pod run with a read-only root. nginx still writes its pid and temp dirs
+          # under /tmp (per nginx.conf), backed by the emptyDir below.
+          command: ["nginx", "-g", "daemon off;"]
           ports:
             - name: http
-              containerPort: 80
+              # The marketing image is nginxinc/nginx-unprivileged, which runs as
+              # uid 101 and listens on 8080 (it cannot bind 80 as non-root). The
+              # Service targetPort and the probes reference this named port, so
+              # the Service still exposes 80 while the pod serves on 8080.
+              containerPort: {{ .Values.marketing.containerPort | default 8080 }}
           resources:
             {{- toYaml .Values.marketing.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
+            # Read-only root is safe here: the entrypoint scripts that wrote to
+            # /etc/nginx are bypassed (command above runs nginx directly), and
+            # nginx's pid + temp paths live under /tmp (writable emptyDir below).
+            # Fully hardened: non-root uid 101, all caps dropped, no privilege
+            # escalation, read-only root filesystem.
             readOnlyRootFilesystem: true
             capabilities:
               drop:
@@ -65,6 +82,20 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
+          # readOnlyRootFilesystem (above) blocks all writes to the image layer.
+          # nginxinc/nginx-unprivileged still needs a writable /tmp (it writes
+          # its pid and request temp files there) and /var/cache/nginx. Mount
+          # emptyDir on both so the pod runs read-only-root without crashlooping.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
