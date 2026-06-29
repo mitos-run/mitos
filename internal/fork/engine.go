@@ -1492,7 +1492,7 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	// (husk pods #18) isolates each fork's interface, live-forking a networked
 	// sandbox is unsupported.
 	if e.networkEnabled() {
-		return nil, fmt.Errorf("live fork (ForkRunning) of a networked sandbox is not supported yet; tracked in #18")
+		return nil, fmt.Errorf("live fork (ForkRunning) of a networked sandbox is not supported yet; tracked in #336")
 	}
 
 	if pauseSource && source.fcClient != nil {
