@@ -146,8 +146,17 @@ func proxyDNATChainName() string {
 // is baked identically into every fork's HTTP_PROXY; the per-tap DNAT is what
 // makes it route to this fork's own proxy context. All values are addresses,
 // safe to log.
+//
+// The function creates the ip nat table and the prerouting chain idempotently
+// before the per-tap rule so that nft does not error on a missing chain at
+// runtime. The chain and table declarations mirror RenderMasquerade's pattern:
+// both use `add` (not `create`), which makes them no-ops if the object already
+// exists. The chain is NOT flushed before the rule because each fork's rule is
+// keyed by its own tap name; flushing would destroy sibling forks' rules.
 func RenderProxyDNAT(tap string, sentinel net.IP, proxyPort int, gatewayIP net.IP) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "add table ip %s\n", NatTableName())
+	fmt.Fprintf(&b, "add chain ip %s %s { type nat hook prerouting priority -100 ; policy accept ; }\n", NatTableName(), proxyDNATChainName())
 	fmt.Fprintf(&b, "add rule ip %s %s iifname %q ip daddr %s tcp dport %d dnat to %s:%d\n",
 		NatTableName(), proxyDNATChainName(), tap, sentinel, proxyPort, gatewayIP, proxyPort)
 	return b.String()

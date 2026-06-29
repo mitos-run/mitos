@@ -526,6 +526,13 @@ func TestRenderSandboxInputChainNoResolverDropsAll(t *testing.T) {
 
 func TestRenderProxyDNAT(t *testing.T) {
 	out := RenderProxyDNAT("mitos0", net.ParseIP("169.254.169.2"), 3128, net.ParseIP("10.200.0.5"))
+	// Idempotent table + chain creation must precede the rule.
+	if !strings.Contains(out, "add table ip "+NatTableName()) {
+		t.Fatalf("nat table creation missing: %q", out)
+	}
+	if !strings.Contains(out, "add chain ip "+NatTableName()+" "+proxyDNATChainName()) {
+		t.Fatalf("prerouting chain creation missing: %q", out)
+	}
 	// DNAT the fork-stable sentinel to THIS fork's gateway:proxyport.
 	if !strings.Contains(out, "ip daddr 169.254.169.2 tcp dport 3128") {
 		t.Fatalf("missing sentinel match: %q", out)
