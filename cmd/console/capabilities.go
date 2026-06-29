@@ -1,11 +1,23 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"mitos.run/mitos/internal/saas/console"
 )
+
+// knownAuthConnectors is the closed set of social-login provider identifiers
+// the console recognises. Values outside this set are silently dropped so a
+// misconfigured env var does not expose unexpected connector URLs.
+var knownAuthConnectors = map[string]bool{
+	"github": true,
+	"google": true,
+}
 
 // capabilitiesFromEnv builds the console capabilities document from the
 // server-controlled environment the Helm chart sets. This is the single source
@@ -25,15 +37,64 @@ func capabilitiesFromEnv() console.Capabilities {
 		orgSwitcher = true
 	}
 	return console.Capabilities{
-		Edition:     edition,
-		Billing:     envBool("MITOS_CONSOLE_BILLING"),
-		Signup:      envBool("MITOS_CONSOLE_SIGNUP"),
-		Teams:       true,
-		IDP:         "oidc",
-		OrgSwitcher: orgSwitcher,
-		Secrets:     console.SecretsCapability{Providers: providers},
-		Proof:       true,
-		Ownership:   ownership,
+		Edition:        edition,
+		Billing:        envBool("MITOS_CONSOLE_BILLING"),
+		Signup:         envBool("MITOS_CONSOLE_SIGNUP"),
+		Teams:          true,
+		IDP:            "oidc",
+		OrgSwitcher:    orgSwitcher,
+		Secrets:        console.SecretsCapability{Providers: providers},
+		Proof:          true,
+		Ownership:      ownership,
+		AuthConnectors: parseAuthConnectors(os.Getenv("MITOS_CONSOLE_AUTH_CONNECTORS")),
+	}
+}
+
+// parseAuthConnectors splits a comma-separated connector list, filters to
+// known providers, deduplicates, and sorts. Unknown values are silently
+// dropped. The result is always non-nil (empty slice, not nil) so the JSON
+// field serialises as [] rather than null when no connectors are configured.
+func parseAuthConnectors(raw string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, v := range splitNonEmpty(raw) {
+		if knownAuthConnectors[v] && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// newAuthConnectorsHandler returns a PUBLIC http.HandlerFunc for
+// GET /auth/connectors. It responds with the connector list from caps so the
+// Login/Signup SPA pages can render only the social-login buttons for
+// providers that are actually wired up. No auth cookie is required: the
+// response carries no org data, only server-controlled provider names.
+func newAuthConnectorsHandler(caps console.Capabilities) http.HandlerFunc {
+	// Capture the slice at startup; it is immutable for the lifetime of the
+	// process (capabilities change only on redeploy).
+	connectors := caps.AuthConnectors
+	if connectors == nil {
+		connectors = []string{}
+	}
+	type response struct {
+		Connectors []string `json:"connectors"`
+	}
+	body, err := json.Marshal(response{Connectors: connectors})
+	if err != nil {
+		// json.Marshal on a []string never errors; this branch is unreachable
+		// in practice, but keeps the compiler and errcheck satisfied.
+		panic(fmt.Sprintf("newAuthConnectorsHandler: marshal: %v", err))
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
 	}
 }
 

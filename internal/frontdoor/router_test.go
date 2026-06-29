@@ -27,7 +27,12 @@ func TestDecide(t *testing.T) {
 		{"/blog", "marketing", false, false},
 		{"/blog/post-1", "marketing", false, false},
 		{"/about", "marketing", false, false},
-		{"/assets/x.js", "marketing", false, false},
+		{"/assets/x.js", "console", false, false},
+		{"/_astro/x.css", "marketing", false, false},
+		{"/og-image.png", "marketing", false, false},
+		{"/favicon.ico", "marketing", false, false},
+		{"/sitemap.xml", "marketing", false, false},
+		{"/some-org-slug", "console", true, false},
 
 		// Auth + onboarding paths: console, no session.
 		{"/login", "console", false, false},
@@ -37,6 +42,11 @@ func TestDecide(t *testing.T) {
 		{"/auth/callback", "console", false, false},
 		{"/onboarding", "console", false, false},
 		{"/onboarding/org", "console", false, false},
+
+		// Webhook paths: console, no session required. Billing providers POST
+		// without a session so this must be public, exactly like onboarding.
+		{"/webhooks/billing", "console", false, false},
+		{"/webhooks/anything", "console", false, false},
 
 		// App paths: console, session required.
 		{"/console", "console", true, false},

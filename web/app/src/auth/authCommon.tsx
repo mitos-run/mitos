@@ -5,8 +5,10 @@
 // Brand: Fluorescence tokens only; no hardcoded hex. Mark (glow) + wordmark.
 // A11y: aria-hidden glyphs, magenta focus ring, keyboard-operable targets.
 
+import { useState, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { Mark, Card } from '@mitos/brand'
+import { api } from '../api'
 
 // ---- Provider glyphs -------------------------------------------------------
 // Inline SVGs: aria-hidden, focusable=false. Parent carries the accessible name.
@@ -141,15 +143,50 @@ export const authCommonStyles = `
 }
 `
 
+// ---- Provider glyph map ----------------------------------------------------
+// Maps connector id to its display label and glyph element. Extend this map
+// when a new provider is added server-side.
+
+type ProviderMeta = { label: string; glyph: ReactNode }
+
+const providerMeta: Record<string, ProviderMeta> = {
+  github: { label: 'Continue with GitHub', glyph: <GitHubGlyph /> },
+  google: { label: 'Continue with Google', glyph: <GoogleGlyph /> },
+}
+
+// ---- useAuthConnectors ------------------------------------------------------
+// Fetches the configured social-login connectors from the public
+// GET /auth/connectors endpoint. Returns [] while loading or on error so the
+// "or" divider is hidden until the server answers; the email form is always
+// visible. The fetch is performed once per component mount; connectors change
+// only on redeploy. State is never updated after the component unmounts.
+
+export function useAuthConnectors(): string[] {
+  const [connectors, setConnectors] = useState<string[]>([])
+  useEffect(() => {
+    let live = true
+    api
+      .authConnectors()
+      .then((c) => { if (live) setConnectors(c) })
+      .catch(() => { if (live) setConnectors([]) })
+    return () => { live = false }
+  }, [])
+  return connectors
+}
+
 // ---- ProviderButtons --------------------------------------------------------
-// The two full-navigation <a> links (GitHub first, then Google) plus the
-// hairline "or" divider. Uses shared .auth-link-btn / .auth-divider classes.
+// Renders one full-navigation <a> link per configured connector plus the
+// hairline "or" divider. When connectors is empty (server returned none or
+// the fetch is still in flight) nothing is rendered, so the email form stands
+// alone without an orphaned divider.
 
 export type ProviderButtonsProps = {
   next: string
+  connectors: string[]
 }
 
-export function ProviderButtons({ next }: ProviderButtonsProps) {
+export function ProviderButtons({ next, connectors }: ProviderButtonsProps) {
+  if (connectors.length === 0) return null
   return (
     <>
       <div
@@ -159,14 +196,16 @@ export function ProviderButtons({ next }: ProviderButtonsProps) {
           gap: 'var(--space-3)',
         }}
       >
-        <a href={connectorHref('github', next)} className="auth-link-btn">
-          <GitHubGlyph />
-          Continue with GitHub
-        </a>
-        <a href={connectorHref('google', next)} className="auth-link-btn">
-          <GoogleGlyph />
-          Continue with Google
-        </a>
+        {connectors.map((id) => {
+          const meta = providerMeta[id]
+          if (!meta) return null
+          return (
+            <a key={id} href={connectorHref(id, next)} className="auth-link-btn">
+              {meta.glyph}
+              {meta.label}
+            </a>
+          )
+        })}
       </div>
       <div className="auth-divider" aria-hidden>
         <hr className="auth-divider-line" />

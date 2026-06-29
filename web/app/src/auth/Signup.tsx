@@ -12,7 +12,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button } from '@mitos/brand'
 import { post } from '../api'
-import { AuthShell, ProviderButtons, resolveNext } from './authCommon'
+import { AuthShell, ProviderButtons, resolveNext, useAuthConnectors } from './authCommon'
 
 // ---- Page-specific styles --------------------------------------------------
 
@@ -65,6 +65,7 @@ export type SignupProps = {
 
 export function Signup({ next, initialEmail }: SignupProps) {
   const resolvedNext = resolveNext(next)
+  const connectors = useAuthConnectors()
 
   // Resolve ?email= query param for the Login-to-Signup email handoff.
   const emailDefault =
@@ -146,10 +147,10 @@ export function Signup({ next, initialEmail }: SignupProps) {
         )}
       </div>
 
-      {/* Provider links (always visible; social signs up new users too) */}
+      {/* Provider links: only renders buttons for configured providers. */}
       {signupState !== 'success' && (
         <>
-          <ProviderButtons next={resolvedNext} />
+          <ProviderButtons next={resolvedNext} connectors={connectors} />
 
           {/* Email form */}
           <form

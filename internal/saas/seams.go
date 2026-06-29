@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+
+	"mitos.run/mitos/internal/apierr"
 )
 
 // QuotaEnforcer is the seam the quota and rate-limit workstream (issue #213)
@@ -66,6 +68,29 @@ type ForwardResponse struct {
 	Header     http.Header
 	Body       []byte
 	BodyStream io.ReadCloser
+}
+
+// RuntimeTarget is the resolved backend for a runtime call: the sandbox's
+// runtime endpoint (host:port of forkd :9091 or the husk-stub) and the
+// per-sandbox bearer token to present to it. SandboxID is the
+// control-plane-resolved sandbox name the proxy puts on the ?sandbox= query and
+// the X-Sandbox-Id header. The Token VALUE is a secret and is never logged.
+type RuntimeTarget struct {
+	Endpoint  string
+	Token     string
+	SandboxID string
+}
+
+// RuntimeResolver is the control-plane seam the gateway uses to proxy a WebSocket
+// runtime call. The interactive PTY rides the Connect Exec RPC over a WebSocket,
+// which is a connection UPGRADE: the ForwardRequest/ForwardResponse buffer-and-
+// stream model cannot carry a hijacked connection, so the gateway resolves the
+// org-scoped target here and performs the upgrade itself (it owns the
+// ResponseWriter). A missing or cross-org sandbox returns a not_found APIError so
+// another org's existence is never revealed; the OrgID passed is taken ONLY from
+// the verified key. A nil *apierr.Error means success.
+type RuntimeResolver interface {
+	ResolveRuntime(ctx context.Context, orgID, sandboxID string) (RuntimeTarget, *apierr.Error)
 }
 
 // ControlPlane is the seam the gateway forwards authenticated, org-scoped

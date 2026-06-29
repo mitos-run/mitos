@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // ErrNoSession is returned by SessionResolver.Resolve when the token does not
@@ -38,6 +41,13 @@ type ProxyConfig struct {
 	// MarketingURL is the base URL of the marketing upstream (e.g. the Next.js
 	// site). Required.
 	MarketingURL string
+	// MarketingPagesAddrs is the list of GitHub Pages anycast IP:port
+	// addresses (e.g. ["185.199.108.153:443", "185.199.109.153:443"]) to
+	// dial when proxying the marketing upstream. When non-empty, DNS
+	// resolution for the marketing host is bypassed; TLS SNI and the
+	// upstream Host header remain the marketing URL host (mitos.run). When
+	// empty, the marketing host is resolved normally via DNS.
+	MarketingPagesAddrs []string
 	// ConsoleURL is the base URL of the console upstream. Required.
 	ConsoleURL string
 	// Resolver resolves session tokens to identities. Required.
@@ -84,7 +94,12 @@ func NewProxy(cfg ProxyConfig) (*Proxy, error) {
 		log = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
 
-	mkt := buildReverseProxy(mktURL, "marketing", log)
+	var mkt *httputil.ReverseProxy
+	if len(cfg.MarketingPagesAddrs) > 0 {
+		mkt = buildPagesMarketingReverseProxy(mktURL, cfg.MarketingPagesAddrs, "marketing", log)
+	} else {
+		mkt = buildReverseProxy(mktURL, "marketing", log)
+	}
 	con := buildReverseProxy(conURL, "console", log)
 
 	return &Proxy{
@@ -105,6 +120,80 @@ func buildReverseProxy(target *url.URL, label string, log *slog.Logger) *httputi
 		log.Info("upstream error", "upstream", label, "status", http.StatusBadGateway)
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 	}
+	return rp
+}
+
+// buildPagesMarketingReverseProxy builds a marketing reverse proxy that dials
+// pagesAddrs instead of resolving target.Host via DNS. It is used when the
+// marketing site is hosted on GitHub Pages and mitos.run DNS points at our own
+// gateway (which would loop if we resolved normally).
+//
+// Security properties:
+//   - TLS SNI stays target.Host (mitos.run): Go's http.Transport derives SNI
+//     from the URL host, not from the dialed address, so the Pages cert is
+//     validated correctly.
+//   - InsecureSkipVerify is never set: the GitHub Pages cert is valid for
+//     mitos.run.
+//   - The upstream Host header is pinned to target.Host by the wrapped
+//     Director, regardless of the incoming client Host value.
+//   - The dial override is scoped to the marketing upstream only; console
+//     dials are unaffected.
+//
+// pagesAddrs are dialed round-robin using a lock-free atomic counter.
+func buildPagesMarketingReverseProxy(target *url.URL, pagesAddrs []string, label string, log *slog.Logger) *httputil.ReverseProxy {
+	rp := buildReverseProxy(target, label, log)
+
+	// Wrap the Director to pin the upstream Host header to the marketing URL
+	// host. This is necessary because req.Host may carry the original client
+	// Host value (which is correct for mitos.run in production but may be
+	// absent or wrong in tests and non-standard deployments).
+	origDirector := rp.Director
+	rp.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Host = target.Host
+	}
+
+	// Construct the needle: the host:port string the http.Transport will pass
+	// to DialContext when dialing the marketing upstream.
+	targetPort := target.Port()
+	if targetPort == "" {
+		switch target.Scheme {
+		case "https":
+			targetPort = "443"
+		default:
+			targetPort = "80"
+		}
+	}
+	needle := net.JoinHostPort(target.Hostname(), targetPort)
+
+	// Clone http.DefaultTransport to inherit its production-ready defaults
+	// (connection pooling, keep-alive, HTTP/2 support). Only DialContext is
+	// overridden; TLSClientConfig is left untouched so ServerName defaults to
+	// the URL host (mitos.run) for SNI, and InsecureSkipVerify stays false.
+	dt, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		dt = &http.Transport{}
+	}
+	base := dt.Clone()
+
+	origDial := base.DialContext
+	if origDial == nil {
+		d := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		origDial = d.DialContext
+	}
+
+	var counter atomic.Uint64
+	base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == needle {
+			n := counter.Add(1) % uint64(len(pagesAddrs))
+			return origDial(ctx, network, pagesAddrs[n])
+		}
+		return origDial(ctx, network, addr)
+	}
+	rp.Transport = base
 	return rp
 }
 
@@ -137,14 +226,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dec.RequireSession {
-		id, authed := p.resolveSession(r)
-		if !authed {
-			// 302 to /login?next=<escaped original path>
-			next := url.QueryEscape(r.URL.RequestURI())
-			http.Redirect(w, r, "/login?next="+next, http.StatusFound)
-			return
+		// Resolve the session so an authenticated request carries its account and
+		// org to the console (X-Mitos-Account / X-Mitos-Org). We do NOT redirect
+		// the anonymous case: the console owns auth. Its BFF (/console/*) returns
+		// 401 so the SPA detects the signed-out state, and it serves the SPA shell
+		// (which routes to login) for page loads. A frontdoor 302 here turned the
+		// SPA's /console/capabilities probe into a redirect and hung every console
+		// page on "loading".
+		if id, authed := p.resolveSession(r); authed {
+			p.injectIdentity(r, id)
 		}
-		p.injectIdentity(r, id)
 		p.console.ServeHTTP(w, r)
 		return
 	}
