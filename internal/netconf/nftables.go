@@ -133,6 +133,35 @@ func SandboxChainName(tap string) string {
 	return "sb_" + tap
 }
 
+// proxyDNATChainName returns the prerouting chain name inside the nat table
+// that holds per-tap DNAT rules for the sentinel proxy address. It follows the
+// masquerade chain naming convention (the masquerade chain is named
+// "postrouting"; this prerouting chain is the pre-path analog).
+func proxyDNATChainName() string {
+	return "prerouting"
+}
+
+// RenderProxyDNAT redirects the fork-stable sentinel proxy address to THIS
+// fork's gateway, where the per-node egress proxy listens. The sentinel value
+// is baked identically into every fork's HTTP_PROXY; the per-tap DNAT is what
+// makes it route to this fork's own proxy context. All values are addresses,
+// safe to log.
+func RenderProxyDNAT(tap string, sentinel net.IP, proxyPort int, gatewayIP net.IP) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "add rule ip %s %s iifname %q ip daddr %s tcp dport %d dnat to %s:%d\n",
+		NatTableName(), proxyDNATChainName(), tap, sentinel, proxyPort, gatewayIP, proxyPort)
+	return b.String()
+}
+
+// RenderProxyAccept allows the guest to reach the per-node proxy listener on
+// the gateway address, ahead of the allowlist. The proxy enforces upstream
+// egress policy; the rule here just opens the path to the proxy listener so
+// the guest can connect before the per-sandbox chain's final verdict.
+func RenderProxyAccept(table, chain string, guestIP, gatewayIP net.IP, proxyPort int) string {
+	return fmt.Sprintf("add rule inet %s %s ip saddr %s ip daddr %s tcp dport %d accept\n",
+		table, chain, guestIP, gatewayIP, proxyPort)
+}
+
 // SandboxAllowSetName returns the per-sandbox dynamic allow set name for a tap.
 // The set holds (ipv4_addr . inet_service) elements with a timeout flag and is
 // populated at runtime by the DNS proxy as it resolves allowlisted names. The

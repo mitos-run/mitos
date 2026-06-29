@@ -523,3 +523,25 @@ func TestRenderSandboxInputChainNoResolverDropsAll(t *testing.T) {
 		t.Errorf("guest-to-local drop absent with no resolver:\n%s", out)
 	}
 }
+
+func TestRenderProxyDNAT(t *testing.T) {
+	out := RenderProxyDNAT("mitos0", net.ParseIP("169.254.169.2"), 3128, net.ParseIP("10.200.0.5"))
+	// DNAT the fork-stable sentinel to THIS fork's gateway:proxyport.
+	if !strings.Contains(out, "ip daddr 169.254.169.2 tcp dport 3128") {
+		t.Fatalf("missing sentinel match: %q", out)
+	}
+	if !strings.Contains(out, "dnat to 10.200.0.5:3128") {
+		t.Fatalf("missing dnat target: %q", out)
+	}
+	if !strings.Contains(out, NatTableName()) {
+		t.Fatalf("dnat must live in the nat table: %q", out)
+	}
+}
+
+func TestRenderProxyAccept(t *testing.T) {
+	out := RenderProxyAccept(SharedTableName(), SandboxChainName("mitos0"),
+		net.ParseIP("10.200.0.6"), net.ParseIP("10.200.0.5"), 3128)
+	if !strings.Contains(out, "ip saddr 10.200.0.6 ip daddr 10.200.0.5 tcp dport 3128 accept") {
+		t.Fatalf("proxy accept rule wrong: %q", out)
+	}
+}
