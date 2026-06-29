@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.7.0](https://github.com/mitos-run/mitos/compare/v1.6.0...v1.7.0) (2026-06-29)
+
+
+### Features
+
+* **chart:** hardened-runtime forkd profile (Talos seccomp + CAP_FOWNER) ([732a95f](https://github.com/mitos-run/mitos/commit/732a95fffd12c90878b500f8f92a4fdfe1572558))
+* **cli:** add HostedBackend for sandbox verbs against the hosted gateway ([103ad67](https://github.com/mitos-run/mitos/commit/103ad678ca6ba7dc5d1a9c3458e8d6a456affef9))
+* **cli:** hosted mode (API key + base URL) for sandbox create/exec/fork/ls/terminate ([794e950](https://github.com/mitos-run/mitos/commit/794e9501de09295d7f08f35cb107aa7f828a08b2))
+* **console:** show social login buttons only for configured connectors ([4e9d741](https://github.com/mitos-run/mitos/commit/4e9d74154ad5bc989704a5500d61150be52ae62c))
+* **console:** show social login buttons only for configured connectors ([f88d8c8](https://github.com/mitos-run/mitos/commit/f88d8c811a43eddf80a478d072ead9e1bb401d9e))
+* **controller:** map sandbox cpu to the husk limit with a low request for node overcommit ([6749205](https://github.com/mitos-run/mitos/commit/6749205fe879c004c9f9d381fab4735ce93f74a9))
+* **controller:** map sandbox cpu to the husk limit with a low request for node overcommit ([10304f1](https://github.com/mitos-run/mitos/commit/10304f16a765f156bceb82170b96e82291648fda))
+* **frontdoor:** add Pages dial override to marketing proxy (SNI pinned, no InsecureSkipVerify) ([c3e25b8](https://github.com/mitos-run/mitos/commit/c3e25b83cee4962f0fd784b65a339316c2679a21))
+* **frontdoor:** parse MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS and wire into ProxyConfig ([ef47cbe](https://github.com/mitos-run/mitos/commit/ef47cbe95e5f3f677f79e0ff9acc6c5714ac4cdf))
+* **frontdoor:** proxy marketing to github pages (sni/host pinned) and mount resolve-token under frontdoor ([1b1d231](https://github.com/mitos-run/mitos/commit/1b1d231dec5ce1efc9f49262ec680adebd343436))
+* **frontdoor:** render MITOS_FRONTDOOR_MARKETING_PAGES_ADDRS from frontdoor.marketingPagesAddrs ([80fce20](https://github.com/mitos-run/mitos/commit/80fce20bbc3fef49987a8693114e380646a409c8))
+* **gateway:** proxy the interactive PTY WebSocket to the owning sandbox ([#532](https://github.com/mitos-run/mitos/issues/532)) ([7975556](https://github.com/mitos-run/mitos/commit/797555652bc19a881953575b8153a1e6090b3eee))
+* **gateway:** single-tenant-namespace override for the control plane ([399bd85](https://github.com/mitos-run/mitos/commit/399bd85545f772f33ada2bb053d34dfc9d0d8741))
+* **gateway:** single-tenant-namespace override for the control plane ([6bb2773](https://github.com/mitos-run/mitos/commit/6bb2773ce7d0d2a28845f406f9775d1a2be0833e))
+* **onboarding:** add E2ETokenSink seam and MemE2ETokenSink ([62393e4](https://github.com/mitos-run/mitos/commit/62393e436c04fa956b7af7bff6e25f88b55ea1e3))
+* **onboarding:** E2EHandler with bearer + domain + sink gates ([514686b](https://github.com/mitos-run/mitos/commit/514686b44009b102dc971bc559830a94a7e95154))
+* **onboarding:** gated QA verify-token seam for hosted e2e ([55a8767](https://github.com/mitos-run/mitos/commit/55a8767a2880134e820be191f6ead3077acd3063))
+* **onboarding:** wire E2E sink and mount gated endpoint in console ([3ed8b56](https://github.com/mitos-run/mitos/commit/3ed8b569ed377ff312f65aaeec300ea6f09605aa))
+
+
+### Bug Fixes
+
+* accept mitos_ keys in hosted harness; env-configurable signup credit ([6f24445](https://github.com/mitos-run/mitos/commit/6f244450f09523a1b3feb68f9f4c66f8984651d7))
+* accept mitos_ keys in hosted harness; env-configurable signup credit ([45bc82f](https://github.com/mitos-run/mitos/commit/45bc82f3edcacce3eaede930971f0295a48b41d2))
+* **chart:** harden marketing pod (read-only root) ([ae0fd18](https://github.com/mitos-run/mitos/commit/ae0fd18f6ba21067265901e13129a886e96f5e80))
+* **chart:** marketing container port 8080 ([96668bc](https://github.com/mitos-run/mitos/commit/96668bce5fd81f431d3b70e56e761d93e5cef0a3))
+* **chart:** marketing container port 8080 (nginx-unprivileged) so the service has endpoints ([8c4ee47](https://github.com/mitos-run/mitos/commit/8c4ee47c41ac933101b15c42a27c53ca7713d13c))
+* **chart:** marketing read-only-root writable mounts ([4ffd756](https://github.com/mitos-run/mitos/commit/4ffd75673eb512cb18e8ecc6e3e35820a8cbe904))
+* **chart:** marketing readOnlyRootFilesystem off ([3a53b08](https://github.com/mitos-run/mitos/commit/3a53b08cf95a25a1320f53586452a0711ddac41c))
+* **chart:** marketing readOnlyRootFilesystem off (nginx-unprivileged entrypoint needs writes) ([d4cd8af](https://github.com/mitos-run/mitos/commit/d4cd8afa16d4fff4548da92adeb758aedeb5d796))
+* **chart:** re-enable marketing readOnlyRootFilesystem by bypassing nginx entrypoint ([75deca7](https://github.com/mitos-run/mitos/commit/75deca76fb6bc8e251d18189f9da854fa28807d7))
+* **charts:** mount MITOS_IDENTITY_RESOLVE_TOKEN in console when frontdoor.enabled ([3c60d05](https://github.com/mitos-run/mitos/commit/3c60d05abf38f2c11deaa71cc6f857bd05d889dd))
+* **chart:** writable /tmp + /var/cache/nginx for read-only-root marketing pod ([04de768](https://github.com/mitos-run/mitos/commit/04de768c90c8a48f8b22860c03b25b2569a314d9))
+* **forkd:** keep jailer template links CoW across the chroot mount ([#526](https://github.com/mitos-run/mitos/issues/526)) ([d79bd9d](https://github.com/mitos-run/mitos/commit/d79bd9d875157fe5cdb7134f2545ac142897bcf3))
+* **fork:** gate SIGUSR2 broadcast on a handler ([#467](https://github.com/mitos-run/mitos/issues/467)) and reap stale-digest husk pods ([#461](https://github.com/mitos-run/mitos/issues/461)) ([#509](https://github.com/mitos-run/mitos/issues/509)) ([fa5d6ad](https://github.com/mitos-run/mitos/commit/fa5d6ad37068842a3543489fc0384e9fbb7d160d))
+* **frontdoor:** /assets is the console Vite bundle (not marketing); /_astro is marketing ([da29d46](https://github.com/mitos-run/mitos/commit/da29d463c73f0b694c1759640aa8be7844887d3a))
+* **frontdoor:** extension-based static assets to marketing ([14ad3b2](https://github.com/mitos-run/mitos/commit/14ad3b29b07795bbbdeea289fdeee268d7c12ce7))
+* **frontdoor:** fix race in Pages dial test and uint64 index overflow ([46b50d9](https://github.com/mitos-run/mitos/commit/46b50d92334e72498cf227c2a07614ab839fb065))
+* **frontdoor:** no session 302 on console paths ([3ed584a](https://github.com/mitos-run/mitos/commit/3ed584a705f86f57d3ee09ae4f72b4d3b0883c82))
+* **frontdoor:** pass anon console requests through (console owns auth) instead of 302 to login ([6aaca62](https://github.com/mitos-run/mitos/commit/6aaca6230119de7714e26b16999abbe65b6ea079))
+* **frontdoor:** route /assets to console, /_astro to marketing ([5ae12d0](https://github.com/mitos-run/mitos/commit/5ae12d05553e49114109500b1d57dd2419965efb))
+* **frontdoor:** route /webhooks/* to console as public (was 302 to login) ([7398341](https://github.com/mitos-run/mitos/commit/739834162d5acc41829708f7249eba5a4b8208be))
+* **frontdoor:** route /webhooks/* to console as public (was 302 to login) ([086b9e3](https://github.com/mitos-run/mitos/commit/086b9e31a7947ff7f9d4ada9b409f18c8de3a43e))
+* **frontdoor:** route root static assets (by extension) to marketing so the site's images/css load ([2c0cdc2](https://github.com/mitos-run/mitos/commit/2c0cdc2537ecc8c7e2615752bd258541874104da))
+* **gateway:** handle POST/GET /v1/templates so hosted SDK create works ([e787c5e](https://github.com/mitos-run/mitos/commit/e787c5e6db3d2fcccae1ac808c38536bd8ea651f))
+* **gateway:** handle POST/GET /v1/templates so hosted SDK create works ([b1af307](https://github.com/mitos-run/mitos/commit/b1af307ed6debdc162c887dfb78951c0cc0820f5))
+* **gateway:** map POST /v1/fork to sandbox.create so hosted SDK create+fork works ([47a27f9](https://github.com/mitos-run/mitos/commit/47a27f991407213b2901a4967ad67a962ca4fac4))
+* **gateway:** map POST /v1/fork to sandbox.create so hosted SDK create+fork works ([d9dd45d](https://github.com/mitos-run/mitos/commit/d9dd45dbdac6e3babef98621575999a05b5496c5))
+* **husk-stub:** remove stale per-vm jailer chroot before start so retries do not fail MkdirOldRoot ([bc37fbb](https://github.com/mitos-run/mitos/commit/bc37fbb7572b2e3dfa1071905c2f5c8061a3e0b8))
+* **husk-stub:** remove stale per-vm jailer chroot before start so retries do not fail MkdirOldRoot ([b58340f](https://github.com/mitos-run/mitos/commit/b58340fecb008b716f31caaa4fdc4591e304422c))
+* **husk:** self-heal a dead Firecracker instead of advertising a dead slot ([72fc826](https://github.com/mitos-run/mitos/commit/72fc8261f46b7da15eece49a14cd8b02ffe8996e))
+* **kubectl-mitos:** register corev1 so exec can read the token Secret ([aff190f](https://github.com/mitos-run/mitos/commit/aff190f43180240eb83c480c59842ba529198633))
+* **onboarding:** align E2EHandler gate numbering in comments with docstring ([f5f27fc](https://github.com/mitos-run/mitos/commit/f5f27fc68b5bf04359dcd73873e97f411c681961))
+* Talos hardening batch ([#525](https://github.com/mitos-run/mitos/issues/525), [#526](https://github.com/mitos-run/mitos/issues/526), [#527](https://github.com/mitos-run/mitos/issues/527), [#528](https://github.com/mitos-run/mitos/issues/528)) ([25a2a81](https://github.com/mitos-run/mitos/commit/25a2a81dce575c708847e612b9183712917281c2))
+
 ## [1.6.0](https://github.com/mitos-run/mitos/compare/v1.5.0...v1.6.0) (2026-06-28)
 
 
