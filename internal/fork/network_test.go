@@ -180,7 +180,7 @@ func TestPrepareForkNetworkDistinctPerFork(t *testing.T) {
 
 // TestForkRunningFailsClosedWithNetworking asserts that a live fork
 // (ForkRunning) of a sandbox is rejected with an explicit, actionable error
-// while per-VM netns is not yet available (#18). Restoring the source's baked
+// while per-VM netns is not yet available (#336). Restoring the source's baked
 // NIC into a second live VM would collide on tap/MAC/IP, so we fail closed
 // rather than silently break networking.
 func TestForkRunningFailsClosedWithNetworking(t *testing.T) {
@@ -193,8 +193,8 @@ func TestForkRunningFailsClosedWithNetworking(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ForkRunning to fail closed when networking is enabled")
 	}
-	if !strings.Contains(err.Error(), "not supported yet") || !strings.Contains(err.Error(), "#18") {
-		t.Errorf("error = %q, want an explicit unsupported message referencing #18", err)
+	if !strings.Contains(err.Error(), "not supported yet") || !strings.Contains(err.Error(), "#336") {
+		t.Errorf("error = %q, want an explicit unsupported message referencing #336", err)
 	}
 }
 
