@@ -24,6 +24,8 @@ on:
       - 'cmd/crash-reap-smoke/**'
       - 'cmd/net-fork-smoke/**'
       - 'cmd/grpc-exec-smoke/**'
+      - 'cmd/live-fork-egress-smoke/**'
+      - 'internal/egressproxy/**'
       - 'internal/guestnet/**'
       - 'internal/husk/**'
       - 'internal/volume/**'
@@ -1479,6 +1481,105 @@ jobs:
 
           echo "================================"
           echo "  Two forks have distinct guest MAC + IP"
+          echo "================================"
+
+      # Networked live fork through the egress proxy (issue #336). This is the
+      # end-to-end acceptance gate: a running NETWORKED sandbox is live-forked
+      # (Engine.ForkRunning) with the per-sandbox egress proxy active, and the
+      # child must egress on its OWN fresh upstream connection through the proxy,
+      # not ride the parent's held keep-alive. cmd/live-fork-egress-smoke drives
+      # fork.NewEngine exactly as forkd does (NetManager + NetAllocator + the
+      # egress proxy registry, sentinel, and port), starts the per-node proxy
+      # listener and a host-side upstream stub, boots a networked source, holds a
+      # keep-alive tunnel open from the source through the proxy, live-forks the
+      # source, and exercises egress from BOTH parent and child. It is also the
+      # ForkRunning networked-SUCCESS test: it genuinely calls engine.ForkRunning
+      # on the networked source, not just prepareForkNetwork.
+      #
+      # Assertions (the binary HARD-FAILS the job on any of them):
+      #   (a) parent AND child both get a 200 (body "hello") through independent
+      #       egress;
+      #   (b) parent and child have DISTINCT tap/MAC/guest-IP (neither the shared
+      #       placeholder) and no upstream 4-tuple collision;
+      #   (c) the stub observes a NEW upstream connection for the child (the
+      #       captured upstream socket is NOT reused) while the parent's held
+      #       keep-alive stays open;
+      #   (d) the child fork-correctness handshake reports ReseededRNG true and
+      #       the child wall clock is stepped to host time.
+      #
+      # The binary distinguishes failure classes by exit code, mirroring
+      # net-fork-smoke: exit 2 is a setup/boot error (a transient nested-KVM
+      # flake is retried) and exit 1 is an assertion failure (a real defect, never
+      # retried). The host network stack is needed (tap + nftables + the proxy
+      # listener), so this runs after the nftables tools are installed.
+      - name: Networked live fork through the egress proxy, child egresses on a fresh connection
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo modprobe nf_tables 2>/dev/null || true
+
+          WORKDIR=/tmp/mitos-test/live-fork-egress-build
+          mkdir -p $WORKDIR/mnt
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=192 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/busybox $WORKDIR/mnt/bin/busybox 2>/dev/null || \
+            sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # The smoke reads eth0 (cat, ip, awk), egresses through the proxy (wget),
+          # and holds a keep-alive tunnel (nc + sleep); date proves the clock step.
+          for cmd in sh cat echo ls ip awk head tr grep wget nc sleep date; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/live-fork-egress-smoke ./cmd/live-fork-egress-smoke/
+
+          run_smoke() {
+            rm -rf /tmp/mitos-test/live-fork-egress-data
+            sudo /tmp/live-fork-egress-smoke \
+              --image $WORKDIR/rootfs.ext4 \
+              --data-dir /tmp/mitos-test/live-fork-egress-data \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/mitos-test/vmlinux \
+              --agent-bin /tmp/mitos-test/agent
+          }
+
+          attempt=1
+          max=3
+          while true; do
+            echo "=== live-fork-egress-smoke attempt ${attempt}/${max} ==="
+            set +e
+            run_smoke
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+            if [ "$rc" -eq 1 ]; then
+              echo "FAIL: live-fork egress acceptance assertion failed (rc=1); this is a real defect, hard-failing the job"
+              exit 1
+            fi
+            # rc=2 is a setup/boot error (e.g. a transient nested-KVM boot flake).
+            if [ "$attempt" -ge "$max" ]; then
+              echo "FAIL: live-fork-egress-smoke setup/boot kept flaking after ${max} attempts (rc=2)"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+
+          echo "================================"
+          echo "  Networked live fork through the egress proxy proven:"
+          echo "  child egresses on a fresh connection, parent keep-alive held"
           echo "================================"
 
       # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE
