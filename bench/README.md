@@ -117,6 +117,61 @@ two modes on the reference node with a higher iteration count (the runs above
 use 100), archive both JSON files, and record the host (CPU, kernel, Firecracker
 version, rootfs) alongside them so the numbers are reproducible and auditable.
 
+## Networked live-fork latency (issue #336)
+
+`bench/networked-live-fork-latency.sh` measures the live-fork latency on the
+networked egress-proxy path introduced by issue #336. It requires a Linux host
+with `/dev/kvm`, a busybox rootfs image with the guest agent as `/init`, the
+guest agent binary, and host network stack support for tap devices and nftables
+(run as root or with `CAP_NET_ADMIN` + `CAP_NET_RAW`).
+
+```sh
+sudo bench/networked-live-fork-latency.sh \
+  --image <rootfs.ext4> \
+  --data-dir <dir> \
+  --kernel <vmlinux> \
+  --agent-bin <agent-rs> \
+  [--firecracker <path>] \
+  [--proxy-sentinel <ip>] \
+  [--proxy-port <port>] \
+  [--iterations <n>] \
+  [--warmup <n>] \
+  [--fanout-n <w1,w2,...>]
+```
+
+The script measures three arms:
+
+**ARM 1 - cold-fork baseline (non-networked):** wall clock from fork start to
+the first successful Control.Ping over gRPC, driven by `cmd/bench --mode
+fork-exec`. This is the established isolated engine baseline (no per-fork
+networking) that every live-fork comparison is measured against.
+
+**ARM 2 - networked live-fork end-to-end (upper bound):** wall clock for a
+complete run of `cmd/live-fork-egress-smoke`, which boots a networked source
+sandbox through the per-sandbox egress proxy (`--enable-networking
+--egress-proxy --proxy-sentinel --proxy-port`), runs `engine.ForkRunning` on
+the live source, delivers the fork-correctness and network handshake to the
+child, and asserts independent egress on a fresh upstream connection. Each
+iteration is an independent binary run (template create + source fork + live
+fork + assertions), so the timing is an UPPER BOUND on the isolated ForkRunning
+latency. A clean comparison against arm 1 requires extending `cmd/bench` with a
+live-fork-networked mode that retains the template and source across iterations.
+
+**ARM 3 - N-way COW fan-out baseline (cold-fork, non-networked):** for each
+fan-out width N in `--fanout-n` (default `1,4,16`), forks ONE warmed template
+into N children and reports the per-child time-to-ready distribution
+(min/P50/P95/max) plus the wall clock until all N children are ready, driven by
+`cmd/bench --mode fork-fanout`. This is the structural fan-out baseline.
+Networked live-fork fan-out (N children from one live networked source via
+concurrent `ForkRunning` calls) requires extending `cmd/bench`.
+
+All binaries are built from this repo by the script (`go build ./cmd/bench/`
+and `go build ./cmd/live-fork-egress-smoke/`). Numbers are produced by the real
+KVM-backed engine; there are no hardcoded or expected latency figures in the
+script (CLAUDE.md operating principle 1). Record results in `bench/results/`
+alongside the host spec, Firecracker version, kernel version, and rootfs
+contents.
+
 ## Controller-path harnesses (claim, sustained, pool-rebuild)
 
 `cmd/bench` measures the in-process engine data path only. The controller + pool
