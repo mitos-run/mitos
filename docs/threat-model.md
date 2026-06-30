@@ -907,6 +907,46 @@ threat properties carry over unchanged:
   in-guest privilege separation). It adds no new host-side privilege. The auditor
   records an `exec_ws` op with the `pty` flag only, never terminal contents.
 
+### Compose provider contract surface (per-service exec/copy/stop, issue #491)
+
+The Harbor compose provider contract (`internal/compose`) defines the per-service
+operations an external compose driver (Harbor) addresses at a named compose
+service in a multi-container sandbox: `ServiceExec`, `ServiceDownloadFile`,
+`ServiceDownloadDir`, `ServiceIsDir`, `StopService`, and collect hooks that gather
+sidecar artifacts at teardown. When the in-guest backend lands (issues #489 and
+#490) this is a NEW exec and file-read surface, the per-service analog of the
+exec/files rows above: a caller can run a command in, and read bytes out of, an
+arbitrary compose service container, not just the main service.
+
+The contract is shipped fail-closed and validation-first ahead of that backend:
+
+- No backend today. The real backend is the in-guest privileged dockerd plus
+  docker compose, which does not exist yet and is a separate, hardware/kernel
+  gated follow-up (#489, #490). Until it is wired, `UnavailableBackend` is the
+  default: `Capabilities().DockerCompose` reports false (the capability is never
+  advertised dishonestly) and every operation fails closed with
+  `ErrBackendUnavailable`, which carries actionable remediation. So the contract
+  cannot drive any execution today; there is no live exec or egress surface to
+  exploit. Status: fail-closed by construction.
+- Input validation is the boundary half and runs BEFORE any backend dispatch.
+  Service names are constrained to `^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`
+  (`validateServiceName`), which forbids slashes, leading dots, `..`, and
+  whitespace, so a service name can never be mistaken for or escape into a path
+  element. Container paths must be absolute with no `..` segment
+  (`validateContainerPath`), mirroring the traversal defense on the sandbox file
+  APIs. An invalid request returns a validation error and the backend is never
+  reached (asserted in `internal/compose` tests). Status: mitigated at the
+  contract boundary; the in-guest containment of the execution itself is gated on
+  #490 and will get its own row when that backend ships.
+- Collect orchestration gathers each hook's output independently and never
+  aborts the batch on a single failure, so a failing sidecar hook cannot suppress
+  the rest of the teardown artifacts; each hook's error is recorded per result.
+
+When #490 wires a real backend, this row must be re-derived: per-service exec and
+file-read carry the same in-guest-unconfined residual as the exec/files surface
+(isolation is the microVM boundary, not in-guest privilege separation), plus the
+intra-VM compose bridge between services.
+
 ## 4. Sandbox → network
 
 See `docs/networking.md` for the full design (tap-per-sandbox, nftables
