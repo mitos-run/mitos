@@ -113,7 +113,7 @@ func run(image, dataDir, fcBin, kernel, agentBin, sentinel string, proxyPort int
 	fmt.Printf("live-fork-egress-smoke: upstream stub on %s\n", stub.addr)
 
 	// Per-fork networking, exactly as forkd assembles it, plus the egress proxy.
-	alloc, err := netconf.NewAllocator("10.203.0.0/24", "lfesmoke")
+	alloc, err := netconf.NewAllocator("10.203.0.0/24", "lfesmk")
 	if err != nil {
 		return setupErr(fmt.Errorf("new allocator: %w", err))
 	}
