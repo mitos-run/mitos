@@ -28,10 +28,15 @@
 //	(a) parent AND child both get a 200 (body "hello") through independent egress.
 //	(b) parent and child have DISTINCT tap/MAC/guest-IP (neither the placeholder)
 //	    and the upstream connections never collide on a remote 4-tuple.
-//	(c) the stub observes a NEW upstream connection attributable to the child (the
-//	    captured upstream socket is NOT reused): the parent holds a keep-alive
-//	    tunnel open across the fork, and the child's request arrives on a fresh
-//	    connection while the parent's held connection stays open.
+//	(c) the stub observes a NEW upstream connection attributable to the child: the
+//	    parent holds a keep-alive tunnel open across the fork, and the child's
+//	    request arrives on a DISTINCT connection while the parent's held tunnel
+//	    stays open. This proves "child has independent egress on a fresh
+//	    connection at the stub." It does NOT independently falsify fd-inheritance:
+//	    a fresh wget always opens its own socket regardless of whether
+//	    ResetUpstreams ran. The specific "captured upstream fd is reset and not
+//	    reused" property is gated by the ResetUpstreams=true assertion (~line 231)
+//	    and the ResetUpstreams unit tests in internal/fork and guest/agent-rs.
 //	(d) the child's fork-correctness handshake reports ReseededRNG true and the
 //	    child guest wall clock is stepped to within a few seconds of the host.
 //
@@ -231,6 +236,9 @@ func run(image, dataDir, fcBin, kernel, agentBin, sentinel string, proxyPort int
 	if !childRes.GuestNetwork.ResetUpstreams {
 		return fmt.Errorf("live fork did not set ResetUpstreams; captured upstream sockets would leak into the child")
 	}
+	if childRes.GuestNetwork.ProxyEndpoint == "" {
+		return fmt.Errorf("live fork carried no child proxy endpoint; ForkRunning did not assign the child's egress proxy")
+	}
 
 	// Deliver the CHILD's fork-correctness + network handshake (live fork: reset
 	// upstreams). Assert reseed and a stepped clock (assertion d).
@@ -288,10 +296,17 @@ func run(image, dataDir, fcBin, kernel, agentBin, sentinel string, proxyPort int
 	afterChildRequests := atomic.LoadInt64(&stub.requests)
 	fmt.Printf("live-fork-egress-smoke: PASS child egress after live fork (assertion a, child)\n")
 
-	// (c) The child opened its OWN fresh upstream connection: the request count
-	// strictly increased at the child step, so it did not ride the parent's held
-	// keep-alive. The held connection is still open (the parent's egress survived
-	// the fork), and no two upstream connections shared a remote 4-tuple.
+	// (c) The child has independent egress on a fresh distinct connection at the
+	// stub while the parent's held keep-alive stays open: the request count
+	// strictly increased at the child step (confirming a new upstream TCP
+	// connection was opened), the held tunnel remains open (confirming the parent
+	// survived), and no two connections share a remote 4-tuple.
+	//
+	// NOTE: this connection-count check proves "child used a fresh connection,"
+	// not "captured upstream fd was reset." A fresh wget always opens its own
+	// socket regardless of whether ResetUpstreams ran. The fd-reset property is
+	// gated by the ResetUpstreams=true assertion above and the ResetUpstreams
+	// unit tests in internal/fork and guest/agent-rs.
 	if afterParentRequests <= baselineRequests {
 		return fmt.Errorf("parent request did not produce a fresh upstream connection (baseline=%d after-parent=%d)", baselineRequests, afterParentRequests)
 	}
