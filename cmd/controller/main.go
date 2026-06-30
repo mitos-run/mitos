@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/eventfeed"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/observability"
+	"mitos.run/mitos/internal/saas/pgstore"
 	"mitos.run/mitos/internal/usage"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -70,6 +71,7 @@ func main() {
 	var usageCollector bool
 	var usageCollectorInterval time.Duration
 	var usageAPIAddr string
+	var usageDatabaseDSN string
 	var vitalsSampler bool
 	var vitalsSamplerInterval time.Duration
 	var exposeProxyAdminURL string
@@ -99,6 +101,7 @@ func main() {
 	flag.BoolVar(&usageCollector, "usage-collector", false, "Run the live multi-node metering scraper: on a fixed interval, scrape every forkd node's GET /v1/metering, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, integrate idempotently into per-(org, sandbox, window) usage records, and publish the per-org mitos_usage_*_total Prometheus series. OFF by default so a self-host deployment that does not want metering is unaffected; turn it on for hosted/multi-tenant. The records land in an in-memory store for now (a durable store is a follow-up); the per-org metric is always published on /metrics. The path carries only ids, byte counts, and seconds, never secret values.")
 	flag.DurationVar(&usageCollectorInterval, "usage-collector-interval", 60*time.Second, "Interval between usage metering scrapes when --usage-collector is set. Defaults to the usage window (60s). Only used when --usage-collector is on.")
 	flag.StringVar(&usageAPIAddr, "usage-api-address", "", "Serve the INTERNAL usage API (GET /internal/usage) on this address (for example :8092) so the hosted console can read the SAME per-org usage the collector recorded, without a shared database. Bearer-gated by the MITOS_USAGE_API_TOKEN environment variable (empty token fails closed: every request is refused). Empty address disables the listener. Only meaningful with --usage-collector on. The endpoint is machine-to-machine: the org is taken from the X-Mitos-Org header the console sets after it verified the session, and the store still scopes every read to that org. The path carries only ids, byte counts, and seconds, never secret values.")
+	flag.StringVar(&usageDatabaseDSN, "usage-database-dsn", "", "Postgres DSN for DURABLE per-org usage records (issue #211): when set, the collector upserts billable usage into Postgres so metered consumption survives a controller restart, instead of the in-memory store that is lost on restart. Falls back to the "+pgstore.EnvDSN+" env var. Empty means the in-memory usage store (DEV ONLY; usage is lost on restart). Only used with --usage-collector on. The value is a secret and is never logged.")
 	flag.BoolVar(&vitalsSampler, "vitals-sampler", false, "Run the guest vitals sampler: on a fixed interval, scrape every forkd node's GET /v1/vitals/node, attribute each sandbox to its org via the trusted mitos.run/org husk-pod label, aggregate per (org, pool), and publish the mitos_guest_cpu_steal_percent, mitos_guest_mem_balloon_bytes, mitos_guest_mem_used_bytes, and mitos_guest_process_count Prometheus gauges. cpu_steal is the MAX across the bucket (the worst-starved sandbox); memory and process_count are SUMs (the fleet footprint). OFF by default so a self-host deployment without guest telemetry is unaffected; turn it on for hosted/multi-tenant. The path carries only ids (for org resolution), pool names, and numeric vitals plus the process-list length, never argv, env, process command lines, pids, or secret values.")
 	flag.DurationVar(&vitalsSamplerInterval, "vitals-sampler-interval", 60*time.Second, "Interval between guest vitals samples when --vitals-sampler is set. Defaults to the usage window (60s). Only used when --vitals-sampler is on.")
 	flag.StringVar(&exposeProxyAdminURL, "expose-proxy-admin-url", "", "Expose proxy admin endpoint base URL for route-sync (POST /internal/routes); empty disables")
@@ -440,7 +443,29 @@ func main() {
 		// One shared store: the collector writes per-org usage records into it, and
 		// the internal usage API serves reads of the SAME store to the console, so
 		// the console shows exactly what was collected without a shared database.
-		usageStore := usage.NewMemUsageStore()
+		//
+		// When a usage DSN is configured (issue #211) the store is durable Postgres,
+		// so metered consumption survives a controller restart; otherwise it is the
+		// in-memory store (DEV ONLY, lost on restart). The DSN is a secret and is
+		// never logged: only the chosen backend is.
+		var usageStore usage.UsageStore = usage.NewMemUsageStore()
+		usageDSN := usageDatabaseDSN
+		if usageDSN == "" {
+			usageDSN = os.Getenv(pgstore.EnvDSN)
+		}
+		if usageDSN != "" {
+			pg, err := pgstore.Open(context.Background(), usageDSN)
+			if err != nil {
+				// Never include the DSN in the error.
+				logger.Error(err, "unable to open durable usage store; refusing to fall back to in-memory so usage is not silently lost")
+				os.Exit(1)
+			}
+			defer pg.Close()
+			usageStore = pgstore.NewPgUsageStore(pg.Pool())
+			logger.Info("usage store: durable Postgres (records survive restart)")
+		} else {
+			logger.Info("usage store: in-memory (DEV ONLY, usage is lost on restart; set --usage-database-dsn for durable Postgres)")
+		}
 		if err := mgr.Add(&controller.UsageCollectorRunnable{
 			Registry:   nodeRegistry,
 			Client:     mgr.GetClient(),
