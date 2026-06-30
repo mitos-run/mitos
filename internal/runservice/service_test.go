@@ -137,6 +137,50 @@ func TestRunProvisionsAndApplies(t *testing.T) {
 	}
 }
 
+// TestRunThreadsPublicURL asserts Run resolves the public URL and threads it
+// through: the shared golden pool gets the stable canonical URL
+// (https://<pool>.<domain>) at build time, while the per-fork Sandbox gets its own
+// per-instance URL (https://<label>.<domain>) in its env.
+func TestRunThreadsPublicURL(t *testing.T) {
+	ap := &fakeApplier{}
+	svc := New(&fakeFetcher{m: mustManifest(t, openclawYAML)}, ap, "mitos.run")
+	if _, err := svc.Run(context.Background(), "github.com/openclaw/openclaw",
+		Identity{Namespace: "tenant-jannes", InstanceLabel: "jannes-openclaw"},
+		map[string]string{"ANTHROPIC_API_KEY": "sk-real"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var pool *v1.SandboxPool
+	var sandbox *v1.Sandbox
+	for _, o := range ap.applied {
+		switch obj := o.(type) {
+		case *v1.SandboxPool:
+			pool = obj
+		case *v1.Sandbox:
+			sandbox = obj
+		}
+	}
+	if pool == nil || sandbox == nil {
+		t.Fatalf("missing applied objects: pool=%v sandbox=%v", pool != nil, sandbox != nil)
+	}
+	const wantGolden = "https://openclaw.mitos.run"
+	if got := envValue(pool.Spec.Template.Env, runmanifest.PublicURLEnvVar); got != wantGolden {
+		t.Errorf("golden %s = %q, want %q", runmanifest.PublicURLEnvVar, got, wantGolden)
+	}
+	const wantInstance = "https://jannes-openclaw.mitos.run"
+	if got := envValue(sandbox.Spec.Env, runmanifest.PublicURLEnvVar); got != wantInstance {
+		t.Errorf("instance %s = %q, want %q", runmanifest.PublicURLEnvVar, got, wantInstance)
+	}
+}
+
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
+
 func TestRunRequiredSecretMissing(t *testing.T) {
 	ap := &fakeApplier{}
 	svc := New(&fakeFetcher{m: mustManifest(t, openclawYAML)}, ap, "mitos.run")

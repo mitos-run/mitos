@@ -32,7 +32,7 @@ func TestGoldenPoolOpenClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	pool, err := m.GoldenPool("sandboxes")
+	pool, err := m.GoldenPool("sandboxes", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSecretValuesNeverInGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	pool, err := m.GoldenPool("sandboxes")
+	pool, err := m.GoldenPool("sandboxes", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestGoldenPoolTrackAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	pool, err := m.GoldenPool("ns")
+	pool, err := m.GoldenPool("ns", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestGoldenPoolBuildNotYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if _, err := m.GoldenPool("sandboxes"); err == nil {
+	if _, err := m.GoldenPool("sandboxes", ""); err == nil {
 		t.Fatal("GoldenPool on a build-from-source manifest should error until that slice lands")
 	} else if !strings.Contains(err.Error(), "source.image") {
 		t.Errorf("error should name source.image, got: %v", err)
@@ -191,7 +191,7 @@ preview:
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	pool, err := m.GoldenPool("inst")
+	pool, err := m.GoldenPool("inst", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestGoldenPoolNoWorkloadWithoutReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	pool, err := m.GoldenPool("inst")
+	pool, err := m.GoldenPool("inst", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}

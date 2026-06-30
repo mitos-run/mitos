@@ -63,7 +63,16 @@ func (m *Manifest) PoolName() string {
 // error otherwise. The HTTP ready gate is preserved on the manifest for the
 // snapshot-after-serving slice; this mapping uses the existing SnapshotAfterReady
 // trigger.
-func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
+//
+// publicURL is the golden's stable public URL (its Mitos Expose address, for
+// example "https://app.mitos.run"). It is injected as MITOS_PUBLIC_URL into the
+// template env and substituted for ${MITOS_PUBLIC_URL} in run.command and run.env,
+// so a snapshot-after-ready app (whose serving workload starts at build time) can
+// self-configure its origin allowlists and redirect URIs (issue #476). Because the
+// golden is shared across a tenant's forks, publicURL must be the stable
+// per-pool URL, not a per-fork one; an empty publicURL injects nothing and leaves
+// ${MITOS_PUBLIC_URL} references literal (back-compat).
+func (m *Manifest) GoldenPool(namespace, publicURL string) (*v1.SandboxPool, error) {
 	if m.Source.Image == "" {
 		return nil, fmt.Errorf("mitos.yaml %q: GoldenPool needs source.image; build-from-source golden resolution is a later slice", m.Name)
 	}
@@ -84,11 +93,11 @@ func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
 		Spec: v1.SandboxPoolSpec{
 			Template: &v1.PoolTemplateSpec{
 				Image:     m.Source.Image,
-				Command:   m.effectiveCommand(),
-				Env:       m.nonSecretEnv(),
+				Command:   m.effectiveCommand(publicURL),
+				Env:       m.nonSecretEnv(publicURL),
 				Resources: res,
 				Network:   m.egressPolicy(),
-				Workload:  m.workload(),
+				Workload:  m.workload(publicURL),
 			},
 			Snapshots: &v1.PoolSnapshots{
 				ReplicasPerNode: 1,
@@ -102,19 +111,26 @@ func (m *Manifest) GoldenPool(namespace string) (*v1.SandboxPool, error) {
 
 // effectiveCommand returns the command to run in the guest, honoring run.workdir by
 // wrapping in a shell when a workdir is set. With no command the image entrypoint
-// is inherited (nil).
-func (m *Manifest) effectiveCommand() []string {
+// is inherited (nil). Each command element and the workdir have ${MITOS_PUBLIC_URL}
+// substituted for publicURL; the resolved value is embedded as a literal (and, in
+// the workdir case, shell-quoted) so there is no shell re-expansion of it.
+func (m *Manifest) effectiveCommand(publicURL string) []string {
 	if len(m.Run.Command) == 0 {
 		return nil
 	}
-	if m.Run.Workdir == "" {
-		return append([]string(nil), m.Run.Command...)
-	}
-	quoted := make([]string, len(m.Run.Command))
+	cmd := make([]string, len(m.Run.Command))
 	for i, c := range m.Run.Command {
+		cmd[i] = expandPublicURL(c, publicURL)
+	}
+	if m.Run.Workdir == "" {
+		return cmd
+	}
+	quoted := make([]string, len(cmd))
+	for i, c := range cmd {
 		quoted[i] = shellQuote(c)
 	}
-	return []string{"sh", "-c", fmt.Sprintf("cd %s && exec %s", shellQuote(m.Run.Workdir), strings.Join(quoted, " "))}
+	workdir := expandPublicURL(m.Run.Workdir, publicURL)
+	return []string{"sh", "-c", fmt.Sprintf("cd %s && exec %s", shellQuote(workdir), strings.Join(quoted, " "))}
 }
 
 // workload maps run.command + run.ready onto a serving WorkloadSpec the build
@@ -123,13 +139,13 @@ func (m *Manifest) effectiveCommand() []string {
 // while listening" signal, so a plain run.command (a batch job) stays an exec-time
 // default and is never started during the build. The workload command is the same
 // workdir-wrapped command effectiveCommand builds; env is non-secret only.
-func (m *Manifest) workload() *v1.WorkloadSpec {
+func (m *Manifest) workload(publicURL string) *v1.WorkloadSpec {
 	if len(m.Run.Command) == 0 || m.Run.Ready == nil {
 		return nil
 	}
 	w := &v1.WorkloadSpec{
-		Command: m.effectiveCommand(),
-		Env:     m.nonSecretEnv(),
+		Command: m.effectiveCommand(publicURL),
+		Env:     m.nonSecretEnv(publicURL),
 	}
 	if h := m.Run.Ready.HTTP; h != nil {
 		w.Ready = &v1.HTTPReadyProbe{
@@ -144,20 +160,30 @@ func (m *Manifest) workload() *v1.WorkloadSpec {
 	return w
 }
 
-// nonSecretEnv maps run.env to a deterministically ordered []corev1.EnvVar. Secret
-// values are NOT here; they are injected per-fork.
-func (m *Manifest) nonSecretEnv() []corev1.EnvVar {
-	if len(m.Run.Env) == 0 {
+// nonSecretEnv maps run.env to a deterministically ordered []corev1.EnvVar, with
+// ${MITOS_PUBLIC_URL} substituted for publicURL in each value, and injects
+// MITOS_PUBLIC_URL itself when publicURL is non-empty (a caller-supplied run.env
+// entry of the same name is overridden by the resolved value). Secret values are
+// NOT here; they are injected per-fork.
+func (m *Manifest) nonSecretEnv(publicURL string) []corev1.EnvVar {
+	vals := make(map[string]string, len(m.Run.Env)+1)
+	for k, v := range m.Run.Env {
+		vals[k] = expandPublicURL(v, publicURL)
+	}
+	if publicURL != "" {
+		vals[PublicURLEnvVar] = publicURL
+	}
+	if len(vals) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(m.Run.Env))
-	for k := range m.Run.Env {
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	out := make([]corev1.EnvVar, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, corev1.EnvVar{Name: k, Value: m.Run.Env[k]})
+		out = append(out, corev1.EnvVar{Name: k, Value: vals[k]})
 	}
 	return out
 }

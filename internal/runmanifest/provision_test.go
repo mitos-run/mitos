@@ -14,7 +14,7 @@ func TestGoldenPoolEgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	pool, err := m.GoldenPool("sandboxes")
+	pool, err := m.GoldenPool("sandboxes", "")
 	if err != nil {
 		t.Fatalf("GoldenPool: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestProvisionOpenClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "sk-real"}, "tenant-jannes", "jannes-openclaw")
+	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "sk-real"}, "tenant-jannes", "jannes-openclaw", "")
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestProvisionOpenClaw(t *testing.T) {
 // Secret, never inlined into the Sandbox spec.
 func TestProvisionSecretValuesOnlyInSecret(t *testing.T) {
 	m, _ := Parse(mustRead(t, "openclaw.yaml"))
-	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "sk-leak-canary"}, "ns", "inst")
+	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "sk-leak-canary"}, "ns", "inst", "")
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -94,10 +94,60 @@ func TestProvisionSecretValuesOnlyInSecret(t *testing.T) {
 	}
 }
 
+// TestProvisionInjectsPublicURL asserts the resolved per-instance public URL is
+// delivered to the fork as the MITOS_PUBLIC_URL env var, and that run.env values
+// referencing ${MITOS_PUBLIC_URL} are resolved per-fork into the Sandbox env so a
+// fork's exec sessions and runtime reads see this instance's own URL.
+func TestProvisionInjectsPublicURL(t *testing.T) {
+	m, err := Parse([]byte(`
+name: app
+source:
+  image: ghcr.io/x/y:latest
+run:
+  env:
+    ALLOWED_ORIGINS: ${MITOS_PUBLIC_URL}
+    HOME: /home/node
+preview:
+  port: 8080
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const url = "https://jannes-app.mitos.run"
+	res, err := Provision(m, nil, "ns", "jannes-app", url)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := envValue(res.Sandbox.Spec.Env, PublicURLEnvVar); got != url {
+		t.Errorf("sandbox env %s = %q, want %q", PublicURLEnvVar, got, url)
+	}
+	if got := envValue(res.Sandbox.Spec.Env, "ALLOWED_ORIGINS"); got != url {
+		t.Errorf("per-fork ALLOWED_ORIGINS = %q, want %q (resolved)", got, url)
+	}
+	// A non-referencing run.env value is not duplicated into the per-fork env (it
+	// stays in the shared golden only).
+	if got := envValue(res.Sandbox.Spec.Env, "HOME"); got != "" {
+		t.Errorf("HOME should not be overlaid per-fork, got %q", got)
+	}
+}
+
+// TestProvisionNoURLNoInjection asserts an empty public URL injects nothing, so a
+// caller without a resolved URL provisions exactly as before.
+func TestProvisionNoURLNoInjection(t *testing.T) {
+	m, _ := Parse(mustRead(t, "openclaw.yaml"))
+	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "x"}, "ns", "inst", "")
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := envValue(res.Sandbox.Spec.Env, PublicURLEnvVar); got != "" {
+		t.Errorf("no MITOS_PUBLIC_URL should be injected with an empty url, got %q", got)
+	}
+}
+
 // TestProvisionRequiredMissing fails closed when a required secret is absent.
 func TestProvisionRequiredMissing(t *testing.T) {
 	m, _ := Parse(mustRead(t, "openclaw.yaml"))
-	_, err := Provision(m, map[string]string{}, "ns", "inst")
+	_, err := Provision(m, map[string]string{}, "ns", "inst", "")
 	if err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("expected required-secret error, got: %v", err)
 	}
@@ -115,7 +165,7 @@ func TestProvisionDeterministicMint(t *testing.T) {
 		return len(b), nil
 	}
 	m, _ := Parse(mustRead(t, "openclaw.yaml"))
-	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "x"}, "ns", "inst")
+	res, err := Provision(m, map[string]string{"ANTHROPIC_API_KEY": "x"}, "ns", "inst", "")
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
