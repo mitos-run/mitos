@@ -133,6 +133,16 @@ func main() {
 	// per-pull minted token / forkd-peer mTLS identity is a follow-up.
 	flag.Parse()
 
+	// Fail fast on egress-proxy without networking (M3): the proxy attributes
+	// every connection by per-sandbox guest IP, which only exists when
+	// --enable-networking is on. Without it the proxy block is skipped and
+	// --egress-proxy would silently no-op, leaving operators to believe egress is
+	// proxied when it is not. Refuse rather than degrade silently.
+	if enableEgressProxy && !enableNet {
+		fmt.Fprintln(os.Stderr, "forkd: --egress-proxy requires --enable-networking: the proxy attributes egress by per-sandbox guest IP, which only exists when networking is on. Enable --enable-networking or drop --egress-proxy.")
+		os.Exit(1)
+	}
+
 	shutdownTracing, err := observability.Setup(context.Background(), "mitos-forkd", otlpEndpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: tracing setup: %v\n", err)
@@ -675,6 +685,13 @@ type redactingEgressLogger struct {
 
 func (r redactingEgressLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {
 	r.log.Info("egress", "sandbox", sandboxID, "hostport", hostport, "bytes_up", bytesUp, "bytes_down", bytesDown)
+}
+
+// Deny records a destination refused by the proxy's hard denylist (IMDS/SSRF
+// floor). Like Egress it logs ONLY the sandbox ID and host:port: never headers,
+// paths, query strings, or auth values.
+func (r redactingEgressLogger) Deny(sandboxID, hostport string) {
+	r.log.Info("egress_denied", "sandbox", sandboxID, "hostport", hostport)
 }
 
 // buildEgressProxy constructs the per-node HTTP forward proxy: it attributes

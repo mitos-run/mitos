@@ -9,12 +9,26 @@ package egressproxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	// maxPreambleBytes bounds the request line plus headers a client may send
+	// before the tunnel/stream phase, so a guest cannot OOM the host with a giant
+	// headerless line. The body/tunnel copy is unbounded again after the preamble.
+	maxPreambleBytes = 64 * 1024
+	// preambleReadTimeout bounds how long the host waits for the request preamble,
+	// so a guest cannot slowloris (open a connection and never send a newline).
+	// Cleared before the tunnel/stream copy, which has no preamble deadline.
+	preambleReadTimeout = 30 * time.Second
 )
 
 // SandboxResolver maps a guest source IP to the sandbox that owns it.
@@ -34,6 +48,10 @@ type Dialer interface {
 // strings, or auth tokens are ever forwarded here.
 type Logger interface {
 	Egress(sandboxID, hostport string, bytesUp, bytesDown int64)
+	// Deny records that a destination was refused by the hard denylist. It
+	// receives ONLY the sandbox ID and the host:port (the same redaction rule as
+	// Egress): no headers, paths, query strings, or auth values.
+	Deny(sandboxID, hostport string)
 }
 
 // Proxy is a host-owned HTTP forward proxy. It handles CONNECT tunnel requests
@@ -42,6 +60,9 @@ type Proxy struct {
 	resolver SandboxResolver
 	dialer   Dialer
 	logger   Logger
+	// resolveIP screens destination names against the denylist (DNS-rebinding
+	// safe). Defaults to net.DefaultResolver; tests inject a stub.
+	resolveIP ipResolver
 
 	// mu guards the listener handle and the closed flag so Close can race with
 	// ListenAndServe (Close may be invoked before the listener is bound).
@@ -51,8 +72,9 @@ type Proxy struct {
 }
 
 // NewProxy constructs a Proxy with the given resolver, dialer, and logger seams.
+// Destination screening uses net.DefaultResolver by default.
 func NewProxy(r SandboxResolver, d Dialer, l Logger) *Proxy {
-	return &Proxy{resolver: r, dialer: d, logger: l}
+	return &Proxy{resolver: r, dialer: d, logger: l, resolveIP: net.DefaultResolver}
 }
 
 // Close stops the listener started by ListenAndServe, unblocking its Accept
@@ -77,7 +99,13 @@ func (p *Proxy) Close() error {
 func (p *Proxy) Serve(client net.Conn, srcIP net.IP) {
 	defer client.Close()
 
-	br := bufio.NewReader(client)
+	// Bound the request preamble (I2, host DoS): cap the bytes read before the
+	// tunnel/stream phase via a LimitedReader and set a read deadline, so a guest
+	// cannot OOM us with a giant headerless line or slowloris us by never sending
+	// a newline. Both bounds are lifted before the body/tunnel copy below.
+	_ = client.SetReadDeadline(time.Now().Add(preambleReadTimeout))
+	lr := &io.LimitedReader{R: client, N: maxPreambleBytes}
+	br := bufio.NewReader(lr)
 
 	// Read the HTTP request line.
 	line, err := br.ReadString('\n')
@@ -107,10 +135,18 @@ func (p *Proxy) Serve(client net.Conn, srcIP net.IP) {
 	if isConnect {
 		// Drain CONNECT request headers: they are never logged or forwarded.
 		drainHeaders(br)
+		// Preamble done: clear the deadline and lift the byte cap before the
+		// (unbounded) tunnel copy.
+		_ = client.SetReadDeadline(time.Time{})
+		lr.N = math.MaxInt64
 		p.serveConnect(client, sandboxID, hostport)
 	} else {
 		// Plain HTTP: collect headers for replay to upstream, but never log them.
 		headers := collectHeaders(br)
+		// Preamble done: clear the deadline and lift the byte cap before the
+		// (unbounded) body/response stream.
+		_ = client.SetReadDeadline(time.Time{})
+		lr.N = math.MaxInt64
 		p.servePlain(client, br, sandboxID, hostport, line, headers)
 	}
 }
@@ -123,8 +159,15 @@ func (p *Proxy) Serve(client net.Conn, srcIP net.IP) {
 // cumulative up and down byte counts. The deferred upstream.Close is a backstop
 // only; the goroutines drive the actual shutdown.
 func (p *Proxy) serveConnect(client net.Conn, sandboxID, hostport string) {
-	upstream, err := p.dialer.Dial(context.Background(), hostport)
+	upstream, err := p.dialUpstream(context.Background(), hostport)
 	if err != nil {
+		if errors.Is(err, ErrDestinationDenied) {
+			// Hard denylist refusal (IMDS/SSRF): log sandbox + host:port + denied
+			// ONLY, never a dial, and return 403.
+			p.logger.Deny(sandboxID, hostport)
+			_, _ = fmt.Fprintf(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
+			return
+		}
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
@@ -168,8 +211,13 @@ func (p *Proxy) serveConnect(client net.Conn, sandboxID, hostport string) {
 // response back to the client, and logs only sandbox ID, host:port, and byte
 // counts.
 func (p *Proxy) servePlain(client net.Conn, br *bufio.Reader, sandboxID, hostport, firstLine string, headers []string) {
-	upstream, err := p.dialer.Dial(context.Background(), hostport)
+	upstream, err := p.dialUpstream(context.Background(), hostport)
 	if err != nil {
+		if errors.Is(err, ErrDestinationDenied) {
+			p.logger.Deny(sandboxID, hostport)
+			_, _ = fmt.Fprintf(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
+			return
+		}
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
@@ -181,11 +229,25 @@ func (p *Proxy) servePlain(client net.Conn, br *bufio.Reader, sandboxID, hostpor
 	n, _ := fmt.Fprintf(upstream, "%s\r\n", firstLine)
 	upBytes += int64(n)
 
-	// Replay headers (never logged).
+	// Replay headers (never logged), but force Connection: close (M6): a
+	// keep-alive upstream would otherwise hold this goroutine open after the
+	// response since the proxy handles exactly one plain request per connection.
+	// Drop the client's own Connection / Proxy-Connection intent and emit our own
+	// before terminating the header block. HTTPS CONNECT tunnels are unaffected.
 	for _, h := range headers {
+		t := strings.TrimRight(h, "\r\n")
+		if t == "" {
+			continue // terminating blank line is re-emitted below
+		}
+		lt := strings.ToLower(t)
+		if strings.HasPrefix(lt, "connection:") || strings.HasPrefix(lt, "proxy-connection:") {
+			continue
+		}
 		n2, _ := io.WriteString(upstream, h)
 		upBytes += int64(n2)
 	}
+	nc, _ := io.WriteString(upstream, "Connection: close\r\n\r\n")
+	upBytes += int64(nc)
 
 	// Stream any remaining body bytes (e.g. POST body).
 	n3, _ := io.Copy(upstream, br)

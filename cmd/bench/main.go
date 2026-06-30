@@ -911,3 +911,4 @@ func (b benchEgressDialer) Dial(ctx context.Context, hostport string) (net.Conn,
 type benchNoopLogger struct{}
 
 func (benchNoopLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {}
+func (benchNoopLogger) Deny(sandboxID, hostport string)                             {}

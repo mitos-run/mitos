@@ -507,6 +507,7 @@ func (n netEgressDialer) Dial(ctx context.Context, hostport string) (net.Conn, e
 type noopEgressLogger struct{}
 
 func (noopEgressLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {}
+func (noopEgressLogger) Deny(sandboxID, hostport string)                             {}
 
 // --- host-side upstream stub ---
 
