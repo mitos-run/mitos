@@ -93,6 +93,16 @@ func deniedIP(ip net.IP) bool {
 	return false
 }
 
+// IsDeniedIP reports whether ip is in the hard host-side egress denylist (cloud
+// metadata, IPv4/IPv6 loopback, link-local, the unspecified address, and the
+// NAT64 well-known prefix that wraps IMDS). It is the exported form of the
+// internal floor so the SNI egress proxy (internal/sniproxy) reapplies the SAME
+// denylist on its transparent splice path: that proxy dials the original
+// guest-chosen destination from the host OUTPUT path, which the per-sandbox
+// nftables FORWARD chain (with its unconditional metadata drop) does NOT cover,
+// so the floor must be reapplied there too. A nil ip is denied (fail closed).
+func IsDeniedIP(ip net.IP) bool { return deniedIP(ip) }
+
 // ipResolver resolves a host name to its IP addresses. *net.Resolver satisfies
 // it, and tests inject a stub so screening never touches real DNS.
 type ipResolver interface {
