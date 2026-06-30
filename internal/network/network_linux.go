@@ -34,6 +34,10 @@ type Options struct {
 	// Setup. Default false: the node is assumed to already forward, or NAT is
 	// handled upstream.
 	EnableForwarding bool
+	// ProxyEnabled mirrors the node-wide egress proxy flag so teardown removes
+	// each tap's per-fork prerouting DNAT. Default false leaves the proxy
+	// datapath untouched, exactly as before.
+	ProxyEnabled bool
 }
 
 // NewManager builds the Linux network Manager with a real exec runner.
@@ -45,6 +49,7 @@ func NewManager(opts Options) Manager {
 			subnetCIDR:       opts.SubnetCIDR,
 			uplink:           opts.Uplink,
 			enableForwarding: opts.EnableForwarding,
+			proxyEnabled:     opts.ProxyEnabled,
 		},
 	}
 }

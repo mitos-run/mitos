@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 
 	"mitos.run/mitos/internal/netconf"
 )
@@ -29,6 +28,12 @@ type applyOptions struct {
 	// before creating the tap. The write is performed by the caller-provided
 	// forwardEnabler so this stays platform-independent and testable.
 	enableForwarding bool
+	// proxyEnabled mirrors the node-wide egress proxy flag. When set, every
+	// sandbox gets a per-tap prerouting DNAT in setup, so teardown must remove
+	// that tap's DNAT chain and dispatch element. It is a node-level setting (the
+	// proxy is per-node, not per-sandbox), so gating teardown on it keeps
+	// non-proxy nodes from attempting deletes of nat objects that never existed.
+	proxyEnabled bool
 }
 
 // forwardEnabler enables host IPv4 forwarding. It is injected so the
@@ -76,7 +81,7 @@ func setup(
 	if err != nil {
 		return fmt.Errorf("parse CIDR allowlist for tap %s: %w", id.TapName, err)
 	}
-	chain := netconf.RenderSandboxChainSpec(netconf.ChainSpec{
+	spec := netconf.ChainSpec{
 		Tap:          id.TapName,
 		GuestIP:      id.GuestIP,
 		Egress:       policy.Egress,
@@ -86,17 +91,18 @@ func setup(
 		ResolverIP:   resolverIP,
 		BlockNetwork: policy.BlockNetwork,
 		Counter:      policy.Counter,
-	})
-	// Per-sandbox egress proxy: fold the proxy accept rule INTO this chain ahead
-	// of the terminal drop so the guest can reach the per-node proxy listener
-	// regardless of the allowlist verdict. The proxy, not the per-sandbox chain,
-	// enforces upstream egress policy. The accept is saddr-pinned to the guest IP
-	// and matches only the gateway:proxyPort destination, so it never broadens the
-	// chain's reach to anything but the proxy listener.
-	if policy.ProxySentinel != nil {
-		accept := netconf.RenderProxyAccept(netconf.SharedTableName(), netconf.SandboxChainName(id.TapName), id.GuestIP, id.HostIP, policy.ProxyPort)
-		chain = insertChainRule(chain, accept)
 	}
+	// Per-sandbox egress proxy: fold the proxy accept rule INTO this chain so the
+	// guest can reach the per-node proxy listener (the proxy, not the per-sandbox
+	// chain, enforces upstream egress policy). The renderer places the accept
+	// AFTER the unconditional cloud-metadata drops and ahead of the allowlist
+	// verdict, so it can never precede the IMDS drops, and saddr-pins it to the
+	// guest IP and the gateway:proxyPort destination so it never broadens reach.
+	if policy.ProxySentinel != nil {
+		spec.ProxyGatewayIP = id.HostIP
+		spec.ProxyPort = policy.ProxyPort
+	}
+	chain := netconf.RenderSandboxChainSpec(spec)
 	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
 		return fmt.Errorf("apply egress chain for tap %s: %w", id.TapName, err)
 	}
@@ -158,19 +164,18 @@ func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOp
 	if err := run(ctx, netconf.NftDeleteSandboxEgressCounterArgs(id.TapName), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("delete egress counter for tap %s: %w", id.TapName, err)
 	}
-	return firstErr
-}
-
-// insertChainRule splices a single rendered nft rule line in immediately after
-// the rendered chain's `add chain` header line, so the rule precedes every
-// accept and the terminal drop verdict in that chain. RenderSandboxChainSpec
-// always emits the `add chain ...` header first, so the spliced rule lands at
-// the top of the chain's rule list, ahead of the allowlist drop. Used to fold
-// the egress proxy accept into the per-sandbox chain. If the chain has no
-// newline (defensive), the rule is appended.
-func insertChainRule(chain, rule string) string {
-	if i := strings.IndexByte(chain, '\n'); i >= 0 {
-		return chain[:i+1] + rule + chain[i+1:]
+	// Per-fork egress proxy DNAT teardown (node-wide proxy only): remove this
+	// tap's dispatch element before its DNAT chain (the element references the
+	// chain). setup installs both for every sandbox on a proxy node, so without
+	// this the per-tap DNAT leaks and a reused tap grows the prerouting dispatch
+	// unbounded. Mirrors the inet dispatch-element-then-chain teardown above.
+	if opts.proxyEnabled {
+		if err := run(ctx, netconf.NftDeleteProxyDNATDispatchElementArgs(id.TapName), ""); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete proxy DNAT dispatch element for tap %s: %w", id.TapName, err)
+		}
+		if err := run(ctx, netconf.NftDeleteProxyDNATChainArgs(id.TapName), ""); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete proxy DNAT chain for tap %s: %w", id.TapName, err)
+		}
 	}
-	return chain + rule
+	return firstErr
 }

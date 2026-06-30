@@ -526,22 +526,32 @@ func TestRenderSandboxInputChainNoResolverDropsAll(t *testing.T) {
 
 func TestRenderProxyDNAT(t *testing.T) {
 	out := RenderProxyDNAT("mitos0", net.ParseIP("169.254.169.2"), 3128, net.ParseIP("10.200.0.5"))
-	// Idempotent table + chain creation must precede the rule.
+	// Idempotent table + base chain + dispatch map creation, mirroring the inet
+	// forward dispatch idiom so the per-tap DNAT can be torn down by tap key.
 	if !strings.Contains(out, "add table ip "+NatTableName()) {
 		t.Fatalf("nat table creation missing: %q", out)
 	}
-	if !strings.Contains(out, "add chain ip "+NatTableName()+" "+proxyDNATChainName()) {
-		t.Fatalf("prerouting chain creation missing: %q", out)
+	if !strings.Contains(out, "add chain ip "+NatTableName()+" "+proxyDNATBaseChainName()+" { type nat hook prerouting") {
+		t.Fatalf("prerouting base chain creation missing: %q", out)
+	}
+	if !strings.Contains(out, "add map ip "+NatTableName()+" "+ProxyDNATDispatchMapName()+" { type ifname : verdict ; }") {
+		t.Fatalf("dispatch map creation missing: %q", out)
+	}
+	// The base chain only dispatches by inbound interface into per-tap chains.
+	if !strings.Contains(out, "iifname vmap @"+ProxyDNATDispatchMapName()) {
+		t.Fatalf("base chain dispatch rule missing: %q", out)
+	}
+	// This fork gets its OWN regular chain holding the DNAT rule.
+	if !strings.Contains(out, "add chain ip "+NatTableName()+" "+ProxyDNATChainName("mitos0")+"\n") {
+		t.Fatalf("per-tap DNAT chain creation missing: %q", out)
 	}
 	// DNAT the fork-stable sentinel to THIS fork's gateway:proxyport.
-	if !strings.Contains(out, "ip daddr 169.254.169.2 tcp dport 3128") {
-		t.Fatalf("missing sentinel match: %q", out)
+	if !strings.Contains(out, "ip daddr 169.254.169.2 tcp dport 3128 dnat to 10.200.0.5:3128") {
+		t.Fatalf("missing sentinel DNAT rule: %q", out)
 	}
-	if !strings.Contains(out, "dnat to 10.200.0.5:3128") {
-		t.Fatalf("missing dnat target: %q", out)
-	}
-	if !strings.Contains(out, NatTableName()) {
-		t.Fatalf("dnat must live in the nat table: %q", out)
+	// The dispatch element routes this tap into its own chain.
+	if !strings.Contains(out, "add element ip "+NatTableName()+" "+ProxyDNATDispatchMapName()+" { \"mitos0\" : jump "+ProxyDNATChainName("mitos0")+" }") {
+		t.Fatalf("missing dispatch element: %q", out)
 	}
 }
 

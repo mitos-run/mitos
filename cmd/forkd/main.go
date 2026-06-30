@@ -287,6 +287,9 @@ func main() {
 			engineOpts.NetManager = network.NewManager(network.Options{
 				SubnetCIDR: sandboxSubnet,
 				Uplink:     uplink,
+				// ProxyEnabled mirrors the node-wide egress proxy flag so teardown
+				// removes each tap's per-fork prerouting DNAT (no leak on tap reuse).
+				ProxyEnabled: enableEgressProxy,
 				// The node is assumed to forward already; the optional uplink
 				// MASQUERADE covers SNAT when set. Forwarding is not toggled
 				// here to avoid surprising the host's sysctl state.
@@ -471,6 +474,11 @@ func main() {
 			if err := egressProxyServer.ListenAndServe(proxyListenAddr); err != nil {
 				fmt.Fprintf(os.Stderr, "forkd: egress proxy error: %v\n", err)
 				os.Exit(1)
+			}
+		}()
+		defer func() {
+			if err := egressProxyServer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: egress proxy shutdown: %v\n", err)
 			}
 		}()
 	}

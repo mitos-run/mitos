@@ -144,6 +144,16 @@ func TestSetupRendersEgressProxyRules(t *testing.T) {
 	if acceptIdx < 0 || dropIdx < 0 || acceptIdx > dropIdx {
 		t.Fatalf("proxy accept (idx %d) must precede the drop verdict (idx %d)\n%s", acceptIdx, dropIdx, chainStdin)
 	}
+	// The proxy accept must come AFTER the unconditional cloud-metadata drops: no
+	// accept of any kind may precede the IMDS drops, or a guest could reach the
+	// node metadata endpoint through the proxy path (latent IMDS bypass).
+	metaIdx := strings.LastIndex(chainStdin, "169.254.169.254")
+	if metaIdx < 0 {
+		t.Fatalf("metadata IMDS drop missing from chain:\n%s", chainStdin)
+	}
+	if acceptIdx < metaIdx {
+		t.Fatalf("proxy accept (idx %d) must come AFTER the metadata drops (idx %d); no accept may precede the IMDS drops\n%s", acceptIdx, metaIdx, chainStdin)
+	}
 
 	// The last apply installs the prerouting DNAT redirecting the sentinel to the
 	// fork's gateway.
@@ -197,6 +207,59 @@ func TestTeardownCommandOrder(t *testing.T) {
 		joined := strings.Join(c.argv, " ")
 		if strings.Contains(joined, "delete table") {
 			t.Errorf("teardown must not delete the shared table: %v", c.argv)
+		}
+	}
+}
+
+// TestTeardownRemovesProxyDNAT asserts that when the egress proxy is enabled,
+// teardown removes BOTH the per-tap DNAT chain and its prerouting dispatch
+// element, and removes the dispatch element BEFORE the chain (the element
+// references the chain). Without this the per-fork DNAT leaks on teardown and a
+// reused tap grows the prerouting dispatch unbounded.
+func TestTeardownRemovesProxyDNAT(t *testing.T) {
+	rr := &recordingRunner{}
+	id := testIdentity()
+	err := teardown(context.Background(), rr.run, id, applyOptions{proxyEnabled: true})
+	if err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	wantElem := strings.Join(netconf.NftDeleteProxyDNATDispatchElementArgs(id.TapName), " ")
+	wantChain := strings.Join(netconf.NftDeleteProxyDNATChainArgs(id.TapName), " ")
+	elemIdx, chainIdx := -1, -1
+	for i, c := range rr.calls {
+		joined := strings.Join(c.argv, " ")
+		if joined == wantElem {
+			elemIdx = i
+		}
+		if joined == wantChain {
+			chainIdx = i
+		}
+	}
+	if elemIdx < 0 {
+		t.Fatalf("teardown did not delete the proxy DNAT dispatch element: %+v", rr.calls)
+	}
+	if chainIdx < 0 {
+		t.Fatalf("teardown did not delete the per-tap proxy DNAT chain: %+v", rr.calls)
+	}
+	if elemIdx > chainIdx {
+		t.Fatalf("dispatch element (idx %d) must be deleted before the chain (idx %d)", elemIdx, chainIdx)
+	}
+}
+
+// TestTeardownNoProxyOmitsDNAT asserts that on a node without the egress proxy,
+// teardown attempts no proxy DNAT deletes (so non-proxy nodes never error on
+// absent nat objects).
+func TestTeardownNoProxyOmitsDNAT(t *testing.T) {
+	rr := &recordingRunner{}
+	id := testIdentity()
+	if err := teardown(context.Background(), rr.run, id, applyOptions{}); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	for _, c := range rr.calls {
+		joined := strings.Join(c.argv, " ")
+		if strings.Contains(joined, netconf.NatTableName()) && strings.Contains(joined, "proxydnat") {
+			t.Errorf("teardown without proxy must not touch proxy DNAT objects: %v", c.argv)
 		}
 	}
 }

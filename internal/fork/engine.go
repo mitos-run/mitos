@@ -523,16 +523,6 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
 	}
 
-	// Register this fork's guest IP with the node-wide egress proxy (it
-	// attributes connections by source IP) and compute the fork-stable proxy
-	// endpoint the guest routes egress through. Done after Setup so a setup
-	// failure does not leave a dangling registration.
-	var proxyEndpoint string
-	if e.egressProxyEnabled() {
-		e.egressProxy.Register(id.GuestIP, sandboxID)
-		proxyEndpoint = net.JoinHostPort(e.proxySentinel.String(), strconv.Itoa(e.proxyPort))
-	}
-
 	// Register this sandbox's DNS-name allowlist with the proxy, keyed by its
 	// unique guest IP (the proxy attributes queries by source IP). Only when
 	// DNS egress is on AND the allowlist actually carries name entries; an
@@ -546,6 +536,17 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		if len(names) > 0 {
 			e.dnsRegistry.Register(id.GuestIP, names)
 		}
+	}
+
+	// Register this fork's guest IP with the node-wide egress proxy (it
+	// attributes connections by source IP) and compute the fork-stable proxy
+	// endpoint the guest routes egress through. Done after Setup AND after every
+	// fallible step above so neither a setup failure nor a later parse error
+	// leaves a dangling proxy attribution (commit-at-the-end).
+	var proxyEndpoint string
+	if e.egressProxyEnabled() {
+		e.egressProxy.Register(id.GuestIP, sandboxID)
+		proxyEndpoint = net.JoinHostPort(e.proxySentinel.String(), strconv.Itoa(e.proxyPort))
 	}
 
 	return &forkNetwork{

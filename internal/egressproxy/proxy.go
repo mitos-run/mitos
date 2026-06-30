@@ -42,11 +42,33 @@ type Proxy struct {
 	resolver SandboxResolver
 	dialer   Dialer
 	logger   Logger
+
+	// mu guards the listener handle and the closed flag so Close can race with
+	// ListenAndServe (Close may be invoked before the listener is bound).
+	mu     sync.Mutex
+	ln     net.Listener
+	closed bool
 }
 
 // NewProxy constructs a Proxy with the given resolver, dialer, and logger seams.
 func NewProxy(r SandboxResolver, d Dialer, l Logger) *Proxy {
 	return &Proxy{resolver: r, dialer: d, logger: l}
+}
+
+// Close stops the listener started by ListenAndServe, unblocking its Accept
+// loop and making ListenAndServe return nil (a clean shutdown, not an error).
+// It is safe to call before ListenAndServe has bound the listener (the bind is
+// then skipped) and safe to call more than once. It mirrors the dnsproxy
+// Server.Shutdown parity so forkd can shut the proxy down gracefully on signal.
+func (p *Proxy) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	ln := p.ln
+	p.mu.Unlock()
+	if ln == nil {
+		return nil
+	}
+	return ln.Close()
 }
 
 // Serve handles one client connection. srcIP is the guest IP used to attribute

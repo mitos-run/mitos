@@ -25,11 +25,29 @@ func (p *Proxy) ListenAndServe(addr string) error {
 	if err != nil {
 		return fmt.Errorf("egress proxy listen on %s: %w", addr, err)
 	}
+	// Publish the listener so Close can unblock the Accept loop. If Close already
+	// ran (shutdown raced ahead of the bind), close immediately and return clean.
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = ln.Close()
+		return nil
+	}
+	p.ln = ln
+	p.mu.Unlock()
 	defer ln.Close()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			// A deliberate Close turns the Accept error into a clean shutdown so the
+			// caller does not treat graceful termination as a fatal listener failure.
+			p.mu.Lock()
+			closed := p.closed
+			p.mu.Unlock()
+			if closed {
+				return nil
+			}
 			return fmt.Errorf("egress proxy accept on %s: %w", addr, err)
 		}
 		tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr)
