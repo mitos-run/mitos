@@ -100,9 +100,25 @@ the same or overlapping samples recomputes the same record value, so:
   re-derives the same records.
 
 The store is the pluggable seam (`UsageStore`), mirroring the accounts `Store`
-pattern. `MemUsageStore` is the tested in-memory default. A durable Postgres
-store is a documented follow-up; the upsert-by-key contract is the seam it
-implements (the natural primary key is `(org_id, sandbox_id, window_start)`).
+pattern. `MemUsageStore` is the tested in-memory reference (lost on restart;
+DEV ONLY). The durable backend is `pgstore.PgUsageStore`
+(`internal/saas/pgstore/usagestore.go`): a Postgres `usage_records` table whose
+primary key is exactly the idempotency key `(org_id, sandbox_id, window_start)`,
+so `UpsertRecord` is an `INSERT ... ON CONFLICT DO UPDATE` that REPLACES the row
+(never adds), and `ListRecords` / `TotalsByOrg` are org-scoped reads. Both stores
+run the SAME behavioral contract (`internal/usage/usagestoretest`), so the
+durable store is proven equivalent to the reference: idempotent upsert, per-org
+isolation, half-open `[from, to)` period bounds, and per-org cumulative totals.
+
+The controller wires the backend behind `--usage-database-dsn` (falling back to
+the `MITOS_DATABASE_DSN` env var): when a DSN is set, the collector and the
+internal usage API use `PgUsageStore` so metered consumption survives a
+controller restart; absent a DSN they use the in-memory store. The DSN is a
+secret and is never logged (only the chosen backend is). A configured-but-
+unreachable DSN fails startup loud rather than silently falling back to a store
+that would lose usage. The `TotalsByOrg` figure for the durable store is a direct
+`SUM` aggregate over the table (there is no eviction to survive, unlike the
+in-memory store's delta-tracked cumulative), so it is the true billing total.
 
 ## CoW reconciliation (no double-count of shared memory)
 
@@ -178,11 +194,13 @@ This usage pipeline produces the auditable records the push consumes.
 
 ## What is a seam / follow-up
 
-- Real multi-node HTTP scrape of `GET /v1/metering` (implements `SampleSource`).
-- Durable Postgres `UsageStore` (implements the upsert-by-key contract).
-- Real `OrgResolver` reading the claim -> org label.
-- Stripe metered-billing push.
+- Real multi-node HTTP scrape of `GET /v1/metering` (implements `SampleSource`): DONE.
+- Durable Postgres `UsageStore` (implements the upsert-by-key contract): DONE
+  (`pgstore.PgUsageStore`, migration `0003_usage_records.sql`).
+- Real `OrgResolver` reading the claim -> org label: DONE.
+- Stripe metered-billing push: implemented in `internal/saas/billing`.
 
-These are seams with tested in-memory or static defaults so the integration,
-idempotency, CoW reconciliation, and org-scoping are fully verifiable on darwin
-without a cluster.
+The in-memory defaults remain so the integration, idempotency, CoW
+reconciliation, and org-scoping are fully verifiable on darwin without a cluster;
+the Postgres store runs the same contract in CI against a Postgres service (set
+`MITOS_TEST_DATABASE_DSN`), and skips locally when no database is configured.
