@@ -48,6 +48,14 @@ import (
 //      own requeue. The Ready early-return in Reconcile routes through the loss
 //      check before the lifetime path, so the enqueued reconcile re-pends.
 
+// reasonCheckpointNotImplemented is the Ready-condition reason and the Warning
+// event reason a Checkpoint-policy pool's re-pend carries when no live-VM
+// checkpoint was captured, which is the only state today: there is no live-VM
+// checkpoint engine yet (full impl is a tracked follow-up requiring KVM). It
+// mirrors the RevisionResumeNotImplemented precedent: a declared-but-unimplemented
+// option is surfaced honestly, never silently degraded. See docs/conditions.md.
+const reasonCheckpointNotImplemented = "CheckpointNotImplemented"
+
 // huskCheckpointer is the seam the claim reconciler checkpoints a live husk VM
 // through before re-pending under a Checkpoint drain policy. The production
 // value (defaultHuskCheckpointer) calls the engine ForkRunning/CreateSnapshot
@@ -159,11 +167,11 @@ func (r *SandboxReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1.S
 			logger.Error(cerr, "live-VM checkpoint failed on husk pod loss; re-pending without a checkpoint", "claim", claim.Name)
 		}
 		checkpointed = ok
-		if !ok {
-			logger.Info("Checkpoint drain policy: nothing to checkpoint (pod/VMM already gone), degrading to re-pend", "claim", claim.Name)
-		} else {
+		if ok {
 			logger.Info("Checkpoint drain policy: captured a live-VM snapshot before re-pend", "claim", claim.Name)
 		}
+		// The not-captured (degraded) case is surfaced honestly below: a distinct
+		// CheckpointNotImplemented condition reason, a Warning event, and a log.
 	}
 
 	reason := "HuskPodLost"
@@ -172,7 +180,19 @@ func (r *SandboxReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1.S
 		if checkpointed {
 			msg = "the backing husk pod was lost; a live-VM checkpoint was captured and the claim is re-pending to re-activate on a replacement slot"
 		} else {
-			msg = "the backing husk pod was lost with no live VMM to checkpoint; the claim is re-pending (Kill semantics) and will re-activate on a replacement dormant slot"
+			// HONEST degrade (issue #374): the pool asked for Checkpoint, but no
+			// live-VM checkpoint engine captured the state, so this re-pend is Kill
+			// semantics and in-VM state was LOST. Surface that LOUDLY with a DISTINCT
+			// reason (not the generic HuskPodLost a Kill pool carries) plus a Warning
+			// event, so a Checkpoint pool never silently masquerades as a successful
+			// drain. The condition on the claim is transient (the next reconcile
+			// re-pends and may set NoHuskPod), so the Warning event is the durable
+			// operator-visible signal.
+			reason = reasonCheckpointNotImplemented
+			msg = "DrainPolicy Checkpoint is not yet implemented (no live-VM checkpoint engine); the backing husk pod was lost and the claim is re-pending with Kill semantics, so in-VM state was NOT captured. Full live-VM checkpoint is a tracked follow-up requiring KVM; until then set DrainPolicy Kill knowingly, or persist state via a workspace"
+			r.Feed.recorderOrNop().Eventf(claim, corev1.EventTypeWarning, reasonCheckpointNotImplemented,
+				"DrainPolicy Checkpoint is not yet implemented; claim %q re-pended with Kill semantics (in-VM state NOT captured)", claim.Name)
+			logger.Info("Checkpoint drain policy is not implemented; degraded to Kill re-pend (in-VM state lost)", "claim", claim.Name)
 		}
 	}
 
