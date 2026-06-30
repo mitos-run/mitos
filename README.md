@@ -245,6 +245,7 @@ The husk pod-native path is the default. A few capabilities run today only on th
 | CoW-aware metering | The shared template page set is counted once, not once per fork, so billing and scheduling reflect the honest physical footprint | [mitos.run/docs/metering](https://mitos.run/docs/metering) |
 | Operator tooling | `kubectl mitos` plugin (`ls` / `ps`) and the operational `GET /v1/metering` report | [mitos.run/docs/observability](https://mitos.run/docs/observability) |
 | Bare metal first-class | Talos + Hetzner is the reference platform | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) |
+| Single-user first run | k3s quickstart with a one-user login gate (QA only, not production) | [docs/platforms/k3s-quickstart.md](docs/platforms/k3s-quickstart.md) |
 
 ## Comparison
 

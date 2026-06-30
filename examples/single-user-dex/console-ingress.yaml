@@ -1,0 +1,50 @@
+# =============================================================================
+# HTTPS Ingress for the Mitos console, single-user QA / first-run ONLY.
+#
+# !!! NOT FOR PRODUCTION. !!!
+#
+# The console sets its session and CSRF cookies with the Secure flag, so the
+# browser only accepts them over HTTPS (or http://localhost). This Ingress
+# terminates TLS for the console host using a self-signed certificate you create
+# out of band (see README.md), so the login flow works on a first install
+# without cert-manager.
+#
+# A self-signed certificate makes the browser show a security warning that you
+# click through. That is fine for solo QA and unacceptable for production: for a
+# real deployment, issue a trusted certificate (cert-manager + a real DNS name)
+# and serve the console behind it.
+#
+# This Ingress points at the mitos-console Service that the Mitos Helm chart
+# renders (console.enabled, the default). Set console.ingress.enabled=false in
+# your chart values so the chart does not also render a non-TLS console Ingress
+# for the same host (the values overlay in console-oidc-values.yaml does this).
+#
+# Replace console.example.com with a hostname that resolves to your cluster.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mitos-console-single-user
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos-console-single-user
+    app.kubernetes.io/component: console
+    app.kubernetes.io/part-of: mitos
+spec:
+  tls:
+    - hosts:
+        - console.example.com
+      # Self-signed TLS Secret you create out of band (README.md). NEVER commit
+      # a real key or certificate to the repo.
+      secretName: mitos-console-tls
+  rules:
+    - host: console.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mitos-console
+                port:
+                  name: http
