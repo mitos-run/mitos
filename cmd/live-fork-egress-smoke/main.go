@@ -17,11 +17,12 @@
 //	    --nftables DNAT per fork--> fork gateway:port
 //	    --> per-node egress proxy (internal/egressproxy) --net.Dial--> upstream stub
 //
-// The upstream stub is a tiny host HTTP server bound on loopback that records
-// every distinct inbound TCP connection (a fresh proxy->stub dial happens for
-// each guest connection). The guest reaches it ONLY through the proxy: the
-// proxy dials the stub host-side, so a fresh stub connection is the observable
-// signal that a guest opened a new, independent upstream.
+// The upstream stub is a tiny host HTTP server bound on a non-loopback host
+// IPv4 (discovered via the UDP routing trick at startup). The egress proxy
+// denylist blocks loopback (127.0.0.0/8, SSRF guard C1, issue #336), so the
+// stub must bind off-loopback. The guest reaches it ONLY through the proxy:
+// the proxy dials the stub host-side, so a fresh stub connection is the
+// observable signal that a guest opened a new, independent upstream.
 //
 // Assertions (exit 1 on failure; setup errors exit 2, mirroring net-fork-smoke):
 //
@@ -101,11 +102,19 @@ func run(image, dataDir, fcBin, kernel, agentBin, sentinel string, proxyPort int
 		return setupErr(fmt.Errorf("invalid --proxy-sentinel %q", sentinel))
 	}
 
-	// Host-side upstream stub. Bound on loopback: the proxy (this process) dials
-	// it host-side, so it never needs to be guest-reachable directly. It counts
-	// every distinct inbound TCP connection so the test can prove a fresh
-	// connection vs a reused one.
-	stub, err := newUpstreamStub()
+	// Discover a non-loopback host IPv4 for the upstream stub. The egress proxy
+	// denylist blocks loopback (127.0.0.0/8) as the SSRF guard (C1, issue #336),
+	// so the stub cannot bind on 127.0.0.1: the proxy would refuse to dial it and
+	// the held keep-alive would never reach the stub. Normal private or routable
+	// host IPs are allowed by the denylist.
+	hostIP, err := hostOutboundIP()
+	if err != nil {
+		return setupErr(fmt.Errorf("discover host outbound IP for upstream stub: %w", err))
+	}
+	// Host-side upstream stub. Bound on a non-loopback host IPv4 so the egress
+	// proxy denylist allows the proxy to dial it. It counts every distinct inbound
+	// TCP connection so the test can prove a fresh connection vs a reused one.
+	stub, err := newUpstreamStub(hostIP)
 	if err != nil {
 		return setupErr(fmt.Errorf("start upstream stub: %w", err))
 	}
@@ -509,6 +518,75 @@ type noopEgressLogger struct{}
 func (noopEgressLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {}
 func (noopEgressLogger) Deny(sandboxID, hostport string)                             {}
 
+// hostOutboundIP returns the first usable non-loopback, non-link-local host
+// IPv4 address. The egress proxy denylist (127.0.0.0/8, 169.254.0.0/16) must
+// allow the address for the proxy to reach the upstream stub. We use the UDP
+// "dial trick" as the primary method: opening a UDP socket toward a routable
+// address causes the kernel to select the outbound source IP without sending
+// any packets. If that fails or returns a denied address we fall back to
+// iterating network interfaces.
+func hostOutboundIP() (net.IP, error) {
+	// UDP dial trick: no packets are sent; the OS picks the preferred source IP.
+	conn, derr := net.Dial("udp", "10.255.255.255:1")
+	if derr == nil {
+		defer conn.Close()
+		ip := conn.LocalAddr().(*net.UDPAddr).IP
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		if ip != nil && !smokeIPDenied(ip) {
+			return ip, nil
+		}
+	}
+	// Fallback: scan interfaces for the first up, non-loopback IPv4.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list interfaces: %w", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, aerr := iface.Addrs()
+		if aerr != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
+			} else {
+				continue
+			}
+			if !smokeIPDenied(ip) {
+				return ip, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no usable non-loopback host IPv4 found; cannot bind upstream stub outside the egress proxy denylist")
+}
+
+// smokeIPDenied mirrors the core of egressproxy.deniedIP for IPv4 addresses.
+// egressproxy.deniedIP is unexported so we replicate the relevant subset here.
+// The proxy rejects any destination matching these rules, so we validate the
+// stub bind address before use to catch misconfigurations at setup time (exit 2)
+// rather than as a confusing tunnel failure inside the test.
+func smokeIPDenied(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
 // --- host-side upstream stub ---
 
 const stubBody = "hello"
@@ -530,8 +608,13 @@ type upstreamStub struct {
 	dupFound string
 }
 
-func newUpstreamStub() (*upstreamStub, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// newUpstreamStub starts the host-side HTTP stub listener on hostIP:0. The
+// caller must pass a non-loopback, non-link-local host IPv4: the egress proxy
+// denylist (127.0.0.0/8, 169.254.0.0/16) rejects a loopback or link-local
+// destination before dialing, so a loopback stub address would cause every
+// CONNECT tunnel from the guest to be refused at the proxy (SSRF guard C1).
+func newUpstreamStub(hostIP net.IP) (*upstreamStub, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(hostIP.String(), "0"))
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
