@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,6 +51,53 @@ func poolTemplateID(pool *v1.SandboxPool) string {
 		return pool.Spec.TemplateRef.Name
 	}
 	return pool.Name
+}
+
+// poolBuildIdentity is the content hash of everything that determines what a
+// pool's template snapshot CONTAINS, so the controller can tell a template-content
+// edit apart from a steady-state reconcile and rebuild the snapshot when (and only
+// when) the content changed (issue #475). It hashes exactly the inputs handed to
+// forkd's CreateTemplate build: the base image, the resolved init commands
+// (BuildSteps flattened, or the legacy Init), the serving workload (command, env,
+// ready probe), the baked volumes, the build VM resources, and the at-rest
+// encryption flag. A change to the workload command, env, or ready probe (the
+// silent-no-rebuild bug) therefore changes the identity exactly the way an image
+// change does. Fields that do not change snapshot content (placement, network
+// posture, warm-pool sizing, budgets) are deliberately excluded so they do not
+// trigger a needless rebuild. A nil template hashes to the empty string.
+func poolBuildIdentity(t *v1.PoolTemplateSpec) string {
+	if t == nil {
+		return ""
+	}
+	// An explicit, named payload (not the whole spec) so the hash is stable against
+	// unrelated PoolTemplateSpec additions and so it is obvious which fields gate a
+	// rebuild. Field order is fixed by the struct, and every member marshals
+	// deterministically (slices are ordered; resource.Quantity has a canonical
+	// JSON form), so the digest is reproducible across reconciles.
+	payload := struct {
+		Image     string              `json:"image"`
+		Init      []string            `json:"init"`
+		Workload  *v1.WorkloadSpec    `json:"workload"`
+		Volumes   []v1.SandboxVolume  `json:"volumes"`
+		Resources v1.SandboxResources `json:"resources"`
+		Encrypted bool                `json:"encrypted"`
+	}{
+		Image:     t.Image,
+		Init:      v1.InitCommands(t.BuildSteps, t.Init),
+		Workload:  t.Workload,
+		Volumes:   t.Volumes,
+		Resources: t.Resources,
+		Encrypted: t.Encrypted,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		// json.Marshal of these value types does not fail; fall back to a constant
+		// so a hypothetical error degrades to "rebuild on every reconcile" rather
+		// than silently colliding identities.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // poolReplicas is the desired per-node snapshot fan-out for a pool: the v1
