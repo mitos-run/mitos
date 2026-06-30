@@ -579,5 +579,17 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    e.vsockPath(newSandboxID),
+		// A live fork gets a FRESH per-fork network identity and must reset its
+		// captured upstream sockets. The mock has no real allocator, so it derives
+		// a distinct guest IP from the fork counter (10.200.x.y) so daemon-level
+		// tests can exercise the live network delivery path (identity +
+		// ResetUpstreams) without KVM. ResetUpstreams is always true for a live
+		// fork.
+		GuestNetwork: &vsock.NotifyForkedNetwork{
+			GuestIP:        fmt.Sprintf("10.200.%d.%d", (id/250)%250, id%250),
+			GatewayIP:      "10.200.0.1",
+			PrefixLen:      30,
+			ResetUpstreams: true,
+		},
 	}, nil
 }

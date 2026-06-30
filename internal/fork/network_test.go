@@ -230,23 +230,87 @@ func TestPrepareForkNetworkDistinctPerFork(t *testing.T) {
 	}
 }
 
-// TestForkRunningFailsClosedWithNetworking asserts that a live fork
-// (ForkRunning) of a sandbox is rejected with an explicit, actionable error
-// while per-VM netns is not yet available (#18). Restoring the source's baked
-// NIC into a second live VM would collide on tap/MAC/IP, so we fail closed
-// rather than silently break networking.
-func TestForkRunningFailsClosedWithNetworking(t *testing.T) {
-	e, _, _ := newNetEngine(t)
-	e.sandboxes = map[string]*Sandbox{
-		"src": {ID: "src"},
+// mustFork sets up a NETWORKED source sandbox on a non-KVM test engine without
+// booting Firecracker: it acquires a real per-fork network identity through
+// prepareForkNetwork (the same seam fork() uses), records the resulting Sandbox
+// (with its retained netOpts) in the engine map, and returns the ForkResult
+// view a real fork would. This lets ForkRunning's gate + live-fork wiring be
+// exercised against a real source identity without KVM.
+func mustFork(t *testing.T, e *Engine, id string) *ForkResult {
+	t.Helper()
+	if e.sandboxes == nil {
+		e.sandboxes = map[string]*Sandbox{}
+	}
+	opts := ForkOpts{Network: &NetworkOpts{EgressPolicy: "deny"}}
+	fn, err := e.prepareForkNetwork(id, opts)
+	if err != nil {
+		t.Fatalf("mustFork prepare network for %s: %v", id, err)
+	}
+	e.sandboxes[id] = &Sandbox{ID: id, netID: fn.identity, netOpts: opts.Network}
+	return &ForkResult{SandboxID: id, GuestNetwork: fn.guestNet}
+}
+
+// TestForkRunningNetworkedFailsClosedWithoutProxy asserts that a live fork
+// (ForkRunning) of a networked sandbox is rejected with an explicit, actionable
+// error referencing #336 when the egress proxy is NOT wired. Without the proxy
+// there is no per-fork isolation, so restoring the source's baked NIC into a
+// second live VM would collide on tap/MAC/IP; we fail closed rather than
+// silently break networking. The stale #18 reference must be gone.
+func TestForkRunningNetworkedFailsClosedWithoutProxy(t *testing.T) {
+	e := newTestEngineWithNetwork(t) // networking on, no proxy
+	src := mustFork(t, e, "src")
+	_, err := e.ForkRunning(src.SandboxID, "child", true)
+	if err == nil || !strings.Contains(err.Error(), "#336") {
+		t.Fatalf("must fail closed referencing #336, got %v", err)
+	}
+	if strings.Contains(err.Error(), "#18") {
+		t.Fatalf("stale #18 reference: %v", err)
+	}
+}
+
+// TestForkRunningLiveForkPreparesResetIdentity asserts the substantive
+// live-fork network behavior the egress-proxy path (#336) unblocks, at the
+// prepareForkNetwork seam ForkRunning drives through fork(): with the proxy
+// active, a live fork (ForkOpts.LiveFork=true) gets a FRESH per-fork identity
+// distinct from the source, that identity is registered with the proxy, the
+// fork-stable proxy endpoint is delivered, and the guest config carries
+// ResetUpstreams=true so captured sockets are dropped. A cold fork
+// (LiveFork=false) of the SAME engine leaves ResetUpstreams off, proving the
+// flag is the only behavioral difference.
+func TestForkRunningLiveForkPreparesResetIdentity(t *testing.T) {
+	reg := egressproxy.NewRegistry()
+	e := newTestEngineWithNetwork(t, withEgressProxy(reg, net.ParseIP("169.254.169.2"), 3128))
+
+	src := mustFork(t, e, "src")
+
+	child, err := e.prepareForkNetwork("child", ForkOpts{
+		Network:  &NetworkOpts{EgressPolicy: "deny"},
+		LiveFork: true,
+	})
+	if err != nil {
+		t.Fatalf("live fork network prepare: %v", err)
+	}
+	if child.guestNet.GuestIP == src.GuestNetwork.GuestIP {
+		t.Fatalf("child must get a FRESH per-fork identity, got source IP %s", child.guestNet.GuestIP)
+	}
+	if !child.guestNet.ResetUpstreams {
+		t.Fatal("live fork must set ResetUpstreams")
+	}
+	if child.guestNet.ProxyEndpoint != "169.254.169.2:3128" {
+		t.Fatalf("live fork must route through the proxy endpoint, got %q", child.guestNet.ProxyEndpoint)
+	}
+	if id, ok := reg.Lookup(child.identity.GuestIP); !ok || id != "child" {
+		t.Fatalf("child guest IP not registered with proxy: %v %v", id, ok)
 	}
 
-	_, err := e.ForkRunning("src", "child", false)
-	if err == nil {
-		t.Fatal("expected ForkRunning to fail closed when networking is enabled")
+	// A cold fork on the same engine leaves ResetUpstreams off: the flag is the
+	// only difference between the two paths.
+	cold, err := e.prepareForkNetwork("cold", ForkOpts{Network: &NetworkOpts{EgressPolicy: "deny"}})
+	if err != nil {
+		t.Fatalf("cold fork network prepare: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not supported yet") || !strings.Contains(err.Error(), "#18") {
-		t.Errorf("error = %q, want an explicit unsupported message referencing #18", err)
+	if cold.guestNet.ResetUpstreams {
+		t.Fatal("cold fork must NOT set ResetUpstreams")
 	}
 }
 

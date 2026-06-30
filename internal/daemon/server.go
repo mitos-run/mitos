@@ -416,7 +416,7 @@ func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID 
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	if err := s.notifyForkedRunning(result.SandboxID, result.VsockPath); err != nil {
+	if err := s.notifyForkedRunning(result.SandboxID, result.VsockPath, result.GuestNetwork); err != nil {
 		// A live fork that did not reseed shares its parent's RNG state; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
 		activeSandboxes.Dec()
@@ -432,7 +432,14 @@ func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID 
 // fork, without delivering config (live forks inherit the parent's env). On
 // the mock engine there is no guest, so it is a no-op. Strict on a real
 // engine: see ForkRunning.
-func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
+//
+// guestNet is the live fork's FRESH per-fork network identity (distinct guest
+// IP + gateway) plus its ResetUpstreams signal, produced by the engine's
+// egress-proxy live-fork path (issue #336). Delivering it re-addresses the
+// child's eth0 off the source's identity and tells the guest to drop captured
+// upstream sockets. Nil when the source was a networking-off sandbox, in which
+// case the child carries no network config (the prior behavior).
+func (s *Server) notifyForkedRunning(sandboxID, vsockPath string, guestNet *vsock.NotifyForkedNetwork) error {
 	if !s.engine.GetCapacity().KVMAvailable {
 		return nil // mock engine: no guest to notify
 	}
@@ -440,11 +447,10 @@ func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
 	s.sandboxAPI.RegisterStreamPath(sandboxID, vsockPath)
-	// Live forks inherit the source VM's baked network identity in memory; the
-	// engine does not (yet) re-address them, so no per-fork network config is
-	// delivered here. Distinct-identity live forks are a follow-up (#18). Live
-	// forks also inherit the source's mounted volumes, so no mount table is sent.
-	return s.notifyForked(sandboxID, nil, nil)
+	// Deliver the live fork's fresh network identity + reset signal so the child
+	// re-addresses eth0 and resets captured upstreams (#336). Live forks inherit
+	// the source's mounted volumes, so no mount table is sent.
+	return s.notifyForked(sandboxID, guestNet, nil)
 }
 
 // Terminate handles a sandbox termination request.
