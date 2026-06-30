@@ -13,12 +13,31 @@ import (
 	"mitos.run/mitos/internal/netconf"
 )
 
+// flushRunner runs argv and returns the combined stdout+stderr output alongside
+// the process error. It is a separate seam from runner because FlushSource
+// needs to inspect the output text to distinguish "no entries matched" (exit 1
+// with a deletion summary) from a genuine failure (exit 1 with, e.g.,
+// "Operation not permitted").
+type flushRunner func(ctx context.Context, argv []string) (string, error)
+
+// execFlushRunner is the production flushRunner: it captures combined
+// stdout+stderr so FlushSource can match on the output message.
+func execFlushRunner(ctx context.Context, argv []string) (string, error) {
+	if len(argv) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // linuxManager is the real, root-requiring Manager. It wires a real
 // exec-based runner into the platform-independent setup/teardown
 // orchestration in network_apply.go. The orchestration is unit-tested with a
 // fake runner; this file is exercised end to end only in KVM CI.
 type linuxManager struct {
 	run     runner
+	flush   flushRunner
 	enableF forwardEnabler
 	opts    applyOptions
 }
@@ -44,6 +63,7 @@ type Options struct {
 func NewManager(opts Options) Manager {
 	return &linuxManager{
 		run:     execRunner,
+		flush:   execFlushRunner,
 		enableF: enableIPForward,
 		opts: applyOptions{
 			subnetCIDR:       opts.SubnetCIDR,
