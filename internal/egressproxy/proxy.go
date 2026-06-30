@@ -64,6 +64,9 @@ func (p *Proxy) Serve(client net.Conn, srcIP net.IP) {
 	}
 	line = strings.TrimRight(line, "\r\n")
 
+	// parseRequestTarget errors embed the raw request line or URI; callers must
+	// NOT log or forward them as they may contain paths, query strings, or auth
+	// values. Serve already discards the error and writes a static 400 response.
 	_, hostport, isConnect, err := parseRequestTarget(line)
 	if err != nil {
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
@@ -92,17 +95,17 @@ func (p *Proxy) Serve(client net.Conn, srcIP net.IP) {
 
 // serveConnect establishes an HTTP CONNECT tunnel. It dials the upstream
 // host-side, replies with 200, then bidirectionally copies bytes until either
-// side closes. Logger.Egress is called exactly once, after the copy completes,
-// with the accumulated byte counts. The deferred upstream.Close fires after
-// Egress so that any test double watching the connection's close can safely
-// read the log entry (see fakeDialer.dialed in proxy_test.go).
+// side closes. When either copy direction finishes, both connections are closed
+// (net.Conn.Close is idempotent) so the other direction unblocks promptly.
+// Logger.Egress is called exactly once after both goroutines exit, with the
+// cumulative up and down byte counts. The deferred upstream.Close is a backstop
+// only; the goroutines drive the actual shutdown.
 func (p *Proxy) serveConnect(client net.Conn, sandboxID, hostport string) {
 	upstream, err := p.dialer.Dial(context.Background(), hostport)
 	if err != nil {
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
-	// Close upstream AFTER Logger.Egress (see defer order note above).
 	defer upstream.Close()
 
 	_, err = fmt.Fprintf(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -114,29 +117,27 @@ func (p *Proxy) serveConnect(client net.Conn, sandboxID, hostport string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Upstream direction: client (guest) -> upstream.
-	// This goroutine does NOT close upstream so the deferred upstream.Close in
-	// the calling frame fires only after Logger.Egress.
+	// UP: client (guest) -> upstream.
+	// On return, close both ends so DOWN's blocked read unblocks promptly.
 	go func() {
 		defer wg.Done()
 		n, _ := io.Copy(upstream, client)
 		upBytes = n
+		upstream.Close()
+		client.Close()
 	}()
 
-	// Downstream direction: upstream -> client (guest).
-	// Closes client when the upstream half closes so the upload goroutine's
-	// blocked read terminates promptly.
+	// DOWN: upstream -> client (guest).
+	// On return, close both ends so UP's blocked read unblocks promptly.
 	go func() {
 		defer wg.Done()
 		n, _ := io.Copy(client, upstream)
 		downBytes = n
 		client.Close()
+		upstream.Close()
 	}()
 
 	wg.Wait()
-	// Egress is called here, before the deferred upstream.Close, so any watcher
-	// that synchronizes on upstream.Close (e.g. fakeDialer.dialed in tests)
-	// observes a complete log entry.
 	p.logger.Egress(sandboxID, hostport, upBytes, downBytes)
 }
 
@@ -211,6 +212,11 @@ func collectHeaders(br *bufio.Reader) []string {
 // For CONNECT the target is the authority directly (host:port).
 // For plain HTTP the target is an absolute-form URI; only the host and port are
 // extracted, stripping path, query, and fragment so they never reach the Logger.
+//
+// IMPORTANT: error values returned by this function embed the raw request line
+// or URI. Callers must never log or forward these errors; they may contain
+// paths, query strings, or auth values. Serve discards them and writes a static
+// 400 response.
 func parseRequestTarget(line string) (method, hostport string, isConnect bool, err error) {
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
