@@ -69,7 +69,7 @@ go build -o /tmp/bench ./cmd/bench/
   --iterations 100 --warmup 10 \
   --summary --json execrt.json
 
-# 1-to-N live fork fan-out (issue #207): fork ONE warmed base into N children
+# 1-to-N fan-out (non-networked): fork ONE warmed base into N children
 /tmp/bench \
   --mode fork-fanout \
   --template <id> \
@@ -78,6 +78,21 @@ go build -o /tmp/bench ./cmd/bench/
   --kernel <data-dir>/vmlinux \
   --fanout-n 1,4,16,64 \
   --summary --json fanout.json
+
+# 1-to-N networked fan-out: same but with per-fork networking and the egress
+# proxy (needs /dev/kvm plus tap, nftables, and the proxy port available;
+# run as root or with CAP_NET_ADMIN + CAP_NET_RAW)
+/tmp/bench \
+  --mode fork-fanout \
+  --networked \
+  --proxy-sentinel 169.254.169.2 \
+  --proxy-port 3128 \
+  --template <id> \
+  --data-dir <data-dir> \
+  --firecracker /usr/local/bin/firecracker \
+  --kernel <data-dir>/vmlinux \
+  --fanout-n 1,4,16,64 \
+  --summary --json fanout-networked.json
 ```
 
 `fork-fanout` forks one base into N children at each N in `--fanout-n` (default
@@ -91,6 +106,15 @@ honest writeup scaffold. The result JSON carries the raw per-child samples
 alongside the summary. Aggregation is the pure, unit-tested
 `internal/benchstat.AggregateFanOut`.
 
+Adding `--networked` wires per-fork networking and the egress proxy into each
+fork: the engine is constructed with a network manager, allocator, and egress
+proxy registry; the proxy listener is started before the first fork; and each
+fork carries `ForkOpts.Network` (EgressPolicy `"deny"`) and `LiveFork true`,
+matching the networked live-fork path. The measured time-to-ready then includes
+host-side network setup (tap creation, nftables rule installation, proxy
+registration) per fork. With `--fanout-n 1` this gives the isolated networked
+fork latency (arm-1 baseline plus networking overhead).
+
 `--summary` prints the count/min/p50/p90/p99/max/mean table to stdout. `--json`
 writes the same distribution as machine-readable JSON (durations in
 nanoseconds) so results can be archived or diffed across hardware.
@@ -99,7 +123,7 @@ nanoseconds) so results can be archived or diffed across hardware.
 
 | flag | meaning |
 | --- | --- |
-| `--mode` | `fork-exec`, `exec-rt`, `metering`, or `fork-fanout` |
+| `--mode` | `fork-exec`, `exec-rt`, `metering`, `fork-fanout`, `prefetch`, or `pinning` |
 | `--iterations` | measured iterations (default 50) |
 | `--warmup` | warmup iterations, discarded (default 5) |
 | `--template` | template (snapshot) id under the data dir (required) |
@@ -107,6 +131,9 @@ nanoseconds) so results can be archived or diffed across hardware.
 | `--firecracker` | Firecracker binary path |
 | `--kernel` | guest kernel path |
 | `--fanout-n` | `fork-fanout` mode: comma-separated fan-out widths N (default `1,4,16,64`) |
+| `--networked` | `fork-fanout` mode only: wire per-fork networking and the egress proxy (needs `/dev/kvm` plus tap, nftables, and the proxy port; run as root or with `CAP_NET_ADMIN + CAP_NET_RAW`) |
+| `--proxy-sentinel` | `--networked`: fork-stable sentinel proxy address DNATed per fork (default `169.254.169.2`) |
+| `--proxy-port` | `--networked`: TCP port the per-node egress proxy listens on (default `3128`) |
 | `--json` | optional path to write results JSON |
 | `--summary` | print the summary table to stdout |
 
@@ -116,6 +143,66 @@ To capture bare-metal reference numbers (roadmap section 4 / issue #15), run the
 two modes on the reference node with a higher iteration count (the runs above
 use 100), archive both JSON files, and record the host (CPU, kernel, Firecracker
 version, rootfs) alongside them so the numbers are reproducible and auditable.
+
+## Networked live-fork latency (issue #336)
+
+`bench/networked-live-fork-latency.sh` measures the live-fork latency on the
+networked egress-proxy path introduced by issue #336. It requires a Linux host
+with `/dev/kvm`, a busybox rootfs image with the guest agent as `/init`, the
+guest agent binary, and host network stack support for tap devices and nftables
+(run as root or with `CAP_NET_ADMIN` + `CAP_NET_RAW`).
+
+```sh
+sudo bench/networked-live-fork-latency.sh \
+  --image <rootfs.ext4> \
+  --data-dir <dir> \
+  --kernel <vmlinux> \
+  --agent-bin <agent-rs> \
+  [--firecracker <path>] \
+  [--proxy-sentinel <ip>] \
+  [--proxy-port <port>] \
+  [--iterations <n>] \
+  [--warmup <n>] \
+  [--fanout-n <w1,w2,...>]
+```
+
+The script measures three arms:
+
+**ARM 1 - cold-fork baseline (non-networked):** wall clock from fork start to
+the first successful Control.Ping over gRPC, driven by `cmd/bench --mode
+fork-exec`. This is the established isolated engine baseline (no per-fork
+networking) that every live-fork comparison is measured against.
+
+**ARM 2 - networked live-fork end-to-end (upper bound):** wall clock for a
+complete run of `cmd/live-fork-egress-smoke`, which boots a networked source
+sandbox through the per-sandbox egress proxy, runs `engine.ForkRunning` on the
+live source, delivers the fork-correctness and network handshake to the child,
+and asserts independent egress on a fresh upstream connection. Each iteration is
+an independent binary run (template create + source fork + live fork +
+assertions), so the timing is an UPPER BOUND on the isolated ForkRunning
+latency. For the networked cold-fork fan-out (fork from template with networking,
+no running source), see arm 3. An isolated ForkRunning measurement (retaining
+the template and running source across iterations) requires a further extension
+to `cmd/bench`.
+
+**ARM 3 - N-way networked fan-out:** for each fan-out width N in `--fanout-n`
+(default `1,4,16`), forks ONE warmed template into N children with per-fork
+networking and the egress proxy engaged, and reports the per-child
+time-to-ready distribution (min/P50/P95/max) plus the wall clock until all N
+children are ready, driven by `cmd/bench --mode fork-fanout --networked`. Each
+child carries `ForkOpts.Network` (EgressPolicy `"deny"`) and `LiveFork true`,
+matching the networked live-fork path: the timing includes tap creation,
+nftables rule installation, and proxy registration per fork. With `--fanout-n 1`
+this gives the isolated networked fork latency; larger N gives the networked
+fan-out shape. Each child is a cold fork from the template snapshot (not
+`engine.ForkRunning`); for a live fork of a running networked source, see arm 2.
+
+All binaries are built from this repo by the script (`go build ./cmd/bench/`
+and `go build ./cmd/live-fork-egress-smoke/`). Numbers are produced by the real
+KVM-backed engine; there are no hardcoded or expected latency figures in the
+script (CLAUDE.md operating principle 1). Record results in `bench/results/`
+alongside the host spec, Firecracker version, kernel version, and rootfs
+contents.
 
 ## Controller-path harnesses (claim, sustained, pool-rebuild)
 

@@ -425,3 +425,40 @@ func TestForkRunningNotifiesAgent(t *testing.T) {
 		t.Errorf("entropy length = %d, want 32", len(rec.notifies[0].Entropy))
 	}
 }
+
+// TestNotifyForkedRunningDeliversIdentity asserts that a live fork now delivers
+// the engine's fresh per-fork network identity + reset signal to the guest
+// (issue #336). notifyForkedRunning used to pass nil network; it must now thread
+// result.GuestNetwork so the child re-addresses eth0 and resets captured
+// upstreams. The mock engine's ForkRunning returns a GuestNetwork with a fresh
+// guest IP and ResetUpstreams=true, and the fake control server records the
+// delivered NotifyForked request.
+func TestNotifyForkedRunningDeliversIdentity(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	if _, err := engine.Fork("py", "sb-src", fork.ForkOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-live-id", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.ForkRunning(context.Background(), "sb-src", "sb-live-id", false, "t"); err != nil {
+		t.Fatalf("fork running: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.notifies) != 1 {
+		t.Fatalf("live fork must notify guest, got %d", len(rec.notifies))
+	}
+	netReq := rec.notifies[0].GetNetwork()
+	if netReq == nil {
+		t.Fatal("live fork must deliver the child's network identity, got nil network")
+	}
+	if netReq.GetGuestIp() == "" {
+		t.Errorf("delivered network must carry a fresh guest IP, got empty")
+	}
+	if !netReq.GetResetUpstreams() {
+		t.Error("delivered network must set ResetUpstreams for a live fork")
+	}
+}

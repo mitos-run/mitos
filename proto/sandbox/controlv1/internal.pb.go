@@ -365,9 +365,20 @@ type NotifyForkedNetwork struct {
 	// resolver_ip, when non-empty, is the DNS resolver the guest must use. The
 	// guest writes it as the sole nameserver in /etc/resolv.conf. Empty leaves
 	// resolv.conf untouched.
-	ResolverIp    string `protobuf:"bytes,5,opt,name=resolver_ip,json=resolverIp,proto3" json:"resolver_ip,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ResolverIp string `protobuf:"bytes,5,opt,name=resolver_ip,json=resolverIp,proto3" json:"resolver_ip,omitempty"`
+	// proxy_endpoint is the fork-stable HTTP(S) proxy address (host:port) the
+	// guest egresses through. The guest agent exports it as HTTP_PROXY and
+	// HTTPS_PROXY so egress is attributed and policy-enforced by the host proxy.
+	// Empty means the per-sandbox egress proxy is disabled. Config, safe to log.
+	ProxyEndpoint string `protobuf:"bytes,6,opt,name=proxy_endpoint,json=proxyEndpoint,proto3" json:"proxy_endpoint,omitempty"`
+	// reset_upstreams tells the guest this is a live fork: drop stale route and
+	// neighbor state after re-addressing eth0 so captured upstream sockets die
+	// and clients re-dial through the proxy. False (the default) leaves existing
+	// connections in place, which is correct for a cold fork from a snapshot.
+	// Config, safe to log.
+	ResetUpstreams bool `protobuf:"varint,7,opt,name=reset_upstreams,json=resetUpstreams,proto3" json:"reset_upstreams,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *NotifyForkedNetwork) Reset() {
@@ -433,6 +444,20 @@ func (x *NotifyForkedNetwork) GetResolverIp() string {
 		return x.ResolverIp
 	}
 	return ""
+}
+
+func (x *NotifyForkedNetwork) GetProxyEndpoint() string {
+	if x != nil {
+		return x.ProxyEndpoint
+	}
+	return ""
+}
+
+func (x *NotifyForkedNetwork) GetResetUpstreams() bool {
+	if x != nil {
+		return x.ResetUpstreams
+	}
+	return false
 }
 
 // VolumeMountEntry mirrors internal/vsock.VolumeMountEntry field-for-field.
@@ -784,7 +809,7 @@ const file_proto_sandbox_controlv1_internal_proto_rawDesc = "" +
 	"\x15host_wall_clock_nanos\x18\x02 \x01(\x03R\x12hostWallClockNanos\x12\x18\n" +
 	"\aentropy\x18\x03 \x01(\fR\aentropy\x12B\n" +
 	"\anetwork\x18\x04 \x01(\v2(.sandbox.internal.v1.NotifyForkedNetworkR\anetwork\x12?\n" +
-	"\avolumes\x18\x05 \x03(\v2%.sandbox.internal.v1.VolumeMountEntryR\avolumes\"\xac\x01\n" +
+	"\avolumes\x18\x05 \x03(\v2%.sandbox.internal.v1.VolumeMountEntryR\avolumes\"\xfc\x01\n" +
 	"\x13NotifyForkedNetwork\x12\x19\n" +
 	"\bguest_ip\x18\x01 \x01(\tR\aguestIp\x12\x1d\n" +
 	"\n" +
@@ -793,7 +818,9 @@ const file_proto_sandbox_controlv1_internal_proto_rawDesc = "" +
 	"prefix_len\x18\x03 \x01(\x05R\tprefixLen\x12\x1b\n" +
 	"\tguest_mac\x18\x04 \x01(\tR\bguestMac\x12\x1f\n" +
 	"\vresolver_ip\x18\x05 \x01(\tR\n" +
-	"resolverIp\"f\n" +
+	"resolverIp\x12%\n" +
+	"\x0eproxy_endpoint\x18\x06 \x01(\tR\rproxyEndpoint\x12'\n" +
+	"\x0freset_upstreams\x18\a \x01(\bR\x0eresetUpstreams\"f\n" +
 	"\x10VolumeMountEntry\x12\x16\n" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x1d\n" +
 	"\n" +

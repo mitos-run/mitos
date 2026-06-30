@@ -2775,6 +2775,8 @@ async fn control_notify_forked_network_fields_mapped_correctly() {
                 prefix_len: 30,
                 guest_mac: "02:ab:cd:ef:01:02".to_string(),
                 resolver_ip: "8.8.8.8".to_string(),
+                proxy_endpoint: "".to_string(),
+                reset_upstreams: false,
             }),
             volumes: vec![],
         })

@@ -143,3 +143,29 @@ func TestParseConfigPinning(t *testing.T) {
 		t.Errorf("mode = %q, want %q", cfg.mode, modePinning)
 	}
 }
+
+func TestParseConfigNetworkedFanOut(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "fork-fanout", "--networked", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if !cfg.networked {
+		t.Errorf("networked = false, want true")
+	}
+}
+
+func TestParseConfigNetworkedDefaultFalse(t *testing.T) {
+	cfg, err := parseConfig([]string{"--mode", "fork-fanout", "--template", "t"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.networked {
+		t.Errorf("networked = true, want false by default")
+	}
+}
+
+func TestParseConfigNetworkedRejectsNonFanOut(t *testing.T) {
+	if _, err := parseConfig([]string{"--mode", "fork-exec", "--networked", "--template", "t"}); err == nil {
+		t.Fatal("expected error when --networked used with non-fanout mode")
+	}
+}
