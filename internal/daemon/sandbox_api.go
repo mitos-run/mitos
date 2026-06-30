@@ -448,6 +448,25 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 	return nil
 }
 
+// toProtoNotifyForkedNetwork converts a vsock.NotifyForkedNetwork to its proto
+// representation. Returns nil when gn is nil, so callers that do not set
+// network identity produce a request with no network field. All fields are
+// plain addresses and flags (config, safe to log); no secrets are carried.
+func toProtoNotifyForkedNetwork(gn *vsock.NotifyForkedNetwork) *internalv1.NotifyForkedNetwork {
+	if gn == nil {
+		return nil
+	}
+	return &internalv1.NotifyForkedNetwork{
+		GuestIp:        gn.GuestIP,
+		GatewayIp:      gn.GatewayIP,
+		PrefixLen:      int32(gn.PrefixLen),
+		GuestMac:       gn.GuestMAC,
+		ResolverIp:     gn.ResolverIP,
+		ProxyEndpoint:  gn.ProxyEndpoint,
+		ResetUpstreams: gn.ResetUpstreams,
+	}
+}
+
 // NotifyForked tells a sandbox's guest agent a restore just happened so it can
 // reseed the kernel CRNG, step the wall clock, and signal userspace, over gRPC.
 // When guestNet is non-nil it also carries this fork's distinct eth0 address +
@@ -470,15 +489,7 @@ func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy
 		Generation:         generation,
 		HostWallClockNanos: time.Now().UnixNano(),
 		Entropy:            entropy,
-	}
-	if guestNet != nil {
-		req.Network = &internalv1.NotifyForkedNetwork{
-			GuestIp:    guestNet.GuestIP,
-			GatewayIp:  guestNet.GatewayIP,
-			PrefixLen:  int32(guestNet.PrefixLen),
-			GuestMac:   guestNet.GuestMAC,
-			ResolverIp: guestNet.ResolverIP,
-		}
+		Network:            toProtoNotifyForkedNetwork(guestNet),
 	}
 	for _, v := range volumes {
 		req.Volumes = append(req.Volumes, &internalv1.VolumeMountEntry{
