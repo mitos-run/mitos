@@ -22,6 +22,20 @@ type FileEntry struct {
 // snapshot layout or restore contract changes incompatibly.
 const CurrentSnapshotFormatVersion = 1
 
+// CurrentGuestProtocolVersion is the guest-agent vsock control/handshake
+// protocol this build speaks. It is stamped into every manifest at template
+// build and checked on load (see internal/snapcompat, issue #459): the guest
+// agent baked into a snapshot speaks a fixed protocol, so a host that speaks a
+// newer one cannot drive an older baked agent. Recording it lets a stale
+// snapshot be refused fail-closed with an actionable rebuild message instead of
+// breaking with an opaque vsock BrokenPipe at the fork-correctness handshake.
+//
+// Bump it whenever the guest agent's vsock control/handshake protocol changes
+// in a way an older baked agent cannot satisfy (the NotifyForked/Configure
+// handshake or the sandbox.v1/sandbox.internal.v1 wire contract). Version 1 is
+// the first tracked version; a recorded 0 means the snapshot predates tracking.
+const CurrentGuestProtocolVersion = 1
+
 // HotPageSet is the captured hot-page working set for snapshot-resume prefetch
 // (issue #167): the set of guest memory page offsets a userfaultfd handler
 // should preload into the restored VM before resume, so the lazy-fault tail that
@@ -91,6 +105,13 @@ type Manifest struct {
 	// (e.g. a pulled template). Empty is omitted from the canonical encoding, so a
 	// 4 KiB snapshot keeps the exact digest it had before the field existed (#32).
 	HugePages string
+	// GuestProtocolVersion is the guest-agent vsock protocol the agent baked into
+	// this snapshot speaks (issue #459); see CurrentGuestProtocolVersion. It binds
+	// the snapshot to its baked agent so snapcompat can refuse a stale snapshot
+	// fail-closed at load instead of breaking at the fork-correctness handshake. 0
+	// (a snapshot built before the field existed) is omitted from the canonical
+	// encoding, so a pre-field snapshot keeps the exact digest it had before (#32).
+	GuestProtocolVersion int
 }
 
 // Canonical returns a deterministic byte encoding of the manifest. Files are
@@ -144,6 +165,17 @@ func (m Manifest) Canonical() []byte {
 		buf.WriteByte('}')
 	}
 	buf.WriteString(`],`)
+
+	// guestProtocolVersion is OPTIONAL and additive (issue #459): emitted only
+	// when the snapshot records a tracked guest-agent protocol version, so a
+	// snapshot built before the field existed (version 0) keeps the exact bytes
+	// (and digest) it had before (#32). It sorts after files and before hotPages
+	// in the fixed alphabetical key order.
+	if m.GuestProtocolVersion != 0 {
+		buf.WriteString(`"guestProtocolVersion":`)
+		writeJSONInt(&buf, int64(m.GuestProtocolVersion))
+		buf.WriteByte(',')
+	}
 
 	// hotPages is OPTIONAL and additive. It is emitted only when the set carries
 	// pages to prefetch; an absent or empty set is omitted entirely so the bytes
@@ -246,6 +278,10 @@ type Metadata struct {
 	// with (issue #167): "" for 4 KiB base pages, "2M" for 2 MiB hugetlbfs. Empty
 	// is omitted from the canonical encoding, preserving pre-field digests.
 	HugePages string
+	// GuestProtocolVersion is the guest-agent vsock protocol baked into the
+	// snapshot (issue #459); see CurrentGuestProtocolVersion. 0 is omitted from
+	// the canonical encoding, preserving pre-field digests.
+	GuestProtocolVersion int
 }
 
 // BuildManifest chunks each file in the name to path map and assembles a
@@ -293,5 +329,6 @@ func manifestFrom(entries []FileEntry, meta Metadata) Manifest {
 		ConfigHash:            meta.ConfigHash,
 		HotPages:              meta.HotPages,
 		HugePages:             meta.HugePages,
+		GuestProtocolVersion:  meta.GuestProtocolVersion,
 	}
 }

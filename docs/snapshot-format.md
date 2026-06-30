@@ -38,6 +38,7 @@ content-addressed digest:
 | `KernelVersion` | The host kernel at capture (informational). |
 | `ConfigHash` | A sha256 over the microvm machine config (vcpu count, memory size, kernel and rootfs identity) the snapshot was captured under. |
 | `HotPages` | OPTIONAL hot-page working set for snapshot-resume prefetch. Part of the digest only when present and non-empty; omitted entirely otherwise. See below. |
+| `GuestProtocolVersion` | OPTIONAL guest-agent vsock protocol the agent baked into the snapshot speaks (`cas.CurrentGuestProtocolVersion`, current = 1). Part of the digest only when non-zero; 0 (a pre-tracking snapshot) is omitted entirely. See below. |
 
 The `HotPages` field is additive and does NOT require a format-version bump. It
 is the captured set of guest memory page offsets a userfaultfd handler preloads
@@ -49,6 +50,21 @@ understand the field simply ignores it and restores lazily. A format-version
 bump is needed only if the descriptor encoding itself changes incompatibly, at
 which point the migration policy below governs the transition.
 
+The `GuestProtocolVersion` field is additive in the same way (issue #459). The
+guest agent baked into a snapshot speaks a fixed vsock control/handshake
+protocol; a host that speaks a newer one cannot drive an older baked agent, so a
+pure runtime upgrade can leave the format, Firecracker, and CPU all matching
+while the activate proceeds through snapshot/load and Resume and only breaks at
+the fork-correctness handshake with an opaque vsock `BrokenPipe`. Recording the
+protocol version (`cas.CurrentGuestProtocolVersion`, bumped whenever the agent's
+vsock contract changes in a way an older baked agent cannot satisfy) lets
+`snapcompat.Check` refuse a stale snapshot fail-closed with an actionable rebuild
+message instead. A recorded 0 means the snapshot predates this tracking, so its
+baked agent's protocol is unknown and it is refused on the same fail-closed path.
+When non-zero the field is part of the digest, so a snapshot built by a different
+agent protocol never collides with one built here; when 0 it is omitted from the
+canonical encoding, preserving the exact digest of a pre-field snapshot.
+
 Because these fields are part of the digest, a snapshot built under a different
 Firecracker or on a different CPU never collides with one built here, and the
 recorded environment cannot be tampered with or downgraded without changing the
@@ -58,9 +74,10 @@ digest and failing the verify-on-load integrity check
 The detected host environment is captured once at engine start
 (`snapcompat.DetectEnvironment`): the Firecracker version from
 `firecracker --version`, the CPU model from the first `model name` line of
-`/proc/cpuinfo`, and the kernel from `uname -r`. A failure to detect any field
-is surfaced rather than silently swallowed, so the engine can refuse to start
-with an unknown environment instead of running blind.
+`/proc/cpuinfo`, and the kernel from `uname -r`. The supported guest-agent
+protocol set is this build's `cas.CurrentGuestProtocolVersion`. A failure to
+detect any field is surfaced rather than silently swallowed, so the engine can
+refuse to start with an unknown environment instead of running blind.
 
 ## Compatibility policy
 
@@ -78,8 +95,15 @@ restored on this host. The policy, checked in order:
    snapshot image itself, so a recorded kernel mismatch usually just means a
    different snapshot was produced, not that this one is unsafe to restore here.
    The contract does not gate on it alone.
+5. **Guest-agent protocol version** must be in the set this build speaks
+   (currently the single value `cas.CurrentGuestProtocolVersion`). A recorded 0
+   (a snapshot built before guest-agent protocol tracking, issue #459) is
+   refused. The check is skipped only when the environment declares no supported
+   set (an undetected host, e.g. the `--allow-unverified-snapshots` development
+   path), so it never refuses every snapshot blindly.
 
-The first mismatch found is the one reported.
+The first mismatch found is the one reported. Firecracker and CPU, the more
+fundamental restore hazards, are reported before a guest-protocol skew.
 
 ## Failure behavior
 
@@ -110,6 +134,16 @@ development only and must never be set for tenant workloads.
 - A format-version migration tool (to upgrade recorded snapshots in place rather
   than rebuilding) is a future follow-up, tracked with the other format-freeze
   work.
+- The guest-agent protocol version (`cas.CurrentGuestProtocolVersion`) is bumped
+  whenever the agent's vsock control/handshake contract changes in a way an older
+  baked agent cannot satisfy. Like a format bump, it requires rebuilding every
+  pool template: a runtime upgrade (new forkd / husk-stub / guest agent) that
+  bumps it strands existing snapshots, which are then refused fail-closed on load
+  until rebuilt. Operationally a runtime upgrade should be followed by a template
+  rebuild for every pool. Auto-rebuild driven by a detected runtime-version
+  change is a follow-up (issue #459, reusing the re-snapshot machinery from the
+  auto-update reconciler #447); today the refusal names the remediation and the
+  operator (or the upgrade runbook) rebuilds the affected pools.
 
 ## Proof
 
@@ -130,6 +164,10 @@ development only and must never be set for tenant workloads.
   CPU family (would relax the exact-CPU-model rule).
 - Live cross-Firecracker-version restore testing (needs two Firecracker versions
   in CI).
+- Controller-driven auto-rebuild of pool templates on a detected runtime-version
+  change, so a guest-agent protocol bump rebuilds affected pools without operator
+  action (issue #459, part 2). Today the load-time refusal is actionable but the
+  rebuild is manual.
 
 Both are out of scope for the contract as shipped; the contract refuses them
 today rather than risking an unsafe restore.

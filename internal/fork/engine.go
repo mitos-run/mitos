@@ -1100,6 +1100,10 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 		// Record the guest-memory page backing so the snapshot is self-describing:
 		// any node restoring it knows it must use the UFFD backend (issue #167).
 		HugePages: cfg.HugePages,
+		// Record the guest-agent protocol this build's agent speaks so a stale
+		// snapshot is refused fail-closed at load after a runtime upgrade instead
+		// of breaking at the fork-correctness handshake (issue #459).
+		GuestProtocolVersion: cas.CurrentGuestProtocolVersion,
 	}
 }
 

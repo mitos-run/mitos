@@ -28,13 +28,21 @@ type Environment struct {
 	VMMVersion     string
 	CPUModel       string
 	KernelVersion  string
+	// GuestProtocolVersions is the set of guest-agent vsock protocol versions
+	// this build can drive (currently a single element,
+	// cas.CurrentGuestProtocolVersion). An empty set means the caller did not
+	// detect the environment (e.g. the development --allow-unverified path), so
+	// the guest-protocol check is skipped rather than refusing every snapshot.
+	GuestProtocolVersions []int
 }
 
 // Check reports whether a snapshot described by m can be safely restored in env.
 // It returns nil when compatible, or an error wrapping ErrIncompatible with an
 // actionable, remediation-bearing message for the first mismatch found.
 //
-// Check order is format, then VMM, then CPU; the first mismatch is returned.
+// Check order is format, then VMM, then CPU, then guest-agent protocol; the
+// first mismatch is returned. VMM and CPU are the more fundamental restore
+// hazards, so they surface before the guest-protocol skew.
 //
 // Kernel-version decision (v1): a recorded kernel mismatch is treated as
 // INFORMATIONAL, not fatal, when the format, VMM, and CPU all match. The guest
@@ -42,6 +50,14 @@ type Environment struct {
 // usually just means a different snapshot was produced, not that this snapshot is
 // unsafe to restore here. Failing on it alone would block legitimate restores
 // without improving safety, so v1 does not gate on it.
+//
+// Guest-agent protocol (issue #459): a pure runtime upgrade can leave the
+// format, VMM, and CPU all matching while the guest agent baked into the
+// snapshot speaks an older vsock protocol than this build. The activate then
+// proceeds through snapshot/load and Resume and only breaks at the
+// fork-correctness handshake with an opaque vsock BrokenPipe. Gating on the
+// recorded guest-protocol version turns that into an actionable rebuild refusal
+// here, before any Firecracker launch.
 func Check(m cas.Manifest, env Environment) error {
 	if !containsInt(env.FormatVersions, m.SnapshotFormatVersion) {
 		if m.SnapshotFormatVersion == 0 {
@@ -56,6 +72,16 @@ func Check(m cas.Manifest, env Environment) error {
 
 	if m.CPUModel != env.CPUModel {
 		return fmt.Errorf("snapshot was captured on CPU %q but this node is %q; cross-CPU-model restore is unsafe without a CPU template, so schedule the fork on a matching CPU or rebuild the template here: %w", m.CPUModel, env.CPUModel, ErrIncompatible)
+	}
+
+	// Guest-agent protocol skew (issue #459). Skipped when this build declares no
+	// supported set (an undetected environment), so a caller that has not detected
+	// the host does not refuse every snapshot.
+	if len(env.GuestProtocolVersions) > 0 && !containsInt(env.GuestProtocolVersions, m.GuestProtocolVersion) {
+		if m.GuestProtocolVersion == 0 {
+			return fmt.Errorf("snapshot predates guest-agent protocol tracking (issue #459); its baked guest agent may not speak this build's vsock handshake, so rebuild the template (this build speaks guest-agent protocol %v): %w", env.GuestProtocolVersions, ErrIncompatible)
+		}
+		return fmt.Errorf("snapshot was built with guest-agent protocol version %d but this build speaks %v; the baked guest agent cannot complete this build's fork-correctness handshake, so rebuild the template: %w", m.GuestProtocolVersion, env.GuestProtocolVersions, ErrIncompatible)
 	}
 
 	return nil

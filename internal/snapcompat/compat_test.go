@@ -10,10 +10,11 @@ import (
 
 func goodEnv() Environment {
 	return Environment{
-		FormatVersions: []int{cas.CurrentSnapshotFormatVersion},
-		VMMVersion:     "1.15.0",
-		CPUModel:       "Intel(R) Xeon(R) CPU @ 2.20GHz",
-		KernelVersion:  "6.1.0",
+		FormatVersions:        []int{cas.CurrentSnapshotFormatVersion},
+		VMMVersion:            "1.15.0",
+		CPUModel:              "Intel(R) Xeon(R) CPU @ 2.20GHz",
+		KernelVersion:         "6.1.0",
+		GuestProtocolVersions: []int{cas.CurrentGuestProtocolVersion},
 	}
 }
 
@@ -23,6 +24,7 @@ func goodManifest() cas.Manifest {
 		VMMVersion:            "1.15.0",
 		CPUModel:              "Intel(R) Xeon(R) CPU @ 2.20GHz",
 		KernelVersion:         "6.1.0",
+		GuestProtocolVersion:  cas.CurrentGuestProtocolVersion,
 	}
 }
 
@@ -123,5 +125,72 @@ func TestCheckOrderFormatBeforeVMM(t *testing.T) {
 	err := Check(m, goodEnv())
 	if err == nil || !strings.Contains(err.Error(), "format version") {
 		t.Fatalf("expected format mismatch first, got %v", err)
+	}
+}
+
+func TestCheckGuestProtocolMismatch(t *testing.T) {
+	// Format, VMM, and CPU all match (a pure guest-agent upgrade, issue #459):
+	// the snapshot's baked agent speaks a protocol this build does not, so the
+	// restore must be refused fail-closed instead of breaking at the handshake.
+	m := goodManifest()
+	m.GuestProtocolVersion = cas.CurrentGuestProtocolVersion + 1
+	err := Check(m, goodEnv())
+	if err == nil {
+		t.Fatal("expected error for guest-protocol mismatch")
+	}
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("expected ErrIncompatible, got %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"guest-agent protocol", "rebuild"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("guest-protocol message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestCheckZeroGuestProtocolPreTracking(t *testing.T) {
+	// A snapshot built before guest-agent protocol tracking (issue #459) records
+	// version 0. Its baked agent's protocol is unknown, so it is refused with an
+	// actionable rebuild message rather than a broken pipe at handshake time.
+	m := goodManifest()
+	m.GuestProtocolVersion = 0
+	err := Check(m, goodEnv())
+	if err == nil {
+		t.Fatal("expected error for zero guest-protocol version")
+	}
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("expected ErrIncompatible, got %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"predates", "rebuild"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("pre-tracking message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestCheckGuestProtocolSkippedWhenEnvUnset(t *testing.T) {
+	// A caller that did not detect the environment (e.g. the development
+	// --allow-unverified path) declares no supported guest-protocol set; the
+	// check must not then refuse every snapshot.
+	env := goodEnv()
+	env.GuestProtocolVersions = nil
+	m := goodManifest()
+	m.GuestProtocolVersion = 0
+	if err := Check(m, env); err != nil {
+		t.Fatalf("expected nil when env declares no supported guest-protocol set, got %v", err)
+	}
+}
+
+func TestCheckGuestProtocolAfterCPU(t *testing.T) {
+	// Both CPU and guest-protocol mismatch: CPU (the more fundamental restore
+	// hazard) is reported first.
+	m := goodManifest()
+	m.CPUModel = "AMD EPYC 7B12"
+	m.GuestProtocolVersion = cas.CurrentGuestProtocolVersion + 1
+	err := Check(m, goodEnv())
+	if err == nil || !strings.Contains(err.Error(), "CPU") {
+		t.Fatalf("expected CPU mismatch first, got %v", err)
 	}
 }

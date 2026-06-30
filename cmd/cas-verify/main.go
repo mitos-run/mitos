@@ -336,8 +336,8 @@ func runRecord(args []string) error {
 	if err != nil {
 		return fmt.Errorf("detect environment: %w", err)
 	}
-	fmt.Printf("recording producing environment: firecracker=%q cpu=%q kernel=%q formatVersion=%d\n",
-		env.VMMVersion, env.CPUModel, env.KernelVersion, cas.CurrentSnapshotFormatVersion)
+	fmt.Printf("recording producing environment: firecracker=%q cpu=%q kernel=%q formatVersion=%d guestProtocol=%d\n",
+		env.VMMVersion, env.CPUModel, env.KernelVersion, cas.CurrentSnapshotFormatVersion, cas.CurrentGuestProtocolVersion)
 
 	st, err := cas.New(store)
 	if err != nil {
@@ -348,6 +348,10 @@ func runRecord(args []string) error {
 		VMMVersion:            env.VMMVersion,
 		CPUModel:              env.CPUModel,
 		KernelVersion:         env.KernelVersion,
+		// Stamp the guest-agent protocol this build speaks, the same as
+		// Engine.manifestMetadata, so a compat-check against this node passes
+		// honestly instead of being refused as a pre-tracking snapshot (#459).
+		GuestProtocolVersion: cas.CurrentGuestProtocolVersion,
 	})
 	if err != nil {
 		return err
