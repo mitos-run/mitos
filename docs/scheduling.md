@@ -75,6 +75,39 @@ and the node-side `ResourceExhausted` reject becomes a rare race (the window
 between `SelectNode` and the `Fork` RPC) rather than the primary path to the cap.
 `MaxSandboxes` 0 (unset, e.g. the mock engine) imposes no count ceiling.
 
+### Disk headroom
+
+Memory is not the only finite local resource. forkd's data dir (snapshots, CoW
+rootfs clones, volume backing files, the CAS) lives on the node's local
+filesystem, and on bare metal that disk is finite. If the controller keeps
+placing builds and forks by memory alone, the data dir fills, the kubelet trips
+its `DiskPressure` eviction, and forkd is evicted: a hard crash instead of a
+graceful "node full".
+
+To back off before that, the capacity heartbeat carries a disk-headroom signal.
+forkd reports `DiskFreeBytes` and `DiskTotalBytes` for the data-dir filesystem
+(a single `statfs` of the data dir on the heartbeat path; free uses the blocks
+available to an unprivileged process, not the root-reserved total). The
+scheduler treats a node whose free fraction is below a fixed floor as having NO
+build capacity:
+
+```
+DiskFree(node) >= DiskTotal(node) * 0.15   # disk headroom floor (15% free)
+```
+
+A node below the floor does not admit, exactly as a memory-exhausted or
+count-capped node does not. The 15% floor sits deliberately above the kubelet's
+default `nodefs.available` hard-eviction threshold (10%), so the scheduler stops
+sending work to a filling node well before the kubelet would evict forkd.
+
+A node that reports `DiskTotal` 0 has an UNKNOWN disk budget: the node's
+`statfs` failed (darwin/dev) or the mock engine has no headroom set. Such a node
+is treated as effectively unlimited so dev and mock paths keep scheduling,
+mirroring the unknown-memory handling. When every healthy node has backed off on
+low disk, `SelectNode` returns `ErrNoCapacity` with a disk-specific message (free
+disk on the nodes or scale out) so the cause is distinguishable from a memory
+shortage. Disk numbers are not secrets and are safe to log.
+
 ## The bin-packing policy
 
 The scheduler PACKS rather than spreads. Among the admitted nodes, `SelectNode`
@@ -169,6 +202,10 @@ ENFORCED and tested:
   drives the claim to Ready: envtest in `internal/controller`.
 - Bounded failure past `--max-pending-duration` with the `CapacityExhausted`
   condition and the capacity error metric: envtest in `internal/controller`.
+- Disk-headroom backoff: a node below the free-disk floor (15%) does not admit,
+  and an all-nodes-low-disk shortage returns a disk-specific `NoCapacity`.
+  Unit-tested in `internal/controller/scheduler_test.go`; the forkd `statfs`
+  report is unit-tested via an injected seam in `internal/fork/capacity_test.go`.
 
 OPEN (not implemented, do not assume):
 
@@ -178,9 +215,11 @@ OPEN (not implemented, do not assume):
   awareness across sockets is still open.)
 - Hugepage-backed guest memory.
 - KSM (kernel same-page merging) tuning for cross-template sharing.
-- Multi-resource bin-packing: disk, CPU, and the cold-start
-  snapshot-distribution cost of fetching a template to a cold node (ties into
-  snapshot distribution). Today only memory is packed.
+- Multi-resource bin-packing: CPU, and the cold-start snapshot-distribution cost
+  of fetching a template to a cold node (ties into snapshot distribution). Disk
+  is a backoff GATE (a low-disk node stops admitting), not yet a packed
+  dimension: the scheduler does not project a fork's marginal disk cost the way
+  it projects memory. Today only memory is bin-packed.
 - Preemption / eviction under pressure, and predictive prewarming.
 - The MEASURED bare-metal density curve on the pinned reference node. The
   density numbers are a TARGET until they are run on that hardware and recorded

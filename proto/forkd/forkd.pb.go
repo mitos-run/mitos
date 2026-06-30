@@ -2702,9 +2702,18 @@ type GetCapacityResponse struct {
 	// project the marginal memory cost of placing a new fork: the shared set a
 	// cold start pays once, and the average per-fork unique footprint a warm
 	// fork adds. Derived from the node's CoW-aware metering.
-	Templates     []*TemplateCapacity `protobuf:"bytes,10,rep,name=templates,proto3" json:"templates,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Templates []*TemplateCapacity `protobuf:"bytes,10,rep,name=templates,proto3" json:"templates,omitempty"`
+	// disk_free_bytes and disk_total_bytes are the data-dir filesystem free and
+	// total bytes (statfs of the forkd dataDir). The controller's scheduler treats
+	// a node with low disk headroom as having no build capacity, so it backs off
+	// before the data dir fills and the kubelet evicts forkd on DiskPressure.
+	// Both zero means unknown (statfs failed, e.g. a dev host) and is treated as
+	// an unlimited budget, exactly like an unknown memory total. Disk numbers are
+	// not secrets.
+	DiskFreeBytes  int64 `protobuf:"varint,11,opt,name=disk_free_bytes,json=diskFreeBytes,proto3" json:"disk_free_bytes,omitempty"`
+	DiskTotalBytes int64 `protobuf:"varint,12,opt,name=disk_total_bytes,json=diskTotalBytes,proto3" json:"disk_total_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GetCapacityResponse) Reset() {
@@ -2805,6 +2814,20 @@ func (x *GetCapacityResponse) GetTemplates() []*TemplateCapacity {
 		return x.Templates
 	}
 	return nil
+}
+
+func (x *GetCapacityResponse) GetDiskFreeBytes() int64 {
+	if x != nil {
+		return x.DiskFreeBytes
+	}
+	return 0
+}
+
+func (x *GetCapacityResponse) GetDiskTotalBytes() int64 {
+	if x != nil {
+		return x.DiskTotalBytes
+	}
+	return 0
 }
 
 // TemplateCapacity is the per-template memory estimate the controller uses to
@@ -3348,7 +3371,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x12(\n" +
 	"\x10modified_at_unix\x18\x04 \x01(\x03R\x0emodifiedAtUnix\x12\x12\n" +
 	"\x04mode\x18\x05 \x01(\rR\x04mode\"\x14\n" +
-	"\x12GetCapacityRequest\"\xb1\x04\n" +
+	"\x12GetCapacityRequest\"\x83\x05\n" +
 	"\x13GetCapacityResponse\x12)\n" +
 	"\x10active_sandboxes\x18\x01 \x01(\x05R\x0factiveSandboxes\x12#\n" +
 	"\rmax_sandboxes\x18\x02 \x01(\x05R\fmaxSandboxes\x12,\n" +
@@ -3360,7 +3383,9 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\rkvm_available\x18\b \x01(\bR\fkvmAvailable\x12Z\n" +
 	"\x10template_digests\x18\t \x03(\v2/.forkd.GetCapacityResponse.TemplateDigestsEntryR\x0ftemplateDigests\x125\n" +
 	"\ttemplates\x18\n" +
-	" \x03(\v2\x17.forkd.TemplateCapacityR\ttemplates\x1aB\n" +
+	" \x03(\v2\x17.forkd.TemplateCapacityR\ttemplates\x12&\n" +
+	"\x0fdisk_free_bytes\x18\v \x01(\x03R\rdiskFreeBytes\x12(\n" +
+	"\x10disk_total_bytes\x18\f \x01(\x03R\x0ediskTotalBytes\x1aB\n" +
 	"\x14TemplateDigestsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xda\x01\n" +

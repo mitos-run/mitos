@@ -134,6 +134,8 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) bo
 	info.MaxSandboxes = resp.MaxSandboxes
 	info.MemoryTotal = resp.MemoryTotalBytes
 	info.MemoryUsed = resp.MemoryUsedBytes
+	info.DiskTotal = resp.DiskTotalBytes
+	info.DiskFree = resp.DiskFreeBytes
 	info.TemplateIDs = resp.TemplateIds
 	info.SnapshotIDs = resp.SnapshotIds
 	info.TemplateDigests = resp.TemplateDigests
