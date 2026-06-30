@@ -288,7 +288,20 @@ carries `EnableHuskPods` from the controller run mode to make this decision.
   re-pend-vs-fail-closed decision), `TestGCRawForkdClaimReforksOntoSurvivingHolder`
   (the end-to-end re-fork onto a surviving holder by the live reconciler),
   `TestGCMarksNodeLost` (fail closed when no holder survives),
-  `TestGCLeavesHealthyNodeClaim`, `TestGCInHuskModeDoesNotFailNodeLostClaim`.
+  `TestGCLeavesHealthyNodeClaim`, `TestGCInHuskModeDoesNotFailNodeLostClaim`. The
+  HUSK self-heal loop is now proven END TO END at envtest level by
+  `TestHuskNodeLossSelfHealsEndToEnd` (`husk_nodeloss_failover_envtest_test.go`): a
+  Ready husk-backed claim has its backing husk pod deleted, `checkHuskPodLost`
+  re-pends it (Ready cleared, dead endpoint/node/sandboxID cleared), the warm pool
+  refills the drained slot, and the claim re-activates on a SURVIVING node, with no
+  stuck claim and no orphan (the lost pod is reaped and exactly one husk pod, the
+  refilled slot, backs the claim). This closes the gap where the full husk loop was
+  only proven on a real multi-node KVM cluster (chaos-e2e stage 5); the envtest runs
+  in the ordinary go-test job, while the cluster-e2e stage stays the KVM-level
+  proof. envtest runs no scheduler or kubelet, so the test binds the warm slot onto
+  a node and forces it Ready (the scheduler + kubelet stand-in) and the activate
+  transport is the suite fake; everything else (loss detection, re-pend, refill,
+  re-activation, orphan accounting) is the real controller code.
 
 ### DrainPolicy Checkpoint: honest degrade to Kill, never a silent lie
 
@@ -432,7 +445,53 @@ against the code below so the gap is honest, not assumed:
   from CRDs with zero orphans and zero stuck claims) is additionally proven
   WITHOUT KVM in `TestGCChaosStormNoOrphansNoStuckClaims`
   (`gc_chaos_storm_test.go`), so the GC reconcile guarantee is covered in the
-  ordinary go-test job, not only on the KVM runner. Still KVM-gated and open:
-  kill -9 of the GUEST agent process inside the VM and the real-forkd-with-VMs
-  crash (both need a real cluster and KVM, unreachable from GitHub-hosted CI),
-  and process-crash variants beyond SIGKILL.
+  ordinary go-test job, not only on the KVM runner. The cross-node-failover loop
+  (stage 5) is now ALSO proven WITHOUT KVM at envtest level by
+  `TestHuskNodeLossSelfHealsEndToEnd` (see the NodeLost guarantee above), so the
+  control-plane half of cross-node failover (loss detection, re-pend, warm-pool
+  refill, re-activation on a surviving node, no orphan) regresses loudly in the
+  required go-test job; the cluster-e2e stage remains the real-VMM-on-real-nodes
+  proof. Still KVM-gated and open: kill -9 of the GUEST agent process inside the VM
+  and the real-forkd-with-VMs crash (both need a real cluster and KVM, unreachable
+  from GitHub-hosted CI), and process-crash variants beyond SIGKILL.
+
+### cluster-e2e gating decision: cadence, not a required check
+
+The chaos suite and the other cluster-e2e predicates (`cluster-husk-e2e`,
+`cluster-workspace-e2e`, `cluster-husk-network-e2e`, `cluster-facade-conformance-e2e`)
+run on the self-hosted multi-node real-KVM cluster via `cluster-e2e.yaml`. The
+DECISION is to keep `cluster-e2e.yaml` a NON-required check, gated by cadence and
+in-job hard-fails rather than by branch protection, for these reasons:
+
+- The runner (`runs-on: [self-hosted, mitos-cluster]`) is a single shared
+  bare-metal cluster that can be offline or busy. Making it a required check would
+  let one unavailable machine block every merge to `main`, which trades the project's
+  boring-failure principle for a single point of failure in the merge path.
+- The CONTROL-PLANE invariants the chaos suite exercises now each have a
+  KVM-independent proof in the required `go-test` job: warm-pool self-heal and
+  cross-node failover via `TestHuskNodeLossSelfHealsEndToEnd`, the
+  controller-restart-under-storm reconcile via
+  `TestGCChaosStormNoOrphansNoStuckClaims`, and the raw-forkd re-fork via the
+  NodeLost tests above. So a control-plane regression is caught on every PR by a
+  required check; only the real-VMM behavior (which a hosted runner cannot run)
+  needs the cluster.
+
+To keep the cluster suite from silently regressing without making it a merge
+blocker, the cadence/gating is:
+
+- it runs on every push to `main` (post-merge) and on any PR labeled `ci-cluster`,
+  so a change touching the husk/fork/node-loss paths can opt in to a pre-merge
+  cluster run by adding the label;
+- each stage HARD-FAILS the workflow when its preconditions are met (e.g. chaos
+  stage 5 fails, not skips, when there are >= 2 KVM nodes and node-cordon
+  permission), and only SELF-SKIPS when a precondition is genuinely absent, so a
+  green run is never a false pass;
+- a post-merge failure on `main` is treated as a release blocker for the affected
+  area (the §2 production-tenant sequencing gate: the failure/GC and fork-correctness
+  suites must be green before shipping to production tenants), tracked by reverting or
+  fixing forward before the next tenant-facing release rather than by blocking
+  unrelated merges.
+
+Recommendation: revisit promoting `cluster-e2e.yaml` to a required check only once
+the cluster runner has redundancy (more than one machine) so its availability is no
+longer a single point of failure in the merge path.
