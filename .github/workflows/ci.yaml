@@ -2094,8 +2094,32 @@ jobs:
     # Every failure distinguishes a SETUP issue (image load, CRD install, stack
     # rollout) from a real CONFORMANCE failure, and dumps facade + our-claim +
     # sandbox describe/logs on any failure (trap).
+    #
+    # LATEST-TWO-MINORS MATRIX (issue #506): the conformance approach tracks the
+    # upstream API by pinning its latest two minor releases. This job runs once
+    # per pinned minor (matrix.minor), each applying THAT minor's vendored CRDs +
+    # examples UNCHANGED from its own tree (matrix.tree):
+    #   - v0.5.0 (matrix.api = v1beta1): the GRADUATED stable surface the facade
+    #     serves. Full object-level bridging conformance (a)-(j) below.
+    #   - v0.4.6 (matrix.api = v1alpha1): the PREVIOUS minor. v0.5.0 graduated the
+    #     API to v1beta1; v0.4.6 serves only v1alpha1, which the facade does NOT
+    #     serve. So this dimension asserts APPLY-UNCHANGED admission only (the
+    #     vendored v1alpha1 CRDs install and the v1alpha1 examples are admitted
+    #     verbatim); the deeper bridging facts are a JUSTIFIED EXCEPTION recorded
+    #     in docs/facade-conformance.md, not hidden. The v1beta1-only steps below
+    #     are gated with `if: matrix.api == 'v1beta1'`.
     runs-on: ubuntu-latest
     needs: [go-test, docker-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - minor: v0.5.0
+            tree: third_party/agent-sandbox
+            api: v1beta1
+          - minor: v0.4.6
+            tree: third_party/agent-sandbox-v0.4.6
+            api: v1alpha1
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -2105,12 +2129,17 @@ jobs:
         with:
           cluster_name: mitos-facade
           config: hack/kind-config.yaml
+      - name: Pinned minor under test
+        run: echo "facade-conformance minor=${{ matrix.minor }} tree=${{ matrix.tree }} api=${{ matrix.api }}"
       - name: Build and load the facade + controller images
         # The facade reconciles the upstream Sandbox; the controller owns the
         # SandboxPool/SandboxClaim object lifecycle the facade bridges onto. The
         # device plugin and forkd (the in-VM engine) are NOT needed for the
         # object-level assertions and are deliberately omitted (their VMM tail is
-        # the bare-metal boundary documented above).
+        # the bare-metal boundary documented above). The facade serves v1beta1,
+        # so it is only deployed for the v1beta1 minor; the v1alpha1 minor is an
+        # apply-unchanged admission dimension (no facade needed).
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           docker build -f Dockerfile.facade -t mitos-facade:ci .
@@ -2119,30 +2148,37 @@ jobs:
             kind load docker-image "$img:ci" --name mitos-facade
           done
       - name: Install the upstream agents.x-k8s.io CRDs (vendored, unchanged)
-        # Install the upstream Sandbox CRD from the vendored third_party tree, so
-        # the apiserver ADMITS their Sandbox manifest verbatim. A failure here is
-        # a SETUP issue (the vendored CRD did not apply), not a conformance gap.
+        # Install the upstream Sandbox CRD from the vendored tree for the minor
+        # under test (matrix.tree), so the apiserver ADMITS that minor's Sandbox
+        # manifest verbatim. A failure here is a SETUP issue (the vendored CRD did
+        # not apply), not a conformance gap.
         run: |
           set -euo pipefail
-          kubectl apply -f third_party/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml
-          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml
-          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml
-          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml
+          kubectl apply -f "${{ matrix.tree }}/crds/agents.x-k8s.io_sandboxes.yaml"
+          kubectl apply -f "${{ matrix.tree }}/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml"
+          kubectl apply -f "${{ matrix.tree }}/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml"
+          kubectl apply -f "${{ matrix.tree }}/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
           kubectl wait --for=condition=Established --timeout=60s \
             crd/sandboxes.agents.x-k8s.io
           for c in sandboxtemplates sandboxwarmpools sandboxclaims; do
             kubectl wait --for=condition=Established --timeout=60s \
               "crd/${c}.extensions.agents.x-k8s.io"
           done
-          # v0.5.0 graduated the API to v1beta1 (the storage version) and ships
-          # the CRD with a v1alpha1<->v1beta1 conversion.strategy: Webhook whose
-          # clientConfig points at agent-sandbox-system/agent-sandbox-webhook-service
-          # (upstream's controller) with no caBundle. We do NOT run upstream's
-          # controller or its conversion webhook, and we exercise conformance only
-          # at the v1beta1 storage/stable version. Pin conversion to None at install
-          # time so the kind apiserver serves v1beta1 without the absent webhook.
-          # This patches the LIVE CRD only; the vendored file on disk is unchanged
-          # (apply-unchanged is preserved). Documented in docs/facade-conformance.md.
+      - name: Pin the v1beta1 conversion strategy to None (no webhook controller)
+        # v0.5.0 graduated the API to v1beta1 (the storage version) and ships the
+        # CRD with a v1alpha1<->v1beta1 conversion.strategy: Webhook whose
+        # clientConfig points at agent-sandbox-system/agent-sandbox-webhook-service
+        # (upstream's controller) with no caBundle. We do NOT run upstream's
+        # controller or its conversion webhook, and we exercise conformance only
+        # at the v1beta1 storage/stable version. Pin conversion to None at install
+        # time so the kind apiserver serves v1beta1 without the absent webhook.
+        # This patches the LIVE CRD only; the vendored file on disk is unchanged
+        # (apply-unchanged is preserved). Documented in docs/facade-conformance.md.
+        # The v1alpha1 minor (v0.4.6) ships single-version CRDs with no conversion
+        # webhook, so this pin applies only to the v1beta1 minor.
+        if: matrix.api == 'v1beta1'
+        run: |
+          set -euo pipefail
           for crd in sandboxes.agents.x-k8s.io \
                      sandboxtemplates.extensions.agents.x-k8s.io \
                      sandboxwarmpools.extensions.agents.x-k8s.io \
@@ -2158,6 +2194,9 @@ jobs:
         # facade default pool is "default" (set below), matching the SandboxPool
         # we create; the upstream manifest carries no mitos.run/pool
         # annotation, so the facade binds it to that default pool.
+        # v1beta1 only: the facade serves the graduated stable surface, so it is
+        # deployed only for the v1beta1 minor (the v1alpha1 minor is admit-only).
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           kubectl apply -k deploy/
@@ -2176,6 +2215,7 @@ jobs:
         # Gate: the controller and facade roll out Ready and the controller's
         # EnsurePKI minted the CA + forkd + controller TLS Secrets. A missing
         # rollout or Secret is a SETUP failure, distinct from a conformance gap.
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           dump() {
@@ -2202,6 +2242,7 @@ jobs:
         # bridged Sandbox references a real pool object. The pool need not reach
         # Ready for the object-level assertions (a running pool needs the VMM
         # tail); the Sandbox CRD admitting the object is what matters here.
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
@@ -2220,24 +2261,34 @@ jobs:
               replicasPerNode: 0
           YAML
           kubectl -n default get sandboxpool default
-      - name: Apply the upstream example Sandbox manifest UNCHANGED
-        # The conformance acceptance: their example manifest applies verbatim.
-        # We substitute ONLY the ${IMAGE} placeholder on a COPY (the vendored
-        # file is not edited; apply-unchanged is the point), then kubectl apply.
-        # A rejection here is a CONFORMANCE failure (their manifest is not
-        # admitted by the upstream CRD we installed).
+      - name: Apply the upstream example Sandbox manifest UNCHANGED and assert admission
+        # The apply-unchanged conformance fact, asserted for BOTH pinned minors:
+        # the minor's example manifest applies verbatim and is ADMITTED by the
+        # minor's vendored CRD. We substitute ONLY the ${IMAGE} placeholder on a
+        # COPY (the vendored file is not edited; apply-unchanged is the point),
+        # then kubectl apply. A rejection here is a CONFORMANCE failure (their
+        # manifest is not admitted by the vendored CRD we installed). Fact (a):
+        # the Sandbox is admitted (queryable) after apply.
         run: |
           set -euo pipefail
-          src=third_party/agent-sandbox/examples/hello-world-sandbox/hello-world.yaml
+          src="${{ matrix.tree }}/examples/hello-world-sandbox/hello-world.yaml"
           cp "$src" /tmp/hello-world.yaml
           sed -i 's#${IMAGE}#busybox:stable#g' /tmp/hello-world.yaml
           echo "=== applied manifest (image placeholder substituted on a copy) ==="
           cat /tmp/hello-world.yaml
           kubectl -n default apply -f /tmp/hello-world.yaml
-      - name: Conformance assertions (object level)
-        # The five object-level conformance facts. Each is gated; a failure is a
+          kubectl -n default get sandbox.agents.x-k8s.io hello-world >/dev/null
+          echo "PASS (a): upstream Sandbox (${{ matrix.minor }}, ${{ matrix.api }}) admitted verbatim"
+      - name: Bridging conformance assertions (object level)
+        # The object-level bridging facts (b)-(f) for the v1beta1 graduated stable
+        # surface the facade serves. Fact (a) (admission) is asserted for both
+        # minors in the apply step above. Each is gated; a failure is a
         # CONFORMANCE failure (the setup gates above already passed). The trap
-        # dumps the sandbox + our claim + facade logs on any failure.
+        # dumps the sandbox + our claim + facade logs on any failure. The v1alpha1
+        # minor does NOT run these (the facade serves only v1beta1; bridging the
+        # v1alpha1 previous-minor surface is a JUSTIFIED EXCEPTION documented in
+        # docs/facade-conformance.md).
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           dump() {
@@ -2249,10 +2300,6 @@ jobs:
             kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
-
-          # (a) the Sandbox is ADMITTED by the upstream CRD.
-          kubectl -n default get sandbox.agents.x-k8s.io hello-world >/dev/null
-          echo "PASS (a): upstream Sandbox admitted verbatim"
 
           # (b) our facade creates the bridged husk-backed Sandbox, with the
           # owner reference back to the Sandbox AND the mitos.run/pool bridge
@@ -2388,17 +2435,19 @@ jobs:
         # SandboxClaim (v1beta1 warmPoolRef pointing at that warm pool). A
         # rejection here is a CONFORMANCE failure (their manifest is not admitted
         # by the upstream extension CRDs we installed).
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
-          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxtemplate.yaml
-          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxwarmpool.yaml
-          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandbox-claim.yaml
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandboxtemplate.yaml"
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandboxwarmpool.yaml"
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandbox-claim.yaml"
           echo "extension examples applied unchanged"
       - name: Extension conformance assertions (object level)
         # Object-level facts for the extension mappings: their SandboxTemplate
         # creates our template, their SandboxWarmPool creates our pool at the
         # requested replicas, their SandboxClaim binds our claim from the
         # template-matching pool (default policy), and deletion GCs ours.
+        if: matrix.api == 'v1beta1'
         run: |
           set -euo pipefail
           dump() {
@@ -2495,6 +2544,24 @@ jobs:
           fi
           echo "PASS (j): deleting their SandboxClaim GCs our Sandbox"
           echo "FACADE-EXTENSION-CONFORMANCE OK: their SandboxTemplate + SandboxWarmPool + SandboxClaim map to our pool (inline template)/pool (warm)/sandbox object-level on kind; the running-sandbox tail is the #18 bare-metal boundary"
+      - name: Previous-minor apply-unchanged extension admission (v1alpha1)
+        # The v1alpha1 previous minor (v0.4.6): apply its extension example
+        # manifests UNCHANGED and assert the apiserver ADMITS them verbatim. The
+        # deeper bridging (the facade mapping these to our objects) is a JUSTIFIED
+        # EXCEPTION for v1alpha1: the facade serves only the v1beta1 graduated
+        # stable surface, so it is not deployed for this minor. This is recorded
+        # in the conformance matrix in docs/facade-conformance.md, not hidden.
+        if: matrix.api != 'v1beta1'
+        run: |
+          set -euo pipefail
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandboxtemplate.yaml"
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandboxwarmpool.yaml"
+          kubectl -n default apply -f "${{ matrix.tree }}/extensions/examples/sandbox-claim.yaml"
+          kubectl -n default get sandboxtemplate.extensions.agents.x-k8s.io >/dev/null
+          kubectl -n default get sandboxwarmpool.extensions.agents.x-k8s.io >/dev/null
+          kubectl -n default get sandboxclaim.extensions.agents.x-k8s.io >/dev/null
+          echo "PASS: ${{ matrix.minor }} (${{ matrix.api }}) CRDs + core/extension examples apply UNCHANGED and are admitted verbatim"
+          echo "JUSTIFIED EXCEPTION: the facade serves only the v1beta1 graduated stable surface; bridging the v1alpha1 previous-minor surface is documented in docs/facade-conformance.md, not asserted here"
       - name: Facade conformance diagnostics and cleanup
         if: always()
         run: |

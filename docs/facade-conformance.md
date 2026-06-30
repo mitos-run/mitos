@@ -32,13 +32,30 @@ is a bug.
 - JUSTIFIED-EXCEPTION: a field or behavior the facade maps differently (or does
   not yet map), with the reason. The behavior is recorded, not silently dropped.
 
-## Pinned upstream version
+## Pinned upstream versions (latest two minors)
 
-- Module: `sigs.k8s.io/agent-sandbox`, version `v0.5.0` (pinned). The CRDs,
-  examples, and `test/e2e` are vendored verbatim under `third_party/agent-sandbox/`.
-  v0.5.0 graduated the API to `v1beta1` (the storage version; `v1alpha1` is still
-  served but deprecated). The facade imports and serves `agents.x-k8s.io/v1beta1`
-  and `extensions.agents.x-k8s.io/v1beta1`.
+The conformance approach tracks the upstream API by pinning its LATEST TWO minor
+releases. Both are wired today (issue #506):
+
+- Current stable minor: `sigs.k8s.io/agent-sandbox` `v0.5.0`, vendored verbatim
+  under `third_party/agent-sandbox/` (CRDs, examples, `extensions/examples`, and
+  `test/e2e`). v0.5.0 graduated the API to `v1beta1` (the storage version;
+  `v1alpha1` is still served but deprecated). The facade imports and serves
+  `agents.x-k8s.io/v1beta1` and `extensions.agents.x-k8s.io/v1beta1`, so this
+  minor carries the FULL object-level bridging conformance.
+- Previous minor: `sigs.k8s.io/agent-sandbox` `v0.4.6` (the latest patch of the
+  v0.4 minor), vendored verbatim under `third_party/agent-sandbox-v0.4.6/` (CRDs,
+  examples, `extensions/examples`). v0.4.6 predates the v1beta1 graduation and
+  serves only `agents.x-k8s.io/v1alpha1` (no conversion webhook). The facade does
+  NOT serve `v1alpha1`, so this minor carries APPLY-UNCHANGED admission
+  conformance (its CRDs install and its examples are admitted verbatim); the
+  deeper bridging facts are a JUSTIFIED EXCEPTION for this minor, recorded below.
+
+Layout: the two minors live as PARALLEL vendored trees (not versioned subdirs)
+so the existing v0.5.0 wiring stays put: `third_party/agent-sandbox/` is the
+v0.5.0 (v1beta1) pin and `third_party/agent-sandbox-v0.4.6/` is the v0.4.6
+(v1alpha1) pin. Each tree carries a nested `go.mod` marker so the parent module's
+`go build` / `go vet` / `go test ./...` skip the vendored subtrees.
 - Conversion webhook accommodation: the vendored CRD ships
   `conversion.strategy: Webhook` whose clientConfig targets upstream's controller
   (`agent-sandbox-system/agent-sandbox-webhook-service`, no caBundle). We do NOT
@@ -50,10 +67,16 @@ is a bug.
   a test-infra accommodation, not an API divergence: the surface we test is the
   graduated stable version.
 - Latest-two-minors policy: the conformance approach tracks the upstream API as
-  it moves by pinning their latest two minor releases. Today only v0.5.0 is
-  wired (vendored + applied unchanged). Wiring the second minor (a parallel
-  vendored tree + a CI matrix dimension) is a follow-up; this is stated honestly
-  rather than implied.
+  it moves by pinning their latest two minor releases. Both minors are wired now
+  (issue #506): v0.5.0 (v1beta1, full bridging) and v0.4.6 (v1alpha1,
+  apply-unchanged admission). When upstream ships a newer minor, re-pin the
+  parallel tree to the new second-latest minor (or retire it if its API surface
+  leaves the latest-two window) and update this matrix in the same PR. The
+  envtest `internal/facade/examples_test.go` (`TestVendoredMinorsApplyUnchanged`)
+  walks BOTH vendored trees and asserts each minor's core Sandbox examples carry
+  the API version that minor is expected to expose, so a silent API-version
+  divergence in either pin fails the build. The `facade-conformance` CI job runs
+  once per pinned minor (a matrix dimension keyed on the minor).
 
 ## Apply-unchanged acceptance
 
@@ -83,13 +106,33 @@ NOT asserted on kind; see the NEEDS-BARE-METAL rows.
 
 ## The facade-conformance CI job (object level)
 
-The `facade-conformance` job in `.github/workflows/ci.yaml` mirrors
-`kind-e2e-husk`: it builds + loads the facade and controller images, creates a
-kind cluster, installs the vendored upstream `agents.x-k8s.io` Sandbox CRD plus
-our CRDs, deploys our controller + the facade (PKI on, `--default-pool=default`)
-and a `default` SandboxPool, applies their hello-world Sandbox UNCHANGED, and
-asserts, each gated with a SETUP-vs-CONFORMANCE distinction and a diagnostics
-trap:
+The `facade-conformance` job in `.github/workflows/ci.yaml` runs once per pinned
+minor (a build matrix keyed on `matrix.minor`, each applying that minor's
+vendored tree `matrix.tree`):
+
+- v0.5.0 (`matrix.api = v1beta1`): the GRADUATED stable surface the facade
+  serves. The job mirrors `kind-e2e-husk`: it builds + loads the facade and
+  controller images, creates a kind cluster, installs the vendored upstream
+  `agents.x-k8s.io` CRDs plus our CRDs, deploys our controller + the facade (PKI
+  on, `--default-pool=default`) and a `default` SandboxPool, applies their
+  hello-world Sandbox UNCHANGED, and asserts facts (a)-(j) below, each gated with
+  a SETUP-vs-CONFORMANCE distinction and a diagnostics trap.
+- v0.4.6 (`matrix.api = v1alpha1`): the previous minor. v0.4.6 serves only
+  `v1alpha1`, which the facade does not serve, so the v1beta1-only steps (image
+  build/load, our-stack deploy, rollout, default pool, bridging assertions
+  (b)-(j)) are gated `if: matrix.api == 'v1beta1'` and skipped. This dimension
+  installs the v0.4.6 CRDs and applies the v0.4.6 core + extension example
+  manifests UNCHANGED, asserting only fact (a) (admission). The bridging facts
+  are a JUSTIFIED EXCEPTION for v1alpha1 (the facade targets the v1beta1
+  graduated stable surface), echoed in the job, not hidden.
+
+NOTE on required checks: matrixing renames the GitHub check from
+`facade-conformance` to `facade-conformance (v0.5.0)` and
+`facade-conformance (v0.4.6)`. Branch-protection required-check names may need
+updating to the matrix names.
+
+For the v1beta1 minor the job asserts, each gated with a SETUP-vs-CONFORMANCE
+distinction and a diagnostics trap:
 
 - (a) the Sandbox is ADMITTED by the upstream CRD (verbatim);
 - (b) the facade creates the bridged husk-backed `Sandbox` (owner reference
@@ -331,8 +374,24 @@ maps.
    linkage (envtest has no GC controller) and facade-conformance (j) asserts the
    live-apiserver GC cascade for the SandboxClaim.
 
+7. previous-minor (v1alpha1) bridging. The second pinned minor (v0.4.6) serves
+   only `agents.x-k8s.io/v1alpha1`; v0.5.0 graduated the API to `v1beta1`. The
+   facade imports and serves the graduated stable surface (`v1beta1`) only, so it
+   does NOT bridge the v1alpha1 previous-minor objects. JUSTIFIED EXCEPTION: for
+   the v0.4.6 pin we assert APPLY-UNCHANGED admission only (its CRDs install and
+   its core + extension example manifests are admitted verbatim; envtest
+   `TestVendoredMinorsApplyUnchanged` plus the `facade-conformance` v0.4.6 matrix
+   cell's fact (a)). The bridging facts (b)-(j) are recorded here as not asserted
+   for v1alpha1, not silently dropped. This pin guards against upstream drift in
+   the v0.4 minor (a broken CRD or a backported version change) and against an
+   empty or mis-vendored second tree; it is a real dimension, not cosmetic.
+
 ## What is PROVEN now
 
+- envtest (`internal/facade`, `TestVendoredMinorsApplyUnchanged`): both pinned
+  minors are vendored and their core Sandbox examples carry the expected API
+  version (v0.5.0 = v1beta1, v0.4.6 = v1alpha1); a silent API-version divergence
+  in either pin fails the build.
 - envtest (`internal/facade`): the facade creates the bridged husk-backed claim
   for a Sandbox, mirrors its readiness into the Sandbox status, RELEASES the
   claim + clears the serving observables on `operatingMode=Suspended` (pause),
@@ -354,6 +413,9 @@ maps.
   facade releases then re-creates the bridged sandbox). Their three extension
   example manifests apply UNCHANGED and the object-level facts (g)-(j) hold (their
   template/warmpool/claim map to our template/pool/claim; deletion GCs ours).
+- CI (`facade-conformance` v0.4.6 matrix cell): the previous-minor v1alpha1 CRDs
+  install and the v0.4.6 core + extension example manifests apply UNCHANGED and
+  are admitted verbatim (fact (a)); bridging is the documented exception 7.
 - CI (`cluster-facade-conformance-e2e` on the real KVM cluster): the upstream
   Sandbox applied UNCHANGED reaches the in-VM Ready predicate ("Pod is Ready;
   Service Exists" analog) on a real booted Firecracker VMM through the facade,
@@ -376,8 +438,10 @@ maps.
   not a regression).
 - Running the full upstream Go e2e suite green end to end (needs their controller
   + the running-sandbox tail). Follow-up issue.
-- The latest-two-minors CI matrix (only v0.5.0 is wired now; the second minor is
-  a follow-up issue).
+- Bridging the v1alpha1 previous-minor surface (v0.4.6): the facade serves the
+  v1beta1 graduated stable surface only, so the v0.4.6 pin is apply-unchanged
+  admission, not bridging (exception 7). Extending the facade to also serve
+  v1alpha1 is not planned; v1alpha1 is upstream-deprecated.
 - State-PRESERVING pause: a memory snapshot taken across the pause (the
   Checkpoint primitive) so resume restores the exact pre-pause in-VM state, not a
   fresh warm pod. The object-level pause/resume mapping (warm-pool release + fast
