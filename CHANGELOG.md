@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.9.0](https://github.com/mitos-run/mitos/compare/v1.8.0...v1.9.0) (2026-06-30)
+
+
+### Features
+
+* **daemon:** add data-dir disk headroom to the capacity heartbeat ([#553](https://github.com/mitos-run/mitos/issues/553)) ([80111a7](https://github.com/mitos-run/mitos/commit/80111a79b024f25ba0c84f7bf1a6aa9e9411b330)), closes [#465](https://github.com/mitos-run/mitos/issues/465)
+* **runmanifest:** inject MITOS_PUBLIC_URL and template ${MITOS_PUBLIC_URL} ([#559](https://github.com/mitos-run/mitos/issues/559)) ([309a013](https://github.com/mitos-run/mitos/commit/309a0133dec7fab6e77b1a36e663a06ddd5cac62)), closes [#476](https://github.com/mitos-run/mitos/issues/476)
+
+
+### Bug Fixes
+
+* **controller:** auto re-fork raw-forkd claims after node loss ([#372](https://github.com/mitos-run/mitos/issues/372)) ([#558](https://github.com/mitos-run/mitos/issues/558)) ([30a5a23](https://github.com/mitos-run/mitos/commit/30a5a2374a64081152c99729f6d260ff1787ccb8))
+* **controller:** rebuild pool snapshot on template-content edits ([#554](https://github.com/mitos-run/mitos/issues/554)) ([93183d8](https://github.com/mitos-run/mitos/commit/93183d8d2931723db49173d7581fe4adb0c29c81))
+* **controller:** surface DrainPolicy Checkpoint degrade honestly, not as a silent Kill ([#552](https://github.com/mitos-run/mitos/issues/552)) ([9912bf7](https://github.com/mitos-run/mitos/commit/9912bf7953141834813e38a589915494db24fcb1)), closes [#374](https://github.com/mitos-run/mitos/issues/374)
+* **snapcompat:** refuse stale snapshots on guest-agent protocol skew ([#459](https://github.com/mitos-run/mitos/issues/459)) ([#549](https://github.com/mitos-run/mitos/issues/549)) ([3531ed8](https://github.com/mitos-run/mitos/commit/3531ed89ccfc74fde7ae8601a2f78864e80ade7c))
+
 ## [1.8.0](https://github.com/mitos-run/mitos/compare/v1.7.0...v1.8.0) (2026-06-30)
 
 
