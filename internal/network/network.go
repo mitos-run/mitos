@@ -23,16 +23,24 @@ type Manager interface {
 	Setup(ctx context.Context, id netconf.Identity, policy netconf.SandboxPolicy, resolverIP net.IP) error
 	// Teardown removes the tap and the per-tap nftables table.
 	Teardown(ctx context.Context, id netconf.Identity) error
+	// FlushSource deletes all conntrack entries whose source IP is guestIP.
+	// This is called on a live fork so that any in-flight proxied flow is
+	// RST'd and the child re-dials through its own proxy context. Returns nil
+	// when no entries matched (conntrack exits nonzero but that is not an
+	// error for the caller).
+	FlushSource(ctx context.Context, guestIP net.IP) error
 }
 
-// FakeManager records Setup and Teardown calls for use by other packages'
-// tests. It performs no real work and is safe for concurrent use.
+// FakeManager records Setup, Teardown, and FlushSource calls for use by other
+// packages' tests. It performs no real work and is safe for concurrent use.
 type FakeManager struct {
-	mu          sync.Mutex
-	SetupLog    []SetupCall
-	Teardowns   []netconf.Identity
-	SetupErr    error
-	TeardownErr error
+	mu           sync.Mutex
+	SetupLog     []SetupCall
+	Teardowns    []netconf.Identity
+	FlushSources []net.IP
+	SetupErr     error
+	TeardownErr  error
+	FlushErr     error
 }
 
 // SetupCall records the arguments of one Setup call.
@@ -56,6 +64,14 @@ func (f *FakeManager) Teardown(_ context.Context, id netconf.Identity) error {
 	defer f.mu.Unlock()
 	f.Teardowns = append(f.Teardowns, id)
 	return f.TeardownErr
+}
+
+// FlushSource records the call and returns FakeManager.FlushErr.
+func (f *FakeManager) FlushSource(_ context.Context, guestIP net.IP) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.FlushSources = append(f.FlushSources, guestIP)
+	return f.FlushErr
 }
 
 var _ Manager = (*FakeManager)(nil)
