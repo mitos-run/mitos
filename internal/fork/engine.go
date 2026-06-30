@@ -1556,6 +1556,18 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	}, nil
 }
 
+// liveForkOpts builds the ForkOpts for a live (running) fork of source: the
+// child inherits the source's network policy (so it gets a fresh per-fork
+// identity through the same path as cold fork) and is marked LiveFork so the
+// guest resets captured upstream sockets.
+func liveForkOpts(source *Sandbox) ForkOpts {
+	opts := ForkOpts{LiveFork: true}
+	if source.netOpts != nil {
+		opts.Network = source.netOpts
+	}
+	return opts
+}
+
 // ForkRunning checkpoints a running sandbox and creates a new fork from it.
 func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource bool) (*ForkResult, error) {
 	e.mu.RLock()
@@ -1631,10 +1643,7 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	// ResetUpstreams=true (captured upstream sockets must die). A networking-off
 	// source has netOpts nil, so the live fork carries no network, exactly as
 	// before. The gate above already refused the networked+no-proxy case.
-	forkOpts := ForkOpts{LiveFork: true}
-	if source.netOpts != nil {
-		forkOpts.Network = source.netOpts
-	}
+	forkOpts := liveForkOpts(source)
 	// Thread the original template rootfs through: the checkpoint's
 	// embedded drive path still points at it, and the new VM's chroot
 	// needs it linked in.
