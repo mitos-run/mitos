@@ -132,6 +132,8 @@ impl Control for ControlService {
             prefix_len: n.prefix_len as u32,
             guest_mac: n.guest_mac,
             resolver_ip: n.resolver_ip,
+            proxy_endpoint: n.proxy_endpoint,
+            reset_upstreams: n.reset_upstreams,
         });
 
         // Map repeated VolumeMountEntry proto messages to typed entries.

@@ -12,16 +12,19 @@ use std::io;
 
 /// MS_RDONLY: mount the filesystem read-only. Mirrors unix.MS_RDONLY in the Go
 /// agent (golang.org/x/sys/unix). Value is 1 on Linux (all architectures).
-pub const MS_RDONLY: u64 = libc::MS_RDONLY;
+/// Hardcoded to avoid the libc crate's Linux-only constant on non-Linux hosts.
+pub const MS_RDONLY: u64 = 1;
 
 /// MS_REC: recursive mount flag. Used with MS_PRIVATE to mark every mount in
 /// the subtree private so propagation is confined to the namespace.
-pub const MS_REC: u64 = libc::MS_REC;
+/// Linux stable value: 1<<14 = 16384.
+pub const MS_REC: u64 = 16384;
 
 /// MS_PRIVATE: do not propagate mount events to or from this mount point.
 /// Combined with MS_REC after unshare(CLONE_NEWNS) to create a fully isolated
 /// mount namespace for host-safe mount tests.
-pub const MS_PRIVATE: u64 = libc::MS_PRIVATE;
+/// Linux stable value: 1<<18 = 262144.
+pub const MS_PRIVATE: u64 = 262144;
 
 /// Check whether a path is currently a mount point by scanning /proc/mounts.
 ///
