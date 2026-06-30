@@ -110,6 +110,49 @@ func TestSetupWithForwardingAndMasquerade(t *testing.T) {
 	}
 }
 
+func TestSetupRendersEgressProxyRules(t *testing.T) {
+	rr := &recordingRunner{}
+	id := testIdentity()
+	sentinel := net.ParseIP("169.254.169.2")
+	policy := netconf.SandboxPolicy{Egress: v1.EgressDeny, ProxySentinel: sentinel, ProxyPort: 3128}
+
+	err := setup(context.Background(), rr.run, func() error { return nil },
+		id, policy, nil, applyOptions{})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// tap, addr, link, nft shared table, nft chain (with proxy accept folded in),
+	// nft proxy DNAT.
+	if len(rr.calls) != 6 {
+		t.Fatalf("expected 6 commands, got %d: %+v", len(rr.calls), rr.calls)
+	}
+
+	// The chain apply must carry the proxy accept rule, and that accept must come
+	// BEFORE the terminal drop verdict (the proxy enforces upstream policy, not
+	// the per-sandbox chain).
+	chainStdin := rr.calls[4].stdin
+	wantAccept := netconf.RenderProxyAccept(netconf.SharedTableName(), netconf.SandboxChainName(id.TapName), id.GuestIP, id.HostIP, 3128)
+	if !strings.Contains(chainStdin, wantAccept) {
+		t.Fatalf("chain stdin missing proxy accept rule\ngot:\n%s\nwant substring:\n%s", chainStdin, wantAccept)
+	}
+	acceptIdx := strings.Index(chainStdin, wantAccept)
+	dropIdx := strings.Index(chainStdin, "ip saddr "+id.GuestIP.String()+" drop")
+	if dropIdx < 0 {
+		dropIdx = strings.LastIndex(chainStdin, "drop")
+	}
+	if acceptIdx < 0 || dropIdx < 0 || acceptIdx > dropIdx {
+		t.Fatalf("proxy accept (idx %d) must precede the drop verdict (idx %d)\n%s", acceptIdx, dropIdx, chainStdin)
+	}
+
+	// The last apply installs the prerouting DNAT redirecting the sentinel to the
+	// fork's gateway.
+	wantDNAT := netconf.RenderProxyDNAT(id.TapName, sentinel, 3128, id.HostIP)
+	if rr.calls[5].stdin != wantDNAT {
+		t.Fatalf("proxy DNAT stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[5].stdin, wantDNAT)
+	}
+}
+
 func TestSetupStopsOnError(t *testing.T) {
 	rr := &recordingRunner{failOn: "addr add", failErr: errors.New("boom")}
 	id := testIdentity()

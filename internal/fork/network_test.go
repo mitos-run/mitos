@@ -7,10 +7,62 @@ import (
 
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/egressproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/network"
 )
+
+// testEngineOption mutates a test Engine so network-enabled engine helpers can
+// opt into extra wiring (e.g. the egress proxy) without growing a tuple return.
+type testEngineOption func(*Engine)
+
+// withEgressProxy wires the per-node egress proxy registry plus the fork-stable
+// sentinel endpoint into a test Engine.
+func withEgressProxy(reg *egressproxy.Registry, sentinel net.IP, port int) testEngineOption {
+	return func(e *Engine) {
+		e.egressProxy = reg
+		e.proxySentinel = sentinel
+		e.proxyPort = port
+	}
+}
+
+// newTestEngineWithNetwork builds an Engine with networking wired (FakeManager +
+// a real Allocator) but WITHOUT touching /dev/kvm or Firecracker, then applies
+// the given options.
+func newTestEngineWithNetwork(t *testing.T, opts ...testEngineOption) *Engine {
+	t.Helper()
+	fm := &network.FakeManager{}
+	alloc, err := netconf.NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e := &Engine{netMgr: fm, netAlloc: alloc}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
+}
+
+func TestPrepareForkNetworkRegistersEgressProxy(t *testing.T) {
+	reg := egressproxy.NewRegistry()
+	e := newTestEngineWithNetwork(t, withEgressProxy(reg, net.ParseIP("169.254.169.2"), 3128))
+	fn, err := e.prepareForkNetwork("sbx-1", ForkOpts{Network: &NetworkOpts{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := reg.Lookup(fn.identity.GuestIP); !ok || id != "sbx-1" {
+		t.Fatalf("guest IP not registered with proxy: %v %v", id, ok)
+	}
+	// guestNet carries the fork-stable sentinel endpoint.
+	if fn.guestNet.ProxyEndpoint != "169.254.169.2:3128" {
+		t.Fatalf("proxy endpoint not delivered: %q", fn.guestNet.ProxyEndpoint)
+	}
+	e.teardownForkNetwork("sbx-1", fn.identity)
+	if _, ok := reg.Lookup(fn.identity.GuestIP); ok {
+		t.Fatal("guest IP still registered after teardown")
+	}
+}
 
 // newNetEngine builds an Engine with networking wired but WITHOUT touching
 // /dev/kvm or Firecracker, so the network helpers are unit testable. The

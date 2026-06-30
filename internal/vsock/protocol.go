@@ -118,6 +118,16 @@ type NotifyForkedNetwork struct {
 	// existing resolv.conf is left untouched. The address is config, not a
 	// secret, and is safe to log.
 	ResolverIP string `json:"resolver_ip,omitempty"`
+	// ProxyEndpoint, when non-empty, is the fork-stable host:port the guest must
+	// send its egress through: the per-node egress proxy. It is the sentinel
+	// proxy address (baked identically into every fork) plus the proxy port; each
+	// fork's nftables DNAT redirects the sentinel to that fork's gateway, where
+	// the single per-node proxy process listens. The guest agent exports it as
+	// HTTP_PROXY/HTTPS_PROXY so guest egress is attributed and policy-enforced by
+	// the host proxy. Empty means the per-sandbox egress proxy is disabled and
+	// the guest's environment is left untouched. The address is config, not a
+	// secret, and is safe to log.
+	ProxyEndpoint string `json:"proxy_endpoint,omitempty"`
 }
 
 // NotifyForkedResponse reports what the guest did in response to a fork

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"mitos.run/mitos/internal/casgc"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/dnsproxy"
+	"mitos.run/mitos/internal/egressproxy"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/netconf"
@@ -52,6 +54,9 @@ func main() {
 		dnsResolver          string
 		enableDNSEgress      bool
 		dnsUpstream          string
+		enableEgressProxy    bool
+		proxySentinel        string
+		proxyPort            int
 		agentBin             string
 		busyboxBin           string
 		enableVolumes        bool
@@ -99,6 +104,9 @@ func main() {
 	flag.StringVar(&dnsResolver, "dns-resolver", "", "DNS resolver IP guests may reach; adds a DNS allow rule to each fork's egress ruleset. Empty omits the rule. With --enable-dns-egress this is the address the controlled resolver binds and every guest is pointed at; it defaults to 169.254.1.1 when unset")
 	flag.BoolVar(&enableDNSEgress, "enable-dns-egress", false, "Enable name-based egress: run a controlled DNS resolver that resolves only allowlisted names and pins each resolved IP into the sandbox's egress set, and point guests at it. Requires --enable-networking. Default false until proven on KVM CI; when off, name-based allow entries stay unenforced as today")
 	flag.StringVar(&dnsUpstream, "dns-upstream", "", "Upstream resolver (host:port) the controlled DNS proxy forwards allowed queries to. Empty derives the first nameserver from /etc/resolv.conf, falling back to 1.1.1.1:53")
+	flag.BoolVar(&enableEgressProxy, "egress-proxy", false, "Enable the per-sandbox egress proxy: run a host-side HTTP forward proxy that attributes each fork's egress by source IP and enforces upstream policy, and point every fork at it via a fork-stable sentinel address (DNATed to each fork's gateway). Requires --enable-networking. Default false until proven on KVM CI; when off, guest egress is governed by the per-sandbox nftables chain exactly as before")
+	flag.StringVar(&proxySentinel, "proxy-sentinel", "169.254.169.2", "Fork-stable sentinel address baked into every fork's proxy endpoint; each fork's nftables DNAT redirects it to that fork's gateway where the per-node proxy listens. Effective only with --egress-proxy")
+	flag.IntVar(&proxyPort, "proxy-port", 3128, "TCP port the per-node egress proxy listens on and the DNAT/accept rules target. Effective only with --egress-proxy")
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
@@ -156,6 +164,11 @@ func main() {
 	// dnsProxyServer is the node-level controlled resolver, set only when
 	// --enable-dns-egress and networking are both on. Nil otherwise.
 	var dnsProxyServer *dnsproxy.Server
+	// egressProxyServer is the node-level HTTP forward proxy and proxyListenAddr
+	// its listen address, set only when --egress-proxy and networking are both
+	// on. Nil otherwise.
+	var egressProxyServer *egressproxy.Proxy
+	var proxyListenAddr string
 	// reqKeyProvider is the request-scoped encryption key provider, set only when
 	// --enable-encryption is on. The same instance is wired into the engine and
 	// the daemon server so the handlers can hand the controller-delivered key to
@@ -306,6 +319,30 @@ func main() {
 				dnsProxyServer = buildDNSProxy(registry, alloc, dnsResolver, dnsUpstream)
 				fmt.Printf("forkd: name-based DNS egress ENABLED (resolver %s, upstream %s)\n", dnsResolver, resolvedUpstream(dnsUpstream))
 			}
+
+			// Per-sandbox egress proxy: a host-side HTTP forward proxy that
+			// attributes each fork's egress by source IP and enforces upstream
+			// policy. Each fork registers its guest IP with the registry and is
+			// pointed at the sentinel endpoint; the per-fork DNAT redirects the
+			// sentinel to that fork's gateway, where this one process listens.
+			if enableEgressProxy {
+				sentinelIP := net.ParseIP(proxySentinel)
+				if sentinelIP == nil {
+					fmt.Fprintf(os.Stderr, "forkd: invalid --proxy-sentinel %q\n", proxySentinel)
+					os.Exit(1)
+				}
+				registry := egressproxy.NewRegistry()
+				engineOpts.EgressProxy = registry
+				engineOpts.ProxySentinel = sentinelIP
+				engineOpts.ProxyPort = proxyPort
+				egressProxyServer = buildEgressProxy(registry)
+				// The DNAT targets each fork's gateway (the host side of its /30),
+				// so the single listener must accept on every gateway address: bind
+				// the wildcard on the proxy port. Source IP still attributes each
+				// connection to its sandbox.
+				proxyListenAddr = net.JoinHostPort("", strconv.Itoa(proxyPort))
+				fmt.Printf("forkd: per-sandbox egress proxy ENABLED (sentinel %s, port %d)\n", proxySentinel, proxyPort)
+			}
 		}
 		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg, engineOpts)
 		if err != nil {
@@ -420,6 +457,20 @@ func main() {
 			defer cancel()
 			if err := dnsProxyServer.Shutdown(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "forkd: DNS resolver shutdown: %v\n", err)
+			}
+		}()
+	}
+
+	// Start the per-sandbox egress proxy (node-level Runnable) when enabled. It
+	// binds the proxy port on every interface so each fork's DNATed gateway
+	// destination lands here; a listen failure is fatal because egress would
+	// silently not work otherwise.
+	if egressProxyServer != nil {
+		go func() {
+			fmt.Printf("forkd: egress proxy on %s\n", proxyListenAddr)
+			if err := egressProxyServer.ListenAndServe(proxyListenAddr); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: egress proxy error: %v\n", err)
+				os.Exit(1)
 			}
 		}()
 	}
@@ -593,6 +644,39 @@ func buildDNSProxy(registry *dnsproxy.Registry, alloc *netconf.Allocator, resolv
 		upstreams = []string{resolvedUpstream("")}
 	}
 	return dnsproxy.NewServer(registry, pinner, upstreams, dnsProxyTTLFloor, alloc.TapForGuestIP, logger)
+}
+
+// netEgressDialer opens upstream sockets through the host's net.Dialer so the
+// host process owns every upstream connection: a forked guest never inherits an
+// already-open upstream. A bounded dial timeout stops a slow upstream from
+// pinning a host goroutine indefinitely.
+type netEgressDialer struct {
+	d net.Dialer
+}
+
+func (n netEgressDialer) Dial(ctx context.Context, hostport string) (net.Conn, error) {
+	return n.d.DialContext(ctx, "tcp", hostport)
+}
+
+// redactingEgressLogger records egress events with sandbox ID, host:port, and
+// byte counts ONLY: never headers, bodies, paths, query strings, or auth
+// values. It satisfies egressproxy.Logger.
+type redactingEgressLogger struct {
+	log *slog.Logger
+}
+
+func (r redactingEgressLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {
+	r.log.Info("egress", "sandbox", sandboxID, "hostport", hostport, "bytes_up", bytesUp, "bytes_down", bytesDown)
+}
+
+// buildEgressProxy constructs the per-node HTTP forward proxy: it attributes
+// each connection to a sandbox by source IP via the registry, dials every
+// upstream host-side through a bounded-timeout net.Dialer, and logs only the
+// sandbox ID, host:port, and byte counts (no headers, paths, or secrets).
+func buildEgressProxy(registry *egressproxy.Registry) *egressproxy.Proxy {
+	dialer := netEgressDialer{d: net.Dialer{Timeout: 30 * time.Second}}
+	logger := redactingEgressLogger{log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	return egressproxy.NewProxy(registry, dialer, logger)
 }
 
 // resolvedUpstream returns the upstream resolver address for the proxy. An

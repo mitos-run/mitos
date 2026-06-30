@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"mitos.run/mitos/internal/netconf"
 )
@@ -86,8 +87,29 @@ func setup(
 		BlockNetwork: policy.BlockNetwork,
 		Counter:      policy.Counter,
 	})
+	// Per-sandbox egress proxy: fold the proxy accept rule INTO this chain ahead
+	// of the terminal drop so the guest can reach the per-node proxy listener
+	// regardless of the allowlist verdict. The proxy, not the per-sandbox chain,
+	// enforces upstream egress policy. The accept is saddr-pinned to the guest IP
+	// and matches only the gateway:proxyPort destination, so it never broadens the
+	// chain's reach to anything but the proxy listener.
+	if policy.ProxySentinel != nil {
+		accept := netconf.RenderProxyAccept(netconf.SharedTableName(), netconf.SandboxChainName(id.TapName), id.GuestIP, id.HostIP, policy.ProxyPort)
+		chain = insertChainRule(chain, accept)
+	}
 	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
 		return fmt.Errorf("apply egress chain for tap %s: %w", id.TapName, err)
+	}
+
+	// Install the prerouting DNAT that redirects this fork's sentinel proxy
+	// address to its gateway, where the single per-node proxy process listens.
+	// The sentinel value is baked identically into every fork; the per-tap DNAT
+	// is what routes it to this fork's own proxy context.
+	if policy.ProxySentinel != nil {
+		dnat := netconf.RenderProxyDNAT(id.TapName, policy.ProxySentinel, policy.ProxyPort, id.HostIP)
+		if err := run(ctx, netconf.NftApplyArgs(), dnat); err != nil {
+			return fmt.Errorf("apply proxy DNAT for tap %s: %w", id.TapName, err)
+		}
 	}
 
 	if opts.uplink != "" {
@@ -137,4 +159,18 @@ func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOp
 		firstErr = fmt.Errorf("delete egress counter for tap %s: %w", id.TapName, err)
 	}
 	return firstErr
+}
+
+// insertChainRule splices a single rendered nft rule line in immediately after
+// the rendered chain's `add chain` header line, so the rule precedes every
+// accept and the terminal drop verdict in that chain. RenderSandboxChainSpec
+// always emits the `add chain ...` header first, so the spliced rule lands at
+// the top of the chain's rule list, ahead of the allowlist drop. Used to fold
+// the egress proxy accept into the per-sandbox chain. If the chain has no
+// newline (defensive), the rule is appended.
+func insertChainRule(chain, rule string) string {
+	if i := strings.IndexByte(chain, '\n'); i >= 0 {
+		return chain[:i+1] + rule + chain[i+1:]
+	}
+	return chain + rule
 }

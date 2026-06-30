@@ -39,6 +39,17 @@ type SandboxPolicy struct {
 	InboundCIDRs []string
 	// Counter requests the per-sandbox egress byte counter (#211 metering seam).
 	Counter bool
+	// ProxySentinel, when non-nil, turns on the per-sandbox egress proxy
+	// datapath: the Manager renders a prerouting DNAT that redirects this fork's
+	// sentinel proxy address to its gateway (where the per-node proxy listens) and
+	// an accept that lets the guest reach the proxy listener ahead of the
+	// allowlist drop. The proxy, not the per-sandbox chain, enforces upstream
+	// egress policy. Nil leaves the proxy datapath off (the prior behavior).
+	ProxySentinel net.IP
+	// ProxyPort is the TCP port the per-node egress proxy listens on; it is the
+	// DNAT target port and the dport the proxy-accept rule matches. Inert when
+	// ProxySentinel is nil.
+	ProxyPort int
 }
 
 // ChainSpec is the full per-sandbox egress chain input. The zero value renders a

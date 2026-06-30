@@ -18,6 +18,7 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/cpupin"
+	"mitos.run/mitos/internal/egressproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
@@ -131,6 +132,20 @@ type Engine struct {
 	// untouched: behavior is exactly as before.
 	dnsRegistry    DNSRegistry
 	enableDNSEgres bool
+
+	// Per-sandbox egress proxy is opt-in on top of networking. When egressProxy
+	// is non-nil, each fork registers its unique guest IP with the node-wide
+	// proxy (so the proxy attributes the fork's connections by source IP), the
+	// fork's egress ruleset gets a DNAT that redirects proxySentinel:proxyPort to
+	// its gateway (where the single per-node proxy listens) plus an accept ahead
+	// of the allowlist drop, and the fork is handed the fork-stable proxy endpoint
+	// over vsock so the guest routes egress through it. Nil (the default) leaves
+	// the proxy datapath off: behavior is exactly as before. proxySentinel is the
+	// fork-stable sentinel address baked identically into every fork; proxyPort is
+	// the proxy listen port.
+	egressProxy   *egressproxy.Registry
+	proxySentinel net.IP
+	proxyPort     int
 
 	// Volumes are opt-in. When enableVolumes is set and volBackend is non-nil,
 	// the template build bakes one placeholder drive per template volume into
@@ -283,6 +298,13 @@ func (e *Engine) networkEnabled() bool {
 // Networking must also be on (the registry keys on the per-fork guest IP).
 func (e *Engine) dnsEgressEnabled() bool {
 	return e.enableDNSEgres && e.dnsRegistry != nil && e.resolverIP != nil && e.networkEnabled()
+}
+
+// egressProxyEnabled reports whether the per-sandbox egress proxy is wired: the
+// registry is present and networking is on (the registry keys on the per-fork
+// guest IP, so networking must allocate one).
+func (e *Engine) egressProxyEnabled() bool {
+	return e.egressProxy != nil && e.networkEnabled()
 }
 
 // volumesEnabled reports whether per-fork volumes are wired. Both the flag and
@@ -489,9 +511,26 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		// counting rule with no verdict, so it never changes enforcement.
 		Counter: true,
 	}
+	// When the per-sandbox egress proxy is on, hand the policy the sentinel and
+	// port so Setup renders the DNAT (sentinel -> this fork's gateway) and the
+	// proxy accept ahead of the allowlist drop.
+	if e.egressProxyEnabled() {
+		sbPolicy.ProxySentinel = e.proxySentinel
+		sbPolicy.ProxyPort = e.proxyPort
+	}
 	if err := e.netMgr.Setup(context.Background(), id, sbPolicy, e.resolverIP); err != nil {
 		e.netAlloc.Release(sandboxID)
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
+	}
+
+	// Register this fork's guest IP with the node-wide egress proxy (it
+	// attributes connections by source IP) and compute the fork-stable proxy
+	// endpoint the guest routes egress through. Done after Setup so a setup
+	// failure does not leave a dangling registration.
+	var proxyEndpoint string
+	if e.egressProxyEnabled() {
+		e.egressProxy.Register(id.GuestIP, sandboxID)
+		proxyEndpoint = net.JoinHostPort(e.proxySentinel.String(), strconv.Itoa(e.proxyPort))
 	}
 
 	// Register this sandbox's DNS-name allowlist with the proxy, keyed by its
@@ -516,11 +555,12 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 			HostDevName: id.TapName,
 		}},
 		guestNet: &vsock.NotifyForkedNetwork{
-			GuestIP:    id.GuestIP.String(),
-			GatewayIP:  id.HostIP.String(),
-			PrefixLen:  30,
-			GuestMAC:   id.GuestMAC,
-			ResolverIP: guestResolver,
+			GuestIP:       id.GuestIP.String(),
+			GatewayIP:     id.HostIP.String(),
+			PrefixLen:     30,
+			GuestMAC:      id.GuestMAC,
+			ResolverIP:    guestResolver,
+			ProxyEndpoint: proxyEndpoint,
 		},
 	}, nil
 }
@@ -538,6 +578,11 @@ func (e *Engine) teardownForkNetwork(sandboxID string, id netconf.Identity) {
 	// Teardown. Safe to call for a guest that was never registered.
 	if e.enableDNSEgres && e.dnsRegistry != nil {
 		e.dnsRegistry.Deregister(id.GuestIP)
+	}
+	// Drop the egress proxy attribution so a reused guest IP cannot inherit a
+	// stale sandbox mapping. Safe to call for a guest that was never registered.
+	if e.egressProxy != nil {
+		e.egressProxy.Deregister(id.GuestIP)
 	}
 	if err := e.netMgr.Teardown(context.Background(), id); err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: teardown network for %s (tap %s): %v\n", sandboxID, id.TapName, err)
@@ -578,6 +623,18 @@ type EngineOpts struct {
 	// DNSRegistry is the dnsproxy registry the engine registers/deregisters
 	// per-fork name allowlists with. Nil leaves DNS egress disabled.
 	DNSRegistry DNSRegistry
+	// EgressProxy is the node-wide egress proxy registry the engine
+	// registers/deregisters each fork's guest IP with (the proxy attributes a
+	// connection to its sandbox by source IP). Nil leaves the per-sandbox egress
+	// proxy disabled (the prior behavior). Networking must also be on.
+	EgressProxy *egressproxy.Registry
+	// ProxySentinel is the fork-stable sentinel proxy address baked identically
+	// into every fork; each fork's DNAT redirects it to that fork's gateway, where
+	// the per-node proxy listens. Inert when EgressProxy is nil.
+	ProxySentinel net.IP
+	// ProxyPort is the TCP port the per-node egress proxy listens on. Inert when
+	// EgressProxy is nil.
+	ProxyPort int
 	// AgentBinPath is the host path of the guest agent binary injected as
 	// /init when CreateTemplate builds a rootfs from an OCI image. It is
 	// REQUIRED for image builds and unused for file-path rootfs templates.
@@ -841,6 +898,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		resolverIP:           opts.ResolverIP,
 		dnsRegistry:          opts.DNSRegistry,
 		enableDNSEgres:       opts.EnableDNSEgress,
+		egressProxy:          opts.EgressProxy,
+		proxySentinel:        opts.ProxySentinel,
+		proxyPort:            opts.ProxyPort,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
 		hugePages:            opts.HugePages,
