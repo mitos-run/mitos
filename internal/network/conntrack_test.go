@@ -13,9 +13,9 @@ import (
 // runner return failErr / flushErr (and flushOutput) for any call whose argv
 // contains failOn as a element.
 type recordRunner struct {
-	calls      [][]string
-	failOn     string
-	failErr    error
+	calls       [][]string
+	failOn      string
+	failErr     error
 	flushCalls  [][]string
 	flushOutput string
 	flushErr    error
@@ -43,27 +43,6 @@ func (r *recordRunner) flush(_ context.Context, argv []string) (string, error) {
 		}
 	}
 	return r.flushOutput, nil
-}
-
-// ran returns true if the runner was ever called via run with exactly the
-// given argv.
-func (r *recordRunner) ran(argv ...string) bool {
-	for _, c := range r.calls {
-		if len(c) != len(argv) {
-			continue
-		}
-		match := true
-		for i, a := range argv {
-			if c[i] != a {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
 }
 
 // flushed returns true if the runner was ever called via flush with exactly the
