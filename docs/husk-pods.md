@@ -196,9 +196,23 @@ addressed digest. A warm husk pod records the digest and node it verifies agains
 reconcile the controller reaps any DORMANT pod whose stamped digest no longer
 matches its node's current recorded digest, and the warm-pool deficit logic
 refills the slot against the fresh snapshot. Claimed (activating or active) pods
-are never reaped. This does not trigger the rebuild itself (a content change
-re-triggering a build is #475); it ensures that once a rebuild has happened, warm
-husks converge instead of CrashLoopBackOff on a stale digest.
+are never reaped. It ensures that once a rebuild has happened, warm husks
+converge instead of CrashLoopBackOff on a stale digest.
+
+### Template-content edits re-trigger the build (#475)
+
+The controller derives a build identity from everything that determines what the
+snapshot contains: the template image, the resolved init/buildSteps, the serving
+workload (command, env, ready probe), the baked volumes, the build VM resources,
+and the at-rest encryption flag. It records that identity in the pool status field
+`templateBuildHash`. On reconcile, when the template's current build identity no
+longer matches the recorded one, the snapshot is rebuilt in place on every holder
+node (a fresh content-addressed digest), and the #461 stale-digest reap above then
+converges the warm pool onto it. So editing `spec.template.workload.command` (or
+env, or the ready probe) on a pool re-runs the build the same way an image change
+does, instead of being silently ignored until the pool is deleted and recreated.
+Fields that do not change snapshot content (placement, network posture, warm-pool
+sizing, budgets) are excluded from the identity, so they never force a rebuild.
 
 ### Measured activation latency (CI husk-stub phase)
 

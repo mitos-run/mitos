@@ -993,6 +993,15 @@ spec:
               restoringCount:
                 format: int32
                 type: integer
+              templateBuildHash:
+                description: |-
+                  TemplateBuildHash records the build identity (a content hash of the template
+                  image, init/buildSteps, workload, volumes, resources and encryption flag) the
+                  pool's snapshot was last built from. The controller rebuilds the snapshot when
+                  the template's current build identity no longer matches this, so a
+                  workload.command, env, or ready-probe edit re-runs the build instead of being
+                  silently ignored (issue #475). A content address, safe to log.
+                type: string
               templateDigest:
                 description: |-
                   TemplateDigest is the content-addressed manifest digest of the pool's

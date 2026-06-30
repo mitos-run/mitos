@@ -277,9 +277,19 @@ type EncKeyRecorder struct {
 	createKeyLen  int
 	createKeySeen bool
 	createKekID   string
+	createCount   int
 	forkKeyLen    int
 	forkKeySeen   bool
 	forkKekID     string
+}
+
+// CreateTemplateCount returns how many CreateTemplate RPCs the fake forkd has
+// served, so a test can assert a template-content edit re-triggered the build
+// (issue #475).
+func (r *EncKeyRecorder) CreateTemplateCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.createCount
 }
 
 // CreateTemplateKeyLen returns whether a CreateTemplate carried an encryption
@@ -320,6 +330,7 @@ func (r *EncKeyRecorder) interceptor() grpc.UnaryServerInterceptor {
 			r.createKeySeen = true
 			r.createKeyLen = len(m.EncryptionKey)
 			r.createKekID = m.KekId
+			r.createCount++
 			r.mu.Unlock()
 		case *forkdpb.ForkRequest:
 			r.mu.Lock()
