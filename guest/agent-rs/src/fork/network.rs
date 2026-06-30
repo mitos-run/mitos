@@ -212,7 +212,9 @@ fn write_resolv_conf(path: &str, resolver_ip: &str) -> std::io::Result<()> {
 }
 
 /// Write shell export lines for HTTP_PROXY and HTTPS_PROXY to `path`, pointing
-/// at `http://<endpoint>`. The file is written with mode 0o644 (umask-independent
+/// at `http://<endpoint>`, plus NO_PROXY/no_proxy covering loopback and the cloud
+/// metadata address/link-local (defense in depth; the host denylist is the real
+/// control). The file is written with mode 0o644 (umask-independent
 /// on Linux via OpenOptionsExt; plain write on other platforms).
 ///
 /// An EMPTY `endpoint` is a no-op: nothing is written and no error is returned,
@@ -230,8 +232,15 @@ pub(super) fn write_proxy_env(path: &std::path::Path, endpoint: &str) -> std::io
         return Ok(());
     }
     let url = format!("http://{endpoint}");
+    // NO_PROXY (defense in depth): cooperative guest clients bypass the proxy for
+    // loopback (so they never proxy localhost calls) and the cloud metadata
+    // address / link-local range (so an honest client never even routes IMDS
+    // through the proxy). This is ADVISORY only: the authoritative control is the
+    // host-side destination denylist in internal/egressproxy, which refuses these
+    // regardless of whether the client honors NO_PROXY.
+    let no_proxy = "127.0.0.1,::1,localhost,169.254.169.254,169.254.0.0/16";
     let content = format!(
-        "export HTTP_PROXY={url}\nexport HTTPS_PROXY={url}\n"
+        "export HTTP_PROXY={url}\nexport HTTPS_PROXY={url}\nexport NO_PROXY={no_proxy}\nexport no_proxy={no_proxy}\n"
     );
     #[cfg(target_os = "linux")]
     {
@@ -292,6 +301,14 @@ mod tests {
         let body = std::fs::read_to_string(&env_path).unwrap();
         assert!(body.contains("HTTP_PROXY=http://169.254.169.2:3128"));
         assert!(body.contains("HTTPS_PROXY=http://169.254.169.2:3128"));
+        // NO_PROXY (and lowercase no_proxy) must cover loopback and the cloud
+        // metadata address/link-local so cooperative clients bypass the proxy
+        // for them (defense in depth; the host denylist is the real control).
+        assert!(body.contains("NO_PROXY="));
+        assert!(body.contains("no_proxy="));
+        for needle in ["127.0.0.1", "::1", "localhost", "169.254.169.254", "169.254.0.0/16"] {
+            assert!(body.contains(needle), "NO_PROXY missing {needle}: {body}");
+        }
         // no secrets, just the endpoint
         assert!(!body.contains("Authorization"));
     }
