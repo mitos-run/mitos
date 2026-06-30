@@ -74,6 +74,9 @@ func main() {
 }
 ```
 
+This hero is the checked example `examples/quickstart`: CI builds and vets it
+against the real SDK, so this snippet cannot drift.
+
 `Fork` is the snapshot-fork primitive: each call forks a warm template into a
 fresh, independent sandbox, so parallel attempts start from the same state.
 

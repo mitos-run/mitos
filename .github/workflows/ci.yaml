@@ -267,6 +267,99 @@ jobs:
             kill "${SANDBOX_SERVER_PID}" 2>/dev/null || true
           fi
 
+  sdk-examples:
+    # Build / type-check EVERY file under each SDK's examples/ so a README or
+    # per-SDK example cannot silently drift from the real API and ship broken
+    # (issue #446, spun out of #22). This is the uniform, fast, non-KVM gate: it
+    # compiles, it does not boot a VM.
+    #
+    # Per-SDK honesty (executed vs compiled):
+    #   Python: byte-compiled AND import-checked. Import runs each example's
+    #           module-level code (imports plus the quickstart drift-guard
+    #           asserts), so a renamed SDK symbol fails here. The examples exec
+    #           inside a guest VM the mock lacks, so they are EXECUTED end to end
+    #           only on real KVM (examples/direct.py in the kvm-test job).
+    #   Go:     compiled (go build) and vetted (go vet) for every example.
+    #           examples/direct is EXECUTED end to end on real KVM (kvm-test).
+    #   TS:     type-checked against the built dist types via check:examples
+    #           (tsconfig.examples.json), which catches signature drift.
+    #   Rust / Java / Ruby: no examples/ directory exists, so nothing to gate.
+    #
+    # README drift: the hosted quickstart hero is extracted into a checked
+    # example per SDK (examples/quickstart.*), and every fenced python block in
+    # the repo and Python SDK READMEs is byte-compiled, so the docs cannot drift
+    # into broken code.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: sdk/go/go.mod
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "20"
+
+      - name: Python examples (byte-compile, import-check, README fences)
+        run: |
+          set -euo pipefail
+          # Install the SDK so the example imports resolve exactly as a user's
+          # would. browser_cdp.py imports playwright only inside main(), so the
+          # import-check below does not need it.
+          pip install ./sdk/python
+          echo "=== byte-compile every Python example ==="
+          python3 -m py_compile sdk/python/examples/*.py
+          echo "=== import-check every Python example (runs module-level code, not main) ==="
+          for f in sdk/python/examples/*.py; do
+            python3 - "$f" <<'PY'
+          import importlib.util, sys
+          path = sys.argv[1]
+          spec = importlib.util.spec_from_file_location("example_under_test", path)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          print("import OK:", path)
+          PY
+          done
+          echo "=== byte-compile every python fence in the READMEs (docs cannot drift) ==="
+          python3 - README.md sdk/python/README.md <<'PY'
+          import os, re, sys, tempfile, py_compile
+          failures = 0
+          checked = 0
+          for f in sys.argv[1:]:
+              text = open(f, encoding="utf-8").read()
+              for i, m in enumerate(re.finditer(r"```python\n(.*?)```", text, re.DOTALL)):
+                  checked += 1
+                  with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as t:
+                      t.write(m.group(1))
+                      tmp = t.name
+                  try:
+                      py_compile.compile(tmp, doraise=True)
+                  except py_compile.PyCompileError as e:
+                      failures += 1
+                      print(f"SYNTAX FAIL in {f} fence #{i}:\n{e}")
+                  finally:
+                      os.unlink(tmp)
+          print(f"checked {checked} python fences; failures={failures}")
+          sys.exit(1 if failures else 0)
+          PY
+
+      - name: Go examples (build and vet)
+        working-directory: sdk/go
+        run: |
+          set -euo pipefail
+          go build ./examples/...
+          go vet ./examples/...
+
+      - name: TypeScript examples (type-check against built types)
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npm run check:examples
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

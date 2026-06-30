@@ -44,6 +44,9 @@ console.log((await sandbox.files.read("/workspace/hello.txt")).trim()); // hello
 await sandbox.terminate();
 ```
 
+This hero is the checked example `examples/quickstart.ts`: CI type-checks it
+against the built types via `npm run check:examples`, so this snippet cannot drift.
+
 Point at a local standalone server by setting `MITOS_BASE_URL` or passing the
 URL: `new SandboxServer("http://localhost:8080")`.
 

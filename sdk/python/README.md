@@ -54,6 +54,9 @@ print(ex.text)                                    # 12.0
 sb.terminate()
 ```
 
+This hero is the checked example `examples/quickstart.py`: CI byte-compiles and
+import-checks it against the real SDK, so this snippet cannot drift.
+
 `mitos.create(image, api_key=..., base_url=...)` resolves auth (see precedence
 below), gets-or-creates the template for `image`, forks it, and returns a READY
 `DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`,
