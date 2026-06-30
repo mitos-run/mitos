@@ -264,6 +264,41 @@ controller run mode to make this decision (`gc.go:42`).
 - Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
   `TestGCInHuskModeDoesNotFailNodeLostClaim`.
 
+### DrainPolicy Checkpoint: honest degrade to Kill, never a silent lie
+
+A `SandboxPool` can set `DrainPolicy: Checkpoint`, asking that an active sandbox's
+live VM be snapshotted before the husk re-pend so the agent resumes from captured
+state. The full live-VM checkpoint engine is NOT yet built (it requires KVM and is
+a tracked follow-up): `defaultHuskCheckpointer` (`huskdrain.go`) captures nothing
+today. The danger is a SILENT degrade: a Checkpoint pool that quietly behaves as
+Kill, losing in-VM state with no signal, would violate the honest-failure
+principle. So the re-pend surfaces the limitation LOUDLY instead
+(`rependOnHuskPodLost`, `huskdrain.go`):
+
+- the claim's `Ready=False` condition carries a DISTINCT reason
+  `CheckpointNotImplemented` (not the generic `HuskPodLost` a Kill pool sets), with
+  an LLM-legible message stating that in-VM state was NOT captured and Kill
+  semantics applied;
+- a `Warning` Kubernetes event with the same reason is recorded on the claim. The
+  condition is transient (a later reconcile may re-pend onto `NoHuskPod`), so the
+  event is the durable, operator-visible signal;
+- a clear controller log line records the degrade.
+
+Kill semantics are otherwise unchanged: the claim still re-pends safely (Phase
+`Pending`, endpoint/node/sandboxID cleared) onto a replacement dormant slot, so a
+Checkpoint pool degrades to the boring, always-available Kill behavior rather than
+stranding the claim. The checkpointer seam (`huskCheckpointer`) is preserved so
+the future KVM impl can capture a real snapshot and report `ok=true`, at which
+point the re-pend keeps the `HuskPodLost` reason and reports the captured snapshot.
+
+- Bound: every Checkpoint-policy re-pend that captures nothing emits the
+  `CheckpointNotImplemented` reason and `Warning` event in the same reconcile.
+- Proving tests: `TestCheckpointDrainDegradeIsHonest` (distinct reason + Warning
+  event + Kill semantics preserved), `TestKillDrainUnchanged` (Kill keeps
+  `HuskPodLost` and emits no false alarm),
+  `TestHuskClaimDrainCheckpointRoutesThroughSeam` (the checkpointer seam is
+  consulted before re-pend).
+
 ### TTL hygiene: finished objects are deleted, including early-failed claims
 
 A claim in a terminal phase (`Terminated` or `Failed`) whose `FinishedAt` is
