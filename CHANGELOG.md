@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.0](https://github.com/mitos-run/mitos/compare/v1.7.0...v1.8.0) (2026-06-30)
+
+
+### Features
+
+* **fork:** live-fork networked sandboxes via per-sandbox egress proxy ([#336](https://github.com/mitos-run/mitos/issues/336)) ([#547](https://github.com/mitos-run/mitos/issues/547)) ([e08b76b](https://github.com/mitos-run/mitos/commit/e08b76b7b9f2e8cdea0d22d71b47853ef8211f2f))
+
+
+### Bug Fixes
+
+* **expose:** forward the public host + X-Forwarded-* to exposed apps ([#476](https://github.com/mitos-run/mitos/issues/476)) ([#478](https://github.com/mitos-run/mitos/issues/478)) ([5111cfd](https://github.com/mitos-run/mitos/commit/5111cfdf0fa03fe7bee83ea2dc2ed92d9bff2044))
+
 ## [1.7.0](https://github.com/mitos-run/mitos/compare/v1.6.0...v1.7.0) (2026-06-29)
 
 
