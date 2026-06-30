@@ -230,39 +230,65 @@ well inside the heartbeat TTL.
 - Proving tests: `TestNodeUnhealthyAfterProbeFailureThreshold`,
   `TestSyncPodsDropsNodeOnRepeatedProbeFailure`.
 
-### NodeLost: a raw-forkd claim on a lost node reaches a terminal phase
+### NodeLost: a raw-forkd claim on a lost node is re-forked or fails closed
 
 In RAW-FORKD mode, a Ready claim whose node is no longer a healthy registered
-node is transitioned to the terminal `Failed` phase with a `NodeLost` reason and
-`FinishedAt` stamped (`markNodeLost`, `gc.go:301`; phase + FinishedAt + condition
-at `gc.go:314`). The node is gone, so there is nothing to terminate; the GC only
-stamps state. The ephemeral VM died with the node and there is no recovery, so
-failing the claim (and letting the TTL pass reap it) is correct. The orphan sweep
-and NodeLost never fight: the sweep visits only healthy nodes (`gc.go:193`), so a
-claim on a lost node is never swept. A claim on a still-healthy node is untouched
-(`gc.go:310`).
+node is handled by `markNodeLost` -> `handleRawNodeLost` (`gc.go`), which chooses
+between automatic re-fork and failing closed (issue #372):
 
-In HUSK mode, `markNodeLost` is a no-op (`if g.EnableHuskPods { return }`,
-`gc.go:302`): a Ready husk-backed claim recovers from node loss by RE-PENDING
-onto a replacement dormant slot (owned by `checkHuskPodLost`,
-`huskdrain.go:86`, and the husk pod watch, which the warm pool self-heals). The
-GC must not race that re-pend into a terminal `Failed`, so it skips the
-node-lost-fail entirely in husk mode. The GC carries `EnableHuskPods` from the
-controller run mode to make this decision (`gc.go:42`).
+- AUTO RE-FORK: when a SURVIVING healthy node still holds the pool's template
+  snapshot (`snapshotHolderSurvives` asks the NodeRegistry via `NodesWithTemplate`
+  for `poolTemplateID(pool)`) AND the per-claim re-fork bound is not yet spent,
+  the claim is RE-PENDED. The GC clears the stale placement
+  (`status.node`/`endpoint`/`sandboxID`), stamps a typed `Ready=False` /
+  `NodeLostReforking` condition, and bumps the durable per-claim re-fork count
+  (the `mitos.run/nodelost-refork-count` annotation, metadata so it survives the
+  status write). The claim reconciler then re-issues the fork onto a surviving
+  holder through its NORMAL placement path (`SelectNode` + `forkOnNode`), which
+  selects only healthy nodes, so it never re-places onto the dead node. This is a
+  placement-only decision and needs no KVM. The surviving snapshot holder is
+  guaranteed to exist or be rebuilt by the snapshot redistribution described under
+  the orphan-sweep guarantees (`TestSnapshotRebuildsOnHolderNodeLoss`).
+- FAIL CLOSED: when NO surviving node holds the template snapshot, OR the bounded
+  retries are exhausted (`maxRawForkdNodeLostReforks`, default 3, counted over the
+  claim's whole life so a claim whose replacement node keeps dying cannot retry
+  forever), the claim is transitioned to the terminal `Failed` phase with a
+  `NodeLost` reason and `FinishedAt` stamped. The condition message names the
+  actual cause (no surviving holder vs retries exhausted) so the remediation is
+  clear: recreate the claim once a snapshot holder is available. The TTL pass then
+  reaps the terminal claim. A claim with no `source.poolRef` (a `fromSandbox` or
+  `fromRevision` sandbox) is never auto-re-forked; it fails closed, preserving the
+  prior terminal behavior.
 
-- Bound: raw mode fails within one `Interval` of the node going unhealthy or
-  leaving the registry; husk mode re-pends on the pod event (or the claim's own
-  requeue).
+The node is gone, so there is nothing to terminate in either branch; the GC only
+stamps state. The orphan sweep and NodeLost never fight: the sweep visits only
+healthy nodes, so a claim on a lost node is never swept. A claim on a
+still-healthy node is untouched.
+
+In HUSK mode, `markNodeLost` is a no-op (`if g.EnableHuskPods { return }`): a
+Ready husk-backed claim recovers from node loss by RE-PENDING onto a replacement
+dormant slot (owned by `checkHuskPodLost`, `huskdrain.go`, and the husk pod
+watch, which the warm pool self-heals). The GC must not race that re-pend into a
+terminal `Failed`, so it skips the node-lost path entirely in husk mode. The GC
+carries `EnableHuskPods` from the controller run mode to make this decision.
+
+- Bound: raw mode re-pends (or fails closed) within one `Interval` of the node
+  going unhealthy or leaving the registry; the re-fork then runs on the claim
+  reconciler's normal placement path. Husk mode re-pends on the pod event (or the
+  claim's own requeue).
 - Husk hard-node-loss latency is cluster-dependent, not a Mitos GC interval. Husk
   node-loss recovery fires immediately on a pod delete or `DeletionTimestamp`
   event. But a HARD host loss where the pod object lingers `Running` with no
   `DeletionTimestamp` is bounded by the cluster's own unreachable-pod eviction
   setting (the `node.kubernetes.io/unreachable` taint toleration husk pods carry,
-  `huskpod.go:1194`), since no pod event fires until the cluster evicts the pod.
+  `huskpod.go`), since no pod event fires until the cluster evicts the pod.
   Operators wanting faster husk node-loss recovery should tune the unreachable
   toleration or the pod-eviction timeout; Mitos cannot shorten it.
-- Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
-  `TestGCInHuskModeDoesNotFailNodeLostClaim`.
+- Proving tests: `TestRawForkdClaimAutoReplacementAfterNodeLossOpen` (the GC
+  re-pend-vs-fail-closed decision), `TestGCRawForkdClaimReforksOntoSurvivingHolder`
+  (the end-to-end re-fork onto a surviving holder by the live reconciler),
+  `TestGCMarksNodeLost` (fail closed when no holder survives),
+  `TestGCLeavesHealthyNodeClaim`, `TestGCInHuskModeDoesNotFailNodeLostClaim`.
 
 ### DrainPolicy Checkpoint: honest degrade to Kill, never a silent lie
 
@@ -367,24 +393,15 @@ Shipped since (now in main):
   (`createSnapshotsOnNodes`, called from `sandboxpool_controller.go:509`)
   redistributes the snapshot onto a surviving node to restore the replica count,
   with no operator action. Proven by `TestSnapshotRebuildsOnHolderNodeLoss`
-  (`distribution_test.go`). This is the SNAPSHOT rebuild only; the CLAIM on the
-  lost raw-forkd node is not auto-replaced (see Known gaps below).
+  (`distribution_test.go`). The CLAIM on the lost raw-forkd node is now also
+  auto-replaced (issue #372): it is re-forked onto a surviving snapshot holder, or
+  fails closed when none survives. See the NodeLost guarantee above.
 
 ### Not yet built (known gaps)
 
 The following are NOT yet built. Each is verified
 against the code below so the gap is honest, not assumed:
 
-- raw-forkd CLAIM auto-replacement after node loss: in the husk default the warm
-  pool self-heals a lost node's dormant slots and the claim re-pends onto a
-  surviving slot, but a raw-forkd claim on a dead node fails (NodeLost) with no
-  automatic replacement, because raw mode has no standing dormant capacity to
-  re-pend onto (its forks are ephemeral). This is acceptable for ephemeral
-  sandboxes; the caller re-claims. It is a product decision, not a missing
-  mechanism, and is held as the documented skip
-  `TestRawForkdClaimAutoReplacementAfterNodeLossOpen` (`distribution_test.go`,
-  `t.Skip("#12: ...")`) with its design (re-issue the fork on a surviving
-  snapshot-holder, which the snapshot rebuild above guarantees exists).
 - status-update rate-limiting and batching: the SandboxPool reconcile elides a
   no-op status write (`writePoolStatusIfChanged`, `sandboxpool_controller.go:434`
   / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the Sandbox

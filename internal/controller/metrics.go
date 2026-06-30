@@ -122,6 +122,16 @@ var (
 		Help: "Number of Ready claims marked NodeLost after their node went unhealthy (raw-forkd path), by node.",
 	}, []string{"node"})
 
+	// nodeLostReforkTotal counts raw-forkd claims that were re-pended for
+	// automatic re-fork onto a surviving snapshot holder after their node was lost
+	// (issue #372), rather than failed closed. Labeled by the LOST node, never a
+	// secret. A claim that fails closed (no surviving holder, or the bounded
+	// retries exhausted) is counted by nodeLostTotal instead.
+	nodeLostReforkTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mitos_node_lost_refork_total",
+		Help: "Number of raw-forkd claims re-pended for automatic re-fork onto a surviving snapshot holder after node loss, by lost node.",
+	}, []string{"node"})
+
 	// claimWaitForWarmSeconds measures, per claim, the wall-clock the claim waited
 	// for a ready dormant pod from its creation to a successful husk activate. A
 	// burst absorbed by warm capacity shows up near the activate cost (~27 ms);
@@ -166,6 +176,7 @@ func init() {
 		huskPodCreatedTotal,
 		huskPodLostTotal,
 		nodeLostTotal,
+		nodeLostReforkTotal,
 		refillLatencySeconds,
 		claimWaitForWarmSeconds,
 		snapshotDistributionLagSeconds,
@@ -232,6 +243,11 @@ func recordHuskPodLost(pool string) { huskPodLostTotal.WithLabelValues(pool).Inc
 // recordNodeLost bumps the per-node counter for a Ready claim marked NodeLost.
 // node is a hostname (never a secret).
 func recordNodeLost(node string) { nodeLostTotal.WithLabelValues(node).Inc() }
+
+// recordNodeLostRefork bumps the per-node counter for a raw-forkd claim re-pended
+// for automatic re-fork after node loss (issue #372). node is the LOST hostname
+// (never a secret).
+func recordNodeLostRefork(node string) { nodeLostReforkTotal.WithLabelValues(node).Inc() }
 
 // forgetPoolMetrics drops every per-pool warm-pool label series for the given
 // pool key. It is called only when a SandboxPool is genuinely deleted (the
