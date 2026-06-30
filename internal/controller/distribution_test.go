@@ -368,7 +368,7 @@ func TestSnapshotRebuildsOnHolderNodeLoss(t *testing.T) {
 
 // TestRawForkdClaimAutoReplacementAfterNodeLossOpen documents, as an explicit
 // skipped placeholder, the part of issue #163 item 6 that is NOT a missing test
-// but a missing FEATURE and a deliberate open product decision (epic #12).
+// but a missing FEATURE and a deliberate open product decision (#372).
 //
 // In HUSK mode a Ready claim on a lost node re-pends onto a surviving dormant
 // warm slot (checkHuskPodLost + the husk pod watch self-heal the warm pool). In
@@ -387,5 +387,5 @@ func TestSnapshotRebuildsOnHolderNodeLoss(t *testing.T) {
 // claim. It needs no KVM; it needs the product decision to give raw claims
 // husk-like resilience at the cost of the pure fork-per-claim model.
 func TestRawForkdClaimAutoReplacementAfterNodeLossOpen(t *testing.T) {
-	t.Skip("#12: raw-forkd claim auto-replacement after NodeLost is an open product decision; today the claim is marked NodeLost and the caller re-claims (husk mode self-heals via the warm pool instead). Snapshot rebuild-elsewhere IS covered by TestSnapshotRebuildsOnHolderNodeLoss.")
+	t.Skip("#372: raw-forkd claim auto-replacement after NodeLost is an open product decision; today the claim is marked NodeLost and the caller re-claims (husk mode self-heals via the warm pool instead). Snapshot rebuild-elsewhere IS covered by TestSnapshotRebuildsOnHolderNodeLoss.")
 }
