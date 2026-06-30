@@ -402,6 +402,96 @@ func TestServeAllowsPublicViaResolver(t *testing.T) {
 	client.Close()
 }
 
+// TestServePlainGETDoesNotDeadlock proves the concurrent-copy fix for issue
+// #336. A plain-HTTP GET through the proxy must deliver the upstream response
+// to the client even when the client does NOT close its write half before
+// reading the response. A real wget / curl keeps its write side open while
+// waiting; closing it early would mask the bug by delivering EOF to the
+// sequential body copy. Before the fix, servePlain ran the body copy and the
+// response copy sequentially, so the body copy blocked forever on a
+// non-closing client and the guest timed out after 60s (DeadlineExceeded in
+// the KVM acceptance test).
+func TestServePlainGETDoesNotDeadlock(t *testing.T) {
+	const wantBody = "hello from upstream\n"
+
+	// upServer acts as the upstream origin. It reads the proxied request until it
+	// sees the end-of-headers marker, then writes a complete HTTP/1.0 response and
+	// returns (defer closes upServer). The close propagates EOF to the proxy's
+	// upstream read, which unblocks io.Copy(client, upstream) in the DOWN goroutine
+	// and lets it forward the response back to the test client.
+	upClient, upServer := net.Pipe()
+	go func() {
+		defer upServer.Close()
+		_ = upServer.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, 4096)
+		accumulated := ""
+		for {
+			n, err := upServer.Read(buf)
+			accumulated += string(buf[:n])
+			if strings.Contains(accumulated, "\r\n\r\n") {
+				break
+			}
+			if err != nil {
+				return
+			}
+		}
+		_ = upServer.SetReadDeadline(time.Time{})
+		resp := fmt.Sprintf("HTTP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(wantBody), wantBody)
+		_, _ = io.WriteString(upServer, resp)
+	}()
+
+	// screenDestination resolves example.com to 93.184.216.34 (a public, non-denied
+	// IP), so the fakeDialer key must be the vetted IP literal, not the hostname.
+	d := &fakeDialer{conns: map[string]net.Conn{"93.184.216.34:80": upClient}}
+	rec := newRecordLogger()
+	p := NewProxy(staticResolver{ip2id: map[string]string{"10.0.0.1": "sbx-get"}}, d, rec)
+	p.resolveIP = stubResolver{hosts: map[string][]net.IP{
+		"example.com": {net.ParseIP("93.184.216.34")},
+	}}
+
+	proxyClient, proxyServer := net.Pipe()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		p.Serve(proxyServer, net.ParseIP("10.0.0.1"))
+	}()
+
+	// Send a plain-HTTP GET request. Critically, do NOT close proxyClient's write
+	// half before reading the response. This is the key scenario: a real HTTP
+	// client (busybox wget, curl) holds its write side open while waiting for the
+	// response. Closing it early would provide EOF to the body copy and mask the
+	// bug even in the old sequential code.
+	_, _ = fmt.Fprintf(proxyClient, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	// Read the full response WITHOUT closing the write side first. A 5s deadline
+	// makes a hung servePlain fail the test promptly rather than blocking forever.
+	_ = proxyClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(proxyClient)
+	if err != nil {
+		// A deadline error here is the deadlock symptom.
+		t.Fatalf("response not received within deadline (deadlock?): %v", err)
+	}
+	if !strings.Contains(string(got), wantBody) {
+		t.Fatalf("unexpected response body: %q (want to contain %q)", got, wantBody)
+	}
+
+	// Logger.Egress must fire exactly once after both goroutines exit.
+	select {
+	case <-rec.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Egress was not called after plain-HTTP GET")
+	}
+
+	// Serve must return; no goroutine or upstream socket leak.
+	select {
+	case <-serveDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after response was delivered")
+	}
+
+	proxyClient.Close()
+}
+
 // TestServeRejectsOverCapHeader proves the preamble byte cap (I2): a request
 // preamble larger than the cap with no newline is rejected and Serve returns
 // promptly instead of buffering unboundedly (host OOM) or hanging.

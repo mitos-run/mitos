@@ -223,7 +223,7 @@ func (p *Proxy) servePlain(client net.Conn, br *bufio.Reader, sandboxID, hostpor
 	}
 	defer upstream.Close()
 
-	var upBytes, downBytes int64
+	var upBytes int64
 
 	// Replay the request line.
 	n, _ := fmt.Fprintf(upstream, "%s\r\n", firstLine)
@@ -249,14 +249,40 @@ func (p *Proxy) servePlain(client net.Conn, br *bufio.Reader, sandboxID, hostpor
 	nc, _ := io.WriteString(upstream, "Connection: close\r\n\r\n")
 	upBytes += int64(nc)
 
-	// Stream any remaining body bytes (e.g. POST body).
-	n3, _ := io.Copy(upstream, br)
-	upBytes += n3
+	// Copy the client body (UP) and the upstream response (DOWN) concurrently.
+	// For a body-less request such as GET, the client holds its write half open
+	// while waiting for the response; running the two copies sequentially would
+	// deadlock: the body copy blocks forever on a client that never sends EOF
+	// before reading (exactly the busybox wget pattern that caused a 60s
+	// DeadlineExceeded in the KVM acceptance test for issue #336). The concurrent
+	// pattern mirrors serveConnect: when either direction finishes, close both
+	// connections so the other direction unblocks promptly.
+	var bodyBytes, downBytes int64
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// Stream the response back to the client.
-	n4, _ := io.Copy(client, upstream)
-	downBytes = n4
+	// UP: forward any remaining client body bytes (e.g. a POST body).
+	// On return, close both ends so DOWN unblocks promptly.
+	go func() {
+		defer wg.Done()
+		n, _ := io.Copy(upstream, br)
+		bodyBytes = n
+		upstream.Close()
+		client.Close()
+	}()
 
+	// DOWN: stream the upstream response back to the client.
+	// On return, close both ends so UP unblocks promptly.
+	go func() {
+		defer wg.Done()
+		n, _ := io.Copy(client, upstream)
+		downBytes = n
+		client.Close()
+		upstream.Close()
+	}()
+
+	wg.Wait()
+	upBytes += bodyBytes
 	p.logger.Egress(sandboxID, hostport, upBytes, downBytes)
 }
 
