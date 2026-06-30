@@ -51,32 +51,42 @@ func (api *SandboxAPI) ProxyHTTP(sandboxID string, guestPort int, prefix string)
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Propagate X-Forwarded-Host and X-Forwarded-Proto so that upstreams
-			// (e.g. the CDP relay) can learn the external origin. When the Rewrite
+			// Reconstruct the public front-door identity for the guest app. The
+			// edge proxy forwards the caller's real host/scheme as X-Forwarded-*;
+			// capture them from pr.In BEFORE SetXForwarded (which would otherwise
+			// overwrite X-Forwarded-Host with this internal hop). When the Rewrite
 			// hook is used, httputil.ReverseProxy strips incoming X-Forwarded-*
-			// headers before calling Rewrite, so we must re-propagate them
-			// explicitly from pr.In (the original, unmodified request). An edge
-			// proxy that already set these headers takes precedence; otherwise we
-			// derive the values from the request itself.
-			xfh := pr.In.Header.Get("X-Forwarded-Host")
-			if xfh == "" && pr.In.Host != "" {
-				xfh = pr.In.Host
+			// before calling Rewrite, so we re-propagate explicitly from pr.In.
+			// Fall back to the request's own host/scheme for a direct forkd call
+			// with no edge in front (e.g. the CDP relay).
+			pubHost := pr.In.Header.Get("X-Forwarded-Host")
+			if pubHost == "" {
+				pubHost = pr.In.Host
 			}
-			if xfh != "" {
-				pr.Out.Header.Set("X-Forwarded-Host", xfh)
-			}
-			xfp := pr.In.Header.Get("X-Forwarded-Proto")
-			if xfp == "" {
+			pubProto := pr.In.Header.Get("X-Forwarded-Proto")
+			if pubProto == "" {
 				if pr.In.TLS != nil {
-					xfp = "https"
+					pubProto = "https"
 				} else {
-					xfp = "http"
+					pubProto = "http"
 				}
 			}
-			pr.Out.Header.Set("X-Forwarded-Proto", xfp)
+			pr.SetXForwarded() // append the X-Forwarded-For chain for the guest
+			if pubHost != "" {
+				pr.Out.Header.Set("X-Forwarded-Host", pubHost)
+			}
+			pr.Out.Header.Set("X-Forwarded-Proto", pubProto)
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = "guest" // ignored: DialContext returns the tunnel
-			pr.Out.Host = "guest"
+			// Send the public host as the upstream Host so the guest app's Host-based
+			// logic (origin / CSRF / local-vs-remote detection) sees a coherent
+			// front-door host instead of the "guest" placeholder (#476). Fall back to
+			// "guest" when no host could be derived.
+			if pubHost != "" {
+				pr.Out.Host = pubHost
+			} else {
+				pr.Out.Host = "guest"
+			}
 			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, prefix)
 			if pr.Out.URL.Path == "" {
 				pr.Out.URL.Path = "/"
