@@ -1518,6 +1518,11 @@ jobs:
           set -e
           sudo chmod 666 /dev/kvm
           command -v nft >/dev/null || sudo apt-get install -y nftables
+          # conntrack-tools provides the conntrack binary used by the engine to
+          # flush stale connection-tracking entries after a live fork. Without it
+          # the flush logs "exec: conntrack: executable file not found in $PATH"
+          # and silently becomes a no-op on the runner.
+          command -v conntrack >/dev/null || sudo apt-get install -y conntrack
           sudo modprobe nf_tables 2>/dev/null || true
 
           WORKDIR=/tmp/mitos-test/live-fork-egress-build
