@@ -28,11 +28,16 @@ type fakeDialer struct {
 	mu          sync.Mutex
 	conns       map[string]net.Conn
 	dialedConns map[string]bool
+	// allDials records every Dial call regardless of whether conns had an entry.
+	// Denial tests assert this is empty (proving no upstream dial happened).
+	allDials []string
 }
 
 func (f *fakeDialer) Dial(_ context.Context, hostport string) (net.Conn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Record every dial attempt so denial tests can assert none happened.
+	f.allDials = append(f.allDials, hostport)
 	if f.dialedConns == nil {
 		f.dialedConns = make(map[string]bool)
 	}
@@ -48,6 +53,14 @@ func (f *fakeDialer) dialed(hostport string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.dialedConns[hostport]
+}
+
+// dialedAnything returns a copy of every Dial call target regardless of success.
+// Denial tests use this to prove no upstream dial reached the network.
+func (f *fakeDialer) dialedAnything() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.allDials...)
 }
 
 // recordLogger captures Egress calls. It signals done after the first call so
@@ -256,8 +269,10 @@ func readStatus(t *testing.T, client net.Conn) string {
 
 // deniedTargets is the table of destinations the host-side denylist must refuse
 // on BOTH the CONNECT and plain-HTTP paths: cloud metadata (IMDS), forkd's own
-// loopback control ports, IPv6 loopback, and IPv6 link-local. Each must yield a
-// refusal with NO upstream dial (no IMDS credential theft, no SSRF to forkd).
+// loopback control ports, IPv6 loopback, IPv6 link-local, unspecified addresses
+// (0.0.0.0 and :: which Linux routes to loopback enabling SSRF to forkd), and
+// the NAT64 well-known prefix (64:ff9b::a9fe:a9fe = NAT64 of 169.254.169.254).
+// Each must yield a refusal with NO upstream dial.
 var deniedTargets = []struct {
 	name   string
 	target string // host:port as it appears in the request line
@@ -267,6 +282,13 @@ var deniedTargets = []struct {
 	{"forkd sandbox api loopback", "127.0.0.1:9091"},
 	{"ipv6 loopback", "[::1]:9090"},
 	{"ipv6 link-local", "[fe80::1]:80"},
+	// CRITICAL: unspecified addresses bypass deniedNets but Linux routes them
+	// to loopback (0.0.0.0->127.0.0.1, ::->  ::1), enabling SSRF to forkd.
+	{"unspecified v4 ssrf forkd grpc", "0.0.0.0:9090"},
+	{"unspecified v4 ssrf forkd api", "0.0.0.0:9091"},
+	{"unspecified v6 ssrf forkd grpc", "[::]:9090"},
+	// IMPORTANT: NAT64 mapped IMDS (64:ff9b::a9fe:a9fe = NAT64 of 169.254.169.254)
+	{"nat64 imds", "[64:ff9b::a9fe:a9fe]:80"},
 }
 
 func TestServeConnectRefusesDeniedDestinations(t *testing.T) {
@@ -292,11 +314,10 @@ func TestServeConnectRefusesDeniedDestinations(t *testing.T) {
 				t.Fatal("Serve hung after denied CONNECT")
 			}
 			// No upstream dial may have happened for a denied target.
-			d.mu.Lock()
-			dialed := len(d.dialedConns)
-			d.mu.Unlock()
-			if dialed != 0 {
-				t.Fatalf("denied target was dialed upstream: %v", d.dialedConns)
+			// dialedAnything() records EVERY Dial call (not just conns hits),
+			// so a bypass would be caught even if conns is empty.
+			if got := d.dialedAnything(); len(got) != 0 {
+				t.Fatalf("denied target was dialed upstream: %v", got)
 			}
 			if rec.denialCount() == 0 {
 				t.Fatal("expected a denial to be logged")
@@ -326,11 +347,8 @@ func TestServePlainRefusesDeniedDestination(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve hung after denied plain-HTTP")
 	}
-	d.mu.Lock()
-	dialed := len(d.dialedConns)
-	d.mu.Unlock()
-	if dialed != 0 {
-		t.Fatalf("denied plain-HTTP target was dialed upstream: %v", d.dialedConns)
+	if got := d.dialedAnything(); len(got) != 0 {
+		t.Fatalf("denied plain-HTTP target was dialed upstream: %v", got)
 	}
 }
 
@@ -353,11 +371,8 @@ func TestServeRefusesRebindToDeniedIP(t *testing.T) {
 	if !strings.Contains(st, "403") {
 		t.Fatalf("rebinding name to denied IP must be refused, got %q", st)
 	}
-	d.mu.Lock()
-	dialed := len(d.dialedConns)
-	d.mu.Unlock()
-	if dialed != 0 {
-		t.Fatalf("rebinding target was dialed upstream: %v", d.dialedConns)
+	if got := d.dialedAnything(); len(got) != 0 {
+		t.Fatalf("rebinding target was dialed upstream: %v", got)
 	}
 }
 
@@ -412,10 +427,7 @@ func TestServeRejectsOverCapHeader(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve hung on an over-cap headerless preamble: byte cap not enforced")
 	}
-	d.mu.Lock()
-	dialed := len(d.dialedConns)
-	d.mu.Unlock()
-	if dialed != 0 {
-		t.Fatalf("over-cap preamble must not dial upstream: %v", d.dialedConns)
+	if got := d.dialedAnything(); len(got) != 0 {
+		t.Fatalf("over-cap preamble must not dial upstream: %v", got)
 	}
 }

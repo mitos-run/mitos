@@ -26,6 +26,13 @@ var ErrDestinationDenied = errors.New("egress destination denied by policy")
 // forkd's own gRPC and sandbox API (SSRF). This denylist is the security floor
 // that replaces the nft metadata block on the proxied path.
 //
+// deniedIP (below) also applies stdlib IP classifiers (IsUnspecified, IsLoopback,
+// IsLinkLocalUnicast, IsLinkLocalMulticast) which cover classes not expressible
+// as a single CIDR (e.g. 0.0.0.0 and :: are "unspecified" with no CIDR). The
+// explicit CIDRs here cover ranges that fall outside those classifiers:
+// fd00:ec2::254 (AWS IMDSv6 unicast within fd00::/8) and 64:ff9b::/96 (NAT64
+// well-known prefix, covering 64:ff9b::a9fe:a9fe = NAT64 of 169.254.169.254).
+//
 // Per-sandbox ALLOWLIST (domain/SNI) policy on the proxied path is deliberately
 // OUT OF SCOPE here and tracked as issue #494; this denylist is the floor, not
 // the allowlist.
@@ -36,6 +43,8 @@ var deniedNets = func() []*net.IPNet {
 		"::1/128",           // IPv6 loopback
 		"fe80::/10",         // IPv6 link-local
 		"fd00:ec2::254/128", // AWS IMDSv6
+		"64:ff9b::/96",      // NAT64 well-known prefix; 64:ff9b::a9fe:a9fe = NAT64 of 169.254.169.254; matches nft RenderMetadataBlock coverage
+		"::/96",             // deprecated IPv4-compatible block; ::a9fe:a9fe (::169.254.169.254) lives here; rarely routable but safe to deny
 	}
 	out := make([]*net.IPNet, 0, len(cidrs))
 	for _, c := range cidrs {
@@ -65,6 +74,16 @@ func deniedIP(ip net.IP) bool {
 	}
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
+	}
+	// Stdlib IP classifiers catch address classes not expressible as a single CIDR
+	// and handle both IPv4 and IPv6 forms (including mapped forms) correctly:
+	//   IsUnspecified: 0.0.0.0 and ::; Linux routes these to loopback, enabling
+	//     SSRF to forkd (gRPC :9090, sandbox API :9091) via CONNECT 0.0.0.0:9090.
+	//   IsLoopback: 127.0.0.0/8 and ::1 (defense in depth alongside deniedNets).
+	//   IsLinkLocalUnicast: 169.254.0.0/16 and fe80::/10 (defense in depth).
+	//   IsLinkLocalMulticast: 224.0.0.0/24 and ff02::/16.
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
 	}
 	for _, n := range deniedNets {
 		if n.Contains(ip) {
