@@ -29,6 +29,7 @@ import (
 	"mitos.run/mitos/internal/network"
 	"mitos.run/mitos/internal/observability"
 	"mitos.run/mitos/internal/pki"
+	"mitos.run/mitos/internal/sniproxy"
 )
 
 func main() {
@@ -57,6 +58,8 @@ func main() {
 		enableEgressProxy    bool
 		proxySentinel        string
 		proxyPort            int
+		enableSNIEgress      bool
+		sniProxyPort         int
 		agentBin             string
 		busyboxBin           string
 		enableVolumes        bool
@@ -107,6 +110,8 @@ func main() {
 	flag.BoolVar(&enableEgressProxy, "egress-proxy", false, "Enable the per-sandbox egress proxy: run a host-side HTTP forward proxy that attributes each fork's egress by source IP and enforces upstream policy, and point every fork at it via a fork-stable sentinel address (DNATed to each fork's gateway). Requires --enable-networking. Default false until proven on KVM CI; when off, guest egress is governed by the per-sandbox nftables chain exactly as before")
 	flag.StringVar(&proxySentinel, "proxy-sentinel", "169.254.169.2", "Fork-stable sentinel address baked into every fork's proxy endpoint; each fork's nftables DNAT redirects it to that fork's gateway where the per-node proxy listens. Effective only with --egress-proxy")
 	flag.IntVar(&proxyPort, "proxy-port", 3128, "TCP port the per-node egress proxy listens on and the DNAT/accept rules target. Effective only with --egress-proxy")
+	flag.BoolVar(&enableSNIEgress, "sni-egress", false, "Enable the host-side TLS SNI egress filter: a transparent peek-and-splice proxy that reads each TLS ClientHello's SNI and allows the connection only when the SNI matches this sandbox's domain allowlist (the SAME exact/anchored-wildcard names the controlled DNS resolver enforces), splicing on allow and closing fail-closed on deny. Requires --enable-networking, --enable-dns-egress (the allowlist source), and --egress-proxy (source attribution and the denied-IP floor). Default false until proven on KVM CI; the nftables redirect of guest tcp/443 to this listener is a KVM follow-up")
+	flag.IntVar(&sniProxyPort, "sni-proxy-port", 8443, "TCP port the host-side TLS SNI egress filter listens on; the nftables redirect target for guest tcp/443. Effective only with --sni-egress")
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
@@ -140,6 +145,15 @@ func main() {
 	// proxied when it is not. Refuse rather than degrade silently.
 	if enableEgressProxy && !enableNet {
 		fmt.Fprintln(os.Stderr, "forkd: --egress-proxy requires --enable-networking: the proxy attributes egress by per-sandbox guest IP, which only exists when networking is on. Enable --enable-networking or drop --egress-proxy.")
+		os.Exit(1)
+	}
+
+	// The SNI egress filter reuses the DNS resolver's per-sandbox domain
+	// allowlist (its allowlist source) and the egress proxy's source attribution
+	// plus denied-IP floor, all of which exist only with networking on. Refuse
+	// rather than degrade silently to a filter with no allowlist to enforce.
+	if enableSNIEgress && (!enableNet || !enableDNSEgress || !enableEgressProxy) {
+		fmt.Fprintln(os.Stderr, "forkd: --sni-egress requires --enable-networking, --enable-dns-egress (the domain allowlist source), and --egress-proxy (per-sandbox source attribution and the denied-IP floor). Enable all three or drop --sni-egress.")
 		os.Exit(1)
 	}
 
@@ -179,6 +193,16 @@ func main() {
 	// on. Nil otherwise.
 	var egressProxyServer *egressproxy.Proxy
 	var proxyListenAddr string
+	// sniProxyServer is the node-level TLS SNI egress filter and sniListenAddr its
+	// listen address, set only when --sni-egress (and its prerequisites) are on. It
+	// reuses the DNS registry as its domain allowlist and the egress proxy registry
+	// for source attribution. Nil otherwise.
+	var sniProxyServer *sniproxy.Proxy
+	var sniListenAddr string
+	// dnsRegistryForSNI and egressRegistryForSNI capture the two registries the SNI
+	// filter composes, so it can be built after both proxy blocks below.
+	var dnsRegistryForSNI *dnsproxy.Registry
+	var egressRegistryForSNI *egressproxy.Registry
 	// reqKeyProvider is the request-scoped encryption key provider, set only when
 	// --enable-encryption is on. The same instance is wired into the engine and
 	// the daemon server so the handlers can hand the controller-delivered key to
@@ -329,6 +353,7 @@ func main() {
 				registry := dnsproxy.NewRegistry()
 				engineOpts.DNSRegistry = registry
 				engineOpts.EnableDNSEgress = true
+				dnsRegistryForSNI = registry
 				dnsProxyServer = buildDNSProxy(registry, alloc, dnsResolver, dnsUpstream)
 				fmt.Printf("forkd: name-based DNS egress ENABLED (resolver %s, upstream %s)\n", dnsResolver, resolvedUpstream(dnsUpstream))
 			}
@@ -348,6 +373,7 @@ func main() {
 				engineOpts.EgressProxy = registry
 				engineOpts.ProxySentinel = sentinelIP
 				engineOpts.ProxyPort = proxyPort
+				egressRegistryForSNI = registry
 				egressProxyServer = buildEgressProxy(registry)
 				// The DNAT targets each fork's gateway (the host side of its /30),
 				// so the single listener must accept on every gateway address: bind
@@ -355,6 +381,20 @@ func main() {
 				// connection to its sandbox.
 				proxyListenAddr = net.JoinHostPort("", strconv.Itoa(proxyPort))
 				fmt.Printf("forkd: per-sandbox egress proxy ENABLED (sentinel %s, port %d)\n", proxySentinel, proxyPort)
+			}
+
+			// Host-side TLS SNI egress filter: a transparent peek-and-splice proxy
+			// that enforces the SAME per-sandbox domain allowlist the DNS resolver
+			// holds, at TLS-connection time, by reading the ClientHello SNI without
+			// terminating TLS. It composes the DNS registry (allowlist source) and the
+			// egress proxy registry (source attribution), both built above; the
+			// prerequisite flag check ran at startup. The nftables redirect of guest
+			// tcp/443 to this listener is a KVM follow-up (see docs/networking.md), so
+			// until it lands no traffic reaches this listener.
+			if enableSNIEgress {
+				sniProxyServer = buildSNIProxy(dnsRegistryForSNI, egressRegistryForSNI)
+				sniListenAddr = net.JoinHostPort("", strconv.Itoa(sniProxyPort))
+				fmt.Printf("forkd: per-sandbox TLS SNI egress filter ENABLED (port %d); the nftables redirect of guest tcp/443 to it is a KVM follow-up\n", sniProxyPort)
 			}
 		}
 		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg, engineOpts)
@@ -489,6 +529,25 @@ func main() {
 		defer func() {
 			if err := egressProxyServer.Close(); err != nil {
 				fmt.Fprintf(os.Stderr, "forkd: egress proxy shutdown: %v\n", err)
+			}
+		}()
+	}
+
+	// Start the host-side TLS SNI egress filter (node-level Runnable) when enabled.
+	// It binds the wildcard on the SNI proxy port so transparently-redirected guest
+	// TLS lands here; a listen failure is fatal because the SNI filter would
+	// silently not enforce otherwise.
+	if sniProxyServer != nil {
+		go func() {
+			fmt.Printf("forkd: TLS SNI egress filter on %s\n", sniListenAddr)
+			if err := sniProxyServer.ListenAndServe(sniListenAddr); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: SNI egress filter error: %v\n", err)
+				os.Exit(1)
+			}
+		}()
+		defer func() {
+			if err := sniProxyServer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: SNI egress filter shutdown: %v\n", err)
 			}
 		}()
 	}
@@ -702,6 +761,35 @@ func buildEgressProxy(registry *egressproxy.Registry) *egressproxy.Proxy {
 	dialer := netEgressDialer{d: net.Dialer{Timeout: 30 * time.Second}}
 	logger := redactingEgressLogger{log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 	return egressproxy.NewProxy(registry, dialer, logger)
+}
+
+// sniEgressLogger records TLS SNI egress decisions. The SNI server name is NOT a
+// secret (it travels in cleartext in the ClientHello on the wire, exactly like
+// the DNS query name), so it may be logged; no bytes after the ClientHello are
+// ever inspected or logged. It satisfies sniproxy.Logger.
+type sniEgressLogger struct {
+	log *slog.Logger
+}
+
+func (l sniEgressLogger) Allow(sandboxID, serverName string, port int, bytesUp, bytesDown int64) {
+	l.log.Info("sni_egress", "sandbox", sandboxID, "sni", serverName, "port", port, "bytes_up", bytesUp, "bytes_down", bytesDown)
+}
+
+func (l sniEgressLogger) Deny(sandboxID, serverName string, port int, reason string) {
+	l.log.Info("sni_egress_denied", "sandbox", sandboxID, "sni", serverName, "port", port, "reason", reason)
+}
+
+// buildSNIProxy constructs the host-side TLS SNI egress filter. It enforces the
+// SAME per-sandbox domain allowlist the DNS resolver holds (allowReg, via
+// sniproxy.RegistryAllowlist, reusing its exact/anchored-wildcard matcher),
+// attributes each connection to a sandbox by source IP (attribReg, the egress
+// proxy registry), dials the original destination host-side through the same
+// bounded-timeout net.Dialer as the egress proxy, and logs only the sandbox ID,
+// SNI, port, and byte counts.
+func buildSNIProxy(allowReg *dnsproxy.Registry, attribReg *egressproxy.Registry) *sniproxy.Proxy {
+	dialer := netEgressDialer{d: net.Dialer{Timeout: 30 * time.Second}}
+	logger := sniEgressLogger{log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	return sniproxy.NewProxy(attribReg, sniproxy.RegistryAllowlist{Registry: allowReg}, dialer, logger)
 }
 
 // resolvedUpstream returns the upstream resolver address for the proxy. An
