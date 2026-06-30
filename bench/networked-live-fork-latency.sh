@@ -32,13 +32,19 @@
 #     the template and source once and times only the ForkRunning + handshake
 #     (tracked by issue #336).
 #
-#   ARM 3 - N-way COW fan-out baseline (cold-fork, non-networked):
+#   ARM 3 - N-way networked fan-out:
 #     Wall clock until all N children of one template snapshot are ready plus
 #     per-child time-to-ready distribution, measured by cmd/bench --mode
-#     fork-fanout across the fan-out widths given by --fanout-n. This is the
-#     established engine-level fan-out baseline. Networked live-fork fan-out
-#     (N children from one live networked source via concurrent ForkRunning
-#     calls) requires extending cmd/bench.
+#     fork-fanout --networked across the fan-out widths given by --fanout-n.
+#     Each child is forked from the template with per-fork networking and the
+#     egress proxy engaged (ForkOpts.Network set, LiveFork true), so the
+#     measured time-to-ready includes host-side network setup (tap, nftables,
+#     proxy registration) per fork. With --fanout-n 1 this gives the isolated
+#     networked fork latency (comparable to arm 1 plus network overhead); larger
+#     N gives the wall-clock-to-N-ready for the networked fan-out.
+#     NOTE: each child is a cold fork from the template snapshot (engine.Fork),
+#     not a live fork of a running source sandbox (engine.ForkRunning). For the
+#     full end-to-end live-fork of a running networked source, see arm 2.
 #
 # Requirements:
 #   - A Linux host with /dev/kvm (bare metal or nested virt with KVM
@@ -261,10 +267,11 @@ echo
 # The measured wall clock is an UPPER BOUND on the isolated ForkRunning
 # latency. It includes: template creation (boot + snapshot), source cold-fork
 # + network setup, egress proxy start, keep-alive tunnel, ForkRunning call,
-# child handshake (MAC/IP/reseed/clock-step), and egress assertions. An
-# isolated ForkRunning measurement requires extending cmd/bench with a
-# live-fork-networked mode that retains the template and source across
-# iterations (issue #336).
+# child handshake (MAC/IP/reseed/clock-step), and egress assertions. For the
+# networked cold-fork fan-out (fork from template with networking, no running
+# source), see arm 3 (--mode fork-fanout --networked). An isolated ForkRunning
+# measurement (retaining the template and running source across iterations)
+# requires a further extension to cmd/bench.
 #
 # This arm requires root (or CAP_NET_ADMIN + CAP_NET_RAW) for tap creation
 # and nftables rules.
@@ -327,23 +334,31 @@ print_stats "networked live-fork end-to-end latency (upper bound)"
 echo
 
 # ========================================================================
-# ARM 3: N-way COW fan-out baseline (cold-fork, non-networked)
+# ARM 3: N-way networked fan-out
 #
 # Measures: for each fan-out width N in --fanout-n, fork ONE warmed template
-# snapshot into N children and record (a) each child's fork -> first gRPC
-# ping (time-to-ready), and (b) the wall clock from fan-out start to the
-# instant the LAST child is ready (wall-clock-to-N-ready). Driven by
-# cmd/bench --mode fork-fanout, which is the established engine-level fan-out
-# measurement.
+# snapshot into N children with per-fork networking and the egress proxy
+# engaged, and record (a) each child's fork -> first gRPC ping
+# (time-to-ready, including host-side network setup per fork), and (b) the
+# wall clock from fan-out start to the instant the LAST child is ready
+# (wall-clock-to-N-ready). Driven by cmd/bench --mode fork-fanout --networked.
 #
-# This arm does NOT include per-fork networking; it is the structural
-# baseline for the networked live-fork fan-out claim. A networked live-fork
-# fan-out (N children from one live networked source via concurrent
-# ForkRunning calls) requires extending cmd/bench (issue #336).
+# Each child carries ForkOpts.Network (EgressPolicy "deny") and LiveFork true,
+# matching the networked live-fork path: the timing includes tap creation,
+# nftables rule installation, and proxy registration per fork. With --fanout-n 1
+# this gives the isolated networked fork latency (comparable to arm 1 plus
+# networking overhead); larger N gives the networked fan-out shape.
+#
+# NOTE: each child is a cold fork from the template snapshot (engine.Fork), not
+# a live fork of a running source sandbox (engine.ForkRunning). For the full
+# end-to-end live fork of a running networked source, see arm 2.
+#
+# Requires root (or CAP_NET_ADMIN + CAP_NET_RAW) for tap creation and nftables.
 # ========================================================================
 
-echo "=== ARM 3: N-way COW fan-out baseline (cold-fork, non-networked) ==="
-echo "  cmd/bench --mode fork-fanout: widths = ${FANOUT_N}"
+echo "=== ARM 3: N-way networked fan-out (cmd/bench --mode fork-fanout --networked) ==="
+echo "  flags: --proxy-sentinel ${PROXY_SENTINEL} --proxy-port ${PROXY_PORT}"
+echo "  widths = ${FANOUT_N}"
 echo
 
 FANOUT_JSON="$(mktemp -t bench-fanout.XXXXXX.json)"
@@ -351,6 +366,9 @@ trap 'rm -f "$BENCH_BIN" "$LFE_BIN" "$BENCH_JSON" "$FANOUT_JSON"' EXIT
 
 "$BENCH_BIN" \
   --mode fork-fanout \
+  --networked \
+  --proxy-sentinel "$PROXY_SENTINEL" \
+  --proxy-port "$PROXY_PORT" \
   --template "$BENCH_TEMPLATE" \
   --data-dir "$DATA_DIR" \
   --firecracker "$FIRECRACKER" \
