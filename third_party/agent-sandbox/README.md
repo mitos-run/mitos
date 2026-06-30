@@ -71,5 +71,8 @@ chmod -R u+w examples extensions test crds
 
 (The module cache is read-only, hence the `chmod`.) Re-run the facade envtest
 suite and update the conformance matrix in docs/facade-conformance.md. The
-conformance approach pins the latest two upstream minors; the second minor is a
-follow-up if only one is wired. See docs/facade-conformance.md.
+conformance approach pins the latest two upstream minors; this tree is the
+CURRENT stable minor (`v0.5.0`, the `v1beta1` graduated API, full bridging
+conformance), and the PREVIOUS minor is pinned as a parallel tree under
+`../agent-sandbox-v0.4.6` (`v0.4.6`, the `v1alpha1` surface, apply-unchanged
+admission). See docs/facade-conformance.md.
