@@ -1,0 +1,216 @@
+# =============================================================================
+# SINGLE-USER DEX FOR MITOS CONSOLE QA / FIRST-RUN ONLY.
+#
+# !!! NOT FOR PRODUCTION. NOT MULTI-TENANT. !!!
+#
+# This is a minimal Dex (https://dexidp.io) that federates exactly ONE static
+# username/password into an OIDC issuer the Mitos console trusts. It exists so
+# you can log into the console without standing up GitHub/Google OAuth apps or a
+# full IdP. It deliberately uses in-memory storage, plaintext HTTP, and a single
+# hardcoded credential. None of that is acceptable for a shared, internet-facing,
+# or multi-user deployment.
+#
+# What this is NOT:
+#   - It is NOT a tenant-isolation boundary. Mitos sandboxes are microVMs, not
+#     pods; nothing here governs sandbox isolation. This only gates console login.
+#   - It is NOT highly available: storage.type is memory, so a pod restart loses
+#     all Dex state (auth codes, refresh tokens). Single replica only.
+#   - It is NOT a substitute for a real IdP. For more than one user, or anything
+#     production, run the chart's federated Dex (dex.enabled, GitHub/Google) or
+#     point console.oidc.* at Keycloak / Okta / your own issuer.
+#
+# Before applying, you MUST:
+#   1. Replace the bcrypt hash below with your own (see README.md). The committed
+#      hash is a deliberately UNUSABLE placeholder (a bcrypt of a random string
+#      nobody knows), so login will fail until you set your own.
+#   2. Replace the email with the address you will sign in as.
+#   3. Replace the placeholder hostnames (dex.example.com / console.example.com)
+#      with hostnames that resolve to your cluster, both from your browser AND
+#      from inside the cluster (a nip.io name built from the node IP works; see
+#      docs/platforms/k3s-quickstart.md).
+#   4. Create the shared client-secret Secret (see README.md); it is NOT inlined
+#      here.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mitos-dex-single-user
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos-dex-single-user
+    app.kubernetes.io/component: dex
+    app.kubernetes.io/part-of: mitos
+data:
+  config.yaml: |
+    # The issuer URL Dex advertises. It MUST be byte-for-byte the URL that both
+    # your browser AND the console pod use to reach Dex, because OIDC discovery
+    # compares the issuer string exactly. HTTP (not HTTPS) is used on purpose so
+    # the console pod can run OIDC discovery against Dex without a trusted TLS
+    # cert. This is acceptable ONLY for single-user local QA.
+    issuer: http://dex.example.com
+
+    # In-memory storage: correct for ONE replica, lost on restart. Production
+    # needs storage.type kubernetes with the Dex CRDs. NOT for production.
+    storage:
+      type: memory
+
+    web:
+      http: 0.0.0.0:5556
+
+    oauth2:
+      # Skip the per-login "grant access?" screen. Fine for a single trusted user.
+      skipApprovalScreen: true
+
+    # Enable the built-in password database connector. This is what serves the
+    # single static credential below. The local connector marks the identity's
+    # email as verified, which the Mitos console requires (it rejects any login
+    # whose email is not verified).
+    enablePasswordDB: true
+
+    # The ONE static user. CHANGE the email and hash before use.
+    # hash: bcrypt of your password. The value below is a PLACEHOLDER bcrypt of a
+    # random string nobody knows, so it cannot be used to log in. Generate your
+    # own (README.md) and paste it here.
+    staticPasswords:
+      - email: "you@example.com"
+        hash: "$2a$10$OmvlI/Z3AiWKIDrP2mT6ZuToWfKr.OwomDtFfniYe4xeVQxDhi416"
+        username: "single-user"
+        userID: "00000000-0000-0000-0000-000000000001"
+
+    # The static OIDC client for the Mitos console. The client secret is NOT
+    # inlined: Dex expands $DEX_CONSOLE_CLIENT_SECRET from the env var injected
+    # via secretKeyRef (the mitos-console-oidc Secret, key client-secret). The
+    # SAME Secret is read by the console as its OIDC client secret, so one Secret
+    # with one key satisfies both sides.
+    staticClients:
+      - id: mitos-console
+        name: Mitos Console
+        secret: $DEX_CONSOLE_CLIENT_SECRET
+        redirectURIs:
+          - https://console.example.com/auth/callback
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-dex-single-user
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos-dex-single-user
+    app.kubernetes.io/component: dex
+    app.kubernetes.io/part-of: mitos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mitos-dex-single-user
+      app.kubernetes.io/component: dex
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mitos-dex-single-user
+        app.kubernetes.io/component: dex
+        app.kubernetes.io/part-of: mitos
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.41.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/dex
+          args:
+            - serve
+            - /etc/dex/config.yaml
+          env:
+            # The console static-client secret. Sourced via secretKeyRef and
+            # NEVER inlined. Dex expands $DEX_CONSOLE_CLIENT_SECRET in config.yaml
+            # from this env var at startup.
+            - name: DEX_CONSOLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mitos-console-oidc
+                  key: client-secret
+          ports:
+            - name: http
+              containerPort: 5556
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: mitos-dex-single-user
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-dex-single-user
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos-dex-single-user
+    app.kubernetes.io/component: dex
+    app.kubernetes.io/part-of: mitos
+spec:
+  selector:
+    app.kubernetes.io/name: mitos-dex-single-user
+    app.kubernetes.io/component: dex
+  ports:
+    - name: http
+      port: 5556
+      targetPort: http
+---
+# Ingress that exposes Dex over plain HTTP at the issuer hostname. The hostname
+# MUST match the issuer in the ConfigMap above and must resolve to your cluster
+# from BOTH the browser and the console pod. Replace dex.example.com. HTTP is
+# intentional here (see the ConfigMap note); do NOT expose this to untrusted
+# networks. NOT FOR PRODUCTION.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mitos-dex-single-user
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos-dex-single-user
+    app.kubernetes.io/component: dex
+    app.kubernetes.io/part-of: mitos
+spec:
+  rules:
+    - host: dex.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mitos-dex-single-user
+                port:
+                  name: http
