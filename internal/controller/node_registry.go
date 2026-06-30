@@ -49,6 +49,16 @@ type NodeInfo struct {
 	MemoryTotal     int64
 	MemoryUsed      int64
 
+	// DiskTotal and DiskFree are the node's data-dir filesystem total and free
+	// bytes, as reported by GetCapacity (statfs of the forkd data dir). The
+	// scheduler treats a node whose free fraction is below minDiskHeadroomFraction
+	// as having no build capacity, so placement backs off before the data dir
+	// fills and the kubelet evicts forkd on DiskPressure. DiskTotal 0 means an
+	// UNKNOWN budget (statfs failed, e.g. dev/mock) and is treated as unlimited,
+	// exactly like MemoryTotal 0.
+	DiskTotal int64
+	DiskFree  int64
+
 	// GPU capacity (issue #221). A GPU node advertises the GPU node label and a
 	// GPU type; the controller mirrors that here so GPU pools are scheduled ONLY
 	// onto GPU-capable nodes, mirroring the KVM node selection. GPUTotal is the
@@ -315,6 +325,9 @@ func (r *NodeRegistry) SelectNodeForFork(req ForkRequest) (*NodeInfo, error) {
 		if req.GPUCount > 0 {
 			return nil, fmt.Errorf("%w: no GPU-capable node admits the request (count %d, type %q); add GPU nodes labeled %s or free GPU devices", ErrNoCapacity, req.GPUCount, req.GPUType, gpuNodeLabel)
 		}
+		if !r.anyHealthyNodeHasDiskHeadroom() {
+			return nil, fmt.Errorf("%w: every healthy forkd node is low on data-dir disk (below %.0f%% free); free disk on the nodes or scale out before the kubelet evicts forkd on DiskPressure", ErrNoCapacity, minDiskHeadroomFraction*100)
+		}
 		return nil, fmt.Errorf("%w: cluster memory exhausted under the overcommit policy (factor %.2f); scale out forkd nodes or raise the overcommit factor", ErrNoCapacity, r.overcommitFactor)
 	}
 
@@ -391,6 +404,20 @@ func (r *NodeRegistry) denser(c, b *NodeInfo, snapshotID string) bool {
 func (r *NodeRegistry) anyNodeMeetsTier(min IsolationTier) bool {
 	for _, n := range r.nodes {
 		if n.isHealthy() && n.IsolationTier.meets(min) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyHealthyNodeHasDiskHeadroom reports whether any HEALTHY node still has data-dir
+// disk headroom (free fraction at or above minDiskHeadroomFraction). It lets
+// SelectNode distinguish "all nodes backed off on low disk" (free disk or scale
+// out before forkd is evicted) from a memory shortage. Caller must hold at least
+// the read lock.
+func (r *NodeRegistry) anyHealthyNodeHasDiskHeadroom() bool {
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.hasDiskHeadroom() {
 			return true
 		}
 	}

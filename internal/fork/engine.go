@@ -240,6 +240,12 @@ type Engine struct {
 	// host MemTotal. A seam: production reads /proc/meminfo; tests inject canned
 	// contents. On non-linux/dev hosts the read fails and MemoryTotal is 0.
 	meminfoReader func() (string, error)
+	// diskStatfs returns the free and total bytes of the filesystem holding the
+	// data dir. A seam: production calls statfs on dataDir; tests inject canned
+	// values (so the disk-headroom path is exercised on darwin). Nil leaves the
+	// disk fields zero, which the controller reads as an unknown (unlimited)
+	// budget.
+	diskStatfs func(path string) (free, total int64, err error)
 
 	// journal persists one on-disk record per live sandbox under the data dir so
 	// a restarted forkd can recognize and reap its own pre-crash VMs (issue #12).
@@ -687,6 +693,10 @@ type EngineOpts struct {
 	// MemTotal. Nil uses the production reader (reads /proc/meminfo); tests
 	// inject canned contents or a failing reader for non-linux paths.
 	MeminfoReader func() (string, error)
+	// DiskStatfs is the statfs source GetCapacity uses for the data-dir disk
+	// headroom (free/total bytes). Nil uses the production reader (statfs of the
+	// data dir); tests inject canned values or a failing reader.
+	DiskStatfs func(path string) (free, total int64, err error)
 	// PullHTTPClient is the HTTP client PullTemplate uses to fetch a peer forkd's
 	// CAS over TLS. The daemon injects one trusting the control-plane CA. Nil
 	// leaves http.DefaultClient; PullTemplate still works against a plaintext
@@ -929,6 +939,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		maxSandboxes:         opts.MaxSandboxes,
 		memReserveBytes:      opts.MemoryReserveBytes,
 		meminfoReader:        opts.MeminfoReader,
+		diskStatfs:           opts.DiskStatfs,
 		journal:              newJournal(dataDir),
 		buildJournal:         newBuildJournal(dataDir),
 		verifyPID:            procfsVerifier,
@@ -942,6 +953,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	}
 	if e.meminfoReader == nil {
 		e.meminfoReader = procMeminfoReader
+	}
+	if e.diskStatfs == nil {
+		e.diskStatfs = statfsDiskBytes
 	}
 	// Wire the production egress-byte reader when networking is enabled so the
 	// metering rollup (#211 seam) attributes per-sandbox egress bytes from the
@@ -1944,6 +1958,18 @@ func (e *Engine) GetCapacity() Capacity {
 		}
 	}
 
+	// Data-dir disk headroom: statfs the data dir for free/total bytes. The seam
+	// fails on non-linux/dev hosts (or when unset), leaving both at 0, which the
+	// controller reads as an unknown (unlimited) budget. This is a single statfs,
+	// cheap enough for the heartbeat path (it stats the filesystem, not backing
+	// files like Metering does).
+	var diskFree, diskTotal int64
+	if e.diskStatfs != nil {
+		if free, total, err := e.diskStatfs(e.dataDir); err == nil {
+			diskFree, diskTotal = free, total
+		}
+	}
+
 	return Capacity{
 		ActiveSandboxes: activeSandboxes,
 		MaxSandboxes:    e.maxSandboxes,
@@ -1958,6 +1984,8 @@ func (e *Engine) GetCapacity() Capacity {
 		TemplateDigests:   digests,
 		TemplateEstimates: templateEstimatesFromReport(report, digests),
 		KVMAvailable:      true,
+		DiskFree:          diskFree,
+		DiskTotal:         diskTotal,
 	}
 }
 
@@ -2474,6 +2502,13 @@ type Capacity struct {
 	// once and the average per-fork unique footprint every fork adds.
 	TemplateEstimates []TemplateEstimate
 	KVMAvailable      bool
+	// DiskFree and DiskTotal are the data-dir filesystem free and total bytes
+	// (statfs of the engine dataDir). The controller treats a node with low disk
+	// headroom as having no build capacity so it backs off before the data dir
+	// fills and the kubelet evicts forkd. Both zero means unknown (statfs failed,
+	// e.g. a dev host) and is treated as an unlimited budget, like MemoryTotal 0.
+	DiskFree  int64
+	DiskTotal int64
 }
 
 type ForkOpts struct {

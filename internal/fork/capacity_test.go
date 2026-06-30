@@ -122,6 +122,53 @@ func TestGetCapacityMemoryTotalZeroWhenReaderFails(t *testing.T) {
 	}
 }
 
+func TestGetCapacityReportsDiskHeadroom(t *testing.T) {
+	dataDir := t.TempDir()
+	tmplMgr := firecracker.NewTemplateManager("fc", "vmlinux", dataDir, firecracker.JailerConfig{})
+	const wantFree = int64(20 * 1024 * 1024 * 1024)
+	const wantTotal = int64(100 * 1024 * 1024 * 1024)
+	e := &Engine{
+		dataDir:         dataDir,
+		sandboxes:       make(map[string]*Sandbox),
+		templateMgr:     tmplMgr,
+		templateDigests: make(map[string]cas.Digest),
+		memReserveBytes: 1024,
+		meminfoReader:   func() (string, error) { return "", fmt.Errorf("no /proc on darwin") },
+		diskStatfs: func(path string) (free, total int64, err error) {
+			if path != dataDir {
+				t.Errorf("statfs path: got %q want %q", path, dataDir)
+			}
+			return wantFree, wantTotal, nil
+		},
+	}
+
+	cap := e.GetCapacity()
+	if cap.DiskFree != wantFree {
+		t.Errorf("DiskFree: got %d want %d", cap.DiskFree, wantFree)
+	}
+	if cap.DiskTotal != wantTotal {
+		t.Errorf("DiskTotal: got %d want %d", cap.DiskTotal, wantTotal)
+	}
+}
+
+func TestGetCapacityDiskZeroWhenStatfsFails(t *testing.T) {
+	dataDir := t.TempDir()
+	tmplMgr := firecracker.NewTemplateManager("fc", "vmlinux", dataDir, firecracker.JailerConfig{})
+	e := &Engine{
+		sandboxes:       make(map[string]*Sandbox),
+		templateMgr:     tmplMgr,
+		templateDigests: make(map[string]cas.Digest),
+		memReserveBytes: 1024,
+		meminfoReader:   func() (string, error) { return "", fmt.Errorf("no /proc on darwin") },
+		diskStatfs:      func(string) (int64, int64, error) { return 0, 0, fmt.Errorf("statfs failed") },
+	}
+
+	cap := e.GetCapacity()
+	if cap.DiskFree != 0 || cap.DiskTotal != 0 {
+		t.Errorf("disk on statfs failure: got free=%d total=%d want 0/0", cap.DiskFree, cap.DiskTotal)
+	}
+}
+
 func TestTemplateEstimatesFloorForZeroForks(t *testing.T) {
 	// A template with no forks yet (no samples) does not appear in the report;
 	// templateEstimateFloor supplies the floor a cold-only template uses.

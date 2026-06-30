@@ -18,6 +18,16 @@ const (
 	defaultForkUniqueBytes int64 = 8 * 1024 * 1024   // 8 MiB per-fork unique
 )
 
+// minDiskHeadroomFraction is the fraction of a node's data-dir filesystem that
+// must remain free for the node to admit new forks. A node below this is treated
+// as having no build capacity, so the scheduler backs off well before the data
+// dir fills and the kubelet's default nodefs.available hard-eviction threshold
+// (10%) trips and evicts forkd outright (a hard crash instead of a graceful
+// "node full"). 0.15 (15%) keeps a deliberate margin above that 10% floor. The
+// signal is the disk-headroom analogue of the memory budget. Bare metal nodes
+// have finite local disk, so this gate matters most there.
+const minDiskHeadroomFraction = 0.15
+
 // available returns the schedulable headroom on a node under the overcommit
 // factor: total*factor - used. A node reporting MemoryTotal 0 has an UNKNOWN
 // budget (the forkd meminfo read failed, e.g. darwin/dev, or mock without a
@@ -32,6 +42,20 @@ func (r *NodeRegistry) available(node *NodeInfo) (int64, bool) {
 		factor = 1.0
 	}
 	return int64(float64(node.MemoryTotal)*factor) - node.MemoryUsed, true
+}
+
+// hasDiskHeadroom reports whether the node has enough free data-dir disk to
+// admit a new fork: its free fraction is at or above minDiskHeadroomFraction. A
+// node reporting DiskTotal 0 has an UNKNOWN budget (statfs failed on the node,
+// e.g. dev/mock) and is treated as effectively unlimited so dev and mock paths
+// keep scheduling, mirroring available()'s unknown-memory handling. Below the
+// floor the node is treated as having no build capacity, so placement backs off
+// before the kubelet evicts forkd on DiskPressure.
+func (n *NodeInfo) hasDiskHeadroom() bool {
+	if n.DiskTotal <= 0 {
+		return true
+	}
+	return float64(n.DiskFree) >= float64(n.DiskTotal)*minDiskHeadroomFraction
 }
 
 // isWarmFor reports whether the node already runs forks of templateID: it holds
@@ -122,6 +146,9 @@ func (n *NodeInfo) atSandboxCeiling() bool {
 // ceiling and the GPU gate. Caller must hold at least the read lock.
 func (r *NodeRegistry) admitsRequest(node *NodeInfo, req ForkRequest) bool {
 	if node.atSandboxCeiling() {
+		return false
+	}
+	if !node.hasDiskHeadroom() {
 		return false
 	}
 	if !node.admitsGPU(req) {
