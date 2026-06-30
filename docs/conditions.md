@@ -49,7 +49,8 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | `HuskPodRaced` | Sandbox (source.poolRef) | Two sandboxes raced for the same dormant husk pod; this one lost and retries. |
 | `NoHuskPod` | Sandbox (source.poolRef) | No dormant husk pod was available to activate. |
 | `NoCapacity` / `CapacityExhausted` | Sandbox (source.poolRef) | No node had capacity to admit the sandbox before the pending deadline. |
-| `NodeLost` | Sandbox (source.poolRef) | The node backing an active sandbox was lost (drain, eviction, deletion). |
+| `NodeLost` | Sandbox (source.poolRef) | The node backing an active sandbox was lost (drain, eviction, deletion), and the sandbox failed closed: no surviving node holds the pool template snapshot to re-fork onto, or the bounded auto re-fork retries were exhausted. Terminal. |
+| `NodeLostReforking` | Sandbox (source.poolRef) | The raw-forkd node backing an active sandbox was lost, but a surviving node holds the pool template snapshot, so the sandbox is being automatically re-forked onto it (issue #372). The sandbox is re-pended and the claim reconciler re-issues the fork on its normal placement path. Bounded by a per-claim retry count; exhausting it fails closed with `NodeLost`. |
 | `OrphanReaped` | Sandbox (source.poolRef) | The GC orphan sweep reaped a backing VM that lingered past this (terminal) sandbox's transition, e.g. a terminate that crashed or was missed and was then re-adopted by a restarted forkd. Informational; the VM is gone. |
 | `SecretInheritanceDenied` | Sandbox (source.fromSandbox) | A fork was rejected because the source sandbox holds secrets and inheritance was not explicitly opted into. |
 | `ExplicitOptIn` | Sandbox (source.fromSandbox) | Secret inheritance was explicitly permitted on the fork. |
@@ -78,7 +79,8 @@ catalogue is the normative reference the alerts and runbooks cite (see
 | `HuskPodRaced` | False | None; two sandboxes raced for one husk pod, the loser retries. Benign under load. |
 | `NoHuskPod` | False | Warm pool is empty for this sandbox's pool; scale the SandboxPool warm count (the WarmPoolStarved runbook). |
 | `NoCapacity` / `CapacityExhausted` | False | No node had admission capacity before the pending deadline; add capacity or scale pools (the ClaimsPendingSustained runbook). |
-| `NodeLost` | False | The backing node was lost (drain, eviction, deletion); the sandbox re-places. Confirm the node and recover it if unexpected. |
+| `NodeLost` | False | Terminal. The backing node was lost and the sandbox could not be auto re-forked: no surviving node holds the pool template snapshot, or the bounded retries were exhausted. Confirm node and snapshot-holder health, then recreate the claim. |
+| `NodeLostReforking` | False | None; the backing node was lost and the sandbox is being automatically re-forked onto a surviving snapshot holder. Investigate only if it recurs for one sandbox (a replacement node that keeps dying eventually fails closed with `NodeLost`). |
 | `OrphanReaped` | False | None; the GC reaped a VM that outlived this terminal sandbox. Investigate only if it recurs, which would point at a forkd terminate path crashing or being missed. |
 | `WorkspaceBusy` | False | None; the sandbox waits on the single-writer-per-workspace lock and retries. Investigate only if a writer never releases it. |
 | `CheckpointNotImplemented` | False | The pool requested `DrainPolicy: Checkpoint`, which is not yet implemented; the claim re-pended with Kill semantics and in-VM state was lost. Set `DrainPolicy: Kill` knowingly, or persist state via a workspace, until the live-VM checkpoint engine lands (a KVM-gated follow-up). |
