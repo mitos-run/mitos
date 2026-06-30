@@ -28,6 +28,7 @@ pip install mitos-run        # import name stays `mitos`
 | `best_of_n.py` | Best-of-N | Fork one warm sandbox into N, run attempts in parallel, keep the winner. | direct |
 | `rl_evals.py` | RL / evals | A SWE-bench-style harness that forks many environments from one golden state. | direct |
 | `background_agent.py` | Background agent | Task in, PR out: a durable workspace pushed to a rendezvous git remote on terminate. | operator |
+| `fork_native_subagent.py` | Fork-native subagents | Spawning a subagent = forking the current warm sandbox; graceful no-op off mitos. | in-guest |
 
 Other examples in this directory: `quickstart.py` (the README hero),
 `direct.py` (the minimal standalone smoke test, executed end to end on real KVM
@@ -93,6 +94,23 @@ python3 background_agent.py
 Honest gap: the SDK has no first-class helper for `spec.git.paths` yet, so this
 example sets it by patching the Workspace CRD through the Kubernetes client
 `AgentRun` already loaded. A `spec.git` helper is a follow-up.
+
+### fork_native_subagent.py
+
+In-guest path. When a multi-agent harness runs inside a mitos sandbox, spawning a
+subagent IS forking the current warm sandbox via the in-guest self-service socket
+(`$MITOS_SOCKET`, `mitos.guest`). `mitos.subagent.spawn_subagent(n, label=...)`
+returns warm `SubagentHandle`s on mitos and a graceful no-op `SubagentResult`
+(`on_mitos=False`) off mitos, so the harness never breaks off-platform. Run it on
+your laptop and it prints the fallback; run it inside a sandbox and it forks.
+
+```
+python3 fork_native_subagent.py
+```
+
+Honest scope: the budget-gated self-fork is wired progressively by the guest
+agent, and driving a child from another process needs control-plane credentials;
+both are documented follow-ups.
 
 ## What CI verifies (and what it does not)
 
