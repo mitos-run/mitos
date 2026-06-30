@@ -197,6 +197,9 @@ func (e *Engine) restampHotPages(template string, hot *cas.HotPageSet) error {
 		// Carry the page backing through so re-stamping the hot set does not drop
 		// the snapshot's self-describing hugepage marker (issue #167).
 		HugePages: m.HugePages,
+		// Carry the guest-agent protocol version through so re-stamping the hot set
+		// preserves the snapshot's compatibility identity (issue #459).
+		GuestProtocolVersion: m.GuestProtocolVersion,
 	}
 	newD, err := recordTemplateDigest(e.casStore, e.dataDir, template, meta)
 	if err != nil {

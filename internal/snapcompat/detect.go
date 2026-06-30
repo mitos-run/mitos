@@ -80,10 +80,11 @@ func DetectEnvironment(firecrackerPath string, runner Runner, cpuinfo CPUInfoRea
 	}
 
 	return Environment{
-		FormatVersions: []int{cas.CurrentSnapshotFormatVersion},
-		VMMVersion:     vmm,
-		CPUModel:       cpu,
-		KernelVersion:  kernel,
+		FormatVersions:        []int{cas.CurrentSnapshotFormatVersion},
+		VMMVersion:            vmm,
+		CPUModel:              cpu,
+		KernelVersion:         kernel,
+		GuestProtocolVersions: []int{cas.CurrentGuestProtocolVersion},
 	}, nil
 }
 

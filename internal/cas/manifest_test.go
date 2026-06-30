@@ -261,3 +261,66 @@ func TestManifestRoundTripEnvFields(t *testing.T) {
 		t.Fatalf("round-trip digest mismatch: %s vs %s", got.Digest(), m.Digest())
 	}
 }
+
+// TestManifestGuestProtocolRoundTrip proves the guest-agent protocol version
+// (issue #459) survives a canonical encode/decode and stays part of the digest.
+func TestManifestGuestProtocolRoundTrip(t *testing.T) {
+	m := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 7, Chunks: []ChunkRef{{Digest: digestBytes([]byte("x")), Size: 1}}}},
+		VMMVersion:            "1.15.0",
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+		CPUModel:              "cpuA",
+		KernelVersion:         "kA",
+		ConfigHash:            "hA",
+		GuestProtocolVersion:  CurrentGuestProtocolVersion,
+	}
+	got, err := decodeManifest(m.Canonical())
+	if err != nil {
+		t.Fatalf("decodeManifest: %v", err)
+	}
+	if got.GuestProtocolVersion != m.GuestProtocolVersion {
+		t.Fatalf("round-trip lost guest-protocol version: got %d want %d", got.GuestProtocolVersion, m.GuestProtocolVersion)
+	}
+	if got.Digest() != m.Digest() {
+		t.Fatalf("round-trip digest mismatch: %s vs %s", got.Digest(), m.Digest())
+	}
+}
+
+// TestManifestZeroGuestProtocolPreservesLegacyDigest proves the field is
+// additive (issue #459, #32): a snapshot that records no guest-protocol version
+// (0) encodes byte-identically to one built before the field existed, so legacy
+// snapshot digests are unchanged.
+func TestManifestZeroGuestProtocolPreservesLegacyDigest(t *testing.T) {
+	base := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 3}},
+		VMMVersion:            "1.15.0",
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+		CPUModel:              "cpuA",
+		KernelVersion:         "kA",
+		ConfigHash:            "hA",
+	}
+	withZero := base
+	withZero.GuestProtocolVersion = 0
+	if !bytes.Equal(base.Canonical(), withZero.Canonical()) {
+		t.Fatalf("zero guest-protocol changed canonical bytes:\n base: %s\n zero: %s", base.Canonical(), withZero.Canonical())
+	}
+	if base.Digest() != withZero.Digest() {
+		t.Fatalf("zero guest-protocol changed digest: %s vs %s", base.Digest(), withZero.Digest())
+	}
+}
+
+// TestManifestGuestProtocolChangesDigest proves a recorded guest-protocol
+// version is part of the snapshot identity: a snapshot built by a different
+// agent protocol never collides with one built here (issue #459), the same way
+// VMMVersion and CPUModel already bind the producing environment.
+func TestManifestGuestProtocolChangesDigest(t *testing.T) {
+	base := Manifest{
+		Files:                 []FileEntry{{Name: "mem", Size: 3}},
+		SnapshotFormatVersion: CurrentSnapshotFormatVersion,
+	}
+	changed := base
+	changed.GuestProtocolVersion = CurrentGuestProtocolVersion
+	if base.Digest() == changed.Digest() {
+		t.Fatal("recording a guest-protocol version did not change the digest")
+	}
+}
