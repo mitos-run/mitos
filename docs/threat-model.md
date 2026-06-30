@@ -627,6 +627,12 @@ escape the exec process-group kill or the per-fork SIGUSR2 reset outside its own
 budget. The workload command and env are non-secret build-time config (env values
 are non-secret; secrets are still injected per fork via `Configure`); the agent
 logs only the workload session id and env-key count, never argv or values. The
+`MITOS_PUBLIC_URL` value injected into the build-time and per-fork env (the Run
+with Mitos public-URL injection, issue #476) is a non-secret URL (the sandbox's
+own Mitos Expose address), never a credential, and the `${MITOS_PUBLIC_URL}`
+manifest substitution expands only that one known token (no shell, path, or
+arbitrary variable expansion), so it adds no secret-exposure or injection surface.
+The
 per-fork SIGUSR2 reset no longer default-terminates a non-handler process: the
 broadcast delivers only to confirmed SIGUSR2 handlers (the `SigCgt` bit in
 `/proc/<pid>/status`), so a captured serving workload that installs no handler

@@ -41,7 +41,7 @@ func TestK8sApplierCreateThenUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool, err := m.GoldenPool("ns")
+	pool, err := m.GoldenPool("ns", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestK8sApplierCreateThenUpdate(t *testing.T) {
 
 	// A fresh object (no resourceVersion), as a second run would build, must update
 	// in place, not error.
-	pool2, _ := m.GoldenPool("ns")
+	pool2, _ := m.GoldenPool("ns", "")
 	if err := ap.Apply(context.Background(), pool2); err != nil {
 		t.Fatalf("second apply (update): %v", err)
 	}
@@ -97,7 +97,7 @@ func TestInstanceLabel(t *testing.T) {
 		t.Errorf("label %q should start with the repo name", a)
 	}
 	// Must be a valid manifest DNS label (Provision will accept it).
-	if _, err := runmanifest.Provision(mustManifest(t, openclawYAML), map[string]string{"ANTHROPIC_API_KEY": "x"}, "ns", a); err != nil {
+	if _, err := runmanifest.Provision(mustManifest(t, openclawYAML), map[string]string{"ANTHROPIC_API_KEY": "x"}, "ns", a, ""); err != nil {
 		t.Errorf("instance label not provisionable: %v", err)
 	}
 }
