@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.10.0](https://github.com/mitos-run/mitos/compare/v1.9.0...v1.10.0) (2026-06-30)
+
+
+### Features
+
+* **compose:** Harbor compose provider contract (per-service ops, fail-closed backend) ([#562](https://github.com/mitos-run/mitos/issues/562)) ([1cd87e3](https://github.com/mitos-run/mitos/commit/1cd87e3de9b2e4c3ade09baeeb866220add38b27))
+* **saas:** durable Postgres usage store for per-org metered usage ([#211](https://github.com/mitos-run/mitos/issues/211)) ([#563](https://github.com/mitos-run/mitos/issues/563)) ([ed6e66e](https://github.com/mitos-run/mitos/commit/ed6e66e49df1216bc006ccfe70e12945201f7edb))
+* **sdk:** fork-native subagent hook with graceful off-mitos fallback ([#561](https://github.com/mitos-run/mitos/issues/561)) ([dc667b1](https://github.com/mitos-run/mitos/commit/dc667b12ed84817410f8a915f4fbfe655332b67d))
+* **sniproxy:** host-side TLS SNI egress allowlist (peek-and-splice) ([#564](https://github.com/mitos-run/mitos/issues/564)) ([d460cbb](https://github.com/mitos-run/mitos/commit/d460cbb75d3b1c36f1b47d7777e27c052ea33536)), closes [#494](https://github.com/mitos-run/mitos/issues/494)
+
 ## [1.9.0](https://github.com/mitos-run/mitos/compare/v1.8.0...v1.9.0) (2026-06-30)
 
 
