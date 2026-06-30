@@ -98,6 +98,16 @@ func setup(
 	// AFTER the unconditional cloud-metadata drops and ahead of the allowlist
 	// verdict, so it can never precede the IMDS drops, and saddr-pins it to the
 	// guest IP and the gateway:proxyPort destination so it never broadens reach.
+	//
+	// SCOPE CAVEAT (M4): this chain is the FORWARD-hook per-sandbox chain. The
+	// proxy DNAT below rewrites the sentinel destination to the gateway IP, which
+	// is LOCAL to forkd's netns, so the DNATed packet is delivered via the INPUT
+	// path, not FORWARD. This forward accept rule therefore does NOT gate the
+	// proxied packet; on raw-forkd the path works because the INPUT base chain
+	// policy is accept (the rule is defense-in-depth/documentation, not the load
+	// bearing accept). The proxied datapath is consequently a raw-forkd path; a
+	// husk pod with an INPUT default-deny would need an explicit INPUT accept for
+	// the gateway:proxyPort, which is a separate concern from this rule.
 	if policy.ProxySentinel != nil {
 		spec.ProxyGatewayIP = id.HostIP
 		spec.ProxyPort = policy.ProxyPort
