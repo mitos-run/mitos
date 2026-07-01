@@ -15,8 +15,9 @@ func canonicalEmail(addr string) (string, bool) {
 		return "", false
 	}
 
-	// Step 2: split at the LAST '@' (normalizeEmail guarantees exactly one '@'
-	// with non-empty local and domain, both already lowercased).
+	// Step 2: split at the LAST '@' (normalizeEmail guarantees at least one '@'
+	// with non-empty local and domain, both already lowercased; a quoted local
+	// part may contain more, so LastIndex is the correct split point).
 	at := strings.LastIndex(norm, "@")
 	local := norm[:at]
 	domain := norm[at+1:]

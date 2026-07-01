@@ -6,9 +6,9 @@ func TestCanonicalEmail(t *testing.T) {
 	t.Parallel()
 
 	type tc struct {
-		input   string
-		want    string
-		wantOK  bool
+		input  string
+		want   string
+		wantOK bool
 	}
 
 	cases := []tc{
@@ -32,6 +32,9 @@ func TestCanonicalEmail(t *testing.T) {
 		{input: "@b.com", want: "", wantOK: false},
 		// Plus-only local on Gmail: stripping the plus-tag leaves an empty local.
 		{input: "+x@gmail.com", want: "", wantOK: false},
+		// All-dots Gmail local: after dot-stripping the local is empty (guards the
+		// step-4 empty-after-dot-strip branch).
+		{input: "...@gmail.com", want: "", wantOK: false},
 	}
 
 	for _, c := range cases {
