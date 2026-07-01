@@ -219,6 +219,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
 	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
 	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
+	mux.HandleFunc("GET /console/first-activity", c.handleFirstActivity)
 	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
 	mux.HandleFunc("GET /console/projects", c.handleListProjects)
 	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
