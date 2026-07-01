@@ -18,8 +18,9 @@ Firecracker requires hardware virtualization exposed to the OS as `/dev/kvm`.
 ## Files
 
 - `worker-kvm.yaml`: a patch over the generated worker config. Loads the KVM /
-  vsock / tun kernel modules, labels the node `mitos.run/kvm=true`, and
-  mounts a data partition at `/var/lib/mitos`.
+  vsock / tun kernel modules and labels the node `mitos.run/kvm=true`. forkd's
+  data dir `/var/lib/mitos` defaults to the node's `/var` (the ephemeral
+  partition); a dedicated data disk is optional and commented out in the patch.
 - `controlplane.yaml`: a tiny optional patch over the generated control-plane
   config (just a role label). A stock Talos control plane needs no KVM.
 
@@ -32,12 +33,20 @@ Firecracker requires hardware virtualization exposed to the OS as `/dev/kvm`.
 - **Node label** (`machine.nodeLabels: mitos.run/kvm: "true"`): the forkd
   DaemonSet in `deploy/daemon/daemonset.yaml` has `nodeSelector
   mitos.run/kvm: "true"`, so forkd only schedules onto labeled KVM workers.
-- **Data partition** at `/var/lib/mitos`: this is forkd's `--data-dir`.
-  Snapshots, rootfs images, and the jailer chroot base all live here and must
-  share one filesystem so forkd can hard-link them into each per-VM chroot
-  (forkd refuses to start if they straddle filesystems). On a Hetzner AX node
-  this is usually the second NVMe; set `machine.disks[].device` to match
-  (commonly `/dev/nvme1n1`).
+- **Data dir** `/var/lib/mitos`: forkd's `--data-dir`. Snapshots, rootfs
+  images, and the jailer chroot base all live here and must share one filesystem
+  so forkd can hard-link them into each per-VM chroot (forkd refuses to start if
+  they straddle filesystems). By default this is a directory on the node's
+  `/var` (the Talos ephemeral partition, which normally spans the whole system
+  disk), so nothing extra is needed. Size the system disk for your template set
+  (tens of GB per template plus warm-pool snapshots).
+  A dedicated data disk is optional (the commented `machine.disks` block). If
+  you use one, point `device` at the FREE data disk, NOT the OS disk: verify
+  with `talosctl -n <node> get disks` (or `lsblk`), and wipe any leftover
+  partition table first. Talos will not repartition a disk with no free space,
+  so a stale partition table can silently mount `/var/lib/mitos` on a tiny
+  leftover partition; the template build then fails with `no space left on
+  device` and every fork times out. `mitos doctor` flags an undersized data dir.
 
 ## Usage
 
