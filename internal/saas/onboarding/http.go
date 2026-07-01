@@ -70,6 +70,18 @@ func WithCaptcha(c CaptchaVerifier) HandlerOption {
 	}
 }
 
+// WithTrustedProxyHops sets how many reverse proxies the console trusts in
+// front of it. With 0 (the default) X-Forwarded-For is IGNORED entirely and
+// the velocity key is derived from RemoteAddr, so a client cannot spoof its
+// rate-limit bucket by sending its own X-Forwarded-For. With n >= 1 the key
+// is the XFF entry inserted by the outermost trusted hop (entries[len-n]); a
+// value the client prepends stays to the LEFT of the trusted hops and is
+// never selected. Set this to the real number of proxies in the deployment
+// (the hosted console sits behind one gateway, so it passes 1).
+func WithTrustedProxyHops(n int) HandlerOption {
+	return func(h *Handler) { h.trustedProxyHops = n }
+}
+
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
 //	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
@@ -82,14 +94,15 @@ func WithCaptcha(c CaptchaVerifier) HandlerOption {
 // is never returned by SignUp and never logged. Verify is the only place a token
 // is accepted, and a bad / expired / used token yields a generic failure.
 type Handler struct {
-	svc        *Service
-	log        *slog.Logger
-	sessions   saas.Sessions // optional; nil skips session cookie
-	newToken   func() string // optional; nil skips session cookie
-	secure     bool
-	disposable *Disposable     // optional; nil disables the disposable-domain check
-	velocity   *Velocity       // optional; nil disables the per-IP velocity cap
-	captcha    CaptchaVerifier // optional; nil disables the captcha check (pass-through)
+	svc              *Service
+	log              *slog.Logger
+	sessions         saas.Sessions // optional; nil skips session cookie
+	newToken         func() string // optional; nil skips session cookie
+	secure           bool
+	disposable       *Disposable     // optional; nil disables the disposable-domain check
+	velocity         *Velocity       // optional; nil disables the per-IP velocity cap
+	captcha          CaptchaVerifier // optional; nil disables the captcha check (pass-through)
+	trustedProxyHops int             // 0 = ignore XFF; n >= 1 = trust n upstream proxies
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
@@ -156,7 +169,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 
 	// Per-IP velocity guard: silently cap mass-signup from a single source
 	// without revealing that a rate limit fired. The IP value is never logged.
-	if h.velocity != nil && !h.velocity.Allow(clientIP(r), time.Now()) {
+	if h.velocity != nil && !h.velocity.Allow(h.clientIP(r), time.Now()) {
 		h.log.Info("onboarding signup refused", "reason", "velocity")
 		h.writeAccepted(w)
 		return
@@ -290,30 +303,64 @@ func classifyVerifyErr(err error) string {
 	}
 }
 
-// clientIP extracts the originating client IP from the request. The console is
-// only reachable through the cluster gateway, which sets X-Forwarded-For from
-// the real client address, so this function trusts that header.
+// clientIP extracts the velocity key (client IP) from the request using a
+// trusted-hop model. The behavior is controlled by h.trustedProxyHops:
 //
-// It reads the first (leftmost) address in X-Forwarded-For when present (the
-// original client as set by the trusted edge), trimming spaces; otherwise it
-// falls back to the host part of r.RemoteAddr (port stripped via
-// net.SplitHostPort, tolerating a bare IP with no port). An empty string is
-// returned when no address is derivable; the empty string is its own
-// rate-limit bucket and is never bypassed.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// The leftmost entry is the original client IP as set by the trusted edge.
-		if idx := strings.IndexByte(xff, ','); idx > 0 {
-			return strings.TrimSpace(xff[:idx])
+// With 0 (the default, safe for self-hosters), X-Forwarded-For is IGNORED and
+// the key is the host part of r.RemoteAddr. A client cannot spoof its bucket
+// by prepending its own X-Forwarded-For values.
+//
+// With n >= 1, the method reads X-Forwarded-For, splits on commas, and picks
+// the entry at index len(entries)-n, which is the address the outermost
+// trusted proxy recorded. Any values the client prepended lie to the left and
+// are never selected. If the computed index is negative it is clamped to 0
+// (fewer entries than trusted hops, so the leftmost real entry is the best
+// available). If XFF is empty or yields no usable entry the method falls back
+// to RemoteAddr.
+//
+// An empty string is returned when no address is derivable; the empty string
+// is its own rate-limit bucket and is never bypassed.
+func (h *Handler) clientIP(r *http.Request) string {
+	remoteHost := func() string {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			return strings.TrimSpace(r.RemoteAddr)
 		}
-		return strings.TrimSpace(xff)
+		return host
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		// RemoteAddr may be a bare IP with no port; use it as-is.
-		return strings.TrimSpace(r.RemoteAddr)
+
+	if h.trustedProxyHops <= 0 {
+		// Default: ignore X-Forwarded-For entirely; use the direct connection address.
+		return remoteHost()
 	}
-	return host
+
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remoteHost()
+	}
+
+	// Split and trim; drop empty entries produced by stray commas.
+	parts := strings.Split(xff, ",")
+	var entries []string
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			entries = append(entries, t)
+		}
+	}
+	if len(entries) == 0 {
+		return remoteHost()
+	}
+
+	// Pick the entry added by the outermost trusted proxy. A client's spoofed
+	// values are to the LEFT; the proxy's appended value is to the RIGHT.
+	idx := len(entries) - h.trustedProxyHops
+	if idx < 0 {
+		idx = 0
+	}
+	if v := entries[idx]; v != "" {
+		return v
+	}
+	return remoteHost()
 }
 
 // normalizeEmail trims, lowercases, and validates an email address. It returns

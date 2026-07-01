@@ -135,6 +135,17 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		handlerOpts = append(handlerOpts, onboarding.WithDisposable(d))
 	}
 
+	// MITOS_CONSOLE_TRUSTED_PROXY_HOPS sets how many reverse proxies sit in front
+	// of the console. With 0 (the default, safe for self-hosters) X-Forwarded-For
+	// is ignored and the velocity key is the direct RemoteAddr, preventing clients
+	// from minting fresh rate-limit buckets by spoofing XFF. Set to 1 for the
+	// hosted deployment that sits behind a single gateway.
+	if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_TRUSTED_PROXY_HOPS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			handlerOpts = append(handlerOpts, onboarding.WithTrustedProxyHops(n))
+		}
+	}
+
 	// Per-IP velocity cap: MITOS_CONSOLE_SIGNUP_IP_LIMIT (int, default 10) and
 	// MITOS_CONSOLE_SIGNUP_IP_WINDOW (duration string, default "1h"). A limit of
 	// 0 disables the cap. Malformed values fall back to safe defaults so a bad

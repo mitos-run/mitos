@@ -340,7 +340,9 @@ func TestSignupDisposableDomainReturnsUniformAcceptedAndNoEmail(t *testing.T) {
 func TestSignupVelocityCapReturnsUniformAcceptedAndNoEmail(t *testing.T) {
 	hr := newHarness(t, ModeOpen)
 	vel := NewVelocity(1, time.Hour)
-	h := NewHandler(hr.svc, nil, WithVelocity(vel))
+	// WithTrustedProxyHops(1): the handler trusts one upstream proxy so XFF is used
+	// as the velocity key, matching the deployment topology this test exercises.
+	h := NewHandler(hr.svc, nil, WithVelocity(vel), WithTrustedProxyHops(1))
 
 	mux := http.NewServeMux()
 	h.Routes(mux)
@@ -511,3 +513,97 @@ func TestSignupPassingCaptchaProceedsToService(t *testing.T) {
 		t.Fatal("captcha verifier was not called")
 	}
 }
+
+// TestClientIPTrustedProxyHops unit-tests the Handler.clientIP method directly
+// by constructing a Handler with various trustedProxyHops values and asserting
+// the key returned for different (RemoteAddr, X-Forwarded-For) combinations.
+func TestClientIPTrustedProxyHops(t *testing.T) {
+	makeHandler := func(hops int) *Handler {
+		h := &Handler{}
+		WithTrustedProxyHops(hops)(h)
+		return h
+	}
+
+	makeReq := func(remoteAddr, xff string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remoteAddr
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		return req
+	}
+
+	t.Run("hops=1 single XFF entry is the key", func(t *testing.T) {
+		h := makeHandler(1)
+		req := makeReq("10.0.0.1:1234", "1.1.1.1")
+		if got := h.clientIP(req); got != "1.1.1.1" {
+			t.Fatalf("clientIP = %q, want 1.1.1.1", got)
+		}
+	})
+
+	t.Run("hops=1 attacker prepended entry is ignored", func(t *testing.T) {
+		// Real client is 1.1.1.1 (appended by the trusted proxy).
+		// Attacker prepended 9.9.9.9. With hops=1 the key must be 1.1.1.1.
+		h := makeHandler(1)
+		req := makeReq("10.0.0.1:1234", "9.9.9.9, 1.1.1.1")
+		if got := h.clientIP(req); got != "1.1.1.1" {
+			t.Fatalf("clientIP = %q, want 1.1.1.1 (spoofed 9.9.9.9 must be ignored)", got)
+		}
+	})
+
+	t.Run("hops=1 no XFF falls back to RemoteAddr host", func(t *testing.T) {
+		h := makeHandler(1)
+		req := makeReq("10.0.0.1:1234", "")
+		if got := h.clientIP(req); got != "10.0.0.1" {
+			t.Fatalf("clientIP = %q, want 10.0.0.1 (RemoteAddr host)", got)
+		}
+	})
+}
+
+// TestClientIPHopsZeroIgnoresXFF asserts that with the default trustedProxyHops=0
+// (safe-by-default for self-hosters) the velocity key is derived from RemoteAddr
+// and X-Forwarded-For is ignored. Two signups with DIFFERENT spoofed XFF values
+// but the SAME RemoteAddr must share ONE velocity bucket, proving that XFF
+// spoofing cannot mint fresh rate-limit buckets.
+func TestClientIPHopsZeroIgnoresXFF(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	vel := NewVelocity(1, time.Hour)
+	// No WithTrustedProxyHops: defaults to 0 (ignore XFF).
+	h := NewHandler(hr.svc, nil, WithVelocity(vel))
+
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	postWithAddrs := func(remoteAddr, xff, email string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/onboarding/signup",
+			strings.NewReader(`{"email":"`+email+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remoteAddr
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// First signup: RemoteAddr=10.0.0.1, XFF=1.2.3.4. hops=0 -> key is 10.0.0.1.
+	first := postWithAddrs("10.0.0.1:9999", "1.2.3.4", "spooftest1@example.com")
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first signup: status %d, want 202; body %s", first.Code, first.Body.String())
+	}
+	if hr.email.LastToken("spooftest1@example.com") == "" {
+		t.Fatal("first signup must send a verification email")
+	}
+
+	// Second signup: SAME RemoteAddr=10.0.0.1, DIFFERENT spoofed XFF=9.9.9.9.
+	// hops=0 -> key is still 10.0.0.1 -> cap fires; no email sent.
+	second := postWithAddrs("10.0.0.1:9999", "9.9.9.9", "spooftest2@example.com")
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second signup: status %d, want 202; body %s", second.Code, second.Body.String())
+	}
+	if hr.email.LastToken("spooftest2@example.com") != "" {
+		t.Fatal("hops=0: second signup with same RemoteAddr but different XFF must be capped; XFF spoofing must not mint a fresh bucket")
+	}
+}
+
