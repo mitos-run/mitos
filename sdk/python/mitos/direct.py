@@ -9,7 +9,8 @@ The headline one-liner is ``mitos.create(...)`` (aliased as
 
 Auth resolution (issue #217): the API key comes from the explicit ``api_key``
 argument, else ``MITOS_API_KEY``; the base URL from ``base_url``, else
-``MITOS_BASE_URL``, else the hosted production endpoint ``https://mitos.run``.
+``MITOS_BASE_URL``, else the hosted production API endpoint
+``https://api.mitos.run`` (the API host, not the ``mitos.run`` console origin).
 The key is sent as ``Authorization: Bearer <key>`` on every
 request and is NEVER logged or placed in an error message. The standalone
 sandbox-server runs tokenless and ignores the header today; the hosted SaaS
@@ -32,7 +33,7 @@ import base64
 import json
 import os
 import uuid
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -46,7 +47,7 @@ from mitos._runtime import (
 )
 from mitos.errors import AgentRunError, ExecutionDeadlineError
 from mitos.types import Execution, ExecResult, FileInfo, Network, Result
-from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _validate_timeout
+from mitos.sandbox import EXEC_TIMEOUT_EXIT_CODE, _normalize_command, _validate_timeout
 
 
 # Environment variables for the flat onboarding path. Explicit constructor or
@@ -101,9 +102,33 @@ def _token_from_credential_file() -> Optional[str]:
 
 # The hosted production control plane. When neither the base_url argument nor
 # MITOS_BASE_URL is set, the flat path targets the hosted endpoint so the
-# examples work without a base URL. Self-hosted or local standalone users opt
-# out by setting MITOS_BASE_URL (e.g. http://localhost:8080).
-DEFAULT_BASE_URL = "https://mitos.run"
+# examples work without a base URL. This is the API host (api.mitos.run), NOT
+# the console origin (mitos.run), which serves the single-page app and would
+# return HTML for /v1/* paths. Self-hosted or local standalone users opt out by
+# setting MITOS_BASE_URL (e.g. http://localhost:8080).
+DEFAULT_BASE_URL = "https://api.mitos.run"
+
+
+def _in_cluster_base_url() -> Optional[str]:
+    """Return the in-cluster mitos gateway URL when running inside the mitos
+    cluster, else None.
+
+    Resolution priority (issue: SDK/CLI config order): a workload running inside
+    the mitos cluster should talk to the in-cluster gateway directly rather than
+    egress to the public hosted endpoint. Kubernetes injects
+    ``MITOS_GATEWAY_SERVICE_HOST`` / ``MITOS_GATEWAY_SERVICE_PORT`` env vars into
+    every pod in the ``mitos-gateway`` Service's namespace (service-link env).
+    Their presence is a precise, mitos-specific, DNS-free signal: it is set only
+    inside the mitos control-plane namespace, so an unrelated Kubernetes cluster
+    (a customer merely holding a hosted API key) never matches and keeps using
+    the hosted endpoint. An explicit ``base_url`` / ``MITOS_BASE_URL`` still wins
+    over this so the autodetect is never a trap.
+    """
+    host = os.environ.get("MITOS_GATEWAY_SERVICE_HOST")
+    if not host:
+        return None
+    port = os.environ.get("MITOS_GATEWAY_SERVICE_PORT", "80")
+    return f"http://{host}:{port}"
 
 
 def _resolve_auth(
@@ -117,12 +142,14 @@ def _resolve_auth(
     (tokenless). The credential file is read only as the last fallback and its
     absence is never an error.
 
-    Precedence for the base URL: explicit argument, then MITOS_BASE_URL, then
-    the hosted production endpoint (DEFAULT_BASE_URL). The API key is optional
-    (the standalone server is tokenless); when present it rides on the
-    Authorization header so the hosted front door (#210) can verify it. The
-    file token is sent as-is; the gateway decides its validity. The key VALUE is
-    never logged or placed in an error message.
+    Precedence for the base URL: explicit argument, then MITOS_BASE_URL, then the
+    in-cluster mitos gateway when running inside the mitos cluster
+    (:func:`_in_cluster_base_url`), then the hosted production endpoint
+    (DEFAULT_BASE_URL). So: use the mitos env you are in first, else assume the
+    hosted service. The API key is optional (the standalone server is tokenless);
+    when present it rides on the Authorization header so the hosted front door
+    (#210) can verify it. The file token is sent as-is; the gateway decides its
+    validity. The key VALUE is never logged or placed in an error message.
     """
     if api_key is not None:
         key: Optional[str] = api_key
@@ -132,8 +159,69 @@ def _resolve_auth(
             key = _token_from_credential_file()
     url = base_url if base_url is not None else os.environ.get(ENV_BASE_URL)
     if not url:
-        url = DEFAULT_BASE_URL
+        url = _in_cluster_base_url() or DEFAULT_BASE_URL
     return key, url.rstrip("/")
+
+
+def _fork_post(
+    http: httpx.Client, url: str, json_body: dict, headers: dict
+) -> httpx.Response:
+    """POST to the fork endpoint, mapping a transport timeout to a structured,
+    LLM-legible AgentRunError instead of a raw ``httpx.ReadTimeout``.
+
+    A fork claims a warm sandbox from the pool; if the pool is exhausted or the
+    fork engine is unhealthy the request can hang until the client deadline.
+    Surfacing that as a typed ``fork_unavailable`` error with retry guidance (not
+    an opaque transport exception) is the boring-failure-behavior contract: the
+    caller can branch on the type and back off rather than parse a stack trace.
+    """
+    try:
+        return http.post(url, json=json_body, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise AgentRunError(
+            "fork did not complete before the client deadline",
+            code="fork_unavailable",
+            cause="the fork endpoint did not respond in time",
+            remediation=(
+                "Retry with backoff. A persistent timeout means the warm pool is "
+                "exhausted or the fork engine is unhealthy; reduce the fork fan-out "
+                "or raise capacity."
+            ),
+        ) from exc
+
+
+def _json(resp: httpx.Response, api_key: Optional[str] = None) -> Any:
+    """Decode a successful response body as JSON, or raise a clear AgentRunError.
+
+    A 2xx whose body is not JSON is the classic base-URL mistake: pointing the
+    SDK at the console origin (``https://mitos.run``) instead of the API host
+    (``https://api.mitos.run``) returns the single-page app HTML with a 200, and
+    a bare ``resp.json()`` then dies with an opaque ``Expecting value`` decode
+    error. This turns that into an actionable message and never leaks the key.
+    """
+    try:
+        return resp.json()
+    except ValueError as exc:
+        content_type = resp.headers.get("content-type", "")
+        looks_like_html = "html" in content_type.lower() or resp.text.lstrip()[:1] == "<"
+        where = getattr(getattr(resp, "request", None), "url", "the Mitos API")
+        cause = (
+            f"the server at {where} returned a {resp.status_code} with "
+            f"content-type {content_type!r} that is not JSON"
+        )
+        remediation = (
+            "Point the SDK at the API host, not the console. Set MITOS_BASE_URL="
+            "https://api.mitos.run (the default) rather than https://mitos.run, "
+            "which serves the web console."
+            if looks_like_html
+            else "Confirm MITOS_BASE_URL targets a Mitos API endpoint."
+        )
+        raise AgentRunError(
+            "expected a JSON response from the Mitos API",
+            code="invalid_response",
+            cause=cause,
+            remediation=remediation,
+        ) from exc
 
 
 class DirectSandboxFiles:
@@ -281,8 +369,11 @@ class DirectSandbox:
         sends the optional bearer key. The key VALUE is never logged."""
         return ConnectClient(self._http, self._server_url, self.id, self._api_key)
 
-    def exec(self, command: str, timeout: int = 30) -> ExecResult:
+    def exec(self, command: "str | list[str]", timeout: int = 30) -> ExecResult:
         """Run a command and return its aggregate result.
+
+        ``command`` is a shell command string, or an argv list (e.g.
+        ``["python", "task.py"]``) which is shell-quoted for you.
 
         Drives the Connect ``ExecStream`` server-streaming RPC (a non-interactive
         exec: the unary request fully describes the command, the reply is a
@@ -291,6 +382,7 @@ class DirectSandbox:
         reaches it. A command killed at its execution deadline reports exit 124,
         surfaced as the typed ExecutionDeadlineError (matching the cluster path).
         The public return shape is unchanged."""
+        command = _normalize_command(command)
         _validate_timeout(timeout)
         out = bytearray()
         err = bytearray()
@@ -405,7 +497,7 @@ class DirectSandbox:
             headers=self._auth_headers(),
         )
         raise_for_status(resp, token=self._api_key)
-        return int(resp.json().get("deadline_unix", 0))
+        return int(_json(resp, self._api_key).get("deadline_unix", 0))
 
     def pause(self) -> None:
         """Pause this sandbox: snapshot full state (memory + filesystem) and
@@ -451,7 +543,7 @@ class DirectSandbox:
             headers=self._auth_headers(),
         )
         raise_for_status(resp, token=self._api_key)
-        url = resp.json().get("url", "")
+        url = _json(resp, self._api_key).get("url", "")
         if not url:
             raise ValueError("server returned no preview URL")
         return url
@@ -484,13 +576,14 @@ class DirectSandbox:
             idempotency_key = uuid.uuid4().hex
         headers = self._auth_headers()
         headers["Idempotency-Key"] = idempotency_key
-        resp = self._http.post(
+        resp = _fork_post(
+            self._http,
             f"{self._server_url}/v1/fork",
-            json={"template": self.template, "id": child_id},
-            headers=headers,
+            {"template": self.template, "id": child_id},
+            headers,
         )
         raise_for_status(resp, token=self._api_key)
-        data = resp.json()
+        data = _json(resp, self._api_key)
         return DirectSandbox(
             id=data["id"],
             template=data["template_id"],
@@ -558,12 +651,12 @@ class SandboxServer:
     def health(self) -> dict:
         resp = self._http.get(f"{self.url}/v1/health", headers=self._auth_headers())
         raise_for_status(resp, token=self._api_key)
-        return resp.json()
+        return _json(resp, self._api_key)
 
     def list_templates(self) -> list[dict]:
         resp = self._http.get(f"{self.url}/v1/templates", headers=self._auth_headers())
         raise_for_status(resp, token=self._api_key)
-        return resp.json()
+        return _json(resp, self._api_key)
 
     def create_template(
         self,
@@ -601,7 +694,7 @@ class SandboxServer:
             headers=self._creating_headers(idempotency_key),
         )
         raise_for_status(resp, token=self._api_key)
-        return resp.json()
+        return _json(resp, self._api_key)
 
     def ensure_template(
         self,
@@ -646,13 +739,14 @@ class SandboxServer:
             id = f"sandbox-{uuid.uuid4().hex[:8]}"
         if idempotency_key is None:
             idempotency_key = uuid.uuid4().hex
-        resp = self._http.post(
+        resp = _fork_post(
+            self._http,
             f"{self.url}/v1/fork",
-            json={"template": template, "id": id},
-            headers=self._creating_headers(idempotency_key),
+            {"template": template, "id": id},
+            self._creating_headers(idempotency_key),
         )
         raise_for_status(resp, token=self._api_key)
-        data = resp.json()
+        data = _json(resp, self._api_key)
         return DirectSandbox(
             id=data["id"],
             template=data["template_id"],
@@ -665,7 +759,7 @@ class SandboxServer:
     def list_sandboxes(self) -> list[dict]:
         resp = self._http.get(f"{self.url}/v1/sandboxes", headers=self._auth_headers())
         raise_for_status(resp, token=self._api_key)
-        return resp.json()
+        return _json(resp, self._api_key)
 
 
 def create(

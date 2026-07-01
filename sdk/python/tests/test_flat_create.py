@@ -294,8 +294,92 @@ def test_default_base_url_is_hosted(monkeypatch):
     monkeypatch.delenv("MITOS_BASE_URL", raising=False)
     monkeypatch.delenv("MITOS_API_KEY", raising=False)
     key, url = _resolve_auth(None, None)
-    assert url == "https://mitos.run"
+    assert url == "https://api.mitos.run"
     assert key is None
+
+
+def test_in_cluster_gateway_beats_hosted_default(monkeypatch):
+    """Inside the mitos cluster (service-link env present) the base URL resolves
+    to the in-cluster gateway, not the public hosted endpoint."""
+    from mitos.direct import _resolve_auth
+
+    monkeypatch.delenv("MITOS_BASE_URL", raising=False)
+    monkeypatch.delenv("MITOS_API_KEY", raising=False)
+    monkeypatch.setenv("MITOS_GATEWAY_SERVICE_HOST", "10.96.1.2")
+    monkeypatch.setenv("MITOS_GATEWAY_SERVICE_PORT", "80")
+    _, url = _resolve_auth(None, None)
+    assert url == "http://10.96.1.2:80"
+
+
+def test_explicit_and_env_base_url_beat_in_cluster(monkeypatch):
+    """An explicit base_url or MITOS_BASE_URL always wins over in-cluster
+    autodetect, so the autodetect is never a trap."""
+    from mitos.direct import _resolve_auth
+
+    monkeypatch.setenv("MITOS_GATEWAY_SERVICE_HOST", "10.96.1.2")
+    monkeypatch.setenv("MITOS_GATEWAY_SERVICE_PORT", "80")
+    monkeypatch.setenv("MITOS_BASE_URL", "https://api.mitos.run")
+    _, url = _resolve_auth(None, None)
+    assert url == "https://api.mitos.run"
+    _, url2 = _resolve_auth(None, "http://localhost:8080")
+    assert url2 == "http://localhost:8080"
+
+
+def test_no_in_cluster_env_falls_back_to_hosted(monkeypatch):
+    """Outside the mitos cluster (no service-link env) it uses the hosted API."""
+    from mitos.direct import _resolve_auth
+
+    monkeypatch.delenv("MITOS_BASE_URL", raising=False)
+    monkeypatch.delenv("MITOS_GATEWAY_SERVICE_HOST", raising=False)
+    _, url = _resolve_auth(None, None)
+    assert url == "https://api.mitos.run"
+
+
+def test_json_guard_on_html_success_points_at_api_host():
+    """A 2xx whose body is the console SPA HTML (the classic base-URL mistake of
+    pointing at https://mitos.run instead of https://api.mitos.run) must raise a
+    clear, LLM-legible error, not an opaque JSON decode error."""
+    from mitos.direct import _json
+    from mitos.errors import AgentRunError
+
+    resp = httpx.Response(
+        200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        text="<!doctype html><html><title>Mitos console</title></html>",
+        request=httpx.Request("POST", "https://mitos.run/v1/templates"),
+    )
+    with pytest.raises(AgentRunError) as ei:
+        _json(resp)
+    err = ei.value
+    assert err.code == "invalid_response"
+    assert "api.mitos.run" in err.remediation
+
+
+def test_fork_post_maps_timeout_to_structured_error():
+    """A hung fork endpoint surfaces as a typed AgentRunError with retry
+    guidance, not a raw httpx.ReadTimeout, so callers branch on the type and back
+    off (boring failure behavior)."""
+    from mitos.direct import _fork_post
+    from mitos.errors import AgentRunError
+
+    def _hang(request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(_hang))
+    with pytest.raises(AgentRunError) as ei:
+        _fork_post(client, "https://api.mitos.run/v1/fork", {"template": "python"}, {})
+    assert ei.value.code == "fork_unavailable"
+    assert "retry" in ei.value.remediation.lower()
+
+
+def test_normalize_command_accepts_argv_list():
+    """exec(["python", "task.py"]) is shell-quoted rather than failing in the
+    wire layer, so the subprocess-style call shape just works on both paths."""
+    from mitos.sandbox import _normalize_command
+
+    assert _normalize_command("python task.py") == "python task.py"
+    assert _normalize_command(["python", "task.py"]) == "python task.py"
+    assert _normalize_command(["python", "-c", "print(1)"]) == "python -c 'print(1)'"
 
 
 def test_explicit_base_url_beats_default(monkeypatch):
@@ -672,7 +756,7 @@ async def test_async_create_resolves_auth(monkeypatch):
     # aio.create resolves via the same _resolve_auth seam; with nothing set it
     # falls back to the hosted production endpoint rather than raising.
     _, url = _resolve_auth(None, None)
-    assert url == "https://mitos.run"
+    assert url == "https://api.mitos.run"
 
 
 @pytest.mark.asyncio
