@@ -207,6 +207,109 @@ func (p *Provider) verifySignature(header string, body []byte) error {
 	return nil
 }
 
+// CheckoutURL creates a Paddle transaction for a prepaid credit top-up and
+// returns its hosted checkout URL. It POSTs to /transactions with the verified
+// Paddle body shape: a single inline price item, collection_mode automatic,
+// and custom_data carrying org_id and amount_cents for reconciliation.
+// The API key is sent as a bearer token and is never surfaced in any error.
+func (p *Provider) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error) {
+	if p.apiKey == "" {
+		return "", errors.New("paddle: checkout not configured (no API key)")
+	}
+	centsStr := strconv.FormatInt(in.AmountCents, 10)
+	type unitPrice struct {
+		Amount       string `json:"amount"`
+		CurrencyCode string `json:"currency_code"`
+	}
+	type priceQuantity struct {
+		Minimum int `json:"minimum"`
+		Maximum int `json:"maximum"`
+	}
+	type price struct {
+		ProductID   string        `json:"product_id"`
+		Description string        `json:"description"`
+		UnitPrice   unitPrice     `json:"unit_price"`
+		TaxMode     string        `json:"tax_mode"`
+		Quantity    priceQuantity `json:"quantity"`
+	}
+	type item struct {
+		Quantity int   `json:"quantity"`
+		Price    price `json:"price"`
+	}
+	type customData struct {
+		Kind        string `json:"kind"`
+		OrgID       string `json:"org_id"`
+		AmountCents string `json:"amount_cents"`
+	}
+	body := struct {
+		Items          []item     `json:"items"`
+		CollectionMode string     `json:"collection_mode"`
+		CustomerID     string     `json:"customer_id,omitempty"`
+		CustomData     customData `json:"custom_data"`
+	}{
+		Items: []item{
+			{
+				Quantity: 1,
+				Price: price{
+					ProductID:   in.ProductID,
+					Description: "Credit top-up",
+					UnitPrice: unitPrice{
+						Amount:       centsStr,
+						CurrencyCode: in.Currency,
+					},
+					TaxMode:  "account_setting",
+					Quantity: priceQuantity{Minimum: 1, Maximum: 1},
+				},
+			},
+		},
+		CollectionMode: "automatic",
+		CustomerID:     in.CustomerRef,
+		CustomData: customData{
+			Kind:        "credit_topup",
+			OrgID:       in.OrgID,
+			AmountCents: centsStr,
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("paddle: marshal checkout request: %w", err)
+	}
+	reqURL := p.baseURL + "/transactions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("paddle: build checkout request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("paddle: checkout request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("paddle: read checkout response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("paddle: checkout API returned status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			ID       string `json:"id"`
+			Checkout struct {
+				URL string `json:"url"`
+			} `json:"checkout"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", fmt.Errorf("paddle: malformed checkout response: %w", err)
+	}
+	if out.Data.Checkout.URL == "" {
+		return "", errors.New("paddle: checkout url missing; set a default payment link")
+	}
+	return out.Data.Checkout.URL, nil
+}
+
 // PortalURL returns a Paddle-hosted customer portal URL ("manage subscription")
 // for the customer, via Paddle Billing's POST
 // /customers/{id}/portal-sessions endpoint. The console deep-links to it rather

@@ -40,6 +40,24 @@ type Provider interface {
 	PortalURL(ctx context.Context, customerRef string) (string, error)
 }
 
+// TopUp carries the inputs for a prepaid credit checkout. AmountCents is the
+// integer cent amount (e.g. 5000 = EUR 50.00); it is sent to the provider as a
+// string. CustomerRef is omitted from the provider request when empty.
+type TopUp struct {
+	// CustomerRef is the provider's customer identifier (e.g. Paddle ctm_…).
+	// Omit for guest checkouts.
+	CustomerRef string
+	// OrgID is the Mitos org identifier recorded in the transaction custom data
+	// for reconciliation.
+	OrgID string
+	// AmountCents is the top-up amount in integer cents (e.g. 5000 = EUR 50.00).
+	AmountCents int64
+	// ProductID is the provider product that represents a credit top-up.
+	ProductID string
+	// Currency is the ISO 4217 currency code (e.g. "EUR").
+	Currency string
+}
+
 // CustomerResolver maps a provider customer id to the owning org. The mapping is
 // recorded when the org first subscribes.
 type CustomerResolver interface {
