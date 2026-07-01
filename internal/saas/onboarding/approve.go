@@ -71,6 +71,14 @@ func (h *approveSignupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "a valid email address is required", http.StatusBadRequest)
 		return
 	}
+	// The allowlist row is the canonical IDENTITY; the approval email is DELIVERED
+	// to the address the operator typed (normalized), so a plus-tagged inbox on a
+	// non-Gmail provider still receives it. Fall back to canonical if the delivery
+	// form somehow fails to parse (canonical already validated above).
+	delivery, ok := normalizeEmail(req.Email)
+	if !ok {
+		delivery = canonical
+	}
 
 	if err := h.allowlist.Add(r.Context(), canonical, req.Note, h.now()); err != nil {
 		h.log.Error("approve signup: add to allowlist", "err", err)
@@ -78,7 +86,7 @@ func (h *approveSignupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.email.SendApproved(r.Context(), canonical); err != nil {
+	if err := h.email.SendApproved(r.Context(), delivery); err != nil {
 		h.log.Error("approve signup: send approved email", "err", err)
 		// Generic message: no email address or token is included.
 		http.Error(w, "approval email could not be sent; the allowlist entry was recorded and you may retry", http.StatusInternalServerError)

@@ -118,8 +118,15 @@ func TestApproveSignup_Canonicalization(t *testing.T) {
 	if !ok {
 		t.Fatalf("allowlist does not contain canonical email %q", want)
 	}
-	if !em.Approved(want) {
-		t.Fatalf("SendApproved was not called with canonical email %q", want)
+	// The allowlist row is the canonical identity, but the approval email is
+	// delivered to the ORIGINAL typed address (normalized), so a plus-tagged inbox
+	// on a non-Gmail provider still receives it.
+	const delivery = "foo+x@example.com"
+	if !em.Approved(delivery) {
+		t.Fatalf("SendApproved was not called with the delivery email %q", delivery)
+	}
+	if em.Approved(want) {
+		t.Fatalf("SendApproved should deliver to the original %q, not the canonical %q", delivery, want)
 	}
 }
 

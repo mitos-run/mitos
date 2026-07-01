@@ -200,7 +200,7 @@ func validateUseCase(s string) string {
 type PendingSignup struct {
 	// ID is the pre-account signup id; it is the funnel subject until an account
 	// exists, then the account id takes over.
-	ID    string
+	ID string
 	// Email is the DELIVERY address: the original typed address after lowercasing.
 	// Verification emails are sent here so the user receives mail where they expect
 	// it. Never use this field for identity or dedup; use CanonicalEmail instead.
@@ -464,10 +464,10 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 		if err := s.pending.AddWaitlist(ctx, WaitlistEntry{Email: email, CreatedAt: now}); err != nil {
 			return SignupResult{}, fmt.Errorf("onboarding sign up: record waitlist: %w", err)
 		}
-		// The waitlist subject keys on the email hash so the analytics event carries
-		// no PII; the same hash deterministically tracks the entry without storing
-		// the address in the event stream.
-		s.events.Record(ctx, Event{Subject: hashString(email), Name: EventWaitlisted, At: now})
+		// The waitlist subject keys on the canonical identity hash so the analytics
+		// event carries no PII and folded variants of one identity map to one
+		// subject (consistent with the open-mode waitlist event).
+		s.events.Record(ctx, Event{Subject: hashString(canonical), Name: EventWaitlisted, At: now})
 		return SignupResult{Waitlisted: true}, nil
 	}
 
@@ -486,8 +486,8 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 	pendingID := s.idgen()
 	pending := PendingSignup{
 		ID:             pendingID,
-		Email:          email,          // delivery address: user receives mail here
-		CanonicalEmail: canonical,      // identity: dedup, allowlist gate, provisioning
+		Email:          email,     // delivery address: user receives mail here
+		CanonicalEmail: canonical, // identity: dedup, allowlist gate, provisioning
 		TokenHash:      hashString(rawToken),
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(s.tokenTTL),
