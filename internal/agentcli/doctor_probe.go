@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +33,9 @@ type realProbe struct {
 	// leaves them at the Linux defaults.
 	modulesPath string
 	kvmPath     string
+	// dataDirPath is forkd's --data-dir (the directory of kernelPath), the
+	// filesystem the data-dir-space check statfs's.
+	dataDirPath string
 }
 
 // DoctorProbeConfig configures the real probe.
@@ -64,6 +69,7 @@ func NewRealProbe(cfg DoctorProbeConfig) DoctorProbe {
 		kernelPath:  kp,
 		modulesPath: "/proc/modules",
 		kvmPath:     "/dev/kvm",
+		dataDirPath: filepath.Dir(kp),
 	}
 }
 
@@ -119,6 +125,19 @@ func (p *realProbe) GuestKernelStaged(context.Context) (bool, string, error) {
 	}
 	// A staged kernel is a regular, non-empty file.
 	return info.Mode().IsRegular() && info.Size() > 0, p.kernelPath, nil
+}
+
+// DataDirFree statfs's the filesystem backing forkd's data dir and returns the
+// bytes available to an unprivileged writer (Bavail, not Bfree). Off a KVM node
+// the dir usually does not exist, which statfs reports as an error; the check
+// folds that into a WARN so a workstation run is not falsely blocked.
+func (p *realProbe) DataDirFree(context.Context) (uint64, string, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(p.dataDirPath, &st); err != nil {
+		return 0, p.dataDirPath, err
+	}
+	// Bsize and Bavail widths differ across platforms; convert explicitly.
+	return uint64(st.Bavail) * uint64(st.Bsize), p.dataDirPath, nil
 }
 
 func (p *realProbe) PKISecretPresent(ctx context.Context, name string) (bool, error) {
