@@ -1,9 +1,13 @@
 // Verify page tests. Mirrors Signup.test.tsx conventions.
 // Mocks fetch (via vi.stubGlobal) so the post() helper in api.ts sees
 // a controlled response without spinning up a real server.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { Verify } from './Verify'
+
+beforeEach(() => {
+  sessionStorage.clear()
+})
 
 describe('Verify page', () => {
   it('(a) shows the API key and a Continue to console link on first-time success', async () => {
@@ -114,6 +118,33 @@ describe('Verify page', () => {
         screen.getByRole('link', { name: /continue to console/i }),
       ).toHaveAttribute('href', '/?uc=rollouts'),
     )
+    vi.unstubAllGlobals()
+  })
+
+  it('(g) successful verify with first key stashes it in sessionStorage before navigation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            accountId: 'a',
+            orgId: 'o',
+            email: 'e@x.com',
+            alreadyDone: false,
+            apiKey: 'mitos_live_abc123',
+            apiKeyId: 'k1',
+          }),
+      }),
+    )
+    render(<Verify token="t" />)
+    // Wait for the key to appear in the UI - this confirms the fetch resolved.
+    await waitFor(() =>
+      expect(screen.getByText('mitos_live_abc123')).toBeInTheDocument(),
+    )
+    // The key must be stashed in sessionStorage so the first-run can read it.
+    expect(sessionStorage.getItem('mitos.firstKey')).toBe('mitos_live_abc123')
     vi.unstubAllGlobals()
   })
 

@@ -176,6 +176,11 @@ export function Verify({ token: tokenProp }: VerifyProps) {
         if (res.alreadyDone || !res.apiKey) {
           setState({ kind: 'success-already-done', email: res.email, useCase: res.useCase })
         } else {
+          // Stash the one-time first key so the console first-run can display
+          // the masked export snippet without a second API round-trip. The raw
+          // key is a secret: it is written only to sessionStorage here and is
+          // NEVER logged or put in any error message.
+          sessionStorage.setItem('mitos.firstKey', res.apiKey)
           setState({ kind: 'success-with-key', email: res.email, apiKey: res.apiKey, useCase: res.useCase })
         }
       })
