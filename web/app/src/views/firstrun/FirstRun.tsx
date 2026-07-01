@@ -154,7 +154,7 @@ export function FirstRun({ uc }: FirstRunProps) {
       return
     }
     try {
-      await navigator.clipboard.writeText(content.snippet)
+      await navigator.clipboard.writeText(content.snippets.python)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
@@ -173,7 +173,7 @@ export function FirstRun({ uc }: FirstRunProps) {
         {/* Snippet block with copy button */}
         <div className="firstrun-snippet-block" role="region" aria-label="Runnable snippet">
           <p className="firstrun-snippet-label">Python</p>
-          <code className="firstrun-snippet-code">{content.snippet}</code>
+          <code className="firstrun-snippet-code">{content.snippets.python}</code>
           <button
             type="button"
             className="firstrun-copy-btn"
