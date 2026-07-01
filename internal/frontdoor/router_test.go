@@ -27,6 +27,9 @@ func TestDecide(t *testing.T) {
 		{"/blog", "marketing", false, false},
 		{"/blog/post-1", "marketing", false, false},
 		{"/about", "marketing", false, false},
+		// /waitlist is the public post-signup "you are on the list" marketing
+		// page; no session required.
+		{"/waitlist", "marketing", false, false},
 		{"/assets/x.js", "console", false, false},
 		{"/_astro/x.css", "marketing", false, false},
 		{"/og-image.png", "marketing", false, false},
