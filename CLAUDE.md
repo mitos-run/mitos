@@ -26,6 +26,16 @@ These outrank convenience:
 6. **Experience is DNA.** Every user-facing surface follows the journey rules:
    no dead ends, simple surface with depth one click down, intent-shaped aha.
    See docs/superpowers/specs/2026-06-27-hosted-launch-journey-design.md.
+7. **Self-host is first-class (Apache-2.0).** mitos is open source and people run
+   it themselves; the self-hosted experience is a peer of the hosted one, never an
+   afterthought to the SaaS. One console image and SPA serve both, differing ONLY
+   by the capabilities document (`GET /console/capabilities`); never fork an
+   edition build. Every hosted-only surface (self-serve signup, billing, credits
+   and top-up, the allowlist gate, Paddle, abuse email checks) MUST be
+   capability-gated so a self-hoster gets a clean, complete product: no dead links,
+   no empty billing panels, no "add credits" or signup prompts. The journey rules
+   apply to the community first-run too; it points at the SDK/CLI and a real first
+   success, never at a paywall.
 
 ## Commands
 
