@@ -218,6 +218,8 @@ export const api = {
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
+  topupUrl: (amountCents: number) =>
+    get<{ url: string }>(`/console/billing/topup?amount=${amountCents}`).then((r) => r.url),
   setSpendCap: (softCents: number, hardCents: number) =>
     post<{ org_id: string }>(
       '/console/billing/spend-cap',

@@ -1,6 +1,6 @@
 // Behavior tests for the Billing view: stat tiles, spend-cap form, ledger
-// table, and aria-live confirmation on a successful cap save.
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+// table, aria-live confirmation on a successful cap save, and add-credits UI.
+import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest'
 import { fireEvent, waitFor, screen } from '@testing-library/react'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
@@ -214,5 +214,87 @@ describe('Billing view', () => {
     })
     await renderAt('/billing', caps)
     await waitFor(() => expect(screen.getByText(/no ledger entries/i)).toBeInTheDocument())
+  })
+})
+
+// Helper: mock fetch including the topup endpoint.
+// When topupOk is false the topup endpoint returns 400 (not configured / invalid).
+function mockFetchWithTopup(topupOk = true) {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+    const url = String(input).split('?')[0]
+    const method = (init?.method ?? 'GET').toUpperCase()
+
+    if (url.endsWith('/console/capabilities')) {
+      return Promise.resolve(
+        new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
+    if (url.endsWith('/console/billing') && method === 'GET') {
+      return Promise.resolve(
+        new Response(JSON.stringify(billingPayload), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
+    if (url.endsWith('/console/billing/topup') && method === 'GET') {
+      if (!topupOk) {
+        return Promise.resolve(new Response('', { status: 400 }))
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ url: 'https://example/checkout' }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+  })
+}
+
+describe('Add credits section', () => {
+  let openSpy: MockInstance
+
+  beforeEach(() => {
+    mockFetchWithTopup()
+    openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+  })
+
+  it('renders the four preset tier buttons', async () => {
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByRole('button', { name: '$10.00' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '$25.00' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '$50.00' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '$100.00' })).toBeInTheDocument()
+  })
+
+  it('clicking the $25 preset calls topupUrl(2500) and opens the checkout url', async () => {
+    await renderAt('/billing', caps)
+    await waitFor(() => screen.getByRole('button', { name: '$25.00' }))
+    fireEvent.click(screen.getByRole('button', { name: '$25.00' }))
+    await waitFor(() => expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank'))
+  })
+
+  it('submitting a valid custom amount of 40 calls topupUrl(4000) and opens checkout', async () => {
+    await renderAt('/billing', caps)
+    const input = await waitFor(() => screen.getByLabelText(/custom amount/i))
+    fireEvent.change(input, { target: { value: '40' } })
+    fireEvent.click(screen.getByRole('button', { name: /add credits/i }))
+    await waitFor(() => expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank'))
+  })
+
+  it('shows a calm validation message and does not open checkout for an empty custom amount', async () => {
+    await renderAt('/billing', caps)
+    await waitFor(() => screen.getByRole('button', { name: /add credits/i }))
+    // submit with no amount entered (empty field -> dollarsToCents returns 0 -> blocked)
+    fireEvent.click(screen.getByRole('button', { name: /add credits/i }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/valid dollar amount/i)).toBeInTheDocument()
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows a calm error when topupUrl rejects and does not open checkout', async () => {
+    mockFetchWithTopup(false)
+    await renderAt('/billing', caps)
+    await waitFor(() => screen.getByRole('button', { name: '$10.00' }))
+    fireEvent.click(screen.getByRole('button', { name: '$10.00' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(openSpy).not.toHaveBeenCalled()
   })
 })

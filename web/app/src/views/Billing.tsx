@@ -1,6 +1,7 @@
 // Billing view: status badge, balance and spend (cents to dollars), cap info,
-// a spend-cap form (soft/hard in dollars), a ledger table (Time, Amount,
-// Reason), and a "Manage billing" button. Gated on c.billing.
+// a spend-cap form (soft/hard in dollars), an add-credits section (preset tiers
+// plus a custom amount), a ledger table (Time, Amount, Reason), and a "Manage
+// billing" button. Gated on c.billing.
 import { useState } from 'react'
 import { useBilling, useSetSpendCap } from '../data/account'
 import { api } from '../api'
@@ -24,17 +25,30 @@ function dollarsToCents(val: string): number | null {
   return Math.round(n * 100)
 }
 
+// Preset top-up tiers. Labels are derived from fmtDollars so formatting stays
+// consistent with the rest of the billing view.
+const TOPUP_TIERS: Array<{ cents: number; label: string }> = [
+  { cents: 1000, label: fmtDollars(1000) },
+  { cents: 2500, label: fmtDollars(2500) },
+  { cents: 5000, label: fmtDollars(5000) },
+  { cents: 10000, label: fmtDollars(10000) },
+]
+
 export function Billing() {
   const { data, isLoading } = useBilling()
   const setSpendCap = useSetSpendCap()
 
-  // Form state: dollar amounts the user types; API receives integer cents.
+  // Spend-cap form state: dollar amounts the user types; API receives integer cents.
   const [softDollars, setSoftDollars] = useState('')
   const [hardDollars, setHardDollars] = useState('')
   const [capSaved, setCapSaved] = useState(false)
   // capInputError is set when a field contains text that is not a valid
   // non-negative dollar amount. It is cleared when the user changes either field.
   const [capInputError, setCapInputError] = useState<string | null>(null)
+
+  // Add-credits state: the custom dollar amount field and any top-up error.
+  const [customTopUp, setCustomTopUp] = useState('')
+  const [topUpError, setTopUpError] = useState<string | null>(null)
 
   function onSpendCapSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -57,6 +71,29 @@ export function Billing() {
   async function onManageBilling() {
     const url = await api.billingPortal()
     window.open(url, '_blank')
+  }
+
+  // startTopUp opens the hosted checkout for the given integer cent amount.
+  // On failure it shows a calm inline message; it never throws out of the handler.
+  async function startTopUp(cents: number) {
+    setTopUpError(null)
+    try {
+      const url = await api.topupUrl(cents)
+      window.open(url, '_blank')
+    } catch {
+      setTopUpError('Credits checkout could not be started. Please try again.')
+    }
+  }
+
+  function onCustomTopUpSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    const cents = dollarsToCents(customTopUp)
+    // Reject null (invalid input) and 0 (empty field or literal zero).
+    if (cents === null || cents === 0) {
+      setTopUpError('Enter a valid dollar amount greater than zero.')
+      return
+    }
+    void startTopUp(cents)
   }
 
   return (
@@ -162,6 +199,49 @@ export function Billing() {
                   style={{ fontSize: 'var(--step--1)', color: 'var(--amber)' }}
                 >
                   The spend cap could not be saved. Please try again.
+                </span>
+              )}
+            </div>
+          </form>
+
+          <h2 style={{ marginBottom: 'var(--space-4)' }}>Add credits</h2>
+          <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
+            Buy prepaid credits for this org. Choose a tier or enter a custom amount.
+          </p>
+          <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-4)' }}>
+            {TOPUP_TIERS.map(({ cents, label }) => (
+              <button key={cents} className="btn" onClick={() => void startTopUp(cents)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <form onSubmit={onCustomTopUpSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 360, marginBottom: 'var(--space-6)' }}>
+            <div>
+              <label htmlFor="custom-topup-dollars" style={{ display: 'block', marginBottom: 'var(--space-1)' }}>
+                Custom amount (dollars)
+              </label>
+              <input
+                id="custom-topup-dollars"
+                type="number"
+                min={0.01}
+                step="0.01"
+                placeholder="0"
+                value={customTopUp}
+                onChange={(e) => { setCustomTopUp(e.target.value); setTopUpError(null) }}
+                style={{ width: '140px' }}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+              <button type="submit" className="btn btn-primary">
+                Add credits
+              </button>
+              {topUpError && (
+                <span
+                  role="alert"
+                  aria-live="assertive"
+                  style={{ fontSize: 'var(--step--1)', color: 'var(--amber)' }}
+                >
+                  {topUpError}
                 </span>
               )}
             </div>
