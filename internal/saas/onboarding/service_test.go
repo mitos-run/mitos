@@ -584,6 +584,24 @@ func TestAllowlistAlreadyVerifiedNotRegressed(t *testing.T) {
 	}
 }
 
+// TestFakeEmailSenderRecordsApproval asserts that SendApproved records an
+// approval and Approved returns true only for the approved email, not for others.
+func TestFakeEmailSenderRecordsApproval(t *testing.T) {
+	f := NewFakeEmailSender()
+	if f.Approved("dev@example.com") {
+		t.Fatal("no approval sent yet; Approved must return false")
+	}
+	if err := f.SendApproved(context.Background(), "dev@example.com"); err != nil {
+		t.Fatalf("send approved: %v", err)
+	}
+	if !f.Approved("dev@example.com") {
+		t.Fatal("after SendApproved, Approved must return true")
+	}
+	if f.Approved("other@example.com") {
+		t.Fatal("Approved must return false for a different email")
+	}
+}
+
 // TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
 // when a PRIOR verify attempt provisioned the account but crashed before marking
 // the pending signup verified (e.g. the credit grant or key issue errored). The

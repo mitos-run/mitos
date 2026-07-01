@@ -245,3 +245,9 @@ func (d devLogEmailSender) SendVerification(_ context.Context, _ string, _ strin
 	d.log.Info("dev email sender: verification email suppressed (configure SMTP to deliver real mail)")
 	return nil
 }
+
+func (d devLogEmailSender) SendApproved(_ context.Context, _ string) error {
+	// Never log the email; only that a send occurred.
+	d.log.Info("dev email sender: approved email suppressed (configure SMTP to deliver real mail)")
+	return nil
+}

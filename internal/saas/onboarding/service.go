@@ -71,6 +71,10 @@ type EmailSender interface {
 	// SendVerification delivers a verification message to email carrying token.
 	// Implementations must not log the raw token or store it in cleartext.
 	SendVerification(ctx context.Context, email, token string) error
+	// SendApproved tells an allowlisted user they are in and can sign in to run
+	// their first fork. It carries no secret; the email is delivered to the
+	// user's inbox and is never logged.
+	SendApproved(ctx context.Context, email string) error
 }
 
 // FakeEmailSender is the in-memory EmailSender used in tests. It captures the
@@ -78,13 +82,17 @@ type EmailSender interface {
 // for a human clicking the link. It is NOT for production: a real sender never
 // retains tokens.
 type FakeEmailSender struct {
-	mu   sync.Mutex
-	sent map[string]string // email -> last token sent
+	mu       sync.Mutex
+	sent     map[string]string // email -> last token sent
+	approved map[string]bool   // email -> approval sent
 }
 
 // NewFakeEmailSender returns an empty fake sender.
 func NewFakeEmailSender() *FakeEmailSender {
-	return &FakeEmailSender{sent: map[string]string{}}
+	return &FakeEmailSender{
+		sent:     map[string]string{},
+		approved: map[string]bool{},
+	}
 }
 
 // SendVerification records the token for email so a test can retrieve it.
@@ -95,12 +103,28 @@ func (f *FakeEmailSender) SendVerification(_ context.Context, email, token strin
 	return nil
 }
 
+// SendApproved records that an approval email was sent to email.
+func (f *FakeEmailSender) SendApproved(_ context.Context, email string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approved[email] = true
+	return nil
+}
+
 // LastToken returns the most recent token sent to email, or "" if none. This is
 // a TEST helper standing in for the user reading the email.
 func (f *FakeEmailSender) LastToken(email string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sent[email]
+}
+
+// Approved returns true when SendApproved has been called for email. This is a
+// TEST helper so A3's test can assert an approval was sent.
+func (f *FakeEmailSender) Approved(email string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approved[email]
 }
 
 // E2ETokenSink captures raw verify tokens at signup time so a QA harness can

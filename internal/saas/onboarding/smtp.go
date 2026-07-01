@@ -95,6 +95,49 @@ func (s *SMTPEmailSender) SendVerification(ctx context.Context, email, token str
 	return nil
 }
 
+// SendApproved composes the "you are in" approval email and delivers it over
+// SMTP. The recipient email is treated as PII: it is never logged and never
+// embedded in a returned error.
+func (s *SMTPEmailSender) SendApproved(ctx context.Context, email string) error {
+	signInURL := consoleOrigin(s.cfg.VerifyBaseURL)
+	msg := buildApprovedMessage(s.cfg.From, email, signInURL)
+	if err := s.dial(ctx, s.cfg, s.cfg.From, []string{email}, msg); err != nil {
+		return fmt.Errorf("smtp email sender: deliver approved: %w", err)
+	}
+	return nil
+}
+
+// consoleOrigin returns the scheme and host of rawURL (no path, no query). When
+// parsing fails it returns rawURL as-is so the caller still has a usable URL.
+func consoleOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// buildApprovedMessage composes a minimal RFC 5322 plain-text approval email.
+// The message carries no secret. Voice: plain, accessible, confident, peer of
+// the best labs. No em or en dashes.
+func buildApprovedMessage(from, to, signInURL string) []byte {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: You are in: start running forks on Mitos\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString("Your Mitos account is approved.\r\n\r\n")
+	b.WriteString("Sign in to run your first fork:\r\n\r\n")
+	b.WriteString(signInURL + "\r\n\r\n")
+	b.WriteString("Mitos gives you a persistent control plane that runs your forks, agents, and\r\n")
+	b.WriteString("automations around the clock. Everything you need is waiting in your dashboard.\r\n\r\n")
+	b.WriteString("Welcome aboard.\r\n")
+	b.WriteString("The Mitos team\r\n")
+	return []byte(b.String())
+}
+
 // verifyLink appends the token to the base URL as a query parameter, preserving
 // any existing query. The token is url-encoded.
 func verifyLink(base, token string) (string, error) {
