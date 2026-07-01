@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,7 +49,7 @@ import (
 // the new user arrives at the console already authenticated. newToken is the
 // SAME generator used by the OIDC callback; the raw token is never logged.
 // secure is the Secure cookie flag, matching the OIDC handler's value.
-func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool) {
+func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool, allowlist onboarding.Allowlist) {
 	if !caps.signupEnabled() {
 		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
 		return
@@ -60,6 +61,7 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 	opts := []onboarding.Option{
 		onboarding.WithMode(onboarding.ModeOpen),
 		onboarding.WithLogger(logger),
+		onboarding.WithAllowlist(allowlist),
 	}
 	if prov != nil {
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
@@ -106,9 +108,75 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		email,
 		opts...,
 	)
-	h := onboarding.NewHandler(svc, logger,
+
+	handlerOpts := []onboarding.HandlerOption{
 		onboarding.WithHandlerSessions(sessions, newToken, secure),
-	)
+	}
+
+	// Friendly Captcha server-side verification: both the secret and the sitekey
+	// must be set for the verifier to be active. When either is absent the
+	// handler passes through (self-host / pre-launch unaffected). The secret is
+	// never logged.
+	{
+		fcSecret := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET")
+		fcSiteKey := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY")
+		if fcSecret != "" && fcSiteKey != "" {
+			fcBaseURL := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL")
+			handlerOpts = append(handlerOpts, onboarding.WithCaptcha(
+				onboarding.NewFriendlyCaptcha(fcSecret, fcSiteKey, fcBaseURL, http.DefaultClient),
+			))
+			logger.Info("onboarding Friendly Captcha verification enabled")
+		}
+	}
+
+	if d, err := onboarding.LoadDisposable(os.Getenv("MITOS_CONSOLE_DISPOSABLE_ALLOW")); err != nil {
+		logger.Warn("disposable-domain check could not load; signup will proceed without it", "err", err.Error())
+	} else {
+		handlerOpts = append(handlerOpts, onboarding.WithDisposable(d))
+	}
+
+	// MITOS_CONSOLE_TRUSTED_PROXY_HOPS sets how many reverse proxies sit in front
+	// of the console. With 0 (the default, safe for self-hosters) X-Forwarded-For
+	// is ignored and the velocity key is the direct RemoteAddr, preventing clients
+	// from minting fresh rate-limit buckets by spoofing XFF. Set to 1 for the
+	// hosted deployment that sits behind a single gateway.
+	if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_TRUSTED_PROXY_HOPS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			if n > 0 {
+				handlerOpts = append(handlerOpts, onboarding.WithTrustedProxyHops(n))
+			}
+		} else {
+			logger.Warn("MITOS_CONSOLE_TRUSTED_PROXY_HOPS is not a valid integer; defaulting to 0 (X-Forwarded-For ignored)")
+		}
+	}
+
+	// Per-IP velocity cap: MITOS_CONSOLE_SIGNUP_IP_LIMIT (int, default 10) and
+	// MITOS_CONSOLE_SIGNUP_IP_WINDOW (duration string, default "1h"). A limit of
+	// 0 disables the cap. Malformed values fall back to safe defaults so a bad
+	// env variable never breaks all signup.
+	{
+		limit := 10
+		if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_SIGNUP_IP_LIMIT")); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				limit = n
+			} else {
+				logger.Warn("MITOS_CONSOLE_SIGNUP_IP_LIMIT is not a valid integer; defaulting to 10")
+			}
+		}
+		if limit > 0 {
+			window := time.Hour
+			if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_SIGNUP_IP_WINDOW")); s != "" {
+				if d, err := time.ParseDuration(s); err == nil {
+					window = d
+				} else {
+					logger.Warn("MITOS_CONSOLE_SIGNUP_IP_WINDOW is not a valid duration; defaulting to 1h")
+				}
+			}
+			handlerOpts = append(handlerOpts, onboarding.WithVelocity(onboarding.NewVelocity(limit, window)))
+		}
+	}
+
+	h := onboarding.NewHandler(svc, logger, handlerOpts...)
 	h.Routes(mux)
 	logger.Info("onboarding signup endpoints mounted",
 		"mode", "open",
@@ -243,5 +311,11 @@ type devLogEmailSender struct{ log *slog.Logger }
 func (d devLogEmailSender) SendVerification(_ context.Context, _ string, _ string) error {
 	// Never log the email or the token; only that a send occurred.
 	d.log.Info("dev email sender: verification email suppressed (configure SMTP to deliver real mail)")
+	return nil
+}
+
+func (d devLogEmailSender) SendApproved(_ context.Context, _ string) error {
+	// Never log the email; only that a send occurred.
+	d.log.Info("dev email sender: approved email suppressed (configure SMTP to deliver real mail)")
 	return nil
 }

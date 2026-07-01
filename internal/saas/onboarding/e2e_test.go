@@ -66,7 +66,7 @@ func getE2EToken(t *testing.T, mux *http.ServeMux, email, bearer string) *httpte
 // TestE2ESinkRecordsTokenOnSignup verifies the sink captures the raw token.
 func TestE2ESinkRecordsTokenOnSignup(t *testing.T) {
 	svc, sink := newE2EHarness(t)
-	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run"); err != nil {
+	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	tok, ok := sink.Last("qa@e2e.mitos.run")
@@ -78,7 +78,7 @@ func TestE2ESinkRecordsTokenOnSignup(t *testing.T) {
 // TestE2EHappyPath: flag+bearer+allowlisted domain -> 200 with token -> verify succeeds.
 func TestE2EHappyPath(t *testing.T) {
 	svc, sink := newE2EHarness(t)
-	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run"); err != nil {
+	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestE2ENonAllowlistedDomainReturns404(t *testing.T) {
 	svc, sink := newE2EHarness(t)
 	// Signup with an allowlisted email so the sink has a token; then attempt to
 	// fetch via a production email that is NOT on the allowlisted domain.
-	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run"); err != nil {
+	if _, err := svc.SignUp(context.Background(), "qa@e2e.mitos.run", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	mux := e2eMux(t, sink)

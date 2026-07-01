@@ -28,7 +28,7 @@ func TestPgPendingStore(t *testing.T) {
 		t.Fatalf("unknown hash: got %v, want onboarding.ErrPendingNotFound", unknownErr)
 	}
 
-	p := onboarding.PendingSignup{ID: "p1", Email: "a@b.com", TokenHash: "h1", CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)}
+	p := onboarding.PendingSignup{ID: "p1", Email: "a@b.com", TokenHash: "h1", CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour), UseCase: "rollouts"}
 	if err := s.PutPending(ctx, p); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -38,6 +38,9 @@ func TestPgPendingStore(t *testing.T) {
 	}
 	if got.Email != "a@b.com" || got.Verified {
 		t.Fatalf("got = %+v", got)
+	}
+	if got.UseCase != "rollouts" {
+		t.Fatalf("got.UseCase = %q, want %q", got.UseCase, "rollouts")
 	}
 	if err := s.MarkVerified(ctx, "h1", "acct1"); err != nil {
 		t.Fatalf("markverified: %v", err)

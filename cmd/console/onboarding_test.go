@@ -28,7 +28,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Disabled: no route. Pass nil pool to use the in-memory fallback stores.
 	muxOff := http.NewServeMux()
-	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false)
+	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false, nil)
 	roff := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	rroff := httptest.NewRecorder()
 	muxOff.ServeHTTP(rroff, roff)
@@ -38,7 +38,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Enabled: route is mounted and accepts. Pass nil pool to use the in-memory fallback stores.
 	muxOn := http.NewServeMux()
-	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
+	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 	ron := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	ron.Header.Set("Content-Type", "application/json")
 	rron := httptest.NewRecorder()
@@ -100,7 +100,7 @@ func TestE2EEndpointNotMountedWhenFlagOff(t *testing.T) {
 	newTok := func() string { return "test-session-token" }
 
 	mux := http.NewServeMux()
-	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
+	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)
 	req.Header.Set("Authorization", "Bearer any-bearer")
@@ -160,7 +160,7 @@ func TestE2EEndpointMountedWhenFlagOn(t *testing.T) {
 	newTok := func() string { return "test-session-token" }
 
 	mux := http.NewServeMux()
-	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false)
+	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 
 	// Route is mounted; wrong bearer returns 401 (not 404).
 	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)

@@ -335,9 +335,48 @@ func TestBillingReturnsOnlyCallerOrg(t *testing.T) {
 	if v.SpendCents == 0 {
 		t.Errorf("expected non-zero spend from alice usage")
 	}
-	for _, e := range v.LedgerEntries {
-		if e.OrgID != f.aliceOrg {
-			t.Errorf("ledger entry for foreign org %q leaked", e.OrgID)
+	// Alice has exactly one ledger entry (the signup credit); bob's entry must
+	// not appear here.
+	if len(v.LedgerEntries) != 1 {
+		t.Errorf("expected 1 ledger entry for alice, got %d (cross-org leak?)", len(v.LedgerEntries))
+	}
+}
+
+// TestBillingLedgerEntriesSerializeSnakeCase asserts the wire format uses
+// snake_case keys (ts, cents, reason) matching the SPA's BillingView type in
+// api.ts: { ts?: string; cents?: number; reason?: string }.
+func TestBillingLedgerEntriesSerializeSnakeCase(t *testing.T) {
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var wire struct {
+		LedgerEntries []struct {
+			Ts     string `json:"ts"`
+			Cents  int64  `json:"cents"`
+			Reason string `json:"reason"`
+		} `json:"ledger_entries"`
+	}
+	decode(t, w, &wire)
+	if len(wire.LedgerEntries) == 0 {
+		t.Fatal("expected at least one ledger entry for alice")
+	}
+	e := wire.LedgerEntries[0]
+	if e.Ts == "" {
+		t.Errorf("ledger_entries[0].ts is empty, want an RFC3339 timestamp")
+	}
+	if e.Cents != int64(billing.USD(50)) {
+		t.Errorf("ledger_entries[0].cents = %d, want %d (alice signup credit)", e.Cents, int64(billing.USD(50)))
+	}
+	if e.Reason != "signup credit" {
+		t.Errorf("ledger_entries[0].reason = %q, want %q", e.Reason, "signup credit")
+	}
+	// Confirm no PascalCase keys appear in the raw body (the pre-fix bug).
+	body := w.Body.String()
+	for _, bad := range []string{`"At"`, `"Amount"`, `"Note"`, `"OrgID"`, `"Kind"`, `"Key"`} {
+		if strings.Contains(body, bad) {
+			t.Errorf("PascalCase key %s leaked into ledger JSON; want snake_case", bad)
 		}
 	}
 }

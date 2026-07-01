@@ -84,6 +84,8 @@ export type ProjectMembership = { account_id: string; project_id: string; role: 
 export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
 export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
 
+export type FirstActivity = { active: boolean }
+
 export type DataRetentionPolicy = {
   sandbox_metadata_days: number
   logs_days: number
@@ -216,6 +218,13 @@ export const api = {
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
+  topupUrl: (amountCents: number) =>
+    get<{ url: string }>(`/console/billing/topup?amount=${amountCents}`).then((r) => r.url),
+  setSpendCap: (softCents: number, hardCents: number) =>
+    post<{ org_id: string }>(
+      '/console/billing/spend-cap',
+      { soft_cents: softCents, hard_cents: hardCents },
+    ),
   members: () => get<{ org_id: string; members: MemberView[] }>('/console/members').then((r) => r.members ?? []),
   setMemberRole: async (accountId: string, role: Role) => {
     const r = await fetch(`/console/members/${encodeURIComponent(accountId)}/role`, {
@@ -340,9 +349,17 @@ export const api = {
   },
 }
 
+export async function firstActivity(): Promise<FirstActivity> {
+  return get<FirstActivity>('/console/first-activity')
+}
+
 export function fmtBytes(n: number): string {
   if (n <= 0) return '0 B'
   const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
   return `${(n / Math.pow(1024, i)).toFixed(1)} ${u[i]}`
+}
+
+export function fmtDollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`
 }

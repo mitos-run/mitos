@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,300 @@ func TestAPIKeyNeverInErrors(t *testing.T) {
 	for _, base := range []string{bad.URL, malformed.URL, empty.URL, "http://127.0.0.1:1"} {
 		p := New(Config{APIKey: apiKey, BaseURL: base, HTTPClient: &http.Client{Timeout: time.Second}})
 		_, err := p.PortalURL(context.Background(), "ctm_42")
+		if err == nil {
+			continue
+		}
+		if strings.Contains(err.Error(), apiKey) {
+			t.Fatalf("API key leaked in error for base %s: %v", base, err)
+		}
+	}
+}
+
+// TestCheckoutURL asserts CheckoutURL POSTs a transaction to Paddle with the
+// correct bearer auth, verified request body shape, and parses the checkout URL.
+func TestCheckoutURL(t *testing.T) {
+	const apiKey = "pdl_live_checkoutkey"
+	const productID = "pro_topup"
+	const orgID = "org_abc"
+	const customerRef = "ctm_42"
+	var amountCents int64 = 5000 // EUR 50.00
+
+	var gotPath, gotMethod, gotAuth string
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"txn_x","checkout":{"url":"https://example/checkout?_ptxn=txn_x"}}}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
+	url, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+		CustomerRef: customerRef,
+		OrgID:       orgID,
+		AmountCents: amountCents,
+		ProductID:   productID,
+		Currency:    "EUR",
+	})
+	if err != nil {
+		t.Fatalf("CheckoutURL: %v", err)
+	}
+	if url != "https://example/checkout?_ptxn=txn_x" {
+		t.Fatalf("url = %q, want checkout URL", url)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/transactions" {
+		t.Fatalf("path = %q, want /transactions", gotPath)
+	}
+	if gotAuth != "Bearer "+apiKey {
+		t.Fatalf("auth = %q, want Bearer key", gotAuth)
+	}
+	// Assert the request body has the verified Paddle shape.
+	items, ok := gotBody["items"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatal("items missing or empty in request body")
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatal("items[0] is not an object")
+	}
+	price, ok := item["price"].(map[string]any)
+	if !ok {
+		t.Fatal("items[0].price is not an object")
+	}
+	if price["product_id"] != productID {
+		t.Fatalf("product_id = %v, want %q", price["product_id"], productID)
+	}
+	unitPrice, ok := price["unit_price"].(map[string]any)
+	if !ok {
+		t.Fatal("unit_price is not an object")
+	}
+	if unitPrice["amount"] != "5000" {
+		t.Fatalf("unit_price.amount = %v, want \"5000\"", unitPrice["amount"])
+	}
+	if unitPrice["currency_code"] != "EUR" {
+		t.Fatalf("currency_code = %v, want \"EUR\"", unitPrice["currency_code"])
+	}
+	customData, ok := gotBody["custom_data"].(map[string]any)
+	if !ok {
+		t.Fatal("custom_data missing in request body")
+	}
+	if customData["org_id"] != orgID {
+		t.Fatalf("custom_data.org_id = %v, want %q", customData["org_id"], orgID)
+	}
+	if customData["amount_cents"] != "5000" {
+		t.Fatalf("custom_data.amount_cents = %v, want \"5000\"", customData["amount_cents"])
+	}
+	if customData["kind"] != "credit_topup" {
+		t.Fatalf("custom_data.kind = %v, want \"credit_topup\"", customData["kind"])
+	}
+	// customer_id must be forwarded when provided.
+	if gotBody["customer_id"] != customerRef {
+		t.Fatalf("customer_id = %v, want %q", gotBody["customer_id"], customerRef)
+	}
+}
+
+// TestCheckoutURLOmitsEmptyCustomerRef asserts customer_id is absent when
+// CustomerRef is empty (guest checkout).
+func TestCheckoutURLOmitsEmptyCustomerRef(t *testing.T) {
+	const apiKey = "pdl_live_checkoutkey"
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"txn_y","checkout":{"url":"https://example/checkout?_ptxn=txn_y"}}}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
+	if _, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+		OrgID:       "org_abc",
+		AmountCents: 1000,
+		ProductID:   "pro_topup",
+		Currency:    "EUR",
+	}); err != nil {
+		t.Fatalf("CheckoutURL: %v", err)
+	}
+	if _, present := gotBody["customer_id"]; present {
+		t.Fatalf("customer_id should be absent for empty CustomerRef, got %v", gotBody["customer_id"])
+	}
+}
+
+// TestCheckoutURLNon2xx asserts a non-2xx Paddle response surfaces as a wrapped
+// error without leaking the API key.
+func TestCheckoutURLNon2xx(t *testing.T) {
+	const apiKey = "pdl_live_checkout_secret_NEVER"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"detail":"forbidden"}}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
+	_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+		OrgID:       "org_abc",
+		AmountCents: 5000,
+		ProductID:   "pro_topup",
+		Currency:    "EUR",
+	})
+	if err == nil {
+		t.Fatal("expected error for 403 response")
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("API key leaked in error: %v", err)
+	}
+}
+
+// TestCheckoutURLEmptyURL asserts an empty checkout.url in the Paddle response
+// yields a clear wrapped error with no secret leak.
+func TestCheckoutURLEmptyURL(t *testing.T) {
+	const apiKey = "pdl_live_checkout_secret_NEVER"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"txn_x","checkout":{"url":""}}}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
+	_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+		OrgID:       "org_abc",
+		AmountCents: 5000,
+		ProductID:   "pro_topup",
+		Currency:    "EUR",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty checkout URL in response")
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("API key leaked in error: %v", err)
+	}
+}
+
+// TestVerifyWebhookTopUpCredit asserts that a signed transaction.completed body
+// carrying custom_data.kind="credit_topup" produces a non-nil ev.TopUp with the
+// correct OrgID, AmountCents, and Ref, AND maps StatusActive.
+func TestVerifyWebhookTopUpCredit(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_9","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"2500"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp == nil {
+		t.Fatal("ev.TopUp is nil, want non-nil for credit_topup event")
+	}
+	if ev.TopUp.OrgID != "orgA" {
+		t.Fatalf("TopUp.OrgID = %q, want \"orgA\"", ev.TopUp.OrgID)
+	}
+	if ev.TopUp.AmountCents != 2500 {
+		t.Fatalf("TopUp.AmountCents = %d, want 2500", ev.TopUp.AmountCents)
+	}
+	if ev.TopUp.Ref != "txn_9" {
+		t.Fatalf("TopUp.Ref = %q, want \"txn_9\"", ev.TopUp.Ref)
+	}
+	// A credit top-up carries no subscription-state meaning, so it must NOT move
+	// the billing status (else buying credits could clear an org's dunning).
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit top-up must not change status)", ev.Status)
+	}
+}
+
+// TestVerifyWebhookTopUpPaidEvent asserts the transaction.paid event type also
+// yields a top-up credit (the completed/paid branch is an OR), so a provider that
+// emits paid instead of completed still credits the org.
+func TestVerifyWebhookTopUpPaidEvent(t *testing.T) {
+	body := `{"event_type":"transaction.paid","data":{"id":"txn_paid","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgB","amount_cents":"7500"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp == nil {
+		t.Fatal("ev.TopUp is nil, want non-nil for a paid credit_topup event")
+	}
+	if ev.TopUp.OrgID != "orgB" || ev.TopUp.AmountCents != 7500 || ev.TopUp.Ref != "txn_paid" {
+		t.Fatalf("TopUp = %+v, want {orgB 7500 txn_paid}", ev.TopUp)
+	}
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit top-up must not change status)", ev.Status)
+	}
+}
+
+// TestVerifyWebhookTopUpKindAbsent asserts that a transaction.completed body
+// without the credit_topup kind leaves ev.TopUp nil (normal transaction, not a
+// credit purchase) AND keeps its subscription status, so a genuine subscription
+// payment still marks the org active. Only a credit_topup transaction suppresses
+// the status.
+func TestVerifyWebhookTopUpKindAbsent(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_10","customer_id":"ctm_x"}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp != nil {
+		t.Fatalf("ev.TopUp = %+v, want nil when kind is absent", ev.TopUp)
+	}
+	if ev.Status != billing.StatusActive {
+		t.Fatalf("Status = %q, want StatusActive for a plain transaction", ev.Status)
+	}
+}
+
+// TestVerifyWebhookTopUpMalformedAmount asserts that a malformed amount_cents
+// leaves ev.TopUp nil and does NOT return a verification error (the event is
+// still acknowledged). The status is still suppressed: a malformed top-up is
+// still a credit_topup transaction, not a subscription signal, so it must not
+// move the billing status either.
+func TestVerifyWebhookTopUpMalformedAmount(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_11","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"abc"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify returned error for malformed amount: %v", err)
+	}
+	if ev.TopUp != nil {
+		t.Fatalf("ev.TopUp = %+v, want nil for malformed amount", ev.TopUp)
+	}
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit_topup transaction never changes status)", ev.Status)
+	}
+}
+
+// TestCheckoutURLKeyNeverInErrors is the secret-hygiene gate for CheckoutURL:
+// the API key must never appear in any returned error string.
+func TestCheckoutURLKeyNeverInErrors(t *testing.T) {
+	const apiKey = "pdl_live_CHECKOUT_NEVER_LOG_ME_1234567890"
+
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer malformed.Close()
+	emptyURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"id":"txn_x","checkout":{"url":""}}}`))
+	}))
+	defer emptyURL.Close()
+
+	for _, base := range []string{bad.URL, malformed.URL, emptyURL.URL, "http://127.0.0.1:1"} {
+		p := New(Config{APIKey: apiKey, BaseURL: base, HTTPClient: &http.Client{Timeout: time.Second}})
+		_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+			OrgID:       "org_abc",
+			AmountCents: 5000,
+			ProductID:   "pro_topup",
+			Currency:    "EUR",
+		})
 		if err == nil {
 			continue
 		}

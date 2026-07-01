@@ -30,17 +30,18 @@ var _ onboarding.PendingStore = (*PgPendingStore)(nil)
 // row is fully replaced so a re-issued token (new hash) replaces the old one.
 func (s *PgPendingStore) PutPending(ctx context.Context, p onboarding.PendingSignup) error {
 	const q = `
-        INSERT INTO pending_signups (id, email, token_hash, created_at, expires_at, verified, account_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO pending_signups (id, email, token_hash, created_at, expires_at, verified, account_id, use_case)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (id) DO UPDATE SET
             email      = EXCLUDED.email,
             token_hash = EXCLUDED.token_hash,
             created_at = EXCLUDED.created_at,
             expires_at = EXCLUDED.expires_at,
             verified   = EXCLUDED.verified,
-            account_id = EXCLUDED.account_id`
+            account_id = EXCLUDED.account_id,
+            use_case   = EXCLUDED.use_case`
 	_, err := s.pool.Exec(ctx, q,
-		p.ID, p.Email, p.TokenHash, p.CreatedAt, p.ExpiresAt, p.Verified, p.AccountID)
+		p.ID, p.Email, p.TokenHash, p.CreatedAt, p.ExpiresAt, p.Verified, p.AccountID, p.UseCase)
 	if err != nil {
 		return fmt.Errorf("put pending signup: %w", err)
 	}
@@ -51,12 +52,12 @@ func (s *PgPendingStore) PutPending(ctx context.Context, p onboarding.PendingSig
 // onboarding.ErrPendingNotFound when no row exists (matching MemPendingStore).
 func (s *PgPendingStore) GetPendingByTokenHash(ctx context.Context, tokenHash string) (onboarding.PendingSignup, error) {
 	const q = `
-        SELECT id, email, token_hash, created_at, expires_at, verified, account_id
+        SELECT id, email, token_hash, created_at, expires_at, verified, account_id, use_case
         FROM pending_signups
         WHERE token_hash = $1`
 	var p onboarding.PendingSignup
 	err := s.pool.QueryRow(ctx, q, tokenHash).Scan(
-		&p.ID, &p.Email, &p.TokenHash, &p.CreatedAt, &p.ExpiresAt, &p.Verified, &p.AccountID)
+		&p.ID, &p.Email, &p.TokenHash, &p.CreatedAt, &p.ExpiresAt, &p.Verified, &p.AccountID, &p.UseCase)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return onboarding.PendingSignup{}, onboarding.ErrPendingNotFound
 	}

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/mail"
 	"strings"
+	"time"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/console"
@@ -36,6 +38,50 @@ func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure 
 	}
 }
 
+// WithDisposable wires a disposable-domain blocklist into the handler. When set,
+// signUp checks the email domain before calling the service; a blocked domain
+// receives the same uniform 202 as a normal signup (no enumeration, no record
+// created, no email sent). A nil checker leaves the check disabled (self-host).
+func WithDisposable(d *Disposable) HandlerOption {
+	return func(h *Handler) {
+		h.disposable = d
+	}
+}
+
+// WithVelocity wires a per-IP sliding-window velocity cap into the handler.
+// When set, signUp checks the client IP before calling the service; an IP that
+// has exceeded the cap receives the same uniform 202 as a normal signup (no
+// enumeration, no record created, no email sent). A nil *Velocity leaves the
+// check disabled (self-host).
+func WithVelocity(v *Velocity) HandlerOption {
+	return func(h *Handler) {
+		h.velocity = v
+	}
+}
+
+// WithCaptcha wires a server-side captcha verifier into the handler. When set,
+// signUp verifies the solution field from the request before calling the
+// service. A missing or invalid solution receives the same uniform 202 as a
+// normal signup (no enumeration, no record created, no email sent). A nil
+// verifier leaves the check disabled (self-host / unconfigured).
+func WithCaptcha(c CaptchaVerifier) HandlerOption {
+	return func(h *Handler) {
+		h.captcha = c
+	}
+}
+
+// WithTrustedProxyHops sets how many reverse proxies the console trusts in
+// front of it. With 0 (the default) X-Forwarded-For is IGNORED entirely and
+// the velocity key is derived from RemoteAddr, so a client cannot spoof its
+// rate-limit bucket by sending its own X-Forwarded-For. With n >= 1 the key
+// is the XFF entry inserted by the outermost trusted hop (entries[len-n]); a
+// value the client prepends stays to the LEFT of the trusted hops and is
+// never selected. Set this to the real number of proxies in the deployment
+// (the hosted console sits behind one gateway, so it passes 1).
+func WithTrustedProxyHops(n int) HandlerOption {
+	return func(h *Handler) { h.trustedProxyHops = n }
+}
+
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
 //	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
@@ -48,11 +94,15 @@ func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure 
 // is never returned by SignUp and never logged. Verify is the only place a token
 // is accepted, and a bad / expired / used token yields a generic failure.
 type Handler struct {
-	svc      *Service
-	log      *slog.Logger
-	sessions saas.Sessions // optional; nil skips session cookie
-	newToken func() string // optional; nil skips session cookie
-	secure   bool
+	svc              *Service
+	log              *slog.Logger
+	sessions         saas.Sessions // optional; nil skips session cookie
+	newToken         func() string // optional; nil skips session cookie
+	secure           bool
+	disposable       *Disposable     // optional; nil disables the disposable-domain check
+	velocity         *Velocity       // optional; nil disables the per-IP velocity cap
+	captcha          CaptchaVerifier // optional; nil disables the captcha check (pass-through)
+	trustedProxyHops int             // 0 = ignore XFF; n >= 1 = trust n upstream proxies
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
@@ -77,12 +127,27 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /onboarding/verify", h.verify)
 }
 
+// writeAccepted writes the uniform 202 accepted response that every guarded
+// signup rejection and every normal signup must share. Byte-identical output is
+// the no-enumeration contract: callers MUST use this helper and MUST NOT inline
+// the JSON body (even with the same text, a differently ordered map may differ).
+func (h *Handler) writeAccepted(w http.ResponseWriter) {
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "accepted",
+		"message": "if that address can sign up, a verification email is on its way",
+	})
+}
+
 // signUp handles POST /onboarding/signup. It validates and normalizes the email,
-// calls the service, and ALWAYS returns the same accepted response regardless of
-// whether the email already exists, so no account enumeration is possible.
+// reads the optional use-case slug (uc), calls the service, and ALWAYS returns
+// the same accepted response regardless of whether the email already exists, so
+// no account enumeration is possible. An absent or invalid uc is silently
+// dropped to ""; it never causes a request failure.
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email string `json:"email"`
+		Email   string `json:"email"`
+		UC      string `json:"uc"`
+		Captcha string `json:"captcha"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		return // decodeJSON already wrote the error
@@ -94,10 +159,52 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.svc.SignUp(r.Context(), email)
+	// Disposable-domain guard: block known throwaway domains without revealing
+	// that a rule fired. The email and domain are never logged here.
+	if h.disposable != nil && h.disposable.Blocked(domainOf(email)) {
+		h.log.Info("onboarding signup refused", "reason", "domain")
+		h.writeAccepted(w)
+		return
+	}
+
+	// Per-IP velocity guard: silently cap mass-signup from a single source
+	// without revealing that a rate limit fired. The IP value is never logged.
+	if h.velocity != nil && !h.velocity.Allow(h.clientIP(r), time.Now()) {
+		h.log.Info("onboarding signup refused", "reason", "velocity")
+		h.writeAccepted(w)
+		return
+	}
+
+	// Captcha guard: verify the solution before hitting the service. We FAIL
+	// CLOSED only on a definitive rejection (ErrCaptchaInvalid): that returns the
+	// same uniform 202 so a bot cannot distinguish a captcha failure from a
+	// successful signup (no enumeration). Any OTHER error means verification could
+	// not be completed (the provider was down or timed out), so we FAIL OPEN and
+	// proceed, so a captcha-provider outage does not silently drop real signups
+	// (the allowlist and the other abuse controls still apply). The solution and
+	// the API key are never logged.
+	if h.captcha != nil {
+		if err := h.captcha.Verify(r.Context(), req.Captcha); err != nil {
+			if errors.Is(err, ErrCaptchaInvalid) {
+				h.log.Info("onboarding signup refused", "reason", "captcha")
+				h.writeAccepted(w)
+				return
+			}
+			h.log.Warn("onboarding signup captcha unverified; proceeding", "reason", "captcha_error")
+		}
+	}
+
+	_, err := h.svc.SignUp(r.Context(), email, req.UC)
 	// Account enumeration guard: a duplicate email (ErrConflict) returns the SAME
 	// accepted response as a fresh signup. Any OTHER error is a genuine server
 	// fault and is surfaced (without the email) so it is not silently swallowed.
+	if err != nil && errors.Is(err, ErrInvalidEmail) {
+		// Syntactically valid but not reducible to a canonical identity: silently
+		// accept with the uniform response (no record, no email, no enumeration).
+		h.log.Info("onboarding signup refused", "reason", "email")
+		h.writeAccepted(w)
+		return
+	}
 	if err != nil && !errors.Is(err, saas.ErrConflict) {
 		h.log.Error("onboarding signup", "err", err)
 		writeJSONError(w, http.StatusInternalServerError, "could not start onboarding; please try again")
@@ -105,11 +212,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("onboarding signup accepted")
 
-	// Uniform body: never leak whether a verification email was actually sent.
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"status":  "accepted",
-		"message": "if that address can sign up, a verification email is on its way",
-	})
+	h.writeAccepted(w)
 }
 
 // verify handles POST/GET /onboarding/verify. It reads the token from the JSON
@@ -152,6 +255,14 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A not-allowed email is on the waitlist: provision nothing, mint no session,
+	// return no key. The response carries only the waitlisted flag; it never leaks
+	// an account id or email (the result has none).
+	if res.Waitlisted {
+		writeJSON(w, http.StatusOK, map[string]any{"waitlisted": true})
+		return
+	}
+
 	// Mint a browser session for a freshly provisioned account so the new user
 	// lands in the console without a second sign-in. The raw token is never
 	// logged. The cookie is set before WriteHeader so the header is flushed
@@ -172,11 +283,13 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 
 	// The raw first key is shown EXACTLY ONCE here (empty on an idempotent
 	// re-verify). The account email is the caller's own, returned to confirm.
+	// useCase is always included (empty string when none was provided at signup).
 	out := map[string]any{
 		"accountId":   res.Account.ID,
 		"orgId":       res.Org.ID,
 		"email":       res.Account.Email,
 		"alreadyDone": res.AlreadyDone,
+		"useCase":     res.UseCase,
 	}
 	if res.FirstKey.RawKey != "" {
 		out["apiKey"] = res.FirstKey.RawKey
@@ -195,6 +308,66 @@ func classifyVerifyErr(err error) string {
 	default:
 		return "invalid"
 	}
+}
+
+// clientIP extracts the velocity key (client IP) from the request using a
+// trusted-hop model. The behavior is controlled by h.trustedProxyHops:
+//
+// With 0 (the default, safe for self-hosters), X-Forwarded-For is IGNORED and
+// the key is the host part of r.RemoteAddr. A client cannot spoof its bucket
+// by prepending its own X-Forwarded-For values.
+//
+// With n >= 1, the method reads X-Forwarded-For, splits on commas, and picks
+// the entry at index len(entries)-n, which is the address the outermost
+// trusted proxy recorded. Any values the client prepended lie to the left and
+// are never selected. If the computed index is negative it is clamped to 0
+// (fewer entries than trusted hops, so the leftmost real entry is the best
+// available). If XFF is empty or yields no usable entry the method falls back
+// to RemoteAddr.
+//
+// An empty string is returned when no address is derivable; the empty string
+// is its own rate-limit bucket and is never bypassed.
+func (h *Handler) clientIP(r *http.Request) string {
+	remoteHost := func() string {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			return strings.TrimSpace(r.RemoteAddr)
+		}
+		return host
+	}
+
+	if h.trustedProxyHops <= 0 {
+		// Default: ignore X-Forwarded-For entirely; use the direct connection address.
+		return remoteHost()
+	}
+
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remoteHost()
+	}
+
+	// Split and trim; drop empty entries produced by stray commas.
+	parts := strings.Split(xff, ",")
+	var entries []string
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			entries = append(entries, t)
+		}
+	}
+	if len(entries) == 0 {
+		return remoteHost()
+	}
+
+	// Pick the entry added by the outermost trusted proxy. A client's spoofed
+	// values are to the LEFT; the proxy's appended value is to the RIGHT.
+	idx := len(entries) - h.trustedProxyHops
+	if idx < 0 {
+		idx = 0
+	}
+	if v := entries[idx]; v != "" {
+		return v
+	}
+	return remoteHost()
 }
 
 // normalizeEmail trims, lowercases, and validates an email address. It returns
