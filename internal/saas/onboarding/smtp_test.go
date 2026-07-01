@@ -157,13 +157,18 @@ func TestSMTPSenderApprovedComposesHeaders(t *testing.T) {
 	if !strings.Contains(body, "From: no-reply@mitos.run") {
 		t.Fatalf("message missing From header: %q", body)
 	}
-	if !strings.Contains(body, "Subject: You are in: start running forks on Mitos") {
+	if !strings.Contains(body, "Subject: You are in: finish signing up for Mitos") {
 		t.Fatalf("message missing Subject header: %q", body)
 	}
-	// The body must contain the sign-in URL derived from the console origin
-	// (scheme + host of VerifyBaseURL, no path).
-	if !strings.Contains(body, "https://app.mitos.run") {
-		t.Fatalf("message missing sign-in URL: %q", body)
+	// The CTA must point at the sign-up page (console origin + /signup), because
+	// approval only adds the allowlist row: the user finishes by signing up again,
+	// which now passes the gate and provisions. The bare origin would be a dead end.
+	if !strings.Contains(body, "https://app.mitos.run/signup") {
+		t.Fatalf("message missing sign-up URL: %q", body)
+	}
+	// It must NOT claim the account is already provisioned (nothing is at send time).
+	if strings.Contains(body, "are ready now") {
+		t.Fatalf("approval email must not claim the account is ready before signup: %q", body)
 	}
 }
 

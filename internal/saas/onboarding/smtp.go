@@ -99,8 +99,11 @@ func (s *SMTPEmailSender) SendVerification(ctx context.Context, email, token str
 // SMTP. The recipient email is treated as PII: it is never logged and never
 // embedded in a returned error.
 func (s *SMTPEmailSender) SendApproved(ctx context.Context, email string) error {
-	signInURL := consoleOrigin(s.cfg.VerifyBaseURL)
-	msg := buildApprovedMessage(s.cfg.From, email, signInURL)
+	// Approval adds the allowlist row; it does NOT provision. The user finishes by
+	// signing up again (now past the gate), which issues a fresh verify link and
+	// provisions. So the CTA points at the sign-up page, not the console root.
+	signupURL := consoleOrigin(s.cfg.VerifyBaseURL) + "/signup"
+	msg := buildApprovedMessage(s.cfg.From, email, signupURL)
 	if err := s.dial(ctx, s.cfg, s.cfg.From, []string{email}, msg); err != nil {
 		return fmt.Errorf("smtp email sender: deliver approved: %w", err)
 	}
@@ -120,19 +123,21 @@ func consoleOrigin(rawURL string) string {
 // buildApprovedMessage composes a minimal RFC 5322 plain-text approval email.
 // The message carries no secret. Voice: plain, accessible, confident, peer of
 // the best labs. No em or en dashes.
-func buildApprovedMessage(from, to, signInURL string) []byte {
+func buildApprovedMessage(from, to, signupURL string) []byte {
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: You are in: start running forks on Mitos\r\n")
+	b.WriteString("Subject: You are in: finish signing up for Mitos\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	b.WriteString("\r\n")
 	b.WriteString("Your Mitos account is approved.\r\n\r\n")
-	b.WriteString("Sign in to run your first fork:\r\n\r\n")
-	b.WriteString(signInURL + "\r\n\r\n")
+	b.WriteString("Finish signing up to activate your account and run your first fork:\r\n\r\n")
+	b.WriteString(signupURL + "\r\n\r\n")
+	b.WriteString("Use the same email address you signed up with. We will send a link to confirm\r\n")
+	b.WriteString("your email, and then your dashboard, first fork, and API keys are ready.\r\n\r\n")
 	b.WriteString("Mitos gives you a persistent control plane that runs your forks, agents, and\r\n")
-	b.WriteString("automations around the clock. Your dashboard, first fork, and API keys are ready now.\r\n\r\n")
+	b.WriteString("automations around the clock.\r\n\r\n")
 	b.WriteString("Welcome aboard.\r\n")
 	b.WriteString("The Mitos team\r\n")
 	return []byte(b.String())
