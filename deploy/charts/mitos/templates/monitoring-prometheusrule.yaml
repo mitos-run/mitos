@@ -130,4 +130,61 @@ spec:
               is {{`{{ printf "%.1f" $value }}`}}s over 10m, sustained for 15m.
               Deficit nodes are pulling the snapshot slowly from a holder; check CAS
               bandwidth and holder load. Populated only on the multi-node path.
+{{- if .Values.canary.enabled }}
+
+    - name: mitos-canary
+      rules:
+        - alert: CanaryDown
+          # The synthetic canary's last full cycle (create, exec, verify) failed.
+          # This is the closest signal to "a real user cannot fork right now": it
+          # rides the same HostedBackend path the SDKs use.
+          expr: |
+            mitos_canary_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Synthetic canary cannot fork and exec a sandbox"
+            description: >
+              The mitos canary's last full cycle failed for 5m: create, exec, or
+              output verification did not succeed against the live gateway. A real
+              user would see fork_unavailable or a broken exec right now. Check
+              the warm pool, forkd readiness, and the gateway before customers do.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/CanaryDown.md"
+
+        - alert: CanaryStale
+          # No successful cycle for 15m even if up briefly flapped: the canary is
+          # either wedged or the path has been failing the whole window.
+          expr: |
+            time() - mitos_canary_last_success_timestamp_seconds > 900
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Synthetic canary has had no successful cycle for 15m"
+            description: >
+              The mitos canary has not completed a green cycle in over 15m. Either
+              the probe loop is wedged (the pod should have restarted; check its
+              liveness) or the sandbox path has been failing the whole window.
+              Treat as a user-facing outage until proven otherwise.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/CanaryDown.md"
+
+        - alert: CanarySandboxLeak
+          # The user path works but cleanup keeps failing: the canary is leaking
+          # sandboxes every cycle. Not user-facing, but it accumulates cost and
+          # eventually exhausts capacity.
+          expr: |
+            sum(rate(mitos_canary_probe_total{phase="terminate",result="failure"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Canary is leaking sandboxes (terminate keeps failing)"
+            description: >
+              The canary's terminate step has been failing for 30m, so every
+              cycle leaks a sandbox. The fork path still works, but leaked
+              sandboxes accumulate cost and can exhaust capacity. Check the
+              terminate/DELETE path and reap any orphaned canary sandboxes.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/CanaryDown.md"
+{{- end }}
 {{- end }}
