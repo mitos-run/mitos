@@ -36,6 +36,16 @@ func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure 
 	}
 }
 
+// WithDisposable wires a disposable-domain blocklist into the handler. When set,
+// signUp checks the email domain before calling the service; a blocked domain
+// receives the same uniform 202 as a normal signup (no enumeration, no record
+// created, no email sent). A nil checker leaves the check disabled (self-host).
+func WithDisposable(d *Disposable) HandlerOption {
+	return func(h *Handler) {
+		h.disposable = d
+	}
+}
+
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
 //	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
@@ -48,11 +58,12 @@ func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure 
 // is never returned by SignUp and never logged. Verify is the only place a token
 // is accepted, and a bad / expired / used token yields a generic failure.
 type Handler struct {
-	svc      *Service
-	log      *slog.Logger
-	sessions saas.Sessions // optional; nil skips session cookie
-	newToken func() string // optional; nil skips session cookie
-	secure   bool
+	svc        *Service
+	log        *slog.Logger
+	sessions   saas.Sessions // optional; nil skips session cookie
+	newToken   func() string // optional; nil skips session cookie
+	secure     bool
+	disposable *Disposable // optional; nil disables the disposable-domain check
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
@@ -77,6 +88,17 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /onboarding/verify", h.verify)
 }
 
+// writeAccepted writes the uniform 202 accepted response that every guarded
+// signup rejection and every normal signup must share. Byte-identical output is
+// the no-enumeration contract: callers MUST use this helper and MUST NOT inline
+// the JSON body (even with the same text, a differently ordered map may differ).
+func (h *Handler) writeAccepted(w http.ResponseWriter) {
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "accepted",
+		"message": "if that address can sign up, a verification email is on its way",
+	})
+}
+
 // signUp handles POST /onboarding/signup. It validates and normalizes the email,
 // reads the optional use-case slug (uc), calls the service, and ALWAYS returns
 // the same accepted response regardless of whether the email already exists, so
@@ -97,6 +119,14 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Disposable-domain guard: block known throwaway domains without revealing
+	// that a rule fired. The email and domain are never logged here.
+	if h.disposable != nil && h.disposable.Blocked(domainOf(email)) {
+		h.log.Info("onboarding signup refused", "reason", "domain")
+		h.writeAccepted(w)
+		return
+	}
+
 	_, err := h.svc.SignUp(r.Context(), email, req.UC)
 	// Account enumeration guard: a duplicate email (ErrConflict) returns the SAME
 	// accepted response as a fresh signup. Any OTHER error is a genuine server
@@ -108,11 +138,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("onboarding signup accepted")
 
-	// Uniform body: never leak whether a verification email was actually sent.
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"status":  "accepted",
-		"message": "if that address can sign up, a verification email is on its way",
-	})
+	h.writeAccepted(w)
 }
 
 // verify handles POST/GET /onboarding/verify. It reads the token from the JSON

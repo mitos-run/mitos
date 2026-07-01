@@ -107,9 +107,17 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		email,
 		opts...,
 	)
-	h := onboarding.NewHandler(svc, logger,
+
+	handlerOpts := []onboarding.HandlerOption{
 		onboarding.WithHandlerSessions(sessions, newToken, secure),
-	)
+	}
+	if d, err := onboarding.LoadDisposable(os.Getenv("MITOS_CONSOLE_DISPOSABLE_ALLOW")); err != nil {
+		logger.Warn("disposable-domain check could not load; signup will proceed without it", "err", err.Error())
+	} else {
+		handlerOpts = append(handlerOpts, onboarding.WithDisposable(d))
+	}
+
+	h := onboarding.NewHandler(svc, logger, handlerOpts...)
 	h.Routes(mux)
 	logger.Info("onboarding signup endpoints mounted",
 		"mode", "open",

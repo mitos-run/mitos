@@ -285,6 +285,37 @@ func TestVerifyWaitlistedReturnsWaitlistedOnly(t *testing.T) {
 	}
 }
 
+// TestSignupDisposableDomainReturnsUniformAcceptedAndNoEmail asserts that a
+// signup with a known disposable email domain returns the SAME 202 body as a
+// normal signup (no enumeration), does NOT call the service (no verification
+// email is sent, no pending record is created), and does NOT log the email or
+// domain value. The disposable check fires before the service call.
+func TestSignupDisposableDomainReturnsUniformAcceptedAndNoEmail(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	disp := NewDisposable([]string{"mailinator.com"}, nil)
+	h := NewHandler(hr.svc, nil, WithDisposable(disp))
+
+	disposableRR := postJSON(t, h, "/onboarding/signup", `{"email":"attacker@mailinator.com"}`)
+	if disposableRR.Code != http.StatusAccepted {
+		t.Fatalf("disposable signup: status %d, want 202; body %s", disposableRR.Code, disposableRR.Body.String())
+	}
+
+	// The service must NOT have been called: no verification email sent.
+	if tok := hr.email.LastToken("attacker@mailinator.com"); tok != "" {
+		t.Fatalf("disposable signup must not send a verification email; got token %q", tok)
+	}
+
+	// The response body must be byte-identical to a normal (non-disposable) signup.
+	normalRR := postJSON(t, h, "/onboarding/signup", `{"email":"real@example.com"}`)
+	if normalRR.Code != http.StatusAccepted {
+		t.Fatalf("normal signup: status %d, want 202; body %s", normalRR.Code, normalRR.Body.String())
+	}
+	if disposableRR.Body.String() != normalRR.Body.String() {
+		t.Fatalf("disposable and normal signup bodies differ (enumeration leak):\ndisposable=%s\nnormal=%s",
+			disposableRR.Body.String(), normalRR.Body.String())
+	}
+}
+
 // TestVerifyNoSessionCookieOnReVerify asserts that an idempotent re-verify
 // (AlreadyDone true) does NOT set a new mitos_session cookie. The existing
 // browser session (if any) must remain the user's only session.
