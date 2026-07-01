@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/mitos-run/mitos/compare/v1.10.0...v1.11.0) (2026-07-01)
+
+
+### Features
+
+* **console:** complete the hosted journey (first-run aha, credits, Paddle top-up), gated ([#567](https://github.com/mitos-run/mitos/issues/567)) ([dcbeff5](https://github.com/mitos-run/mitos/commit/dcbeff5e134cd426bba511a9ccb62c9569b5a886))
+* **console:** route /waitlist and show a calm not-configured add-credits state ([#569](https://github.com/mitos-run/mitos/issues/569)) ([d72f893](https://github.com/mitos-run/mitos/commit/d72f89384f0a3f48b112c42036d8fd0efbba2b7c))
+
 ## [1.10.0](https://github.com/mitos-run/mitos/compare/v1.9.0...v1.10.0) (2026-06-30)
 
 
