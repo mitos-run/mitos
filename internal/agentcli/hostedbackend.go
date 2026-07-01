@@ -8,15 +8,36 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/mcp"
 )
 
-// DefaultHostedBaseURL is the hosted production control plane. Set
-// MITOS_BASE_URL or pass --server to override.
-const DefaultHostedBaseURL = "https://mitos.run"
+// DefaultHostedBaseURL is the hosted production API endpoint. Set MITOS_BASE_URL
+// or pass --server to override. This is the API host (api.mitos.run), NOT the
+// console origin (mitos.run), which serves the web app and returns HTML for
+// /v1/* paths.
+const DefaultHostedBaseURL = "https://api.mitos.run"
+
+// inClusterBaseURL returns the in-cluster mitos gateway URL when running inside
+// the mitos cluster, else the empty string. Kubernetes injects
+// MITOS_GATEWAY_SERVICE_HOST / MITOS_GATEWAY_SERVICE_PORT into every pod in the
+// mitos-gateway Service's namespace, a precise DNS-free signal that we are in
+// the mitos control plane; an unrelated cluster with only a hosted API key never
+// matches and keeps using the hosted endpoint.
+func inClusterBaseURL() string {
+	host := os.Getenv("MITOS_GATEWAY_SERVICE_HOST")
+	if host == "" {
+		return ""
+	}
+	port := os.Getenv("MITOS_GATEWAY_SERVICE_PORT")
+	if port == "" {
+		port = "80"
+	}
+	return "http://" + host + ":" + port
+}
 
 // HostedBackend implements Backend against the mitos.run hosted gateway (or a
 // compatible standalone sandbox-server) via the /v1 REST API and the Connect
@@ -39,8 +60,8 @@ const DefaultHostedBaseURL = "https://mitos.run"
 // the running sandbox. That live-fork capability requires the cluster backend
 // (source.fromSandbox on a KVM node).
 type HostedBackend struct {
-	baseURL string        // trailing slash stripped; set once at construction
-	apiKey  string        // bearer token; NEVER logged or placed in errors
+	baseURL string           // trailing slash stripped; set once at construction
+	apiKey  string           // bearer token; NEVER logged or placed in errors
 	hb      *mcp.HTTPBackend // covers exec / read_file / write_file / fork / terminate
 	client  *http.Client
 }
@@ -51,6 +72,11 @@ type HostedBackend struct {
 func NewHostedBackend(baseURL, apiKey string, httpClient *http.Client) *HostedBackend {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
+	}
+	if baseURL == "" {
+		// No explicit --server / MITOS_BASE_URL: prefer the in-cluster gateway
+		// when running inside the mitos cluster, else the hosted endpoint.
+		baseURL = inClusterBaseURL()
 	}
 	if baseURL == "" {
 		baseURL = DefaultHostedBaseURL

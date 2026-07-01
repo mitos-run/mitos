@@ -16,16 +16,20 @@ The PyPI distribution is named `mitos-run`, but the import package stays
 import mitos
 
 # Set MITOS_API_KEY (get a key from https://mitos.run). The base URL defaults to
-# the hosted production endpoint https://mitos.run, so no base URL is needed.
+# the hosted production API endpoint https://api.mitos.run, so no base URL is
+# needed. (That is the API host; https://mitos.run itself serves the console.)
 sb = mitos.create("python")                 # Ready sandbox handle
-print(sb.run_code("print(1 + 1)").text)     # 2
+print(sb.exec("echo hello").stdout)         # hello
 sb.terminate()
 ```
 
 That is the whole thing: one `pip install mitos-run`, one import, one `create`, code
-execution, no second SDK to install. `mitos.create(image, api_key=..., base_url=...)`
+execution, no second SDK to install. The stateful code interpreter
+(`sb.run_code(...)`) hangs off the same handle; it is fail-closed
+`KernelUnavailable` until the code-interpreter kernel ships in the hosted base
+image, so the first-run snippet above uses `exec`, which is always available. `mitos.create(image, api_key=..., base_url=...)`
 resolves the API key (argument, else `MITOS_API_KEY`) and the base URL (argument,
-else `MITOS_BASE_URL`, else the hosted endpoint `https://mitos.run`), then returns
+else `MITOS_BASE_URL`, else the hosted API endpoint `https://api.mitos.run`), then returns
 a sandbox handle that exposes `exec`, `run_code`, `files`, `fork`, and `terminate`
 directly. The API key value is never logged. `Sandbox.create(...)` is an alias for
 the same call.
@@ -100,7 +104,7 @@ The api key value is never logged or echoed in any error. Pass `--api-key` and
 `--server` inline to override the environment:
 
 ```bash
-mitos --api-key sk-... --server https://mitos.run sandbox ls
+mitos --api-key sk-... --server https://api.mitos.run sandbox ls
 ```
 
 Workspace verbs (`mitos ws *`) and template build/push require a Kubernetes
