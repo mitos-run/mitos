@@ -2,6 +2,7 @@ package billingprovider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,19 @@ import (
 
 	"mitos.run/mitos/internal/saas/billing"
 )
+
+// errLedger is a CreditLedger whose Append fails with a non-duplicate error. It
+// exercises the webhook's 500 path: a transient ledger failure on a cleared
+// payment must make the provider retry, never ack a credit that did not land.
+type errLedger struct{}
+
+func (errLedger) Append(context.Context, billing.LedgerEntry) error {
+	return errors.New("ledger unavailable")
+}
+func (errLedger) Balance(context.Context, string) (billing.Money, error) { return 0, nil }
+func (errLedger) Entries(context.Context, string) ([]billing.LedgerEntry, error) {
+	return nil, nil
+}
 
 // handleTopUp builds a WebhookHandler with the given provider and ledger, POSTs
 // an empty body, and returns the response recorder.
@@ -107,6 +121,17 @@ func TestWebhookTopUpEmptyOrgSkipped(t *testing.T) {
 	}
 	if bal != 0 {
 		t.Fatalf("balance = %d after empty-org top-up, want 0", bal)
+	}
+}
+
+// TestWebhookTopUpLedgerErrorIs500 asserts a non-duplicate ledger error on the
+// credit path returns 500, so the provider retries the delivery rather than
+// treating a failed credit as acknowledged. ErrDuplicateEntry stays 200 (see the
+// idempotency test); any OTHER error must not be swallowed.
+func TestWebhookTopUpLedgerErrorIs500(t *testing.T) {
+	w := handleTopUp(t, topUpProvider("org1", 5000, "txn_err"), errLedger{}, fixedNow())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 on ledger error", w.Code)
 	}
 }
 

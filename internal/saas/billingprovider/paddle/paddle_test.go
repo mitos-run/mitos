@@ -465,6 +465,26 @@ func TestVerifyWebhookTopUpCredit(t *testing.T) {
 	}
 }
 
+// TestVerifyWebhookTopUpPaidEvent asserts the transaction.paid event type also
+// yields a top-up credit (the completed/paid branch is an OR), so a provider that
+// emits paid instead of completed still credits the org.
+func TestVerifyWebhookTopUpPaidEvent(t *testing.T) {
+	body := `{"event_type":"transaction.paid","data":{"id":"txn_paid","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgB","amount_cents":"7500"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp == nil {
+		t.Fatal("ev.TopUp is nil, want non-nil for a paid credit_topup event")
+	}
+	if ev.TopUp.OrgID != "orgB" || ev.TopUp.AmountCents != 7500 || ev.TopUp.Ref != "txn_paid" {
+		t.Fatalf("TopUp = %+v, want {orgB 7500 txn_paid}", ev.TopUp)
+	}
+	if ev.Status != billing.StatusActive {
+		t.Fatalf("Status = %q, want StatusActive", ev.Status)
+	}
+}
+
 // TestVerifyWebhookTopUpKindAbsent asserts that a transaction.completed body
 // without the credit_topup kind leaves ev.TopUp nil (normal transaction, not a
 // credit purchase).
