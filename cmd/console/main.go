@@ -106,6 +106,16 @@ func main() {
 		sessionStore = saas.NewSessionStore()
 	}
 
+	// spendCapStore is the durable per-org spend-cap store when Postgres is
+	// configured, in-memory otherwise. This closes the money-safety gap where a
+	// redeploy silently dropped every configured cap.
+	var spendCapStore billing.SpendCapStore
+	if pool != nil {
+		spendCapStore = pgstore.NewPgSpendCapStore(pool)
+	} else {
+		spendCapStore = billing.NewMemSpendCapStore()
+	}
+
 	con := console.New(console.Deps{
 		Accounts: accounts,
 		// The usage store the console reads: the controller's internal usage API
@@ -118,7 +128,7 @@ func main() {
 		Billing: console.BillingReader{
 			Ledger: creditLedger,
 			Status: statusStore,
-			Caps:   billing.NewMemSpendCapStore(),
+			Caps:   spendCapStore,
 			Rates:  billing.DefaultRates(),
 		},
 		// The active secret backend selected from config (kube / openbao), falling
