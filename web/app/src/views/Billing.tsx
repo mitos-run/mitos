@@ -46,9 +46,12 @@ export function Billing() {
   // non-negative dollar amount. It is cleared when the user changes either field.
   const [capInputError, setCapInputError] = useState<string | null>(null)
 
-  // Add-credits state: the custom dollar amount field and any top-up error.
+  // Add-credits state: the custom dollar amount field, any top-up error, and
+  // a pending flag that disables all top-up controls while a checkout call is
+  // in-flight to prevent double-submit.
   const [customTopUp, setCustomTopUp] = useState('')
   const [topUpError, setTopUpError] = useState<string | null>(null)
+  const [topUpPending, setTopUpPending] = useState(false)
 
   function onSpendCapSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -74,14 +77,19 @@ export function Billing() {
   }
 
   // startTopUp opens the hosted checkout for the given integer cent amount.
-  // On failure it shows a calm inline message; it never throws out of the handler.
+  // Guards against double-submit by returning early when a call is already in
+  // flight. On failure it shows a calm inline message; never throws.
   async function startTopUp(cents: number) {
+    if (topUpPending) return
+    setTopUpPending(true)
     setTopUpError(null)
     try {
       const url = await api.topupUrl(cents)
       window.open(url, '_blank')
     } catch {
       setTopUpError('Credits checkout could not be started. Please try again.')
+    } finally {
+      setTopUpPending(false)
     }
   }
 
@@ -208,9 +216,19 @@ export function Billing() {
           <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
             Buy prepaid credits for this org. Choose a tier or enter a custom amount.
           </p>
+          {/* Single shared aria-live region for all top-up errors (preset and custom). */}
+          {topUpError && (
+            <span
+              role="alert"
+              aria-live="assertive"
+              style={{ display: 'block', fontSize: 'var(--step--1)', color: 'var(--amber)', marginBottom: 'var(--space-3)' }}
+            >
+              {topUpError}
+            </span>
+          )}
           <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-4)' }}>
             {TOPUP_TIERS.map(({ cents, label }) => (
-              <button key={cents} className="btn" onClick={() => void startTopUp(cents)}>
+              <button key={cents} className="btn" disabled={topUpPending} onClick={() => void startTopUp(cents)}>
                 {label}
               </button>
             ))}
@@ -232,18 +250,9 @@ export function Billing() {
               />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-              <button type="submit" className="btn btn-primary">
+              <button type="submit" className="btn btn-primary" disabled={topUpPending}>
                 Add credits
               </button>
-              {topUpError && (
-                <span
-                  role="alert"
-                  aria-live="assertive"
-                  style={{ fontSize: 'var(--step--1)', color: 'var(--amber)' }}
-                >
-                  {topUpError}
-                </span>
-              )}
             </div>
           </form>
 

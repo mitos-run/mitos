@@ -3,7 +3,7 @@
 import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest'
 import { fireEvent, waitFor, screen } from '@testing-library/react'
 import { renderAt } from '../test/utils'
-import type { Capabilities } from '../api'
+import { api, type Capabilities } from '../api'
 
 const caps: Capabilities = {
   edition: 'hosted',
@@ -217,42 +217,15 @@ describe('Billing view', () => {
   })
 })
 
-// Helper: mock fetch including the topup endpoint.
-// When topupOk is false the topup endpoint returns 400 (not configured / invalid).
-function mockFetchWithTopup(topupOk = true) {
-  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
-    const url = String(input).split('?')[0]
-    const method = (init?.method ?? 'GET').toUpperCase()
-
-    if (url.endsWith('/console/capabilities')) {
-      return Promise.resolve(
-        new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }),
-      )
-    }
-    if (url.endsWith('/console/billing') && method === 'GET') {
-      return Promise.resolve(
-        new Response(JSON.stringify(billingPayload), { status: 200, headers: { 'content-type': 'application/json' } }),
-      )
-    }
-    if (url.endsWith('/console/billing/topup') && method === 'GET') {
-      if (!topupOk) {
-        return Promise.resolve(new Response('', { status: 400 }))
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({ url: 'https://example/checkout' }), { status: 200, headers: { 'content-type': 'application/json' } }),
-      )
-    }
-    return Promise.resolve(
-      new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }),
-    )
-  })
-}
-
 describe('Add credits section', () => {
   let openSpy: MockInstance
+  let topupSpy: MockInstance
 
   beforeEach(() => {
-    mockFetchWithTopup()
+    // The global beforeEach already sets up mockFetch() for capabilities + billing.
+    // Spy on api.topupUrl directly so tests can assert exact cent amounts and
+    // control promise resolution without depending on the fetch query string.
+    topupSpy = vi.spyOn(api, 'topupUrl').mockResolvedValue('https://example/checkout')
     openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
   })
 
@@ -268,7 +241,8 @@ describe('Add credits section', () => {
     await renderAt('/billing', caps)
     await waitFor(() => screen.getByRole('button', { name: '$25.00' }))
     fireEvent.click(screen.getByRole('button', { name: '$25.00' }))
-    await waitFor(() => expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank'))
+    await waitFor(() => expect(topupSpy).toHaveBeenCalledWith(2500))
+    expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank')
   })
 
   it('submitting a valid custom amount of 40 calls topupUrl(4000) and opens checkout', async () => {
@@ -276,25 +250,70 @@ describe('Add credits section', () => {
     const input = await waitFor(() => screen.getByLabelText(/custom amount/i))
     fireEvent.change(input, { target: { value: '40' } })
     fireEvent.click(screen.getByRole('button', { name: /add credits/i }))
-    await waitFor(() => expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank'))
+    await waitFor(() => expect(topupSpy).toHaveBeenCalledWith(4000))
+    expect(openSpy).toHaveBeenCalledWith('https://example/checkout', '_blank')
   })
 
   it('shows a calm validation message and does not open checkout for an empty custom amount', async () => {
     await renderAt('/billing', caps)
     await waitFor(() => screen.getByRole('button', { name: /add credits/i }))
-    // submit with no amount entered (empty field -> dollarsToCents returns 0 -> blocked)
+    // Submit with no amount entered (empty field -> dollarsToCents returns 0 -> blocked).
     fireEvent.click(screen.getByRole('button', { name: /add credits/i }))
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
     expect(screen.getByText(/valid dollar amount/i)).toBeInTheDocument()
+    expect(topupSpy).not.toHaveBeenCalled()
     expect(openSpy).not.toHaveBeenCalled()
   })
 
   it('shows a calm error when topupUrl rejects and does not open checkout', async () => {
-    mockFetchWithTopup(false)
+    topupSpy.mockRejectedValue(new Error('checkout unavailable'))
     await renderAt('/billing', caps)
     await waitFor(() => screen.getByRole('button', { name: '$10.00' }))
     fireEvent.click(screen.getByRole('button', { name: '$10.00' }))
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  // Fix 2: a second click while the first topupUrl call is still in-flight must not
+  // fire a second call. The component sets disabled=true on all top-up controls for
+  // the duration of the async call.
+  it('a second click while topupUrl is in-flight does not fire a second call', async () => {
+    let resolveTopup!: (url: string) => void
+    const pendingPromise = new Promise<string>((resolve) => { resolveTopup = resolve })
+    topupSpy.mockReturnValueOnce(pendingPromise)
+
+    await renderAt('/billing', caps)
+    const btn = await waitFor(() => screen.getByRole('button', { name: '$25.00' }))
+
+    // First click starts the pending call.
+    fireEvent.click(btn)
+
+    // Wait for the button to become disabled while the call is in-flight.
+    await waitFor(() => expect(btn).toBeDisabled())
+
+    // Second click on the now-disabled button must not trigger another call.
+    fireEvent.click(btn)
+
+    // Resolve the first call and confirm topupUrl was only called once.
+    resolveTopup('https://example/checkout')
+    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1))
+    expect(topupSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // Fix 3: a non-empty but invalid custom amount (negative, which is the JSDOM-
+  // testable proxy for non-numeric input like "abc" that type="number" sanitizes
+  // to "" in jsdom) must block submission and show the calm validation message.
+  // This exercises the dollarsToCents null path (n < 0 returns null).
+  it('entering an invalid non-empty custom amount does not call topupUrl and shows a calm message', async () => {
+    await renderAt('/billing', caps)
+    const input = await waitFor(() => screen.getByLabelText(/custom amount/i))
+    // Use -5 to exercise dollarsToCents null path; JSDOM sanitizes "abc" to ""
+    // for type="number" inputs (see spend-cap validation test for the same pattern).
+    fireEvent.change(input, { target: { value: '-5' } })
+    fireEvent.click(screen.getByRole('button', { name: /add credits/i }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/valid dollar amount/i)).toBeInTheDocument()
+    expect(topupSpy).not.toHaveBeenCalled()
     expect(openSpy).not.toHaveBeenCalled()
   })
 })
