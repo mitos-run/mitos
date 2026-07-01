@@ -55,7 +55,8 @@ type Deps struct {
 	Portal      PortalLinker
 	// TopUp is the prepaid credit checkout seam. It starts a hosted checkout
 	// session and returns the URL for the provider's payment page. Defaults to
-	// noTopUp (the endpoint returns 404) when billing is not configured.
+	// noTopUp{} when billing is not configured; with an empty TopUpProductID the
+	// endpoint returns 400 (top-up not configured) before the seam is called.
 	TopUp TopUpLinker
 	// TopUpProductID is the billing provider product that represents a credit
 	// top-up. Empty means top-up is not enabled; the endpoint returns 400.

@@ -64,7 +64,7 @@ func (c *Console) handleBillingTopUp(w http.ResponseWriter, r *http.Request) {
 		ProductID:   c.deps.TopUpProductID,
 		Currency:    c.deps.TopUpCurrency,
 	})
-	if err != nil {
+	if err != nil || checkoutURL == "" {
 		if errors.Is(err, ErrNotFound) {
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
 				WithCause("no billing customer is linked to this organization"))

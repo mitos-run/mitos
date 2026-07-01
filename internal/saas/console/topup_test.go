@@ -127,6 +127,19 @@ func TestTopUpAtCeilingIs200(t *testing.T) {
 	}
 }
 
+// TestTopUpEmptyCheckoutURLIs500 asserts that a provider returning an empty url
+// with no error is treated as a failure (mirrors the portal handler guard),
+// never surfaced to the client as a 200 with a blank url.
+func TestTopUpEmptyCheckoutURLIs500(t *testing.T) {
+	f := newFixture(t)
+	stub := &stubTopUp{wantOrg: f.aliceOrg, url: ""}
+	f.con = New(Deps{Accounts: f.accounts, TopUp: stub, TopUpProductID: testTopUpProductID, TopUpCurrency: testTopUpCurrency})
+	w := f.req(t, "GET", "/console/billing/topup?amount=2500", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("empty checkout url status = %d, want 500", w.Code)
+	}
+}
+
 // TestTopUpEmptyProductIDIs400 asserts that when the top-up product id is not
 // configured, the endpoint returns 400 rather than attempting a checkout.
 func TestTopUpEmptyProductIDIs400(t *testing.T) {
