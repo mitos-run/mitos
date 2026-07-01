@@ -148,6 +148,26 @@ describe('Verify page', () => {
     vi.unstubAllGlobals()
   })
 
+  it('(h) waitlisted response shows on-the-list heading, docs link, back affordance, and does not write mitos.firstKey', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ waitlisted: true }),
+      }),
+    )
+    render(<Verify token="t" />)
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /you are on the list/i })).toBeInTheDocument(),
+    )
+    expect(screen.getByRole('link', { name: /docs/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /back to sign in/i })).toBeInTheDocument()
+    expect(screen.queryByText(/mitos_live/)).not.toBeInTheDocument()
+    expect(sessionStorage.getItem('mitos.firstKey')).toBeNull()
+    vi.unstubAllGlobals()
+  })
+
   it('(c) shows invalid-link message and /signup link on 400 error', async () => {
     vi.stubGlobal(
       'fetch',

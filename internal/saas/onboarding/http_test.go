@@ -236,6 +236,55 @@ func TestVerifyResponseIncludesUseCase(t *testing.T) {
 	}
 }
 
+// TestVerifyWaitlistedReturnsWaitlistedOnly asserts that when an allowlist is
+// configured and the signup email is not on it, the verify endpoint returns 200
+// with {"waitlisted": true}, sets no session cookie, and leaks no account id,
+// org id, or api key. A sessions-enabled handler is used so the no-cookie
+// assertion is meaningful even when the session path is wired.
+func TestVerifyWaitlistedReturnsWaitlistedOnly(t *testing.T) {
+	sessions := saas.NewSessionStore()
+	tok := 0
+	newTok := func() string {
+		tok++
+		return fmt.Sprintf("sess-%d", tok)
+	}
+
+	// Empty allowlist: no auto-allow domains, no rows -> all emails are denied.
+	al := NewMemAllowlist(nil)
+	hr := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+	h := NewHandler(hr.svc, nil, WithHandlerSessions(sessions, newTok, false))
+
+	postJSON(t, h, "/onboarding/signup", `{"email":"waitlisted@example.com"}`)
+	verifyTok := hr.email.LastToken("waitlisted@example.com")
+	if verifyTok == "" {
+		t.Fatal("no verification token for waitlisted email")
+	}
+
+	rr := postJSON(t, h, "/onboarding/verify", `{"token":"`+verifyTok+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body %s", rr.Code, rr.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["waitlisted"] != true {
+		t.Fatalf("waitlisted = %v, want true; body: %s", out["waitlisted"], rr.Body.String())
+	}
+	if _, ok := out["accountId"]; ok {
+		t.Fatalf("waitlisted response must not include accountId, got %v", out)
+	}
+	if _, ok := out["apiKey"]; ok {
+		t.Fatalf("waitlisted response must not include apiKey, got %v", out)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "mitos_session" {
+			t.Fatal("waitlisted verify must not set a session cookie")
+		}
+	}
+}
+
 // TestVerifyNoSessionCookieOnReVerify asserts that an idempotent re-verify
 // (AlreadyDone true) does NOT set a new mitos_session cookie. The existing
 // browser session (if any) must remain the user's only session.

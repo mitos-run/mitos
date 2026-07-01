@@ -155,6 +155,14 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A not-allowed email is on the waitlist: provision nothing, mint no session,
+	// return no key. The response carries only the waitlisted flag; it never leaks
+	// an account id or email (the result has none).
+	if res.Waitlisted {
+		writeJSON(w, http.StatusOK, map[string]any{"waitlisted": true})
+		return
+	}
+
 	// Mint a browser session for a freshly provisioned account so the new user
 	// lands in the console without a second sign-in. The raw token is never
 	// logged. The cookie is set before WriteHeader so the header is flushed
