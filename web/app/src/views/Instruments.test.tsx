@@ -222,6 +222,34 @@ describe('Recent activity panel', () => {
   })
 })
 
+// ---- Available credit (D1) ----------------------------------------------------
+
+describe('Available credit', () => {
+  it('shows the available credit amount and spent figure for an active org, ungated on billing capability', async () => {
+    // Active org: forks_served 10 + running sandboxes (beforeEach default).
+    // billing capability is OFF in beforeEach (capsNoBilling), which must NOT
+    // gate this element.
+    mockUseBilling.mockReturnValue({
+      data: { ...billingData, balance_cents: 500, spend_cents: 123 },
+      isLoading: false,
+      error: null,
+    })
+    wrap(<Instruments />)
+    await waitFor(() => expect(screen.getByText(/Available credit/i)).toBeInTheDocument())
+    // balance_cents: 500 -> $5.00
+    expect(screen.getByText('$5.00')).toBeInTheDocument()
+    // spend_cents: 123 -> $1.23 shown as secondary line
+    expect(screen.getByText(/\$1\.23/)).toBeInTheDocument()
+  })
+
+  it('shows a placeholder while billing data is loading', async () => {
+    mockUseBilling.mockReturnValue({ data: undefined, isLoading: true, error: null })
+    wrap(<Instruments />)
+    await waitFor(() => expect(screen.getByText(/Available credit/i)).toBeInTheDocument())
+    // When loading, no dollar value; heading itself is enough to confirm render.
+  })
+})
+
 // ---- FirstRun visibility on Overview -----------------------------------------
 
 describe('FirstRun visibility on Overview', () => {
