@@ -141,8 +141,12 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 	// from minting fresh rate-limit buckets by spoofing XFF. Set to 1 for the
 	// hosted deployment that sits behind a single gateway.
 	if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_TRUSTED_PROXY_HOPS")); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			handlerOpts = append(handlerOpts, onboarding.WithTrustedProxyHops(n))
+		if n, err := strconv.Atoi(s); err == nil {
+			if n > 0 {
+				handlerOpts = append(handlerOpts, onboarding.WithTrustedProxyHops(n))
+			}
+		} else {
+			logger.Warn("MITOS_CONSOLE_TRUSTED_PROXY_HOPS is not a valid integer; defaulting to 0 (X-Forwarded-For ignored)")
 		}
 	}
 
