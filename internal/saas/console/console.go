@@ -53,6 +53,16 @@ type Deps struct {
 	ForkTree    ForkTreeSource
 	Projects    ProjectStore
 	Portal      PortalLinker
+	// TopUp is the prepaid credit checkout seam. It starts a hosted checkout
+	// session and returns the URL for the provider's payment page. Defaults to
+	// noTopUp (the endpoint returns 404) when billing is not configured.
+	TopUp TopUpLinker
+	// TopUpProductID is the billing provider product that represents a credit
+	// top-up. Empty means top-up is not enabled; the endpoint returns 400.
+	TopUpProductID string
+	// TopUpCurrency is the ISO 4217 currency code for top-up transactions.
+	// Defaults to "EUR" when billing is configured.
+	TopUpCurrency string
 	// Retention is the per-org audit-retention policy seam. It stores and
 	// exposes the retention window in days for each org; the GC sweep that
 	// enforces the policy runs in the controller (issue #163). Defaults to the
@@ -135,6 +145,12 @@ func New(deps Deps) *Console {
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
 	}
+	if deps.TopUp == nil {
+		deps.TopUp = noTopUp{}
+	}
+	if deps.TopUpCurrency == "" {
+		deps.TopUpCurrency = "EUR"
+	}
 	if deps.Retention == nil {
 		deps.Retention = NewMemRetentionStore()
 	}
@@ -202,6 +218,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/billing", c.handleBilling)
 	mux.HandleFunc("POST /console/billing/spend-cap", c.handleSetSpendCap)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
+	mux.HandleFunc("GET /console/billing/topup", c.handleBillingTopUp)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
