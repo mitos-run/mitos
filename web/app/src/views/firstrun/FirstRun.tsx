@@ -98,7 +98,6 @@ const styles = `
   color: var(--cyan);
   font-size: var(--step-0);
   margin-left: auto;
-  aria-hidden: true;
 }
 /* Key block */
 .firstrun-key-block {

@@ -457,13 +457,13 @@ type ledgerEntryView struct {
 // ledger entries (the closest thing to invoices in this slice; real Stripe
 // invoices are a documented follow-up).
 type BillingView struct {
-	OrgID         string              `json:"org_id"`
+	OrgID         string                `json:"org_id"`
 	Status        billing.BillingStatus `json:"status"`
-	BalanceCents  int64               `json:"balance_cents"`
-	SpendCents    int64               `json:"spend_cents"`
-	SoftCapCents  int64               `json:"soft_cap_cents"`
-	HardCapCents  int64               `json:"hard_cap_cents"`
-	LedgerEntries []ledgerEntryView   `json:"ledger_entries"`
+	BalanceCents  int64                 `json:"balance_cents"`
+	SpendCents    int64                 `json:"spend_cents"`
+	SoftCapCents  int64                 `json:"soft_cap_cents"`
+	HardCapCents  int64                 `json:"hard_cap_cents"`
+	LedgerEntries []ledgerEntryView     `json:"ledger_entries"`
 }
 
 func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
