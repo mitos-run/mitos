@@ -198,6 +198,13 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	// Account enumeration guard: a duplicate email (ErrConflict) returns the SAME
 	// accepted response as a fresh signup. Any OTHER error is a genuine server
 	// fault and is surfaced (without the email) so it is not silently swallowed.
+	if err != nil && errors.Is(err, ErrInvalidEmail) {
+		// Syntactically valid but not reducible to a canonical identity: silently
+		// accept with the uniform response (no record, no email, no enumeration).
+		h.log.Info("onboarding signup refused", "reason", "email")
+		h.writeAccepted(w)
+		return
+	}
 	if err != nil && !errors.Is(err, saas.ErrConflict) {
 		h.log.Error("onboarding signup", "err", err)
 		writeJSONError(w, http.StatusInternalServerError, "could not start onboarding; please try again")

@@ -607,3 +607,34 @@ func TestClientIPHopsZeroIgnoresXFF(t *testing.T) {
 	}
 }
 
+// TestSignupOddValidEmailReturnsUniform202 asserts that a syntactically valid
+// email whose local part becomes empty after plus-tag stripping (e.g.
+// "+x@gmail.com") returns the same uniform 202 as a normal accepted signup,
+// sends NO verification email, and creates NO account or pending record. It
+// must NOT return 500.
+func TestSignupOddValidEmailReturnsUniform202(t *testing.T) {
+	h, hr := newHandler(t, ModeOpen)
+
+	oddRR := postJSON(t, h, "/onboarding/signup", `{"email":"+x@gmail.com"}`)
+	if oddRR.Code == http.StatusInternalServerError {
+		t.Fatalf("odd email signup returned 500; want 202; body %s", oddRR.Body.String())
+	}
+	if oddRR.Code != http.StatusAccepted {
+		t.Fatalf("odd email signup: status %d, want 202; body %s", oddRR.Code, oddRR.Body.String())
+	}
+
+	// Must send NO verification email.
+	if tok := hr.email.LastToken("+x@gmail.com"); tok != "" {
+		t.Fatalf("odd email signup must not send a verification email; got token %q", tok)
+	}
+
+	// Body must be byte-identical to a normal accepted signup (no enumeration).
+	normalRR := postJSON(t, h, "/onboarding/signup", `{"email":"normal@example.com"}`)
+	if normalRR.Code != http.StatusAccepted {
+		t.Fatalf("normal signup: status %d, want 202; body %s", normalRR.Code, normalRR.Body.String())
+	}
+	if oddRR.Body.String() != normalRR.Body.String() {
+		t.Fatalf("odd email and normal signup bodies differ (enumeration leak):\nodd=%s\nnormal=%s",
+			oddRR.Body.String(), normalRR.Body.String())
+	}
+}

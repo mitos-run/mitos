@@ -45,6 +45,12 @@ var (
 	ErrTokenInvalid = errors.New("onboarding: verification token is invalid")
 	// ErrTokenExpired is returned when a verify token resolved but is past expiry.
 	ErrTokenExpired = errors.New("onboarding: verification token has expired")
+	// ErrInvalidEmail is returned by SignUp when the address is syntactically
+	// acceptable but cannot be reduced to a canonical identity (for example the
+	// local part is empty after stripping a leading plus tag). The HTTP handler
+	// maps it to the uniform accepted response so the signup contract stays
+	// byte-identical and no 500 is emitted for odd client input.
+	ErrInvalidEmail = errors.New("onboarding sign up: invalid email")
 )
 
 // OrgProvisioner is the seam that materializes the tenant isolation stack for a
@@ -450,13 +456,14 @@ type SignupResult struct {
 // absent useCase is stored as "".
 func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResult, error) {
 	if email == "" {
-		return SignupResult{}, fmt.Errorf("onboarding sign up: email is required")
+		return SignupResult{}, ErrInvalidEmail
 	}
-	// Compute the canonical identity. A malformed address returns !ok; surface the
-	// same error as the empty-email path so a probe learns nothing about why.
+	// Compute the canonical identity. A syntactically valid but un-canonicalizable
+	// address (e.g. local part empty after plus-tag stripping) also returns
+	// ErrInvalidEmail so the HTTP handler can map both cases to the uniform 202.
 	canonical, ok := canonicalEmail(email)
 	if !ok {
-		return SignupResult{}, fmt.Errorf("onboarding sign up: email is required")
+		return SignupResult{}, ErrInvalidEmail
 	}
 	now := s.now()
 
