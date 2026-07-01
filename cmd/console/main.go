@@ -36,6 +36,7 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/pgstore"
 	"mitos.run/mitos/internal/telemetry"
@@ -232,6 +233,29 @@ func main() {
 	} else {
 		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/identity/resolve not mounted")
 		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/session/resolve not mounted")
+	}
+	// The approve-signup endpoint is an INTERNAL machine-to-machine endpoint,
+	// bearer-gated by a dedicated shared secret (MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN).
+	// It canonicalizes the email, adds an allowlist row (idempotent), and sends the
+	// "you are in" email. Mounted OUTSIDE the session middleware. The token value is
+	// never logged. When unset, the endpoint is not mounted and a warning is logged.
+	if approveToken := os.Getenv("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN"); approveToken != "" {
+		var approveAL onboarding.Allowlist
+		if pool != nil {
+			approveAL = pgstore.NewPgAllowlist(pool, nil)
+		} else {
+			logger.Warn("approve-signup allowlist is in-memory (dev only); entries do not survive restarts")
+			approveAL = onboarding.NewMemAllowlist(nil)
+		}
+		mux.Handle("POST /internal/approve-signup", onboarding.NewApproveSignupHandler(
+			approveAL,
+			buildEmailSender(logger),
+			approveToken,
+			logger,
+		))
+		logger.Info("approve-signup endpoint mounted")
+	} else {
+		logger.Warn("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN unset; POST /internal/approve-signup not mounted")
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

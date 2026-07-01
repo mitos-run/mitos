@@ -1,0 +1,258 @@
+package onboarding
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// errSendApproved is a test EmailSender whose SendApproved always returns an
+// error so the 500-on-send-failure path can be exercised.
+type errSendApproved struct{}
+
+func (errSendApproved) SendVerification(_ context.Context, _, _ string) error { return nil }
+func (errSendApproved) SendApproved(_ context.Context, _ string) error {
+	return errors.New("smtp: connection refused")
+}
+
+// fixedNow is the deterministic clock injected in tests. Using a concrete time
+// makes Add calls reproducible regardless of wall-clock drift.
+var fixedNow = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+// newTestApproveHandler builds an approveSignupHandler directly (same package
+// access) with a fixed clock. Use this instead of NewApproveSignupHandler in
+// tests that need the now field to be deterministic.
+func newTestApproveHandler(al Allowlist, em EmailSender, tok string) http.Handler {
+	return &approveSignupHandler{
+		allowlist: al,
+		email:     em,
+		token:     tok,
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:       fixedNow,
+	}
+}
+
+// postApprove fires a POST to the handler with the given Authorization header
+// value and JSON body. Pass authHeader="" to omit the Authorization header.
+func postApprove(t *testing.T, h http.Handler, authHeader, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/internal/approve-signup", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// decodeEmail decodes {"email": "..."} from rr and returns the value.
+func decodeEmail(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	return resp["email"]
+}
+
+// TestApproveSignup_SuccessAddsAllowlistAndSendsEmail covers the happy path:
+// correct bearer + valid email -> 200, allowlist row added, approval email sent.
+func TestApproveSignup_SuccessAddsAllowlistAndSendsEmail(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "s3cr3t")
+
+	rr := postApprove(t, h, "Bearer s3cr3t", `{"email":"user@example.com"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := decodeEmail(t, rr); got != "user@example.com" {
+		t.Fatalf("response email = %q, want user@example.com", got)
+	}
+
+	ok, err := al.IsAllowed(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("allowlist does not contain the approved email after a successful approve")
+	}
+	if !em.Approved("user@example.com") {
+		t.Fatal("SendApproved was not called for the approved email")
+	}
+}
+
+// TestApproveSignup_Canonicalization checks that a mixed-case address is
+// stored and returned in its lowercased canonical form.
+func TestApproveSignup_Canonicalization(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	rr := postApprove(t, h, "Bearer tok", `{"email":"Foo+x@Example.com"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	const want = "foo+x@example.com"
+	if got := decodeEmail(t, rr); got != want {
+		t.Fatalf("response email = %q, want %q", got, want)
+	}
+
+	ok, err := al.IsAllowed(context.Background(), want)
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("allowlist does not contain canonical email %q", want)
+	}
+	if !em.Approved(want) {
+		t.Fatalf("SendApproved was not called with canonical email %q", want)
+	}
+}
+
+// TestApproveSignup_MissingBearer401 checks that a request with no
+// Authorization header is rejected with 401 and causes no side effects.
+func TestApproveSignup_MissingBearer401(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	// No Authorization header.
+	rr := postApprove(t, h, "", `{"email":"u@x.com"}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	ok, _ := al.IsAllowed(context.Background(), "u@x.com")
+	if ok {
+		t.Fatal("allowlist must not be modified on 401")
+	}
+	if em.Approved("u@x.com") {
+		t.Fatal("SendApproved must not be called on 401")
+	}
+}
+
+// TestApproveSignup_WrongBearer401 checks that a mismatched bearer token
+// results in 401 with no side effects.
+func TestApproveSignup_WrongBearer401(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "correct-token")
+
+	rr := postApprove(t, h, "Bearer wrong-token", `{"email":"u@x.com"}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong token, got %d", rr.Code)
+	}
+	ok, _ := al.IsAllowed(context.Background(), "u@x.com")
+	if ok {
+		t.Fatal("allowlist must not be modified on wrong-bearer 401")
+	}
+	if em.Approved("u@x.com") {
+		t.Fatal("SendApproved must not be called on wrong-bearer 401")
+	}
+}
+
+// TestApproveSignup_EmptyHandlerToken401 checks that a handler constructed
+// with an empty token rejects every request with 401 (fail-closed).
+func TestApproveSignup_EmptyHandlerToken401(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "") // empty token -> fail-closed
+
+	rr := postApprove(t, h, "Bearer anything", `{"email":"u@x.com"}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for empty handler token, got %d", rr.Code)
+	}
+}
+
+// TestApproveSignup_MissingEmail400 checks that a body with an absent or
+// empty email field is rejected with 400 and causes no side effects.
+func TestApproveSignup_MissingEmail400(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	for _, body := range []string{`{}`, `{"email":""}`} {
+		rr := postApprove(t, h, "Bearer tok", body)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("body %q: expected 400, got %d", body, rr.Code)
+		}
+	}
+}
+
+// TestApproveSignup_MalformedEmail400 checks that an invalid email is
+// rejected with 400 and causes no side effects.
+func TestApproveSignup_MalformedEmail400(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	rr := postApprove(t, h, "Bearer tok", `{"email":"not-an-email"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed email, got %d", rr.Code)
+	}
+	// Nothing should be added or sent.
+	ok, _ := al.IsAllowed(context.Background(), "not-an-email")
+	if ok {
+		t.Fatal("allowlist must not be modified on 400")
+	}
+}
+
+// TestApproveSignup_ReApproveIdempotent checks that approving the same email
+// twice returns 200 on both calls and leaves exactly one allowlist row.
+func TestApproveSignup_ReApproveIdempotent(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	for i := 0; i < 2; i++ {
+		rr := postApprove(t, h, "Bearer tok", `{"email":"repeat@example.com"}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("call %d: expected 200, got %d: %s", i+1, rr.Code, rr.Body.String())
+		}
+	}
+	ok, err := al.IsAllowed(context.Background(), "repeat@example.com")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("allowlist does not contain the email after two approvals")
+	}
+}
+
+// TestApproveSignup_SendApprovedFailure500 checks that when SendApproved
+// returns an error the handler returns 500 with a generic message that
+// contains neither the email nor any secret. The allowlist Add already ran
+// (idempotent), so the operator can retry to re-send.
+func TestApproveSignup_SendApprovedFailure500(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	h := newTestApproveHandler(al, errSendApproved{}, "tok")
+
+	rr := postApprove(t, h, "Bearer tok", `{"email":"err@example.com"}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on SendApproved failure, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "err@example.com") {
+		t.Fatalf("500 response must not contain the email address: %q", body)
+	}
+	if strings.Contains(body, "tok") {
+		t.Fatalf("500 response must not contain the bearer token: %q", body)
+	}
+
+	// The allowlist row must have been added before the send failure.
+	ok, err := al.IsAllowed(context.Background(), "err@example.com")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !ok {
+		t.Fatal("allowlist must contain the row even when SendApproved fails")
+	}
+}
