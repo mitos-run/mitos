@@ -335,9 +335,48 @@ func TestBillingReturnsOnlyCallerOrg(t *testing.T) {
 	if v.SpendCents == 0 {
 		t.Errorf("expected non-zero spend from alice usage")
 	}
-	for _, e := range v.LedgerEntries {
-		if e.OrgID != f.aliceOrg {
-			t.Errorf("ledger entry for foreign org %q leaked", e.OrgID)
+	// Alice has exactly one ledger entry (the signup credit); bob's entry must
+	// not appear here.
+	if len(v.LedgerEntries) != 1 {
+		t.Errorf("expected 1 ledger entry for alice, got %d (cross-org leak?)", len(v.LedgerEntries))
+	}
+}
+
+// TestBillingLedgerEntriesSerializeSnakeCase asserts the wire format uses
+// snake_case keys (ts, cents, reason) matching the SPA's BillingView type in
+// api.ts: { ts?: string; cents?: number; reason?: string }.
+func TestBillingLedgerEntriesSerializeSnakeCase(t *testing.T) {
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var wire struct {
+		LedgerEntries []struct {
+			Ts     string `json:"ts"`
+			Cents  int64  `json:"cents"`
+			Reason string `json:"reason"`
+		} `json:"ledger_entries"`
+	}
+	decode(t, w, &wire)
+	if len(wire.LedgerEntries) == 0 {
+		t.Fatal("expected at least one ledger entry for alice")
+	}
+	e := wire.LedgerEntries[0]
+	if e.Ts == "" {
+		t.Errorf("ledger_entries[0].ts is empty, want an RFC3339 timestamp")
+	}
+	if e.Cents != int64(billing.USD(50)) {
+		t.Errorf("ledger_entries[0].cents = %d, want %d (alice signup credit)", e.Cents, int64(billing.USD(50)))
+	}
+	if e.Reason != "signup credit" {
+		t.Errorf("ledger_entries[0].reason = %q, want %q", e.Reason, "signup credit")
+	}
+	// Confirm no PascalCase keys appear in the raw body (the pre-fix bug).
+	body := w.Body.String()
+	for _, bad := range []string{`"At"`, `"Amount"`, `"Note"`, `"OrgID"`, `"Kind"`, `"Key"`} {
+		if strings.Contains(body, bad) {
+			t.Errorf("PascalCase key %s leaked into ledger JSON; want snake_case", bad)
 		}
 	}
 }
@@ -349,6 +388,50 @@ func TestBillingBobSeesOwnSuspendedStatus(t *testing.T) {
 	decode(t, w, &v)
 	if v.Status != billing.StatusSuspended || v.BalanceCents != int64(billing.USD(123)) {
 		t.Errorf("bob billing = %+v, want suspended + 12300", v)
+	}
+}
+
+// TestBillingTopUpAvailableTrue asserts that when the Console is built with a
+// non-empty TopUpProductID, GET /console/billing returns topup_available: true.
+func TestBillingTopUpAvailableTrue(t *testing.T) {
+	f := newFixture(t)
+	// Override the console to add a product ID (the default fixture leaves it empty).
+	f.con = New(Deps{
+		Accounts:    f.con.deps.Accounts,
+		Usage:       f.usage,
+		Billing:     BillingReader{Ledger: f.ledger, Status: f.status, Caps: f.caps, Rates: billing.DefaultRates()},
+		Sandboxes:   f.sandboxes,
+		Templates:   f.templates,
+		Audit:       f.audit,
+		Instruments: f.instr,
+		Logs:        NewAuthorizingLogStreamer(f.sandboxes, f.rawlogs),
+		Now:         func() time.Time { return time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC) },
+		TopUpProductID: "prod_test123",
+	})
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var v BillingView
+	decode(t, w, &v)
+	if !v.TopUpAvailable {
+		t.Errorf("topup_available = false, want true when TopUpProductID is set")
+	}
+}
+
+// TestBillingTopUpAvailableFalse asserts that when the Console is built with an
+// empty TopUpProductID (the default), GET /console/billing returns topup_available: false.
+func TestBillingTopUpAvailableFalse(t *testing.T) {
+	// The default fixture leaves TopUpProductID empty.
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var v BillingView
+	decode(t, w, &v)
+	if v.TopUpAvailable {
+		t.Errorf("topup_available = true, want false when TopUpProductID is empty")
 	}
 }
 

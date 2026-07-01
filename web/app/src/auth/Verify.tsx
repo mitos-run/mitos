@@ -134,12 +134,17 @@ type VerifyResponse = {
   alreadyDone: boolean
   apiKey?: string
   apiKeyId?: string
+  /** Use-case slug carried from signup (e.g. "ai-coding"). Empty string when absent. */
+  useCase?: string
+  /** True when the allowlist gate rejected this email. No session is issued. */
+  waitlisted?: boolean
 }
 
 type VerifyState =
   | { kind: 'loading' }
-  | { kind: 'success-with-key'; email: string; apiKey: string }
-  | { kind: 'success-already-done'; email: string }
+  | { kind: 'waitlisted' }
+  | { kind: 'success-with-key'; email: string; apiKey: string; useCase?: string }
+  | { kind: 'success-already-done'; email: string; useCase?: string }
   | { kind: 'error' }
   | { kind: 'no-token' }
 
@@ -171,10 +176,20 @@ export function Verify({ token: tokenProp }: VerifyProps) {
     post<VerifyResponse>('/onboarding/verify', { token })
       .then((res) => {
         if (cancelled || !res) return
+        // Check waitlisted FIRST: no session was issued, never touch sessionStorage.
+        if (res.waitlisted) {
+          setState({ kind: 'waitlisted' })
+          return
+        }
         if (res.alreadyDone || !res.apiKey) {
-          setState({ kind: 'success-already-done', email: res.email })
+          setState({ kind: 'success-already-done', email: res.email, useCase: res.useCase })
         } else {
-          setState({ kind: 'success-with-key', email: res.email, apiKey: res.apiKey })
+          // Stash the one-time first key so the console first-run can display
+          // the masked export snippet without a second API round-trip. The raw
+          // key is a secret: it is written only to sessionStorage here and is
+          // NEVER logged or put in any error message.
+          sessionStorage.setItem('mitos.firstKey', res.apiKey)
+          setState({ kind: 'success-with-key', email: res.email, apiKey: res.apiKey, useCase: res.useCase })
         }
       })
       .catch(() => {
@@ -201,17 +216,48 @@ export function Verify({ token: tokenProp }: VerifyProps) {
     }
   }
 
+  const title = state.kind === 'waitlisted' ? 'You are on the list' : 'Verify your email'
+
   const subtitle =
     state.kind === 'loading'
       ? 'One moment while we verify your link.'
-      : state.kind === 'success-with-key'
-        ? 'Your account is ready. Save your key before continuing.'
-        : state.kind === 'success-already-done'
-          ? 'Your email is already verified.'
-          : 'There was a problem with your link.'
+      : state.kind === 'waitlisted'
+        ? 'We will let you know as soon as your account is ready.'
+        : state.kind === 'success-with-key'
+          ? 'Your account is ready. Save your key before continuing.'
+          : state.kind === 'success-already-done'
+            ? 'Your email is already verified.'
+            : 'There was a problem with your link.'
 
   function renderState() {
     switch (state.kind) {
+      case 'waitlisted':
+        return (
+          <>
+            <p
+              style={{
+                margin: '0 0 var(--space-3)',
+                fontSize: 'var(--step-0)',
+                color: 'var(--ink)',
+                textAlign: 'center',
+                lineHeight: 'var(--lh-base)',
+              }}
+            >
+              We are letting people in gradually. We will email you when your account is ready.
+            </p>
+            <a
+              href="https://docs.mitos.run"
+              className="verify-error-link"
+              style={{ display: 'block', textAlign: 'center', marginBottom: 'var(--space-5)' }}
+            >
+              Read the docs while you wait
+            </a>
+            <a href="/signup" className="verify-error-link" style={{ display: 'block', textAlign: 'center' }}>
+              Back to sign up
+            </a>
+          </>
+        )
+
       case 'loading':
         return (
           <p
@@ -283,7 +329,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
             </p>
             <code className="verify-snippet">pip install mitos-run</code>
 
-            <a href="/" className="verify-continue-link">
+            <a href={state.useCase ? `/?uc=${state.useCase}` : '/'} className="verify-continue-link">
               Continue to console
             </a>
           </>
@@ -303,7 +349,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
             >
               You are already verified.
             </p>
-            <a href="/" className="verify-continue-link">
+            <a href={state.useCase ? `/?uc=${state.useCase}` : '/'} className="verify-continue-link">
               Continue to console
             </a>
           </>
@@ -343,7 +389,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
   }
 
   return (
-    <AuthShell title="Verify your email" subtitle={subtitle}>
+    <AuthShell title={title} subtitle={subtitle}>
       <style>{styles}</style>
 
       {/* Status region: always in the DOM so screen readers observe content

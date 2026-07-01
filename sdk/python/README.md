@@ -54,6 +54,9 @@ print(ex.text)                                    # 12.0
 sb.terminate()
 ```
 
+This hero is the checked example `examples/quickstart.py`: CI byte-compiles and
+import-checks it against the real SDK, so this snippet cannot drift.
+
 `mitos.create(image, api_key=..., base_url=...)` resolves auth (see precedence
 below), gets-or-creates the template for `image`, forks it, and returns a READY
 `DirectSandbox` exposing `exec`, `run_code`, `files`, `pty`, `fork`,
@@ -279,6 +282,46 @@ The ordered steps (copy / run / env / workdir) map onto the CRD
 `spec.buildSteps` and feed a content-addressed, chained build cache so unchanged
 steps are reused. See the [docs](https://mitos.run) for the CLI
 (`mitos template build` / `push`) and the cache semantics.
+
+## Fork-native subagents
+
+When a multi-agent harness runs INSIDE a mitos sandbox, spawning a subagent IS
+forking the current warm sandbox: the child is a copy-on-write snapshot of the
+live parent, so it starts warm with the parent's state, with no cold boot and no
+external orchestrator round-trip. `mitos.subagent` is the small hook that does
+this, with a graceful no-op fallback when the code is not on mitos.
+
+```python
+import mitos.subagent as sub
+
+result = sub.spawn_subagent(3, label="researcher")
+if result.on_mitos:
+    for child in result.children:
+        print("warm subagent:", child.sandbox_id)   # forked from this sandbox
+else:
+    print("off mitos:", result.reason)              # fall back to your normal spawn
+```
+
+- Detection signal: the in-guest self-service socket advertised at
+  `$MITOS_SOCKET` (see `mitos.guest`). The host sets it at claim time only inside
+  a mitos sandbox, so its presence is the honest "am I running inside mitos"
+  check. `sub.is_on_mitos()` is that pure check; `sub.current_sandbox()` returns
+  the sandbox's own identity (or `None` off mitos).
+- On mitos: `spawn_subagent(n, label=...)` routes the spawn through the
+  budget-gated self-fork on that socket (`mitos.guest.fork`), no network egress
+  and no API credentials, and returns a `SubagentResult` with `on_mitos=True` and
+  a `SubagentHandle` per warm child.
+- Off mitos: it returns `on_mitos=False` with an explanatory `reason`, does NOT
+  call fork, and never raises. The fallback path is first-class so a harness
+  using this hook does not break off-platform.
+
+Honest scope: the warm fork needs a running mitos sandbox context. The
+budget-gated self-fork is wired progressively by the guest agent; where it is not
+yet enabled the socket returns its remediation as a `mitos.guest.GuestError`,
+which is a real on-mitos error rather than the off-mitos fallback. The handles
+carry the child sandbox names; driving a child from another process needs
+control-plane credentials, which is a documented follow-up. See
+`examples/fork_native_subagent.py`.
 
 ## Integrations
 

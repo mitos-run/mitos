@@ -167,6 +167,19 @@ message NotifyForkedNetwork {
   // guest writes it as the sole nameserver in /etc/resolv.conf. Empty leaves
   // resolv.conf untouched.
   string resolver_ip = 5;
+
+  // proxy_endpoint is the fork-stable HTTP(S) proxy address (host:port) the
+  // guest egresses through. The guest agent exports it as HTTP_PROXY and
+  // HTTPS_PROXY so egress is attributed and policy-enforced by the host proxy.
+  // Empty means the per-sandbox egress proxy is disabled. Config, safe to log.
+  string proxy_endpoint = 6;
+
+  // reset_upstreams tells the guest this is a live fork: drop stale route and
+  // neighbor state after re-addressing eth0 so captured upstream sockets die
+  // and clients re-dial through the proxy. False (the default) leaves existing
+  // connections in place, which is correct for a cold fork from a snapshot.
+  // Config, safe to log.
+  bool reset_upstreams = 7;
 }
 
 // VolumeMountEntry mirrors internal/vsock.VolumeMountEntry field-for-field.

@@ -335,3 +335,38 @@ func TestExposeResolvesSingleSandboxID(t *testing.T) {
 		t.Fatal("raw cluster id must not be registered; handleExpose must resolve it")
 	}
 }
+
+// TestExposeForwardsPublicHost guards the proxy-trust fix (#476): the expose
+// port-forward must present the guest app its real public front-door host (from
+// the edge's X-Forwarded-Host) as the upstream Host, plus the X-Forwarded-* chain,
+// rather than the internal "guest" placeholder. Apps behind the edge (e.g.
+// openclaw's Control-UI origin/local-vs-remote check) need this to accept traffic.
+func TestExposeForwardsPublicHost(t *testing.T) {
+	var gotHost, gotXFH, gotXFP string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		gotXFH = r.Header.Get("X-Forwarded-Host")
+		gotXFP = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	port := portOf(t, backend)
+	api := newExposeTestAPI(t, backend.Listener.Addr().String())
+	rp, err := api.ProxyHTTP("sb1", port, "/v1/sandboxes/sb1/expose/"+itoa(port))
+	if err != nil {
+		t.Fatalf("ProxyHTTP: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/sb1/expose/"+itoa(port)+"/", nil)
+	req.Header.Set("X-Forwarded-Host", "openclaw.mitos.run")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rp.ServeHTTP(httptest.NewRecorder(), req)
+	if gotHost != "openclaw.mitos.run" {
+		t.Fatalf("upstream Host = %q, want openclaw.mitos.run", gotHost)
+	}
+	if gotXFH != "openclaw.mitos.run" {
+		t.Fatalf("X-Forwarded-Host = %q, want openclaw.mitos.run", gotXFH)
+	}
+	if gotXFP != "https" {
+		t.Fatalf("X-Forwarded-Proto = %q, want https", gotXFP)
+	}
+}

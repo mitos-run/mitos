@@ -36,9 +36,12 @@ import (
 	"google.golang.org/grpc"
 	"mitos.run/mitos/internal/benchstat"
 	"mitos.run/mitos/internal/cpupin"
+	"mitos.run/mitos/internal/egressproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/network"
 	"mitos.run/mitos/internal/vsock"
 	internalv1 "mitos.run/mitos/proto/sandbox/controlv1"
 )
@@ -91,6 +94,15 @@ type config struct {
 	// time-to-ready distribution plus the wall clock to all N ready. Unused by
 	// the other modes.
 	fanOutN []int
+	// networked wires per-fork networking and the egress proxy into each
+	// fork-fanout fork. When true the engine is constructed with a network
+	// manager, allocator, egress proxy registry, and the proxy listener is
+	// started; each fork carries ForkOpts.Network set (EgressPolicy "deny") and
+	// LiveFork true, matching the networked live-fork path. Only valid with
+	// --mode fork-fanout; an error is returned if used with any other mode.
+	networked     bool
+	proxySentinel string
+	proxyPort     int
 }
 
 // parseConfig parses args (excluding the program name) into a validated config.
@@ -112,6 +124,9 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.settleMs, "settle-ms", 500, "metering mode: milliseconds to let the forks settle before reading the report")
 	fs.StringVar(&fanOutNs, "fanout-n", defaultFanOutNs, "fork-fanout mode: comma-separated fan-out widths (N) to measure, e.g. 1,4,16,64")
 	fs.StringVar(&cfg.execTransport, "exec-transport", execTransportGRPC, "retained for backward compatibility: the exec round-trip always uses gRPC Control.Ping over AgentGRPCPort 53 (Rust guest agent); the legacy JSON transport and Go agent were removed (#310), so grpc (default) and json both drive the gRPC path")
+	fs.BoolVar(&cfg.networked, "networked", false, "fork-fanout mode only: wire per-fork networking and the egress proxy into each fan-out fork, measuring the networked path (needs /dev/kvm plus tap, nftables, and the proxy port available)")
+	fs.StringVar(&cfg.proxySentinel, "proxy-sentinel", "169.254.169.2", "networked mode: fork-stable sentinel proxy address DNATed per fork to the fork gateway")
+	fs.IntVar(&cfg.proxyPort, "proxy-port", 3128, "networked mode: TCP port the per-node egress proxy listens on")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -146,6 +161,9 @@ func parseConfig(args []string) (config, error) {
 			return config{}, err
 		}
 		cfg.fanOutN = ns
+	}
+	if cfg.networked && cfg.mode != modeForkFanOut {
+		return config{}, fmt.Errorf("--networked requires --mode %s, got %q", modeForkFanOut, cfg.mode)
 	}
 	return cfg, nil
 }
@@ -190,10 +208,42 @@ func main() {
 }
 
 func run(cfg config) error {
-	// Mirror cmd/forkd construction with a zero jailer config (jailer
-	// disabled) and networking/CAS opts left at their defaults: the bench
-	// measures the bare fork + exec path, so no per-fork network is set up.
-	engine, err := fork.NewEngine(cfg.dataDir, cfg.firecracker, cfg.kernel, firecracker.JailerConfig{}, fork.EngineOpts{})
+	// engineOpts is built up before engine construction. In non-networked mode
+	// (the default) the zero value is the safe default: jailer disabled,
+	// networking disabled, CAS under <dataDir>/cas. With --networked the
+	// engine is wired with per-fork networking and the egress proxy, mirroring
+	// how cmd/live-fork-egress-smoke constructs the engine (see that binary for
+	// the detailed topology). The proxy listener is started before engine
+	// construction so the port is bound before any Fork call.
+	engineOpts := fork.EngineOpts{}
+	if cfg.networked {
+		sentinelIP := net.ParseIP(cfg.proxySentinel)
+		if sentinelIP == nil {
+			return fmt.Errorf("--networked: invalid --proxy-sentinel %q", cfg.proxySentinel)
+		}
+		alloc, allocErr := netconf.NewAllocator("10.204.0.0/24", "bench")
+		if allocErr != nil {
+			return fmt.Errorf("--networked: new allocator: %w", allocErr)
+		}
+		mgr := network.NewManager(network.Options{SubnetCIDR: "10.204.0.0/16", EnableForwarding: true})
+		registry := egressproxy.NewRegistry()
+		engineOpts.NetManager = mgr
+		engineOpts.NetAllocator = alloc
+		engineOpts.EgressProxy = registry
+		engineOpts.ProxySentinel = sentinelIP
+		engineOpts.ProxyPort = cfg.proxyPort
+		proxy := egressproxy.NewProxy(registry, benchEgressDialer{d: net.Dialer{Timeout: 30 * time.Second}}, benchNoopLogger{})
+		defer func() { _ = proxy.Close() }()
+		proxyErrCh := make(chan error, 1)
+		go func() { proxyErrCh <- proxy.ListenAndServe(net.JoinHostPort("", strconv.Itoa(cfg.proxyPort))) }()
+		select {
+		case proxyErr := <-proxyErrCh:
+			return fmt.Errorf("--networked: egress proxy on port %d: %w", cfg.proxyPort, proxyErr)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	engine, err := fork.NewEngine(cfg.dataDir, cfg.firecracker, cfg.kernel, firecracker.JailerConfig{}, engineOpts)
 	if err != nil {
 		return fmt.Errorf("init engine (needs Linux + /dev/kvm + template under --data-dir): %w", err)
 	}
@@ -518,14 +568,22 @@ func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpup
 	return benchstat.ActivateOutcome{OK: true, Latency: time.Since(t0)}
 }
 
-// runForkFanOut measures the 1-to-N live-fork fan-out shape (issue #207): fork
-// ONE warmed base (the template snapshot, which already has the repo loaded and
-// deps installed when the maintainer builds it that way) into N children, and
-// for each N in cfg.fanOutN record (a) each child's time-to-ready (fork ->
-// first successful exec) and (b) the wall clock from the fan-out start to the
-// instant the LAST child is ready. The defensible Mitos claim under test is
-// sub-second 1-to-N COW fan-out, so the headline number is wall-clock-to-N-ready
-// at the larger N.
+// runForkFanOut measures the 1-to-N fan-out shape (issue #207): fork ONE warmed
+// base (the template snapshot, which already has the repo loaded and deps
+// installed when the maintainer builds it that way) into N children, and for
+// each N in cfg.fanOutN record (a) each child's time-to-ready (fork -> first
+// successful exec) and (b) the wall clock from the fan-out start to the instant
+// the LAST child is ready. The defensible Mitos claim under test is sub-second
+// 1-to-N COW fan-out, so the headline number is wall-clock-to-N-ready at the
+// larger N.
+//
+// Without --networked, each fork uses the default ForkOpts (no per-fork
+// networking), measuring the bare fork + exec path. With --networked, each fork
+// carries ForkOpts.Network set (EgressPolicy "deny") and LiveFork true,
+// matching the networked live-fork path: the measured time-to-ready includes
+// host-side network setup (tap, nftables, proxy registration) per fork. The
+// engine is built with the egress proxy registry and the proxy listener is
+// started in run() before this is called.
 //
 // Children are forked sequentially from the one base on a single shared wall
 // clock: each child's ReadyOffset is measured from the fan-out start, so the
@@ -538,13 +596,24 @@ func oneStormActivate(engine *fork.Engine, template, sandboxID string, pin *cpup
 // pure, unit-tested benchstat.AggregateFanOut; this function only collects the
 // real samples and hands them to it.
 func runForkFanOut(engine *fork.Engine, cfg config) error {
+	// Build the per-fork opts once: non-networked uses the zero value
+	// (bare fork + exec path, no networking); networked sets Network and
+	// LiveFork to exercise the same per-fork network setup as ForkRunning.
+	forkOpts := fork.ForkOpts{}
+	name := "fork_fanout"
+	if cfg.networked {
+		forkOpts.Network = &fork.NetworkOpts{EgressPolicy: "deny"}
+		forkOpts.LiveFork = true
+		name = "fork_fanout_networked"
+	}
+
 	results := make([]benchstat.FanOutResult, 0, len(cfg.fanOutN))
 	for _, n := range cfg.fanOutN {
-		fo, err := oneFanOut(engine, cfg.template, n)
+		fo, err := oneFanOut(engine, cfg.template, n, forkOpts)
 		if err != nil {
 			return fmt.Errorf("fan-out N=%d: %w", n, err)
 		}
-		results = append(results, benchstat.FanOutResult{N: n, Name: "fork_fanout", FanOut: fo})
+		results = append(results, benchstat.FanOutResult{N: n, Name: name, FanOut: fo})
 
 		if cfg.summary {
 			fmt.Printf("=== fork-fanout N=%d ===\n%s\n", n, fo.Table())
@@ -564,16 +633,21 @@ func runForkFanOut(engine *fork.Engine, cfg config) error {
 	return nil
 }
 
-// oneFanOut forks one base into n children, measuring each child's
-// fork->first-exec time-to-ready on a shared wall clock, then tears every child
-// down. The base itself is the template snapshot, so every child is a live COW
-// fork of the same warmed state. Children are torn down only after all of them
-// have reached ready and the wall clock has been read, so teardown never
+// oneFanOut forks one base into n children using forkOpts, measuring each
+// child's fork->first-exec time-to-ready on a shared wall clock, then tears
+// every child down. The base itself is the template snapshot, so every child is
+// a COW fork of the same warmed state. Children are torn down only after all of
+// them have reached ready and the wall clock has been read, so teardown never
 // inflates the measured wall-clock-to-N-ready.
-func oneFanOut(engine *fork.Engine, template string, n int) (benchstat.FanOut, error) {
+//
+// When forkOpts carries Network and LiveFork true (the --networked path), each
+// child's measured time-to-ready includes host-side network setup (tap,
+// nftables, proxy registration); engine.Terminate also tears down the per-fork
+// network, so no network resources leak across iterations.
+func oneFanOut(engine *fork.Engine, template string, n int, forkOpts fork.ForkOpts) (benchstat.FanOut, error) {
 	forked := make([]string, 0, n)
 	// Tear every child down on the way out, success or failure, so a fan-out
-	// run never leaks VMs on the runner.
+	// run never leaks VMs (or per-fork network resources) on the runner.
 	defer func() {
 		for _, id := range forked {
 			_ = engine.Terminate(id)
@@ -585,7 +659,7 @@ func oneFanOut(engine *fork.Engine, template string, n int) (benchstat.FanOut, e
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("fanout-%d-%d", n, i)
 		childStart := time.Now()
-		ttr, err := forkToReady(engine, template, id)
+		ttr, err := forkToReady(engine, template, id, forkOpts)
 		if err != nil {
 			return benchstat.FanOut{}, fmt.Errorf("child %d of %d: %w", i+1, n, err)
 		}
@@ -602,15 +676,19 @@ func oneFanOut(engine *fork.Engine, template string, n int) (benchstat.FanOut, e
 	return benchstat.AggregateFanOut(children), nil
 }
 
-// forkToReady forks one child off the base and returns the time from fork start
-// to the first successful exec result (the child's time-to-ready). It does NOT
-// tear the child down: the caller keeps every child alive for the duration of
-// the fan-out so that N live COW forks coexist, which is the whole point of the
-// 1-to-N shape. The clock starts immediately before Fork and stops the instant
-// the first exec result is in.
-func forkToReady(engine *fork.Engine, template, sandboxID string) (time.Duration, error) {
+// forkToReady forks one child off the base using forkOpts and returns the time
+// from fork start to the first successful exec result (the child's
+// time-to-ready). It does NOT tear the child down: the caller keeps every child
+// alive for the duration of the fan-out so that N live COW forks coexist, which
+// is the whole point of the 1-to-N shape. The clock starts immediately before
+// Fork and stops the instant the first exec result is in.
+//
+// When forkOpts carries Network set, the measured time includes host-side
+// network setup (tap, nftables, proxy registration) per fork, which is the
+// correct measurement boundary for the networked live-fork latency claim.
+func forkToReady(engine *fork.Engine, template, sandboxID string, forkOpts fork.ForkOpts) (time.Duration, error) {
 	t0 := time.Now()
-	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{})
+	res, err := engine.Fork(template, sandboxID, forkOpts)
 	if err != nil {
 		return 0, fmt.Errorf("fork: %w", err)
 	}
@@ -815,3 +893,22 @@ func oneForkExecGRPC(engine *fork.Engine, template, sandboxID string) (time.Dura
 	cleanup()
 	return elapsed, nil
 }
+
+// benchEgressDialer opens upstream sockets for the bench egress proxy,
+// mirroring cmd/live-fork-egress-smoke. All upstream sockets are owned by the
+// bench process so a forked guest cannot inherit an open upstream.
+type benchEgressDialer struct {
+	d net.Dialer
+}
+
+func (b benchEgressDialer) Dial(ctx context.Context, hostport string) (net.Conn, error) {
+	return b.d.DialContext(ctx, "tcp", hostport)
+}
+
+// benchNoopLogger discards egress events from the bench egress proxy. The
+// redaction contract (sandbox ID, host:port, and byte counts only; no headers,
+// bodies, or auth values) is unit-tested in internal/egressproxy.
+type benchNoopLogger struct{}
+
+func (benchNoopLogger) Egress(sandboxID, hostport string, bytesUp, bytesDown int64) {}
+func (benchNoopLogger) Deny(sandboxID, hostport string)                             {}

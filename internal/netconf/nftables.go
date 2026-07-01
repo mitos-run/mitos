@@ -133,6 +133,80 @@ func SandboxChainName(tap string) string {
 	return "sb_" + tap
 }
 
+// proxyDNATBaseChainName returns the nat-table prerouting base chain that
+// dispatches per-tap sentinel DNAT through a verdict map. It mirrors
+// BaseChainName on the inet forward path: a single hooked base chain that holds
+// no per-tap state and only dispatches by inbound interface into per-tap chains,
+// so adding or removing one fork never disturbs another's DNAT.
+func proxyDNATBaseChainName() string {
+	return "prerouting"
+}
+
+// ProxyDNATDispatchMapName returns the ifname-keyed verdict map the prerouting
+// base chain dispatches through into per-tap DNAT chains. It is the nat-path
+// analog of DispatchMapName: adding or removing a fork's DNAT is a single map
+// element add/delete by tap key, with no rule handles to track.
+func ProxyDNATDispatchMapName() string {
+	return "proxydnat"
+}
+
+// ProxyDNATChainName returns the per-tap regular nat chain holding that fork's
+// sentinel DNAT rule. It is reached only via the proxy DNAT dispatch jump for
+// its tap, mirroring SandboxChainName on the inet path, so teardown can remove
+// it by name; this stops a reused tap from inheriting a stale DNAT and keeps the
+// prerouting dispatch from growing unbounded.
+func ProxyDNATChainName(tap string) string {
+	return "proxydnat_" + tap
+}
+
+// RenderProxyDNAT redirects the fork-stable sentinel proxy address to THIS
+// fork's gateway, where the per-node egress proxy listens. The sentinel value
+// is baked identically into every fork's HTTP_PROXY; the per-tap DNAT is what
+// makes it route to this fork's own proxy context. All values are addresses,
+// safe to log.
+//
+// It mirrors the inet forward dispatch idiom (RenderSharedTable plus a per-tap
+// chain): the ip nat table, the hooked prerouting base chain, and the
+// ifname-keyed dispatch map are created idempotently with `add` (a no-op if they
+// already exist), the base chain is flushed only to re-add its single dispatch
+// rule (the base chain holds no per-tap state), and this fork's OWN regular DNAT
+// chain plus the dispatch element keyed by its tap are added. Because the DNAT
+// lives in a per-tap chain reached by a map element, teardown removes it by tap
+// key and name, so it never leaks and tap reuse is clean.
+func RenderProxyDNAT(tap string, sentinel net.IP, proxyPort int, gatewayIP net.IP) string {
+	table := NatTableName()
+	base := proxyDNATBaseChainName()
+	dispatch := ProxyDNATDispatchMapName()
+	chain := ProxyDNATChainName(tap)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "add table ip %s\n", table)
+	fmt.Fprintf(&b, "add chain ip %s %s { type nat hook prerouting priority -100 ; policy accept ; }\n", table, base)
+	fmt.Fprintf(&b, "add map ip %s %s { type ifname : verdict ; }\n", table, dispatch)
+	// Flush only the base chain's rules before re-adding the single dispatch rule
+	// (the base chain holds no per-tap state; that lives in the map and the per-tap
+	// chains), so re-applying this skeleton on each fork stays idempotent. Mirrors
+	// RenderSharedTable.
+	fmt.Fprintf(&b, "flush chain ip %s %s\n", table, base)
+	fmt.Fprintf(&b, "add rule ip %s %s iifname vmap @%s\n", table, base, dispatch)
+	// This fork's own DNAT chain, the rule that redirects the fork-stable sentinel
+	// to this fork's gateway, and the dispatch element routing this tap into it.
+	fmt.Fprintf(&b, "add chain ip %s %s\n", table, chain)
+	fmt.Fprintf(&b, "add rule ip %s %s ip daddr %s tcp dport %d dnat to %s:%d\n",
+		table, chain, sentinel, proxyPort, gatewayIP, proxyPort)
+	fmt.Fprintf(&b, "add element ip %s %s { %q : jump %s }\n", table, dispatch, tap, chain)
+	return b.String()
+}
+
+// RenderProxyAccept allows the guest to reach the per-node proxy listener on
+// the gateway address, ahead of the allowlist. The proxy enforces upstream
+// egress policy; the rule here just opens the path to the proxy listener so
+// the guest can connect before the per-sandbox chain's final verdict.
+func RenderProxyAccept(table, chain string, guestIP, gatewayIP net.IP, proxyPort int) string {
+	return fmt.Sprintf("add rule inet %s %s ip saddr %s ip daddr %s tcp dport %d accept\n",
+		table, chain, guestIP, gatewayIP, proxyPort)
+}
+
 // SandboxAllowSetName returns the per-sandbox dynamic allow set name for a tap.
 // The set holds (ipv4_addr . inet_service) elements with a timeout flag and is
 // populated at runtime by the DNS proxy as it resolves allowlisted names. The

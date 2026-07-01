@@ -1,0 +1,40 @@
+# Helm values overlay that wires the Mitos console to the single-user Dex.
+# QA / first-run ONLY. NOT FOR PRODUCTION. NOT MULTI-TENANT. See README.md.
+#
+# Apply on top of your normal install values:
+#   helm upgrade mitos deploy/charts/mitos -n mitos \
+#     --set namespace.create=false \
+#     -f examples/single-user-dex/console-oidc-values.yaml
+#
+# Replace the placeholder hostnames with the ones you used in dex.yaml and
+# console-ingress.yaml. The issuerURL MUST be byte-for-byte the Dex issuer in
+# dex.yaml. The redirectURL MUST be byte-for-byte a redirectURI in the Dex
+# static client (dex.yaml). The clientID MUST match the Dex static client id.
+
+console:
+  enabled: true
+  # The single-user Dex is for community / self-host QA. Keep the community
+  # edition; do not set edition: hosted.
+  edition: community
+  oidc:
+    # Must equal the Dex issuer in dex.yaml (plain HTTP on purpose for QA).
+    issuerURL: "http://dex.example.com"
+    # Must equal the Dex static client id in dex.yaml.
+    clientID: "mitos-console"
+    # The Secret you create out of band (README.md). The chart reads key
+    # "client-secret" from it; the same Secret feeds Dex's static-client secret.
+    clientSecretRef: "mitos-console-oidc"
+    # Must equal a redirectURI on the Dex static client in dex.yaml. The console
+    # serves its callback at /auth/callback. HTTPS because the console session
+    # cookie is Secure (see console-ingress.yaml).
+    redirectURL: "https://console.example.com/auth/callback"
+  # We supply our own HTTPS Ingress for the console (console-ingress.yaml) so the
+  # Secure session cookie works over TLS. Turn the chart's plain console Ingress
+  # off so two Ingresses do not fight over the same host.
+  ingress:
+    enabled: false
+
+# The chart also ships a federated Dex (GitHub/Google). Keep it OFF: the
+# single-user Dex in this example replaces it for QA. Do not run both.
+dex:
+  enabled: false

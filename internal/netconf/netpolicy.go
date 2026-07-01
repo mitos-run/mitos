@@ -39,6 +39,17 @@ type SandboxPolicy struct {
 	InboundCIDRs []string
 	// Counter requests the per-sandbox egress byte counter (#211 metering seam).
 	Counter bool
+	// ProxySentinel, when non-nil, turns on the per-sandbox egress proxy
+	// datapath: the Manager renders a prerouting DNAT that redirects this fork's
+	// sentinel proxy address to its gateway (where the per-node proxy listens) and
+	// an accept that lets the guest reach the proxy listener ahead of the
+	// allowlist drop. The proxy, not the per-sandbox chain, enforces upstream
+	// egress policy. Nil leaves the proxy datapath off (the prior behavior).
+	ProxySentinel net.IP
+	// ProxyPort is the TCP port the per-node egress proxy listens on; it is the
+	// DNAT target port and the dport the proxy-accept rule matches. Inert when
+	// ProxySentinel is nil.
+	ProxyPort int
 }
 
 // ChainSpec is the full per-sandbox egress chain input. The zero value renders a
@@ -73,6 +84,18 @@ type ChainSpec struct {
 	// sandbox's egress bytes. Opt-in so the legacy chain shape is unchanged by
 	// default.
 	Counter bool
+
+	// ProxyGatewayIP, when non-nil, folds a single accept for the per-node egress
+	// proxy listener into this chain. It is emitted right AFTER the unconditional
+	// cloud-metadata drops and BEFORE any allowlist or terminal verdict, so the
+	// guest can always reach the proxy (which enforces upstream egress policy) but
+	// can NEVER reach a metadata endpoint through it. The accept is saddr-pinned to
+	// GuestIP and scoped to ProxyGatewayIP:ProxyPort. It is inert under
+	// BlockNetwork: total deny denies the proxy path too.
+	ProxyGatewayIP net.IP
+	// ProxyPort is the TCP port the per-node egress proxy listens on; the dport the
+	// proxy accept matches. Inert when ProxyGatewayIP is nil.
+	ProxyPort int
 
 	// AllowCIDRs is the raw CIDR allowlist as written in the policy. When set and
 	// the pre-parsed slices are empty, RenderSandboxChainSpec parses it (ignoring
@@ -131,6 +154,15 @@ func RenderSandboxChainSpec(spec ChainSpec) string {
 		fmt.Fprintf(&b, "add rule inet %s %s meta nfproto ipv6 drop\n", table, chain)
 		fmt.Fprintf(&b, "add element inet %s %s { %q : jump %s }\n", table, dispatch, spec.Tap, chain)
 		return b.String()
+	}
+
+	// Per-node egress proxy accept (opt-in): let the guest reach the proxy
+	// listener AFTER the metadata drops and ahead of the allowlist verdict. The
+	// proxy enforces upstream policy; this rule only opens the path to it. Placed
+	// after RenderMetadataBlock so it can never precede the IMDS drops, and after
+	// the block_network early-return above so total deny still denies the proxy.
+	if spec.ProxyGatewayIP != nil {
+		b.WriteString(RenderProxyAccept(table, chain, spec.GuestIP, spec.ProxyGatewayIP, spec.ProxyPort))
 	}
 
 	fmt.Fprintf(&b, "add rule inet %s %s %s ct state established,related accept\n", table, chain, saddr)

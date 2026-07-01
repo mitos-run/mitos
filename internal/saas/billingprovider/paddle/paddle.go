@@ -118,20 +118,55 @@ func (p *Provider) VerifyWebhook(r *http.Request, body []byte) (billingprovider.
 	}
 	// Paddle Billing webhook envelope. The customer id lives at data.customer_id
 	// for subscription and transaction events; subscription.canceled etc. all
-	// carry it. We read only what the neutral event needs.
+	// carry it. For credit top-up transactions we also read data.id (the
+	// transaction id, used as the idempotency ref) and data.custom_data (the
+	// org/amount we embedded at checkout).
 	var ev struct {
 		EventType string `json:"event_type"`
 		Data      struct {
+			ID         string `json:"id"`
 			CustomerID string `json:"customer_id"`
+			CustomData struct {
+				Kind        string `json:"kind"`
+				OrgID       string `json:"org_id"`
+				AmountCents string `json:"amount_cents"`
+			} `json:"custom_data"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return billingprovider.Event{}, fmt.Errorf("paddle: malformed event: %w", err)
 	}
-	return billingprovider.Event{
+	out := billingprovider.Event{
 		Status:      statusFor(ev.EventType),
 		CustomerRef: ev.Data.CustomerID,
-	}, nil
+	}
+	// A credit top-up rides on the same transaction.completed / transaction.paid
+	// event types as a subscription payment. It is a one-off prepaid purchase and
+	// carries NO subscription-state meaning, so it must never move the org's
+	// billing status: otherwise a past_due or suspended org that buys credits would
+	// silently clear its own dunning. Suppress the status for a credit_topup
+	// transaction (the credit itself is applied via TopUp below), independent of
+	// whether the amount parses. A plain (non-top-up) transaction keeps its status.
+	isTopUpTxn := (ev.EventType == "transaction.completed" || ev.EventType == "transaction.paid") &&
+		ev.Data.CustomData.Kind == "credit_topup"
+	if isTopUpTxn {
+		out.Status = ""
+		// Populate the credit when org_id is present and amount_cents parses to a
+		// positive value. A missing, zero, or malformed amount leaves TopUp nil; the
+		// event is still acknowledged. We do NOT fail verification for a malformed
+		// top-up field.
+		if ev.Data.CustomData.OrgID != "" {
+			cents, err := strconv.ParseInt(ev.Data.CustomData.AmountCents, 10, 64)
+			if err == nil && cents > 0 {
+				out.TopUp = &billingprovider.TopUpCredit{
+					OrgID:       ev.Data.CustomData.OrgID,
+					AmountCents: cents,
+					Ref:         ev.Data.ID,
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // statusFor maps Paddle Billing event types to the neutral billing status,
@@ -205,6 +240,109 @@ func (p *Provider) verifySignature(header string, body []byte) error {
 		return errors.New("paddle: signature mismatch")
 	}
 	return nil
+}
+
+// CheckoutURL creates a Paddle transaction for a prepaid credit top-up and
+// returns its hosted checkout URL. It POSTs to /transactions with the verified
+// Paddle body shape: a single inline price item, collection_mode automatic,
+// and custom_data carrying org_id and amount_cents for reconciliation.
+// The API key is sent as a bearer token and is never surfaced in any error.
+func (p *Provider) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error) {
+	if p.apiKey == "" {
+		return "", errors.New("paddle: checkout not configured (no API key)")
+	}
+	centsStr := strconv.FormatInt(in.AmountCents, 10)
+	type unitPrice struct {
+		Amount       string `json:"amount"`
+		CurrencyCode string `json:"currency_code"`
+	}
+	type priceQuantity struct {
+		Minimum int `json:"minimum"`
+		Maximum int `json:"maximum"`
+	}
+	type price struct {
+		ProductID   string        `json:"product_id"`
+		Description string        `json:"description"`
+		UnitPrice   unitPrice     `json:"unit_price"`
+		TaxMode     string        `json:"tax_mode"`
+		Quantity    priceQuantity `json:"quantity"`
+	}
+	type item struct {
+		Quantity int   `json:"quantity"`
+		Price    price `json:"price"`
+	}
+	type customData struct {
+		Kind        string `json:"kind"`
+		OrgID       string `json:"org_id"`
+		AmountCents string `json:"amount_cents"`
+	}
+	body := struct {
+		Items          []item     `json:"items"`
+		CollectionMode string     `json:"collection_mode"`
+		CustomerID     string     `json:"customer_id,omitempty"`
+		CustomData     customData `json:"custom_data"`
+	}{
+		Items: []item{
+			{
+				Quantity: 1,
+				Price: price{
+					ProductID:   in.ProductID,
+					Description: "Credit top-up",
+					UnitPrice: unitPrice{
+						Amount:       centsStr,
+						CurrencyCode: in.Currency,
+					},
+					TaxMode:  "account_setting",
+					Quantity: priceQuantity{Minimum: 1, Maximum: 1},
+				},
+			},
+		},
+		CollectionMode: "automatic",
+		CustomerID:     in.CustomerRef,
+		CustomData: customData{
+			Kind:        "credit_topup",
+			OrgID:       in.OrgID,
+			AmountCents: centsStr,
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("paddle: marshal checkout request: %w", err)
+	}
+	reqURL := p.baseURL + "/transactions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("paddle: build checkout request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("paddle: checkout request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("paddle: read checkout response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("paddle: checkout API returned status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			ID       string `json:"id"`
+			Checkout struct {
+				URL string `json:"url"`
+			} `json:"checkout"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", fmt.Errorf("paddle: malformed checkout response: %w", err)
+	}
+	if out.Data.Checkout.URL == "" {
+		return "", errors.New("paddle: checkout url missing; set a default payment link")
+	}
+	return out.Data.Checkout.URL, nil
 }
 
 // PortalURL returns a Paddle-hosted customer portal URL ("manage subscription")

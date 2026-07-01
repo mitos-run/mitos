@@ -112,11 +112,15 @@ func (s *Service) Run(ctx context.Context, src string, id Identity, secrets map[
 	if err != nil {
 		return nil, fmt.Errorf("run %q: %w", src, err)
 	}
-	pool, err := m.GoldenPool(id.Namespace)
+	// The golden is shared across a tenant's forks, so it gets the stable per-pool
+	// canonical URL; each fork gets its own per-instance URL (issue #476).
+	goldenURL := fmt.Sprintf("https://%s.%s", m.PoolName(), s.exposeDomain)
+	instanceURL := fmt.Sprintf("https://%s.%s", id.InstanceLabel, s.exposeDomain)
+	pool, err := m.GoldenPool(id.Namespace, goldenURL)
 	if err != nil {
 		return nil, fmt.Errorf("run %q: golden pool: %w", src, err)
 	}
-	res, err := runmanifest.Provision(m, secrets, id.Namespace, id.InstanceLabel)
+	res, err := runmanifest.Provision(m, secrets, id.Namespace, id.InstanceLabel, instanceURL)
 	if err != nil {
 		return nil, fmt.Errorf("run %q: provision: %w", src, err)
 	}
@@ -125,6 +129,6 @@ func (s *Service) Run(ctx context.Context, src string, id Identity, secrets map[
 	}
 	return &RunResult{
 		Instance: id.InstanceLabel,
-		URL:      fmt.Sprintf("https://%s.%s", id.InstanceLabel, s.exposeDomain),
+		URL:      instanceURL,
 	}, nil
 }

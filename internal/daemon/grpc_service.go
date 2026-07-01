@@ -134,6 +134,8 @@ func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityReq
 		KvmAvailable:      c.KVMAvailable,
 		TemplateDigests:   c.TemplateDigests,
 		Templates:         templates,
+		DiskFreeBytes:     c.DiskFree,
+		DiskTotalBytes:    c.DiskTotal,
 	}, nil
 }
 

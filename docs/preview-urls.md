@@ -295,6 +295,51 @@ expose the proxy returns a typed `501`. The E2B compatibility shim
 (`mitos.e2b.Sandbox.get_host`) delegates to this same method, so an
 E2B script's `sandbox.get_host(port)` works unchanged.
 
+## Self-configuring with MITOS_PUBLIC_URL
+
+An exposed app often needs to know its own public URL at config or build time: a
+CORS or origin allowlist, an OAuth redirect URI, a base URL. Because Mitos assigns
+the subdomain dynamically (`<label>.<expose-domain>`), the app cannot hardcode it.
+The Run with Mitos provisioner (the `mitos.yaml` path) injects it for you.
+
+- `MITOS_PUBLIC_URL` is set in the environment to the sandbox's resolved public
+  URL, for example `https://app.mitos.run`. It is delivered both into the golden
+  template env at build time (so a `run.ready`-gated serving workload, which starts
+  during the snapshot build, sees it at startup) and into each fork's env at run
+  time (so exec sessions and processes started after the fork see this instance's
+  own URL). The value is a plain non-secret URL; it is safe to read, log, and bake
+  into the shareable golden snapshot.
+
+- `${MITOS_PUBLIC_URL}` may be referenced in `run.command`, `run.env`, and any
+  config string the manifest maps, and it is substituted with the resolved URL.
+  This is a single, well-defined substitution of one known token, not a shell:
+  only `${MITOS_PUBLIC_URL}` is expanded, and every other `${...}`, `$name`, or
+  shell construct is left exactly as written, so there is no expansion or injection
+  surface. A bare `$MITOS_PUBLIC_URL` (no braces) is NOT substituted; use the
+  braced form. When no public URL is resolved the token is left literal rather than
+  silently blanked.
+
+```yaml
+run:
+  command: ["node", "app.js", "--origin", "${MITOS_PUBLIC_URL}"]
+  env:
+    ALLOWED_ORIGINS: ${MITOS_PUBLIC_URL}
+    OAUTH_REDIRECT_URI: ${MITOS_PUBLIC_URL}/auth/callback
+```
+
+URL resolution detail: the golden pool is shared across a tenant's forks, so it is
+built once with the stable per-pool URL (`https://<pool>.<expose-domain>`), while
+each fork's `MITOS_PUBLIC_URL` is its own per-instance URL
+(`https://<label>.<expose-domain>`). For a single-instance app these are the same.
+For per-user apps where many forks share one golden, a snapshot-after-ready
+workload is captured with the per-pool URL and per-fork exec sessions see the
+per-instance URL; an app that must self-configure its origin per fork should read
+`MITOS_PUBLIC_URL` from the environment at run time.
+
+Forwarding the caller's verified Mitos Expose identity into the app (forward-auth
+headers and a signed identity assertion, deep SSO) is a separate, tracked
+follow-up (the auth bridge); it is NOT part of this URL injection.
+
 ## Operating the proxy
 
 ```bash

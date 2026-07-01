@@ -65,6 +65,56 @@ func TestSelectNodeNoCapacityWhenAllFull(t *testing.T) {
 	}
 }
 
+func TestSelectNodeRejectsLowDiskNode(t *testing.T) {
+	r := NewNodeRegistry()
+	// Ample memory but the data-dir filesystem is nearly full (1% free), well
+	// below the headroom floor: the node must not be chosen and the only node
+	// being low-disk yields ErrNoCapacity (back off before DiskPressure).
+	n := coldNode("n1", 64*gib, 0)
+	n.DiskTotal = 100 * gib
+	n.DiskFree = 1 * gib
+	r.Register(n)
+
+	_, err := r.SelectNode("py", "")
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity for a low-disk node, got %v", err)
+	}
+}
+
+func TestSelectNodeSkipsLowDiskPrefersHealthyDisk(t *testing.T) {
+	r := NewNodeRegistry()
+	// Both have ample memory; the low-disk node is below the floor and must be
+	// skipped in favor of the node with disk headroom.
+	low := coldNode("low", 64*gib, 0)
+	low.DiskTotal = 100 * gib
+	low.DiskFree = 1 * gib
+	ok := coldNode("ok", 64*gib, 0)
+	ok.DiskTotal = 100 * gib
+	ok.DiskFree = 50 * gib
+	r.Register(low)
+	r.Register(ok)
+
+	node, err := r.SelectNode("py", "")
+	if err != nil {
+		t.Fatalf("SelectNode: %v", err)
+	}
+	if node.Name != "ok" {
+		t.Fatalf("got %q want ok (low-disk node must be skipped)", node.Name)
+	}
+}
+
+func TestSelectNodeAdmitsUnknownDisk(t *testing.T) {
+	r := NewNodeRegistry()
+	// DiskTotal 0 means the node reported no disk numbers (statfs failed, dev, or
+	// mock): an unknown budget is treated as unlimited, exactly like an unknown
+	// memory budget, so dev and mock paths keep scheduling.
+	r.Register(coldNode("n1", 64*gib, 0))
+
+	if _, err := r.SelectNode("py", ""); err != nil {
+		t.Fatalf("expected admission with unknown disk budget, got %v", err)
+	}
+}
+
 func TestSelectNodePacksWarmHolderOverColdEmpty(t *testing.T) {
 	r := NewNodeRegistry()
 	// Cold node has the MOST free memory but does not hold the template. The

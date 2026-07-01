@@ -26,6 +26,7 @@
             "forbidden",
             "idle_timeout",
             "internal",
+            "invalid_input",
             "invalid_json",
             "not_found",
             "quota_exceeded",

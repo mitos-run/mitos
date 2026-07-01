@@ -36,6 +36,7 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/pgstore"
 	"mitos.run/mitos/internal/telemetry"
@@ -80,7 +81,20 @@ func main() {
 	// One status store is shared by the BFF billing view and the billing webhook
 	// so a provider event (payment failed / canceled) is reflected in the console.
 	statusStore := billing.NewMemStatusStore()
-	bill := setupBilling(logger, statusStore)
+
+	// creditLedger is the single shared instance used by the onboarding grant
+	// path, the billing view, AND the billing webhook (so a cleared top-up from
+	// the provider is immediately visible in the console). It is constructed
+	// BEFORE setupBilling so the same instance can be forwarded into the webhook
+	// handler without building a second ledger.
+	var creditLedger billing.CreditLedger
+	if pool != nil {
+		creditLedger = pgstore.NewPgCreditLedger(pool)
+	} else {
+		creditLedger = billing.NewMemCreditLedger()
+	}
+
+	bill := setupBilling(logger, statusStore, creditLedger)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -93,14 +107,14 @@ func main() {
 		sessionStore = saas.NewSessionStore()
 	}
 
-	// creditLedger is the single shared instance used by both the onboarding
-	// grant path and the billing view. Constructing it once here ensures a
-	// credit granted at signup is visible in the console billing endpoint.
-	var creditLedger billing.CreditLedger
+	// spendCapStore is the durable per-org spend-cap store when Postgres is
+	// configured, in-memory otherwise. This closes the money-safety gap where a
+	// redeploy silently dropped every configured cap.
+	var spendCapStore billing.SpendCapStore
 	if pool != nil {
-		creditLedger = pgstore.NewPgCreditLedger(pool)
+		spendCapStore = pgstore.NewPgSpendCapStore(pool)
 	} else {
-		creditLedger = billing.NewMemCreditLedger()
+		spendCapStore = billing.NewMemSpendCapStore()
 	}
 
 	con := console.New(console.Deps{
@@ -115,7 +129,7 @@ func main() {
 		Billing: console.BillingReader{
 			Ledger: creditLedger,
 			Status: statusStore,
-			Caps:   billing.NewMemSpendCapStore(),
+			Caps:   spendCapStore,
 			Rates:  billing.DefaultRates(),
 		},
 		// The active secret backend selected from config (kube / openbao), falling
@@ -127,6 +141,12 @@ func main() {
 		// The manage-subscription portal link (provider-neutral); nil keeps the
 		// console's no-portal default (community edition).
 		Portal: bill.portal,
+		// The prepaid credit top-up seam + its provider product/currency; nil
+		// keeps the console's no-top-up default (community edition), and an empty
+		// product id makes the endpoint return 400 until configured.
+		TopUp:          bill.topUp,
+		TopUpProductID: bill.topUpProductID,
+		TopUpCurrency:  bill.topUpCurrency,
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
 		Capabilities: caps,
@@ -180,7 +200,17 @@ func main() {
 	// Secure mirrors mountAuth (hardcoded true: the console is always TLS in
 	// production; -dev runs without cookies anyway since no session middleware
 	// is active in that branch).
-	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true)
+	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
+	// default mitos.run so a mitos.run address never needs a manual approval.
+	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
+	var allowlist onboarding.Allowlist
+	if pool != nil {
+		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
+	} else {
+		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
+		allowlist = onboarding.NewMemAllowlist(autoAllow)
+	}
+	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session
@@ -213,6 +243,22 @@ func main() {
 	} else {
 		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/identity/resolve not mounted")
 		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/session/resolve not mounted")
+	}
+	// The approve-signup endpoint is an INTERNAL machine-to-machine endpoint,
+	// bearer-gated by a dedicated shared secret (MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN).
+	// It canonicalizes the email, adds an allowlist row (idempotent), and sends the
+	// "you are in" email. Mounted OUTSIDE the session middleware. The token value is
+	// never logged. When unset, the endpoint is not mounted and a warning is logged.
+	if approveToken := os.Getenv("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN"); approveToken != "" {
+		mux.Handle("POST /internal/approve-signup", onboarding.NewApproveSignupHandler(
+			allowlist,
+			buildEmailSender(logger),
+			approveToken,
+			logger,
+		))
+		logger.Info("approve-signup endpoint mounted")
+	} else {
+		logger.Warn("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN unset; POST /internal/approve-signup not mounted")
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -350,4 +396,25 @@ func indexPage(logger *slog.Logger) http.HandlerFunc {
 			logger.Error("render index", "err", err.Error())
 		}
 	}
+}
+
+// parseAutoAllowDomains splits raw on commas, trims spaces, lowercases, and drops
+// empty entries. An empty input returns the default ["mitos.run"] so a mitos.run
+// address never requires a manual approval in a fresh deployment. The domains are
+// not secret and are not logged at startup.
+func parseAutoAllowDomains(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{"mitos.run"}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.ToLower(strings.TrimSpace(p)); d != "" {
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"mitos.run"}
+	}
+	return out
 }

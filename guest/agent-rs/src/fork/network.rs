@@ -26,7 +26,7 @@
 //   on box1) and mirrors what Go's internal/guestnet package does.
 
 /// Per-fork network identity delivered by the host in the notify-forked request.
-/// All fields are plain addresses; none are secret.
+/// All fields are plain addresses or config; none are secret.
 pub struct NetworkConfig {
     /// IPv4 address to assign to eth0 (e.g. "10.200.0.6").
     pub guest_ip: String,
@@ -40,6 +40,17 @@ pub struct NetworkConfig {
     /// IPv4 address of the per-node DNS resolver.
     /// Empty means leave /etc/resolv.conf untouched.
     pub resolver_ip: String,
+    /// Host:port of the per-fork egress HTTP(S) proxy, e.g. "169.254.169.2:3128".
+    /// The guest agent exports it as HTTP_PROXY and HTTPS_PROXY in
+    /// /etc/profile.d/mitos-proxy.sh so egress is policy-enforced by the host.
+    /// Empty means the egress proxy is disabled; no proxy env file is written.
+    /// Config, not secret: the endpoint is a local link address, not credentials.
+    pub proxy_endpoint: String,
+    /// When true, this is a live fork: flush stale ARP neighbor entries on eth0
+    /// after re-addressing so captured upstream sockets die and clients re-dial
+    /// through the egress proxy. False leaves existing ARP state in place, which
+    /// is correct for a cold fork from a snapshot.
+    pub reset_upstreams: bool,
 }
 
 /// Reconfigure eth0 with the per-fork address and default route.
@@ -116,7 +127,7 @@ fn apply_linux(cfg: &NetworkConfig, iface: &str, resolv_conf_path: &str) {
 
     if let Err(e) = crate::sys::netlink::configure(iface, mac, guest_ip, gateway_ip, prefix_len) {
         eprintln!("sandbox-agent: net config failed: {e}");
-        // Do not return: attempt resolv.conf even if netlink failed,
+        // Do not return: attempt resolv.conf and proxy env even if netlink failed,
         // matching the Go behavior of writeResolvConf after a configureNetwork error.
     }
 
@@ -124,11 +135,31 @@ fn apply_linux(cfg: &NetworkConfig, iface: &str, resolv_conf_path: &str) {
         eprintln!("sandbox-agent: write resolv.conf: {e}");
     }
 
+    // Write proxy env file when a per-fork egress proxy is configured.
+    if !cfg.proxy_endpoint.is_empty() {
+        let proxy_path = std::path::Path::new("/etc/profile.d/mitos-proxy.sh");
+        if let Err(e) = write_proxy_env(proxy_path, &cfg.proxy_endpoint) {
+            eprintln!("sandbox-agent: write proxy env: {e}");
+        }
+    }
+
+    // Flush stale ARP entries on live forks so captured upstream sockets die
+    // and clients re-dial through the per-fork egress proxy. Best-effort: log
+    // and continue on error, matching the overall "fail-open for observability"
+    // style of this function.
+    if cfg.reset_upstreams {
+        if let Err(e) = crate::sys::netlink::flush_neighbors(iface) {
+            eprintln!("sandbox-agent: flush neighbors on {iface}: {e}");
+        }
+    }
+
     let addr_str = format!("{guest_ip}/{prefix_len}");
     println!(
-        "sandbox-agent: configured {iface} addr={addr_str} gateway={gateway} resolver={resolver}",
+        "sandbox-agent: configured {iface} addr={addr_str} gateway={gateway} resolver={resolver} proxy={proxy} reset_upstreams={reset}",
         gateway = cfg.gateway_ip,
         resolver = cfg.resolver_ip,
+        proxy = cfg.proxy_endpoint,
+        reset = cfg.reset_upstreams,
     );
 }
 
@@ -180,6 +211,59 @@ fn write_resolv_conf(path: &str, resolver_ip: &str) -> std::io::Result<()> {
     }
 }
 
+/// Write shell export lines for HTTP_PROXY and HTTPS_PROXY to `path`, pointing
+/// at `http://<endpoint>`, plus NO_PROXY/no_proxy covering loopback and the cloud
+/// metadata address/link-local (defense in depth; the host denylist is the real
+/// control). The file is written with mode 0o644 (umask-independent
+/// on Linux via OpenOptionsExt; plain write on other platforms).
+///
+/// An EMPTY `endpoint` is a no-op: nothing is written and no error is returned,
+/// so non-proxy forks leave the file untouched.
+///
+/// This function performs only file I/O (no syscalls, no Linux-specific calls)
+/// and is testable on any OS. No secret material is written: `endpoint` is a
+/// plain host:port address, not a credential.
+pub(super) fn write_proxy_env(path: &std::path::Path, endpoint: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if endpoint.is_empty() {
+        return Ok(());
+    }
+    let url = format!("http://{endpoint}");
+    // NO_PROXY (defense in depth): cooperative guest clients bypass the proxy for
+    // loopback (so they never proxy localhost calls) and the cloud metadata
+    // address / link-local range (so an honest client never even routes IMDS
+    // through the proxy). This is ADVISORY only: the authoritative control is the
+    // host-side destination denylist in internal/egressproxy, which refuses these
+    // regardless of whether the client honors NO_PROXY.
+    let no_proxy = "127.0.0.1,::1,localhost,169.254.169.254,169.254.0.0/16";
+    let content = format!(
+        "export HTTP_PROXY={url}\nexport HTTPS_PROXY={url}\nexport NO_PROXY={no_proxy}\nexport no_proxy={no_proxy}\n"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        // Create parent directory if needed (best-effort; file write may fail
+        // independently if the dir truly cannot be created).
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(path)?;
+        f.write_all(content.as_bytes())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Non-Linux (macOS CI): plain write, no mode control.
+        std::fs::write(path, content)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
@@ -197,6 +281,37 @@ mod tests {
     // -----------------------------------------------------------------------
     // Unit tests: run on all platforms (no syscalls).
     // -----------------------------------------------------------------------
+
+    // TDD RED: this test must fail until NetworkConfig gains proxy_endpoint +
+    // reset_upstreams and write_proxy_env is implemented.
+    #[test]
+    fn writes_proxy_env_file_on_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("mitos-proxy.sh");
+        let cfg = NetworkConfig {
+            guest_ip: "10.0.0.6".into(),
+            gateway_ip: "10.0.0.5".into(),
+            prefix_len: 30,
+            guest_mac: String::new(),
+            resolver_ip: String::new(),
+            proxy_endpoint: "169.254.169.2:3128".into(),
+            reset_upstreams: true,
+        };
+        write_proxy_env(std::path::Path::new(env_path.to_str().unwrap()), &cfg.proxy_endpoint).unwrap();
+        let body = std::fs::read_to_string(&env_path).unwrap();
+        assert!(body.contains("HTTP_PROXY=http://169.254.169.2:3128"));
+        assert!(body.contains("HTTPS_PROXY=http://169.254.169.2:3128"));
+        // NO_PROXY (and lowercase no_proxy) must cover loopback and the cloud
+        // metadata address/link-local so cooperative clients bypass the proxy
+        // for them (defense in depth; the host denylist is the real control).
+        assert!(body.contains("NO_PROXY="));
+        assert!(body.contains("no_proxy="));
+        for needle in ["127.0.0.1", "::1", "localhost", "169.254.169.254", "169.254.0.0/16"] {
+            assert!(body.contains(needle), "NO_PROXY missing {needle}: {body}");
+        }
+        // no secrets, just the endpoint
+        assert!(!body.contains("Authorization"));
+    }
 
     #[test]
     fn none_config_is_noop() {
@@ -339,6 +454,8 @@ mod tests {
                         prefix_len: 30,
                         guest_mac: "".to_string(),
                         resolver_ip: "10.88.0.1".to_string(),
+                        proxy_endpoint: "".to_string(),
+                        reset_upstreams: false,
                     };
                     configure_network_on(Some(&cfg), iface, resolv_str);
 
@@ -369,6 +486,8 @@ mod tests {
                         prefix_len: 30,
                         guest_mac: "".to_string(),
                         resolver_ip: "".to_string(),
+                        proxy_endpoint: "".to_string(),
+                        reset_upstreams: false,
                     };
                     let cfg2 = NetworkConfig {
                         guest_ip: "10.89.1.6".to_string(),
@@ -376,6 +495,8 @@ mod tests {
                         prefix_len: 30,
                         guest_mac: "".to_string(),
                         resolver_ip: "".to_string(),
+                        proxy_endpoint: "".to_string(),
+                        reset_upstreams: false,
                     };
                     configure_network_on(Some(&cfg1), iface, resolv_str);
                     configure_network_on(Some(&cfg2), iface, resolv_str);
@@ -400,6 +521,8 @@ mod tests {
                         prefix_len: 30,
                         guest_mac: "02:aa:bb:cc:dd:ee".to_string(),
                         resolver_ip: "".to_string(),
+                        proxy_endpoint: "".to_string(),
+                        reset_upstreams: false,
                     };
                     configure_network_on(Some(&cfg), iface, resolv_str.to_str().unwrap());
 

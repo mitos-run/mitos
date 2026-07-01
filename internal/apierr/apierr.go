@@ -31,6 +31,11 @@ type Code string
 
 // The normative error-code set. Keep in step with docs/api/errors.md.
 const (
+	// CodeInvalidInput: the request body is syntactically valid JSON but fails a
+	// semantic business rule (negative value, ordering constraint, missing required
+	// field). Distinct from invalid_json (a parse failure): the body decoded but
+	// a field value violates the endpoint contract.
+	CodeInvalidInput Code = "invalid_input"
 	// CodeInvalidJSON: the request body is not valid JSON.
 	CodeInvalidJSON Code = "invalid_json"
 	// CodeBodyTooLarge: the request body exceeds the server size limit.
@@ -141,6 +146,12 @@ func Encode(w http.ResponseWriter, e Error) {
 // docs/api/errors.md (the single source of truth) and docs/api/v2-spec.md in
 // step. The doc-sync test enforces the doc matches these entries.
 var Catalogue = map[string]Error{
+	string(CodeInvalidInput): {
+		Code:        string(CodeInvalidInput),
+		Message:     "the request body is semantically invalid",
+		Remediation: "Correct the value in the request body; consult the endpoint documentation for the valid range and business rules.",
+		Status:      http.StatusBadRequest,
+	},
 	string(CodeInvalidJSON): {
 		Code:        string(CodeInvalidJSON),
 		Message:     "request body is not valid JSON",

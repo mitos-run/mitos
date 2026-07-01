@@ -118,6 +118,23 @@ type NotifyForkedNetwork struct {
 	// existing resolv.conf is left untouched. The address is config, not a
 	// secret, and is safe to log.
 	ResolverIP string `json:"resolver_ip,omitempty"`
+	// ProxyEndpoint, when non-empty, is the fork-stable host:port the guest must
+	// send its egress through: the per-node egress proxy. It is the sentinel
+	// proxy address (baked identically into every fork) plus the proxy port; each
+	// fork's nftables DNAT redirects the sentinel to that fork's gateway, where
+	// the single per-node proxy process listens. The guest agent exports it as
+	// HTTP_PROXY/HTTPS_PROXY so guest egress is attributed and policy-enforced by
+	// the host proxy. Empty means the per-sandbox egress proxy is disabled and
+	// the guest's environment is left untouched. The address is config, not a
+	// secret, and is safe to log.
+	ProxyEndpoint string `json:"proxy_endpoint,omitempty"`
+	// ResetUpstreams, when true, tells the guest this is a live fork: it must
+	// drop stale route and neighbor state after re-addressing eth0, so that
+	// captured upstream sockets die and clients re-dial through the proxy. False
+	// (the default) leaves existing connections in place, which is correct for a
+	// cold fork from a snapshot. This flag is config, not a secret, and is safe
+	// to log.
+	ResetUpstreams bool `json:"reset_upstreams,omitempty"`
 }
 
 // NotifyForkedResponse reports what the guest did in response to a fork

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -11,6 +13,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// nodeLostReforkCountAnnotation records how many times a raw-forkd claim has been
+// automatically re-forked after node loss. It is the durable, per-claim bound on
+// the auto-replacement retries (issue #372): the GC reads it to decide re-fork vs
+// fail-closed and bumps it on each re-pend, so a claim whose replacement node
+// keeps dying cannot retry forever. It is metadata, not status, so it survives the
+// status re-pend write below.
+const nodeLostReforkCountAnnotation = "mitos.run/nodelost-refork-count"
+
+// maxRawForkdNodeLostReforks bounds how many times a single raw-forkd claim is
+// automatically re-forked onto a surviving snapshot-holder after node loss before
+// the GC fails it closed with a terminal NodeLost. The bound is over the claim's
+// whole life (the count is never reset), so a claim repeatedly landing on dying
+// nodes fails closed instead of churning forever. Husk mode is unaffected; it
+// self-heals via the warm pool re-pend.
+const maxRawForkdNodeLostReforks = 3
 
 // GarbageCollector is a manager Runnable that periodically reconciles forkd
 // actuals against CRD-desired state. In one pass it sweeps orphan VMs: a forkd
@@ -274,19 +292,25 @@ func (g *GarbageCollector) sweepOrphanVolumes(ctx context.Context, logger logr.L
 	}
 }
 
-// markNodeLost transitions Ready claims whose node is no longer a healthy
-// registered node to a terminal Failed phase with a NodeLost condition.
+// markNodeLost handles raw-forkd Ready claims whose node is no longer a healthy
+// registered node. In raw-forkd mode (issue #372) a lost node does not always
+// end the claim: when a surviving node still holds the pool's template snapshot
+// and the per-claim re-fork bound is not yet spent, the claim is RE-PENDED so the
+// claim reconciler re-issues the fork onto that surviving holder (the same
+// SelectNode + forkOnNode placement path, no KVM needed to decide). The claim
+// only reaches the terminal Failed phase with a NodeLost condition when it fails
+// closed: no surviving snapshot holder, or the bounded retries are exhausted.
 //
-// We reuse the existing SandboxFailed phase with a NodeLost reason rather than
-// adding a dedicated phase const: the phase set stays small and a NodeLost
-// claim is, for every consumer, just a failed claim with a specific reason.
-// The node is gone, so there is nothing to terminate; we only stamp state,
-// bounded by the GC interval.
+// We reuse the existing SandboxFailed phase with a NodeLost reason for the
+// terminal case rather than adding a dedicated phase const: the phase set stays
+// small and a NodeLost claim is, for every consumer, just a failed claim with a
+// specific reason. The node is gone, so there is nothing to terminate; we only
+// stamp state, bounded by the GC interval.
 //
-// In husk mode this is a no-op: a Ready husk-backed claim recovers from node
-// loss by re-pending onto a replacement dormant slot (checkHuskPodLost + the
-// husk pod watch own that path). Failing it here would race that re-pend into a
-// terminal state and defeat the husk self-heal.
+// In husk mode this whole path is a no-op: a Ready husk-backed claim recovers
+// from node loss by re-pending onto a replacement dormant slot (checkHuskPodLost
+// + the husk pod watch own that path). Acting here would race that re-pend and
+// defeat the husk self-heal.
 func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger, sandboxes []v1.Sandbox) {
 	if g.EnableHuskPods {
 		return
@@ -299,23 +323,108 @@ func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger,
 		if c.Status.Node == "" || g.Registry.NodeHealthy(c.Status.Node) {
 			continue
 		}
-		now := metav1.Now()
-		c.Status.Phase = v1.SandboxFailed
-		c.Status.FinishedAt = &now
+		g.handleRawNodeLost(ctx, logger, c)
+	}
+}
+
+// handleRawNodeLost decides between auto re-fork and fail-closed for a single
+// raw-forkd Ready claim on a lost node. It re-pends the claim (back to Pending,
+// stale placement cleared, a typed NodeLostReforking condition, the per-claim
+// re-fork count bumped) when a surviving snapshot holder exists AND the bound is
+// not yet spent; the claim reconciler then re-issues the fork onto a surviving
+// holder via its normal placement path. Otherwise it fails the claim closed with
+// a terminal NodeLost condition whose message names the actual cause (no surviving
+// holder, or the retries exhausted).
+func (g *GarbageCollector) handleRawNodeLost(ctx context.Context, logger logr.Logger, c *v1.Sandbox) {
+	holderSurvives := g.snapshotHolderSurvives(ctx, c)
+	reforks := nodeLostReforkCount(c)
+	lostNode := c.Status.Node
+
+	if holderSurvives && reforks < maxRawForkdNodeLostReforks {
+		// Bump the durable per-claim re-fork count first (metadata, so it survives
+		// the status re-pend write). On a write error, leave the claim Ready and
+		// retry next pass rather than re-pending without recording the attempt.
+		if c.Annotations == nil {
+			c.Annotations = map[string]string{}
+		}
+		c.Annotations[nodeLostReforkCountAnnotation] = strconv.Itoa(reforks + 1)
+		if err := g.Client.Update(ctx, c); err != nil {
+			logger.Error(err, "stamp re-fork count for NodeLost claim", "claim", c.Name, "node", lostNode)
+			return
+		}
+		// Re-pend: clear the stale placement so no consumer reads a dead endpoint,
+		// and let the claim reconciler re-fork onto a surviving holder.
+		c.Status.Phase = v1.SandboxPending
+		c.Status.Node = ""
+		c.Status.Endpoint = ""
+		c.Status.SandboxID = ""
+		c.Status.StartedAt = nil
 		setCondition(&c.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
-			LastTransitionTime: now,
-			Reason:             "NodeLost",
-			Message:            "node running this sandbox is no longer healthy or registered",
+			LastTransitionTime: metav1.Now(),
+			Reason:             "NodeLostReforking",
+			Message:            fmt.Sprintf("node %s running this sandbox was lost; a surviving node holds the pool template snapshot, so the sandbox is being re-forked onto it (attempt %d of %d)", lostNode, reforks+1, maxRawForkdNodeLostReforks),
 		})
 		if err := g.Client.Status().Update(ctx, c); err != nil {
-			logger.Error(err, "mark claim NodeLost", "claim", c.Name, "node", c.Status.Node)
-			continue
+			logger.Error(err, "re-pend NodeLost claim for auto re-fork", "claim", c.Name, "node", lostNode)
+			return
 		}
-		recordNodeLost(c.Status.Node)
-		logger.Info("claim transitioned to NodeLost", "claim", c.Name, "node", c.Status.Node)
+		recordNodeLostRefork(lostNode)
+		logger.Info("raw-forkd claim re-pending for auto re-fork after node loss", "claim", c.Name, "node", lostNode, "attempt", reforks+1)
+		return
 	}
+
+	// Fail closed: no surviving snapshot holder, or the bounded retries are spent.
+	now := metav1.Now()
+	c.Status.Phase = v1.SandboxFailed
+	c.Status.FinishedAt = &now
+	message := fmt.Sprintf("node %s running this sandbox is no longer healthy or registered, and no surviving node holds the pool template snapshot to re-fork onto; recreate the claim once a snapshot holder is available", lostNode)
+	if holderSurvives {
+		message = fmt.Sprintf("node %s running this sandbox was lost; automatic re-fork onto a surviving snapshot holder was attempted %d times (the bound) without a durable placement, so the claim is failed; recreate the claim", lostNode, reforks)
+	}
+	setCondition(&c.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: now,
+		Reason:             "NodeLost",
+		Message:            message,
+	})
+	if err := g.Client.Status().Update(ctx, c); err != nil {
+		logger.Error(err, "mark claim NodeLost", "claim", c.Name, "node", lostNode)
+		return
+	}
+	recordNodeLost(lostNode)
+	logger.Info("claim transitioned to NodeLost", "claim", c.Name, "node", lostNode)
+}
+
+// snapshotHolderSurvives reports whether a healthy node still holds the template
+// snapshot the claim's pool forks from, so the claim can be re-forked onto it.
+// It is the placement-only decision (no KVM): it resolves the pool's template id
+// (poolTemplateID) and asks the NodeRegistry whether any healthy node holds it.
+// It returns false (fail closed) for a claim with no pool source (a fromSandbox
+// or fromRevision sandbox is never auto-re-forked) or when the pool cannot be
+// read, preserving the terminal NodeLost behavior for those.
+func (g *GarbageCollector) snapshotHolderSurvives(ctx context.Context, c *v1.Sandbox) bool {
+	if c.Spec.Source.PoolRef == nil || c.Spec.Source.PoolRef.Name == "" {
+		return false
+	}
+	var pool v1.SandboxPool
+	if err := g.Client.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: c.Spec.Source.PoolRef.Name}, &pool); err != nil {
+		return false
+	}
+	return len(g.Registry.NodesWithTemplate(poolTemplateID(&pool))) > 0
+}
+
+// nodeLostReforkCount reads the durable per-claim auto re-fork count from the
+// claim's annotation, defaulting to 0 when absent or unparseable.
+func nodeLostReforkCount(c *v1.Sandbox) int {
+	if v := c.Annotations[nodeLostReforkCountAnnotation]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // ttlFinished deletes claims in a terminal phase (Terminated or Failed) whose

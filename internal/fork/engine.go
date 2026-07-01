@@ -18,6 +18,7 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/cpupin"
+	"mitos.run/mitos/internal/egressproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
@@ -132,6 +133,20 @@ type Engine struct {
 	dnsRegistry    DNSRegistry
 	enableDNSEgres bool
 
+	// Per-sandbox egress proxy is opt-in on top of networking. When egressProxy
+	// is non-nil, each fork registers its unique guest IP with the node-wide
+	// proxy (so the proxy attributes the fork's connections by source IP), the
+	// fork's egress ruleset gets a DNAT that redirects proxySentinel:proxyPort to
+	// its gateway (where the single per-node proxy listens) plus an accept ahead
+	// of the allowlist drop, and the fork is handed the fork-stable proxy endpoint
+	// over vsock so the guest routes egress through it. Nil (the default) leaves
+	// the proxy datapath off: behavior is exactly as before. proxySentinel is the
+	// fork-stable sentinel address baked identically into every fork; proxyPort is
+	// the proxy listen port.
+	egressProxy   *egressproxy.Registry
+	proxySentinel net.IP
+	proxyPort     int
+
 	// Volumes are opt-in. When enableVolumes is set and volBackend is non-nil,
 	// the template build bakes one placeholder drive per template volume into
 	// the snapshot, and every fork prepares its OWN backing per fork policy and
@@ -225,6 +240,12 @@ type Engine struct {
 	// host MemTotal. A seam: production reads /proc/meminfo; tests inject canned
 	// contents. On non-linux/dev hosts the read fails and MemoryTotal is 0.
 	meminfoReader func() (string, error)
+	// diskStatfs returns the free and total bytes of the filesystem holding the
+	// data dir. A seam: production calls statfs on dataDir; tests inject canned
+	// values (so the disk-headroom path is exercised on darwin). Nil leaves the
+	// disk fields zero, which the controller reads as an unknown (unlimited)
+	// budget.
+	diskStatfs func(path string) (free, total int64, err error)
 
 	// journal persists one on-disk record per live sandbox under the data dir so
 	// a restarted forkd can recognize and reap its own pre-crash VMs (issue #12).
@@ -283,6 +304,13 @@ func (e *Engine) networkEnabled() bool {
 // Networking must also be on (the registry keys on the per-fork guest IP).
 func (e *Engine) dnsEgressEnabled() bool {
 	return e.enableDNSEgres && e.dnsRegistry != nil && e.resolverIP != nil && e.networkEnabled()
+}
+
+// egressProxyEnabled reports whether the per-sandbox egress proxy is wired: the
+// registry is present and networking is on (the registry keys on the per-fork
+// guest IP, so networking must allocate one).
+func (e *Engine) egressProxyEnabled() bool {
+	return e.egressProxy != nil && e.networkEnabled()
 }
 
 // volumesEnabled reports whether per-fork volumes are wired. Both the flag and
@@ -489,6 +517,13 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		// counting rule with no verdict, so it never changes enforcement.
 		Counter: true,
 	}
+	// When the per-sandbox egress proxy is on, hand the policy the sentinel and
+	// port so Setup renders the DNAT (sentinel -> this fork's gateway) and the
+	// proxy accept ahead of the allowlist drop.
+	if e.egressProxyEnabled() {
+		sbPolicy.ProxySentinel = e.proxySentinel
+		sbPolicy.ProxyPort = e.proxyPort
+	}
 	if err := e.netMgr.Setup(context.Background(), id, sbPolicy, e.resolverIP); err != nil {
 		e.netAlloc.Release(sandboxID)
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
@@ -509,6 +544,17 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		}
 	}
 
+	// Register this fork's guest IP with the node-wide egress proxy (it
+	// attributes connections by source IP) and compute the fork-stable proxy
+	// endpoint the guest routes egress through. Done after Setup AND after every
+	// fallible step above so neither a setup failure nor a later parse error
+	// leaves a dangling proxy attribution (commit-at-the-end).
+	var proxyEndpoint string
+	if e.egressProxyEnabled() {
+		e.egressProxy.Register(id.GuestIP, sandboxID)
+		proxyEndpoint = net.JoinHostPort(e.proxySentinel.String(), strconv.Itoa(e.proxyPort))
+	}
+
 	return &forkNetwork{
 		identity: id,
 		overrides: []firecracker.NetworkOverride{{
@@ -516,11 +562,18 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 			HostDevName: id.TapName,
 		}},
 		guestNet: &vsock.NotifyForkedNetwork{
-			GuestIP:    id.GuestIP.String(),
-			GatewayIP:  id.HostIP.String(),
-			PrefixLen:  30,
-			GuestMAC:   id.GuestMAC,
-			ResolverIP: guestResolver,
+			GuestIP:       id.GuestIP.String(),
+			GatewayIP:     id.HostIP.String(),
+			PrefixLen:     30,
+			GuestMAC:      id.GuestMAC,
+			ResolverIP:    guestResolver,
+			ProxyEndpoint: proxyEndpoint,
+			// A live fork (ForkRunning) inherits the parent's open upstream
+			// sockets in memory; the guest must drop them after re-addressing eth0
+			// so captured connections die and clients re-dial through the proxy. A
+			// cold fork from a snapshot has no such captured sockets, so this stays
+			// false for it (the default).
+			ResetUpstreams: opts.LiveFork,
 		},
 	}, nil
 }
@@ -538,6 +591,11 @@ func (e *Engine) teardownForkNetwork(sandboxID string, id netconf.Identity) {
 	// Teardown. Safe to call for a guest that was never registered.
 	if e.enableDNSEgres && e.dnsRegistry != nil {
 		e.dnsRegistry.Deregister(id.GuestIP)
+	}
+	// Drop the egress proxy attribution so a reused guest IP cannot inherit a
+	// stale sandbox mapping. Safe to call for a guest that was never registered.
+	if e.egressProxy != nil {
+		e.egressProxy.Deregister(id.GuestIP)
 	}
 	if err := e.netMgr.Teardown(context.Background(), id); err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: teardown network for %s (tap %s): %v\n", sandboxID, id.TapName, err)
@@ -578,6 +636,18 @@ type EngineOpts struct {
 	// DNSRegistry is the dnsproxy registry the engine registers/deregisters
 	// per-fork name allowlists with. Nil leaves DNS egress disabled.
 	DNSRegistry DNSRegistry
+	// EgressProxy is the node-wide egress proxy registry the engine
+	// registers/deregisters each fork's guest IP with (the proxy attributes a
+	// connection to its sandbox by source IP). Nil leaves the per-sandbox egress
+	// proxy disabled (the prior behavior). Networking must also be on.
+	EgressProxy *egressproxy.Registry
+	// ProxySentinel is the fork-stable sentinel proxy address baked identically
+	// into every fork; each fork's DNAT redirects it to that fork's gateway, where
+	// the per-node proxy listens. Inert when EgressProxy is nil.
+	ProxySentinel net.IP
+	// ProxyPort is the TCP port the per-node egress proxy listens on. Inert when
+	// EgressProxy is nil.
+	ProxyPort int
 	// AgentBinPath is the host path of the guest agent binary injected as
 	// /init when CreateTemplate builds a rootfs from an OCI image. It is
 	// REQUIRED for image builds and unused for file-path rootfs templates.
@@ -623,6 +693,10 @@ type EngineOpts struct {
 	// MemTotal. Nil uses the production reader (reads /proc/meminfo); tests
 	// inject canned contents or a failing reader for non-linux paths.
 	MeminfoReader func() (string, error)
+	// DiskStatfs is the statfs source GetCapacity uses for the data-dir disk
+	// headroom (free/total bytes). Nil uses the production reader (statfs of the
+	// data dir); tests inject canned values or a failing reader.
+	DiskStatfs func(path string) (free, total int64, err error)
 	// PullHTTPClient is the HTTP client PullTemplate uses to fetch a peer forkd's
 	// CAS over TLS. The daemon injects one trusting the control-plane CA. Nil
 	// leaves http.DefaultClient; PullTemplate still works against a plaintext
@@ -666,6 +740,13 @@ type Sandbox struct {
 	// enabled and the fork requested it; the zero value (empty TapName) means
 	// no host network was set up and Terminate skips teardown.
 	netID netconf.Identity
+	// netOpts is the NetworkOpts this sandbox was forked with (egress policy,
+	// allowlists, inbound, CIDRs). It is retained so a LIVE fork (ForkRunning)
+	// of this sandbox can give the child the SAME egress policy: the child runs
+	// the full cold-fork network path (fresh per-fork identity + proxy
+	// registration) under the source's policy. Nil for a networking-off sandbox,
+	// in which case a live fork carries no network.
+	netOpts *NetworkOpts
 	// uffd is the userfaultfd memory backend serving this fork's guest memory
 	// when it was restored via UFFD (issue #167: hugepage-backed snapshots and
 	// hot-page prefetch). It runs a Serve goroutine for the life of the VM and is
@@ -841,6 +922,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		resolverIP:           opts.ResolverIP,
 		dnsRegistry:          opts.DNSRegistry,
 		enableDNSEgres:       opts.EnableDNSEgress,
+		egressProxy:          opts.EgressProxy,
+		proxySentinel:        opts.ProxySentinel,
+		proxyPort:            opts.ProxyPort,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
 		hugePages:            opts.HugePages,
@@ -855,6 +939,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		maxSandboxes:         opts.MaxSandboxes,
 		memReserveBytes:      opts.MemoryReserveBytes,
 		meminfoReader:        opts.MeminfoReader,
+		diskStatfs:           opts.DiskStatfs,
 		journal:              newJournal(dataDir),
 		buildJournal:         newBuildJournal(dataDir),
 		verifyPID:            procfsVerifier,
@@ -868,6 +953,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	}
 	if e.meminfoReader == nil {
 		e.meminfoReader = procMeminfoReader
+	}
+	if e.diskStatfs == nil {
+		e.diskStatfs = statfsDiskBytes
 	}
 	// Wire the production egress-byte reader when networking is enabled so the
 	// metering rollup (#211 seam) attributes per-sandbox egress bytes from the
@@ -1026,6 +1114,10 @@ func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
 		// Record the guest-memory page backing so the snapshot is self-describing:
 		// any node restoring it knows it must use the UFFD backend (issue #167).
 		HugePages: cfg.HugePages,
+		// Record the guest-agent protocol this build's agent speaks so a stale
+		// snapshot is refused fail-closed at load after a runtime upgrade instead
+		// of breaking at the fork-correctness handshake (issue #459).
+		GuestProtocolVersion: cas.CurrentGuestProtocolVersion,
 	}
 }
 
@@ -1442,6 +1534,10 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	var guestNet *vsock.NotifyForkedNetwork
 	if fnet != nil {
 		sandbox.netID = fnet.identity
+		// Retain the opts this fork was created with so a later LIVE fork of this
+		// sandbox can give its child the SAME egress policy (allowlist, CIDRs,
+		// inbound). Only meaningful when networking was actually set up.
+		sandbox.netOpts = opts.Network
 		guestNet = fnet.guestNet
 	}
 	sandbox.hasVolumes = len(rebinds) > 0
@@ -1478,6 +1574,18 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	}, nil
 }
 
+// liveForkOpts builds the ForkOpts for a live (running) fork of source: the
+// child inherits the source's network policy (so it gets a fresh per-fork
+// identity through the same path as cold fork) and is marked LiveFork so the
+// guest resets captured upstream sockets.
+func liveForkOpts(source *Sandbox) ForkOpts {
+	opts := ForkOpts{LiveFork: true}
+	if source.netOpts != nil {
+		opts.Network = source.netOpts
+	}
+	return opts
+}
+
 // ForkRunning checkpoints a running sandbox and creates a new fork from it.
 func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource bool) (*ForkResult, error) {
 	e.mu.RLock()
@@ -1487,12 +1595,16 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		return nil, fmt.Errorf("sandbox %s not found", sourceSandboxID)
 	}
 
-	// Fail closed: a live fork restores the source's baked NIC, which would
-	// collide on tap/MAC/IP with the source's live network. Until per-VM netns
-	// (husk pods #18) isolates each fork's interface, live-forking a networked
-	// sandbox is unsupported.
-	if e.networkEnabled() {
-		return nil, fmt.Errorf("live fork (ForkRunning) of a networked sandbox is not supported yet; tracked in #18")
+	// Fail closed unless the egress proxy is active: a live fork restores the
+	// source's baked NIC, which would collide on tap/MAC/IP with the source's
+	// live network. The egress proxy (issue #336) is what makes a live fork of a
+	// networked sandbox safe: the child gets a FRESH per-fork identity (distinct
+	// tap/MAC/IP via the cold-fork network path) and its captured upstream
+	// sockets are reset, so there is no collision and no leaked connection. With
+	// networking on but no proxy wired we have no such isolation, so we refuse
+	// with an actionable error rather than silently breaking networking.
+	if e.networkEnabled() && !e.egressProxyEnabled() {
+		return nil, fmt.Errorf("live fork of a networked sandbox requires the egress proxy; start forkd with --egress-proxy (tracked in #336)")
 	}
 
 	if pauseSource && source.fcClient != nil {
@@ -1541,10 +1653,37 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		return nil, fmt.Errorf("symlink checkpoint vmstate: %w", err)
 	}
 
+	// Run the SAME network path as a cold fork so the child gets a FRESH per-fork
+	// identity (distinct tap/MAC/IP), the network_overrides NIC rebind, and proxy
+	// registration: this is what makes a live fork of a networked sandbox safe.
+	// The child inherits the SOURCE's egress policy (retained in source.netOpts at
+	// fork time), and LiveFork marks it so prepareForkNetwork sets
+	// ResetUpstreams=true (captured upstream sockets must die). A networking-off
+	// source has netOpts nil, so the live fork carries no network, exactly as
+	// before. The gate above already refused the networked+no-proxy case.
+	forkOpts := liveForkOpts(source)
 	// Thread the original template rootfs through: the checkpoint's
 	// embedded drive path still points at it, and the new VM's chroot
 	// needs it linked in.
-	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{}, false)
+	res, err := e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, forkOpts, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Flush conntrack for the child's fresh source IP, best-effort. The eth0
+	// re-address already kills captured sockets; this just makes the reset
+	// deterministic by dropping any stale flow state. A flush error never fails
+	// the fork (the fork is correct, the reset is just less crisp), so it is
+	// logged with the guest IP only (config, no secrets) and we continue. Only
+	// when networking actually gave the child an identity.
+	if res.GuestNetwork != nil {
+		if childIP := net.ParseIP(res.GuestNetwork.GuestIP); childIP != nil {
+			if ferr := e.netMgr.FlushSource(context.Background(), childIP); ferr != nil {
+				fmt.Fprintf(os.Stderr, "forkd: flush conntrack for live fork %s (guest %s): %v\n", newSandboxID, res.GuestNetwork.GuestIP, ferr)
+			}
+		}
+	}
+	return res, nil
 }
 
 // Pause snapshots a running sandbox's FULL state (memory + filesystem) to its
@@ -1819,6 +1958,18 @@ func (e *Engine) GetCapacity() Capacity {
 		}
 	}
 
+	// Data-dir disk headroom: statfs the data dir for free/total bytes. The seam
+	// fails on non-linux/dev hosts (or when unset), leaving both at 0, which the
+	// controller reads as an unknown (unlimited) budget. This is a single statfs,
+	// cheap enough for the heartbeat path (it stats the filesystem, not backing
+	// files like Metering does).
+	var diskFree, diskTotal int64
+	if e.diskStatfs != nil {
+		if free, total, err := e.diskStatfs(e.dataDir); err == nil {
+			diskFree, diskTotal = free, total
+		}
+	}
+
 	return Capacity{
 		ActiveSandboxes: activeSandboxes,
 		MaxSandboxes:    e.maxSandboxes,
@@ -1833,6 +1984,8 @@ func (e *Engine) GetCapacity() Capacity {
 		TemplateDigests:   digests,
 		TemplateEstimates: templateEstimatesFromReport(report, digests),
 		KVMAvailable:      true,
+		DiskFree:          diskFree,
+		DiskTotal:         diskTotal,
 	}
 }
 
@@ -2349,6 +2502,13 @@ type Capacity struct {
 	// once and the average per-fork unique footprint every fork adds.
 	TemplateEstimates []TemplateEstimate
 	KVMAvailable      bool
+	// DiskFree and DiskTotal are the data-dir filesystem free and total bytes
+	// (statfs of the engine dataDir). The controller treats a node with low disk
+	// headroom as having no build capacity so it backs off before the data dir
+	// fills and the kubelet evicts forkd. Both zero means unknown (statfs failed,
+	// e.g. a dev host) and is treated as an unlimited budget, like MemoryTotal 0.
+	DiskFree  int64
+	DiskTotal int64
 }
 
 type ForkOpts struct {
@@ -2387,6 +2547,15 @@ type ForkOpts struct {
 	// a hot-page set and stamped onto the manifest. Used by CaptureTemplateHotPages
 	// off the tenant claim path; the default (false) never records.
 	CaptureHotPages bool
+
+	// LiveFork marks this fork as a LIVE fork (ForkRunning) of a running
+	// sandbox, as opposed to a cold fork from a template snapshot. The only
+	// effect is on networking: prepareForkNetwork sets the child's guest config
+	// ResetUpstreams=true so the guest drops captured upstream sockets after
+	// re-addressing eth0 (a live fork inherits the parent's open connections in
+	// memory; a cold fork from a snapshot does not). The default (false) is the
+	// cold-fork behavior and leaves ResetUpstreams off.
+	LiveFork bool
 }
 
 type NetworkOpts struct {

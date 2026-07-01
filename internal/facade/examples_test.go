@@ -2,6 +2,7 @@ package facade_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,123 @@ func loadCoreSandboxExamples(t *testing.T) []coreSandboxExample {
 // Sandbox object using the runtime scheme registered for the test.
 func convertUnstructured(u *unstructured.Unstructured, into *agentsv1beta1.Sandbox) error {
 	return scheme.Convert(u, into, nil)
+}
+
+// pinnedMinor describes one upstream agent-sandbox minor that the conformance
+// approach pins under the latest-two-minors policy (issue #506): the vendored
+// tree roots we walk, and the core agents.x-k8s.io API version that minor's
+// surface is expected to carry. v0.5.0 graduated the API to v1beta1; the
+// previous minor v0.4.6 serves only v1alpha1. The facade serves the graduated
+// stable surface (v1beta1), so only the v1beta1 minor carries the full bridging
+// conformance (TestFacadeReconcilesVendoredExamples + the facade-conformance CI
+// job); the v1alpha1 minor is tracked for apply-unchanged conformance. See
+// docs/facade-conformance.md.
+type pinnedMinor struct {
+	version           string
+	exampleRoots      []string
+	wantCoreAPIVers01 string
+}
+
+// pinnedMinors is the latest-two-minors set. Keep this in lockstep with the
+// vendored trees, the conformance matrix in docs/facade-conformance.md, and the
+// facade-conformance CI matrix.
+var pinnedMinors = []pinnedMinor{
+	{
+		version: "v0.5.0",
+		exampleRoots: []string{
+			filepath.Join("..", "..", "third_party", "agent-sandbox", "examples"),
+			filepath.Join("..", "..", "third_party", "agent-sandbox", "extensions", "examples"),
+		},
+		wantCoreAPIVers01: "agents.x-k8s.io/v1beta1",
+	},
+	{
+		version: "v0.4.6",
+		exampleRoots: []string{
+			filepath.Join("..", "..", "third_party", "agent-sandbox-v0.4.6", "examples"),
+			filepath.Join("..", "..", "third_party", "agent-sandbox-v0.4.6", "extensions", "examples"),
+		},
+		wantCoreAPIVers01: "agents.x-k8s.io/v1alpha1",
+	},
+}
+
+// coreSandboxAPIVersions walks the given example trees and returns the
+// apiVersion of every core agents.x-k8s.io Sandbox document found, keyed by
+// source path. It does not require the apiserver; it is a pure file-level
+// apply-unchanged shape check over the vendored trees.
+func coreSandboxAPIVersions(t *testing.T, roots []string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
+				return nil
+			}
+			raw, readErr := os.ReadFile(path) //nolint:gosec // vendored test fixtures
+			if readErr != nil {
+				t.Fatalf("read %s: %v", path, readErr)
+			}
+			dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096)
+			docIdx := 0
+			for {
+				var u unstructured.Unstructured
+				if decErr := dec.Decode(&u); decErr != nil {
+					break
+				}
+				docIdx++
+				if u.Object == nil {
+					continue
+				}
+				if u.GetKind() != "Sandbox" {
+					continue
+				}
+				gv := u.GetAPIVersion()
+				if !strings.HasPrefix(gv, "agents.x-k8s.io/") {
+					continue
+				}
+				out[fmt.Sprintf("%s#%d", path, docIdx)] = gv
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	return out
+}
+
+// TestVendoredMinorsApplyUnchanged is the latest-two-minors apply-unchanged
+// check (issue #506). For each pinned minor it walks the vendored example trees
+// and asserts that every core agents.x-k8s.io Sandbox example carries the API
+// version that minor's surface is expected to expose. This makes the two-minor
+// matrix REAL rather than cosmetic: it proves the second minor (v0.4.6) is
+// actually vendored (a non-empty tree), and it guards against silent API-version
+// drift in either pin (for example an upstream patch that backports v1beta1 onto
+// the v0.4 minor, or a vendoring slip that mixes versions). The full bridging
+// conformance for the graduated stable surface (v1beta1) stays in
+// TestFacadeReconcilesVendoredExamples; the v1alpha1 minor's bridging is a
+// JUSTIFIED EXCEPTION recorded in docs/facade-conformance.md (the facade serves
+// only the v1beta1 graduated stable surface).
+func TestVendoredMinorsApplyUnchanged(t *testing.T) {
+	for _, m := range pinnedMinors {
+		m := m
+		t.Run(m.version, func(t *testing.T) {
+			versions := coreSandboxAPIVersions(t, m.exampleRoots)
+			if len(versions) == 0 {
+				t.Fatalf("%s: found no core agents.x-k8s.io Sandbox examples under %v (is the minor vendored?)", m.version, m.exampleRoots)
+			}
+			for src, gv := range versions {
+				if gv != m.wantCoreAPIVers01 {
+					t.Fatalf("%s: core Sandbox %s has apiVersion %q, want %q (silent API-version divergence in the pin)", m.version, src, gv, m.wantCoreAPIVers01)
+				}
+			}
+		})
+	}
 }
 
 // TestFacadeReconcilesVendoredExamples is the apply-unchanged conformance check

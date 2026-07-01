@@ -134,7 +134,7 @@ spec:
           #   - DAC_OVERRIDE: reopen the template rootfs.ext4 the builder itself
           #     wrote, after the jailer chowned the shared inode to the per-VM
           #     uid, so a rebuild does not fail with EACCES (#426).
-          # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
+          # /dev/kvm, /dev/net/tun, and /dev/vhost-vsock come from the device plugin (mitos.run/kvm),
           # NOT a privileged hostPath, so the device cgroup is scoped by the
           # kubelet. allowPrivilegeEscalation: false and seccompProfile
           # RuntimeDefault complete the hardening (privileged: true had disabled
@@ -159,7 +159,7 @@ spec:
             requests:
               memory: "1Gi"
               cpu: "500m"
-              # The device plugin injects /dev/kvm and /dev/net/tun on Allocate;
+              # The device plugin injects /dev/kvm, /dev/net/tun, and /dev/vhost-vsock on Allocate;
               # requesting the extended resource is what replaces privileged: true
               # for device access.
               mitos.run/kvm: "1"
@@ -197,7 +197,7 @@ spec:
           hostPath:
             path: /var/lib/mitos
             type: DirectoryOrCreate
-        # /dev/kvm and /dev/net/tun are injected by the device plugin
+        # /dev/kvm, /dev/net/tun, and /dev/vhost-vsock are injected by the device plugin
         # (mitos.run/kvm) on Allocate, NOT a privileged hostPath CharDevice.
         # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
         - name: tls

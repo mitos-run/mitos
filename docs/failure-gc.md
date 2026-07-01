@@ -230,39 +230,113 @@ well inside the heartbeat TTL.
 - Proving tests: `TestNodeUnhealthyAfterProbeFailureThreshold`,
   `TestSyncPodsDropsNodeOnRepeatedProbeFailure`.
 
-### NodeLost: a raw-forkd claim on a lost node reaches a terminal phase
+### NodeLost: a raw-forkd claim on a lost node is re-forked or fails closed
 
 In RAW-FORKD mode, a Ready claim whose node is no longer a healthy registered
-node is transitioned to the terminal `Failed` phase with a `NodeLost` reason and
-`FinishedAt` stamped (`markNodeLost`, `gc.go:301`; phase + FinishedAt + condition
-at `gc.go:314`). The node is gone, so there is nothing to terminate; the GC only
-stamps state. The ephemeral VM died with the node and there is no recovery, so
-failing the claim (and letting the TTL pass reap it) is correct. The orphan sweep
-and NodeLost never fight: the sweep visits only healthy nodes (`gc.go:193`), so a
-claim on a lost node is never swept. A claim on a still-healthy node is untouched
-(`gc.go:310`).
+node is handled by `markNodeLost` -> `handleRawNodeLost` (`gc.go`), which chooses
+between automatic re-fork and failing closed (issue #372):
 
-In HUSK mode, `markNodeLost` is a no-op (`if g.EnableHuskPods { return }`,
-`gc.go:302`): a Ready husk-backed claim recovers from node loss by RE-PENDING
-onto a replacement dormant slot (owned by `checkHuskPodLost`,
-`huskdrain.go:86`, and the husk pod watch, which the warm pool self-heals). The
-GC must not race that re-pend into a terminal `Failed`, so it skips the
-node-lost-fail entirely in husk mode. The GC carries `EnableHuskPods` from the
-controller run mode to make this decision (`gc.go:42`).
+- AUTO RE-FORK: when a SURVIVING healthy node still holds the pool's template
+  snapshot (`snapshotHolderSurvives` asks the NodeRegistry via `NodesWithTemplate`
+  for `poolTemplateID(pool)`) AND the per-claim re-fork bound is not yet spent,
+  the claim is RE-PENDED. The GC clears the stale placement
+  (`status.node`/`endpoint`/`sandboxID`), stamps a typed `Ready=False` /
+  `NodeLostReforking` condition, and bumps the durable per-claim re-fork count
+  (the `mitos.run/nodelost-refork-count` annotation, metadata so it survives the
+  status write). The claim reconciler then re-issues the fork onto a surviving
+  holder through its NORMAL placement path (`SelectNode` + `forkOnNode`), which
+  selects only healthy nodes, so it never re-places onto the dead node. This is a
+  placement-only decision and needs no KVM. The surviving snapshot holder is
+  guaranteed to exist or be rebuilt by the snapshot redistribution described under
+  the orphan-sweep guarantees (`TestSnapshotRebuildsOnHolderNodeLoss`).
+- FAIL CLOSED: when NO surviving node holds the template snapshot, OR the bounded
+  retries are exhausted (`maxRawForkdNodeLostReforks`, default 3, counted over the
+  claim's whole life so a claim whose replacement node keeps dying cannot retry
+  forever), the claim is transitioned to the terminal `Failed` phase with a
+  `NodeLost` reason and `FinishedAt` stamped. The condition message names the
+  actual cause (no surviving holder vs retries exhausted) so the remediation is
+  clear: recreate the claim once a snapshot holder is available. The TTL pass then
+  reaps the terminal claim. A claim with no `source.poolRef` (a `fromSandbox` or
+  `fromRevision` sandbox) is never auto-re-forked; it fails closed, preserving the
+  prior terminal behavior.
 
-- Bound: raw mode fails within one `Interval` of the node going unhealthy or
-  leaving the registry; husk mode re-pends on the pod event (or the claim's own
-  requeue).
+The node is gone, so there is nothing to terminate in either branch; the GC only
+stamps state. The orphan sweep and NodeLost never fight: the sweep visits only
+healthy nodes, so a claim on a lost node is never swept. A claim on a
+still-healthy node is untouched.
+
+In HUSK mode, `markNodeLost` is a no-op (`if g.EnableHuskPods { return }`): a
+Ready husk-backed claim recovers from node loss by RE-PENDING onto a replacement
+dormant slot (owned by `checkHuskPodLost`, `huskdrain.go`, and the husk pod
+watch, which the warm pool self-heals). The GC must not race that re-pend into a
+terminal `Failed`, so it skips the node-lost path entirely in husk mode. The GC
+carries `EnableHuskPods` from the controller run mode to make this decision.
+
+- Bound: raw mode re-pends (or fails closed) within one `Interval` of the node
+  going unhealthy or leaving the registry; the re-fork then runs on the claim
+  reconciler's normal placement path. Husk mode re-pends on the pod event (or the
+  claim's own requeue).
 - Husk hard-node-loss latency is cluster-dependent, not a Mitos GC interval. Husk
   node-loss recovery fires immediately on a pod delete or `DeletionTimestamp`
   event. But a HARD host loss where the pod object lingers `Running` with no
   `DeletionTimestamp` is bounded by the cluster's own unreachable-pod eviction
   setting (the `node.kubernetes.io/unreachable` taint toleration husk pods carry,
-  `huskpod.go:1194`), since no pod event fires until the cluster evicts the pod.
+  `huskpod.go`), since no pod event fires until the cluster evicts the pod.
   Operators wanting faster husk node-loss recovery should tune the unreachable
   toleration or the pod-eviction timeout; Mitos cannot shorten it.
-- Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
-  `TestGCInHuskModeDoesNotFailNodeLostClaim`.
+- Proving tests: `TestRawForkdClaimAutoReplacementAfterNodeLossOpen` (the GC
+  re-pend-vs-fail-closed decision), `TestGCRawForkdClaimReforksOntoSurvivingHolder`
+  (the end-to-end re-fork onto a surviving holder by the live reconciler),
+  `TestGCMarksNodeLost` (fail closed when no holder survives),
+  `TestGCLeavesHealthyNodeClaim`, `TestGCInHuskModeDoesNotFailNodeLostClaim`. The
+  HUSK self-heal loop is now proven END TO END at envtest level by
+  `TestHuskNodeLossSelfHealsEndToEnd` (`husk_nodeloss_failover_envtest_test.go`): a
+  Ready husk-backed claim has its backing husk pod deleted, `checkHuskPodLost`
+  re-pends it (Ready cleared, dead endpoint/node/sandboxID cleared), the warm pool
+  refills the drained slot, and the claim re-activates on a SURVIVING node, with no
+  stuck claim and no orphan (the lost pod is reaped and exactly one husk pod, the
+  refilled slot, backs the claim). This closes the gap where the full husk loop was
+  only proven on a real multi-node KVM cluster (chaos-e2e stage 5); the envtest runs
+  in the ordinary go-test job, while the cluster-e2e stage stays the KVM-level
+  proof. envtest runs no scheduler or kubelet, so the test binds the warm slot onto
+  a node and forces it Ready (the scheduler + kubelet stand-in) and the activate
+  transport is the suite fake; everything else (loss detection, re-pend, refill,
+  re-activation, orphan accounting) is the real controller code.
+
+### DrainPolicy Checkpoint: honest degrade to Kill, never a silent lie
+
+A `SandboxPool` can set `DrainPolicy: Checkpoint`, asking that an active sandbox's
+live VM be snapshotted before the husk re-pend so the agent resumes from captured
+state. The full live-VM checkpoint engine is NOT yet built (it requires KVM and is
+a tracked follow-up): `defaultHuskCheckpointer` (`huskdrain.go`) captures nothing
+today. The danger is a SILENT degrade: a Checkpoint pool that quietly behaves as
+Kill, losing in-VM state with no signal, would violate the honest-failure
+principle. So the re-pend surfaces the limitation LOUDLY instead
+(`rependOnHuskPodLost`, `huskdrain.go`):
+
+- the claim's `Ready=False` condition carries a DISTINCT reason
+  `CheckpointNotImplemented` (not the generic `HuskPodLost` a Kill pool sets), with
+  an LLM-legible message stating that in-VM state was NOT captured and Kill
+  semantics applied;
+- a `Warning` Kubernetes event with the same reason is recorded on the claim. The
+  condition is transient (a later reconcile may re-pend onto `NoHuskPod`), so the
+  event is the durable, operator-visible signal;
+- a clear controller log line records the degrade.
+
+Kill semantics are otherwise unchanged: the claim still re-pends safely (Phase
+`Pending`, endpoint/node/sandboxID cleared) onto a replacement dormant slot, so a
+Checkpoint pool degrades to the boring, always-available Kill behavior rather than
+stranding the claim. The checkpointer seam (`huskCheckpointer`) is preserved so
+the future KVM impl can capture a real snapshot and report `ok=true`, at which
+point the re-pend keeps the `HuskPodLost` reason and reports the captured snapshot.
+
+- Bound: every Checkpoint-policy re-pend that captures nothing emits the
+  `CheckpointNotImplemented` reason and `Warning` event in the same reconcile.
+- Proving tests: `TestCheckpointDrainDegradeIsHonest` (distinct reason + Warning
+  event + Kill semantics preserved), `TestKillDrainUnchanged` (Kill keeps
+  `HuskPodLost` and emits no false alarm),
+  `TestHuskClaimDrainCheckpointRoutesThroughSeam` (the checkpointer seam is
+  consulted before re-pend).
 
 ### TTL hygiene: finished objects are deleted, including early-failed claims
 
@@ -332,24 +406,15 @@ Shipped since (now in main):
   (`createSnapshotsOnNodes`, called from `sandboxpool_controller.go:509`)
   redistributes the snapshot onto a surviving node to restore the replica count,
   with no operator action. Proven by `TestSnapshotRebuildsOnHolderNodeLoss`
-  (`distribution_test.go`). This is the SNAPSHOT rebuild only; the CLAIM on the
-  lost raw-forkd node is not auto-replaced (see Known gaps below).
+  (`distribution_test.go`). The CLAIM on the lost raw-forkd node is now also
+  auto-replaced (issue #372): it is re-forked onto a surviving snapshot holder, or
+  fails closed when none survives. See the NodeLost guarantee above.
 
 ### Not yet built (known gaps)
 
 The following are NOT yet built. Each is verified
 against the code below so the gap is honest, not assumed:
 
-- raw-forkd CLAIM auto-replacement after node loss: in the husk default the warm
-  pool self-heals a lost node's dormant slots and the claim re-pends onto a
-  surviving slot, but a raw-forkd claim on a dead node fails (NodeLost) with no
-  automatic replacement, because raw mode has no standing dormant capacity to
-  re-pend onto (its forks are ephemeral). This is acceptable for ephemeral
-  sandboxes; the caller re-claims. It is a product decision, not a missing
-  mechanism, and is held as the documented skip
-  `TestRawForkdClaimAutoReplacementAfterNodeLossOpen` (`distribution_test.go`,
-  `t.Skip("#12: ...")`) with its design (re-issue the fork on a surviving
-  snapshot-holder, which the snapshot rebuild above guarantees exists).
 - status-update rate-limiting and batching: the SandboxPool reconcile elides a
   no-op status write (`writePoolStatusIfChanged`, `sandboxpool_controller.go:434`
   / `poolStatusUnchanged`, `sandboxpool_controller.go:420`), and the Sandbox
@@ -380,7 +445,53 @@ against the code below so the gap is honest, not assumed:
   from CRDs with zero orphans and zero stuck claims) is additionally proven
   WITHOUT KVM in `TestGCChaosStormNoOrphansNoStuckClaims`
   (`gc_chaos_storm_test.go`), so the GC reconcile guarantee is covered in the
-  ordinary go-test job, not only on the KVM runner. Still KVM-gated and open:
-  kill -9 of the GUEST agent process inside the VM and the real-forkd-with-VMs
-  crash (both need a real cluster and KVM, unreachable from GitHub-hosted CI),
-  and process-crash variants beyond SIGKILL.
+  ordinary go-test job, not only on the KVM runner. The cross-node-failover loop
+  (stage 5) is now ALSO proven WITHOUT KVM at envtest level by
+  `TestHuskNodeLossSelfHealsEndToEnd` (see the NodeLost guarantee above), so the
+  control-plane half of cross-node failover (loss detection, re-pend, warm-pool
+  refill, re-activation on a surviving node, no orphan) regresses loudly in the
+  required go-test job; the cluster-e2e stage remains the real-VMM-on-real-nodes
+  proof. Still KVM-gated and open: kill -9 of the GUEST agent process inside the VM
+  and the real-forkd-with-VMs crash (both need a real cluster and KVM, unreachable
+  from GitHub-hosted CI), and process-crash variants beyond SIGKILL.
+
+### cluster-e2e gating decision: cadence, not a required check
+
+The chaos suite and the other cluster-e2e predicates (`cluster-husk-e2e`,
+`cluster-workspace-e2e`, `cluster-husk-network-e2e`, `cluster-facade-conformance-e2e`)
+run on the self-hosted multi-node real-KVM cluster via `cluster-e2e.yaml`. The
+DECISION is to keep `cluster-e2e.yaml` a NON-required check, gated by cadence and
+in-job hard-fails rather than by branch protection, for these reasons:
+
+- The runner (`runs-on: [self-hosted, mitos-cluster]`) is a single shared
+  bare-metal cluster that can be offline or busy. Making it a required check would
+  let one unavailable machine block every merge to `main`, which trades the project's
+  boring-failure principle for a single point of failure in the merge path.
+- The CONTROL-PLANE invariants the chaos suite exercises now each have a
+  KVM-independent proof in the required `go-test` job: warm-pool self-heal and
+  cross-node failover via `TestHuskNodeLossSelfHealsEndToEnd`, the
+  controller-restart-under-storm reconcile via
+  `TestGCChaosStormNoOrphansNoStuckClaims`, and the raw-forkd re-fork via the
+  NodeLost tests above. So a control-plane regression is caught on every PR by a
+  required check; only the real-VMM behavior (which a hosted runner cannot run)
+  needs the cluster.
+
+To keep the cluster suite from silently regressing without making it a merge
+blocker, the cadence/gating is:
+
+- it runs on every push to `main` (post-merge) and on any PR labeled `ci-cluster`,
+  so a change touching the husk/fork/node-loss paths can opt in to a pre-merge
+  cluster run by adding the label;
+- each stage HARD-FAILS the workflow when its preconditions are met (e.g. chaos
+  stage 5 fails, not skips, when there are >= 2 KVM nodes and node-cordon
+  permission), and only SELF-SKIPS when a precondition is genuinely absent, so a
+  green run is never a false pass;
+- a post-merge failure on `main` is treated as a release blocker for the affected
+  area (the §2 production-tenant sequencing gate: the failure/GC and fork-correctness
+  suites must be green before shipping to production tenants), tracked by reverting or
+  fixing forward before the next tenant-facing release rather than by blocking
+  unrelated merges.
+
+Recommendation: revisit promoting `cluster-e2e.yaml` to a required check only once
+the cluster runner has redundancy (more than one machine) so its availability is no
+longer a single point of failure in the merge path.

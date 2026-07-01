@@ -427,6 +427,15 @@ message GetCapacityResponse {
   // cold start pays once, and the average per-fork unique footprint a warm
   // fork adds. Derived from the node's CoW-aware metering.
   repeated TemplateCapacity templates = 10;
+  // disk_free_bytes and disk_total_bytes are the data-dir filesystem free and
+  // total bytes (statfs of the forkd dataDir). The controller's scheduler treats
+  // a node with low disk headroom as having no build capacity, so it backs off
+  // before the data dir fills and the kubelet evicts forkd on DiskPressure.
+  // Both zero means unknown (statfs failed, e.g. a dev host) and is treated as
+  // an unlimited budget, exactly like an unknown memory total. Disk numbers are
+  // not secrets.
+  int64 disk_free_bytes = 11;
+  int64 disk_total_bytes = 12;
 }
 
 // TemplateCapacity is the per-template memory estimate the controller uses to

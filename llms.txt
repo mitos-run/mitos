@@ -36,6 +36,10 @@ Every error is:
 
 - `invalid_json` (HTTP 400): the request body is not valid JSON. Send a JSON
   body matching the endpoint contract.
+- `invalid_input` (HTTP 400): the request body is valid JSON but fails a
+  semantic business rule (negative value, ordering constraint, missing required
+  field). Correct the value and resend; consult the endpoint documentation for
+  the valid range and business rules.
 - `body_too_large` (HTTP 413): the body exceeds the size limit. Reduce the
   payload (file content is hex-encoded and bounded).
 - `build_failed` (HTTP 422): a declarative template build step failed, so no

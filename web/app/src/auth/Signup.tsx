@@ -74,6 +74,13 @@ export function Signup({ next, initialEmail }: SignupProps) {
       ? new URLSearchParams(window.location.search).get('email') ?? ''
       : '')
 
+  // Resolve ?uc= marketing use-case slug; carried through into the signup POST
+  // so the server can seed the console welcome flow after verification.
+  const uc =
+    typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('uc') ?? '')
+      : ''
+
   const [email, setEmail] = useState(emailDefault)
   const [signupState, setSignupState] = useState<SignupState>('idle')
   const [submittedEmail, setSubmittedEmail] = useState('')
@@ -84,7 +91,7 @@ export function Signup({ next, initialEmail }: SignupProps) {
     if (!trimmed) return
     setSignupState('loading')
     try {
-      await post<null>('/onboarding/signup', { email: trimmed })
+      await post<null>('/onboarding/signup', { email: trimmed, ...(uc ? { uc } : {}) })
       setSubmittedEmail(trimmed)
       setSignupState('success')
     } catch {

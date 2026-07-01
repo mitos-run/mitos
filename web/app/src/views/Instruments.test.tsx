@@ -27,16 +27,24 @@ vi.mock('../data/query', () => ({
   useCapabilities: vi.fn(),
 }))
 
+// Mock useFirstActivity so that when FirstRun mounts (new-org branch) it does
+// not attempt a real network call.
+vi.mock('../data/firstActivity', () => ({
+  useFirstActivity: vi.fn(),
+}))
+
 import { useInstruments } from '../data/instruments'
 import { useSandboxes } from '../data/sandboxes'
 import { useBilling, useAudit } from '../data/account'
 import { useCapabilities } from '../data/query'
+import { useFirstActivity } from '../data/firstActivity'
 
 const mockUseInstruments = useInstruments as ReturnType<typeof vi.fn>
 const mockUseSandboxes = useSandboxes as ReturnType<typeof vi.fn>
 const mockUseBilling = useBilling as ReturnType<typeof vi.fn>
 const mockUseAudit = useAudit as ReturnType<typeof vi.fn>
 const mockUseCapabilities = useCapabilities as ReturnType<typeof vi.fn>
+const mockUseFirstActivity = useFirstActivity as ReturnType<typeof vi.fn>
 
 function wrap(ui: React.ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -94,6 +102,8 @@ beforeEach(() => {
   mockUseBilling.mockReturnValue({ data: billingData, isLoading: false, error: null })
   mockUseAudit.mockReturnValue({ data: auditData, isLoading: false, error: null })
   mockUseCapabilities.mockReturnValue({ data: capsNoBilling, isLoading: false, error: null })
+  // Stable default for useFirstActivity so FirstRun does not error when it mounts.
+  mockUseFirstActivity.mockReturnValue({ data: { active: false }, isLoading: false })
 })
 
 describe('Instruments (Overview) cockpit', () => {
@@ -209,5 +219,65 @@ describe('Recent activity panel', () => {
     mockUseAudit.mockReturnValue({ data: [], isLoading: false, error: null })
     wrap(<Instruments />)
     await waitFor(() => expect(screen.getByText(/No activity yet/i)).toBeInTheDocument())
+  })
+})
+
+// ---- Available credit (D1) ----------------------------------------------------
+
+describe('Available credit', () => {
+  it('shows the available credit amount and spent figure for an active org, ungated on billing capability', async () => {
+    // Active org: forks_served 10 + running sandboxes (beforeEach default).
+    // billing capability is OFF in beforeEach (capsNoBilling), which must NOT
+    // gate this element.
+    mockUseBilling.mockReturnValue({
+      data: { ...billingData, balance_cents: 500, spend_cents: 123 },
+      isLoading: false,
+      error: null,
+    })
+    wrap(<Instruments />)
+    await waitFor(() => expect(screen.getByText(/Available credit/i)).toBeInTheDocument())
+    // balance_cents: 500 -> $5.00
+    expect(screen.getByText('$5.00')).toBeInTheDocument()
+    // spend_cents: 123 -> $1.23 shown as secondary line
+    expect(screen.getByText(/\$1\.23/)).toBeInTheDocument()
+  })
+
+  it('shows a placeholder while billing data is loading', async () => {
+    mockUseBilling.mockReturnValue({ data: undefined, isLoading: true, error: null })
+    wrap(<Instruments />)
+    await waitFor(() => expect(screen.getByText(/Available credit/i)).toBeInTheDocument())
+    // When loading, no dollar value; heading itself is enough to confirm render.
+  })
+})
+
+// ---- FirstRun visibility on Overview -----------------------------------------
+
+describe('FirstRun visibility on Overview', () => {
+  it('hides the FirstRun card and shows normal panels for an active org (forks_served > 0)', async () => {
+    // Default beforeEach: forks_served 10 + Running sandboxes -> isFirstRun false.
+    wrap(<Instruments />)
+    await waitFor(() => expect(screen.getByText(/Running now/i)).toBeInTheDocument())
+    expect(screen.getByText(/Recent activity/i)).toBeInTheDocument()
+    // FirstRun heading must not be present.
+    expect(screen.queryByRole('heading', { name: /Fork your first swarm/i })).not.toBeInTheDocument()
+  })
+
+  it('shows the FirstRun card for a new org with no forks and no sandboxes', async () => {
+    // New-org state: forks_served 0, empty sandbox list.
+    mockUseInstruments.mockReturnValue({
+      data: { ...instrumentsData, forks_served: 0, activate_p50_ms: 0, activate_p99_ms: 0 },
+      isLoading: false,
+      error: null,
+    })
+    mockUseSandboxes.mockReturnValue({ data: [], isLoading: false, error: null })
+
+    wrap(<Instruments />)
+
+    // isFirstRun -> true -> <FirstRun /> mounts; useFirstActivity is mocked in beforeEach.
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /Fork your first swarm/i })).toBeInTheDocument(),
+    )
+    // Normal operational panels still render alongside the FirstRun card.
+    expect(screen.getByText(/Running now/i)).toBeInTheDocument()
   })
 })

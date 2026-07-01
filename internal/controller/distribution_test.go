@@ -4,13 +4,22 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"strconv"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/pki"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // distMTLSPair builds a CA and the forkd server + controller client TLS configs
@@ -366,26 +375,154 @@ func TestSnapshotRebuildsOnHolderNodeLoss(t *testing.T) {
 	}
 }
 
-// TestRawForkdClaimAutoReplacementAfterNodeLossOpen documents, as an explicit
-// skipped placeholder, the part of issue #163 item 6 that is NOT a missing test
-// but a missing FEATURE and a deliberate open product decision (epic #12).
+// TestRawForkdClaimAutoReplacementAfterNodeLossOpen proves raw-forkd claim
+// auto-replacement after node loss (issue #372): the part of issue #163 item 6
+// that was a missing FEATURE, now implemented.
 //
 // In HUSK mode a Ready claim on a lost node re-pends onto a surviving dormant
 // warm slot (checkHuskPodLost + the husk pod watch self-heal the warm pool). In
-// RAW-FORKD mode there is no standing dormant capacity to re-pend onto: a
-// raw-forkd pool holds only template snapshots, and per-claim forks are
-// ephemeral. So a raw-forkd claim on a dead node is correctly marked NodeLost /
-// Failed (proven by TestGCMarksNodeLost) and is NOT auto-replaced; the caller
-// re-claims. This is acceptable open behavior for ephemeral sandboxes
-// (docs/failure-gc.md), not a half-built mechanism, so this is a t.Skip, not a
-// faked or failing assertion.
+// RAW-FORKD mode there is no standing dormant capacity to re-pend onto, but a
+// raw-forkd pool DOES hold per-node template snapshots, and
+// TestSnapshotRebuildsOnHolderNodeLoss guarantees a surviving holder exists (or
+// is rebuilt). So on node loss the GC re-pends the claim instead of failing it
+// terminally, and the claim reconciler re-issues the fork onto a surviving
+// snapshot holder via its normal SelectNode + forkOnNode placement path (no KVM
+// needed to decide). It fails closed (terminal NodeLost) only when no holder
+// survives or the bounded retries are exhausted.
 //
-// Design IF a future product decision wants raw-mode auto-replacement: on a
-// NodeLost transition in raw mode, the claim reconciler would re-issue the fork
-// on a surviving snapshot-holder node (which TestSnapshotRebuildsOnHolderNodeLoss
-// guarantees still exists or is rebuilt), rather than terminally failing the
-// claim. It needs no KVM; it needs the product decision to give raw claims
-// husk-like resilience at the cost of the pure fork-per-claim model.
+// This is the GC decision half (re-pend vs fail-closed). The end-to-end re-fork
+// onto a surviving holder by the live reconciler is proven by the envtest
+// TestGCRawForkdClaimReforksOntoSurvivingHolder (nodelost_test.go).
 func TestRawForkdClaimAutoReplacementAfterNodeLossOpen(t *testing.T) {
-	t.Skip("#12: raw-forkd claim auto-replacement after NodeLost is an open product decision; today the claim is marked NodeLost and the caller re-claims (husk mode self-heals via the warm pool instead). Snapshot rebuild-elsewhere IS covered by TestSnapshotRebuildsOnHolderNodeLoss.")
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	const poolName = "rf-pool"
+	const claimName = "rf-claim"
+	const lostNode = "lost-node"
+
+	// newCase builds a fake client holding a pool (inline template, so the
+	// template id is the pool name) and a Ready claim bound to the lost node, plus
+	// a registry with the given healthy snapshot holders. lostNode is never
+	// registered, so it always reads as lost. reforks pre-seeds the per-claim
+	// re-fork count annotation.
+	newCase := func(t *testing.T, reforks int, holders ...string) *GarbageCollector {
+		t.Helper()
+		pool := &v1.SandboxPool{
+			ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default"},
+			Spec:       v1.SandboxPoolSpec{Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"}},
+		}
+		claim := &v1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
+			Spec:       v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: poolName}}},
+			Status: v1.SandboxStatus{
+				Phase:     v1.SandboxReady,
+				Node:      lostNode,
+				Endpoint:  "10.9.9.9:9091",
+				SandboxID: claimName,
+			},
+		}
+		if reforks > 0 {
+			claim.Annotations = map[string]string{nodeLostReforkCountAnnotation: strconv.Itoa(reforks)}
+		}
+		registry := NewNodeRegistry()
+		for _, h := range holders {
+			registry.Register(&NodeInfo{Name: h, TemplateIDs: []string{poolName}, MaxSandboxes: 100})
+		}
+		c := fakeclient.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&v1.Sandbox{}).
+			WithObjects(pool, claim).
+			Build()
+		return &GarbageCollector{Client: c, Registry: registry}
+	}
+
+	run := func(t *testing.T, gc *GarbageCollector) {
+		t.Helper()
+		var list v1.SandboxList
+		if err := gc.Client.List(context.Background(), &list); err != nil {
+			t.Fatal(err)
+		}
+		gc.markNodeLost(context.Background(), logr.Discard(), list.Items)
+	}
+
+	get := func(t *testing.T, gc *GarbageCollector) *v1.Sandbox {
+		t.Helper()
+		var got v1.Sandbox
+		if err := gc.Client.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: claimName}, &got); err != nil {
+			t.Fatal(err)
+		}
+		return &got
+	}
+
+	t.Run("re-forks onto a surviving snapshot holder", func(t *testing.T) {
+		gc := newCase(t, 0, "survivor")
+		run(t, gc)
+		got := get(t, gc)
+		if got.Status.Phase != v1.SandboxPending {
+			t.Fatalf("phase = %q, want Pending (re-pended for auto re-fork)", got.Status.Phase)
+		}
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "NodeLostReforking" {
+			t.Fatalf("Ready condition = %+v, want Status=False Reason=NodeLostReforking", cond)
+		}
+		if got.Status.Node != "" || got.Status.SandboxID != "" || got.Status.Endpoint != "" {
+			t.Fatalf("stale placement not cleared: node=%q sandbox=%q endpoint=%q", got.Status.Node, got.Status.SandboxID, got.Status.Endpoint)
+		}
+		if got.Status.FinishedAt != nil {
+			t.Fatal("FinishedAt must not be stamped on a re-pended claim")
+		}
+		if got.Annotations[nodeLostReforkCountAnnotation] != "1" {
+			t.Fatalf("re-fork count annotation = %q, want 1", got.Annotations[nodeLostReforkCountAnnotation])
+		}
+	})
+
+	t.Run("fails closed when no snapshot holder survives", func(t *testing.T) {
+		gc := newCase(t, 0) // no holders registered
+		run(t, gc)
+		got := get(t, gc)
+		if got.Status.Phase != v1.SandboxFailed {
+			t.Fatalf("phase = %q, want Failed (no holder to re-fork onto)", got.Status.Phase)
+		}
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "NodeLost" {
+			t.Fatalf("Ready condition = %+v, want Status=False Reason=NodeLost", cond)
+		}
+		if got.Status.FinishedAt == nil {
+			t.Fatal("FinishedAt not stamped on terminal NodeLost claim")
+		}
+	})
+
+	t.Run("fails closed after the bounded retries are exhausted", func(t *testing.T) {
+		// The count is already at the bound, so even with a surviving holder the
+		// GC must fail the claim closed rather than re-fork forever.
+		gc := newCase(t, maxRawForkdNodeLostReforks, "survivor")
+		run(t, gc)
+		got := get(t, gc)
+		if got.Status.Phase != v1.SandboxFailed {
+			t.Fatalf("phase = %q, want Failed (re-fork bound exhausted)", got.Status.Phase)
+		}
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		if cond == nil || cond.Reason != "NodeLost" {
+			t.Fatalf("Ready condition = %+v, want Reason=NodeLost", cond)
+		}
+		if got.Status.FinishedAt == nil {
+			t.Fatal("FinishedAt not stamped on terminal NodeLost claim")
+		}
+	})
+
+	t.Run("husk mode is unchanged: no re-pend, no fail", func(t *testing.T) {
+		gc := newCase(t, 0, "survivor")
+		gc.EnableHuskPods = true
+		run(t, gc)
+		got := get(t, gc)
+		if got.Status.Phase != v1.SandboxReady {
+			t.Fatalf("husk-mode markNodeLost must be a no-op; phase = %q, want Ready", got.Status.Phase)
+		}
+	})
 }

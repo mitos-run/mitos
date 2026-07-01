@@ -60,7 +60,7 @@ func TestSignupVerifyProvisionsOrgCreditAndKey(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
 
-	res, err := h.svc.SignUp(ctx, "dev@example.com")
+	res, err := h.svc.SignUp(ctx, "dev@example.com", "")
 	if err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSignupVerifyProvisionsOrgCreditAndKey(t *testing.T) {
 func TestVerifyRejectsInvalidToken(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	_, err := h.svc.Verify(ctx, "tok-not-a-real-token")
@@ -139,7 +139,7 @@ func TestVerifyRejectsInvalidToken(t *testing.T) {
 func TestVerifyRejectsExpiredToken(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -155,7 +155,7 @@ func TestVerifyRejectsExpiredToken(t *testing.T) {
 func TestReVerifyIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -202,7 +202,7 @@ func TestWaitlistModeRecordsEntryAndDoesNotProvision(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeWaitlist)
 
-	res, err := h.svc.SignUp(ctx, "dev@example.com")
+	res, err := h.svc.SignUp(ctx, "dev@example.com", "")
 	if err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestWaitlistModeRecordsEntryAndDoesNotProvision(t *testing.T) {
 func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")
@@ -246,7 +246,7 @@ func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 	// A second signup for the now-provisioned email is a conflict.
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); !errors.Is(err, saas.ErrConflict) {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); !errors.Is(err, saas.ErrConflict) {
 		t.Fatalf("duplicate signup: %v, want ErrConflict", err)
 	}
 }
@@ -254,7 +254,7 @@ func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 func TestVerifyErrorsNeverLeakTokenOrEmail(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
-	if _, err := h.svc.SignUp(ctx, "secret@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "secret@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	_, err := h.svc.Verify(ctx, "tok-leaky-raw-token")
@@ -281,7 +281,7 @@ func TestCustomSignupCreditAmount(t *testing.T) {
 	svc := NewService(accounts, store, NewMemPendingStore(), ledger, email,
 		WithMode(ModeOpen), WithClock(clock), WithSignupCredit(billing.USD(200)))
 
-	if _, err := svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := email.LastToken("dev@example.com")
@@ -305,6 +305,403 @@ func TestDefaultModeIsWaitlist(t *testing.T) {
 	}
 }
 
+// TestSignUpPersistsUseCase asserts that a valid use-case slug passed to SignUp
+// is stored on the pending signup and surfaced in VerifyResult.UseCase.
+func TestSignUpPersistsUseCase(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	_, err := h.svc.SignUp(ctx, "dev@example.com", "rollouts")
+	if err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if pending.UseCase != "rollouts" {
+		t.Fatalf("pending.UseCase = %q, want %q", pending.UseCase, "rollouts")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.UseCase != "rollouts" {
+		t.Fatalf("VerifyResult.UseCase = %q, want %q", vr.UseCase, "rollouts")
+	}
+}
+
+// TestSignUpDropsInvalidUseCase asserts that an invalid use-case slug is silently
+// replaced with "" rather than causing an error or being stored as-is.
+func TestSignUpDropsInvalidUseCase(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	_, err := h.svc.SignUp(ctx, "dev@example.com", "INVALID UC!")
+	if err != nil {
+		t.Fatalf("sign up must not error on an invalid uc: %v", err)
+	}
+
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if pending.UseCase != "" {
+		t.Fatalf("pending.UseCase = %q, want empty string for invalid input", pending.UseCase)
+	}
+}
+
+// newHarnessWithOpts builds a harness identical to newHarness but appends extra
+// options after the standard set. Use when a test needs to wire an allowlist or
+// other non-default option without repeating all the deterministic plumbing.
+func newHarnessWithOpts(t *testing.T, mode Mode, extra ...Option) *harness {
+	t.Helper()
+	store := saas.NewMemStore()
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	var n int
+	idgen := func() string {
+		n++
+		return "id-" + string(rune('a'+n))
+	}
+
+	keys := saas.NewKeyService(store, saas.WithClock(clock), saas.WithIDGen(idgen))
+	accounts := saas.NewAccountService(store, keys, saas.WithClock(clock), saas.WithIDGen(idgen))
+	ledger := billing.NewMemCreditLedger()
+	email := NewFakeEmailSender()
+	events := NewMemEventRecorder()
+
+	tok := 0
+	tokengen := func() (string, error) {
+		tok++
+		return "tok-" + string(rune('0'+tok)), nil
+	}
+
+	base := []Option{
+		WithMode(mode),
+		WithClock(clock),
+		WithIDGen(idgen),
+		WithTokenGen(tokengen),
+		WithEventRecorder(events),
+	}
+	svc := NewService(accounts, store, NewMemPendingStore(), ledger, email,
+		append(base, extra...)...)
+	return &harness{svc: svc, store: store, ledger: ledger, email: email, events: events, now: &now}
+}
+
+// TestAllowlistAllowedEmailProvisions confirms that when WithAllowlist is wired
+// and the signup email is on the allowlist, Verify provisions the account, org,
+// first key, and credit exactly as in the no-allowlist case.
+func TestAllowlistAllowedEmailProvisions(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil)
+	if err := al.Add(ctx, "dev@example.com", "", time.Time{}); err != nil {
+		t.Fatalf("allowlist add: %v", err)
+	}
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Waitlisted {
+		t.Fatal("allowed email must not be waitlisted")
+	}
+	if vr.Account.Email != "dev@example.com" {
+		t.Fatalf("account email = %q, want %q", vr.Account.Email, "dev@example.com")
+	}
+	if !vr.Org.Personal {
+		t.Fatal("verify must create a Personal org")
+	}
+	if vr.FirstKey.RawKey == "" {
+		t.Fatal("verify must issue a first key")
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
+// TestAllowlistBlockedEmailWaitlists confirms that when WithAllowlist is wired
+// and the signup email is NOT on the allowlist, Verify returns a waitlisted result
+// with no account, org, key, or credit granted, and the pending record is marked
+// Waitlisted but NOT Verified (so the token remains valid for a future approve).
+func TestAllowlistBlockedEmailWaitlists(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil) // empty: no email is allowed
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "blocked@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("blocked@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify returned unexpected error: %v", err)
+	}
+	if !vr.Waitlisted {
+		t.Fatal("blocked email must be waitlisted")
+	}
+	if vr.Account.ID != "" || vr.Org.ID != "" {
+		t.Fatalf("waitlisted verify must not provision account/org: got %+v / %+v", vr.Account, vr.Org)
+	}
+	if vr.FirstKey.RawKey != "" {
+		t.Fatalf("waitlisted verify must not issue a key: got %+v", vr.FirstKey)
+	}
+	if vr.GrantedCredit != 0 {
+		t.Fatalf("waitlisted verify must grant zero credit, got %v", vr.GrantedCredit)
+	}
+
+	// Account store must have no new account.
+	if _, err := h.store.GetAccountByEmail(ctx, "blocked@example.com"); !errors.Is(err, saas.ErrNotFound) {
+		t.Fatalf("waitlisted verify must not create an account, got %v", err)
+	}
+
+	// Pending record must be marked Waitlisted but NOT Verified (token stays valid).
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if !pending.Waitlisted {
+		t.Fatal("pending record must be marked Waitlisted")
+	}
+	if pending.Verified {
+		t.Fatal("pending record must NOT be marked Verified")
+	}
+
+	// A waitlisted funnel event must be recorded.
+	var gotWaitlisted bool
+	for _, e := range h.events.Events(ctx) {
+		if e.Name == EventWaitlisted {
+			gotWaitlisted = true
+		}
+	}
+	if !gotWaitlisted {
+		t.Fatal("waitlisted funnel event must be recorded")
+	}
+}
+
+// TestNoAllowlistBehavesAsToday confirms that when no WithAllowlist option is
+// wired, Verify provisions every email that passes token validation, preserving
+// the behavior for community and self-host deployments.
+func TestNoAllowlistBehavesAsToday(t *testing.T) {
+	ctx := context.Background()
+	// No WithAllowlist option: allowlist is nil, allow all.
+	h := newHarnessWithOpts(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Waitlisted {
+		t.Fatal("no-allowlist mode must not waitlist")
+	}
+	if vr.Account.Email != "dev@example.com" {
+		t.Fatalf("account email = %q", vr.Account.Email)
+	}
+	if vr.FirstKey.RawKey == "" {
+		t.Fatal("verify must issue a first key")
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
+// TestAllowlistAlreadyVerifiedNotRegressed confirms that an already-provisioned
+// account returns its account/org on re-verify even when the allowlist is
+// configured and the email is no longer on it. The idempotent short-circuit fires
+// before the allowlist gate so a provisioned account can never regress to
+// waitlisted.
+func TestAllowlistAlreadyVerifiedNotRegressed(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil)
+	if err := al.Add(ctx, "dev@example.com", "", time.Time{}); err != nil {
+		t.Fatalf("allowlist add: %v", err)
+	}
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+
+	// First verify: email is on the allowlist, must provision.
+	first, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+	if first.Waitlisted || first.Account.ID == "" {
+		t.Fatalf("first verify must provision: %+v", first)
+	}
+
+	// Swap the allowlist for an empty one: dev@example.com is no longer allowed.
+	h.svc.allowlist = NewMemAllowlist(nil)
+
+	// Re-verify must return the existing account via the idempotent short-circuit,
+	// not regress to waitlisted.
+	second, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("second verify: %v", err)
+	}
+	if second.Waitlisted {
+		t.Fatal("already-provisioned account must never regress to waitlisted")
+	}
+	if second.Account.ID != first.Account.ID {
+		t.Fatalf("re-verify account id = %q, want %q", second.Account.ID, first.Account.ID)
+	}
+	if !second.AlreadyDone {
+		t.Fatal("re-verify must be flagged AlreadyDone")
+	}
+}
+
+// TestFakeEmailSenderRecordsApproval asserts that SendApproved records an
+// approval and Approved returns true only for the approved email, not for others.
+func TestFakeEmailSenderRecordsApproval(t *testing.T) {
+	f := NewFakeEmailSender()
+	if f.Approved("dev@example.com") {
+		t.Fatal("no approval sent yet; Approved must return false")
+	}
+	if err := f.SendApproved(context.Background(), "dev@example.com"); err != nil {
+		t.Fatalf("send approved: %v", err)
+	}
+	if !f.Approved("dev@example.com") {
+		t.Fatal("after SendApproved, Approved must return true")
+	}
+	if f.Approved("other@example.com") {
+		t.Fatal("Approved must return false for a different email")
+	}
+}
+
+// TestCanonicalEmailFoldingCollapsesToOneAccountAndOneCredit proves the
+// anti-abuse guarantee: signing up with two Gmail variants that fold to the
+// same canonical identity results in exactly ONE account and the signup credit
+// is granted exactly ONCE. The second signup attempt returns ErrConflict
+// because the canonical identity already exists in the account store.
+func TestCanonicalEmailFoldingCollapsesToOneAccountAndOneCredit(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	// First signup with a dotted + tagged Gmail variant. The HTTP layer
+	// normalizes to lowercase before calling SignUp; replicate that here.
+	_, err := h.svc.SignUp(ctx, "u.ser+x@gmail.com", "")
+	if err != nil {
+		t.Fatalf("first sign up: %v", err)
+	}
+
+	// Delivery must go to the ORIGINAL lowercased address.
+	tok1 := h.email.LastToken("u.ser+x@gmail.com")
+	if tok1 == "" {
+		t.Fatal("verification email must be sent to the original address u.ser+x@gmail.com")
+	}
+
+	vr1, err := h.svc.Verify(ctx, tok1)
+	if err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+	// The account identity must be the canonical form.
+	if vr1.Account.Email != "user@gmail.com" {
+		t.Fatalf("account email = %q, want canonical %q", vr1.Account.Email, "user@gmail.com")
+	}
+
+	// Second signup with the bare canonical form must be rejected as a duplicate
+	// because the canonical identity already has an account.
+	_, err = h.svc.SignUp(ctx, "user@gmail.com", "")
+	if !errors.Is(err, saas.ErrConflict) {
+		t.Fatalf("duplicate signup via canonical form: got %v, want ErrConflict", err)
+	}
+
+	// Exactly ONE signup credit entry on the org, proving per-person enforcement.
+	entries, err := h.ledger.Entries(ctx, vr1.Org.ID)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	signupGrants := 0
+	for _, e := range entries {
+		if e.Kind == billing.KindSignupCredit {
+			signupGrants++
+		}
+	}
+	if signupGrants != 1 {
+		t.Fatalf("signup credit granted %d times, want exactly 1", signupGrants)
+	}
+}
+
+// TestCanonicalEmailDeliveryToOriginal proves the verification email is sent to
+// the ORIGINAL (delivery) address, not the canonical identity. A user who typed
+// u.ser+x@gmail.com must receive the link there, not at user@gmail.com.
+func TestCanonicalEmailDeliveryToOriginal(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "u.ser+x@gmail.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+
+	// Token must be findable at the typed (delivery) address.
+	if h.email.LastToken("u.ser+x@gmail.com") == "" {
+		t.Fatal("verification email must be sent to the original address u.ser+x@gmail.com")
+	}
+	// Token must NOT appear at the canonical address.
+	if h.email.LastToken("user@gmail.com") != "" {
+		t.Fatal("verification email must NOT be sent to the canonical address user@gmail.com")
+	}
+}
+
+// TestCanonicalEmailNonGmailProvisions confirms that a plain non-Gmail address
+// (no plus-tag, no dots) still provisions normally after this change.
+func TestCanonicalEmailNonGmailProvisions(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "plain@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	tok := h.email.LastToken("plain@example.com")
+	if tok == "" {
+		t.Fatal("no verification token")
+	}
+	vr, err := h.svc.Verify(ctx, tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Account.Email != "plain@example.com" {
+		t.Fatalf("account email = %q, want plain@example.com", vr.Account.Email)
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
 // TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
 // when a PRIOR verify attempt provisioned the account but crashed before marking
 // the pending signup verified (e.g. the credit grant or key issue errored). The
@@ -315,7 +712,7 @@ func TestVerifyRecoversFromHalfProvisionedAccount(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)
 
-	if _, err := h.svc.SignUp(ctx, "dev@example.com"); err != nil {
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
 		t.Fatalf("sign up: %v", err)
 	}
 	token := h.email.LastToken("dev@example.com")

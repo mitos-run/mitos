@@ -1,0 +1,17 @@
+# Single-user Dex example for the Mitos console. QA / first-run ONLY.
+# NOT FOR PRODUCTION. NOT MULTI-TENANT. See README.md.
+#
+# This kustomization exists so the manifests can be validated and applied as a
+# set:
+#   kubectl kustomize examples/single-user-dex   # render / validate
+#   kubectl apply -k examples/single-user-dex     # apply
+#
+# It does NOT include the prerequisite Secret (mitos-console-oidc) or the
+# self-signed TLS Secret (mitos-console-tls); create those out of band first
+# (see README.md) so no secret value is ever committed to the repo.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mitos
+resources:
+  - dex.yaml
+  - console-ingress.yaml

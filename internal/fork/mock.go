@@ -74,6 +74,12 @@ type MockEngine struct {
 	// to 16 GiB; SetMemoryTotal overrides it (Task 3 envtests shrink it to
 	// force capacity exhaustion).
 	memoryTotalBytes int64
+	// diskFreeBytes and diskTotalBytes are the fixed data-dir disk headroom the
+	// mock's GetCapacity reports. Both default to 0 (unknown budget: the
+	// controller treats it as unlimited, so existing envtest scheduling is
+	// unchanged); SetDiskHeadroom sets them to exercise the disk-backoff path.
+	diskFreeBytes  int64
+	diskTotalBytes int64
 	// pulls records every PullTemplate call the mock received, in call order, so
 	// distribution tests can assert the controller issued a pull (source URL +
 	// digest) instead of a second build. The pull token is NEVER recorded: only
@@ -162,6 +168,18 @@ func (e *MockEngine) SetMemoryTotal(bytes int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.memoryTotalBytes = bytes
+}
+
+// SetDiskHeadroom overrides the fixed data-dir disk headroom the mock's
+// GetCapacity reports (free and total bytes). Tests use it to drive a node below
+// the scheduler's disk-headroom floor and exercise the disk-backoff path. Both
+// zero (the default) reports an unknown budget the controller treats as
+// unlimited.
+func (e *MockEngine) SetDiskHeadroom(free, total int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.diskFreeBytes = free
+	e.diskTotalBytes = total
 }
 
 func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
@@ -419,6 +437,8 @@ func (e *MockEngine) GetCapacity() Capacity {
 	}
 	active := int32(len(e.sandboxes))
 	memTotal := e.memoryTotalBytes
+	diskFree := e.diskFreeBytes
+	diskTotal := e.diskTotalBytes
 	digests := make(map[string]string, len(e.templateDigests))
 	for id, d := range e.templateDigests {
 		digests[id] = d
@@ -457,6 +477,8 @@ func (e *MockEngine) GetCapacity() Capacity {
 		TemplateDigests:   digests,
 		TemplateEstimates: estimates,
 		KVMAvailable:      false,
+		DiskFree:          diskFree,
+		DiskTotal:         diskTotal,
 	}
 }
 
@@ -579,5 +601,17 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    e.vsockPath(newSandboxID),
+		// A live fork gets a FRESH per-fork network identity and must reset its
+		// captured upstream sockets. The mock has no real allocator, so it derives
+		// a distinct guest IP from the fork counter (10.200.x.y) so daemon-level
+		// tests can exercise the live network delivery path (identity +
+		// ResetUpstreams) without KVM. ResetUpstreams is always true for a live
+		// fork.
+		GuestNetwork: &vsock.NotifyForkedNetwork{
+			GuestIP:        fmt.Sprintf("10.200.%d.%d", (id/250)%250, id%250),
+			GatewayIP:      "10.200.0.1",
+			PrefixLen:      30,
+			ResetUpstreams: true,
+		},
 	}, nil
 }

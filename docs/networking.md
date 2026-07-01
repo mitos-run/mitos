@@ -196,6 +196,68 @@ pod's netns and a Kubernetes NetworkPolicy/Cilium over that pod is the governing
 egress layer (no bespoke nftables for husk pods). Exactly one layer governs a
 given sandbox, never both (threat model section 0, surface 5).
 
+## Domain egress at TLS time: the SNI peek-and-splice filter
+
+The DNS resolver above decides which NAMES a sandbox may RESOLVE and pins their
+resolved IPs. It does not, by itself, see the name on a TLS connection: once the
+guest holds an IP it opens a TCP/TLS connection to that IP, and a shared CDN or
+host that serves many names behind one address would be reachable for ALL of its
+names if IP were the only check. The `--sni-egress` path closes that at TLS
+connection time with a host-side SNI peek-and-splice filter (`internal/sniproxy`),
+the SNI piece of per-sandbox domain egress allowlisting (issue #494). It
+COMPLEMENTS the DNS allowlist; it does not replace it.
+
+The design:
+
+- **Same allowlist, enforced again at connect time.** The filter reuses the EXACT
+  same per-sandbox domain allowlist the DNS resolver holds (`dnsproxy.Registry`,
+  via `sniproxy.RegistryAllowlist`): the same exact-or-anchored-wildcard name
+  matcher (`*.D` anchored as described above) and the same per-name port set,
+  attributed by the same guest source IP. There is no second matcher.
+- **Peek, do not terminate.** For each connection the filter reads the TLS
+  ClientHello and extracts the SNI `server_name` WITHOUT terminating TLS: it
+  drives the stdlib record/handshake parser only far enough to parse the
+  ClientHello, then aborts before any ServerHello. The exact ClientHello bytes are
+  buffered and replayed to the upstream on allow, so the guest's TLS session is
+  end to end and the filter never sees a single plaintext application byte.
+- **Allow splices, deny closes fail-closed.** When the SNI matches the allowlist
+  for the connection's port, the filter dials the ORIGINAL destination (recovered
+  host-side via `SO_ORIGINAL_DST`) and splices the connection (replayed
+  ClientHello plus a bidirectional copy). A non-allowlisted SNI, a missing SNI (a
+  TLS connection with no SNI is DENIED, so a guest cannot reach an allowlisted
+  name by omitting it), a malformed or non-TLS first record, or a source IP with
+  no sandbox attribution all close the connection with no dial.
+- **Host-side, guest cannot disable it.** The connection is transparently
+  redirected to the filter by the per-node nftables datapath; the peek, the
+  allowlist decision, and the splice dial all run in the forkd host process. The
+  guest never sees the decision and cannot route around it.
+- **Denied-IP floor reapplied.** The splice dial leaves the host OUTPUT path and
+  so bypasses the per-sandbox nftables FORWARD metadata drop, exactly as the
+  egress proxy's dial does. The filter therefore reapplies the SAME denied-IP
+  floor (`egressproxy.IsDeniedIP`: cloud metadata, loopback, link-local, the
+  unspecified address, the NAT64 wrap of IMDS) before dialing, so an allowlisted
+  SNI cannot be used to reach IMDS or forkd's own ports.
+
+Honest limitation: this is SNI-based filtering, NOT full TLS interception. The
+filter trusts that the SNI in the ClientHello names the host the connection is
+actually for; it does not terminate TLS, validate the server certificate, or
+inspect any byte after the ClientHello. A client that controls BOTH ends can send
+a benign SNI and then speak to a different server (domain fronting), so SNI
+filtering is a policy and egress-shaping control, not a cryptographic guarantee.
+It is layered on top of the DNS allowlist and the denied-IP floor, which together
+bound which IPs the guest can even reach; the SNI filter adds name-level
+confinement at connect time for the shared-IP case.
+
+Wireup status: the peek, the allowlist decision (exact and anchored wildcard), the
+missing/malformed/non-TLS deny, and the splice are implemented and unit-tested in
+`internal/sniproxy` (no VM required: the tests feed crafted TLS 1.2 and TLS 1.3
+ClientHello byte streams). forkd constructs the filter under `--sni-egress`
+(requires `--enable-networking`, `--enable-dns-egress`, and `--egress-proxy`) and
+runs its listener. The remaining piece is the per-sandbox nftables rule that
+REDIRECTS guest `tcp dport 443` to the filter and the IPv6 original-destination
+recovery; both are a KVM-gated follow-up (`internal/netconf`), so until that lands
+no traffic reaches the listener.
+
 ## Enforced vs open
 
 **ENFORCED (proven in KVM CI):**

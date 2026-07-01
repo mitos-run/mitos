@@ -23,6 +23,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 /// Both fds are owned and closed on drop via `OwnedFd`. The caller converts
 /// the slave into stdio files via `PtyPair::slave_stdio_files` and the master
 /// into a tokio async file via `master_to_async_file`.
+#[derive(Debug)]
 pub struct PtyPair {
     /// The master side: the host reads output and writes input here.
     pub master: OwnedFd,

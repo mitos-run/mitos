@@ -53,6 +53,17 @@ type Deps struct {
 	ForkTree    ForkTreeSource
 	Projects    ProjectStore
 	Portal      PortalLinker
+	// TopUp is the prepaid credit checkout seam. It starts a hosted checkout
+	// session and returns the URL for the provider's payment page. Defaults to
+	// noTopUp{} when billing is not configured; with an empty TopUpProductID the
+	// endpoint returns 400 (top-up not configured) before the seam is called.
+	TopUp TopUpLinker
+	// TopUpProductID is the billing provider product that represents a credit
+	// top-up. Empty means top-up is not enabled; the endpoint returns 400.
+	TopUpProductID string
+	// TopUpCurrency is the ISO 4217 currency code for top-up transactions.
+	// Defaults to "EUR" when billing is configured.
+	TopUpCurrency string
 	// Retention is the per-org audit-retention policy seam. It stores and
 	// exposes the retention window in days for each org; the GC sweep that
 	// enforces the policy runs in the controller (issue #163). Defaults to the
@@ -135,6 +146,12 @@ func New(deps Deps) *Console {
 	if deps.Portal == nil {
 		deps.Portal = noPortal{}
 	}
+	if deps.TopUp == nil {
+		deps.TopUp = noTopUp{}
+	}
+	if deps.TopUpCurrency == "" {
+		deps.TopUpCurrency = "EUR"
+	}
 	if deps.Retention == nil {
 		deps.Retention = NewMemRetentionStore()
 	}
@@ -200,7 +217,9 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/usage", c.handleUsage)
 	mux.Handle("GET /console/usage/api", c.usageAPIHandler())
 	mux.HandleFunc("GET /console/billing", c.handleBilling)
+	mux.HandleFunc("POST /console/billing/spend-cap", c.handleSetSpendCap)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
+	mux.HandleFunc("GET /console/billing/topup", c.handleBillingTopUp)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
@@ -219,6 +238,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/secrets", c.handleCreateSecret)
 	mux.HandleFunc("DELETE /console/secrets/{name}", c.handleDeleteSecret)
 	mux.HandleFunc("GET /console/instruments", c.handleInstruments)
+	mux.HandleFunc("GET /console/first-activity", c.handleFirstActivity)
 	mux.HandleFunc("GET /console/forktree", c.handleForkTree)
 	mux.HandleFunc("GET /console/projects", c.handleListProjects)
 	mux.HandleFunc("POST /console/projects", c.handleCreateProject)
@@ -440,6 +460,17 @@ func (c *Console) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 // --- Billing (over #212) ---
 
+// ledgerEntryView is the snake_case JSON view of a billing.LedgerEntry sent to
+// the SPA. The underlying LedgerEntry struct has no json tags (PascalCase by
+// default), so this view model maps the fields the SPA actually reads:
+// ts (At), cents (Amount as int64), reason (Note). OrgID and Key are internal
+// fields and must not appear on the wire.
+type ledgerEntryView struct {
+	Ts     time.Time `json:"ts"`
+	Cents  int64     `json:"cents"`
+	Reason string    `json:"reason"`
+}
+
 // BillingView is the console billing summary: the plan/dunning status, the
 // current period spend, the credit balance, the dunning status, and the credit
 // ledger entries (the closest thing to invoices in this slice; real Stripe
@@ -451,7 +482,12 @@ type BillingView struct {
 	SpendCents    int64                 `json:"spend_cents"`
 	SoftCapCents  int64                 `json:"soft_cap_cents"`
 	HardCapCents  int64                 `json:"hard_cap_cents"`
-	LedgerEntries []billing.LedgerEntry `json:"ledger_entries"`
+	LedgerEntries []ledgerEntryView     `json:"ledger_entries"`
+	// TopUpAvailable is true when the prepaid credit top-up provider is
+	// configured (a non-empty TopUpProductID). When false the SPA shows a calm
+	// "adding credits is not available yet" state instead of offering a checkout
+	// that would fail. The signup credit and balance are unaffected either way.
+	TopUpAvailable bool `json:"topup_available"`
 }
 
 func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
@@ -461,6 +497,9 @@ func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := BillingView{OrgID: orgID, Status: billing.StatusActive}
+	// A top-up is available exactly when the product ID is configured, matching
+	// the topup.go guard that returns 400 on an empty product ID.
+	view.TopUpAvailable = c.deps.TopUpProductID != ""
 	if c.deps.Billing.Status != nil {
 		st, err := c.deps.Billing.Status.Status(r.Context(), orgID)
 		if err != nil {
@@ -481,10 +520,14 @@ func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view.BalanceCents = int64(bal)
-		view.LedgerEntries = entries
+		views := make([]ledgerEntryView, len(entries))
+		for i, e := range entries {
+			views[i] = ledgerEntryView{Ts: e.At, Cents: int64(e.Amount), Reason: e.Note}
+		}
+		view.LedgerEntries = views
 	}
 	if view.LedgerEntries == nil {
-		view.LedgerEntries = []billing.LedgerEntry{}
+		view.LedgerEntries = []ledgerEntryView{}
 	}
 	if c.deps.Billing.Caps != nil {
 		cap, has, err := c.deps.Billing.Caps.Get(r.Context(), orgID)

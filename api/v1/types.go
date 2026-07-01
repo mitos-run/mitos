@@ -347,6 +347,14 @@ type SandboxPoolStatus struct {
 	// snapshot. A content address, safe to log.
 	TemplateDigest string `json:"templateDigest,omitempty"`
 
+	// TemplateBuildHash records the build identity (a content hash of the template
+	// image, init/buildSteps, workload, volumes, resources and encryption flag) the
+	// pool's snapshot was last built from. The controller rebuilds the snapshot when
+	// the template's current build identity no longer matches this, so a
+	// workload.command, env, or ready-probe edit re-runs the build instead of being
+	// silently ignored (issue #475). A content address, safe to log.
+	TemplateBuildHash string `json:"templateBuildHash,omitempty"`
+
 	// DesiredWarm is the autoscaler's computed desired dormant pod count.
 	DesiredWarm int32 `json:"desiredWarm,omitempty"`
 

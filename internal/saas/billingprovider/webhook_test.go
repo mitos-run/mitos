@@ -37,7 +37,7 @@ func (f fakeCustomers) OrgForCustomer(_ context.Context, c string) (string, bool
 func handle(t *testing.T, p Provider) (*httptest.ResponseRecorder, *billing.MemStatusStore) {
 	t.Helper()
 	status := billing.NewMemStatusStore()
-	h := NewWebhookHandler(p, fakeCustomers{"cus_alice": "org-alice"}, status)
+	h := NewWebhookHandler(p, fakeCustomers{"cus_alice": "org-alice"}, status, nil, nil)
 	r := httptest.NewRequest("POST", "/webhooks/billing", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

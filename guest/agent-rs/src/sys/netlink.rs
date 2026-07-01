@@ -39,6 +39,9 @@ const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
+const RTM_NEWNEIGH: u16 = 28;
+const RTM_DELNEIGH: u16 = 29;
+const RTM_GETNEIGH: u16 = 30;
 
 // Netlink message flags.
 const NLM_F_REQUEST: u16 = 0x0001;
@@ -81,6 +84,12 @@ const IFA_LOCAL: u16 = 2;
 // rtattr types for routes (linux/rtnetlink.h).
 const RTA_GATEWAY: u16 = 5;
 const RTA_OIF: u16 = 4;
+
+// rtattr type for neighbor (ARP) destination address (linux/neighbour.h).
+const NDA_DST: u16 = 1;
+
+// ndmsg body size (linux/neighbour.h): family(1)+pad1(1)+pad2(2)+ifindex(4)+state(2)+flags(1)+type(1) = 12.
+const NDMSG_HDRLEN: usize = 12;
 
 // rtattr types for links (linux/if_link.h / linux/if_ether.h).
 const IFLA_ADDRESS: u16 = 1;
@@ -449,15 +458,17 @@ pub fn parse_addr_dump(buf: &[u8]) -> io::Result<Vec<AddrEntry>> {
 }
 
 // ---------------------------------------------------------------------------
-// Netlink socket helpers.
+// Netlink socket helpers (Linux only: sockaddr_nl, SOCK_CLOEXEC).
 // ---------------------------------------------------------------------------
 
 /// A raw AF_NETLINK RTNETLINK socket with a 5-second receive timeout.
 /// Wraps the raw fd and closes it on drop.
+#[cfg(target_os = "linux")]
 pub struct NetlinkSocket {
     fd: libc::c_int,
 }
 
+#[cfg(target_os = "linux")]
 impl NetlinkSocket {
     /// Open a new NETLINK_ROUTE socket and bind to the kernel.
     pub fn open() -> io::Result<Self> {
@@ -582,6 +593,7 @@ impl NetlinkSocket {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for NetlinkSocket {
     fn drop(&mut self) {
         // SAFETY: fd is valid and has not been closed elsewhere.
@@ -590,6 +602,7 @@ impl Drop for NetlinkSocket {
 }
 
 /// Returns true if `buf` contains an NLMSG_DONE or NLMSG_ERROR message.
+#[cfg(target_os = "linux")]
 fn is_terminated(buf: &[u8]) -> bool {
     let mut pos = 0usize;
     while pos + NLMSG_HDRLEN <= buf.len() {
@@ -613,11 +626,12 @@ fn is_terminated(buf: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Interface index lookup.
+// Interface index lookup (Linux only).
 // ---------------------------------------------------------------------------
 
 /// Look up the interface index for `iface_name`. Returns an error when the
 /// interface is not found or the name is too long.
+#[cfg(target_os = "linux")]
 pub fn if_nametoindex(iface_name: &str) -> io::Result<u32> {
     let bytes = iface_name.as_bytes();
     if bytes.len() >= libc::IFNAMSIZ {
@@ -646,6 +660,9 @@ pub fn if_nametoindex(iface_name: &str) -> io::Result<u32> {
 /// ready gate (issue #460) cannot reach it until lo is up. eth0 gets its link-up
 /// via configure() on each fork; lo has no addresses to manage, so this is the
 /// minimal link-up-only path.
+///
+/// Non-Linux (macOS CI): returns Ok(()) so call sites compile cleanly.
+#[cfg(target_os = "linux")]
 pub fn link_up(iface: &str) -> io::Result<()> {
     let idx_i32 = if_nametoindex(iface)? as i32;
     let sock = NetlinkSocket::open()
@@ -655,8 +672,13 @@ pub fn link_up(iface: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn link_up(_iface: &str) -> io::Result<()> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// High-level configure: mirrors guestnet.Configure in Go exactly.
+// High-level configure: mirrors guestnet.Configure in Go exactly (Linux only).
 // ---------------------------------------------------------------------------
 
 /// Sequence (mirrors internal/guestnet/configure_linux.go Configure):
@@ -667,6 +689,7 @@ pub fn link_up(iface: &str) -> io::Result<()> {
 ///
 /// Returns an error on any netlink failure. Does NOT write resolv.conf (that
 /// is the caller's responsibility, matching Go's configureNetwork separation).
+#[cfg(target_os = "linux")]
 pub fn configure(
     iface: &str,
     mac: Option<[u8; 6]>,
@@ -712,6 +735,141 @@ pub fn configure(
     sock.request(&build_replace_default_route(next_seq(), idx_i32, gateway_ip))
         .map_err(|e| io::Error::new(e.kind(), format!("netlink: default route via {gateway_ip}: {e}")))?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Neighbor (ARP) flush: drops stale neighbor entries after a live fork so
+// captured upstream sockets re-dial through the new per-fork egress proxy.
+// ---------------------------------------------------------------------------
+
+/// Build RTM_GETNEIGH | NLM_F_DUMP to enumerate all IPv4 neighbor entries.
+pub fn build_dump_neigh(seq: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(NLMSG_HDRLEN + NDMSG_HDRLEN);
+    // nlmsghdr (16 bytes).
+    put_u32_le(&mut buf, 0); // nlmsg_len: patched later.
+    put_u16_le(&mut buf, RTM_GETNEIGH);
+    put_u16_le(&mut buf, NLM_F_REQUEST | NLM_F_DUMP);
+    put_u32_le(&mut buf, seq);
+    put_u32_le(&mut buf, 0); // nlmsg_pid = 0 (kernel fills).
+    // ndmsg (12 bytes): AF_INET, pads, ifindex=0 (all ifaces), state=0, flags=0, type=0.
+    put_u8(&mut buf, AF_INET);
+    put_u8(&mut buf, 0); // pad1.
+    put_u16_le(&mut buf, 0); // pad2.
+    put_u32_le(&mut buf, 0); // ndm_ifindex = 0: dump all.
+    put_u16_le(&mut buf, 0); // ndm_state.
+    put_u8(&mut buf, 0); // ndm_flags.
+    put_u8(&mut buf, 0); // ndm_type.
+    patch_len(&mut buf);
+    buf
+}
+
+/// Build RTM_DELNEIGH to remove a specific IPv4 neighbor on `ifindex`.
+pub fn build_del_neigh(seq: u32, ifindex: i32, ip: Ipv4Addr) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(NLMSG_HDRLEN + NDMSG_HDRLEN + 8);
+    // nlmsghdr.
+    put_u32_le(&mut buf, 0);
+    put_u16_le(&mut buf, RTM_DELNEIGH);
+    put_u16_le(&mut buf, NLM_F_REQUEST | NLM_F_ACK);
+    put_u32_le(&mut buf, seq);
+    put_u32_le(&mut buf, 0);
+    // ndmsg.
+    put_u8(&mut buf, AF_INET);
+    put_u8(&mut buf, 0);
+    put_u16_le(&mut buf, 0);
+    buf.extend_from_slice(&ifindex.to_le_bytes()); // ndm_ifindex.
+    put_u16_le(&mut buf, 0); // ndm_state.
+    put_u8(&mut buf, 0); // ndm_flags.
+    put_u8(&mut buf, 0); // ndm_type.
+    // NDA_DST attribute: the neighbor IP to remove.
+    put_attr(&mut buf, NDA_DST, &ip.octets());
+    patch_len(&mut buf);
+    buf
+}
+
+/// Parse a RTM_GETNEIGH dump response and collect IPv4 addresses on `ifindex`.
+/// Stops at NLMSG_DONE or NLMSG_ERROR.
+#[cfg(target_os = "linux")]
+fn parse_neigh_dump(buf: &[u8], ifindex: u32) -> io::Result<Vec<Ipv4Addr>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + NLMSG_HDRLEN <= buf.len() {
+        let nlmsg_len = read_u32_le(buf, pos)? as usize;
+        let nlmsg_type = read_u16_le(buf, pos + 4)?;
+        if nlmsg_len < NLMSG_HDRLEN || pos + nlmsg_len > buf.len() {
+            break;
+        }
+        match nlmsg_type {
+            NLMSG_DONE | NLMSG_ERROR => break,
+            RTM_NEWNEIGH => {
+                if nlmsg_len < NLMSG_HDRLEN + NDMSG_HDRLEN {
+                    pos += nl_align(nlmsg_len);
+                    continue;
+                }
+                let msg_start = pos + NLMSG_HDRLEN;
+                // ndmsg: family at 0, ifindex at 4 (i32, but compare as u32).
+                let family = read_u8(buf, msg_start)?;
+                let entry_ifindex = read_u32_le(buf, msg_start + 4)?;
+                if family != AF_INET || entry_ifindex != ifindex {
+                    pos += nl_align(nlmsg_len);
+                    continue;
+                }
+                // Parse NDA_DST attribute from msg_start + NDMSG_HDRLEN.
+                let mut attr_pos = msg_start + NDMSG_HDRLEN;
+                let msg_end = pos + nlmsg_len;
+                while attr_pos + 4 <= msg_end {
+                    let attr_len = read_u16_le(buf, attr_pos)? as usize;
+                    let attr_type = read_u16_le(buf, attr_pos + 2)?;
+                    if attr_len < 4 || attr_pos + attr_len > msg_end {
+                        break;
+                    }
+                    let data_start = attr_pos + 4;
+                    let data_end = attr_pos + attr_len;
+                    if attr_type == NDA_DST && (data_end - data_start) == 4 {
+                        let a = read_u8(buf, data_start)?;
+                        let b = read_u8(buf, data_start + 1)?;
+                        let c = read_u8(buf, data_start + 2)?;
+                        let d = read_u8(buf, data_start + 3)?;
+                        out.push(Ipv4Addr::new(a, b, c, d));
+                    }
+                    attr_pos += nl_align(attr_len);
+                }
+            }
+            _ => {}
+        }
+        pos += nl_align(nlmsg_len);
+    }
+    Ok(out)
+}
+
+/// Flush all IPv4 neighbor (ARP) entries on `iface`. Best-effort: individual
+/// delete failures are logged and skipped so a single stale entry does not
+/// block the rest. Mirrors the "log + continue" style of configure().
+///
+/// Called on the live-fork path (reset_upstreams = true) so that captured
+/// upstream sockets die and clients re-dial through the per-fork egress proxy.
+#[cfg(target_os = "linux")]
+pub fn flush_neighbors(iface: &str) -> io::Result<()> {
+    let raw_idx = if_nametoindex(iface)?;
+    let idx_i32 = raw_idx as i32;
+    let sock = NetlinkSocket::open()
+        .map_err(|e| io::Error::new(e.kind(), format!("netlink: flush_neighbors open: {e}")))?;
+    let mut seq: u32 = 0;
+    let mut next_seq = || {
+        seq += 1;
+        seq
+    };
+    let dump_buf = sock
+        .dump(&build_dump_neigh(next_seq()))
+        .map_err(|e| io::Error::new(e.kind(), format!("netlink: neigh dump: {e}")))?;
+    let entries = parse_neigh_dump(&dump_buf, raw_idx)
+        .map_err(|e| io::Error::new(e.kind(), format!("netlink: parse neigh dump: {e}")))?;
+    for ip in &entries {
+        if let Err(e) = sock.request(&build_del_neigh(next_seq(), idx_i32, *ip)) {
+            // best-effort: log and continue on per-entry delete failure.
+            eprintln!("sandbox-agent: flush neighbor {ip} on {iface}: {e}");
+        }
+    }
     Ok(())
 }
 

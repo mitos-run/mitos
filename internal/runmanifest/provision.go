@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +32,14 @@ var randSource = rand.Read
 // that are neither supplied nor mintable fail closed. Mintable secrets
 // (generate > 0) left blank are minted from crypto/rand. SecretInheritance is set
 // to reissue so a fork never inherits the golden's in-memory secrets.
-func Provision(m *Manifest, supplied map[string]string, namespace, instanceLabel string) (*ProvisionResult, error) {
+//
+// publicURL is this instance's resolved public URL (https://<instanceLabel>.<expose
+// -domain>). It is delivered to the fork as the MITOS_PUBLIC_URL env var, and any
+// run.env value referencing ${MITOS_PUBLIC_URL} is resolved per-fork into the
+// Sandbox env (overlaying the shared golden's value), so this fork's exec sessions
+// and runtime reads see its own URL (issue #476). An empty publicURL injects
+// nothing. publicURL is a non-secret URL, never a credential.
+func Provision(m *Manifest, supplied map[string]string, namespace, instanceLabel, publicURL string) (*ProvisionResult, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
@@ -103,8 +111,35 @@ func Provision(m *Manifest, supplied map[string]string, namespace, instanceLabel
 	if m.Workspace != nil && m.Workspace.Persist {
 		sandbox.Spec.WorkspaceRef = &v1.LocalObjectReference{Name: instanceLabel + "-workspace"}
 	}
+	sandbox.Spec.Env = publicURLEnv(m, publicURL)
 
 	return &ProvisionResult{Secret: secret, Sandbox: sandbox}, nil
+}
+
+// publicURLEnv builds the per-fork env that carries this instance's public URL:
+// MITOS_PUBLIC_URL set to publicURL, plus every run.env entry that references
+// ${MITOS_PUBLIC_URL} resolved to publicURL (so a fork's exec sessions see this
+// instance's own URL, overlaying the shared golden's value). Entries that do not
+// reference the URL are left in the golden only and not duplicated here. Returns
+// nil when publicURL is empty, so a caller without a resolved URL provisions
+// exactly as before.
+func publicURLEnv(m *Manifest, publicURL string) []corev1.EnvVar {
+	if publicURL == "" {
+		return nil
+	}
+	keys := make([]string, 0, len(m.Run.Env))
+	for k, v := range m.Run.Env {
+		if k != PublicURLEnvVar && referencesPublicURL(v) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	out := make([]corev1.EnvVar, 0, len(keys)+1)
+	out = append(out, corev1.EnvVar{Name: PublicURLEnvVar, Value: publicURL})
+	for _, k := range keys {
+		out = append(out, corev1.EnvVar{Name: k, Value: expandPublicURL(m.Run.Env[k], publicURL)})
+	}
+	return out
 }
 
 // exposeSharing maps the manifest preview.auth to the expose sharing tier. The

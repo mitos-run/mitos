@@ -100,6 +100,26 @@ func NftDeleteSandboxEgressCounterArgs(tap string) []string {
 	return []string{"nft", "delete", "counter", "inet", SharedTableName(), SandboxEgressCounterName(tap)}
 }
 
+// NftDeleteProxyDNATDispatchElementArgs builds the argv to remove this tap's
+// element from the proxy DNAT dispatch map: nft delete element ip <nattable>
+// proxydnat { "<tap>" }. After this no prerouting traffic jumps into the per-tap
+// DNAT chain, so the chain can be removed. The nat-path counterpart of
+// NftDeleteDispatchElementArgs; deleting by key needs no rule handle.
+func NftDeleteProxyDNATDispatchElementArgs(tap string) []string {
+	return []string{"nft", "delete", "element", "ip", NatTableName(), ProxyDNATDispatchMapName(),
+		fmt.Sprintf("{ %q }", tap)}
+}
+
+// NftDeleteProxyDNATChainArgs builds the argv to remove this tap's DNAT chain
+// from the nat table: nft delete chain ip <nattable> proxydnat_<tap>. Run after
+// the dispatch element is deleted (the element references the chain). The nat
+// table, base chain, and dispatch map are left intact for other forks. This
+// stops a reused tap from inheriting a stale sentinel DNAT and keeps the
+// prerouting dispatch from growing unbounded.
+func NftDeleteProxyDNATChainArgs(tap string) []string {
+	return []string{"nft", "delete", "chain", "ip", NatTableName(), ProxyDNATChainName(tap)}
+}
+
 // MasqueradeAddArgs builds the argv to add a MASQUERADE rule for the sandbox
 // subnet on the uplink interface. This is optional (the node may already NAT
 // the subnet); callers gate it behind a flag.

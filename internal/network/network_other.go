@@ -20,6 +20,7 @@ type Options struct {
 	SubnetCIDR       string
 	Uplink           string
 	EnableForwarding bool
+	ProxyEnabled     bool
 }
 
 // NewManager returns a Manager that reports networking is unsupported on this
