@@ -127,6 +127,12 @@ func main() {
 		// The manage-subscription portal link (provider-neutral); nil keeps the
 		// console's no-portal default (community edition).
 		Portal: bill.portal,
+		// The prepaid credit top-up seam + its provider product/currency; nil
+		// keeps the console's no-top-up default (community edition), and an empty
+		// product id makes the endpoint return 400 until configured.
+		TopUp:          bill.topUp,
+		TopUpProductID: bill.topUpProductID,
+		TopUpCurrency:  bill.topUpCurrency,
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
 		Capabilities: caps,
