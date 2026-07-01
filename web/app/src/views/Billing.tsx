@@ -14,10 +14,13 @@ function fmtDollars(cents: number): string {
 }
 
 // dollarsToCents converts a dollar-string entered by the user to integer cents.
-// Returns 0 for empty or non-numeric input.
-function dollarsToCents(val: string): number {
+// Returns 0 for an empty string (meaning "not set" for that threshold).
+// Returns null when the input is non-empty but not a valid non-negative number;
+// callers must treat null as an invalid entry and block submission.
+function dollarsToCents(val: string): number | null {
+  if (val.trim() === '') return 0
   const n = parseFloat(val)
-  if (!isFinite(n) || n < 0) return 0
+  if (!isFinite(n) || n < 0) return null
   return Math.round(n * 100)
 }
 
@@ -29,11 +32,20 @@ export function Billing() {
   const [softDollars, setSoftDollars] = useState('')
   const [hardDollars, setHardDollars] = useState('')
   const [capSaved, setCapSaved] = useState(false)
+  // capInputError is set when a field contains text that is not a valid
+  // non-negative dollar amount. It is cleared when the user changes either field.
+  const [capInputError, setCapInputError] = useState<string | null>(null)
 
   function onSpendCapSubmit(e: React.FormEvent) {
     e.preventDefault()
     const softCents = dollarsToCents(softDollars)
     const hardCents = dollarsToCents(hardDollars)
+    if (softCents === null || hardCents === null) {
+      setCapInputError('Enter a valid dollar amount, or leave the field empty to remove that cap.')
+      return
+    }
+    setCapInputError(null)
+    setCapSaved(false)
     setSpendCap.mutate(
       { softCents, hardCents },
       {
@@ -90,7 +102,7 @@ export function Billing() {
             A soft cap fires a budget alert. A hard cap suspends the org to prevent unbounded spend.
             Enter amounts in dollars. Leave a field at 0 to leave that threshold unset.
           </p>
-          <form onSubmit={onSpendCapSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 360, marginBottom: 'var(--space-6)' }}>
+          <form onSubmit={onSpendCapSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 360, marginBottom: 'var(--space-6)' }}>
             <div>
               <label htmlFor="soft-cap-dollars" style={{ display: 'block', marginBottom: 'var(--space-1)' }}>
                 Soft cap (dollars)
@@ -102,7 +114,7 @@ export function Billing() {
                 step="0.01"
                 placeholder="0"
                 value={softDollars}
-                onChange={(e) => { setSoftDollars(e.target.value); setCapSaved(false) }}
+                onChange={(e) => { setSoftDollars(e.target.value); setCapSaved(false); setCapInputError(null) }}
                 style={{ width: '140px' }}
               />
             </div>
@@ -117,7 +129,7 @@ export function Billing() {
                 step="0.01"
                 placeholder="0"
                 value={hardDollars}
-                onChange={(e) => { setHardDollars(e.target.value); setCapSaved(false) }}
+                onChange={(e) => { setHardDollars(e.target.value); setCapSaved(false); setCapInputError(null) }}
                 style={{ width: '140px' }}
               />
             </div>
@@ -129,9 +141,27 @@ export function Billing() {
                 <span
                   role="status"
                   aria-live="polite"
-                  style={{ fontSize: 'var(--step--1)', color: 'var(--color-ok, green)' }}
+                  style={{ fontSize: 'var(--step--1)', color: 'var(--green)' }}
                 >
                   Spend cap saved.
+                </span>
+              )}
+              {capInputError && (
+                <span
+                  role="alert"
+                  aria-live="assertive"
+                  style={{ fontSize: 'var(--step--1)', color: 'var(--amber)' }}
+                >
+                  {capInputError}
+                </span>
+              )}
+              {setSpendCap.isError && !capInputError && (
+                <span
+                  role="alert"
+                  aria-live="assertive"
+                  style={{ fontSize: 'var(--step--1)', color: 'var(--amber)' }}
+                >
+                  The spend cap could not be saved. Please try again.
                 </span>
               )}
             </div>

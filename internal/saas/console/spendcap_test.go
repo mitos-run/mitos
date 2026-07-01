@@ -38,7 +38,6 @@ func TestSetSpendCapPersistsCap(t *testing.T) {
 // billing.manage gets 403. Viewers have only PermReadOnly; they cannot alter
 // spend caps even from within the org.
 func TestSetSpendCapForbiddenWithoutBillingManage(t *testing.T) {
-	t.Helper()
 	ctx := context.Background()
 	store := saas.NewMemStore()
 	keys := saas.NewKeyService(store)

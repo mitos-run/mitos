@@ -47,7 +47,7 @@ function mockFetch(postResponse?: object) {
     if (url.endsWith('/console/billing/spend-cap') && method === 'POST') {
       return Promise.resolve(
         new Response(
-          JSON.stringify(postResponse ?? { org_id: 'org-1', soft_cap_cents: 2000, hard_cap_cents: 5000 }),
+          JSON.stringify(postResponse ?? { org_id: 'org-1' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
       )
@@ -104,7 +104,7 @@ describe('Billing view', () => {
         calls.push({ url, body })
         return Promise.resolve(
           new Response(
-            JSON.stringify({ org_id: 'org-1', soft_cap_cents: 2000, hard_cap_cents: 5000 }),
+            JSON.stringify({ org_id: 'org-1' }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           ),
         )
@@ -132,6 +132,63 @@ describe('Billing view', () => {
     expect(calls.length).toBeGreaterThanOrEqual(1)
     const last = calls[calls.length - 1]
     expect(last.body).toEqual({ soft_cents: 2000, hard_cents: 5000 })
+  })
+
+  it('blocks submit and shows a validation message when an amount is negative', async () => {
+    // A type="number" input does not pass 'abc' through the change event in JSDOM
+    // (the browser sanitizes non-numeric text to ""). A negative number (-5) CAN
+    // be typed into a number input and is the real invalid-dollar-amount scenario:
+    // dollarsToCents('-5') returns null, which must block submit and show an alert.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    await renderAt('/billing', caps)
+    const softInput = await waitFor(() => screen.getByLabelText(/soft cap/i))
+    fireEvent.change(softInput, { target: { value: '-5' } })
+    fireEvent.click(screen.getByRole('button', { name: /save spend cap/i }))
+    // A validation alert must appear and no POST must have been made to the cap endpoint.
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/valid dollar amount/i)).toBeInTheDocument()
+    const capCalls = fetchSpy.mock.calls.filter(([input, init]) => {
+      const url = String(input).split('?')[0]
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      return url.endsWith('/console/billing/spend-cap') && method === 'POST'
+    })
+    expect(capCalls.length).toBe(0)
+  })
+
+  it('shows an error alert when the spend-cap mutation fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input).split('?')[0]
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }
+      if (url.endsWith('/console/billing') && method === 'GET') {
+        return Promise.resolve(
+          new Response(JSON.stringify(billingPayload), { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }
+      if (url.endsWith('/console/billing/spend-cap') && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { code: 'invalid_input', message: 'soft_cents must not exceed hard_cents', remediation: 'Correct the value.' } }),
+            { status: 400, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    })
+    await renderAt('/billing', caps)
+    const softInput = await waitFor(() => screen.getByLabelText(/soft cap/i))
+    const hardInput = screen.getByLabelText(/hard cap/i)
+    fireEvent.change(softInput, { target: { value: '50' } })
+    fireEvent.change(hardInput, { target: { value: '20' } })
+    fireEvent.click(screen.getByRole('button', { name: /save spend cap/i }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/could not be saved/i)).toBeInTheDocument()
   })
 
   it('shows an empty ledger state when there are no entries', async () => {

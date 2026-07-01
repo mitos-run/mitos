@@ -40,12 +40,12 @@ func (c *Console) handleSetSpendCap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.SoftCents < 0 || req.HardCents < 0 {
-		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).
 			WithCause("soft_cents and hard_cents must not be negative"))
 		return
 	}
 	if req.SoftCents > 0 && req.HardCents > 0 && req.SoftCents > req.HardCents {
-		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).
 			WithCause("soft_cents must not exceed hard_cents"))
 		return
 	}
@@ -65,8 +65,6 @@ func (c *Console) handleSetSpendCap(w http.ResponseWriter, r *http.Request) {
 	c.deps.Log.Info("spend cap updated", "org", orgID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"org_id":         orgID,
-		"soft_cap_cents": req.SoftCents,
-		"hard_cap_cents": req.HardCents,
+		"org_id": orgID,
 	})
 }
