@@ -100,7 +100,7 @@ spec:
           # --enable-networking), scoped to forkd's own pod netns; DAC_OVERRIDE so
           # the builder can reopen the template rootfs.ext4 it wrote after the
           # jailer chowned the shared inode to the per-VM uid, #426).
-          # /dev/kvm and /dev/net/tun come from the device plugin (mitos.run/kvm),
+          # /dev/kvm, /dev/net/tun, and /dev/vhost-vsock come from the device plugin (mitos.run/kvm),
           # not a privileged hostPath. allowPrivilegeEscalation: false and the
           # seccomp profile complete the hardening. The base capability set and
           # privileged: false are fixed; forkd.seccompProfile and
@@ -165,7 +165,7 @@ spec:
           hostPath:
             path: {{ .Values.forkd.dataDir }}
             type: DirectoryOrCreate
-        # /dev/kvm and /dev/net/tun are injected by the device plugin
+        # /dev/kvm, /dev/net/tun, and /dev/vhost-vsock are injected by the device plugin
         # (mitos.run/kvm) on Allocate, NOT a privileged hostPath CharDevice.
         # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
         - name: tls

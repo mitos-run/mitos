@@ -7,13 +7,15 @@ import (
 	"strings"
 )
 
-// DefaultBaseURL is the hosted production control plane. When neither the
-// WithBaseURL option nor MITOS_BASE_URL is set, the client targets this hosted
-// endpoint so the examples work without a base URL. Self-hosted or local
-// standalone users opt out by setting MITOS_BASE_URL (for example
-// http://localhost:8080). It mirrors the Python, TypeScript, Ruby, Rust, and
-// Java SDK defaults.
-const DefaultBaseURL = "https://mitos.run"
+// DefaultBaseURL is the hosted production API endpoint. When neither the
+// WithBaseURL option nor MITOS_BASE_URL is set (and the client is not running
+// inside the mitos cluster), it targets this hosted endpoint so the examples
+// work without a base URL. This is the API host (api.mitos.run), NOT the console
+// origin (mitos.run), which serves the single-page app and returns HTML for
+// /v1/* paths. Self-hosted or local standalone users opt out by setting
+// MITOS_BASE_URL (for example http://localhost:8080). It mirrors the Python,
+// TypeScript, Ruby, Rust, and Java SDK defaults.
+const DefaultBaseURL = "https://api.mitos.run"
 
 // Environment variables for the direct-mode onboarding path. Explicit options
 // always take precedence over these.
@@ -23,13 +25,36 @@ const (
 	envConfigDir = "MITOS_CONFIG_DIR"
 )
 
+// inClusterBaseURL returns the in-cluster mitos gateway URL when running inside
+// the mitos cluster, else the empty string. Kubernetes injects
+// MITOS_GATEWAY_SERVICE_HOST / MITOS_GATEWAY_SERVICE_PORT into every pod in the
+// mitos-gateway Service's namespace (service-link env), so their presence is a
+// precise, DNS-free, mitos-specific signal: an unrelated cluster merely holding
+// a hosted API key never matches and keeps using the hosted endpoint.
+func inClusterBaseURL() string {
+	host := os.Getenv("MITOS_GATEWAY_SERVICE_HOST")
+	if host == "" {
+		return ""
+	}
+	port := os.Getenv("MITOS_GATEWAY_SERVICE_PORT")
+	if port == "" {
+		port = "80"
+	}
+	return "http://" + host + ":" + port
+}
+
 // resolveBaseURL applies the base-URL precedence: the explicit value, then
-// MITOS_BASE_URL, then the hosted production endpoint. Trailing slashes are
-// stripped. Parity with the other SDKs' base-URL resolution.
+// MITOS_BASE_URL, then the in-cluster mitos gateway when running inside the
+// mitos cluster, then the hosted production endpoint. So: use the mitos env you
+// are in first, else assume the hosted service. Trailing slashes are stripped.
+// Parity with the other SDKs' base-URL resolution.
 func resolveBaseURL(url string) string {
 	chosen := url
 	if chosen == "" {
 		chosen = os.Getenv(envBaseURL)
+	}
+	if chosen == "" {
+		chosen = inClusterBaseURL()
 	}
 	if chosen == "" {
 		chosen = DefaultBaseURL

@@ -124,6 +124,23 @@ MAX_EXEC_TIMEOUT_SECONDS = 86400
 EXEC_TIMEOUT_EXIT_CODE = 124
 
 
+def _normalize_command(command: "str | list[str]") -> str:
+    """Accept either a shell command string or an argv list and return the
+    string the exec RPC expects.
+
+    A list is quoted with ``shlex.join`` so ``exec(["python", "task.py"])`` works
+    the same as ``exec("python task.py")`` instead of failing deep in the wire
+    layer with a cryptic proto unmarshal error. This mirrors the subprocess-style
+    call shape developers reach for and keeps both the hosted and cluster exec
+    paths ergonomically identical.
+    """
+    if isinstance(command, (list, tuple)):
+        import shlex
+
+        return shlex.join(str(part) for part in command)
+    return command
+
+
 def _validate_timeout(timeout: int) -> None:
     """Reject a requested timeout over the ceiling with a typed
     TimeoutTooLargeError (issue #216): the SDK never silently clamps a requested
@@ -402,7 +419,7 @@ class Sandbox:
 
     def exec(
         self,
-        command: str,
+        command: "str | list[str]",
         timeout: int = 30,
         working_dir: str = "/workspace",
         env: Optional[dict[str, str]] = None,
@@ -410,6 +427,9 @@ class Sandbox:
         on_stderr: Optional[Callable[[bytes], None]] = None,
     ) -> ExecResult:
         """Execute a command in the sandbox.
+
+        ``command`` is a shell command string, or an argv list (e.g.
+        ``["python", "task.py"]``) which is shell-quoted for you.
 
         Drives the Connect ``ExecStream`` server-streaming RPC (issue #24): a
         non-interactive exec whose unary request fully describes the command,
@@ -419,6 +439,7 @@ class Sandbox:
         A command killed at its execution deadline reports exit 124, surfaced as
         the typed ExecutionDeadlineError. The public return shape is unchanged.
         """
+        command = _normalize_command(command)
         _validate_timeout(timeout)
         out_parts: list[bytes] = []
         err_parts: list[bytes] = []
