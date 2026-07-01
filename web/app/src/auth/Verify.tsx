@@ -253,7 +253,7 @@ export function Verify({ token: tokenProp }: VerifyProps) {
               Read the docs while you wait
             </a>
             <a href="/signup" className="verify-error-link" style={{ display: 'block', textAlign: 'center' }}>
-              Back to sign in
+              Back to sign up
             </a>
           </>
         )

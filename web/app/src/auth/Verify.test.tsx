@@ -162,7 +162,7 @@ describe('Verify page', () => {
       expect(screen.getByRole('heading', { name: /you are on the list/i })).toBeInTheDocument(),
     )
     expect(screen.getByRole('link', { name: /docs/i })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /back to sign in/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /back to sign up/i })).toBeInTheDocument()
     expect(screen.queryByText(/mitos_live/)).not.toBeInTheDocument()
     expect(sessionStorage.getItem('mitos.firstKey')).toBeNull()
     vi.unstubAllGlobals()
