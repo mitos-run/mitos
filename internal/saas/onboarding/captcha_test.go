@@ -3,6 +3,7 @@ package onboarding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,26 +82,39 @@ func TestFriendlyCaptchaInvalidSolution(t *testing.T) {
 	defer srv.Close()
 
 	v := NewFriendlyCaptcha(testAPIKey, testSiteKey, srv.URL, srv.Client())
-	if err := v.Verify(context.Background(), "bad-solution"); err == nil {
+	err := v.Verify(context.Background(), "bad-solution")
+	if err == nil {
 		t.Fatal("Verify returned nil error for invalid solution (success:false)")
+	}
+	// A definitive rejection must be ErrCaptchaInvalid so the signup handler fails
+	// CLOSED on it (as opposed to a transient error, which fails open).
+	if !errors.Is(err, ErrCaptchaInvalid) {
+		t.Fatalf("invalid-solution error = %v, want ErrCaptchaInvalid", err)
 	}
 }
 
 // TestFriendlyCaptchaNon2xxStatus asserts that a non-2xx API response yields a
-// non-nil error.
+// non-nil error that is NOT the definitive-rejection sentinel (so the handler
+// fails OPEN on a provider fault rather than dropping the signup).
 func TestFriendlyCaptchaNon2xxStatus(t *testing.T) {
 	srv, _ := newFriendlyCaptchaServer(false, http.StatusUnauthorized)
 	defer srv.Close()
 
 	v := NewFriendlyCaptcha(testAPIKey, testSiteKey, srv.URL, srv.Client())
-	if err := v.Verify(context.Background(), "any-solution"); err == nil {
+	err := v.Verify(context.Background(), "any-solution")
+	if err == nil {
 		t.Fatal("Verify returned nil error for non-2xx API response")
+	}
+	if errors.Is(err, ErrCaptchaInvalid) {
+		t.Fatal("a non-2xx provider fault must NOT be ErrCaptchaInvalid (it should fail open)")
 	}
 }
 
-// TestFriendlyCaptchaAPIKeyNotInError asserts that the API key never appears in
-// any error returned by Verify, across all failure scenarios.
-func TestFriendlyCaptchaAPIKeyNotInError(t *testing.T) {
+// TestFriendlyCaptchaSecretsNotInError asserts that neither the API key nor the
+// submitted solution ever appears in any error returned by Verify, across all
+// failure scenarios.
+func TestFriendlyCaptchaSecretsNotInError(t *testing.T) {
+	const solution = "some-solution"
 	cases := []struct {
 		name    string
 		success bool
@@ -116,12 +130,15 @@ func TestFriendlyCaptchaAPIKeyNotInError(t *testing.T) {
 			defer srv.Close()
 
 			v := NewFriendlyCaptcha(testAPIKey, testSiteKey, srv.URL, srv.Client())
-			err := v.Verify(context.Background(), "some-solution")
+			err := v.Verify(context.Background(), solution)
 			if err == nil {
 				t.Fatal("Verify returned nil error; expected a failure")
 			}
 			if strings.Contains(err.Error(), testAPIKey) {
 				t.Errorf("error message contains the API key (secret leak): %v", err)
+			}
+			if strings.Contains(err.Error(), solution) {
+				t.Errorf("error message contains the submitted solution (leak): %v", err)
 			}
 		})
 	}

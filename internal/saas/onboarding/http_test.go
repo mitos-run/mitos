@@ -14,20 +14,18 @@ import (
 	"mitos.run/mitos/internal/saas"
 )
 
-// stubCaptcha is a test-only CaptchaVerifier that can be configured to pass or
-// fail. It records whether Verify was called so tests can assert that the
-// service was (or was not) reached.
+// stubCaptcha is a test-only CaptchaVerifier that returns a configurable error
+// (nil = pass). It records whether Verify was called so tests can assert that the
+// service was (or was not) reached, and distinguishes a definitive rejection
+// (ErrCaptchaInvalid, fail closed) from a transient verification error (fail open).
 type stubCaptcha struct {
-	fail   bool
+	err    error
 	called bool
 }
 
 func (s *stubCaptcha) Verify(context.Context, string) error {
 	s.called = true
-	if s.fail {
-		return errors.New("stub: captcha failed")
-	}
-	return nil
+	return s.err
 }
 
 func newHandler(t *testing.T, mode Mode) (*Handler, *harness) {
@@ -439,7 +437,7 @@ func TestVerifyNoSessionCookieOnReVerify(t *testing.T) {
 // is created), and does not reach the service at all.
 func TestSignupFailedCaptchaReturnsUniformAcceptedAndNoService(t *testing.T) {
 	hr := newHarness(t, ModeOpen)
-	stub := &stubCaptcha{fail: true}
+	stub := &stubCaptcha{err: ErrCaptchaInvalid}
 	h := NewHandler(hr.svc, nil, WithCaptcha(stub))
 
 	captchaRR := postJSON(t, h, "/onboarding/signup", `{"email":"bot@example.com","captcha":"bad-token"}`)
@@ -447,13 +445,17 @@ func TestSignupFailedCaptchaReturnsUniformAcceptedAndNoService(t *testing.T) {
 		t.Fatalf("captcha-failed signup: status %d, want 202; body %s", captchaRR.Code, captchaRR.Body.String())
 	}
 
+	// The verifier must have been consulted (guard against the check being skipped).
+	if !stub.called {
+		t.Fatal("captcha verifier was not called on a captcha-guarded signup")
+	}
 	// The service must NOT have been called: no verification email sent.
 	if tok := hr.email.LastToken("bot@example.com"); tok != "" {
 		t.Fatalf("captcha-failed signup must not send a verification email; got token %q", tok)
 	}
 
 	// The response body must be byte-identical to a normal (passing captcha) signup.
-	stub2 := &stubCaptcha{fail: false}
+	stub2 := &stubCaptcha{err: nil}
 	h2 := NewHandler(hr.svc, nil, WithCaptcha(stub2))
 	normalRR := postJSON(t, h2, "/onboarding/signup", `{"email":"real@example.com","captcha":"good-token"}`)
 	if normalRR.Code != http.StatusAccepted {
@@ -465,12 +467,34 @@ func TestSignupFailedCaptchaReturnsUniformAcceptedAndNoService(t *testing.T) {
 	}
 }
 
+// TestSignupCaptchaVerificationErrorFailsOpen asserts that a NON-definitive
+// verification error (the provider is unreachable / faulted, NOT an explicit
+// rejection) fails OPEN: the signup proceeds so a captcha-provider outage does
+// not silently drop legitimate users. Only ErrCaptchaInvalid fails closed.
+func TestSignupCaptchaVerificationErrorFailsOpen(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	stub := &stubCaptcha{err: errors.New("captcha: request failed")}
+	h := NewHandler(hr.svc, nil, WithCaptcha(stub))
+
+	rr := postJSON(t, h, "/onboarding/signup", `{"email":"legit@example.com","captcha":"tok"}`)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("captcha-outage signup: status %d, want 202; body %s", rr.Code, rr.Body.String())
+	}
+	if !stub.called {
+		t.Fatal("captcha verifier was not called")
+	}
+	// Fail OPEN: the service WAS reached, so a verification email was sent.
+	if tok := hr.email.LastToken("legit@example.com"); tok == "" {
+		t.Fatal("captcha-outage signup must fail open and reach the service")
+	}
+}
+
 // TestSignupPassingCaptchaProceedsToService asserts that when a captcha verifier
 // is wired and the solution passes verification, the signup proceeds normally:
 // the service is called, a verification email is sent, and 202 is returned.
 func TestSignupPassingCaptchaProceedsToService(t *testing.T) {
 	hr := newHarness(t, ModeOpen)
-	stub := &stubCaptcha{fail: false}
+	stub := &stubCaptcha{err: nil}
 	h := NewHandler(hr.svc, nil, WithCaptcha(stub))
 
 	rr := postJSON(t, h, "/onboarding/signup", `{"email":"legit@example.com","captcha":"good-token"}`)

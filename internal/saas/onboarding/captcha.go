@@ -23,9 +23,18 @@ const maxCaptchaResponseBytes = 1 << 14 // 16 KiB
 // ensures a slow external API never holds up the signup handler.
 const captchaTimeout = 10 * time.Second
 
+// ErrCaptchaInvalid is returned by Verify when the provider explicitly rejects
+// the solution (a definitive "this is not a real user" signal). The signup
+// handler fails CLOSED on this error (refuses the signup). Any OTHER error means
+// verification could not be completed (the provider was unreachable, timed out,
+// or returned a fault): the handler fails OPEN on those, so a provider outage
+// does not silently drop legitimate signups. Callers distinguish with errors.Is.
+var ErrCaptchaInvalid = errors.New("captcha: solution invalid")
+
 // CaptchaVerifier verifies a captcha solution server-side. Verify returns nil
-// when the solution is valid, a non-nil error when it is invalid or verification
-// failed. The no-op verifier (used when unconfigured) always returns nil
+// when the solution is valid, ErrCaptchaInvalid when the provider definitively
+// rejects it, and any other non-nil error when verification could not be
+// completed. The no-op verifier (used when unconfigured) always returns nil
 // (pass-through).
 type CaptchaVerifier interface {
 	Verify(ctx context.Context, solution string) error
@@ -119,7 +128,7 @@ func (f *friendlyCaptcha) Verify(ctx context.Context, solution string) error {
 		return fmt.Errorf("captcha: malformed response: %w", err)
 	}
 	if !out.Success {
-		return errors.New("captcha: solution invalid")
+		return ErrCaptchaInvalid
 	}
 	return nil
 }

@@ -162,14 +162,23 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Captcha guard: verify the Friendly Captcha solution before hitting the
-	// service. A missing or invalid solution returns the same uniform 202 so
-	// a bot cannot distinguish a captcha failure from a successful signup (no
-	// enumeration). The solution and the API key are never logged.
-	if h.captcha != nil && h.captcha.Verify(r.Context(), req.Captcha) != nil {
-		h.log.Info("onboarding signup refused", "reason", "captcha")
-		h.writeAccepted(w)
-		return
+	// Captcha guard: verify the solution before hitting the service. We FAIL
+	// CLOSED only on a definitive rejection (ErrCaptchaInvalid): that returns the
+	// same uniform 202 so a bot cannot distinguish a captcha failure from a
+	// successful signup (no enumeration). Any OTHER error means verification could
+	// not be completed (the provider was down or timed out), so we FAIL OPEN and
+	// proceed, so a captcha-provider outage does not silently drop real signups
+	// (the allowlist and the other abuse controls still apply). The solution and
+	// the API key are never logged.
+	if h.captcha != nil {
+		if err := h.captcha.Verify(r.Context(), req.Captcha); err != nil {
+			if errors.Is(err, ErrCaptchaInvalid) {
+				h.log.Info("onboarding signup refused", "reason", "captcha")
+				h.writeAccepted(w)
+				return
+			}
+			h.log.Warn("onboarding signup captcha unverified; proceeding", "reason", "captcha_error")
+		}
 	}
 
 	_, err := h.svc.SignUp(r.Context(), email, req.UC)
