@@ -141,10 +141,10 @@ spec:
             - name: docker-config
               mountPath: /etc/forkd/docker
               readOnly: true
-          # Readiness is fail-closed on the required host devices (/dev/kvm,
-          # /dev/vhost-vsock): if the device plugin or a node kernel module drops
-          # one, /readyz returns 503, this pod goes NotReady, and the controller
-          # stops routing forks here instead of every fork hanging (issue #571).
+          # Readiness is fail-closed on the required host device (/dev/kvm): if
+          # the device plugin or a node kernel module drops it, /readyz returns
+          # 503, this pod goes NotReady, and the controller stops routing forks
+          # here instead of every fork hanging (issue #571).
           readinessProbe:
             httpGet:
               path: /readyz

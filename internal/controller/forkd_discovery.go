@@ -156,8 +156,8 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) bo
 }
 
 // podReady reports whether the pod's Ready condition is true. forkd's readiness
-// probe (/readyz) is fail-closed on the required host devices (/dev/kvm,
-// /dev/vhost-vsock), so a device-missing forkd reports NotReady here.
+// probe (/readyz) is fail-closed on the required host device (/dev/kvm), so a
+// device-missing forkd reports NotReady here.
 func podReady(pod corev1.Pod) bool {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodReady {

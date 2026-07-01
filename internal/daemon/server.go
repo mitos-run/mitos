@@ -132,13 +132,21 @@ func (c *CASServing) enabled() bool {
 }
 
 // requiredKVMDevices are the host character devices a real-KVM forkd must have
-// to boot a microVM and reach guest-Ready: /dev/kvm (Firecracker) and
-// /dev/vhost-vsock (the guest-agent vsock transport). If either is absent every
-// fork stalls waiting for a guest that can never answer, and the client sees a
-// read timeout rather than an error. These are exactly the devices the
-// kvm-device-plugin injects, so a plugin or node kernel-module regression that
-// drops one is caught here. Package-level so tests can override it.
-var requiredKVMDevices = []string{"/dev/kvm", "/dev/vhost-vsock"}
+// INSIDE its container to boot a microVM and reach guest-Ready. /dev/kvm is the
+// one hard requirement: Firecracker boots every microVM through it, and the
+// kvm-device-plugin injects it on Allocate (the DaemonSet requests
+// mitos.run/kvm). If it is absent every fork stalls waiting for a guest that can
+// never boot, and the client sees a read timeout rather than an error, so a
+// plugin or node kernel-module regression that drops it is caught here.
+//
+// The guest-agent vsock is deliberately NOT listed. Firecracker implements
+// virtio-vsock in USERSPACE and exposes it as a unix-domain socket (the snapshot
+// uds_path); forkd dials the guest over that socket (internal/vsock dials
+// "unix"), never the host /dev/vhost-vsock kernel device. The device plugin
+// injects only /dev/kvm and /dev/net/tun, so /dev/vhost-vsock is never present in
+// the forkd container and gating on it would fail closed on every node, real KVM
+// included. Package-level so tests can override it.
+var requiredKVMDevices = []string{"/dev/kvm"}
 
 // missingCharDevices returns the subset of paths that are not present as
 // character devices (missing entirely, or present but not a char device).
@@ -179,7 +187,7 @@ func readinessHandler(cap capacityProvider) http.HandlerFunc {
 			joined := strings.Join(missing, ", ")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"error":{"code":"devices_missing","message":"forkd not ready: required host device(s) missing","cause":%q,"remediation":"Ensure the kvm-device-plugin injects these devices (--device-paths) and the node kernel modules (kvm, vhost_vsock) are loaded; a fork cannot reach Ready without them."}}`+"\n", joined)
+			fmt.Fprintf(w, `{"error":{"code":"devices_missing","message":"forkd not ready: required host device(s) missing","cause":%q,"remediation":"Ensure the kvm-device-plugin injects /dev/kvm (--device-paths) and the node kvm kernel modules (kvm plus kvm_intel or kvm_amd) are loaded; a fork cannot reach Ready without a usable /dev/kvm."}}`+"\n", joined)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
