@@ -27,6 +27,7 @@ const billingPayload = {
   ledger_entries: [
     { ts: '2026-06-01T00:00:00Z', cents: 5000, reason: 'signup credit' },
   ],
+  topup_available: true,
 }
 
 function mockFetch(postResponse?: object) {
@@ -315,5 +316,38 @@ describe('Add credits section', () => {
     expect(screen.getByText(/valid dollar amount/i)).toBeInTheDocument()
     expect(topupSpy).not.toHaveBeenCalled()
     expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows a calm not-available note and no add-credits controls when topup_available is false', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input).split('?')[0]
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.endsWith('/console/billing') && method === 'GET') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ ...billingPayload, topup_available: false }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByText(/adding credits is not available yet/i)).toBeInTheDocument())
+    // Tier buttons and Add credits submit button must not be rendered.
+    expect(screen.queryByRole('button', { name: '$10.00' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /add credits/i })).not.toBeInTheDocument()
+  })
+
+  it('shows the active add-credits controls when topup_available is true', async () => {
+    // billingPayload already sets topup_available: true; the global beforeEach
+    // uses mockFetch() which serves it, so no additional setup is needed.
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByRole('button', { name: '$10.00' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: /add credits/i })).toBeInTheDocument()
+    expect(screen.queryByText(/adding credits is not available yet/i)).not.toBeInTheDocument()
   })
 })

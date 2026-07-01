@@ -27,6 +27,7 @@ const billingPayload = {
   ledger_entries: [
     { ts: '2026-06-01T00:00:00Z', cents: 5000, reason: 'signup credit' },
   ],
+  topup_available: true,
 }
 
 beforeEach(() => {
