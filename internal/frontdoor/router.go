@@ -29,6 +29,10 @@ var marketingSegments = map[string]bool{
 	"compare":   true,
 	"blog":      true,
 	"about":     true,
+	// /waitlist is the public post-signup "you are on the list" marketing page.
+	// No session required: visitors land here after joining the waitlist and must
+	// be able to read it without being redirected to the console.
+	"waitlist": true,
 	// Astro emits its bundled CSS/JS under /_astro/ (the build.assets default).
 	// The console's Vite bundle lives under /assets/, so /assets is owned by the
 	// console (see authSegments), NOT marketing. Routing /assets to marketing

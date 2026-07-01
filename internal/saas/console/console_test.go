@@ -391,6 +391,50 @@ func TestBillingBobSeesOwnSuspendedStatus(t *testing.T) {
 	}
 }
 
+// TestBillingTopUpAvailableTrue asserts that when the Console is built with a
+// non-empty TopUpProductID, GET /console/billing returns topup_available: true.
+func TestBillingTopUpAvailableTrue(t *testing.T) {
+	f := newFixture(t)
+	// Override the console to add a product ID (the default fixture leaves it empty).
+	f.con = New(Deps{
+		Accounts:    f.con.deps.Accounts,
+		Usage:       f.usage,
+		Billing:     BillingReader{Ledger: f.ledger, Status: f.status, Caps: f.caps, Rates: billing.DefaultRates()},
+		Sandboxes:   f.sandboxes,
+		Templates:   f.templates,
+		Audit:       f.audit,
+		Instruments: f.instr,
+		Logs:        NewAuthorizingLogStreamer(f.sandboxes, f.rawlogs),
+		Now:         func() time.Time { return time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC) },
+		TopUpProductID: "prod_test123",
+	})
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var v BillingView
+	decode(t, w, &v)
+	if !v.TopUpAvailable {
+		t.Errorf("topup_available = false, want true when TopUpProductID is set")
+	}
+}
+
+// TestBillingTopUpAvailableFalse asserts that when the Console is built with an
+// empty TopUpProductID (the default), GET /console/billing returns topup_available: false.
+func TestBillingTopUpAvailableFalse(t *testing.T) {
+	// The default fixture leaves TopUpProductID empty.
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/billing", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var v BillingView
+	decode(t, w, &v)
+	if v.TopUpAvailable {
+		t.Errorf("topup_available = true, want false when TopUpProductID is empty")
+	}
+}
+
 // --- Live sandboxes ---
 
 func TestSandboxListReturnsOnlyCallerOrg(t *testing.T) {

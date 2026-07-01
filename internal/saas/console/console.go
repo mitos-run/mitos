@@ -483,6 +483,11 @@ type BillingView struct {
 	SoftCapCents  int64                 `json:"soft_cap_cents"`
 	HardCapCents  int64                 `json:"hard_cap_cents"`
 	LedgerEntries []ledgerEntryView     `json:"ledger_entries"`
+	// TopUpAvailable is true when the prepaid credit top-up provider is
+	// configured (a non-empty TopUpProductID). When false the SPA shows a calm
+	// "adding credits is not available yet" state instead of offering a checkout
+	// that would fail. The signup credit and balance are unaffected either way.
+	TopUpAvailable bool `json:"topup_available"`
 }
 
 func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +497,9 @@ func (c *Console) handleBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := BillingView{OrgID: orgID, Status: billing.StatusActive}
+	// A top-up is available exactly when the product ID is configured, matching
+	// the topup.go guard that returns 400 on an empty product ID.
+	view.TopUpAvailable = c.deps.TopUpProductID != ""
 	if c.deps.Billing.Status != nil {
 		st, err := c.deps.Billing.Status.Status(r.Context(), orgID)
 		if err != nil {

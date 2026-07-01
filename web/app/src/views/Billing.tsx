@@ -213,48 +213,56 @@ export function Billing() {
           </form>
 
           <h2 style={{ marginBottom: 'var(--space-4)' }}>Add credits</h2>
-          <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
-            Buy prepaid credits for this org. Choose a tier or enter a custom amount.
-          </p>
-          {/* Single shared aria-live region for all top-up errors (preset and custom). */}
-          {topUpError && (
-            <span
-              role="alert"
-              aria-live="assertive"
-              style={{ display: 'block', fontSize: 'var(--step--1)', color: 'var(--amber)', marginBottom: 'var(--space-3)' }}
-            >
-              {topUpError}
-            </span>
+          {data.topup_available ? (
+            <>
+              <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
+                Buy prepaid credits for this org. Choose a tier or enter a custom amount.
+              </p>
+              {/* Single shared aria-live region for all top-up errors (preset and custom). */}
+              {topUpError && (
+                <span
+                  role="alert"
+                  aria-live="assertive"
+                  style={{ display: 'block', fontSize: 'var(--step--1)', color: 'var(--amber)', marginBottom: 'var(--space-3)' }}
+                >
+                  {topUpError}
+                </span>
+              )}
+              <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-4)' }}>
+                {TOPUP_TIERS.map(({ cents, label }) => (
+                  <button key={cents} className="btn" disabled={topUpPending} onClick={() => void startTopUp(cents)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <form onSubmit={onCustomTopUpSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 360, marginBottom: 'var(--space-6)' }}>
+                <div>
+                  <label htmlFor="custom-topup-dollars" style={{ display: 'block', marginBottom: 'var(--space-1)' }}>
+                    Custom amount (dollars)
+                  </label>
+                  <input
+                    id="custom-topup-dollars"
+                    type="number"
+                    min={0.01}
+                    step="0.01"
+                    placeholder="0"
+                    value={customTopUp}
+                    onChange={(e) => { setCustomTopUp(e.target.value); setTopUpError(null) }}
+                    style={{ width: '140px' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                  <button type="submit" className="btn btn-primary" disabled={topUpPending}>
+                    Add credits
+                  </button>
+                </div>
+              </form>
+            </>
+          ) : (
+            <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-6)' }}>
+              Adding credits is not available yet. Please check back soon.
+            </p>
           )}
-          <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-4)' }}>
-            {TOPUP_TIERS.map(({ cents, label }) => (
-              <button key={cents} className="btn" disabled={topUpPending} onClick={() => void startTopUp(cents)}>
-                {label}
-              </button>
-            ))}
-          </div>
-          <form onSubmit={onCustomTopUpSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 360, marginBottom: 'var(--space-6)' }}>
-            <div>
-              <label htmlFor="custom-topup-dollars" style={{ display: 'block', marginBottom: 'var(--space-1)' }}>
-                Custom amount (dollars)
-              </label>
-              <input
-                id="custom-topup-dollars"
-                type="number"
-                min={0.01}
-                step="0.01"
-                placeholder="0"
-                value={customTopUp}
-                onChange={(e) => { setCustomTopUp(e.target.value); setTopUpError(null) }}
-                style={{ width: '140px' }}
-              />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-              <button type="submit" className="btn btn-primary" disabled={topUpPending}>
-                Add credits
-              </button>
-            </div>
-          </form>
 
           <h2 style={{ marginBottom: 'var(--space-3)' }}>Ledger</h2>
           {data.ledger_entries.length === 0 ? (
