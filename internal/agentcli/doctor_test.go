@@ -3,6 +3,7 @@ package agentcli
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,9 @@ type fakeProbe struct {
 	psaLabelValue string
 	namespace     string
 	userfaultfd   bool
+	dataDirFree   uint64
+	dataDirPath   string
+	dataDirErr    error
 }
 
 func (f *fakeProbe) Userfaultfd(context.Context) (bool, error) { return f.userfaultfd, nil }
@@ -35,6 +39,10 @@ func (f *fakeProbe) KernelModuleLoaded(_ context.Context, name string) (bool, er
 
 func (f *fakeProbe) GuestKernelStaged(context.Context) (present bool, path string, err error) {
 	return f.kernelStaged, f.kernelPath, nil
+}
+
+func (f *fakeProbe) DataDirFree(context.Context) (uint64, string, error) {
+	return f.dataDirFree, f.dataDirPath, f.dataDirErr
 }
 
 func (f *fakeProbe) PKISecretPresent(_ context.Context, name string) (bool, error) {
@@ -70,6 +78,8 @@ func healthyProbe() *fakeProbe {
 		psaLabelValue: "privileged",
 		namespace:     "mitos",
 		userfaultfd:   true,
+		dataDirFree:   50 << 30, // 50 GiB, well above the minimum
+		dataDirPath:   "/var/lib/mitos",
 	}
 }
 
@@ -107,6 +117,44 @@ func TestDoctorUserfaultfdPresentPasses(t *testing.T) {
 		if r.Name == "userfaultfd" && r.Status != CheckPass {
 			t.Errorf("userfaultfd present should pass, got %s: %s", r.Status, r.Detail)
 		}
+	}
+}
+
+// TestDoctorDataDirSpaceLowFails proves the preflight names an undersized data
+// dir: when forkd's --data-dir sits on a tiny partition (the real-world case: a
+// reset bare-metal box left /var/lib/mitos on a ~100MB leftover partition of the
+// OS disk), template builds fail with ENOSPC and every fork times out with a
+// generic fork_unavailable. doctor must FAIL and point at the data disk so the
+// operator does not have to trace a fork timeout back to a full filesystem.
+func TestDoctorDataDirSpaceLowFails(t *testing.T) {
+	p := healthyProbe()
+	p.dataDirFree = 88 << 20 // 88 MiB, the observed misprovisioned case
+	r := findCheck(t, RunDoctorChecks(context.Background(), p), "data-dir-space")
+	if r.Status != CheckFail {
+		t.Errorf("an 88 MiB data dir should FAIL, got %s: %s", r.Status, r.Detail)
+	}
+	if !strings.Contains(r.Remediation, "--data-dir") || !strings.Contains(r.Remediation, "DATA disk") {
+		t.Errorf("remediation should point at --data-dir and the data disk, got: %s", r.Remediation)
+	}
+}
+
+// TestDoctorDataDirSpacePasses proves an amply sized data dir passes.
+func TestDoctorDataDirSpacePasses(t *testing.T) {
+	r := findCheck(t, RunDoctorChecks(context.Background(), healthyProbe()), "data-dir-space")
+	if r.Status != CheckPass {
+		t.Errorf("a 50 GiB data dir should pass, got %s: %s", r.Status, r.Detail)
+	}
+}
+
+// TestDoctorDataDirSpaceProbeErrorWarns proves a statfs error (e.g. the data dir
+// does not exist off a KVM node, so a workstation run cannot check it) is a
+// non-blocking WARN, not a FAIL, so `mitos doctor` still runs off-node.
+func TestDoctorDataDirSpaceProbeErrorWarns(t *testing.T) {
+	p := healthyProbe()
+	p.dataDirErr = os.ErrNotExist
+	r := findCheck(t, RunDoctorChecks(context.Background(), p), "data-dir-space")
+	if r.Status != CheckWarn {
+		t.Errorf("a statfs error should WARN (off-node run), got %s: %s", r.Status, r.Detail)
 	}
 }
 
