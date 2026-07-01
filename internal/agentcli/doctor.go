@@ -64,6 +64,11 @@ type DoctorProbe interface {
 	// GuestKernelStaged reports whether the guest kernel image is staged at the
 	// path forkd boots from, and returns that path for the remediation message.
 	GuestKernelStaged(ctx context.Context) (present bool, path string, err error)
+	// DataDirFree reports the free bytes on the filesystem backing forkd's data
+	// dir (--data-dir, default /var/lib/mitos) and returns that path for the
+	// report. Template rootfs images, snapshots, and per-VM jailer chroots all
+	// live here; a too-small or full data dir makes the build fail with ENOSPC.
+	DataDirFree(ctx context.Context) (freeBytes uint64, path string, err error)
 	// PKISecretPresent reports whether the named PKI Secret exists in the install
 	// namespace. It reads presence only, never the Secret contents.
 	PKISecretPresent(ctx context.Context, name string) (bool, error)
@@ -98,11 +103,48 @@ func RunDoctorChecks(ctx context.Context, probe DoctorProbe) []CheckResult {
 	results = append(results,
 		checkUserfaultfd(ctx, probe),
 		checkGuestKernel(ctx, probe),
+		checkDataDirSpace(ctx, probe),
 		checkPKI(ctx, probe),
 		checkPullSecret(ctx, probe),
 		checkPSA(ctx, probe),
 	)
 	return results
+}
+
+// dataDirMinFreeBytes is the floor below which forkd cannot reliably build a
+// template snapshot: a single template rootfs.ext4 is hundreds of MB to a few
+// GB, and the husk warm pool holds several plus their jailer chroots. Below
+// this the build fails with "no space left on device" and every fork times out
+// with a generic fork_unavailable, so the symptom the caller sees (a fork
+// timeout) is far from the cause (a full data dir). This check names the cause.
+const dataDirMinFreeBytes = 5 << 30 // 5 GiB
+
+// checkDataDirSpace fails when forkd's data dir has too little free space to
+// build a template. A probe error (e.g. the dir does not exist off a KVM node,
+// or statfs is unavailable) is a WARN, not a FAIL, so `mitos doctor` still runs
+// on a workstation without falsely blocking.
+func checkDataDirSpace(ctx context.Context, probe DoctorProbe) CheckResult {
+	free, path, err := probe.DataDirFree(ctx)
+	res := CheckResult{Name: "data-dir-space"}
+	if path == "" {
+		path = defaultKernelPath[:strings.LastIndex(defaultKernelPath, "/")]
+	}
+	remediation := fmt.Sprintf("forkd's data dir %s holds template rootfs images, snapshots, and per-VM jailer chroots; below ~%d GiB free the template build fails with \"no space left on device\" and every fork times out (surfaced to the SDK as a generic fork_unavailable). Point --data-dir at a real, adequately sized filesystem: check df -h %s, and on bare metal make sure it is the DATA disk, not a small leftover partition (a reset box can leave forkd on a ~100MB EFI/boot partition of the OS disk while the real disk sits unused). See docs/platforms/host-prerequisites.md.", path, dataDirMinFreeBytes>>30, path)
+	if err != nil {
+		res.Status = CheckWarn
+		res.Detail = fmt.Sprintf("could not stat data dir %s: %v", path, err)
+		res.Remediation = remediation
+		return res
+	}
+	if free < dataDirMinFreeBytes {
+		res.Status = CheckFail
+		res.Detail = fmt.Sprintf("data dir %s has %d MiB free, below the %d GiB minimum", path, free>>20, dataDirMinFreeBytes>>30)
+		res.Remediation = remediation
+		return res
+	}
+	res.Status = CheckPass
+	res.Detail = fmt.Sprintf("data dir %s has %d GiB free", path, free>>30)
+	return res
 }
 
 func checkKVM(ctx context.Context, probe DoctorProbe) CheckResult {

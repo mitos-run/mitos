@@ -80,12 +80,29 @@ root filesystem is itself an overlay, fails the snapshotter at image-pull time
 with an opaque mount error. The fix is a real block-backed root filesystem
 (ext4/xfs); it is not a containerd configuration tweak.
 
+### 3. data dir too small, or on the wrong disk
+
+forkd's `--data-dir` (default `/var/lib/mitos`) holds template rootfs images,
+snapshots, and the per-VM jailer chroot base. If it sits on an undersized or
+full filesystem, the template build fails with `no space left on device`, the
+husk warm pool never fills, and every sandbox create/fork times out. The SDK
+sees only a generic `fork_unavailable`, so the symptom is far from the cause.
+
+The common trap is a dedicated data disk pointed at the wrong device. On a bare
+metal box that was reset but whose old partition table was not wiped, Talos (or
+any partitioner) will not repartition a disk with no free space, so a
+`machine.disks` mount can silently land `/var/lib/mitos` on a tiny leftover
+partition (we hit a 100MB one) while the real disk sits unused. Keep the data
+dir on the system `/var` unless you deliberately add a wiped, correctly chosen
+data disk. Budget tens of GB per template plus the warm-pool snapshots. `mitos
+doctor` fails the `data-dir-space` check when free space is below the minimum.
+
 ## One-shot verify
 
 Run `mitos doctor` on each candidate node (or as an in-cluster Job). It checks
-`/dev/kvm`, the required kernel modules, the staged guest kernel, the minted PKI
-secrets, the image pull secret, and the privileged PodSecurity label, and prints
-an actionable remediation per failing check:
+`/dev/kvm`, the required kernel modules, the staged guest kernel, free space on
+the data dir, the minted PKI secrets, the image pull secret, and the privileged
+PodSecurity label, and prints an actionable remediation per failing check:
 
 ```bash
 mitos doctor                 # node + cluster preflight, exits non-zero on any failure

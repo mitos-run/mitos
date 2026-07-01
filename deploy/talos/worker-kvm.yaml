@@ -39,13 +39,26 @@ machine:
   # guest-agent vsock from vhost_vsock, and tap devices from tun. Add
   # machine.sysctls here only if a future networking change needs one.
   #
-  # Mount a dedicated data partition at /var/lib/mitos, the forkd dataDir
-  # (--data-dir in deploy/daemon/daemonset.yaml). Snapshot, rootfs, and the
-  # jailer chroot base all live here and must share one filesystem so forkd can
-  # hard-link them into each per-VM chroot. Point device at the actual data
-  # disk on the Hetzner AX node (commonly the second NVMe, e.g. /dev/nvme1n1);
-  # adjust per machine.
-  disks:
-    - device: /dev/nvme1n1
-      partitions:
-        - mountpoint: /var/lib/mitos
+  # forkd's data dir (--data-dir, default /var/lib/mitos) holds template rootfs
+  # images, snapshots, and the per-VM jailer chroot base, which must share one
+  # filesystem so forkd can hard-link them into each chroot. By DEFAULT it lives
+  # on the node's /var (the Talos EPHEMERAL partition, which normally spans the
+  # whole system disk), so no machine.disks entry is needed and there is nothing
+  # to misconfigure. Size the system disk for your template set: tens of GB per
+  # template plus the warm-pool snapshots.
+  #
+  # A dedicated data disk (the block below, commented out) is OPTIONAL, for
+  # isolation or extra capacity. If you add one, get the device RIGHT: point
+  # `device` at the FREE data disk, NOT the OS/system disk. Verify with
+  # `talosctl -n <node> get disks` (or lsblk), and WIPE any leftover partition
+  # table from a prior OS first. A reset box often keeps old partitions, and
+  # Talos will NOT repartition a disk with no free space, so machine.disks can
+  # silently land /var/lib/mitos on a tiny leftover partition (we hit a ~100MB
+  # one); the template build then fails with "no space left on device" and every
+  # fork times out as fork_unavailable. `mitos doctor` has a data-dir-space check
+  # that catches this before it bites.
+  #
+  # disks:
+  #   - device: /dev/nvmeXn1   # the FREE data disk, NOT the OS disk; wipe it first
+  #     partitions:
+  #       - mountpoint: /var/lib/mitos
