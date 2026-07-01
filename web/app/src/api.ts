@@ -84,6 +84,8 @@ export type ProjectMembership = { account_id: string; project_id: string; role: 
 export type SinkType = 'webhook' | 's3' | 'splunk' | 'datadog'
 export type SinkView = { id: string; org_id: string; type: SinkType; endpoint: string; enabled: boolean; created_at: string }
 
+export type FirstActivity = { active: boolean }
+
 export type DataRetentionPolicy = {
   sandbox_metadata_days: number
   logs_days: number
@@ -338,6 +340,10 @@ export const api = {
     })
     if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
   },
+}
+
+export async function firstActivity(): Promise<FirstActivity> {
+  return get<FirstActivity>('/console/first-activity')
 }
 
 export function fmtBytes(n: number): string {
