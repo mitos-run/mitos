@@ -91,7 +91,9 @@ func TestApproveSignup_SuccessAddsAllowlistAndSendsEmail(t *testing.T) {
 }
 
 // TestApproveSignup_Canonicalization checks that a mixed-case address is
-// stored and returned in its lowercased canonical form.
+// stored and returned in its canonical form (lowercased and plus-tag stripped).
+// Updated for B1b: canonicalEmail strips the plus-tag for all providers, so
+// "Foo+x@Example.com" becomes "foo@example.com" (not "foo+x@example.com").
 func TestApproveSignup_Canonicalization(t *testing.T) {
 	al := NewMemAllowlist(nil)
 	em := NewFakeEmailSender()
@@ -101,7 +103,10 @@ func TestApproveSignup_Canonicalization(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	const want = "foo+x@example.com"
+	// canonicalEmail strips the plus-tag for all providers:
+	// "Foo+x@Example.com" -> normalizeEmail -> "foo+x@example.com"
+	//   -> drop plus-tag -> "foo@example.com"
+	const want = "foo@example.com"
 	if got := decodeEmail(t, rr); got != want {
 		t.Fatalf("response email = %q, want %q", got, want)
 	}
@@ -115,6 +120,36 @@ func TestApproveSignup_Canonicalization(t *testing.T) {
 	}
 	if !em.Approved(want) {
 		t.Fatalf("SendApproved was not called with canonical email %q", want)
+	}
+}
+
+// TestApproveSignup_CanonicalGmailStoresCanonical confirms that approving a
+// Gmail address with dots and a plus-tag stores the canonical identity in the
+// allowlist. This ensures the verify gate matches any folded variant of that
+// identity without requiring a separate approval for each variant.
+func TestApproveSignup_CanonicalGmailStoresCanonical(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+	h := newTestApproveHandler(al, em, "tok")
+
+	rr := postApprove(t, h, "Bearer tok", `{"email":"U.ser+x@Gmail.com"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// "U.ser+x@Gmail.com" -> normalizeEmail -> "u.ser+x@gmail.com"
+	//   -> drop plus-tag -> "u.ser@gmail.com"
+	//   -> gmail domain, strip dots -> "user@gmail.com"
+	const want = "user@gmail.com"
+	if got := decodeEmail(t, rr); got != want {
+		t.Fatalf("response email = %q, want %q", got, want)
+	}
+
+	ok, err := al.IsAllowed(context.Background(), want)
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("allowlist does not contain canonical email %q after approving a folded variant", want)
 	}
 }
 

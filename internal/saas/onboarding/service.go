@@ -200,11 +200,20 @@ func validateUseCase(s string) string {
 type PendingSignup struct {
 	// ID is the pre-account signup id; it is the funnel subject until an account
 	// exists, then the account id takes over.
-	ID        string
-	Email     string
-	TokenHash string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID    string
+	// Email is the DELIVERY address: the original typed address after lowercasing.
+	// Verification emails are sent here so the user receives mail where they expect
+	// it. Never use this field for identity or dedup; use CanonicalEmail instead.
+	Email string
+	// CanonicalEmail is the IDENTITY: the folded form of Email with plus-tags
+	// stripped (all providers) and Gmail dots removed and domain normalised to
+	// gmail.com. All dedup checks, the allowlist gate, and account provisioning
+	// key on this value. If empty on an in-flight record created before B1b, the
+	// gate falls back to Email for back-compat.
+	CanonicalEmail string
+	TokenHash      string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
 	// Verified is set once the signup has been provisioned; a re-verify with the
 	// same token then returns the same account idempotently.
 	Verified bool
@@ -443,6 +452,12 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 	if email == "" {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: email is required")
 	}
+	// Compute the canonical identity. A malformed address returns !ok; surface the
+	// same error as the empty-email path so a probe learns nothing about why.
+	canonical, ok := canonicalEmail(email)
+	if !ok {
+		return SignupResult{}, fmt.Errorf("onboarding sign up: email is required")
+	}
 	now := s.now()
 
 	if s.mode == ModeWaitlist {
@@ -456,9 +471,11 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 		return SignupResult{Waitlisted: true}, nil
 	}
 
-	// Reject a duplicate email up front so a re-signup does not strand a second
-	// pending token for an address that already has an account.
-	if _, err := s.store.GetAccountByEmail(ctx, email); err == nil {
+	// Reject a duplicate identity up front so a re-signup does not strand a second
+	// pending token for a canonical address that already has an account. The check
+	// uses the canonical form so that folded Gmail variants (u.ser+x@gmail.com vs
+	// user@gmail.com) are treated as the same person.
+	if _, err := s.store.GetAccountByEmail(ctx, canonical); err == nil {
 		return SignupResult{}, saas.ErrConflict
 	}
 
@@ -468,16 +485,19 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 	}
 	pendingID := s.idgen()
 	pending := PendingSignup{
-		ID:        pendingID,
-		Email:     email,
-		TokenHash: hashString(rawToken),
-		CreatedAt: now,
-		ExpiresAt: now.Add(s.tokenTTL),
-		UseCase:   validateUseCase(useCase),
+		ID:             pendingID,
+		Email:          email,          // delivery address: user receives mail here
+		CanonicalEmail: canonical,      // identity: dedup, allowlist gate, provisioning
+		TokenHash:      hashString(rawToken),
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(s.tokenTTL),
+		UseCase:        validateUseCase(useCase),
 	}
 	if err := s.pending.PutPending(ctx, pending); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: store pending: %w", err)
 	}
+	// Delivery is always to the ORIGINAL typed address so the user receives the
+	// verification link where they expect it, regardless of canonicalization.
 	if err := s.email.SendVerification(ctx, email, rawToken); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: send verification: %w", err)
 	}
@@ -549,12 +569,22 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		return VerifyResult{}, ErrTokenExpired
 	}
 
+	// identity is the canonical form of the signup email: the stable key used for
+	// the allowlist gate, event hashing, and account provisioning. Fall back to
+	// pending.Email for in-flight records that pre-date B1b and therefore have an
+	// empty CanonicalEmail field, so users with tokens issued before this change
+	// can still complete verification. Never log the identity (PII).
+	identity := pending.CanonicalEmail
+	if identity == "" {
+		identity = pending.Email
+	}
+
 	// Allowlist gate: consult only when an allowlist is configured. A nil allowlist
 	// means allow all so community and self-host deployments are unaffected.
-	// pending.Email is already the lowercased canonical address stored at signup;
-	// do not re-parse. Never log the email.
+	// Use the canonical identity so the row an operator added via the approve
+	// endpoint (also keyed on canonical) matches correctly.
 	if s.allowlist != nil {
-		allowed, aerr := s.allowlist.IsAllowed(ctx, pending.Email)
+		allowed, aerr := s.allowlist.IsAllowed(ctx, identity)
 		if aerr != nil {
 			return VerifyResult{}, fmt.Errorf("onboarding verify: allowlist check: %w", aerr)
 		}
@@ -566,22 +596,24 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 			if perr := s.pending.PutPending(ctx, pending); perr != nil {
 				return VerifyResult{}, fmt.Errorf("onboarding verify: mark waitlisted: %w", perr)
 			}
-			// Funnel event keyed on the email hash so no PII enters the event stream.
-			s.events.Record(ctx, Event{Subject: hashString(pending.Email), Name: EventWaitlisted, At: now})
+			// Funnel event keyed on the identity hash so no PII enters the event stream.
+			s.events.Record(ctx, Event{Subject: hashString(identity), Name: EventWaitlisted, At: now})
 			return VerifyResult{Waitlisted: true}, nil
 		}
 	}
 
-	// Provision: account + Personal org (#210). A prior verify attempt may have
-	// provisioned the account but crashed before MarkVerified (the credit grant or
-	// key issue below errored), leaving the email taken while this pending signup
-	// is still unverified. In that case SignUp returns ErrConflict; load the
-	// existing account+org and finish onboarding idempotently rather than stranding
-	// the user (the documented re-verify idempotency must hold even after a partial
-	// prior attempt, not only after a fully successful one).
-	acct, org, err := s.accounts.SignUp(ctx, pending.Email)
+	// Provision: account + Personal org (#210). The account is stored under the
+	// canonical identity so all folded variants of the same address share one
+	// account and one signup credit. A prior verify attempt may have provisioned
+	// the account but crashed before MarkVerified (the credit grant or key issue
+	// below errored), leaving the identity taken while this pending signup is still
+	// unverified. In that case SignUp returns ErrConflict; load the existing
+	// account+org and finish onboarding idempotently rather than stranding the user
+	// (the documented re-verify idempotency must hold even after a partial prior
+	// attempt, not only after a fully successful one).
+	acct, org, err := s.accounts.SignUp(ctx, identity)
 	if errors.Is(err, saas.ErrConflict) {
-		existing, gerr := s.store.GetAccountByEmail(ctx, pending.Email)
+		existing, gerr := s.store.GetAccountByEmail(ctx, identity)
 		if gerr != nil {
 			return VerifyResult{}, fmt.Errorf("onboarding verify: load account after conflict: %w", gerr)
 		}

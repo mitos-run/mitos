@@ -62,7 +62,11 @@ func (h *approveSignupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	canonical, valid := normalizeEmail(req.Email)
+	// canonicalEmail folds plus-tags (all providers) and Gmail dots so the
+	// allowlist row stored here matches the identity key the Verify gate reads.
+	// An operator approving u.ser+x@gmail.com must produce the same row as a
+	// signup whose Verify gate checks user@gmail.com.
+	canonical, valid := canonicalEmail(req.Email)
 	if !valid {
 		http.Error(w, "a valid email address is required", http.StatusBadRequest)
 		return

@@ -602,6 +602,106 @@ func TestFakeEmailSenderRecordsApproval(t *testing.T) {
 	}
 }
 
+// TestCanonicalEmailFoldingCollapsesToOneAccountAndOneCredit proves the
+// anti-abuse guarantee: signing up with two Gmail variants that fold to the
+// same canonical identity results in exactly ONE account and the signup credit
+// is granted exactly ONCE. The second signup attempt returns ErrConflict
+// because the canonical identity already exists in the account store.
+func TestCanonicalEmailFoldingCollapsesToOneAccountAndOneCredit(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	// First signup with a dotted + tagged Gmail variant. The HTTP layer
+	// normalizes to lowercase before calling SignUp; replicate that here.
+	_, err := h.svc.SignUp(ctx, "u.ser+x@gmail.com", "")
+	if err != nil {
+		t.Fatalf("first sign up: %v", err)
+	}
+
+	// Delivery must go to the ORIGINAL lowercased address.
+	tok1 := h.email.LastToken("u.ser+x@gmail.com")
+	if tok1 == "" {
+		t.Fatal("verification email must be sent to the original address u.ser+x@gmail.com")
+	}
+
+	vr1, err := h.svc.Verify(ctx, tok1)
+	if err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+	// The account identity must be the canonical form.
+	if vr1.Account.Email != "user@gmail.com" {
+		t.Fatalf("account email = %q, want canonical %q", vr1.Account.Email, "user@gmail.com")
+	}
+
+	// Second signup with the bare canonical form must be rejected as a duplicate
+	// because the canonical identity already has an account.
+	_, err = h.svc.SignUp(ctx, "user@gmail.com", "")
+	if !errors.Is(err, saas.ErrConflict) {
+		t.Fatalf("duplicate signup via canonical form: got %v, want ErrConflict", err)
+	}
+
+	// Exactly ONE signup credit entry on the org, proving per-person enforcement.
+	entries, err := h.ledger.Entries(ctx, vr1.Org.ID)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	signupGrants := 0
+	for _, e := range entries {
+		if e.Kind == billing.KindSignupCredit {
+			signupGrants++
+		}
+	}
+	if signupGrants != 1 {
+		t.Fatalf("signup credit granted %d times, want exactly 1", signupGrants)
+	}
+}
+
+// TestCanonicalEmailDeliveryToOriginal proves the verification email is sent to
+// the ORIGINAL (delivery) address, not the canonical identity. A user who typed
+// u.ser+x@gmail.com must receive the link there, not at user@gmail.com.
+func TestCanonicalEmailDeliveryToOriginal(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "u.ser+x@gmail.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+
+	// Token must be findable at the typed (delivery) address.
+	if h.email.LastToken("u.ser+x@gmail.com") == "" {
+		t.Fatal("verification email must be sent to the original address u.ser+x@gmail.com")
+	}
+	// Token must NOT appear at the canonical address.
+	if h.email.LastToken("user@gmail.com") != "" {
+		t.Fatal("verification email must NOT be sent to the canonical address user@gmail.com")
+	}
+}
+
+// TestCanonicalEmailNonGmailProvisions confirms that a plain non-Gmail address
+// (no plus-tag, no dots) still provisions normally after this change.
+func TestCanonicalEmailNonGmailProvisions(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "plain@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	tok := h.email.LastToken("plain@example.com")
+	if tok == "" {
+		t.Fatal("no verification token")
+	}
+	vr, err := h.svc.Verify(ctx, tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Account.Email != "plain@example.com" {
+		t.Fatalf("account email = %q, want plain@example.com", vr.Account.Email)
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
 // TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
 // when a PRIOR verify attempt provisioned the account but crashed before marking
 // the pending signup verified (e.g. the credit grant or key issue errored). The
