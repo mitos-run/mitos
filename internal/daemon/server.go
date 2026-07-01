@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -129,6 +131,62 @@ func (c *CASServing) enabled() bool {
 	return c != nil && c.Store != nil && c.Token != "" && c.TLS != nil && c.Addr != ""
 }
 
+// requiredKVMDevices are the host character devices a real-KVM forkd must have
+// to boot a microVM and reach guest-Ready: /dev/kvm (Firecracker) and
+// /dev/vhost-vsock (the guest-agent vsock transport). If either is absent every
+// fork stalls waiting for a guest that can never answer, and the client sees a
+// read timeout rather than an error. These are exactly the devices the
+// kvm-device-plugin injects, so a plugin or node kernel-module regression that
+// drops one is caught here. Package-level so tests can override it.
+var requiredKVMDevices = []string{"/dev/kvm", "/dev/vhost-vsock"}
+
+// missingCharDevices returns the subset of paths that are not present as
+// character devices (missing entirely, or present but not a char device).
+func missingCharDevices(paths []string) []string {
+	var missing []string
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			missing = append(missing, p)
+		}
+	}
+	return missing
+}
+
+// capacityProvider is the slice of ForkEngine the readiness check needs; a
+// narrow interface keeps the handler unit-testable without a real engine.
+type capacityProvider interface {
+	GetCapacity() fork.Capacity
+}
+
+// readinessHandler serves /readyz. On a real-KVM node it fails the readiness
+// probe (503) with a structured, LLM-legible reason when a required host device
+// is missing, so a device-injection or kernel-module regression takes this node
+// OUT of fork rotation (the controller stops placing forks here) instead of
+// letting every fork hang to the client deadline. This is the boring-failure
+// contract for capacity/node loss. The mock engine (kind e2e, envtest) has no
+// real devices and is always ready. Liveness stays on /healthz, so a missing
+// device does NOT crash-loop the pod: when the device returns, readiness
+// recovers with no restart.
+func readinessHandler(cap capacityProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if !cap.GetCapacity().KVMAvailable {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "ok (mock)")
+			return
+		}
+		if missing := missingCharDevices(requiredKVMDevices); len(missing) > 0 {
+			joined := strings.Join(missing, ", ")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `{"error":{"code":"devices_missing","message":"forkd not ready: required host device(s) missing","cause":%q,"remediation":"Ensure the kvm-device-plugin injects these devices (--device-paths) and the node kernel modules (kvm, vhost_vsock) are loaded; a fork cannot reach Ready without them."}}`+"\n", joined)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok (kvm)")
+	}
+}
+
 // ServeHTTP starts the HTTP server for metrics, health, and the sandbox API.
 // This server's scheme is UNCHANGED by CAS distribution: it is always the
 // plaintext operational mux (sandbox routes carry their own bearer auth). When
@@ -146,7 +204,10 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI, casCfg *C
 	// Metrics
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// Health
+	// Liveness: the process is up. Deliberately does NOT check devices, so a
+	// missing host device parks the pod NotReady (via /readyz) rather than
+	// crash-looping it; the pod recovers without a restart when the device
+	// returns.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		cap := engine.GetCapacity()
@@ -156,6 +217,10 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI, casCfg *C
 			fmt.Fprint(w, "ok (mock)")
 		}
 	})
+
+	// Readiness: fail-closed when a real-KVM node is missing a required device,
+	// so a fork can never be routed to a node where it would hang (issue #571).
+	mux.HandleFunc("/readyz", readinessHandler(engine))
 
 	// Node-level CoW-aware metering report for operators/billing. This is
 	// node-scoped operational data (the same access class as /metrics and
