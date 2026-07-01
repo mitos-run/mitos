@@ -20,10 +20,17 @@ vi.mock('../../data/account', () => ({
   useBilling: vi.fn(),
 }))
 
+// Mock useFirstActivity so tests are deterministic.
+vi.mock('../../data/firstActivity', () => ({
+  useFirstActivity: vi.fn(),
+}))
+
 import { useBilling } from '../../data/account'
+import { useFirstActivity } from '../../data/firstActivity'
 import { FirstRun, isFirstRun } from './FirstRun'
 
 const mockUseBilling = useBilling as ReturnType<typeof vi.fn>
+const mockUseFirstActivity = useFirstActivity as ReturnType<typeof vi.fn>
 
 const billingData = {
   org_id: 'o1',
@@ -40,9 +47,22 @@ const billingWithSpend = {
   spend_cents: 1234,
 }
 
+// jsdom does not implement window.matchMedia; stub it so Celebrate can read
+// prefers-reduced-motion without throwing.
+function mockMatchMedia(matches = false) {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    configurable: true,
+    value: vi.fn().mockReturnValue({ matches }),
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockUseBilling.mockReturnValue({ data: billingData, isLoading: false, error: null })
+  mockUseFirstActivity.mockReturnValue({ data: { active: false }, isLoading: false })
+  mockMatchMedia(false)
+  sessionStorage.clear()
 })
 
 // ---- isFirstRun predicate ---------------------------------------------------
@@ -167,18 +187,27 @@ describe('FirstRun with uc="rollouts"', () => {
     })
   })
 
-  it('links to /forks as the fork tree pointer', async () => {
+  it('links to /forks when first call lands', async () => {
+    mockUseFirstActivity.mockReturnValue({ data: { active: true }, isLoading: false })
     render(<FirstRun uc="rollouts" />)
     await waitFor(() => {
-      const link = screen.getByRole('link', { name: /fork tree/i })
+      const link = screen.getByRole('link', { name: /open the fork tree/i })
       expect(link).toHaveAttribute('href', '/forks')
     })
   })
 
-  it('mentions that metrics light up on this page', async () => {
+  it('does not show the fork-tree link while waiting for first call', async () => {
+    // active: false is the beforeEach default
     render(<FirstRun uc="rollouts" />)
     await waitFor(() => {
-      expect(screen.getByText(/light up/i)).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: /open the fork tree/i })).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows waiting-for-first-call text in step 3', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for your first call/i)).toBeInTheDocument()
     })
   })
 })
@@ -225,5 +254,192 @@ describe('FirstRun billing fallback', () => {
     await waitFor(() =>
       expect(screen.getByText(/free credit available/i)).toBeInTheDocument(),
     )
+  })
+})
+
+// ---- Step 1: masked key copy ------------------------------------------------
+
+describe('FirstRun step 1: masked key copy', () => {
+  const TEST_KEY = 'mk_live_a1b2c3d4e5f6'
+
+  beforeEach(() => {
+    sessionStorage.setItem('mitos.firstKey', TEST_KEY)
+  })
+
+  it('shows the masked key prefix and bullets, not the raw tail', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      // Prefix (first 12 chars)
+      expect(screen.getByText(/mk_live_a1b2/)).toBeInTheDocument()
+    })
+    // Raw tail must NOT be in the DOM
+    expect(screen.queryByText(/c3d4e5f6/)).not.toBeInTheDocument()
+  })
+
+  it('does not render the raw key tail anywhere in the DOM', async () => {
+    const { container } = render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/mk_live_a1b2/)).toBeInTheDocument()
+    })
+    expect(container.innerHTML).not.toContain('c3d4e5f6')
+  })
+
+  it('copies the full raw export line and marks step 1 done', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    render(<FirstRun uc="rollouts" />)
+
+    const copyBtn = await screen.findByRole('button', { name: /copy.*key/i })
+    await userEvent.click(copyBtn)
+
+    expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining('export MITOS_API_KEY=mk_live_a1b2c3d4e5f6'),
+    )
+
+    await waitFor(() => {
+      const step = document.querySelector('[data-step="key"]')
+      expect(step).toHaveAttribute('data-done', 'true')
+    })
+  })
+
+  it('announces key copy via aria-live', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    render(<FirstRun uc="rollouts" />)
+    const copyBtn = await screen.findByRole('button', { name: /copy.*key/i })
+    await userEvent.click(copyBtn)
+
+    await waitFor(() => {
+      expect(screen.getByText(/API key copied/i)).toBeInTheDocument()
+    })
+  })
+})
+
+// ---- Step 1: no key fallback ------------------------------------------------
+
+describe('FirstRun step 1: no key stashed', () => {
+  it('shows a Create an API key link to /keys', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      const link = screen.getByRole('link', { name: /create an api key/i })
+      expect(link).toHaveAttribute('href', '/keys')
+    })
+  })
+
+  it('does not show a masked key line', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: /create an api key/i })).toBeInTheDocument()
+    })
+    // No export MITOS_API_KEY= visible
+    expect(screen.queryByText(/MITOS_API_KEY=/)).not.toBeInTheDocument()
+  })
+})
+
+// ---- Step 2: tabbed runtimes ------------------------------------------------
+
+describe('FirstRun step 2: tabbed runtimes', () => {
+  it('renders three runtime tabs', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: /python/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /typescript/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /cli/i })).toBeInTheDocument()
+    })
+  })
+
+  it('defaults to Python tab selected', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      const pythonTab = screen.getByRole('tab', { name: /python/i })
+      expect(pythonTab).toHaveAttribute('aria-selected', 'true')
+    })
+  })
+
+  it('shows the TypeScript snippet after clicking the TypeScript tab', async () => {
+    render(<FirstRun uc="rollouts" />)
+    const tsTab = await screen.findByRole('tab', { name: /typescript/i })
+    await userEvent.click(tsTab)
+    await waitFor(() => {
+      // The TS rollouts snippet uses Promise.all and swarm.map
+      expect(screen.getByText(/Promise\.all/)).toBeInTheDocument()
+    })
+  })
+
+  it('copy snippet marks step 2 done', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    render(<FirstRun uc="rollouts" />)
+    const copyBtn = await screen.findByRole('button', { name: /copy snippet/i })
+    await userEvent.click(copyBtn)
+
+    await waitFor(() => {
+      const step = document.querySelector('[data-step="snippet"]')
+      expect(step).toHaveAttribute('data-done', 'true')
+    })
+  })
+})
+
+// ---- Step 3: first call state -----------------------------------------------
+
+describe('FirstRun step 3: first call', () => {
+  it('shows waiting text when first call has not landed', async () => {
+    // active: false is the beforeEach default
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for your first call/i)).toBeInTheDocument()
+    })
+  })
+
+  it('does not show the celebration status while waiting', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows You are live status when first call lands', async () => {
+    mockUseFirstActivity.mockReturnValue({ data: { active: true }, isLoading: false })
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent('You are live')
+    })
+  })
+
+  it('reveals next-step links when first call lands', async () => {
+    mockUseFirstActivity.mockReturnValue({ data: { active: true }, isLoading: false })
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: /open the fork tree/i })).toHaveAttribute('href', '/forks')
+      expect(screen.getByRole('link', { name: /view usage/i })).toHaveAttribute('href', '/usage')
+      expect(screen.getByRole('link', { name: /add credits/i })).toHaveAttribute('href', '/billing')
+    })
+  })
+
+  it('does not show next-step links while waiting', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for your first call/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('link', { name: /view usage/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /add credits/i })).not.toBeInTheDocument()
+  })
+})
+
+// ---- No em or en dash in rendered text --------------------------------------
+
+describe('FirstRun: copy and voice', () => {
+  it('renders no em or en dashes in any text', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('heading', { name: /Fork your first swarm of rollouts/i }),
+      ).toBeInTheDocument(),
+    )
+    const bodyText = document.body.textContent ?? ''
+    expect(bodyText).not.toMatch(/—|–/)
   })
 })
