@@ -460,8 +460,10 @@ func TestVerifyWebhookTopUpCredit(t *testing.T) {
 	if ev.TopUp.Ref != "txn_9" {
 		t.Fatalf("TopUp.Ref = %q, want \"txn_9\"", ev.TopUp.Ref)
 	}
-	if ev.Status != billing.StatusActive {
-		t.Fatalf("Status = %q, want StatusActive", ev.Status)
+	// A credit top-up carries no subscription-state meaning, so it must NOT move
+	// the billing status (else buying credits could clear an org's dunning).
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit top-up must not change status)", ev.Status)
 	}
 }
 
@@ -480,14 +482,16 @@ func TestVerifyWebhookTopUpPaidEvent(t *testing.T) {
 	if ev.TopUp.OrgID != "orgB" || ev.TopUp.AmountCents != 7500 || ev.TopUp.Ref != "txn_paid" {
 		t.Fatalf("TopUp = %+v, want {orgB 7500 txn_paid}", ev.TopUp)
 	}
-	if ev.Status != billing.StatusActive {
-		t.Fatalf("Status = %q, want StatusActive", ev.Status)
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit top-up must not change status)", ev.Status)
 	}
 }
 
 // TestVerifyWebhookTopUpKindAbsent asserts that a transaction.completed body
 // without the credit_topup kind leaves ev.TopUp nil (normal transaction, not a
-// credit purchase).
+// credit purchase) AND keeps its subscription status, so a genuine subscription
+// payment still marks the org active. Only a credit_topup transaction suppresses
+// the status.
 func TestVerifyWebhookTopUpKindAbsent(t *testing.T) {
 	body := `{"event_type":"transaction.completed","data":{"id":"txn_10","customer_id":"ctm_x"}}`
 	ev, err := verify(t, secret, now, body)
@@ -497,11 +501,16 @@ func TestVerifyWebhookTopUpKindAbsent(t *testing.T) {
 	if ev.TopUp != nil {
 		t.Fatalf("ev.TopUp = %+v, want nil when kind is absent", ev.TopUp)
 	}
+	if ev.Status != billing.StatusActive {
+		t.Fatalf("Status = %q, want StatusActive for a plain transaction", ev.Status)
+	}
 }
 
 // TestVerifyWebhookTopUpMalformedAmount asserts that a malformed amount_cents
 // leaves ev.TopUp nil and does NOT return a verification error (the event is
-// still acknowledged and status applied).
+// still acknowledged). The status is still suppressed: a malformed top-up is
+// still a credit_topup transaction, not a subscription signal, so it must not
+// move the billing status either.
 func TestVerifyWebhookTopUpMalformedAmount(t *testing.T) {
 	body := `{"event_type":"transaction.completed","data":{"id":"txn_11","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"abc"}}}`
 	ev, err := verify(t, secret, now, body)
@@ -511,8 +520,8 @@ func TestVerifyWebhookTopUpMalformedAmount(t *testing.T) {
 	if ev.TopUp != nil {
 		t.Fatalf("ev.TopUp = %+v, want nil for malformed amount", ev.TopUp)
 	}
-	if ev.Status != billing.StatusActive {
-		t.Fatalf("Status = %q, want StatusActive (event still acknowledged)", ev.Status)
+	if ev.Status != "" {
+		t.Fatalf("Status = %q, want empty (a credit_topup transaction never changes status)", ev.Status)
 	}
 }
 

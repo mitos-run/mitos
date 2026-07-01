@@ -128,7 +128,8 @@ func TestTopUpAtCeilingIs200(t *testing.T) {
 }
 
 // TestTopUpEmptyCheckoutURLIs500 asserts that a provider returning an empty url
-// with no error is treated as a failure (mirrors the portal handler guard),
+// with no error is treated as a failure (an internal 500 for a misbehaving
+// provider; the portal handler guards the same empty-url case but returns 404),
 // never surfaced to the client as a 200 with a blank url.
 func TestTopUpEmptyCheckoutURLIs500(t *testing.T) {
 	f := newFixture(t)

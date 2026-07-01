@@ -140,19 +140,29 @@ func (p *Provider) VerifyWebhook(r *http.Request, body []byte) (billingprovider.
 		Status:      statusFor(ev.EventType),
 		CustomerRef: ev.Data.CustomerID,
 	}
-	// Populate a top-up credit when the event is a cleared transaction carrying
-	// credit_topup custom data. A missing, zero, or malformed amount_cents or an
-	// empty org_id leaves TopUp nil; the event is still acknowledged and the
-	// status applied. We do NOT fail verification for a malformed top-up field.
-	if (ev.EventType == "transaction.completed" || ev.EventType == "transaction.paid") &&
-		ev.Data.CustomData.Kind == "credit_topup" &&
-		ev.Data.CustomData.OrgID != "" {
-		cents, err := strconv.ParseInt(ev.Data.CustomData.AmountCents, 10, 64)
-		if err == nil && cents > 0 {
-			out.TopUp = &billingprovider.TopUpCredit{
-				OrgID:       ev.Data.CustomData.OrgID,
-				AmountCents: cents,
-				Ref:         ev.Data.ID,
+	// A credit top-up rides on the same transaction.completed / transaction.paid
+	// event types as a subscription payment. It is a one-off prepaid purchase and
+	// carries NO subscription-state meaning, so it must never move the org's
+	// billing status: otherwise a past_due or suspended org that buys credits would
+	// silently clear its own dunning. Suppress the status for a credit_topup
+	// transaction (the credit itself is applied via TopUp below), independent of
+	// whether the amount parses. A plain (non-top-up) transaction keeps its status.
+	isTopUpTxn := (ev.EventType == "transaction.completed" || ev.EventType == "transaction.paid") &&
+		ev.Data.CustomData.Kind == "credit_topup"
+	if isTopUpTxn {
+		out.Status = ""
+		// Populate the credit when org_id is present and amount_cents parses to a
+		// positive value. A missing, zero, or malformed amount leaves TopUp nil; the
+		// event is still acknowledged. We do NOT fail verification for a malformed
+		// top-up field.
+		if ev.Data.CustomData.OrgID != "" {
+			cents, err := strconv.ParseInt(ev.Data.CustomData.AmountCents, 10, 64)
+			if err == nil && cents > 0 {
+				out.TopUp = &billingprovider.TopUpCredit{
+					OrgID:       ev.Data.CustomData.OrgID,
+					AmountCents: cents,
+					Ref:         ev.Data.ID,
+				}
 			}
 		}
 	}
