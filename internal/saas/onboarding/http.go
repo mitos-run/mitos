@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/mail"
 	"strings"
+	"time"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/console"
@@ -46,6 +48,17 @@ func WithDisposable(d *Disposable) HandlerOption {
 	}
 }
 
+// WithVelocity wires a per-IP sliding-window velocity cap into the handler.
+// When set, signUp checks the client IP before calling the service; an IP that
+// has exceeded the cap receives the same uniform 202 as a normal signup (no
+// enumeration, no record created, no email sent). A nil *Velocity leaves the
+// check disabled (self-host).
+func WithVelocity(v *Velocity) HandlerOption {
+	return func(h *Handler) {
+		h.velocity = v
+	}
+}
+
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
 //	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
@@ -64,6 +77,7 @@ type Handler struct {
 	newToken   func() string // optional; nil skips session cookie
 	secure     bool
 	disposable *Disposable // optional; nil disables the disposable-domain check
+	velocity   *Velocity   // optional; nil disables the per-IP velocity cap
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
@@ -123,6 +137,14 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	// that a rule fired. The email and domain are never logged here.
 	if h.disposable != nil && h.disposable.Blocked(domainOf(email)) {
 		h.log.Info("onboarding signup refused", "reason", "domain")
+		h.writeAccepted(w)
+		return
+	}
+
+	// Per-IP velocity guard: silently cap mass-signup from a single source
+	// without revealing that a rate limit fired. The IP value is never logged.
+	if h.velocity != nil && !h.velocity.Allow(clientIP(r), time.Now()) {
+		h.log.Info("onboarding signup refused", "reason", "velocity")
 		h.writeAccepted(w)
 		return
 	}
@@ -234,6 +256,32 @@ func classifyVerifyErr(err error) string {
 	default:
 		return "invalid"
 	}
+}
+
+// clientIP extracts the originating client IP from the request. The console is
+// only reachable through the cluster gateway, which sets X-Forwarded-For from
+// the real client address, so this function trusts that header.
+//
+// It reads the first (leftmost) address in X-Forwarded-For when present (the
+// original client as set by the trusted edge), trimming spaces; otherwise it
+// falls back to the host part of r.RemoteAddr (port stripped via
+// net.SplitHostPort, tolerating a bare IP with no port). An empty string is
+// returned when no address is derivable; the empty string is its own
+// rate-limit bucket and is never bypassed.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// The leftmost entry is the original client IP as set by the trusted edge.
+		if idx := strings.IndexByte(xff, ','); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// RemoteAddr may be a bare IP with no port; use it as-is.
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 // normalizeEmail trims, lowercases, and validates an email address. It returns

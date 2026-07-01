@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -115,6 +116,32 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		logger.Warn("disposable-domain check could not load; signup will proceed without it", "err", err.Error())
 	} else {
 		handlerOpts = append(handlerOpts, onboarding.WithDisposable(d))
+	}
+
+	// Per-IP velocity cap: MITOS_CONSOLE_SIGNUP_IP_LIMIT (int, default 10) and
+	// MITOS_CONSOLE_SIGNUP_IP_WINDOW (duration string, default "1h"). A limit of
+	// 0 disables the cap. Malformed values fall back to safe defaults so a bad
+	// env variable never breaks all signup.
+	{
+		limit := 10
+		if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_SIGNUP_IP_LIMIT")); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				limit = n
+			} else {
+				logger.Warn("MITOS_CONSOLE_SIGNUP_IP_LIMIT is not a valid integer; defaulting to 10")
+			}
+		}
+		if limit > 0 {
+			window := time.Hour
+			if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_SIGNUP_IP_WINDOW")); s != "" {
+				if d, err := time.ParseDuration(s); err == nil {
+					window = d
+				} else {
+					logger.Warn("MITOS_CONSOLE_SIGNUP_IP_WINDOW is not a valid duration; defaulting to 1h")
+				}
+			}
+			handlerOpts = append(handlerOpts, onboarding.WithVelocity(onboarding.NewVelocity(limit, window)))
+		}
 	}
 
 	h := onboarding.NewHandler(svc, logger, handlerOpts...)

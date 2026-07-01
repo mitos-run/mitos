@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/saas"
 )
@@ -313,6 +314,64 @@ func TestSignupDisposableDomainReturnsUniformAcceptedAndNoEmail(t *testing.T) {
 	if disposableRR.Body.String() != normalRR.Body.String() {
 		t.Fatalf("disposable and normal signup bodies differ (enumeration leak):\ndisposable=%s\nnormal=%s",
 			disposableRR.Body.String(), normalRR.Body.String())
+	}
+}
+
+// TestSignupVelocityCapReturnsUniformAcceptedAndNoEmail asserts that a signup
+// from an IP that has exceeded the per-IP velocity cap returns the same uniform
+// 202 as a normal signup (no enumeration), does NOT call the service (no
+// verification email is sent, no pending record is created), and that a signup
+// from a different IP is not affected by the cap.
+func TestSignupVelocityCapReturnsUniformAcceptedAndNoEmail(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	vel := NewVelocity(1, time.Hour)
+	h := NewHandler(hr.svc, nil, WithVelocity(vel))
+
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	// postWithXFF is a local helper that sets an X-Forwarded-For header.
+	postWithXFF := func(xff, email string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/onboarding/signup",
+			strings.NewReader(`{"email":"`+email+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", xff)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// First signup from 1.2.3.4: allowed; service is called; email is sent.
+	first := postWithXFF("1.2.3.4", "vel1@example.com")
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first signup: status %d, want 202; body %s", first.Code, first.Body.String())
+	}
+	if hr.email.LastToken("vel1@example.com") == "" {
+		t.Fatal("first signup: expected verification email to be sent")
+	}
+
+	// Second signup from 1.2.3.4 (over cap, limit=1): returns 202 but NO email.
+	second := postWithXFF("1.2.3.4", "vel2@example.com")
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("over-cap signup: status %d, want 202; body %s", second.Code, second.Body.String())
+	}
+	if hr.email.LastToken("vel2@example.com") != "" {
+		t.Fatal("over-cap signup must not send a verification email")
+	}
+
+	// The 202 body must be byte-identical (no enumeration).
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("velocity-capped and normal signup bodies differ (enumeration leak):\nfirst=%s\nsecond=%s",
+			first.Body.String(), second.Body.String())
+	}
+
+	// A signup from a different IP must not be affected by the cap.
+	third := postWithXFF("5.6.7.8", "vel3@example.com")
+	if third.Code != http.StatusAccepted {
+		t.Fatalf("different-IP signup: status %d, want 202; body %s", third.Code, third.Body.String())
+	}
+	if hr.email.LastToken("vel3@example.com") == "" {
+		t.Fatal("different-IP signup must succeed and send a verification email")
 	}
 }
 
