@@ -38,7 +38,10 @@ spec:
             - --resource-name=mitos.run/kvm
             # 0 = auto: advertise a sane slot count (100) where /dev/kvm exists.
             - --device-count=0
-            - --device-paths=/dev/kvm,/dev/net/tun
+            # /dev/vhost-vsock is required: forkd is non-privileged and gets its
+            # devices only from this plugin, so without it a fork boots a VM whose
+            # guest-agent vsock transport never comes up and the fork hangs.
+            - --device-paths=/dev/kvm,/dev/net/tun,/dev/vhost-vsock
             - --kubelet-dir=/var/lib/kubelet/device-plugins
             # Probe the host /dev/kvm at /host-dev/kvm: the host /dev is mounted
             # read-only at /host-dev, NOT over the container's own /dev.

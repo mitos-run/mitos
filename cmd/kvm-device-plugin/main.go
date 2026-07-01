@@ -40,6 +40,13 @@ const defaultKVMDevicePath = "/host-dev/kvm"
 // device count.
 const defaultDeviceCount = 100
 
+// defaultDevicePaths is the set of host device nodes injected into a container
+// requesting mitos.run/kvm. /dev/vhost-vsock is REQUIRED alongside /dev/kvm and
+// /dev/net/tun: forkd is non-privileged and receives devices only from this
+// plugin, so omitting vhost-vsock makes every fork boot a VM whose guest-agent
+// vsock transport never comes up, and the fork hangs. Do not drop it.
+const defaultDevicePaths = "/dev/kvm,/dev/net/tun,/dev/vhost-vsock"
+
 func main() {
 	var (
 		resourceName  string
@@ -50,7 +57,7 @@ func main() {
 	)
 	flag.StringVar(&resourceName, "resource-name", "mitos.run/kvm", "Extended resource name the plugin advertises; pods request it under resources.limits")
 	flag.IntVar(&deviceCount, "device-count", 0, "Number of synthetic device slots to advertise when /dev/kvm is present; 0 means auto (a sane default). /dev/kvm is shareable, so this is a soft per-node concurrency cap, not a physical device count")
-	flag.StringVar(&devicePaths, "device-paths", "/dev/kvm,/dev/net/tun", "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw)")
+	flag.StringVar(&devicePaths, "device-paths", defaultDevicePaths, "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw). Includes /dev/vhost-vsock: forkd is non-privileged and needs the host vsock device to build the guest-agent transport, so a fork without it boots a VM that never reaches Ready and hangs.")
 	flag.StringVar(&kubeletDir, "kubelet-dir", "/var/lib/kubelet/device-plugins", "Kubelet device-plugins directory: the plugin serves its socket here and dials the kubelet registry socket (kubelet.sock) here")
 	flag.StringVar(&kvmDevicePath, "kvm-device-path", defaultKVMDevicePath, "Container path the plugin stat(2)s to decide whether KVM is present; the DaemonSet mounts the host /dev read-only here (not over the container /dev)")
 	flag.Parse()
