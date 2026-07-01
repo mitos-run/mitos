@@ -85,7 +85,7 @@ type billingWiring struct {
 //
 // Secrets: the Paddle API key and webhook secret are read from env and never
 // logged; only the selected provider's Name() is logged.
-func setupBilling(logger *slog.Logger, status billing.StatusStore) billingWiring {
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
@@ -118,7 +118,7 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore) billingWiring
 	logger.Info("billing enabled", "provider", provider.Name())
 	return billingWiring{
 		portal:         portalLinker{provider: provider, customers: customers},
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, status),
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, status, creditLedger, time.Now),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,

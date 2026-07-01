@@ -80,7 +80,20 @@ func main() {
 	// One status store is shared by the BFF billing view and the billing webhook
 	// so a provider event (payment failed / canceled) is reflected in the console.
 	statusStore := billing.NewMemStatusStore()
-	bill := setupBilling(logger, statusStore)
+
+	// creditLedger is the single shared instance used by the onboarding grant
+	// path, the billing view, AND the billing webhook (so a cleared top-up from
+	// the provider is immediately visible in the console). It is constructed
+	// BEFORE setupBilling so the same instance can be forwarded into the webhook
+	// handler without building a second ledger.
+	var creditLedger billing.CreditLedger
+	if pool != nil {
+		creditLedger = pgstore.NewPgCreditLedger(pool)
+	} else {
+		creditLedger = billing.NewMemCreditLedger()
+	}
+
+	bill := setupBilling(logger, statusStore, creditLedger)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -91,16 +104,6 @@ func main() {
 		sessionStore = pgstore.NewPgSessionStore(pool)
 	} else {
 		sessionStore = saas.NewSessionStore()
-	}
-
-	// creditLedger is the single shared instance used by both the onboarding
-	// grant path and the billing view. Constructing it once here ensures a
-	// credit granted at signup is visible in the console billing endpoint.
-	var creditLedger billing.CreditLedger
-	if pool != nil {
-		creditLedger = pgstore.NewPgCreditLedger(pool)
-	} else {
-		creditLedger = billing.NewMemCreditLedger()
 	}
 
 	con := console.New(console.Deps{

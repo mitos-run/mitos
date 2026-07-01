@@ -439,6 +439,63 @@ func TestCheckoutURLEmptyURL(t *testing.T) {
 	}
 }
 
+// TestVerifyWebhookTopUpCredit asserts that a signed transaction.completed body
+// carrying custom_data.kind="credit_topup" produces a non-nil ev.TopUp with the
+// correct OrgID, AmountCents, and Ref, AND maps StatusActive.
+func TestVerifyWebhookTopUpCredit(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_9","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"2500"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp == nil {
+		t.Fatal("ev.TopUp is nil, want non-nil for credit_topup event")
+	}
+	if ev.TopUp.OrgID != "orgA" {
+		t.Fatalf("TopUp.OrgID = %q, want \"orgA\"", ev.TopUp.OrgID)
+	}
+	if ev.TopUp.AmountCents != 2500 {
+		t.Fatalf("TopUp.AmountCents = %d, want 2500", ev.TopUp.AmountCents)
+	}
+	if ev.TopUp.Ref != "txn_9" {
+		t.Fatalf("TopUp.Ref = %q, want \"txn_9\"", ev.TopUp.Ref)
+	}
+	if ev.Status != billing.StatusActive {
+		t.Fatalf("Status = %q, want StatusActive", ev.Status)
+	}
+}
+
+// TestVerifyWebhookTopUpKindAbsent asserts that a transaction.completed body
+// without the credit_topup kind leaves ev.TopUp nil (normal transaction, not a
+// credit purchase).
+func TestVerifyWebhookTopUpKindAbsent(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_10","customer_id":"ctm_x"}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.TopUp != nil {
+		t.Fatalf("ev.TopUp = %+v, want nil when kind is absent", ev.TopUp)
+	}
+}
+
+// TestVerifyWebhookTopUpMalformedAmount asserts that a malformed amount_cents
+// leaves ev.TopUp nil and does NOT return a verification error (the event is
+// still acknowledged and status applied).
+func TestVerifyWebhookTopUpMalformedAmount(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_11","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"abc"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify returned error for malformed amount: %v", err)
+	}
+	if ev.TopUp != nil {
+		t.Fatalf("ev.TopUp = %+v, want nil for malformed amount", ev.TopUp)
+	}
+	if ev.Status != billing.StatusActive {
+		t.Fatalf("Status = %q, want StatusActive (event still acknowledged)", ev.Status)
+	}
+}
+
 // TestCheckoutURLKeyNeverInErrors is the secret-hygiene gate for CheckoutURL:
 // the API key must never appear in any returned error string.
 func TestCheckoutURLKeyNeverInErrors(t *testing.T) {

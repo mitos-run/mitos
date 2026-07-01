@@ -118,20 +118,45 @@ func (p *Provider) VerifyWebhook(r *http.Request, body []byte) (billingprovider.
 	}
 	// Paddle Billing webhook envelope. The customer id lives at data.customer_id
 	// for subscription and transaction events; subscription.canceled etc. all
-	// carry it. We read only what the neutral event needs.
+	// carry it. For credit top-up transactions we also read data.id (the
+	// transaction id, used as the idempotency ref) and data.custom_data (the
+	// org/amount we embedded at checkout).
 	var ev struct {
 		EventType string `json:"event_type"`
 		Data      struct {
+			ID         string `json:"id"`
 			CustomerID string `json:"customer_id"`
+			CustomData struct {
+				Kind        string `json:"kind"`
+				OrgID       string `json:"org_id"`
+				AmountCents string `json:"amount_cents"`
+			} `json:"custom_data"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return billingprovider.Event{}, fmt.Errorf("paddle: malformed event: %w", err)
 	}
-	return billingprovider.Event{
+	out := billingprovider.Event{
 		Status:      statusFor(ev.EventType),
 		CustomerRef: ev.Data.CustomerID,
-	}, nil
+	}
+	// Populate a top-up credit when the event is a cleared transaction carrying
+	// credit_topup custom data. A missing, zero, or malformed amount_cents or an
+	// empty org_id leaves TopUp nil; the event is still acknowledged and the
+	// status applied. We do NOT fail verification for a malformed top-up field.
+	if (ev.EventType == "transaction.completed" || ev.EventType == "transaction.paid") &&
+		ev.Data.CustomData.Kind == "credit_topup" &&
+		ev.Data.CustomData.OrgID != "" {
+		cents, err := strconv.ParseInt(ev.Data.CustomData.AmountCents, 10, 64)
+		if err == nil && cents > 0 {
+			out.TopUp = &billingprovider.TopUpCredit{
+				OrgID:       ev.Data.CustomData.OrgID,
+				AmountCents: cents,
+				Ref:         ev.Data.ID,
+			}
+		}
+	}
+	return out, nil
 }
 
 // statusFor maps Paddle Billing event types to the neutral billing status,
