@@ -191,6 +191,10 @@ type PendingSignup struct {
 	// The value is validated and normalised before storage; the console uses it
 	// to pre-seed the welcome flow. It is never treated as a secret.
 	UseCase string
+	// Waitlisted is set to true when the allowlist gate rejected this signup at
+	// verify time. The pending record is NOT marked Verified, so a later approve
+	// and re-verify with the same token can still provision.
+	Waitlisted bool
 }
 
 // WaitlistEntry records a signup captured while the funnel is in waitlist mode.
@@ -300,6 +304,7 @@ type Service struct {
 	tokenTTL  time.Duration
 	keyScopes []string
 	sink      E2ETokenSink // QA seam; no-op when MITOS_CONSOLE_E2E is off
+	allowlist Allowlist    // nil means allow all (community / self-host default)
 }
 
 // Option configures a Service.
@@ -345,6 +350,12 @@ func WithE2ETokenSink(sink E2ETokenSink) Option {
 // signup creates the account and org in the store but provisions no Kubernetes
 // namespace (pure dev mode); Verify logs a warning in that case.
 func WithOrgProvisioner(p OrgProvisioner) Option { return func(s *Service) { s.provision = p } }
+
+// WithAllowlist wires an Allowlist gate that Verify consults before provisioning.
+// When unset (nil), Verify provisions every email that passes token validation so
+// community and self-host deployments are unaffected. Do NOT default-construct a
+// restrictive allowlist.
+func WithAllowlist(a Allowlist) Option { return func(s *Service) { s.allowlist = a } }
 
 // WithLogger sets the structured logger. It is used only for non-secret
 // operational lines (for example the skip-provisioning warning); it never logs an
@@ -468,6 +479,11 @@ type VerifyResult struct {
 	// "ai-coding"). It is "" when none was provided. The console uses it to route
 	// the user to the relevant getting-started flow after verification.
 	UseCase string
+	// Waitlisted is true when an allowlist is configured and the signup email is
+	// not on it. Account, Org, and FirstKey are zero; GrantedCredit is 0. The
+	// pending record is marked waitlisted but NOT verified, so re-verify with the
+	// same token will provision once the email is added to the allowlist.
+	Waitlisted bool
 }
 
 // Verify accepts a raw verify token and, if valid and unexpired, provisions the
@@ -507,6 +523,29 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 	now := s.now()
 	if !pending.ExpiresAt.IsZero() && !now.Before(pending.ExpiresAt) {
 		return VerifyResult{}, ErrTokenExpired
+	}
+
+	// Allowlist gate: consult only when an allowlist is configured. A nil allowlist
+	// means allow all so community and self-host deployments are unaffected.
+	// pending.Email is already the lowercased canonical address stored at signup;
+	// do not re-parse. Never log the email.
+	if s.allowlist != nil {
+		allowed, aerr := s.allowlist.IsAllowed(ctx, pending.Email)
+		if aerr != nil {
+			return VerifyResult{}, fmt.Errorf("onboarding verify: allowlist check: %w", aerr)
+		}
+		if !allowed {
+			// Mark the pending record waitlisted without setting Verified: the token
+			// remains valid so a later approve + re-verify with the same token can
+			// provision. PutPending is idempotent on repeated waitlist hits.
+			pending.Waitlisted = true
+			if perr := s.pending.PutPending(ctx, pending); perr != nil {
+				return VerifyResult{}, fmt.Errorf("onboarding verify: mark waitlisted: %w", perr)
+			}
+			// Funnel event keyed on the email hash so no PII enters the event stream.
+			s.events.Record(ctx, Event{Subject: hashString(pending.Email), Name: EventWaitlisted, At: now})
+			return VerifyResult{Waitlisted: true}, nil
+		}
 	}
 
 	// Provision: account + Personal org (#210). A prior verify attempt may have

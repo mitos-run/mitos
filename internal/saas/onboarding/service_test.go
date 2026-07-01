@@ -361,6 +361,229 @@ func TestSignUpDropsInvalidUseCase(t *testing.T) {
 	}
 }
 
+// newHarnessWithOpts builds a harness identical to newHarness but appends extra
+// options after the standard set. Use when a test needs to wire an allowlist or
+// other non-default option without repeating all the deterministic plumbing.
+func newHarnessWithOpts(t *testing.T, mode Mode, extra ...Option) *harness {
+	t.Helper()
+	store := saas.NewMemStore()
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	var n int
+	idgen := func() string {
+		n++
+		return "id-" + string(rune('a'+n))
+	}
+
+	keys := saas.NewKeyService(store, saas.WithClock(clock), saas.WithIDGen(idgen))
+	accounts := saas.NewAccountService(store, keys, saas.WithClock(clock), saas.WithIDGen(idgen))
+	ledger := billing.NewMemCreditLedger()
+	email := NewFakeEmailSender()
+	events := NewMemEventRecorder()
+
+	tok := 0
+	tokengen := func() (string, error) {
+		tok++
+		return "tok-" + string(rune('0'+tok)), nil
+	}
+
+	base := []Option{
+		WithMode(mode),
+		WithClock(clock),
+		WithIDGen(idgen),
+		WithTokenGen(tokengen),
+		WithEventRecorder(events),
+	}
+	svc := NewService(accounts, store, NewMemPendingStore(), ledger, email,
+		append(base, extra...)...)
+	return &harness{svc: svc, store: store, ledger: ledger, email: email, events: events, now: &now}
+}
+
+// TestAllowlistAllowedEmailProvisions confirms that when WithAllowlist is wired
+// and the signup email is on the allowlist, Verify provisions the account, org,
+// first key, and credit exactly as in the no-allowlist case.
+func TestAllowlistAllowedEmailProvisions(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil)
+	if err := al.Add(ctx, "dev@example.com", "", time.Time{}); err != nil {
+		t.Fatalf("allowlist add: %v", err)
+	}
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Waitlisted {
+		t.Fatal("allowed email must not be waitlisted")
+	}
+	if vr.Account.Email != "dev@example.com" {
+		t.Fatalf("account email = %q, want %q", vr.Account.Email, "dev@example.com")
+	}
+	if !vr.Org.Personal {
+		t.Fatal("verify must create a Personal org")
+	}
+	if vr.FirstKey.RawKey == "" {
+		t.Fatal("verify must issue a first key")
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
+// TestAllowlistBlockedEmailWaitlists confirms that when WithAllowlist is wired
+// and the signup email is NOT on the allowlist, Verify returns a waitlisted result
+// with no account, org, key, or credit granted, and the pending record is marked
+// Waitlisted but NOT Verified (so the token remains valid for a future approve).
+func TestAllowlistBlockedEmailWaitlists(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil) // empty: no email is allowed
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "blocked@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("blocked@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify returned unexpected error: %v", err)
+	}
+	if !vr.Waitlisted {
+		t.Fatal("blocked email must be waitlisted")
+	}
+	if vr.Account.ID != "" || vr.Org.ID != "" {
+		t.Fatalf("waitlisted verify must not provision account/org: got %+v / %+v", vr.Account, vr.Org)
+	}
+	if vr.FirstKey.RawKey != "" {
+		t.Fatalf("waitlisted verify must not issue a key: got %+v", vr.FirstKey)
+	}
+	if vr.GrantedCredit != 0 {
+		t.Fatalf("waitlisted verify must grant zero credit, got %v", vr.GrantedCredit)
+	}
+
+	// Account store must have no new account.
+	if _, err := h.store.GetAccountByEmail(ctx, "blocked@example.com"); !errors.Is(err, saas.ErrNotFound) {
+		t.Fatalf("waitlisted verify must not create an account, got %v", err)
+	}
+
+	// Pending record must be marked Waitlisted but NOT Verified (token stays valid).
+	pending, err := h.svc.pending.GetPendingByTokenHash(ctx, hashString(token))
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if !pending.Waitlisted {
+		t.Fatal("pending record must be marked Waitlisted")
+	}
+	if pending.Verified {
+		t.Fatal("pending record must NOT be marked Verified")
+	}
+
+	// A waitlisted funnel event must be recorded.
+	var gotWaitlisted bool
+	for _, e := range h.events.Events(ctx) {
+		if e.Name == EventWaitlisted {
+			gotWaitlisted = true
+		}
+	}
+	if !gotWaitlisted {
+		t.Fatal("waitlisted funnel event must be recorded")
+	}
+}
+
+// TestNoAllowlistBehavesAsToday confirms that when no WithAllowlist option is
+// wired, Verify provisions every email that passes token validation, preserving
+// the behavior for community and self-host deployments.
+func TestNoAllowlistBehavesAsToday(t *testing.T) {
+	ctx := context.Background()
+	// No WithAllowlist option: allowlist is nil, allow all.
+	h := newHarnessWithOpts(t, ModeOpen)
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+	if token == "" {
+		t.Fatal("no verification token sent")
+	}
+
+	vr, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Waitlisted {
+		t.Fatal("no-allowlist mode must not waitlist")
+	}
+	if vr.Account.Email != "dev@example.com" {
+		t.Fatalf("account email = %q", vr.Account.Email)
+	}
+	if vr.FirstKey.RawKey == "" {
+		t.Fatal("verify must issue a first key")
+	}
+	if vr.GrantedCredit != billing.DefaultSignupCredit() {
+		t.Fatalf("granted credit = %v, want %v", vr.GrantedCredit, billing.DefaultSignupCredit())
+	}
+}
+
+// TestAllowlistAlreadyVerifiedNotRegressed confirms that an already-provisioned
+// account returns its account/org on re-verify even when the allowlist is
+// configured and the email is no longer on it. The idempotent short-circuit fires
+// before the allowlist gate so a provisioned account can never regress to
+// waitlisted.
+func TestAllowlistAlreadyVerifiedNotRegressed(t *testing.T) {
+	ctx := context.Background()
+	al := NewMemAllowlist(nil)
+	if err := al.Add(ctx, "dev@example.com", "", time.Time{}); err != nil {
+		t.Fatalf("allowlist add: %v", err)
+	}
+	h := newHarnessWithOpts(t, ModeOpen, WithAllowlist(al))
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	token := h.email.LastToken("dev@example.com")
+
+	// First verify: email is on the allowlist, must provision.
+	first, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+	if first.Waitlisted || first.Account.ID == "" {
+		t.Fatalf("first verify must provision: %+v", first)
+	}
+
+	// Swap the allowlist for an empty one: dev@example.com is no longer allowed.
+	h.svc.allowlist = NewMemAllowlist(nil)
+
+	// Re-verify must return the existing account via the idempotent short-circuit,
+	// not regress to waitlisted.
+	second, err := h.svc.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("second verify: %v", err)
+	}
+	if second.Waitlisted {
+		t.Fatal("already-provisioned account must never regress to waitlisted")
+	}
+	if second.Account.ID != first.Account.ID {
+		t.Fatalf("re-verify account id = %q, want %q", second.Account.ID, first.Account.ID)
+	}
+	if !second.AlreadyDone {
+		t.Fatal("re-verify must be flagged AlreadyDone")
+	}
+}
+
 // TestVerifyRecoversFromHalfProvisionedAccount proves Verify is idempotent even
 // when a PRIOR verify attempt provisioned the account but crashed before marking
 // the pending signup verified (e.g. the credit grant or key issue errored). The
