@@ -3,6 +3,7 @@ package onboarding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,22 @@ import (
 
 	"mitos.run/mitos/internal/saas"
 )
+
+// stubCaptcha is a test-only CaptchaVerifier that can be configured to pass or
+// fail. It records whether Verify was called so tests can assert that the
+// service was (or was not) reached.
+type stubCaptcha struct {
+	fail   bool
+	called bool
+}
+
+func (s *stubCaptcha) Verify(context.Context, string) error {
+	s.called = true
+	if s.fail {
+		return errors.New("stub: captcha failed")
+	}
+	return nil
+}
 
 func newHandler(t *testing.T, mode Mode) (*Handler, *harness) {
 	t.Helper()
@@ -412,5 +429,61 @@ func TestVerifyNoSessionCookieOnReVerify(t *testing.T) {
 		if c.Name == "mitos_session" {
 			t.Fatal("re-verify must NOT set a mitos_session cookie")
 		}
+	}
+}
+
+// TestSignupFailedCaptchaReturnsUniformAcceptedAndNoService asserts that when a
+// captcha verifier is wired and the solution fails verification, the handler
+// returns the SAME byte-identical 202 as a normal signup (no enumeration),
+// does NOT call the service (no verification email is sent, no pending record
+// is created), and does not reach the service at all.
+func TestSignupFailedCaptchaReturnsUniformAcceptedAndNoService(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	stub := &stubCaptcha{fail: true}
+	h := NewHandler(hr.svc, nil, WithCaptcha(stub))
+
+	captchaRR := postJSON(t, h, "/onboarding/signup", `{"email":"bot@example.com","captcha":"bad-token"}`)
+	if captchaRR.Code != http.StatusAccepted {
+		t.Fatalf("captcha-failed signup: status %d, want 202; body %s", captchaRR.Code, captchaRR.Body.String())
+	}
+
+	// The service must NOT have been called: no verification email sent.
+	if tok := hr.email.LastToken("bot@example.com"); tok != "" {
+		t.Fatalf("captcha-failed signup must not send a verification email; got token %q", tok)
+	}
+
+	// The response body must be byte-identical to a normal (passing captcha) signup.
+	stub2 := &stubCaptcha{fail: false}
+	h2 := NewHandler(hr.svc, nil, WithCaptcha(stub2))
+	normalRR := postJSON(t, h2, "/onboarding/signup", `{"email":"real@example.com","captcha":"good-token"}`)
+	if normalRR.Code != http.StatusAccepted {
+		t.Fatalf("normal signup: status %d, want 202; body %s", normalRR.Code, normalRR.Body.String())
+	}
+	if captchaRR.Body.String() != normalRR.Body.String() {
+		t.Fatalf("captcha-failed and normal signup bodies differ (enumeration leak):\ncaptcha-failed=%s\nnormal=%s",
+			captchaRR.Body.String(), normalRR.Body.String())
+	}
+}
+
+// TestSignupPassingCaptchaProceedsToService asserts that when a captcha verifier
+// is wired and the solution passes verification, the signup proceeds normally:
+// the service is called, a verification email is sent, and 202 is returned.
+func TestSignupPassingCaptchaProceedsToService(t *testing.T) {
+	hr := newHarness(t, ModeOpen)
+	stub := &stubCaptcha{fail: false}
+	h := NewHandler(hr.svc, nil, WithCaptcha(stub))
+
+	rr := postJSON(t, h, "/onboarding/signup", `{"email":"legit@example.com","captcha":"good-token"}`)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("passing captcha signup: status %d, want 202; body %s", rr.Code, rr.Body.String())
+	}
+
+	// The service must have been called: a verification email was sent.
+	if tok := hr.email.LastToken("legit@example.com"); tok == "" {
+		t.Fatal("passing captcha signup must send a verification email")
+	}
+
+	if !stub.called {
+		t.Fatal("captcha verifier was not called")
 	}
 }

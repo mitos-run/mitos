@@ -112,6 +112,23 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 	handlerOpts := []onboarding.HandlerOption{
 		onboarding.WithHandlerSessions(sessions, newToken, secure),
 	}
+
+	// Friendly Captcha server-side verification: both the secret and the sitekey
+	// must be set for the verifier to be active. When either is absent the
+	// handler passes through (self-host / pre-launch unaffected). The secret is
+	// never logged.
+	{
+		fcSecret := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET")
+		fcSiteKey := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY")
+		if fcSecret != "" && fcSiteKey != "" {
+			fcBaseURL := os.Getenv("MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL")
+			handlerOpts = append(handlerOpts, onboarding.WithCaptcha(
+				onboarding.NewFriendlyCaptcha(fcSecret, fcSiteKey, fcBaseURL, http.DefaultClient),
+			))
+			logger.Info("onboarding Friendly Captcha verification enabled")
+		}
+	}
+
 	if d, err := onboarding.LoadDisposable(os.Getenv("MITOS_CONSOLE_DISPOSABLE_ALLOW")); err != nil {
 		logger.Warn("disposable-domain check could not load; signup will proceed without it", "err", err.Error())
 	} else {

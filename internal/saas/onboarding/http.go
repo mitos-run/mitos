@@ -59,6 +59,17 @@ func WithVelocity(v *Velocity) HandlerOption {
 	}
 }
 
+// WithCaptcha wires a server-side captcha verifier into the handler. When set,
+// signUp verifies the solution field from the request before calling the
+// service. A missing or invalid solution receives the same uniform 202 as a
+// normal signup (no enumeration, no record created, no email sent). A nil
+// verifier leaves the check disabled (self-host / unconfigured).
+func WithCaptcha(c CaptchaVerifier) HandlerOption {
+	return func(h *Handler) {
+		h.captcha = c
+	}
+}
+
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
 //	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
@@ -76,8 +87,9 @@ type Handler struct {
 	sessions   saas.Sessions // optional; nil skips session cookie
 	newToken   func() string // optional; nil skips session cookie
 	secure     bool
-	disposable *Disposable // optional; nil disables the disposable-domain check
-	velocity   *Velocity   // optional; nil disables the per-IP velocity cap
+	disposable *Disposable     // optional; nil disables the disposable-domain check
+	velocity   *Velocity       // optional; nil disables the per-IP velocity cap
+	captcha    CaptchaVerifier // optional; nil disables the captcha check (pass-through)
 }
 
 // NewHandler builds the onboarding HTTP handler over svc. If log is nil a
@@ -120,8 +132,9 @@ func (h *Handler) writeAccepted(w http.ResponseWriter) {
 // dropped to ""; it never causes a request failure.
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email string `json:"email"`
-		UC    string `json:"uc"`
+		Email   string `json:"email"`
+		UC      string `json:"uc"`
+		Captcha string `json:"captcha"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		return // decodeJSON already wrote the error
@@ -145,6 +158,16 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 	// without revealing that a rate limit fired. The IP value is never logged.
 	if h.velocity != nil && !h.velocity.Allow(clientIP(r), time.Now()) {
 		h.log.Info("onboarding signup refused", "reason", "velocity")
+		h.writeAccepted(w)
+		return
+	}
+
+	// Captcha guard: verify the Friendly Captcha solution before hitting the
+	// service. A missing or invalid solution returns the same uniform 202 so
+	// a bot cannot distinguish a captcha failure from a successful signup (no
+	// enumeration). The solution and the API key are never logged.
+	if h.captcha != nil && h.captcha.Verify(r.Context(), req.Captcha) != nil {
+		h.log.Info("onboarding signup refused", "reason", "captcha")
 		h.writeAccepted(w)
 		return
 	}
