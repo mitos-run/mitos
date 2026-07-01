@@ -170,6 +170,14 @@ func TestApproveSignup_EmptyHandlerToken401(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for empty handler token, got %d", rr.Code)
 	}
+	// The empty-token case is the most dangerous misconfiguration (a fully open
+	// endpoint), so prove it has NO side effects, not just the status code.
+	if ok, _ := al.IsAllowed(context.Background(), "u@x.com"); ok {
+		t.Fatal("allowlist must not be modified when the handler token is empty")
+	}
+	if em.Approved("u@x.com") {
+		t.Fatal("SendApproved must not be called when the handler token is empty")
+	}
 }
 
 // TestApproveSignup_MissingEmail400 checks that a body with an absent or
