@@ -285,10 +285,17 @@ canary:
 # Monitoring artifacts: the PrometheusRule and the Grafana dashboard ConfigMap.
 # Opt-in; requires the Prometheus Operator CRDs and a Grafana sidecar.
 monitoring:
-  # Gate both the PrometheusRule and the dashboard ConfigMap.
+  # Gate the PrometheusRule, the dashboard ConfigMap, and the PodMonitors.
   enabled: false
   # Label value selected by the Prometheus Operator ruleSelector for the rule.
   prometheusRuleRelease: prometheus
+  # PodMonitors that make the control-plane metrics the alerts depend on actually
+  # get scraped. A Prometheus Operator does NOT honor prometheus.io/scrape pod
+  # annotations, so without these the alert rules evaluate on absent series.
+  podMonitors:
+    # Render PodMonitors for the controller and forkd (needs monitoring.enabled).
+    enabled: true
+    interval: 30s
 
 # Namespace the workloads install into.
 namespace:
