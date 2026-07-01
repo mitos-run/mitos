@@ -200,7 +200,17 @@ func main() {
 	// Secure mirrors mountAuth (hardcoded true: the console is always TLS in
 	// production; -dev runs without cookies anyway since no session middleware
 	// is active in that branch).
-	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true)
+	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
+	// default mitos.run so a mitos.run address never needs a manual approval.
+	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
+	var allowlist onboarding.Allowlist
+	if pool != nil {
+		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
+	} else {
+		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
+		allowlist = onboarding.NewMemAllowlist(autoAllow)
+	}
+	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session
@@ -240,15 +250,8 @@ func main() {
 	// "you are in" email. Mounted OUTSIDE the session middleware. The token value is
 	// never logged. When unset, the endpoint is not mounted and a warning is logged.
 	if approveToken := os.Getenv("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN"); approveToken != "" {
-		var approveAL onboarding.Allowlist
-		if pool != nil {
-			approveAL = pgstore.NewPgAllowlist(pool, nil)
-		} else {
-			logger.Warn("approve-signup allowlist is in-memory (dev only); entries do not survive restarts")
-			approveAL = onboarding.NewMemAllowlist(nil)
-		}
 		mux.Handle("POST /internal/approve-signup", onboarding.NewApproveSignupHandler(
-			approveAL,
+			allowlist,
 			buildEmailSender(logger),
 			approveToken,
 			logger,
@@ -393,4 +396,25 @@ func indexPage(logger *slog.Logger) http.HandlerFunc {
 			logger.Error("render index", "err", err.Error())
 		}
 	}
+}
+
+// parseAutoAllowDomains splits raw on commas, trims spaces, lowercases, and drops
+// empty entries. An empty input returns the default ["mitos.run"] so a mitos.run
+// address never requires a manual approval in a fresh deployment. The domains are
+// not secret and are not logged at startup.
+func parseAutoAllowDomains(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{"mitos.run"}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.ToLower(strings.TrimSpace(p)); d != "" {
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"mitos.run"}
+	}
+	return out
 }

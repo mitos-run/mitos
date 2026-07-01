@@ -48,7 +48,7 @@ import (
 // the new user arrives at the console already authenticated. newToken is the
 // SAME generator used by the OIDC callback; the raw token is never logged.
 // secure is the Secure cookie flag, matching the OIDC handler's value.
-func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool) {
+func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool, allowlist onboarding.Allowlist) {
 	if !caps.signupEnabled() {
 		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
 		return
@@ -60,6 +60,7 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 	opts := []onboarding.Option{
 		onboarding.WithMode(onboarding.ModeOpen),
 		onboarding.WithLogger(logger),
+		onboarding.WithAllowlist(allowlist),
 	}
 	if prov != nil {
 		opts = append(opts, onboarding.WithOrgProvisioner(prov))
