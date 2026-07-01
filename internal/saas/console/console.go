@@ -200,6 +200,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/usage", c.handleUsage)
 	mux.Handle("GET /console/usage/api", c.usageAPIHandler())
 	mux.HandleFunc("GET /console/billing", c.handleBilling)
+	mux.HandleFunc("POST /console/billing/spend-cap", c.handleSetSpendCap)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)

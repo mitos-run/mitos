@@ -218,6 +218,11 @@ export const api = {
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
+  setSpendCap: (softCents: number, hardCents: number) =>
+    post<{ org_id: string; soft_cap_cents: number; hard_cap_cents: number }>(
+      '/console/billing/spend-cap',
+      { soft_cents: softCents, hard_cents: hardCents },
+    ),
   members: () => get<{ org_id: string; members: MemberView[] }>('/console/members').then((r) => r.members ?? []),
   setMemberRole: async (accountId: string, role: Role) => {
     const r = await fetch(`/console/members/${encodeURIComponent(accountId)}/role`, {
