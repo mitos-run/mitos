@@ -115,6 +115,27 @@ func TestVerifyLinkPreservesExistingQuery(t *testing.T) {
 	}
 }
 
+// TestConsoleOrigin pins the scheme+host derivation: the verify path and query
+// must be stripped (a substring check in the message test would pass even if they
+// were not, so this asserts the exact origin), and a parse failure falls back to
+// the raw value so the caller still has a usable URL.
+func TestConsoleOrigin(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"https://app.mitos.run/auth/verify", "https://app.mitos.run"},
+		{"https://app.mitos.run/auth/verify?token=abc", "https://app.mitos.run"},
+		{"https://app.mitos.run", "https://app.mitos.run"},
+		{"http://localhost:8090/auth/verify", "http://localhost:8090"},
+		{"not-a-url", "not-a-url"},
+	}
+	for _, c := range cases {
+		if got := consoleOrigin(c.in); got != c.want {
+			t.Fatalf("consoleOrigin(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestSMTPSenderApprovedComposesHeaders asserts that SendApproved composes a
 // message with the correct From/To/Subject headers and a sign-in URL in the
 // body, and that the envelope addresses match.

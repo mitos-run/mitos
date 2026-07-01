@@ -132,7 +132,7 @@ func buildApprovedMessage(from, to, signInURL string) []byte {
 	b.WriteString("Sign in to run your first fork:\r\n\r\n")
 	b.WriteString(signInURL + "\r\n\r\n")
 	b.WriteString("Mitos gives you a persistent control plane that runs your forks, agents, and\r\n")
-	b.WriteString("automations around the clock. Everything you need is waiting in your dashboard.\r\n\r\n")
+	b.WriteString("automations around the clock. Your dashboard, first fork, and API keys are ready now.\r\n\r\n")
 	b.WriteString("Welcome aboard.\r\n")
 	b.WriteString("The Mitos team\r\n")
 	return []byte(b.String())
