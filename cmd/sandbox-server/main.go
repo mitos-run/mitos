@@ -330,6 +330,13 @@ func main() {
 	mux.HandleFunc("POST /v1/templates", s.handleCreateTemplate)
 	mux.HandleFunc("GET /v1/templates", s.handleListTemplates)
 	mux.HandleFunc("POST /v1/fork", s.handleFork)
+	// Live-state fork (issue #596): fork an ALREADY-RUNNING sandbox, carrying its
+	// live memory AND its on-disk filesystem to the child, instead of re-forking
+	// the cold template. The source is the {id} path component; the child boots
+	// from the source's paused checkpoint through engine.ForkRunning. This is the
+	// standalone-server peer of the cluster FromSandbox path the cluster SDK
+	// already drives.
+	mux.HandleFunc("POST /v1/sandboxes/{id}/fork", s.handleForkRunning)
 	mux.HandleFunc("GET /v1/sandboxes", s.handleListSandboxes)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", s.handleTerminate)
 	// Standalone guest-port forward (issue #228): open a host TCP listener that
@@ -760,6 +767,151 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	log.Printf("fork %q from %q in %.2fms", req.ID, req.Template, info.ForkTimeMs)
+	resp(w, info)
+}
+
+// liveForkReq is the body for POST /v1/sandboxes/{id}/fork: the child id and
+// whether to pause the source across the checkpoint. Template is accepted and
+// echoed for the hosted-gateway compatibility path (the gateway maps this route
+// to sandbox.create, whose control-plane handler reads the template as the pool)
+// but the STANDALONE live fork ignores it: the source is the {id} path
+// component, and the child descends from that running sandbox, not a template.
+type liveForkReq struct {
+	ID          string `json:"id"`
+	PauseSource bool   `json:"pause_source"`
+	Template    string `json:"template"`
+}
+
+// handleForkRunning forks an ALREADY-RUNNING sandbox (issue #596). Unlike
+// handleFork, which restores a cold template, this checkpoints the running
+// source (memory + on-disk filesystem, captured while the source is paused so
+// the two are consistent) and boots the child from that checkpoint through
+// engine.ForkRunning. It reuses handleFork's guards: safe-id path-traversal
+// checks on BOTH the source and child ids, the Idempotency-Key contract, and the
+// FAIL-CLOSED reseed handshake (a child that never confirmed a fresh CRNG seed
+// is never served). It returns the same sandboxInfo shape handleFork returns, so
+// the SDK's post-fork reconnect logic is unchanged. The standalone server keeps
+// the loopback tokenless trust model of the other /v1 routes.
+func (s *server) handleForkRunning(w http.ResponseWriter, r *http.Request) {
+	sourceID := r.PathValue("id")
+	var req liveForkReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errResp(w, "invalid json", 400)
+		return
+	}
+	// Path-traversal guard: BOTH the source (path component) and the new child id
+	// (path component) become host path components in the engine. Reject unsafe
+	// ids at the boundary with a 400 (CodeQL go/path-injection).
+	if !safeIDComponent(sourceID) {
+		errResp(w, "invalid source id: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", 400)
+		return
+	}
+	if !safeIDComponent(req.ID) {
+		errResp(w, "invalid id: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", 400)
+		return
+	}
+
+	// Idempotency (issue #22): a repeat live fork with the same Idempotency-Key
+	// returns the child the first call forked, never a duplicate. Resolved before
+	// any checkpoint work so a retry never drives a second restore.
+	idemKey := r.Header.Get(idempotencyHeader)
+	existingID, idemSt := s.beginIdempotent(idemKey, idempotencyFork)
+	if idemSt == idemInFlight {
+		errResp(w, "a fork with this Idempotency-Key is already in progress; retry shortly", 409)
+		return
+	}
+	if idemSt == idemReplay {
+		s.mu.RLock()
+		existing := s.sandboxes[existingID]
+		s.mu.RUnlock()
+		if existing != nil {
+			resp(w, existing)
+			return
+		}
+		// The recorded child was since terminated; fall through and re-fork under
+		// the same key (recordIdempotent below rebinds it).
+	}
+
+	// The source must be an ALREADY-RUNNING sandbox: a live fork descends from a
+	// running VM, not a template. A missing source is a 404, never a template
+	// lookup.
+	s.mu.RLock()
+	source, ok := s.sandboxes[sourceID]
+	s.mu.RUnlock()
+	if !ok {
+		s.releaseIdempotent(idemKey)
+		errResp(w, fmt.Sprintf("sandbox %q not found", sourceID), 404)
+		return
+	}
+
+	start := time.Now()
+	if s.mockMode {
+		time.Sleep(800 * time.Microsecond)
+	}
+
+	// vsockPath is the child's per-fork guest agent UDS. In real mode with a live
+	// engine it is the REAL path engine.ForkRunning returned; otherwise (real-mode
+	// unit tests with no engine) it is derived from the data dir, which does not
+	// exist on disk so the standalone unix fallback routes the dial to the local
+	// agent. forkTimeMs is the measured checkpoint+restore time when the engine
+	// forks.
+	vsockPath := ""
+	forkTimeMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if !s.mockMode {
+		if s.engine != nil {
+			// Real live fork: checkpoint the running source and restore the child
+			// through the proven engine path. On failure release the idempotency
+			// reservation and reap any partial VM so a failed fork never leaks a
+			// Firecracker process.
+			res, err := s.engine.ForkRunning(sourceID, req.ID, req.PauseSource)
+			if err != nil {
+				s.releaseIdempotent(idemKey)
+				_ = s.engine.Terminate(req.ID)
+				errResp(w, fmt.Sprintf("live fork %q from %q: %v", req.ID, sourceID, err), 500)
+				return
+			}
+			vsockPath = res.VsockPath
+			forkTimeMs = res.ForkTimeMs
+		} else {
+			// No engine (real-mode unit tests): derive the vsock path from the data
+			// dir. It will not exist, so RegisterSandbox's unix fallback applies.
+			vsockPath = filepath.Join(s.dataDir, "sandboxes", req.ID, "vsock.sock")
+		}
+	}
+
+	// The child inherits the SOURCE's template id and network posture: it descends
+	// from the running source, so it lives under the same template and is governed
+	// by the same policy.
+	info := &sandboxInfo{
+		ID: req.ID, TemplateID: source.TemplateID,
+		Endpoint: "http://localhost:8080", CreatedAt: time.Now(),
+		ForkTimeMs: forkTimeMs,
+		Network:    source.Network,
+	}
+
+	// FAIL CLOSED reseed handshake, identical to the cold fork path: a live fork
+	// restores a checkpoint, so the child shares the source's CRNG state until it
+	// reseeds. If the agent is unreachable, the notify fails, or the guest reports
+	// it did not reseed, the fork is rejected and never registered. Mock mode has
+	// no guest, so it skips the handshake.
+	if !s.mockMode {
+		if err := s.registerAndReseed(req.ID, vsockPath); err != nil {
+			s.sandboxAPI.UnregisterSandbox(req.ID)
+			s.releaseIdempotent(idemKey)
+			if s.engine != nil {
+				_ = s.engine.Terminate(req.ID)
+			}
+			errResp(w, fmt.Sprintf("live fork %q from %q: %v", req.ID, sourceID, err), 500)
+			return
+		}
+	}
+
+	s.mu.Lock()
+	s.sandboxes[req.ID] = info
+	s.recordIdempotent(idemKey, idempotencyFork, req.ID)
+	s.mu.Unlock()
+
+	log.Printf("live fork %q from running %q in %.2fms", req.ID, sourceID, info.ForkTimeMs)
 	resp(w, info)
 }
 

@@ -216,6 +216,25 @@ def _make_fake_server():
                 state["sandboxes"][sid] = info
                 state["files"].setdefault(sid, {})
                 self._json(200, info)
+            elif self.path.startswith("/v1/sandboxes/") and self.path.endswith("/fork"):
+                # Live fork (issue #596): the source is the {id} path component and
+                # must already be a running sandbox; the child inherits its template
+                # id and the source's files (live filesystem carry).
+                source = self.path[len("/v1/sandboxes/"):-len("/fork")]
+                src = state["sandboxes"].get(source)
+                if src is None:
+                    self._err(404, "sandbox not found")
+                    return
+                sid = req["id"]
+                info = {
+                    "id": sid, "template_id": src["template_id"],
+                    "endpoint": "http://localhost", "fork_time_ms": 0.9,
+                }
+                state["sandboxes"][sid] = info
+                # The child sees the source's on-disk files (live fork carries the
+                # filesystem), then diverges copy-on-write.
+                state["files"][sid] = dict(state["files"].get(source, {}))
+                self._json(200, info)
             else:
                 self._err(404, "not found")
 
@@ -727,6 +746,13 @@ async def _async_app(scope, receive, send):
     if path == "/v1/fork":
         await send_json(200, {"id": req["id"], "template_id": req["template"],
                               "endpoint": "http://sb", "fork_time_ms": 0.8})
+        return
+    if path.startswith("/v1/sandboxes/") and path.endswith("/fork") and method == "POST":
+        # Live fork (issue #596): the child inherits the source's template id
+        # (carried in the body for gateway compatibility) and descends from the
+        # running source named in the path.
+        await send_json(200, {"id": req["id"], "template_id": req.get("template", "python"),
+                              "endpoint": "http://sb", "fork_time_ms": 0.9})
         return
     if path.startswith("/v1/sandboxes/") and method == "DELETE":
         await send_json(200, {"status": "terminated"})
