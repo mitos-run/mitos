@@ -250,13 +250,15 @@ func main() {
 		logger.Info("billing webhook mounted at /webhooks/billing")
 	}
 	// GET /auth/connectors is a PUBLIC, pre-auth endpoint that returns the list
-	// of configured social-login providers (e.g. ["github"]). The SPA fetches
-	// it before any session exists so the Login/Signup pages can show only the
-	// buttons for providers that are actually configured. The response carries
-	// NO org data: only provider names that came from a server-controlled env
-	// var. It is mounted OUTSIDE the session middleware so no cookie is needed.
-	// The endpoint is intentionally minimal: {"connectors":["github"]} or
-	// {"connectors":[]} when none are configured.
+	// of configured social-login providers (e.g. ["github"]) plus the
+	// server-controlled signup flag. The SPA fetches it before any session
+	// exists so the Login/Signup pages can show only the buttons for providers
+	// that are actually configured and can hide self-serve signup when the
+	// deployment disables it. The response carries NO org data: only
+	// server-controlled deployment configuration. It is mounted OUTSIDE the
+	// session middleware so no cookie is needed. The endpoint is intentionally
+	// minimal: {"connectors":["github"],"signup":true} or
+	// {"connectors":[],"signup":false} when nothing is configured.
 	mux.HandleFunc("GET /auth/connectors", newAuthConnectorsHandler(caps))
 
 	// The identity resolve endpoint is an INTERNAL machine-to-machine endpoint,
