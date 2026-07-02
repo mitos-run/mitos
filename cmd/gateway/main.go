@@ -19,11 +19,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -149,14 +153,35 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", gw)
 	mux.Handle("/sandbox.v1.Sandbox/", gw)
+	// Liveness stays a static 200 (the process is up); readiness is split out to
+	// /readyz so a draining replica is removed from the Service before its
+	// in-flight requests are cut. draining flips on SIGTERM/SIGINT below.
+	var draining atomic.Bool
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/readyz", newReadyzHandler(&draining))
 
 	logger.Info("gateway listening", "addr", *addr)
 	srv := &http.Server{Addr: *addr, Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+
+	// Graceful shutdown (same pattern and timeout as cmd/frontdoor): serve in a
+	// goroutine, then on SIGTERM/SIGINT flip readiness to 503 and drain in-flight
+	// requests (API calls, billing-relevant creates) inside a bounded timeout
+	// instead of dropping them on every rollout.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("gateway: listen: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	<-stop
+	draining.Store(true)
+	logger.Info("gateway shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }

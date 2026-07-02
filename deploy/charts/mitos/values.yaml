@@ -33,6 +33,14 @@ controller:
     pullPolicy: IfNotPresent
   # Number of controller replicas. Multiple replicas run HA with leader election.
   replicas: 2
+  # PodDisruptionBudget for the controller Deployment. Opt-in: enable it when
+  # replicas > 1 so a node drain always leaves minAvailable controller pods
+  # serving (leader election keeps reconciliation on the survivor). With a
+  # single replica a minAvailable-1 PDB would block every drain, so the default
+  # is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   # Controller container resource requests and limits.
   resources:
     requests:
@@ -414,6 +422,12 @@ console:
   # no longer matches (#427). Default to 1; running more than one for HA requires a
   # shared session store first (sticky sessions or a backed store).
   replicas: 1
+  # PodDisruptionBudget for the console Deployment. Opt-in: enable it only when
+  # replicas > 1 (see the replicas caveat above); with a single replica a
+  # minAvailable-1 PDB would block every node drain, so the default is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   resources:
     requests:
       memory: "64Mi"
@@ -543,6 +557,13 @@ gateway:
     tag: ""
     pullPolicy: IfNotPresent
   replicas: 2
+  # PodDisruptionBudget for the gateway Deployment. Opt-in: enable it when
+  # replicas > 1 so a node drain always leaves minAvailable gateway pods
+  # serving the public API. With a single replica a minAvailable-1 PDB would
+  # block every drain, so the default is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   # Abuse-control enforcement (quotas, rate limits, and the kill-switch). Default
   # on for the hosted profile: a public multi-tenant front door must enforce
   # per-org quotas, per-org and per-IP rate limits, the per-sandbox size cap, and

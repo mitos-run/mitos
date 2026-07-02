@@ -23,13 +23,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"html/template"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"mitos.run/mitos/cmd/console/spa"
@@ -176,6 +179,10 @@ func main() {
 	// follow-up. No billing provider is involved: Drawdown only prices the
 	// record and debits prepaid credit, idempotently per (org, sandbox, window).
 	// The driver logs counts only, never balances or costs.
+	// rootCtx is canceled on shutdown so the drawdown driver's background loop
+	// stops cleanly instead of ticking into a dying process.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
 	_, usageLive := usageStore.(*usage.HTTPStore)
 	ddInterval, err := drawdownInterval(os.Getenv("MITOS_CONSOLE_DRAWDOWN_INTERVAL"), usageLive)
 	if err != nil {
@@ -183,7 +190,7 @@ func main() {
 	}
 	if ddInterval > 0 {
 		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: billing.DefaultRates()})
-		startDrawdownDriver(context.Background(), logger, ddInterval, store, usageStore, dd)
+		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
 	} else {
 		logger.Info("usage drawdown driver disabled (in-memory usage store or interval 0/off)")
@@ -290,16 +297,41 @@ func main() {
 	} else {
 		logger.Warn("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN unset; POST /internal/approve-signup not mounted")
 	}
+	// Liveness stays a static 200 (the process is up); readiness is split out to
+	// /readyz, which pings the configured Postgres pool with a short timeout so a
+	// console with a dead database is removed from the Service instead of serving
+	// failures. With in-memory persistence (pool == nil) /readyz is always 200.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	var readyDB pgPinger
+	if pool != nil {
+		readyDB = pool
+	}
+	mux.HandleFunc("/readyz", newReadyzHandler(readyDB))
 
 	logger.Info("console listening", "addr", *addr, "dev", *dev)
 	srv := &http.Server{Addr: *addr, Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+
+	// Graceful shutdown (same pattern and timeout as cmd/frontdoor): serve in a
+	// goroutine, then on SIGTERM/SIGINT stop the background loops and drain
+	// in-flight requests (API calls, billing webhooks) inside a bounded timeout
+	// instead of dropping them on every rollout.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("console: listen: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	<-stop
+	logger.Info("console shutting down")
+	rootCancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }
 
 // sessionStoreAdapter bridges saas.Sessions to the console.SessionLister
