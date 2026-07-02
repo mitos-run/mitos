@@ -29,9 +29,16 @@ func (f fakeProvider) PortalURL(_ context.Context, _ string) (string, error) {
 
 type fakeCustomers map[string]string
 
-func (f fakeCustomers) OrgForCustomer(_ context.Context, c string) (string, bool) {
+func (f fakeCustomers) OrgForCustomer(_ context.Context, c string) (string, bool, error) {
 	o, ok := f[c]
-	return o, ok
+	return o, ok, nil
+}
+
+// errCustomers is a CustomerResolver whose store is down: every lookup errors.
+type errCustomers struct{}
+
+func (errCustomers) OrgForCustomer(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("store unavailable")
 }
 
 func handle(t *testing.T, p Provider) (*httptest.ResponseRecorder, *billing.MemStatusStore) {
@@ -77,6 +84,24 @@ func TestUnknownCustomerAcknowledged(t *testing.T) {
 	w, _ := handle(t, fakeProvider{ev: Event{Status: billing.StatusSuspended, CustomerRef: "cus_unknown"}})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 ack", w.Code)
+	}
+}
+
+// TestCustomerLookupFailureIsRetried asserts a customer-store FAILURE (as
+// opposed to an unknown customer) is a 5xx, so the provider retries and a
+// transient store error cannot permanently drop a status sync (issue #614).
+func TestCustomerLookupFailureIsRetried(t *testing.T) {
+	status := billing.NewMemStatusStore()
+	h := NewWebhookHandler(fakeProvider{ev: Event{Status: billing.StatusSuspended, CustomerRef: "cus_alice"}}, errCustomers{}, status, nil, nil)
+	r := httptest.NewRequest("POST", "/webhooks/billing", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (a lookup failure must not be acked)", w.Code)
+	}
+	got, _ := status.Status(context.Background(), "org-alice")
+	if got != billing.StatusActive {
+		t.Fatalf("failed lookup changed status to %q", got)
 	}
 }
 
