@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/mitos-run/mitos/compare/v1.13.0...v1.13.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **console:** first-run snippets use the hosted surface, not cluster-mode AgentRun ([#603](https://github.com/mitos-run/mitos/issues/603)) ([#604](https://github.com/mitos-run/mitos/issues/604)) ([2b8806a](https://github.com/mitos-run/mitos/commit/2b8806a7718e0b9b37017f2eda350238b2405afd))
+* **saas:** sandboxes scope implies read-only so default keys can list ([#599](https://github.com/mitos-run/mitos/issues/599)) ([#600](https://github.com/mitos-run/mitos/issues/600)) ([fb3bc2a](https://github.com/mitos-run/mitos/commit/fb3bc2aed8fcfcb68badb24222ba4afc07a7047d))
+
 ## [1.13.0](https://github.com/mitos-run/mitos/compare/v1.12.0...v1.13.0) (2026-07-02)
 
 
