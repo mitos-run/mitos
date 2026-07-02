@@ -101,10 +101,14 @@ func TestCapabilitiesFromEnvConnectors(t *testing.T) {
 // TestAuthConnectorsEndpoint asserts the public GET /auth/connectors handler
 // returns the correct JSON payload without requiring a session. This endpoint
 // is the pre-auth data source the SPA Login/Signup pages consume to render
-// only the social-login buttons for configured providers.
+// only the social-login buttons for configured providers and to decide
+// whether to offer self-serve signup (the server-controlled caps.Signup flag;
+// /console/capabilities sits behind the session middleware in production so
+// the pre-auth pages cannot read it there).
 func TestAuthConnectorsEndpoint(t *testing.T) {
 	type resp struct {
 		Connectors []string `json:"connectors"`
+		Signup     bool     `json:"signup"`
 	}
 
 	hit := func(t *testing.T, caps console.Capabilities) resp {
@@ -147,6 +151,20 @@ func TestAuthConnectorsEndpoint(t *testing.T) {
 		}
 		if len(got.Connectors) != 0 {
 			t.Errorf("connectors = %v, want []", got.Connectors)
+		}
+	})
+
+	t.Run("signup flag mirrors caps.Signup", func(t *testing.T) {
+		got := hit(t, console.Capabilities{Signup: true, AuthConnectors: []string{}})
+		if !got.Signup {
+			t.Error("signup = false, want true when caps.Signup is true")
+		}
+	})
+
+	t.Run("signup defaults to false (the #208 gate)", func(t *testing.T) {
+		got := hit(t, console.Capabilities{AuthConnectors: []string{"github"}})
+		if got.Signup {
+			t.Error("signup = true, want false when caps.Signup is unset")
 		}
 	})
 }

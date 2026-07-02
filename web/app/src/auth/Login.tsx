@@ -10,7 +10,7 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button } from '@mitos/brand'
-import { AuthShell, ProviderButtons, resolveNext, useAuthConnectors } from './authCommon'
+import { AuthShell, ProviderButtons, orgSignInHref, resolveNext, useAuthConfig } from './authCommon'
 
 // ---- Page-specific styles --------------------------------------------------
 
@@ -32,7 +32,12 @@ export type LoginProps = {
 export function Login({ next }: LoginProps) {
   const [email, setEmail] = useState('')
   const resolvedNext = resolveNext(next)
-  const connectors = useAuthConnectors()
+  const { connectors, signup } = useAuthConfig()
+  // The email form's only action is the /signup handoff, so the whole form is
+  // the signup CTA. It hides only when the server positively disabled signup;
+  // while loading or on error (signup === null) it stays, so a transient
+  // failure never removes a hosted deployment's signup path.
+  const signupDisabled = signup === false
 
   function handleEmailSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -49,31 +54,41 @@ export function Login({ next }: LoginProps) {
 
       {/* Provider links: full navigations to the Go /auth/login endpoint.
           Only renders buttons for providers returned by /auth/connectors. */}
-      <ProviderButtons next={resolvedNext} connectors={connectors} />
+      <ProviderButtons next={resolvedNext} connectors={connectors} divider={!signupDisabled} />
 
-      {/* Email to signup flow */}
-      <form
-        className="login-email-form"
-        onSubmit={handleEmailSubmit}
-        aria-label="Continue with email"
-      >
-        <div className="form-row">
-          <label htmlFor="login-email">Email</label>
-          <input
-            id="login-email"
-            type="email"
-            name="email"
-            autoComplete="email"
-            autoFocus
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-        </div>
-        <Button variant="ghost" type="submit">
-          Sign up with email
-        </Button>
-      </form>
+      {/* Email to signup flow; hidden when the deployment disables signup. */}
+      {!signupDisabled && (
+        <form
+          className="login-email-form"
+          onSubmit={handleEmailSubmit}
+          aria-label="Continue with email"
+        >
+          <div className="form-row">
+            <label htmlFor="login-email">Email</label>
+            <input
+              id="login-email"
+              type="email"
+              name="email"
+              autoComplete="email"
+              autoFocus
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+          <Button variant="ghost" type="submit">
+            Sign up with email
+          </Button>
+        </form>
+      )}
+
+      {/* No dead ends: with signup off and no social providers configured, the
+          identity provider's own sign-in is still one click away. */}
+      {signupDisabled && connectors.length === 0 && (
+        <a href={orgSignInHref(resolvedNext)} className="auth-link-btn">
+          Sign in with your organization account
+        </a>
+      )}
     </AuthShell>
   )
 }

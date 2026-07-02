@@ -73,10 +73,14 @@ func parseAuthConnectors(raw string) []string {
 // newAuthConnectorsHandler returns a PUBLIC http.HandlerFunc for
 // GET /auth/connectors. It responds with the connector list from caps so the
 // Login/Signup SPA pages can render only the social-login buttons for
-// providers that are actually wired up. No auth cookie is required: the
-// response carries no org data, only server-controlled provider names.
+// providers that are actually wired up, and with the server-controlled signup
+// flag so those pages can hide self-serve signup when the deployment disables
+// it (in production /console/capabilities sits behind the session middleware,
+// so this is the pre-auth pages' only capability source). No auth cookie is
+// required: the response carries no org data, only server-controlled
+// deployment configuration.
 func newAuthConnectorsHandler(caps console.Capabilities) http.HandlerFunc {
-	// Capture the slice at startup; it is immutable for the lifetime of the
+	// Capture the values at startup; they are immutable for the lifetime of the
 	// process (capabilities change only on redeploy).
 	connectors := caps.AuthConnectors
 	if connectors == nil {
@@ -84,8 +88,9 @@ func newAuthConnectorsHandler(caps console.Capabilities) http.HandlerFunc {
 	}
 	type response struct {
 		Connectors []string `json:"connectors"`
+		Signup     bool     `json:"signup"`
 	}
-	body, err := json.Marshal(response{Connectors: connectors})
+	body, err := json.Marshal(response{Connectors: connectors, Signup: caps.Signup})
 	if err != nil {
 		// json.Marshal on a []string never errors; this branch is unreachable
 		// in practice, but keeps the compiler and errcheck satisfied.
