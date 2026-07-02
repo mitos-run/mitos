@@ -98,6 +98,18 @@ func main() {
 		creditLedger = billing.NewMemCreditLedger()
 	}
 
+	// Billing rate table: MITOS_CONSOLE_RATES (a JSON object mapping onto
+	// billing.Rates; Helm value console.billing.rates) REPLACES the built-in
+	// illustrative defaults when set. A malformed value fails startup (fail
+	// closed) rather than silently pricing usage at the wrong rates; the parse
+	// error carries the remediation text. The SAME table prices the billing
+	// view, the drawdown driver, and (via ToPriceList) the display cost
+	// estimate, so they never drift. See docs/saas/pricing.md.
+	rates, err := billing.ParseRatesConfig(os.Getenv("MITOS_CONSOLE_RATES"))
+	if err != nil {
+		log.Fatalf("MITOS_CONSOLE_RATES: %v", err)
+	}
+
 	bill := setupBilling(logger, statusStore, creditLedger)
 
 	// sessionStore is created before console.New so it can be passed into
@@ -137,8 +149,12 @@ func main() {
 			Ledger: creditLedger,
 			Status: statusStore,
 			Caps:   spendCapStore,
-			Rates:  billing.DefaultRates(),
+			Rates:  rates,
 		},
+		// The display price list derives from the SAME configured rate table
+		// the ledger bills with, so the estimate a user sees matches what is
+		// charged.
+		Prices: rates.ToPriceList(),
 		// The active secret backend selected from config (kube / openbao), falling
 		// back to in-memory in dev. Capabilities advertise the same providers.
 		Secrets: buildSecretStore(logger, caps),
@@ -174,11 +190,11 @@ func main() {
 	// dev fallback (nothing real to settle); MITOS_CONSOLE_DRAWDOWN_INTERVAL
 	// overrides (a Go duration, or 0/off to disable). The service is built over
 	// the SAME credit ledger and status store the BFF billing view reads, and
-	// prices with the default rate table (billing.DefaultRates,
-	// docs/saas/pricing.md); a configurable price list is a documented
-	// follow-up. No billing provider is involved: Drawdown only prices the
-	// record and debits prepaid credit, idempotently per (org, sandbox, window).
-	// The driver logs counts only, never balances or costs.
+	// prices with the SAME rate table (billing.DefaultRates unless
+	// MITOS_CONSOLE_RATES overrides it; docs/saas/pricing.md). No billing
+	// provider is involved: Drawdown only prices the record and debits prepaid
+	// credit, idempotently per (org, sandbox, window). The driver logs counts
+	// only, never balances or costs.
 	// rootCtx is canceled on shutdown so the drawdown driver's background loop
 	// stops cleanly instead of ticking into a dying process.
 	rootCtx, rootCancel := context.WithCancel(context.Background())
@@ -189,7 +205,7 @@ func main() {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: billing.DefaultRates()})
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates})
 		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
 	} else {

@@ -124,6 +124,63 @@ spec:
             - name: MITOS_CONSOLE_BILLING
               value: {{ .Values.console.billing.enabled | quote }}
             {{- /*
+            Self-host operator knobs, first-class values (previously only
+            reachable via extraEnv). Each renders ONLY when set, so a default
+            install carries no extra env and the binary defaults apply. None of
+            these values is a secret; the captcha secret below is the one
+            exception and rides a secretKeyRef.
+            */}}
+            {{- if .Values.console.signupCreditCents }}
+            - name: MITOS_CONSOLE_SIGNUP_CREDIT_CENTS
+              value: {{ .Values.console.signupCreditCents | quote }}
+            {{- end }}
+            {{- with .Values.console.autoAllowDomains }}
+            - name: MITOS_CONSOLE_AUTOALLOW_DOMAINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.console.authConnectors }}
+            - name: MITOS_CONSOLE_AUTH_CONNECTORS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.console.antiAbuse }}
+            {{- if and .friendlyCaptcha.siteKey .friendlyCaptcha.secretRef.name }}
+            - name: MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY
+              value: {{ .friendlyCaptcha.siteKey | quote }}
+            - name: MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .friendlyCaptcha.secretRef.name | quote }}
+                  key: {{ .friendlyCaptcha.secretRef.key | default "friendly-captcha-secret" | quote }}
+            {{- if .friendlyCaptcha.url }}
+            - name: MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL
+              value: {{ .friendlyCaptcha.url | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .disposableAllowDomains }}
+            - name: MITOS_CONSOLE_DISPOSABLE_ALLOW
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if ne (toString .signupIPLimit) "" }}
+            - name: MITOS_CONSOLE_SIGNUP_IP_LIMIT
+              value: {{ .signupIPLimit | quote }}
+            {{- end }}
+            {{- if ne (toString .signupIPWindow) "" }}
+            - name: MITOS_CONSOLE_SIGNUP_IP_WINDOW
+              value: {{ .signupIPWindow | quote }}
+            {{- end }}
+            {{- end }}
+            {{- /*
+            Billing rate table (docs/saas/pricing.md): the values map renders as
+            ONE JSON env value the binary parses strictly (unknown keys and
+            negative rates fail startup). Not gated by billing.enabled: the
+            rate table also prices the credit drawdown and the display cost
+            estimate, which run regardless of the provider surface.
+            */}}
+            {{- with .Values.console.billing.rates }}
+            - name: MITOS_CONSOLE_RATES
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- /*
             Paddle (Merchant of Record) selection. The provider switches to Paddle
             only when BOTH the API key and the webhook signing secret are present;
             otherwise the binary keeps the Stripe default. Both are SECRETS,
@@ -153,6 +210,19 @@ spec:
             {{- if .Values.console.billing.paddle.baseURL }}
             - name: MITOS_CONSOLE_PADDLE_BASE_URL
               value: {{ .Values.console.billing.paddle.baseURL | quote }}
+            {{- end }}
+            {{- /*
+            Prepaid top-up checkout (Paddle only). The product id and currency
+            are plain config, not secrets; an empty product id disables the
+            affordance in the binary, so nothing renders until it is set.
+            */}}
+            {{- if .Values.console.billing.paddle.topUpProduct }}
+            - name: MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT
+              value: {{ .Values.console.billing.paddle.topUpProduct | quote }}
+            {{- end }}
+            {{- if .Values.console.billing.paddle.currency }}
+            - name: MITOS_CONSOLE_PADDLE_CURRENCY
+              value: {{ .Values.console.billing.paddle.currency | quote }}
             {{- end }}
             {{- end }}
             - name: MITOS_CONSOLE_OIDC_ISSUER

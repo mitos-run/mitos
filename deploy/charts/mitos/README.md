@@ -162,6 +162,19 @@ already optional, so a missing secret never blocks forkd from starting.
 | `imagePullSecret.dockerconfigjson` | `{"auths":{}}` base64 | Base64 dockerconfigjson value used when `create=true`. |
 | `imagePullSecrets` | `[]` | Pull-secret names attached to every workload pod. Empty by default (public images); populate for a private mirror. |
 | `commonLabels` | `{}` | Extra labels merged onto every resource. |
+| `controller.usage.priceList` | `{}` | Display price list for the internal usage API (`MITOS_USAGE_PRICELIST`, dollars per unit, rendered as one JSON env). Non-empty REPLACES the illustrative defaults; unknown keys or negative values fail controller startup. Keep consistent with `console.billing.rates`. |
+| `console.signupCreditCents` | `0` | Signup credit for a newly verified org in integer cents (`MITOS_CONSOLE_SIGNUP_CREDIT_CENTS`). 0 renders no env (binary default applies). |
+| `console.autoAllowDomains` | `[]` | Email domains whose signups bypass manual allowlist approval (`MITOS_CONSOLE_AUTOALLOW_DOMAINS`, comma-joined). Empty renders no env; the binary defaults to `mitos.run`. |
+| `console.authConnectors` | `[]` | Social-login connectors advertised at `GET /auth/connectors` (`MITOS_CONSOLE_AUTH_CONNECTORS`). Known values: `github`, `google`. |
+| `console.antiAbuse.friendlyCaptcha.siteKey` | `""` | Friendly Captcha sitekey (`MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY`). Captcha env renders only when both the sitekey and the secret ref are set. |
+| `console.antiAbuse.friendlyCaptcha.secretRef` | `name: ""`, `key: friendly-captcha-secret` | Existing Secret holding the Friendly Captcha API secret, injected via secretKeyRef ONLY (`MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET`). |
+| `console.antiAbuse.friendlyCaptcha.url` | `""` | Verification API base URL override (`MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL`). |
+| `console.antiAbuse.disposableAllowDomains` | `[]` | Email domains exempted from the disposable-domain blocklist (`MITOS_CONSOLE_DISPOSABLE_ALLOW`, comma-joined). |
+| `console.antiAbuse.signupIPLimit` | `""` | Per-IP signup velocity cap (`MITOS_CONSOLE_SIGNUP_IP_LIMIT`). Empty renders no env (binary default 10 per 1h); `"0"` disables the cap. |
+| `console.antiAbuse.signupIPWindow` | `""` | Velocity window as a Go duration (`MITOS_CONSOLE_SIGNUP_IP_WINDOW`), e.g. `30m`. |
+| `console.billing.paddle.topUpProduct` | `""` | Paddle product id for prepaid credit top-up checkout (`MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT`). Empty disables the affordance. |
+| `console.billing.paddle.currency` | `""` | ISO currency code for top-up checkout (`MITOS_CONSOLE_PADDLE_CURRENCY`). Empty uses the binary default (EUR). |
+| `console.billing.rates` | `{}` | Billing rate table (`MITOS_CONSOLE_RATES`, milli-cents per unit, rendered as one JSON env). Non-empty REPLACES the illustrative defaults entirely; unknown keys or negative values fail console startup. Use a values file or `--set-json` for fractional values. See `docs/saas/pricing.md`. |
 
 ## Security notes
 
