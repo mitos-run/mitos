@@ -85,6 +85,38 @@ controller:
     defaultCPU: "32"
     # Default per-org aggregate memory limit ceiling (a Kubernetes quantity).
     defaultMemory: "64Gi"
+  # Usage metering (issues #164/#211/#602): the live per-org metering scraper
+  # and the bearer-gated internal usage API the hosted console reads. OFF by
+  # default: a self-host install that does not want metering renders none of it.
+  # When collector is true the chart renders --usage-collector,
+  # --usage-collector-interval, and --usage-api-address on the controller,
+  # sources MITOS_DATABASE_DSN from database.dsnSecretRef (the durable Postgres
+  # usage store; without it usage lives in memory and is LOST on restart, DEV
+  # ONLY, and with controller.replicas > 1 only the leader replica holds it),
+  # injects MITOS_USAGE_API_TOKEN from tokenSecret via secretKeyRef, adds a
+  # ClusterIP Service for the usage API port, and wires the console's
+  # MITOS_USAGE_API_URL + MITOS_USAGE_API_TOKEN to match. Attribution rule: with
+  # orgTenancy the org derives from the per-org namespace; a single-tenant
+  # (shared namespace) hosted deployment relies on the claim-time org label the
+  # controller copies from the Sandbox object the gateway stamped. Credit
+  # drawdown prices records with the built-in default rate table
+  # (billing.DefaultRates); a configurable price list is a documented follow-up.
+  usage:
+    # Run the collector and serve the internal usage API.
+    collector: false
+    # Interval between metering scrapes (--usage-collector-interval).
+    interval: "60s"
+    # Internal usage API listen address (--usage-api-address), ":<port>" form;
+    # the chart derives the container and Service port from it. The API serves
+    # ids, byte counts, and seconds only, never secret values, and fails closed
+    # without a valid bearer token.
+    apiAddress: ":8092"
+    # Existing Secret holding the internal usage API bearer token. Injected via
+    # secretKeyRef ONLY, never inline. An empty name renders no token env and
+    # the API then refuses every request (fail closed).
+    tokenSecret:
+      name: ""
+      key: "usage-api-token"
   # Extra args appended verbatim to the controller container args.
   extraArgs: []
   # Extra env vars appended verbatim to the controller container. FORKD_NAMESPACE
@@ -406,6 +438,15 @@ console:
     # (installs without OIDC are unaffected); when OIDC is configured this MUST be
     # set or the login flow fails with an empty redirect_uri.
     redirectURL: ""
+  # Usage read side (issue #602): where the console reads per-org usage from.
+  usage:
+    # Base URL of the controller's internal usage API (MITOS_USAGE_API_URL).
+    # Empty derives the in-cluster Service URL
+    # (http://mitos-controller-usage.<namespace>.svc:<port>) when
+    # controller.usage.collector is true; set it only for a split or
+    # out-of-cluster deployment. The bearer token comes from
+    # controller.usage.tokenSecret (the same secretKeyRef the controller uses).
+    url: ""
   # Extra env vars appended verbatim to the console container, for env the chart
   # does not model (mirrors controller.extraEnv).
   extraEnv: []

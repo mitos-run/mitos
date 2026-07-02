@@ -228,6 +228,25 @@ spec:
                   name: {{ .Values.expose.secretName }}
                   key: resolve-token
             {{- end }}
+            {{- /*
+            Usage read side (issue #602): the console reads the SAME per-org
+            usage the controller's collector recorded over the bearer-gated
+            internal usage API. The URL defaults to the chart's in-cluster
+            usage Service; console.usage.url overrides it for split
+            deployments. The bearer token is the SAME secretKeyRef the
+            controller gates the API on, never an inline value. Rendered when
+            the collector is on or a URL override is set; otherwise the console
+            falls back to its in-memory usage store (dev only).
+            */}}
+            {{- if or .Values.controller.usage.collector .Values.console.usage.url }}
+            - name: MITOS_USAGE_API_URL
+              {{- if .Values.console.usage.url }}
+              value: {{ .Values.console.usage.url | quote }}
+              {{- else }}
+              value: {{ printf "http://mitos-controller-usage.%s.svc%s" (include "mitos.namespace" .) .Values.controller.usage.apiAddress | quote }}
+              {{- end }}
+            {{- include "mitos.usageToken.env" . | nindent 12 }}
+            {{- end }}
             {{- include "mitos.database.env" . | nindent 12 }}
             {{- include "mitos.telemetry.env" . | nindent 12 }}
             {{- with .Values.console.extraEnv }}
