@@ -100,6 +100,16 @@ spec:
             {{- if .Values.controller.usage.collector }}
             {{- include "mitos.database.env" . | nindent 12 }}
             {{- include "mitos.usageToken.env" . | nindent 12 }}
+            {{- /*
+            Display price list for the internal usage API: the values map
+            renders as ONE JSON env value the binary parses strictly (unknown
+            keys and negative rates fail startup). Empty renders nothing and
+            the illustrative defaults apply. Not a secret.
+            */}}
+            {{- with .Values.controller.usage.priceList }}
+            - name: MITOS_USAGE_PRICELIST
+              value: {{ toJson . | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
