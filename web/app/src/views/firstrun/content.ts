@@ -30,20 +30,23 @@ import mitos
 
 sb = mitos.create("python")
 swarm = sb.fork(8)
-for run in swarm:
-    run.exec("python rollout.py")
+for i, run in enumerate(swarm):
+    print(run.exec(f"python3 -c 'print({i} ** 2)'").stdout.strip())
 `,
   typescript: `\
 import { SandboxServer } from "@mitos/sdk"
 
 const sb = await new SandboxServer().fork("python")
 const swarm = await sb.fork(8)
-await Promise.all(swarm.map((run) => run.exec("python rollout.py")))
+const results = await Promise.all(
+  swarm.map((run, i) => run.exec(\`python3 -c 'print(\${i} ** 2)'\`))
+)
+results.forEach((r) => console.log(r.stdout.trim()))
 `,
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count 8
-mitos sandbox exec <fork-id> python rollout.py
+mitos sandbox exec <fork-id> python3 -c 'print(42)'
 `,
 }
 
@@ -74,24 +77,27 @@ const EVALS = {
   python: `\
 import mitos
 
+prompts = ["2 + 2", "10 * 4.2"]
 sb = mitos.create("python")
 cases = sb.fork(len(prompts))
 for run, prompt in zip(cases, prompts):
-    run.exec(f"python eval_one.py --prompt {prompt}")
+    print(run.exec(f"python3 -c 'print({prompt})'").stdout.strip())
 `,
   typescript: `\
 import { SandboxServer } from "@mitos/sdk"
 
+const prompts = ["2 + 2", "10 * 4.2"]
 const sb = await new SandboxServer().fork("python")
 const cases = await sb.fork(prompts.length)
-await Promise.all(
-  cases.map((run, i) => run.exec(\`python eval_one.py --prompt \${prompts[i]}\`))
+const results = await Promise.all(
+  cases.map((run, i) => run.exec(\`python3 -c 'print(\${prompts[i]})'\`))
 )
+results.forEach((r) => console.log(r.stdout.trim()))
 `,
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count <n>
-mitos sandbox exec <fork-id> python eval_one.py --prompt <prompt>
+mitos sandbox exec <fork-id> python3 -c 'print(2 + 2)'
 `,
 }
 
@@ -102,20 +108,23 @@ import mitos
 
 sb = mitos.create("python")
 swarm = sb.fork(4)
-for run in swarm:
-    run.exec("python task.py")
+for i, run in enumerate(swarm):
+    print(run.exec(f"python3 -c 'print({i} ** 2)'").stdout.strip())
 `,
   typescript: `\
 import { SandboxServer } from "@mitos/sdk"
 
 const sb = await new SandboxServer().fork("python")
 const swarm = await sb.fork(4)
-await Promise.all(swarm.map((run) => run.exec("python task.py")))
+const results = await Promise.all(
+  swarm.map((run, i) => run.exec(\`python3 -c 'print(\${i} ** 2)'\`))
+)
+results.forEach((r) => console.log(r.stdout.trim()))
 `,
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count 4
-mitos sandbox exec <fork-id> python task.py
+mitos sandbox exec <fork-id> python3 -c 'print(42)'
 `,
 }
 
