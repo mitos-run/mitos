@@ -12,11 +12,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/saas"
@@ -879,4 +882,42 @@ func flipWhenCreatedInNs(t *testing.T, c client.Client, ns string, mutate func(*
 		}
 	}()
 	return func() { once.Do(func() { close(done) }) }
+}
+
+// TestCreateApiServerInvalidSurfacesValidationCause asserts that when the api
+// server rejects the sandbox OBJECT as invalid (for example an org id that is
+// not a valid label value, #593), the error surfaced to the caller carries the
+// validation message and does not claim their request body was malformed JSON.
+func TestCreateApiServerInvalidSurfacesValidationCause(t *testing.T) {
+	base := fakeclient.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&v1.Sandbox{}).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			return apierrors.NewInvalid(
+				v1.GroupVersion.WithKind("Sandbox").GroupKind(), obj.GetName(),
+				field.ErrorList{field.Invalid(
+					field.NewPath("metadata", "labels"), "bad_",
+					"a valid label must be an empty string or consist of alphanumeric characters")})
+		},
+	})
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if strings.Contains(body, "invalid_json") || strings.Contains(body, "not valid JSON") {
+		t.Errorf("error blames the caller's JSON for an object validation failure: %s", body)
+	}
+	if !strings.Contains(body, "metadata.labels") {
+		t.Errorf("error body missing the api server validation detail: %s", body)
+	}
 }
