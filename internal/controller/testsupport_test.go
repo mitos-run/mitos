@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"mitos.run/mitos/internal/cas"
@@ -266,6 +267,17 @@ func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, 
 		return err
 	}
 	return r.ensureTemplateBuilt(ctx, pool, template, nodeFilter)
+}
+
+// DriveTemplateHealthForTest exposes driveTemplateHealth to the external
+// controller_test package so the restore-failing detection + backoff-bounded
+// forced rebuild (#584) can be envtested directly against a pool object,
+// without racing the suite's manager-level pool reconciler (which runs the
+// raw-forkd path against every pool) over the same status subresource the way
+// driving the full husk-mode Reconcile would.
+func (r *SandboxPoolReconciler) DriveTemplateHealthForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, dormantPods []corev1.Pod, warmReady bool, now metav1.Time) {
+	nodeFilter, _ := r.placementFilter(ctx, pool)
+	r.driveTemplateHealth(ctx, pool, template, poolTemplateID(pool), nodeFilter, dormantPods, warmReady, now)
 }
 
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake

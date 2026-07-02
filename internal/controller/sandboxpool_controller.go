@@ -319,13 +319,23 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if res.scaledDn {
 			pool.Status.LastScaleDownTime = &now
 		}
+		warmReady := warm >= desiredWarm && readySnapshots > 0
 		setCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
-			Status:             conditionStatus(warm >= desiredWarm && readySnapshots > 0),
+			Status:             conditionStatus(warmReady),
 			LastTransitionTime: now,
 			Reason:             "HuskPodsReady",
 			Message:            fmt.Sprintf("%d/%d warm husk pods (%d in use), %d snapshot node(s)", warm, desiredWarm, res.inUse, readySnapshots),
 		})
+
+		// Restore-failing detection + backoff-bounded forced rebuild (#584): a
+		// snapshot that "built" successfully but fails to RESTORE crashloops
+		// every dormant husk pod bound to it forever, a condition no other path
+		// here rebuilds from. Must run after pool.Status.TemplateDigest above and
+		// before the status write below so its condition and RebuildAttempts/
+		// LastRebuildTime bookkeeping land in the same write.
+		r.driveTemplateHealth(ctx, &pool, template, templateID, nodeFilter, res.dormantPods, warmReady, now)
+
 		if err := r.writePoolStatusIfChanged(ctx, &pool, before, now); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -523,26 +533,18 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 		return nil
 	}
 
-	var wrappedDEK []byte
-	var kekID string
-	if template.Encrypted {
-		var keyErr error
-		// The pool owns the per-template key Secret now that the template inlines
-		// into it (no standalone SandboxTemplate object to own it).
-		wrappedDEK, kekID, keyErr = EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, pool)
-		if keyErr != nil {
-			// The error names only the Secret and the non-secret KEK id, never key
-			// bytes.
-			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
-		}
+	wrappedDEK, kekID, err := r.templateEncKey(ctx, pool, template, templateID)
+	if err != nil {
+		return err
 	}
 
 	// Content changed: rebuild the stale snapshot in place on every current holder
 	// so each produces a fresh content-addressed digest. This runs BEFORE the
 	// deficit fill so the deficit's distribution-by-pull source is the fresh
-	// snapshot, not a stale holder.
+	// snapshot, not a stale holder. force=true: this replaces a known-stale
+	// snapshot, so the node's reuse-or-rebuild gate must not skip it (#584).
 	if contentChanged {
-		if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter); err != nil {
+		if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true); err != nil {
 			return fmt.Errorf("rebuild template snapshot %s after a content change: %w", templateID, err)
 		}
 		// A rebuild does not change the holder count, but recompute so the deficit
@@ -567,15 +569,43 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	return nil
 }
 
+// templateEncKey resolves the wrapped DEK and KEK id an encrypted template's
+// CreateTemplate call must carry, ensuring the per-template key Secret exists.
+// EnsureEncKey is idempotent: a repeat call for the same templateID returns the
+// SAME wrapped bytes rather than minting a new DEK, so calling this from more
+// than one rebuild path (the content-change path and the restore-failing forced
+// rebuild, #584) never produces a snapshot encrypted under a different key than
+// its siblings. A non-encrypted template returns nil, "", nil without touching
+// Secrets.
+func (r *SandboxPoolReconciler) templateEncKey(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, templateID string) ([]byte, string, error) {
+	if !template.Encrypted {
+		return nil, "", nil
+	}
+	// The pool owns the per-template key Secret now that the template inlines
+	// into it (no standalone SandboxTemplate object to own it).
+	wrappedDEK, kekID, err := EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, pool)
+	if err != nil {
+		// The error names only the Secret and the non-secret KEK id, never key
+		// bytes.
+		return nil, "", fmt.Errorf("ensure encryption key for template %s: %w", templateID, err)
+	}
+	return wrappedDEK, kekID, nil
+}
+
 // rebuildStaleSnapshots rebuilds the template snapshot in place on every healthy
 // node that currently holds it (within nodeFilter when set), after a template
-// content edit made the existing snapshots stale (issue #475). Each rebuild
-// overwrites the node's snapshot under the same templateID and produces a fresh
-// content-addressed digest, which the #461 stale-digest reap uses to refill the
-// warm husk pool. It never pulls (a peer's CAS chunks are stale too); every holder
-// rebuilds from the template. An empty holder set is a no-op (the deficit fill
-// then builds the snapshot fresh).
-func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templateID string, template *v1.PoolTemplateSpec, wrappedDEK []byte, kekID string, nodeFilter map[string]bool) error {
+// content edit made the existing snapshots stale (issue #475), or after the
+// restore-failing detector (#584) presumes the current snapshot is
+// restore-broken. Each rebuild overwrites the node's snapshot under the same
+// templateID and produces a fresh content-addressed digest, which the #461
+// stale-digest reap uses to refill the warm husk pool. It never pulls (a peer's
+// CAS chunks are stale too); every holder rebuilds from the template. An empty
+// holder set is a no-op (the deficit fill then builds the snapshot fresh).
+// force is threaded to buildTemplateOnNode's forkd CreateTemplate call: both
+// callers of rebuildStaleSnapshots pass force=true, because in both cases the
+// existing on-disk snapshot is known-bad and must not be silently reused by the
+// node's reuse-or-rebuild gate (#584).
+func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templateID string, template *v1.PoolTemplateSpec, wrappedDEK []byte, kekID string, nodeFilter map[string]bool, force bool) error {
 	var errs []error
 	for _, node := range r.NodeRegistry.NodesWithTemplate(templateID) {
 		if nodeFilter != nil && !nodeFilter[node.Name] {
@@ -584,7 +614,7 @@ func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templ
 		if !node.isHealthy() {
 			continue
 		}
-		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, forkdWorkload(template.Workload), forkdResources(template.Resources)); err != nil {
+		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, forkdWorkload(template.Workload), forkdResources(template.Resources), force); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 		}
 	}
@@ -704,8 +734,10 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			}
 		}
 
-		// Build path on a node that does not yet hold the template.
-		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, image, initCommands, templateVolumes, wrappedDEK, kekID, workload, resources); err != nil {
+		// Build path on a node that does not yet hold the template. Never forced:
+		// this is the deficit fill, building fresh on a node that has no snapshot
+		// yet, not replacing a known-bad one (#584).
+		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, image, initCommands, templateVolumes, wrappedDEK, kekID, workload, resources, false); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 			continue
 		}
@@ -719,11 +751,15 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 
 // buildTemplateOnNode builds (or rebuilds in place) the template snapshot on a
 // single node via forkd CreateTemplate and records the resulting content-addressed
-// digest in the registry. It is the shared build primitive behind both the deficit
-// fill (createSnapshotsOnNodes) and the content-change rebuild (rebuildStaleSnapshots),
-// so the encryption fail-closed guard and the bounded build timeout live in exactly
-// one place. The returned error is un-prefixed; callers add the node name.
-func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeName, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec) error {
+// digest in the registry. It is the shared build primitive behind the deficit fill
+// (createSnapshotsOnNodes), the content-change rebuild, and the restore-failing
+// forced rebuild (both via rebuildStaleSnapshots), so the encryption fail-closed
+// guard and the bounded build timeout live in exactly one place. force maps to
+// CreateTemplateRequest.ForceRebuild (#584): when true it tells the node to skip
+// its reuse-or-rebuild gate (bf9590df) and rebuild even if the on-disk snapshot
+// looks reusable, because the caller already knows that snapshot is stale or
+// restore-broken. The returned error is un-prefixed; callers add the node name.
+func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeName, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec, force bool) error {
 	// Fail closed: an encrypted template's WRAPPED DEK travels in CreateTemplate, so
 	// the node connection must be mTLS. Refuse to send the wrapped DEK over an
 	// insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI bootstrap
@@ -757,6 +793,7 @@ func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeNam
 		// plaintext template. The wrapped DEK is never logged.
 		EncryptionKey: wrappedDEK,
 		KekId:         kekID,
+		ForceRebuild:  force,
 	})
 	if err != nil {
 		return err
