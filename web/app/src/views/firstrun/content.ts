@@ -21,98 +21,101 @@ export type FirstRunContent = {
 }
 
 // Rollouts: warm sandbox forked into a swarm, one task per fork.
+// Hosted surface: mitos.create / SandboxServer resolve MITOS_API_KEY and
+// default to https://api.mitos.run; the cluster-mode AgentRun client needs a
+// kubeconfig a hosted signup does not have.
 const ROLLOUTS = {
   python: `\
-from mitos import AgentRun
+import mitos
 
-sb = AgentRun().sandbox("python", ready=True)
+sb = mitos.create("python")
 swarm = sb.fork(8)
 for run in swarm:
-    run.exec(["python", "rollout.py"])
+    run.exec("python rollout.py")
 `,
   typescript: `\
-import { AgentRun } from "mitos"
+import { SandboxServer } from "@mitos/sdk"
 
-const sb = await new AgentRun().sandbox("python", { ready: true })
+const sb = await new SandboxServer().fork("python")
 const swarm = await sb.fork(8)
-await Promise.all(swarm.map((run) => run.exec(["python", "rollout.py"])))
+await Promise.all(swarm.map((run) => run.exec("python rollout.py")))
 `,
   cli: `\
-mitos sandbox create --ready python
-mitos fork <sandbox-id> --count 8 \\
-  --exec "python rollout.py"
+mitos sandbox create --pool python
+mitos fork <sandbox-id> --count 8
+mitos exec <fork-id> python rollout.py
 `,
 }
 
 // Code execution: boot a warm microVM and exec a single command.
 const CODE_EXEC = {
   python: `\
-from mitos import AgentRun
+import mitos
 
-sb = AgentRun().sandbox("python", ready=True)
-result = sb.exec(["python", "-c", "print('hello from the sandbox')"])
+sb = mitos.create("python")
+result = sb.exec("python3 -c 'print(40 + 2)'")
 print(result.stdout)
 `,
   typescript: `\
-import { AgentRun } from "mitos"
+import { SandboxServer } from "@mitos/sdk"
 
-const sb = await new AgentRun().sandbox("python", { ready: true })
-const result = await sb.exec(["python", "-c", "print('hello from the sandbox')"])
+const sb = await new SandboxServer().fork("python")
+const result = await sb.exec("python3 -c 'print(40 + 2)'")
 console.log(result.stdout)
 `,
   cli: `\
-mitos sandbox create --ready python
-mitos exec <sandbox-id> python -c "print('hello from the sandbox')"
+mitos sandbox create --pool python
+mitos exec <sandbox-id> python3 -c 'print(40 + 2)'
 `,
 }
 
 // Evals: fork one sandbox per test case, no shared state.
 const EVALS = {
   python: `\
-from mitos import AgentRun
+import mitos
 
-sb = AgentRun().sandbox("python", ready=True)
+sb = mitos.create("python")
 cases = sb.fork(len(prompts))
 for run, prompt in zip(cases, prompts):
-    run.exec(["python", "eval_one.py", "--prompt", prompt])
+    run.exec(f"python eval_one.py --prompt {prompt}")
 `,
   typescript: `\
-import { AgentRun } from "mitos"
+import { SandboxServer } from "@mitos/sdk"
 
-const sb = await new AgentRun().sandbox("python", { ready: true })
+const sb = await new SandboxServer().fork("python")
 const cases = await sb.fork(prompts.length)
 await Promise.all(
-  cases.map((run, i) => run.exec(["python", "eval_one.py", "--prompt", prompts[i]]))
+  cases.map((run, i) => run.exec(\`python eval_one.py --prompt \${prompts[i]}\`))
 )
 `,
   cli: `\
-mitos sandbox create --ready python
-mitos fork <sandbox-id> --count <n> \\
-  --exec "python eval_one.py --prompt <prompt>"
+mitos sandbox create --pool python
+mitos fork <sandbox-id> --count <n>
+mitos exec <fork-id> python eval_one.py --prompt <prompt>
 `,
 }
 
 // Default: generic swarm pattern.
 const DEFAULT_SNIPPETS = {
   python: `\
-from mitos import AgentRun
+import mitos
 
-sb = AgentRun().sandbox("python", ready=True)
+sb = mitos.create("python")
 swarm = sb.fork(4)
 for run in swarm:
-    run.exec(["python", "task.py"])
+    run.exec("python task.py")
 `,
   typescript: `\
-import { AgentRun } from "mitos"
+import { SandboxServer } from "@mitos/sdk"
 
-const sb = await new AgentRun().sandbox("python", { ready: true })
+const sb = await new SandboxServer().fork("python")
 const swarm = await sb.fork(4)
-await Promise.all(swarm.map((run) => run.exec(["python", "task.py"])))
+await Promise.all(swarm.map((run) => run.exec("python task.py")))
 `,
   cli: `\
-mitos sandbox create --ready python
-mitos fork <sandbox-id> --count 4 \\
-  --exec "python task.py"
+mitos sandbox create --pool python
+mitos fork <sandbox-id> --count 4
+mitos exec <fork-id> python task.py
 `,
 }
 
