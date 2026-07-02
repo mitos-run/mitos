@@ -68,3 +68,33 @@ describe('FIRST_RUN entries: no em or en dashes', () => {
     expect(DASH_RE.test(entry.watchFor)).toBe(false)
   })
 })
+
+describe('snippets use the hosted surface a new signup can actually run', () => {
+  // AgentRun is the CLUSTER-mode client: it loads a kubeconfig and cannot work
+  // for a hosted signup, whose only credential is MITOS_API_KEY. The first-run
+  // snippet must use the hosted entry points (mitos.create / SandboxServer) or
+  // every new user's first copy-paste dies on ConfigException.
+  it('python snippets never use the cluster-mode AgentRun client', () => {
+    for (const entry of FIRST_RUN) {
+      expect(entry.snippets.python).not.toContain('AgentRun')
+      expect(entry.snippets.python).toContain('mitos.create(')
+    }
+  })
+
+  it('typescript snippets use SandboxServer from the @mitos/sdk package', () => {
+    for (const entry of FIRST_RUN) {
+      expect(entry.snippets.typescript).not.toContain('AgentRun')
+      expect(entry.snippets.typescript).toContain('SandboxServer')
+      expect(entry.snippets.typescript).toContain('@mitos/sdk')
+    }
+  })
+
+  it('cli snippets only use flags the mitos CLI actually has', () => {
+    for (const entry of FIRST_RUN) {
+      // sandbox create has --pool, not --ready; fork has --count, not --exec.
+      expect(entry.snippets.cli).not.toContain('--ready')
+      expect(entry.snippets.cli).not.toContain('--exec')
+      expect(entry.snippets.cli).toContain('--pool')
+    }
+  })
+})
