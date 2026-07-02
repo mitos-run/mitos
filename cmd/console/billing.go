@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +25,10 @@ type portalLinker struct {
 }
 
 func (p portalLinker) PortalURL(ctx context.Context, orgID string) (string, error) {
-	cust, ok := p.customers.CustomerForOrg(ctx, orgID)
+	cust, ok, err := p.customers.CustomerForOrg(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("resolve billing customer: %w", err)
+	}
 	if !ok {
 		return "", console.ErrNotFound
 	}
@@ -49,7 +53,10 @@ type topUpLinker struct {
 }
 
 func (l topUpLinker) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error) {
-	cust, ok := l.customers.CustomerForOrg(ctx, in.OrgID)
+	cust, ok, err := l.customers.CustomerForOrg(ctx, in.OrgID)
+	if err != nil {
+		return "", fmt.Errorf("resolve billing customer: %w", err)
+	}
 	if !ok {
 		return "", console.ErrNotFound
 	}
@@ -85,14 +92,20 @@ type billingWiring struct {
 //
 // Secrets: the Paddle API key and webhook secret are read from env and never
 // logged; only the selected provider's Name() is logged.
-func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger) billingWiring {
+//
+// customers is the org to billing-customer map shared by the webhook (customer
+// to org), the portal link, and top-up checkout (org to customer). The caller
+// selects it the same way it selects the credit ledger: durable
+// pgstore.PgCustomers when Postgres is configured, in-memory otherwise (DEV
+// ONLY: an in-memory map cannot survive a restart, so a webhook arriving after
+// a redeploy would drop its status sync).
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
 	var provider billingprovider.Provider
 	paddleKey := os.Getenv("MITOS_CONSOLE_PADDLE_API_KEY")
 	paddleSecret := os.Getenv("MITOS_CONSOLE_PADDLE_WEBHOOK_SECRET")
-	customers := billingprovider.NewMemCustomers() // durable mapping is a follow-up
 
 	var tu console.TopUpLinker
 	var topUpProductID, topUpCurrency string

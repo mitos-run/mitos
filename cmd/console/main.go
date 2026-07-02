@@ -35,6 +35,7 @@ import (
 	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/billingprovider"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/onboarding"
@@ -79,9 +80,17 @@ func main() {
 	accounts := saas.NewAccountService(store, keys)
 
 	caps := capabilitiesFromEnv()
-	// One status store is shared by the BFF billing view and the billing webhook
-	// so a provider event (payment failed / canceled) is reflected in the console.
-	statusStore := billing.NewMemStatusStore()
+	// One status store is shared by the BFF billing view, the billing webhook,
+	// and the drawdown service, so a provider event (payment failed / canceled)
+	// is reflected in the console. Durable Postgres when configured (a past_due
+	// or suspended state set by a webhook must survive a restart, issue #614);
+	// in-memory is the dev-only fallback.
+	var statusStore billing.StatusStore
+	if pool != nil {
+		statusStore = pgstore.NewPgStatusStore(pool)
+	} else {
+		statusStore = billing.NewMemStatusStore()
+	}
 
 	// creditLedger is the single shared instance used by the onboarding grant
 	// path, the billing view, AND the billing webhook (so a cleared top-up from
@@ -95,7 +104,19 @@ func main() {
 		creditLedger = billing.NewMemCreditLedger()
 	}
 
-	bill := setupBilling(logger, statusStore, creditLedger)
+	// customers is the org to billing-customer map the webhook resolves incoming
+	// customer ids through and the portal/top-up links resolve orgs through.
+	// Durable Postgres when configured (after a restart the webhook must still
+	// map a customer_id back to its org, or paid top-ups and status syncs are
+	// dropped, issue #614); in-memory is the dev-only fallback.
+	var customers billingprovider.Customers
+	if pool != nil {
+		customers = pgstore.NewPgCustomers(pool)
+	} else {
+		customers = billingprovider.NewMemCustomers()
+	}
+
+	bill := setupBilling(logger, statusStore, creditLedger, customers)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
