@@ -38,7 +38,13 @@ export const ROUTES: RouteDef[] = [
   { path: '/sandboxes', label: 'Sandboxes', group: 'Run', element: () => <SandboxList /> },
   { path: '/sandboxes/$id', label: 'Sandbox', group: 'Run', element: () => <SandboxDetail />, hidden: true },
   { path: '/forks', label: 'Fork tree', group: 'Run', element: () => <ForkTree /> },
-  { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => <Placeholder title="Workspaces" endpoint="/console/workspaces" phase="B2" /> },
+  { path: '/workspaces', label: 'Workspaces', group: 'Build', element: () => (
+    <Placeholder
+      title="Workspaces"
+      description="Versioned filesystems your sandboxes share and keep between runs: browse them, compare revisions, and revert."
+      today={<>Until then, manage workspaces from the CLI: <code>mitos ws create &lt;name&gt;</code> makes one and <code>mitos ws ls</code> lists what you have.</>}
+    />
+  ) },
   { path: '/templates', label: 'Templates', group: 'Build', element: () => <Templates /> },
   { path: '/secrets', label: 'Secrets', group: 'Build', element: () => <Secrets /> },
   { path: '/keys', label: 'API keys', group: 'Build', element: () => <Keys /> },
