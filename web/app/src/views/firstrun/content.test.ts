@@ -100,4 +100,16 @@ describe('snippets use the hosted surface a new signup can actually run', () => 
       expect(entry.snippets.cli).not.toMatch(/\nmitos exec /)
     }
   })
+
+  it('snippets are self-contained: no references to files the snippet never creates', () => {
+    // A fresh sandbox has no task.py / rollout.py / eval_one.py, and hosted
+    // fork re-forks the template, so a file staged in the parent does not
+    // reach the children either. A pasted snippet must produce real output,
+    // not a swarm of "can't open file" exits.
+    for (const entry of FIRST_RUN) {
+      for (const runtime of ['python', 'typescript', 'cli'] as const) {
+        expect(entry.snippets[runtime]).not.toMatch(/\w+\.(py|js)\b/)
+      }
+    }
+  })
 })
