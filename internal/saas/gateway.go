@@ -168,6 +168,15 @@ func opFromPath(method, path string) string {
 	// {"pool":"<name>"} or {"image":"<name>"}. The create handler resolves all three.
 	case p == "fork" && method == http.MethodPost:
 		return "sandbox.create"
+	// Pause and resume: the SDK calls POST /v1/pause and POST /v1/resume with the
+	// body {"sandbox":"<id>"} (issue #601). Both are mutating lifecycle verbs, so
+	// the requiredScopeFor default (the sandboxes scope) is correct. The control
+	// plane proxies them to the per-sandbox runtime endpoint, which already serves
+	// the routes (internal/daemon/lifecycle_api.go).
+	case p == "pause" && method == http.MethodPost:
+		return "sandbox.pause"
+	case p == "resume" && method == http.MethodPost:
+		return "sandbox.resume"
 	default:
 		return "sandbox." + strings.ToLower(method)
 	}
