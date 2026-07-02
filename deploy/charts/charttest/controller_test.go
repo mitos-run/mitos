@@ -127,3 +127,31 @@ func TestUsageMeteringConsoleURLOverride(t *testing.T) {
 	dep := consoleDeployment(t, render(t, sets...))
 	mustEnv(t, dep, "MITOS_USAGE_API_URL", "http://usage.internal:9000")
 }
+
+// TestUsagePriceListAbsentByDefault asserts MITOS_USAGE_PRICELIST is not
+// rendered by default, even with the collector on: unset means the binary's
+// illustrative default price list applies.
+func TestUsagePriceListAbsentByDefault(t *testing.T) {
+	for _, out := range []string{render(t), render(t, usageEnabledSets()...)} {
+		if strings.Contains(out, "MITOS_USAGE_PRICELIST") {
+			t.Fatal("MITOS_USAGE_PRICELIST rendered without controller.usage.priceList set")
+		}
+	}
+}
+
+// TestUsagePriceListRendersAsJSONEnv asserts controller.usage.priceList renders
+// as ONE JSON object in MITOS_USAGE_PRICELIST on the controller container, with
+// the keys the binary's strict parser accepts. Requires the collector: the env
+// only matters when the internal usage API runs.
+func TestUsagePriceListRendersAsJSONEnv(t *testing.T) {
+	sets := []string{
+		`controller.usage.collector=true`,
+		`controller.usage.tokenSecret.name="mitos-usage"`,
+		`database.dsnSecretRef.name="mitos-db"`,
+		`controller.usage.priceList={"vcpu_second":0.5,"egress_gib":0.09}`,
+	}
+	dep := controllerDeployment(t, renderJSON(t, sets...))
+	mustContain(t, dep, "- name: MITOS_USAGE_PRICELIST")
+	mustContain(t, dep, `\"vcpu_second\":0.5`)
+	mustContain(t, dep, `\"egress_gib\":0.09`)
+}
