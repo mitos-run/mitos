@@ -130,6 +130,18 @@ func main() {
 		spendCapStore = billing.NewMemSpendCapStore()
 	}
 
+	// auditLog is the durable org audit trail when Postgres is configured
+	// (issue #616), in-memory otherwise (dev only). Without Postgres the
+	// recorded actions (key create/revoke, member changes, billing actions)
+	// are wiped on every restart, which undermines the audit view and export.
+	var auditLog console.AuditRecorder
+	if pool != nil {
+		auditLog = pgstore.NewPgAuditLog(pool)
+	} else {
+		logger.Warn("audit log is in-memory (dev only); audit events do not survive restarts")
+		auditLog = console.NewMemAuditLog()
+	}
+
 	// The usage store the console reads: the controller's internal usage API
 	// (the SAME usage the collector recorded) when configured, in-memory in dev.
 	// Shared by the BFF usage view and the drawdown driver below.
@@ -142,6 +154,9 @@ func main() {
 		// in a cluster, in-memory otherwise.
 		Instruments: buildInstruments(logger),
 		ForkTree:    buildForkTree(logger),
+		// The org audit trail: durable Postgres when configured, in-memory in
+		// dev. New wraps it with the sink dispatcher exactly as before.
+		Audit: auditLog,
 		Billing: console.BillingReader{
 			Ledger: creditLedger,
 			Status: statusStore,
