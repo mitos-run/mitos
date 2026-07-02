@@ -13,6 +13,7 @@ import { useCapabilities } from '../data/query'
 import { navRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
 import { CommandPalette } from './CommandPalette'
 import { TopBar } from './TopBar'
+import { LoadingScreen } from '../ui/LoadingScreen'
 import type { Capabilities } from '../api'
 
 export function AppShell() {
@@ -67,11 +68,7 @@ export function AppShell() {
   }, [drawerOpen])
 
   if (!caps) {
-    return (
-      <main style={{ padding: 'var(--space-6)' }}>
-        <div className="t-dim">loading...</div>
-      </main>
-    )
+    return <LoadingScreen />
   }
 
   const routes = navRoutes(caps)
