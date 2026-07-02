@@ -75,9 +75,11 @@ type TopUp struct {
 }
 
 // CustomerResolver maps a provider customer id to the owning org. The mapping is
-// recorded when the org first subscribes.
+// recorded when the org first subscribes. An unknown customer is ("", false,
+// nil); a store failure is an error the webhook must answer 5xx with, so the
+// provider retries instead of the event being dropped as unknown.
 type CustomerResolver interface {
-	OrgForCustomer(ctx context.Context, customerRef string) (string, bool)
+	OrgForCustomer(ctx context.Context, customerRef string) (string, bool, error)
 }
 
 const maxWebhookBytes = 1 << 20 // 1 MiB
@@ -135,7 +137,14 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // acknowledged, nothing to apply
 		return
 	}
-	orgID, ok := h.customers.OrgForCustomer(r.Context(), ev.CustomerRef)
+	orgID, ok, err := h.customers.OrgForCustomer(r.Context(), ev.CustomerRef)
+	if err != nil {
+		// A lookup FAILURE must not be acked as "unknown customer": a 5xx makes
+		// the provider retry, so a transient store error (e.g. right after a
+		// restart) cannot permanently drop a status sync. No detail is echoed.
+		http.Error(w, "customer lookup failed", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		w.WriteHeader(http.StatusOK) // unknown customer: ack so retries stop
 		return
