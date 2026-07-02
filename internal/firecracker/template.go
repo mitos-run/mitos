@@ -523,6 +523,15 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		return nil, fmt.Errorf("sync snapshot vmstate file: %w", err)
 	}
 
+	// Hand the canonical template tree back to the daemon before the caller
+	// records its digest: the jailed build flips artifact ownership to the
+	// per-VM jailed uid, which the husk VMM cannot open (#583, see
+	// normalizeTemplateArtifacts). A template that fails normalization must
+	// never be registered or marked verified.
+	if err := normalizeTemplateArtifacts(workDir); err != nil {
+		return nil, fmt.Errorf("normalize template artifact ownership: %w", err)
+	}
+
 	// Get snapshot size
 	memInfo, err := os.Stat(memFile)
 	if err != nil {
@@ -539,6 +548,45 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 		CreationTimeMs: float64(elapsed.Milliseconds()),
 		SnapshotSize:   memInfo.Size(),
 	}, nil
+}
+
+// normalizeTemplateArtifacts hands every file under the canonical template
+// tree back to the daemon's own uid/gid with world-readable modes (files
+// 0o644, dirs 0o755) after the jailed build VM is done with it.
+//
+// Why this exists (#583): in jailer mode the build hardlinks the canonical
+// rootfs into the per-VM chroot and chownIntoJail flips the SHARED inode to
+// the jailed uid; it must, because the deprivileged build VM writes the
+// rootfs. The snapshot mem and vmstate are likewise created inside the jail
+// and hardlinked out still owned by the jailed uid. Left that way, the husk
+// VMM (uid 0 with ALL capabilities dropped, so no CAP_DAC_OVERRIDE) fails
+// EACCES opening the rootfs O_RDWR at /snapshot/load and the warm pool
+// crashloops. The bug was latent while the data dir and the chroot base sat
+// on different filesystems: prepareChroot's EXDEV fallback copied instead of
+// hardlinking, so the chown hit the jail-private copy. Consolidating both
+// onto one filesystem made the hardlink succeed and unmasked it.
+//
+// Chowning to the daemon's own euid keeps this a no-op in non-jailed and
+// non-root paths (mock engine, unit tests) while restoring root ownership on
+// a production forkd.
+func normalizeTemplateArtifacts(root string) error {
+	uid, gid := os.Geteuid(), os.Getegid()
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if d.IsDir() {
+			mode = 0o755
+		}
+		if err := os.Chown(path, uid, gid); err != nil {
+			return fmt.Errorf("chown %s: %w", path, err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("chmod %s: %w", path, err)
+		}
+		return nil
+	})
 }
 
 // DeleteTemplate removes a template and its snapshot files.
