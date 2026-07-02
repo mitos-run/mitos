@@ -448,6 +448,176 @@ func TestProxyUnknownSandboxIsNotFound(t *testing.T) {
 	}
 }
 
+// ----- pause / resume lifecycle proxy (#601) -----
+
+// TestPauseResumeForwardToSandboxEndpoint asserts sandbox.pause and
+// sandbox.resume POST the daemon lifecycle routes on the org-owned sandbox
+// endpoint with the per-sandbox bearer token and the body {"sandbox": <name>},
+// and pass the upstream 2xx status and body through.
+func TestPauseResumeForwardToSandboxEndpoint(t *testing.T) {
+	cases := []struct {
+		op       string
+		route    string
+		upstream string
+	}{
+		{op: "sandbox.pause", route: "/v1/pause", upstream: `{"status":"paused"}`},
+		{op: "sandbox.resume", route: "/v1/resume", upstream: `{"status":"running"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			var gotMethod, gotPath, gotAuth, gotBody string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotPath = r.URL.Path
+				gotAuth = r.Header.Get("Authorization")
+				b, _ := io.ReadAll(r.Body)
+				gotBody = string(b)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.upstream))
+			}))
+			defer srv.Close()
+			endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+			sb, secret := readySandbox(orgA, "sb-hold", endpoint, "the-real-token")
+			c := newFakeClient(t, sb, secret)
+			cp := New(c, WithHTTPClient(srv.Client()))
+
+			resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+				OrgID: orgA, Op: tc.op, Path: tc.route, Body: []byte(`{"sandbox":"sb-hold"}`),
+			})
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+			if resp.Status != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+			}
+			if string(resp.Body) != tc.upstream {
+				t.Errorf("body = %q, want the upstream body %q", resp.Body, tc.upstream)
+			}
+			if gotMethod != http.MethodPost {
+				t.Errorf("upstream method = %q, want POST", gotMethod)
+			}
+			if gotPath != tc.route {
+				t.Errorf("upstream path = %q, want %q", gotPath, tc.route)
+			}
+			if gotAuth != "Bearer the-real-token" {
+				t.Errorf("upstream Authorization = %q, want the per-sandbox token", gotAuth)
+			}
+			if gotBody != `{"sandbox":"sb-hold"}` {
+				t.Errorf("upstream body = %q, want {\"sandbox\":\"sb-hold\"}", gotBody)
+			}
+		})
+	}
+}
+
+// TestPauseUpstreamErrorPassesThrough asserts a non-2xx daemon response (for
+// example a failed engine pause) is passed through with its status and body,
+// so the caller sees the daemon's actionable error, not a generic one.
+func TestPauseUpstreamErrorPassesThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"pause sandbox: snapshot failed"}`))
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	sb, secret := readySandbox(orgA, "sb-err", endpoint, "tok")
+	c := newFakeClient(t, sb, secret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-err"}`),
+	})
+	if resp.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the upstream 500 passed through; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "snapshot failed") {
+		t.Errorf("body = %q, want the upstream error body passed through", resp.Body)
+	}
+}
+
+// TestPauseCrossOrgIsNotFoundAndNeverReachesEndpoint asserts org A cannot pause
+// org B's sandbox: not_found, the endpoint is never hit, AND the response is
+// indistinguishable from a sandbox that does not exist at all (no oracle).
+func TestPauseCrossOrgIsNotFoundAndNeverReachesEndpoint(t *testing.T) {
+	var reached bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	sb, secret := readySandbox(orgB, "sb-bheld", endpoint, "tok")
+	c := newFakeClient(t, sb, secret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	cross, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-bheld"}`),
+	})
+	if cross.Status != http.StatusNotFound {
+		t.Fatalf("cross-org pause: status = %d, want 404", cross.Status)
+	}
+	if reached {
+		t.Fatal("cross-org pause REACHED the sandbox endpoint; the boundary failed")
+	}
+
+	// A truly missing id must be byte-for-byte indistinguishable modulo the id.
+	missing, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-ghost"}`),
+	})
+	if missing.Status != cross.Status {
+		t.Errorf("missing-id status = %d, cross-org status = %d; the two must not differ (oracle)", missing.Status, cross.Status)
+	}
+	crossBody := strings.ReplaceAll(string(cross.Body), "sb-bheld", "<id>")
+	missingBody := strings.ReplaceAll(string(missing.Body), "sb-ghost", "<id>")
+	if crossBody != missingBody {
+		t.Errorf("cross-org body %q differs from missing-id body %q; a probe can map ids", crossBody, missingBody)
+	}
+}
+
+// TestPauseNotReadySandboxIsClearError asserts pausing a sandbox with no
+// runtime endpoint yet returns an actionable error, mirroring the runtime
+// proxy's not-ready behavior.
+func TestPauseNotReadySandboxIsClearError(t *testing.T) {
+	sb, secret := readySandbox(orgA, "sb-cold", "", "tok")
+	sb.Status.Phase = v1.SandboxPending
+	sb.Status.Endpoint = ""
+	c := newFakeClient(t, sb, secret)
+	cp := New(c)
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-cold"}`),
+	})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404-style not-ready error; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "not Ready") {
+		t.Errorf("error body not actionable about readiness: %s", resp.Body)
+	}
+}
+
+// TestPauseBodyWithoutSandboxIsInvalidInput asserts a pause or resume body that
+// does not name a sandbox (missing field, empty value, or invalid JSON) is a
+// 400 invalid_input with remediation, not a forwarded request.
+func TestPauseBodyWithoutSandboxIsInvalidInput(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c)
+	for _, body := range []string{`{}`, `{"sandbox":""}`, `not json`, ``} {
+		for _, op := range []string{"sandbox.pause", "sandbox.resume"} {
+			resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+				OrgID: orgA, Op: op, Path: "/v1/pause", Body: []byte(body),
+			})
+			if resp.Status != http.StatusBadRequest {
+				t.Errorf("%s body=%q: status = %d, want 400; body = %s", op, body, resp.Status, resp.Body)
+			}
+			if !strings.Contains(string(resp.Body), "invalid_input") {
+				t.Errorf("%s body=%q: error code missing invalid_input: %s", op, body, resp.Body)
+			}
+		}
+	}
+}
+
 // TestTokenNeverAppearsInErrorOrNonCreateResponse asserts the per-sandbox token
 // is returned ONLY on create: status and list responses, and every error body,
 // are scanned and must not contain it.

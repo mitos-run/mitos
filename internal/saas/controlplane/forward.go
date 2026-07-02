@@ -44,6 +44,10 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 		return k.terminate(ctx, req)
 	case "sandbox.runtime":
 		return k.proxy(ctx, req)
+	case "sandbox.pause":
+		return k.lifecycle(ctx, req, "/v1/pause")
+	case "sandbox.resume":
+		return k.lifecycle(ctx, req, "/v1/resume")
 	case "template.ensure":
 		return k.ensureTemplate(ctx, req)
 	case "template.list":
