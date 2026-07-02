@@ -214,6 +214,71 @@ does, instead of being silently ignored until the pool is deleted and recreated.
 Fields that do not change snapshot content (placement, network posture, warm-pool
 sizing, budgets) are excluded from the identity, so they never force a rebuild.
 
+### Self-healing template rebuild (#584, closes #578)
+
+A template snapshot can be structurally present, a build "succeeded" and a
+digest was recorded, yet fail to RESTORE: a corrupt memory file, or a kernel
+mismatch introduced by a bad init step. Every dormant husk pod bound to that
+snapshot then CrashLoopBackOffs forever, because from the controller's point
+of view the build already succeeded and the holder count is satisfied; no
+other reconcile path rebuilds it. Three seams close this gap.
+
+**Forkd-side reuse-or-rebuild gate.** `Engine.CreateTemplate` no longer
+unconditionally rebuilds an on-disk template on every call: an existing
+template is reused only when its digest re-verifies AND its snapshot
+artifacts pass an ownership invariant check. A template that fails either
+check is deleted and rebuilt in the same call. A `ForceRebuild` flag on the
+request lets the controller skip reuse unconditionally, even over a template
+that would otherwise pass both checks; see `docs/threat-model.md` for the
+full mitigation writeup.
+
+**Controller-side detection and backoff-bounded rebuild.** Each husk-path
+reconcile counts DISTINCT dormant husk pods bound to the pool's current
+template digest that are in CrashLoopBackOff with at least 3 restarts. Two or
+more such pods (one flaky pod is not evidence of a broken template; two
+independent pods hitting the same crashloop on the same digest is) presumes
+the template is restore-broken, and the pool reports it on the
+`TemplateHealthy` condition:
+
+- `True/Healthy`: the warm pool is ready and no crashloopers on the current
+  digest.
+- `False/RestoreFailing`: two or more crashloopers on the current digest were
+  observed; a rebuild has not (yet) been triggered this reconcile, because it
+  is still inside the backoff window.
+- `False/Rebuilding`: a forced rebuild was just triggered.
+
+A rebuild forces the snapshot to rebuild in place on every current holder
+(`ForceRebuild`, so the node's reuse-or-rebuild gate cannot silently skip a
+snapshot the controller already knows is broken), then deletes the
+crashlooping pods bound to the bad digest so they recreate against the fresh
+one. Rebuild attempts back off exponentially: `1m << (attempts-1)`, capped at
+30m, recorded on `Status.RebuildAttempts` and `Status.LastRebuildTime`. The
+attempt counter resets to zero once the pool's husks are healthy again.
+
+**Operator-side force-rebuild annotation.** An operator can force an
+immediate rebuild, bypassing the backoff entirely, by annotating the pool:
+
+```
+kubectl -n mitos annotate sandboxpool <pool> mitos.run/force-rebuild="$(date +%s)" --overwrite
+```
+
+Any new annotation value (a Unix timestamp is the documented convention, but
+any string that differs from the last-handled value works) triggers exactly
+one rebuild; the pool records the value it acted on in
+`Status.ForceRebuildHandled`, so a repeat reconcile with the same value is a
+no-op and a later `--overwrite` with a new value triggers exactly one more.
+A forced rebuild does not increment `Status.RebuildAttempts` or stamp
+`Status.LastRebuildTime`: it is an explicit, human-triggered override, not
+evidence toward the automatic backoff exponent. This annotation is now the
+documented recovery path for a restore-broken template; it replaces the old
+hand recovery of deleting on-disk template artifacts and restarting forkd.
+
+**Build result visibility.** Independent of restore-time health, every
+reconcile also reports whether `ensureTemplateBuilt` itself succeeded via the
+`TemplateBuilt` condition: `True/Built` on success, `False/BuildFailed` with
+the build error (truncated to 512 characters) on failure. This covers both
+the husk-pod and the raw-forkd (`--enable-raw-forkd`) reconcile paths.
+
 ### Measured activation latency (CI husk-stub phase)
 
 The KVM integration workflow runs a `husk-stub` phase that proves the split and

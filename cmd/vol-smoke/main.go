@@ -121,7 +121,7 @@ func run(o opts) error {
 
 	fmt.Printf("vol-smoke: building template %q from %q with %d volumes\n", templateID, o.image, len(specs))
 	buildStart := time.Now()
-	if err := engine.CreateTemplate(templateID, o.image, nil, specs, nil, nil); err != nil {
+	if err := engine.CreateTemplate(templateID, o.image, nil, specs, nil, nil, false); err != nil {
 		if isPullFailure(err) {
 			fmt.Println("PULL_FAILED")
 		}

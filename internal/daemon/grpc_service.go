@@ -156,7 +156,7 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 		g.srv.keyProvider.SetWrappedKey(req.TemplateId, req.EncryptionKey, req.KekId)
 		defer g.srv.keyProvider.ForgetKey(req.TemplateId)
 	}
-	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols, toFirecrackerWorkload(req.Workload), vmResources(req.Resources)); err != nil {
+	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols, toFirecrackerWorkload(req.Workload), vmResources(req.Resources), req.ForceRebuild); err != nil {
 		return nil, grpcError(err)
 	}
 	// Report the content-addressed digest the engine just recorded so the
