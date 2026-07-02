@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"syscall"
+
+	"mitos.run/mitos/internal/firecracker"
 )
 
 // Reuse-or-rebuild gate (issue #584): a template discovered on disk (typically
@@ -15,20 +17,26 @@ import (
 // ownership invariants enforced here (proves the jailed build did not leave
 // the artifacts in a state the husk VMM cannot read).
 //
-// The production trigger for the invariant check is incident #583: the
-// jailed build flips template artifact ownership to uid 64000 (the jailer's
-// unprivileged build uid), which a husk VMM running as a different euid
-// cannot open. A companion change (#587) normalizes ownership back to the
-// running process's euid at the end of a successful build
-// (normalizeTemplateArtifacts); this function is the READ-side gate that
-// refuses to reuse a template that was never normalized, or whose ownership
-// regressed after the fact, rather than trusting an on-disk template blindly.
+// The production trigger for the invariant check is incident #583/#597: the
+// jailed build flips template artifact ownership to the jailer's unprivileged
+// build uid (firecracker.JailerBuildUID), which a husk VMM running as a
+// different uid cannot open. A companion change (#587, extended by #597)
+// normalizes ownership at the end of a successful build
+// (normalizeTemplateArtifacts) to root:SharedKVMGID with a group-readable mode;
+// this function is the READ-side gate that refuses to reuse a template that was
+// never normalized, or whose ownership regressed after the fact, rather than
+// trusting an on-disk template blindly.
 
 // checkTemplateArtifactInvariants verifies that every snapshot artifact of
 // template id under dataDir (rootfs.ext4 when present, snapshot/mem,
-// snapshot/vmstate) is owned by the calling process's effective uid and
-// carries mode 0o644. It returns a descriptive error naming the offending
-// file, its actual owner, and the expected owner on the first invariant that
+// snapshot/vmstate) matches the normalized ownership contract: owned by the
+// calling process's effective uid, group-owned by the shared kvm gid
+// (firecracker.SharedKVMGID), and carrying the group-readable file mode 0o640.
+// This is the read side of the contract normalizeTemplateArtifacts writes at
+// build time: root:SharedKVMGID, group-readable, not world-writable, so the
+// current uid-0 husk reads as owner and a future non-root husk (issue #585) in
+// the SharedKVMGID group reads through the group class. It returns a
+// descriptive error naming the offending file on the first invariant that
 // fails; artifacts are checked in a stable (sorted) order so the error is
 // deterministic across runs.
 func checkTemplateArtifactInvariants(dataDir, id string) error {
@@ -52,10 +60,13 @@ func checkTemplateArtifactInvariants(dataDir, id string) error {
 			return fmt.Errorf("template %s artifact %s: cannot determine owner on this platform", id, path)
 		}
 		if gotUID := int(st.Uid); gotUID != wantUID {
-			return fmt.Errorf("template %s artifact %s is owned by uid %d, expected uid %d (this process's euid); the jailed build likely flipped ownership (issue #583), so the template is unusable until rebuilt or its ownership is fixed", id, path, gotUID, wantUID)
+			return fmt.Errorf("template %s artifact %s is owned by uid %d, expected uid %d (this process's euid); the jailed build likely flipped ownership (issues #583, #597), so the template is unusable until rebuilt or its ownership is fixed", id, path, gotUID, wantUID)
 		}
-		if mode := info.Mode().Perm(); mode != 0o644 {
-			return fmt.Errorf("template %s artifact %s has mode %#o, expected mode 0o644; the template is unusable until rebuilt or its mode is fixed", id, path, mode)
+		if gotGID := int(st.Gid); gotGID != firecracker.SharedKVMGID {
+			return fmt.Errorf("template %s artifact %s is group-owned by gid %d, expected gid %d (the shared kvm group a husk reads the template through, issues #585, #597); the template is unusable until rebuilt or its group is fixed", id, path, gotGID, firecracker.SharedKVMGID)
+		}
+		if mode := info.Mode().Perm(); mode != 0o640 {
+			return fmt.Errorf("template %s artifact %s has mode %#o, expected mode 0o640 (group-readable, not world-writable); the template is unusable until rebuilt or its mode is fixed", id, path, mode)
 		}
 	}
 	return nil

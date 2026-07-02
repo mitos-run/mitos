@@ -59,9 +59,16 @@ func writeRebuiltTemplate(t *testing.T, dataDir, id string) {
 // case: a healthy on-disk template (digest verifies, ownership invariants
 // pass) must be reused, so runTemplateBuild must never run.
 func TestCreateTemplateEngineReusesHealthyTemplate(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("a reusable template must be group-owned by the shared kvm gid, which requires root to set up")
+	}
 	e := newTestEngine(t)
 	id := "py"
 	seedHealthyTemplate(t, e, id)
+	// The reuse gate now also requires the normalized root:SharedKVMGID
+	// group-readable ownership contract (issue #597), which the seed cannot set
+	// non-root; apply it here so the gate sees a healthy template.
+	makeTemplateArtifactsCompliant(t, e.dataDir, id)
 
 	built := false
 	e.runTemplateBuild = func(string, firecracker.VMConfig, []string, *firecracker.WorkloadSpec) error {

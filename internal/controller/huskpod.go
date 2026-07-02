@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	v1 "mitos.run/mitos/api/v1"
+	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/tenant"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -758,6 +759,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 				SeccompProfile: &corev1.SeccompProfile{
 					Type: corev1.SeccompProfileTypeRuntimeDefault,
 				},
+				// The shared kvm group the template artifacts are group-owned by
+				// (forkd's normalizeTemplateArtifacts writes them root:SharedKVMGID,
+				// group-readable). Carrying it as a supplemental group means every
+				// stub process is in the file group class of the template rootfs,
+				// snapshot mem, and vmstate, so a future non-root husk (issue #585)
+				// reads the shared template through the group without owning it. The
+				// current uid-0 husk already reads them as owner; adding the group is
+				// a no-op for it and does not widen anything (issue #597). Not applied
+				// as fsGroup: hostPath volumes are exempt from fsGroup ownership
+				// management, so it would neither help nor take effect there.
+				SupplementalGroups: []int64{firecracker.SharedKVMGID},
 			},
 			// Pin to a KVM node: the dormant VMM needs /dev/kvm AND the pod must
 			// land where the template snapshot hostPath exists. The nodeAffinity

@@ -27,6 +27,27 @@ const jailerExecFileName = "firecracker"
 // binds the socket there.
 const jailedAPISocketRelPath = "/run/firecracker.socket"
 
+// JailerBuildUID is the low end of the default per-VM jailer uid/gid range
+// (cmd/forkd --uid-range "64000-64999"). The jailed template build VM runs as
+// this uid, and the build hardlinks the canonical template artifacts into its
+// chroot; a freshly built, un-normalized template therefore comes out owned by
+// this uid, which a husk VMM that is neither this uid nor privileged cannot
+// open (issues #583, #597). It is named here so the ownership normalize
+// (normalizeTemplateArtifacts) and the read-side reuse invariant
+// (internal/fork.checkTemplateArtifactInvariants) refer to the same value.
+const JailerBuildUID = 64000
+
+// SharedKVMGID is the group the normalized template artifacts are owned by so a
+// husk VMM can READ them (rootfs.ext4 for the per-activation reflink clone,
+// snapshot mem and vmstate for the load) through the file group class, without
+// being the file owner. It is chosen OUTSIDE the per-VM jailer uid/gid range
+// [64000, 64999] so it can never collide with a per-VM jailer gid. The husk pod
+// carries it as a supplemental group (see the controller husk pod builder), so
+// once the husk runs a non-root uid (issue #585) it still reads the shared
+// template artifacts through this group. The current uid-0 husk owns the
+// artifacts directly (they are root-owned after normalize) and is unaffected.
+const SharedKVMGID = 65000
+
 // JailerConfig configures launching Firecracker through the jailer
 // binary. The zero value disables the jailer: StartVM execs the
 // firecracker binary directly, exactly as before.

@@ -551,35 +551,43 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 }
 
 // normalizeTemplateArtifacts hands every file under the canonical template
-// tree back to the daemon's own uid/gid with world-readable modes (files
-// 0o644, dirs 0o755) after the jailed build VM is done with it.
+// tree back to the daemon's own uid and the shared kvm group with
+// group-readable modes (files 0o640, dirs 0o750) after the jailed build VM is
+// done with it.
 //
-// Why this exists (#583): in jailer mode the build hardlinks the canonical
-// rootfs into the per-VM chroot and chownIntoJail flips the SHARED inode to
-// the jailed uid; it must, because the deprivileged build VM writes the
-// rootfs. The snapshot mem and vmstate are likewise created inside the jail
-// and hardlinked out still owned by the jailed uid. Left that way, the husk
-// VMM (uid 0 with ALL capabilities dropped, so no CAP_DAC_OVERRIDE) fails
-// EACCES opening the rootfs O_RDWR at /snapshot/load and the warm pool
-// crashloops. The bug was latent while the data dir and the chroot base sat
-// on different filesystems: prepareChroot's EXDEV fallback copied instead of
-// hardlinking, so the chown hit the jail-private copy. Consolidating both
-// onto one filesystem made the hardlink succeed and unmasked it.
+// Why this exists (#583, #597): in jailer mode the build hardlinks the
+// canonical rootfs into the per-VM chroot and chownIntoJail flips the SHARED
+// inode to the jailed uid (JailerBuildUID); it must, because the deprivileged
+// build VM writes the rootfs. The snapshot mem and vmstate are likewise created
+// inside the jail and hardlinked out still owned by the jailed uid. Left that
+// way, the husk VMM (uid 0 with ALL capabilities dropped, so no
+// CAP_DAC_OVERRIDE) fails EACCES opening the rootfs O_RDWR at /snapshot/load
+// and the warm pool crashloops. The bug was latent while the data dir and the
+// chroot base sat on different filesystems: prepareChroot's EXDEV fallback
+// copied instead of hardlinking, so the chown hit the jail-private copy.
+// Consolidating both onto one filesystem made the hardlink succeed and
+// unmasked it.
 //
-// Chowning to the daemon's own euid keeps this a no-op in non-jailed and
-// non-root paths (mock engine, unit tests) while restoring root ownership on
-// a production forkd.
+// The owner is the daemon's own euid (root:0 on a production forkd), which
+// keeps the current uid-0 husk the file OWNER so its O_RDWR snapshot load still
+// works. The GROUP is set to SharedKVMGID and the mode made group-readable so a
+// FUTURE non-root husk (issue #585) that carries SharedKVMGID as a supplemental
+// group can still read the shared template (its per-activation rootfs reflink
+// clone reads rootfs.ext4; the load reads mem and vmstate) without owning the
+// files. The artifacts stay NOT world-writable. This requires the ability to
+// chgrp to SharedKVMGID, i.e. it runs on a production root forkd; the mock
+// engine never calls it.
 func normalizeTemplateArtifacts(root string) error {
-	uid, gid := os.Geteuid(), os.Getegid()
+	uid := os.Geteuid()
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		mode := os.FileMode(0o644)
+		mode := os.FileMode(0o640)
 		if d.IsDir() {
-			mode = 0o755
+			mode = 0o750
 		}
-		if err := os.Chown(path, uid, gid); err != nil {
+		if err := os.Chown(path, uid, SharedKVMGID); err != nil {
 			return fmt.Errorf("chown %s: %w", path, err)
 		}
 		if err := os.Chmod(path, mode); err != nil {

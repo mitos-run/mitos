@@ -140,6 +140,16 @@ func templateRestoreFailing(pods []corev1.Pod, digest string) bool {
 func (r *SandboxPoolReconciler) driveTemplateHealth(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, templateID string, nodeFilter map[string]bool, dormantPods []corev1.Pod, warmReady bool, now metav1.Time) {
 	logger := log.FromContext(ctx)
 	digest := pool.Status.TemplateDigest
+	// TODO(#578, #579): templateRestoreFailing detects husk pods that CRASHLOOP
+	// (e.g. a Prepare-time reflink clone or snapshot verify that fails closed), so
+	// a template that is unreadable at Prepare is already reflected here. It does
+	// NOT yet cover a pod that stays dormant+Ready but fails every ACTIVATE (e.g.
+	// the mandatory-CoW fail-closed on a missing clone, or a filesystem
+	// permission error surfaced only at load): the pool can still report Ready
+	// while 100% of activations fail. Surfacing per-activation failures on the
+	// SandboxPool status is the #578 honesty gap and is deferred to that issue;
+	// #597 closes the read/CoW permission root cause so this path fails at Prepare
+	// (visible) rather than silently at Activate wherever possible.
 	failing := templateRestoreFailing(dormantPods, digest)
 
 	if !failing {

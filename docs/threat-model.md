@@ -328,6 +328,33 @@ tenant's filesystem state into another. The clone is removed on pod teardown
 (`Stub.Close`). Fully pod-native snapshot delivery (a CAS pull into the pod,
 removing the shared read-only mem/vmstate hostPath) remains a documented follow-up.
 
+Template artifact FILE PERMISSION posture (#597). The jailed build leaves the
+canonical template artifacts (`rootfs.ext4`, `snapshot/mem`, `snapshot/vmstate`)
+owned by the per-VM jailer build uid (`firecracker.JailerBuildUID`, the low end
+of `--uid-range`), which a husk VMM that is neither that uid nor privileged
+cannot open. `internal/firecracker` `normalizeTemplateArtifacts` now hands them
+back to `root` and the shared kvm group (`firecracker.SharedKVMGID`, a fixed gid
+OUTSIDE the per-VM jailer range so it can never collide with a per-VM jailer
+gid), with group-readable, NOT world-writable modes (files `0o640`, dirs
+`0o750`); the prior posture was world-readable `0o644`/`0o755`. The husk pod
+carries `SharedKVMGID` as a supplemental group (`huskpod.go` PodSecurityContext),
+so the current uid-0 husk reads the artifacts as the file OWNER and a future
+non-root husk (#585) reads them through the file GROUP class. `internal/fork`
+`checkTemplateArtifactInvariants` is the read-side reuse gate: it refuses to
+reuse an on-disk template whose ownership regressed off `root:SharedKVMGID`,
+group-readable. The artifacts stay read-only to the husk (its per-activation
+reflink clone is the only writable copy) and the template hostPath stays a
+read-write MOUNT only because Firecracker opens the baked rootfs O_RDWR at load
+(above); the FILES themselves are never world-writable. The husk now
+FAILS CLOSED when a template rootfs is configured without a per-activation CoW
+clone rather than restoring the shared template in place (`Stub.Activate`,
+mandatory CoW), so a misconfiguration can never silently reopen the shared
+`rootfs.ext4` O_RDWR. Residual, stated honestly: because the baked rootfs load is
+O_RDWR, a FUTURE non-root husk (#585) reading through the group class will still
+need the load itself resolved (group-write on the template, or a read-only baked
+rootfs drive); this PR keeps the current uid-0 husk correct as the file owner and
+lands the group-read contract the non-root husk will build on.
+
 ### Warm-pool autoscaling (no integrity-gate move)
 
 Demand-driven warm-pool autoscaling changes only WHEN and HOW MANY dormant husk

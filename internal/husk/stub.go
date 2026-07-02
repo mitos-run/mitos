@@ -796,6 +796,23 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		}
 	}
 
+	// Mandatory per-activation rootfs CoW (issue #597): when this husk was
+	// configured with a shared template rootfs, the ONLY correct restore rebinds
+	// the baked rootfs drive to THIS activation's own reflink clone (prepared
+	// during the dormant window); the resumed guest must never write, and the
+	// pool must never silently in-place restore, the shared template. If the
+	// clone is missing (the CoW dir was not configured, or the Prepare clone did
+	// not run) we FAIL CLOSED here rather than fall back to opening the shared
+	// template: an in-place restore both corrupts concurrent activations of one
+	// template and, once the template artifacts are group-readable to a non-owner
+	// husk (issue #585), is the exact O_RDWR-open EACCES this change removes.
+	// rootfsTemplatePath empty means no shared template is in play (the raw
+	// control-socket and unit-test paths), which keeps the prior behavior.
+	if s.rootfsTemplatePath != "" && s.rootfsClonePath == "" {
+		werr := fmt.Errorf("husk: per-activation rootfs CoW required for template %s but no clone was prepared; --rootfs-cow-dir must be configured, refusing in-place restore of the shared template", s.rootfsTemplatePath)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
 	// Load the snapshot PAUSED (resume=false). The rootfs drive rebind below MUST
 	// happen before the guest runs, and PATCH /drives on the ROOT device of an
 	// already-RESUMED VM both leaves a write window (any writeback between resume
