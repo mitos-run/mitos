@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.13.0](https://github.com/mitos-run/mitos/compare/v1.12.0...v1.13.0) (2026-07-02)
+
+
+### Features
+
+* **api:** SandboxPool rebuild bookkeeping fields ([#584](https://github.com/mitos-run/mitos/issues/584)) ([e4f3eaa](https://github.com/mitos-run/mitos/commit/e4f3eaa35515b4d1944af5eef926248b88200913))
+* **controller:** detect restore-failing husks and rebuild the template with backoff ([#584](https://github.com/mitos-run/mitos/issues/584)) ([f6ecb77](https://github.com/mitos-run/mitos/commit/f6ecb77220d3bb454748b280b5ecd63993051723))
+* **controller:** TemplateBuilt condition and force-rebuild annotation ([#584](https://github.com/mitos-run/mitos/issues/584), closes [#578](https://github.com/mitos-run/mitos/issues/578)) ([e8d4dc4](https://github.com/mitos-run/mitos/commit/e8d4dc45da4aad5bf354383cc2f73097f31f7a8e))
+* **fork:** reuse-or-rebuild gate for on-disk templates in CreateTemplate ([#584](https://github.com/mitos-run/mitos/issues/584)) ([bf9590d](https://github.com/mitos-run/mitos/commit/bf9590df2c3093b8583a518a4c2b2d46348d761c))
+* **guest:** mitos-python base image with the run_code kernel baked in ([#572](https://github.com/mitos-run/mitos/issues/572)) ([#595](https://github.com/mitos-run/mitos/issues/595)) ([c606363](https://github.com/mitos-run/mitos/commit/c60636365a2a585a0406ef1d67a892165564c3e0))
+* **sdk:** one-import Daytona-compat shim (mitos.daytona) + migration doc ([#592](https://github.com/mitos-run/mitos/issues/592)) ([765146f](https://github.com/mitos-run/mitos/commit/765146f9635b4811bf1fbe5abc9d36c94438cd25))
+* self-healing template snapshot rebuild ([0aab570](https://github.com/mitos-run/mitos/commit/0aab5702d32dee4cf22511d23c47ec6ce084017b))
+
+
+### Bug Fixes
+
+* **ci:** stop the publish SBOM step from failing on release-asset upload ([db903b0](https://github.com/mitos-run/mitos/commit/db903b04bff8f82265ef0bb5b32d0b2fdba10000))
+* **ci:** stop the publish SBOM step from failing on release-asset upload ([ab2787d](https://github.com/mitos-run/mitos/commit/ab2787d39afd58b7f2eaf69b0887fee2bffc4c99))
+* **firecracker:** normalize template artifact ownership after the jailed build ([0eebf29](https://github.com/mitos-run/mitos/commit/0eebf2979fc78b886fafa5811625057da64efd1d))
+* **firecracker:** normalize template artifact ownership after the jailed build ([#583](https://github.com/mitos-run/mitos/issues/583)) ([c3aa75c](https://github.com/mitos-run/mitos/commit/c3aa75cd2071a9d9c5087da1262b3f2e8b583eaf))
+* **forkd:** fail-closed readiness gate on missing KVM devices ([095ca20](https://github.com/mitos-run/mitos/commit/095ca20f67e96f290128bbb8708a25591022648e))
+* **saas:** mint label-safe ids; surface api server validation errors ([#593](https://github.com/mitos-run/mitos/issues/593)) ([#594](https://github.com/mitos-run/mitos/issues/594)) ([e98d113](https://github.com/mitos-run/mitos/commit/e98d113425e3dea6da43e0dea18d06d41b89ce22))
+
 ## [1.12.0](https://github.com/mitos-run/mitos/compare/v1.11.1...v1.12.0) (2026-07-01)
 
 

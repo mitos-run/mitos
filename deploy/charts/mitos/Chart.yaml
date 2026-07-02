@@ -5,8 +5,8 @@ name: mitos
 # lifecycle through the mitos.run CRDs.
 description: Snapshot-fork sandboxes for AI agents on Kubernetes.
 type: application
-version: 1.12.0 # x-release-please-version
-appVersion: "v1.12.0" # x-release-please-version
+version: 1.13.0 # x-release-please-version
+appVersion: "v1.13.0" # x-release-please-version
 kubeVersion: ">=1.29.0-0"
 keywords:
   - sandbox
@@ -43,19 +43,19 @@ annotations:
       url: https://github.com/mitos-run/mitos/issues
   artifacthub.io/images: |
     - name: controller
-      image: ghcr.io/mitos-run/mitos-controller:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-controller:v1.13.0 # x-release-please-version
     - name: forkd
-      image: ghcr.io/mitos-run/mitos-forkd:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-forkd:v1.13.0 # x-release-please-version
     - name: husk-stub
-      image: ghcr.io/mitos-run/mitos-husk-stub:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-husk-stub:v1.13.0 # x-release-please-version
     - name: kvm-device-plugin
-      image: ghcr.io/mitos-run/mitos-kvm-device-plugin:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-kvm-device-plugin:v1.13.0 # x-release-please-version
     - name: facade
-      image: ghcr.io/mitos-run/mitos-facade:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-facade:v1.13.0 # x-release-please-version
     - name: console
-      image: ghcr.io/mitos-run/mitos-console:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-console:v1.13.0 # x-release-please-version
     - name: gateway
-      image: ghcr.io/mitos-run/mitos-gateway:v1.12.0 # x-release-please-version
+      image: ghcr.io/mitos-run/mitos-gateway:v1.13.0 # x-release-please-version
   artifacthub.io/crds: |
     - kind: SandboxPool
       version: v1
