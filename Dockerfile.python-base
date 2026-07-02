@@ -1,0 +1,17 @@
+# The hosted "python" sandbox template base image. Plain python:3.12-slim
+# plus the pieces run_code needs in the guest: ipykernel and jupyter_client
+# for the stateful kernel and /opt/mitos/kernel_driver.py, the line-oriented
+# JSON driver the guest agent spawns (guest/agent-rs kernel/driver.rs). The
+# fork engine's OCI path injects only the guest agent into a template image
+# (internal/fork/imagebuild.go), so the kernel pieces must already be in the
+# image; without them run_code fails structured with KernelUnavailable (#572).
+# matplotlib, matplotlib-inline, and pandas match guest/rootfs/build.sh's
+# FULL_ROOTFS=1 set so notebook-style snippets work out of the box.
+FROM mirror.gcr.io/library/python:3.12-slim
+
+RUN pip install --no-cache-dir \
+        ipykernel jupyter_client matplotlib matplotlib-inline pandas \
+    && python3 -m ipykernel install --name python3 --sys-prefix
+
+COPY guest/rootfs/kernel_driver.py /opt/mitos/kernel_driver.py
+RUN chmod 0755 /opt/mitos/kernel_driver.py
