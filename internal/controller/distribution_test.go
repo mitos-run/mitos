@@ -59,7 +59,7 @@ func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, h
 	engine.ForkDelay = 0
 	digests := make(map[string]string)
 	for _, tmpl := range heldTemplates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
 			t.Fatal(err)
 		}
 		digests[tmpl] = engine.GetCapacity().TemplateDigests[tmpl]
@@ -98,7 +98,7 @@ func startDistForkdNode(t *testing.T, registry *NodeRegistry, nodeName, httpEndp
 	engine.ForkDelay = 0
 	digests := make(map[string]string)
 	for _, tmpl := range heldTemplates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
 			t.Fatal(err)
 		}
 		digests[tmpl] = engine.GetCapacity().TemplateDigests[tmpl]

@@ -95,7 +95,14 @@ type CreateTemplateRequest struct {
 	// listening (issue #460). The node drives it via the guest Control
 	// StartWorkload RPC and gates the snapshot on its readiness. Empty means the
 	// template has no serving workload (exec-only).
-	Workload      *WorkloadSpec `protobuf:"bytes,9,opt,name=workload,proto3" json:"workload,omitempty"`
+	Workload *WorkloadSpec `protobuf:"bytes,9,opt,name=workload,proto3" json:"workload,omitempty"`
+	// force_rebuild, when true, skips the node's reuse-or-rebuild gate (#584)
+	// and always deletes and rebuilds the template, even if a healthy on-disk
+	// template already exists. The controller sets it when the template
+	// CONTENT changed (issue #475): digest verification proves the on-disk
+	// bytes are intact, not that they still match the requested spec. False
+	// (the default) lets the node reuse a verified on-disk template.
+	ForceRebuild  bool `protobuf:"varint,10,opt,name=force_rebuild,json=forceRebuild,proto3" json:"force_rebuild,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -191,6 +198,13 @@ func (x *CreateTemplateRequest) GetWorkload() *WorkloadSpec {
 		return x.Workload
 	}
 	return nil
+}
+
+func (x *CreateTemplateRequest) GetForceRebuild() bool {
+	if x != nil {
+		return x.ForceRebuild
+	}
+	return false
 }
 
 // WorkloadSpec is the serving workload the controller declares for a template
@@ -3163,7 +3177,7 @@ var File_proto_forkd_proto protoreflect.FileDescriptor
 
 const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/forkd.proto\x12\x05forkd\"\xe4\x02\n" +
+	"\x11proto/forkd.proto\x12\x05forkd\"\x89\x03\n" +
 	"\x15CreateTemplateRequest\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12\x14\n" +
@@ -3175,7 +3189,9 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\avolumes\x18\x06 \x03(\v2\x12.forkd.VolumeMountR\avolumes\x12%\n" +
 	"\x0eencryption_key\x18\a \x01(\fR\rencryptionKey\x12\x15\n" +
 	"\x06kek_id\x18\b \x01(\tR\x05kekId\x12/\n" +
-	"\bworkload\x18\t \x01(\v2\x13.forkd.WorkloadSpecR\bworkload\"\xc0\x01\n" +
+	"\bworkload\x18\t \x01(\v2\x13.forkd.WorkloadSpecR\bworkload\x12#\n" +
+	"\rforce_rebuild\x18\n" +
+	" \x01(\bR\fforceRebuild\"\xc0\x01\n" +
 	"\fWorkloadSpec\x12\x18\n" +
 	"\acommand\x18\x01 \x03(\tR\acommand\x12.\n" +
 	"\x03env\x18\x02 \x03(\v2\x1c.forkd.WorkloadSpec.EnvEntryR\x03env\x12.\n" +

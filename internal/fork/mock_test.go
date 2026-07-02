@@ -10,7 +10,7 @@ import (
 func TestMockEngine_CreateTemplate(t *testing.T) {
 	engine := NewMockEngine()
 
-	if err := engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil); err != nil {
+	if err := engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -22,7 +22,7 @@ func TestMockEngine_CreateTemplate(t *testing.T) {
 
 func TestMockEngine_CapacityReportsTotalAndEstimate(t *testing.T) {
 	engine := NewMockEngine()
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 
 	cap := engine.GetCapacity()
 	if cap.MemoryTotal != 16*1024*1024*1024 {
@@ -51,7 +51,7 @@ func TestMockEngine_CapacityReportsTotalAndEstimate(t *testing.T) {
 
 func TestMockEngine_Fork(t *testing.T) {
 	engine := NewMockEngine()
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 
 	result, err := engine.Fork("python", "sandbox-1", ForkOpts{})
 	if err != nil {
@@ -88,7 +88,7 @@ func TestMockEngine_ForkUnknownSnapshot(t *testing.T) {
 
 func TestMockEngine_Terminate(t *testing.T) {
 	engine := NewMockEngine()
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 	engine.Fork("python", "sandbox-1", ForkOpts{})
 
 	if err := engine.Terminate("sandbox-1"); err != nil {
@@ -112,7 +112,7 @@ func TestMockEngine_TerminateUnknown(t *testing.T) {
 func TestMockEngine_ConcurrentForks(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 0
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 
 	const n = 100
 	var wg sync.WaitGroup
@@ -146,7 +146,7 @@ func TestMockEngine_ConcurrentForks(t *testing.T) {
 func TestMockEngine_ForkLatency(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 500 * time.Microsecond
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 
 	result, err := engine.Fork("python", "sandbox-1", ForkOpts{})
 	if err != nil {
@@ -161,7 +161,7 @@ func TestMockEngine_ForkLatency(t *testing.T) {
 func TestMockEngine_MemoryAccounting(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 0
-	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil)
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil, nil, nil, false)
 
 	for i := 0; i < 10; i++ {
 		engine.Fork("python", "sandbox-"+string(rune('0'+i)), ForkOpts{})
@@ -186,7 +186,7 @@ func TestMockEngine_MemoryAccounting(t *testing.T) {
 func TestMockEngine_ListSandboxes(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil); err != nil {
+	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -240,7 +240,7 @@ func TestMockEngine_ListSandboxes(t *testing.T) {
 func TestMockForkRunning(t *testing.T) {
 	e := NewMockEngine()
 	e.ForkDelay = 0
-	if err := e.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil); err != nil {
+	if err := e.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	parent, err := e.Fork("py", "parent", ForkOpts{})

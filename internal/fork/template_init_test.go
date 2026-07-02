@@ -19,12 +19,18 @@ func newTestEngine(t *testing.T) *Engine {
 	if err != nil {
 		t.Fatalf("cas.New: %v", err)
 	}
+	dataDir := t.TempDir()
 	return &Engine{
-		dataDir:          t.TempDir(),
+		dataDir:          dataDir,
 		casStore:         store,
 		sandboxes:        make(map[string]*Sandbox),
 		unverifiedWarned: make(map[string]struct{}),
 		templateDigests:  make(map[string]cas.Digest),
+		// The reuse-or-rebuild gate (#584) unconditionally pre-rebuild-deletes any
+		// on-disk template before building, even when nothing is there yet (a
+		// no-op delete), so CreateTemplate needs a real templateMgr the way
+		// production Engines built via NewEngine always have one.
+		templateMgr: firecracker.NewTemplateManager("", "", dataDir, firecracker.JailerConfig{}),
 		buildRootfsFromImage: func(ctx context.Context, ref, outPath, agentBin, busyboxBin string) error {
 			t.Fatalf("buildRootfsFromImage should not run for a file-path template")
 			return nil
@@ -47,7 +53,7 @@ func TestCreateTemplate_InitFailureAbortsBuild(t *testing.T) {
 		return runInitCommandsForTest(initCommands)
 	}
 
-	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil)
+	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected CreateTemplate to fail when an init command fails")
 	}
@@ -104,7 +110,7 @@ func TestCreateTemplate_FilePathSkipsImageBuild(t *testing.T) {
 	// recordTemplateDigest will fail (no real snapshot on disk), but the build
 	// seam must have been reached with the file path as the rootfs and the
 	// image build seam must NOT have run (it t.Fatals if it does).
-	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil)
+	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil, false)
 	if gotCfg.RootfsPath != rootfs {
 		t.Errorf("file-path rootfs not passed through: got %q want %q", gotCfg.RootfsPath, rootfs)
 	}

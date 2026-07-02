@@ -425,7 +425,7 @@ func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, 
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}
