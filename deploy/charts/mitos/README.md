@@ -1,9 +1,10 @@
 # Mitos Helm chart
 
 Snapshot-fork sandboxes for AI agents on Kubernetes. This chart installs the
-mitos.run operator: the controller Deployment, the privileged forkd DaemonSet,
-the KVM device plugin, the guest-kernel provisioner, and the six mitos.run CRDs.
-It is a faithful translation of the kustomize manifests under `deploy/`.
+mitos.run operator: the controller Deployment, the forkd DaemonSet, the KVM
+device plugin, the guest-kernel provisioner, the console and gateway front
+door, and the five mitos.run CRDs. It is a faithful translation of the
+kustomize manifests under `deploy/`.
 
 ## Prerequisites
 
@@ -63,13 +64,26 @@ The published chart is indexed on Artifact Hub at
 https://artifacthub.io/packages/helm/mitos/mitos.
 
 The `crds/` directory installs the CRDs before the templated resources. Helm does
-not upgrade or delete CRDs on chart upgrade or uninstall; manage CRD schema
-changes out of band.
+not upgrade or delete CRDs on chart upgrade or uninstall; apply CRD schema
+changes yourself with `kubectl apply` against the manifests in `crds/`. The
+exact procedure is in `docs/platforms/lifecycle.md` (CRD upgrades).
 
 `namespace.create=true` renders a Namespace object with the PodSecurity labels
 for the case where the chart is installed into a DIFFERENT namespace than the one
 it creates; do not combine it with `--create-namespace` for the release namespace
 (see above).
+
+## Upgrading
+
+Read the release notes, apply the CRD manifests for the target version, then
+`helm upgrade` with the same values files you installed with. The full day-2
+runbook (upgrade order, CRD step, rollback semantics, backup and restore of the
+Postgres state, uninstall) is `docs/platforms/lifecycle.md`.
+
+```
+kubectl apply --server-side --force-conflicts -f deploy/charts/mitos/crds/
+helm upgrade mitos mitos/mitos -n mitos --set namespace.create=false -f your-values.yaml
+```
 
 ## Uninstall
 
@@ -77,7 +91,9 @@ it creates; do not combine it with `--create-namespace` for the release namespac
 helm uninstall mitos -n mitos
 ```
 
-CRDs and any data they own are left in place by design.
+CRDs and any data they own are left in place by design. See
+`docs/platforms/lifecycle.md` (Uninstalling) for the safe deletion order and
+full cleanup.
 
 ## Image pull secret
 
@@ -111,50 +127,104 @@ already optional, so a missing secret never blocks forkd from starting.
 
 ## Values
 
+Every per-component `image.tag` defaults to `""`, which resolves to the chart
+`appVersion` (the release the chart shipped with); `global.imageTag` overrides
+all of them at once. `deploy/charts/mitos/values.yaml` is the authoritative,
+fully commented reference; the tables below cover the major knobs.
+
+### Images and core components
+
 | Key | Default | Description |
 | --- | --- | --- |
 | `image.registry` | `ghcr.io/mitos-run` | Registry hosting every Mitos image. |
 | `global.imageTag` | `""` | When set, overrides every per-component image tag. |
 | `controller.image.repository` | `mitos-controller` | Controller image repository. |
-| `controller.image.tag` | `v0.13.0` | Controller image tag. |
+| `controller.image.tag` | `""` | Controller image tag; empty uses the chart `appVersion`. |
 | `controller.image.pullPolicy` | `IfNotPresent` | Controller image pull policy. |
-| `controller.replicas` | `2` | Controller replica count. |
+| `controller.replicas` | `2` | Controller replica count (HA with leader election). |
 | `controller.resources` | requests 128Mi/100m, limits 512Mi/500m | Controller resources. |
 | `controller.enableHuskPods` | `true` | Render `--enable-husk-pods`. |
 | `controller.huskDataDir` | `/var/lib/mitos` | Value for `--husk-data-dir`. |
 | `controller.huskDnsUpstream` | `""` | When set, render `--husk-dns-upstream=<value>`; empty omits the flag. |
 | `controller.kvmResourceName` | `mitos.run/kvm` | KVM extended-resource name husk pods request. |
-| `controller.extraArgs` | `[]` | Extra args appended to the controller container. |
-| `huskStub.image.repository` | `mitos-husk-stub` | Husk stub image repository (passed via `--husk-stub-image`). |
-| `huskStub.image.tag` | `v0.13.0` | Husk stub image tag. |
-| `huskStub.image.pullPolicy` | `IfNotPresent` | Husk stub image pull policy. |
-| `forkd.image.repository` | `mitos-forkd` | forkd image repository. |
-| `forkd.image.tag` | `v0.13.0` | forkd image tag. |
-| `forkd.image.pullPolicy` | `IfNotPresent` | forkd image pull policy. |
-| `forkd.resources` | requests 1Gi/500m, limits 16Gi/8 | forkd resources. |
-| `forkd.dataDir` | `/var/lib/mitos` | forkd `--data-dir` and the data hostPath. |
 | `controller.namespacedSecretsRBAC` | `false` | When true, remove the controller's cluster-wide Secrets grant; it instead binds itself to the `mitos-pool-secrets` ClusterRole per adopted pool namespace (+ a RoleBinding in its own namespace). Leave false until per-pool bindings have reconciled, then flip to narrow Secrets access. Multi-tenancy hardening. |
+| `controller.orgTenancy.enabled` | `false` | Run the OrgReconciler: per-org isolation namespaces with quota, LimitRange, and default-deny NetworkPolicy. Off for single-tenant self-host. |
+| `controller.usage.collector` | `false` | Run the per-org usage metering scraper and the bearer-gated internal usage API the console reads. |
+| `controller.usage.tokenSecret.name` | `""` | Existing Secret holding the usage API bearer token (key `usage-api-token`). Empty renders no token and the API fails closed. |
+| `controller.extraArgs` | `[]` | Extra args appended to the controller container. |
+| `controller.extraEnv` | `[]` | Extra env vars appended to the controller container. |
+| `huskStub.image.repository` | `mitos-husk-stub` | Husk stub image repository (passed via `--husk-stub-image`). |
+| `huskStub.image.tag` | `""` | Husk stub image tag; empty uses the chart `appVersion`. |
+| `forkd.image.repository` | `mitos-forkd` | forkd image repository. |
+| `forkd.image.tag` | `""` | forkd image tag; empty uses the chart `appVersion`. |
+| `forkd.resources` | requests 1Gi/500m, limits 16Gi/8 | forkd resources (includes the `mitos.run/kvm` device resource; do not remove it). |
+| `forkd.dataDir` | `/var/lib/mitos` | forkd `--data-dir` and the data hostPath. |
 | `forkd.enableNetworking` | `true` | Render `--enable-networking`. |
+| `forkd.priorityClassName` | `system-node-critical` | Keeps forkd from kubelet eviction; set `""` to disable. |
+| `forkd.seccompProfile` | `RuntimeDefault` | forkd seccomp profile; hardened runtimes (Talos) need a jailer-compatible profile, see `values/talos.yaml`. |
+| `forkd.extraCapabilities` | `[]` | Capabilities ADDED to forkd's fixed builder set (hardened runtimes only). |
 | `forkd.nodeSelector` | `mitos.run/kvm: "true"` | forkd and kernel-stage nodeSelector. |
 | `forkd.tolerations` | `mitos.run/dedicated` NoSchedule | forkd and kernel-stage tolerations. |
 | `devicePlugin.enabled` | `true` | Render the KVM device plugin DaemonSet. |
 | `devicePlugin.image.repository` | `mitos-kvm-device-plugin` | Device plugin image repository. |
-| `devicePlugin.image.tag` | `v0.13.0` | Device plugin image tag. |
-| `devicePlugin.image.pullPolicy` | `IfNotPresent` | Device plugin image pull policy. |
+| `devicePlugin.image.tag` | `""` | Device plugin image tag; empty uses the chart `appVersion`. |
 | `kernelProvisioner.enabled` | `true` | Render the kernel-stage DaemonSet. |
 | `kernelProvisioner.kernelUrl` | Firecracker CI x86_64 5.10 vmlinux | Guest kernel download URL. |
 | `kernelProvisioner.kernelSha256` | `""` | Expected SHA256 of the kernel. When set, the staged kernel is verified and the init container fails closed on mismatch. Strongly recommended; compute with `curl -fsSL <kernelUrl> \| sha256sum`. |
-| `admissionWebhook.enabled` | `false` | Render the validating webhook that requires a Sandbox creator to be authorized to impersonate `spec.serviceAccount`. Strongly recommended with `controller.workspaceMemorySnapshots` in a multi-tenant cluster. Self-signed cert by default; prefer cert-manager for production rotation. |
+| `admissionWebhook.enabled` | `false` | Render the validating webhook that requires a Sandbox creator to be authorized to impersonate `spec.serviceAccount`. Strongly recommended in a multi-tenant cluster. Self-signed cert by default; prefer cert-manager for production rotation. |
 | `admissionWebhook.failurePolicy` | `Fail` | Webhook failure policy. `Fail` rejects claims if the webhook is unreachable (fail closed); set `Ignore` only if availability outranks the principal guarantee. |
-| `facade.enabled` | `false` | Render the agents.x-k8s.io facade. |
-| `facade.image.repository` | `mitos-facade` | Facade image repository. |
-| `facade.image.tag` | `v0.13.0` | Facade image tag. |
-| `facade.image.pullPolicy` | `IfNotPresent` | Facade image pull policy. |
-| `facade.defaultPool` | `default` | Facade `--default-pool`. |
-| `facade.clusterDomain` | `cluster.local` | Facade `--cluster-domain`. |
-| `facade.resources` | requests 128Mi/100m, limits 256Mi/500m | Facade resources. |
-| `monitoring.enabled` | `false` | Render the PrometheusRule and Grafana dashboard ConfigMap. |
+| `facade.enabled` | `false` | Render the agents.x-k8s.io facade (see `facade.*` in values.yaml for image, pool, and resources). |
+| `monitoring.enabled` | `false` | Render the PrometheusRule, Grafana dashboard ConfigMap, and PodMonitors. |
 | `monitoring.prometheusRuleRelease` | `prometheus` | `release` label the Prometheus Operator selects on. |
+| `canary.enabled` | `false` | Render the synthetic fork/exec canary (needs a scoped API key; see `canary.*` in values.yaml). |
+
+### Console, gateway, and database
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `console.enabled` | `true` | Render the web console (BFF + embedded SPA). |
+| `console.edition` | `community` | `community` (self-host) or `hosted`; a runtime value, never a build fork. |
+| `console.replicas` | `1` | Console replicas. OIDC session state is per-pod in memory, so more than 1 breaks login without a shared session store. |
+| `console.signup` | `false` | Mount the public self-serve signup endpoints. |
+| `console.oidc.issuerURL` | `""` | Browser-session OIDC issuer (Dex/Keycloak/Google/...). |
+| `console.oidc.clientID` | `""` | OIDC client ID. |
+| `console.oidc.clientSecretRef` | `""` | Existing Secret with key `client-secret`. |
+| `console.oidc.redirectURL` | `""` | The registered redirect URI, normally `https://<console-host>/auth/callback`. Required when OIDC is configured. |
+| `console.usage.url` | `""` | Usage API base URL; empty derives the in-cluster Service when `controller.usage.collector` is true. |
+| `console.secrets.kube.enabled` | `true` | Kubernetes-native org secret provider. |
+| `console.secrets.openbao.enabled` | `false` | OpenBao/Vault external secret provider (`address`, `perOrg`). |
+| `console.billing.enabled` | `false` | Billing surface toggle. Off for community: the billing routes never mount. |
+| `console.billing.paddle.apiKeySecretRef` | name `""`, key `api-key` | Existing Secret holding the Paddle API key; with `webhookSecretRef` also set, Paddle is the provider. |
+| `console.billing.paddle.webhookSecretRef` | name `""`, key `webhook-secret` | Existing Secret holding the Paddle webhook signing secret. |
+| `console.onboarding.verifyURL` | `""` | Base URL of the signup verification link; required when SMTP is configured. |
+| `console.onboarding.clusterProvisioning` | `false` | A verified signup creates the Org CR (requires `controller.orgTenancy.enabled`). |
+| `console.onboarding.smtp.host` | `""` | SMTP host for the verification email; empty uses the dev log sender. |
+| `console.onboarding.smtp.credentialsSecretRef` | `""` | Existing Secret with keys `username` and `password`; never inlined. |
+| `console.ingress.enabled` | `false` | Render the console Ingress (`className`, `host`, `annotations`). |
+| `console.extraEnv` | `[]` | Extra env vars appended to the console container. |
+| `gateway.enabled` | `true` | Render the public API gateway (API-key auth, org resolution, forwarding). |
+| `gateway.replicas` | `2` | Gateway replica count. |
+| `gateway.enforce.enabled` | `true` | Quotas, rate limits, size caps, and the abuse kill-switch. Disable only for a trusted single-tenant deployment; the bypass is logged. |
+| `gateway.enforce.trustedProxyHops` | `0` | Trusted reverse-proxy hops for client-IP resolution; `0` does not trust `X-Forwarded-For`. |
+| `gateway.singleTenantNamespace` | `""` | Pin all sandbox operations to one fixed namespace instead of per-org namespaces (QA/single-tenant). |
+| `gateway.ingress.enabled` | `false` | Render the gateway Ingress (`className`, `host`, `annotations`). |
+| `database.dsnSecretRef.name` | `""` | Existing Secret holding the Postgres DSN for the console and gateway (accounts, orgs, API keys, credit ledger). Empty falls back to in-memory storage: DEV ONLY, lost on restart. |
+| `database.dsnSecretRef.key` | `dsn` | Key within that Secret holding the DSN. |
+
+### Telemetry
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `telemetry.enabled` | `false` | Opt-in product telemetry. Off renders no telemetry env at all; see `docs/telemetry.md`. |
+| `telemetry.optOut` | `false` | Force-disable even when enabled; `DO_NOT_TRACK=1` is honored independently. |
+| `telemetry.endpoint` | `""` | Collector URL; required when enabled, empty fails closed. |
+| `telemetry.saltSecretRef` | name `""`, key `salt` | Secret holding the org-id HMAC salt; without it the org id is dropped. |
+| `telemetry.tokenSecretRef` | name `""`, key `token` | Optional collector bearer token Secret. |
+
+### Namespace, pull secrets, labels
+
+| Key | Default | Description |
+| --- | --- | --- |
 | `namespace.name` | `mitos` | Install namespace. |
 | `namespace.create` | `true` | Render the Namespace with PodSecurity labels. |
 | `imagePullSecret.create` | `false` | Render the dockerconfigjson Secret named below. Public images need none; set true only for a private mirror. |
@@ -162,6 +232,18 @@ already optional, so a missing secret never blocks forkd from starting.
 | `imagePullSecret.dockerconfigjson` | `{"auths":{}}` base64 | Base64 dockerconfigjson value used when `create=true`. |
 | `imagePullSecrets` | `[]` | Pull-secret names attached to every workload pod. Empty by default (public images); populate for a private mirror. |
 | `commonLabels` | `{}` | Extra labels merged onto every resource. |
+
+### Optional subsystems (one-line pointers)
+
+Each block is off by default and fully documented inline in `values.yaml`:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `expose.enabled` | `false` | The preview-proxy for authed wildcard sandbox URLs (`expose.domain`, TLS, OIDC tiers, the `mitos-expose` Secret). |
+| `dex.enabled` | `false` | In-cluster Dex federating GitHub/Google into one OIDC issuer for the console. |
+| `frontdoor.enabled` | `false` | Single-origin reverse proxy routing marketing and console paths. |
+| `edge.enabled` | `false` | Cilium Gateway-API edge resources (Gateway, Certificate, HTTPRoutes). |
+| `marketing.enabled` | `false` | Marketing static-site Deployment behind the frontdoor. |
 
 ## Security notes
 
