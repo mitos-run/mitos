@@ -471,6 +471,75 @@ func TestGatewayExistingSandboxesPathStillWorks(t *testing.T) {
 	}
 }
 
+// TestGatewayPauseMapsToSandboxPause asserts POST /v1/pause (the SDK
+// sandbox.pause() call, body {"sandbox": "<id>"}) routes as the "sandbox.pause"
+// op with the org taken from the verified key. Before #601 it fell through to
+// "sandbox.post", which the control plane rejects as an unknown operation.
+func TestGatewayPauseMapsToSandboxPause(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"status":"paused"}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/pause", f.rawA, `{"sandbox":"sb-x"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "sandbox.pause" {
+		t.Errorf("op = %q, want sandbox.pause", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayResumeMapsToSandboxResume asserts POST /v1/resume routes as the
+// "sandbox.resume" op with the org taken from the verified key.
+func TestGatewayResumeMapsToSandboxResume(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"status":"running"}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/resume", f.rawA, `{"sandbox":"sb-x"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "sandbox.resume" {
+		t.Errorf("op = %q, want sandbox.resume", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayPauseResumeRequireSandboxScope asserts pause and resume are
+// MUTATING ops: a read-only key is rejected with forbidden and never reaches
+// the control plane.
+func TestGatewayPauseResumeRequireSandboxScope(t *testing.T) {
+	store := NewMemStore()
+	newTestOrg(t, store, "org-a")
+	keys := NewKeyService(store)
+	created, err := keys.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Scopes: []string{ScopeReadOnly}})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	cp := &fakeControlPlane{respBody: []byte(`{}`)}
+	gw := NewGateway(keys, nil, cp, nil)
+	for _, path := range []string{"/v1/pause", "/v1/resume"} {
+		rec := doRequest(gw, http.MethodPost, path, created.RawKey, `{"sandbox":"sb-x"}`)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403 for a read-only key", path, rec.Code)
+		}
+		if code := decodeErr(t, rec); code != "forbidden" {
+			t.Errorf("%s: error code = %q, want forbidden", path, code)
+		}
+	}
+	if len(cp.got) != 0 {
+		t.Error("control plane reached despite a read-only key on pause/resume")
+	}
+}
+
 // TestGatewayTemplatesPathStillWorks is a regression guard: the /v1/templates POST
 // path added in #520 must still route as template.ensure after the /v1/fork case
 // is added.
