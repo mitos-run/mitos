@@ -974,6 +974,18 @@ spec:
                   pod count.
                 format: int32
                 type: integer
+              forceRebuildHandled:
+                description: |-
+                  ForceRebuildHandled records the last mitos.run/force-rebuild annotation
+                  value already acted on, so one annotation change triggers exactly one
+                  rebuild.
+                type: string
+              lastRebuildTime:
+                description: |-
+                  LastRebuildTime is when the last automatic or forced rebuild was
+                  triggered; with RebuildAttempts it gates the exponential backoff.
+                format: date-time
+                type: string
               lastScaleDownTime:
                 description: LastScaleDownTime records when the pool last reduced
                   its dormant pod count.
@@ -988,6 +1000,13 @@ spec:
                   type: integer
                 type: object
               readySnapshots:
+                format: int32
+                type: integer
+              rebuildAttempts:
+                description: |-
+                  RebuildAttempts counts consecutive automatic rebuilds triggered because
+                  the template failed verification or restore (#584). Reset to zero when
+                  the pool's husks are healthy again. Bounds the backoff exponent.
                 format: int32
                 type: integer
               restoringCount:

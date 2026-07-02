@@ -938,6 +938,10 @@ func (in *SandboxPoolStatus) DeepCopyInto(out *SandboxPoolStatus) {
 			(*out)[key] = val
 		}
 	}
+	if in.LastRebuildTime != nil {
+		in, out := &in.LastRebuildTime, &out.LastRebuildTime
+		*out = (*in).DeepCopy()
+	}
 	if in.LastScaleDownTime != nil {
 		in, out := &in.LastScaleDownTime, &out.LastScaleDownTime
 		*out = (*in).DeepCopy()
