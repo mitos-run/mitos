@@ -152,10 +152,18 @@ func (k ApiKey) IsRevoked() bool {
 	return !k.RevokedAt.IsZero()
 }
 
-// HasScope reports whether the key carries the named scope.
+// HasScope reports whether the key carries the named scope. The full
+// lifecycle scope implies read-only access: a key that may create and
+// terminate sandboxes may also list them; without the implication the default
+// onboarding key (sandboxes only) is locked out of the gateway's read-only
+// ops (#599). The reverse does not hold: a read-only key never satisfies a
+// mutating requirement.
 func (k ApiKey) HasScope(scope string) bool {
 	for _, s := range k.Scopes {
 		if s == scope {
+			return true
+		}
+		if scope == ScopeReadOnly && s == ScopeSandboxes {
 			return true
 		}
 	}
