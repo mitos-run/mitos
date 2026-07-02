@@ -1,5 +1,5 @@
 // Behavior tests for the Settings view: Profile (email, editable display name),
-// Security (session rows), and Appearance (reduced-motion toggle).
+// Security (session rows), and Appearance (theme select, reduced-motion toggle, density).
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, waitFor, screen } from '@testing-library/react'
 import { renderAt } from '../test/utils'
@@ -65,6 +65,7 @@ beforeEach(() => {
   localStorage.clear()
   delete document.documentElement.dataset['reduceMotion']
   delete document.documentElement.dataset['density']
+  delete document.documentElement.dataset['theme']
 })
 
 describe('Settings view', () => {
@@ -121,5 +122,34 @@ describe('Settings view', () => {
     const densitySelect = await waitFor(() => screen.getByRole('combobox', { name: /density/i }))
     fireEvent.change(densitySelect, { target: { value: 'compact' } })
     expect(document.documentElement.dataset['density']).toBe('compact')
+  })
+
+  it('theme select offers System, Dark, and Light and applies dataset.theme immediately', async () => {
+    await renderAt('/settings', caps)
+    const appearanceTab = await waitFor(() => screen.getByRole('tab', { name: /appearance/i }))
+    fireEvent.click(appearanceTab)
+    const themeSelect = await waitFor(() => screen.getByRole('combobox', { name: /theme/i }))
+    const labels = Array.from((themeSelect as HTMLSelectElement).options).map((o) => o.textContent)
+    expect(labels).toEqual(['System', 'Dark', 'Light'])
+
+    fireEvent.change(themeSelect, { target: { value: 'light' } })
+    expect(document.documentElement.dataset['theme']).toBe('light')
+
+    fireEvent.change(themeSelect, { target: { value: 'dark' } })
+    expect(document.documentElement.dataset['theme']).toBe('dark')
+
+    // System removes the attribute so the prefers-color-scheme default decides.
+    fireEvent.change(themeSelect, { target: { value: 'system' } })
+    expect(document.documentElement.dataset['theme']).toBeUndefined()
+  })
+
+  it('persists the chosen theme to localStorage', async () => {
+    await renderAt('/settings', caps)
+    const appearanceTab = await waitFor(() => screen.getByRole('tab', { name: /appearance/i }))
+    fireEvent.click(appearanceTab)
+    const themeSelect = await waitFor(() => screen.getByRole('combobox', { name: /theme/i }))
+    fireEvent.change(themeSelect, { target: { value: 'light' } })
+    const stored = JSON.parse(localStorage.getItem('mitos-appearance') ?? '{}')
+    expect(stored.theme).toBe('light')
   })
 })
