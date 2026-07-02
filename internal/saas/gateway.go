@@ -193,8 +193,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	raw, ok := bearerToken(r)
 	if !ok {
-		g.fail(w, apierr.Get(apierr.CodeUnauthorized).
-			WithCause("no bearer api key was presented"))
+		g.fail(w, unauthorizedKey("no bearer api key was presented"))
 		return
 	}
 
@@ -323,6 +322,22 @@ func curatedRuntimeHeaders(in http.Header) http.Header {
 	return out
 }
 
+// unauthorizedKey is the public-gateway 401. The shared apierr catalogue entry
+// for unauthorized carries the SANDBOX API remediation (the per-sandbox token
+// Secret), which is the wrong next action at the front door; here the
+// remediation names the customer credential this surface actually takes, the
+// mitos API key from the console Keys page, per the
+// remediation-matches-the-surface rule (issue #631).
+func unauthorizedKey(cause string) apierr.Error {
+	return apierr.Error{
+		Code:        string(apierr.CodeUnauthorized),
+		Message:     "the api key is missing or invalid",
+		Cause:       cause,
+		Remediation: "Send Authorization: Bearer <key> with your mitos API key; create or view keys on the console Keys page.",
+		Status:      http.StatusUnauthorized,
+	}
+}
+
 // failVerify maps a key-verification error to the public envelope. A missing,
 // malformed, or unknown key is unauthorized (a probe cannot distinguish them); an
 // expired or revoked key is unauthorized; a scope or wrong-org failure is
@@ -335,8 +350,7 @@ func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
 	default:
 		// Malformed, unknown, expired, revoked all collapse to unauthorized so the
 		// response does not reveal which one applies.
-		g.fail(w, apierr.Get(apierr.CodeUnauthorized).
-			WithCause("the api key is missing, invalid, expired, or revoked"))
+		g.fail(w, unauthorizedKey("the api key is missing, invalid, expired, or revoked"))
 	}
 }
 

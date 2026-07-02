@@ -2,8 +2,10 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"mitos.run/mitos/internal/saas"
@@ -79,4 +81,78 @@ func TestSessionMiddlewareRejectsForgedCookie(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
+}
+
+// decode401 parses the structured error envelope out of a 401 response.
+func decode401(t *testing.T, w *httptest.ResponseRecorder) (code, remediation string) {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code        string `json:"code"`
+			Remediation string `json:"remediation"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope from %q: %v", w.Body.String(), err)
+	}
+	return env.Error.Code, env.Error.Remediation
+}
+
+// assertConsole401Body asserts a console-surface 401 body: code unauthorized,
+// a remediation that names the SPA sign-in path, and no trace of the sandbox
+// API's per-sandbox-token wording (issue #631: the remediation must match the
+// surface).
+func assertConsole401Body(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	code, remediation := decode401(t, w)
+	if code != "unauthorized" {
+		t.Errorf("error code = %q, want unauthorized", code)
+	}
+	if !strings.Contains(remediation, "/login") {
+		t.Errorf("remediation %q does not name the /login sign-in path", remediation)
+	}
+	if strings.Contains(w.Body.String(), "sandbox-token") || strings.Contains(w.Body.String(), "per-sandbox") {
+		t.Errorf("console 401 body carries sandbox API wording: %s", w.Body.String())
+	}
+}
+
+// TestSessionMiddleware401BodyNamesSignIn asserts the unauthenticated console
+// 401 body carries the console-surface remediation (sign in at /login), not
+// the sandbox API's per-sandbox-token wording, for both a missing and a
+// forged session cookie.
+func TestSessionMiddleware401BodyNamesSignIn(t *testing.T) {
+	h, _, _ := sessionSetup(t)
+
+	t.Run("missing cookie", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/console/capabilities", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		assertConsole401Body(t, w)
+	})
+
+	t.Run("forged cookie", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/console/capabilities", nil)
+		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "forged"})
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		assertConsole401Body(t, w)
+	})
+}
+
+// TestConsoleCallerRefusal401BodyNamesSignIn asserts the defense-in-depth
+// caller() refusal (a request that reached the BFF with no caller context
+// attached) also carries the console-surface 401 body, not the sandbox
+// wording.
+func TestConsoleCallerRefusal401BodyNamesSignIn(t *testing.T) {
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	con := New(Deps{Accounts: accounts})
+	r := httptest.NewRequest("GET", "/console/keys", nil)
+	w := httptest.NewRecorder()
+	con.ServeHTTP(w, r)
+	assertConsole401Body(t, w)
 }

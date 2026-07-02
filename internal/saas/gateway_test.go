@@ -142,6 +142,47 @@ func TestGatewayRejectsForgedKey(t *testing.T) {
 	}
 }
 
+// TestGatewayUnauthorizedRemediationNamesAPIKey asserts the front-door 401
+// remediation names the mitos API key from the console Keys page, never the
+// per-sandbox token Secret (issue #631): the credential at this surface is
+// the customer API key, so the remediation must match it.
+func TestGatewayUnauthorizedRemediationNamesAPIKey(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	cases := map[string]string{
+		"missing key": "",
+		"forged key":  keyPrefix + "forged-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	for name, bearer := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", bearer, "{}")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			var env struct {
+				Error struct {
+					Code        string `json:"code"`
+					Remediation string `json:"remediation"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode error envelope from %q: %v", rec.Body.String(), err)
+			}
+			if env.Error.Code != "unauthorized" {
+				t.Errorf("error code = %q, want unauthorized", env.Error.Code)
+			}
+			if !strings.Contains(env.Error.Remediation, "API key") {
+				t.Errorf("remediation %q does not name the mitos API key", env.Error.Remediation)
+			}
+			if !strings.Contains(env.Error.Remediation, "Keys") {
+				t.Errorf("remediation %q does not name the console Keys page", env.Error.Remediation)
+			}
+			if strings.Contains(rec.Body.String(), "sandbox-token") || strings.Contains(rec.Body.String(), "per-sandbox") {
+				t.Errorf("gateway 401 body carries sandbox API wording: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestGatewayRejectsWrongScopeAsForbidden asserts a key lacking the op's scope
 // yields a forbidden envelope (valid credential, not allowed) and never
 // forwards. A read-only key cannot create a sandbox.

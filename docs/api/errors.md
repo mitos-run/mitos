@@ -73,6 +73,16 @@ gRPC status the controller<->forkd path maps to (the gRPC mapping column). The
 Rows are sorted by `code` to match `internal/apierr` `Codes()` ordering so a
 reviewer can diff the doc against the constants by eye.
 
+The `unauthorized` message and remediation in the table are the SANDBOX API
+wording (the per-sandbox token). Surfaces that take a different credential keep
+the same code, status, and envelope shape but carry a remediation naming the
+credential that surface actually takes: the console session middleware
+(`/console/*`) answers "Sign in at /login to establish a console session, then
+retry the request." and the hosted public gateway answers "Send Authorization:
+Bearer <key> with your mitos API key; create or view keys on the console Keys
+page." A remediation always names the next action for the surface the caller
+hit.
+
 ### Context field meanings
 
 - `sandbox`: the sandbox id the call targeted.

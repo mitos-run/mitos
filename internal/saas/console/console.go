@@ -270,8 +270,9 @@ func (c *Console) caller(r *http.Request) (accountID, orgID string, err apierr.E
 	orgID, hasOrg := OrgFromContext(r.Context())
 	accountID, hasCaller := CallerFromContext(r.Context())
 	if !hasOrg || !hasCaller {
-		return "", "", apierr.Get(apierr.CodeUnauthorized).
-			WithCause("no authenticated org context is attached to the request"), false
+		// Console-surface 401 (issue #631): the remediation names the sign-in
+		// path, never the sandbox API's per-sandbox token.
+		return "", "", unauthorizedSession("no authenticated org context is attached to the request"), false
 	}
 	// noErr is the zero value returned on the success path; callers ignore the
 	// error whenever ok is true, so it is never surfaced. It is a declaration,
