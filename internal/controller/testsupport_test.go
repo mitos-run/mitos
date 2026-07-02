@@ -280,6 +280,28 @@ func (r *SandboxPoolReconciler) DriveTemplateHealthForTest(ctx context.Context, 
 	r.driveTemplateHealth(ctx, pool, template, poolTemplateID(pool), nodeFilter, dormantPods, warmReady, now)
 }
 
+// DriveForceRebuildForTest exposes driveForceRebuild to the external
+// controller_test package so the force-rebuild annotation path (#584, #578)
+// can be envtested directly, mirroring DriveTemplateHealthForTest. Returns
+// whether a rebuild was triggered.
+func (r *SandboxPoolReconciler) DriveForceRebuildForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, dormantPods []corev1.Pod, now metav1.Time) bool {
+	nodeFilter, _ := r.placementFilter(ctx, pool)
+	return r.driveForceRebuild(ctx, pool, template, poolTemplateID(pool), nodeFilter, dormantPods, now)
+}
+
+// TemplateBuiltConditionForTest exposes templateBuiltCondition to the
+// external controller_test package so the TemplateBuilt condition (#578) can
+// be asserted against a genuine ensureTemplateBuilt error from a fake forkd,
+// without racing the ambient manager-level pool reconciler via the full
+// Reconcile.
+func TemplateBuiltConditionForTest(buildErr error, now metav1.Time) metav1.Condition {
+	return templateBuiltCondition(buildErr, now)
+}
+
+// ForceRebuildAnnotationForTest exposes the forceRebuildAnnotation key to the
+// external controller_test package.
+const ForceRebuildAnnotationForTest = forceRebuildAnnotation
+
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake
 // forkd received. It records presence/length only, NEVER the key value, so a
 // test can assert the controller delivered a key without the value ever

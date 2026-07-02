@@ -328,13 +328,28 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Message:            fmt.Sprintf("%d/%d warm husk pods (%d in use), %d snapshot node(s)", warm, desiredWarm, res.inUse, readySnapshots),
 		})
 
+		// TemplateBuilt (#578): surfaces ensureTemplateBuilt's result (already
+		// captured in buildErr above) as a condition, so a build failure is
+		// visible on the pool object and not just in the reconcile log.
+		setCondition(&pool.Status.Conditions, templateBuiltCondition(buildErr, now))
+
+		// Force-rebuild annotation (#584, #578): an operator setting
+		// mitos.run/force-rebuild is an explicit override that bypasses
+		// rebuildBackoff. It must run BEFORE driveTemplateHealth and, when it
+		// actually triggers a rebuild, suppress driveTemplateHealth for this
+		// reconcile: both read pool.Status.TemplateDigest and res.dormantPods as
+		// captured before either ran, so evaluating both against the same
+		// pre-rebuild snapshot would double-count the attempt.
+		//
 		// Restore-failing detection + backoff-bounded forced rebuild (#584): a
 		// snapshot that "built" successfully but fails to RESTORE crashloops
 		// every dormant husk pod bound to it forever, a condition no other path
 		// here rebuilds from. Must run after pool.Status.TemplateDigest above and
 		// before the status write below so its condition and RebuildAttempts/
 		// LastRebuildTime bookkeeping land in the same write.
-		r.driveTemplateHealth(ctx, &pool, template, templateID, nodeFilter, res.dormantPods, warmReady, now)
+		if !r.driveForceRebuild(ctx, &pool, template, templateID, nodeFilter, res.dormantPods, now) {
+			r.driveTemplateHealth(ctx, &pool, template, templateID, nodeFilter, res.dormantPods, warmReady, now)
+		}
 
 		if err := r.writePoolStatusIfChanged(ctx, &pool, before, now); err != nil {
 			return ctrl.Result{}, err
@@ -362,9 +377,15 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// called now (not gated on a count deficit) so a template-content edit rebuilds
 	// the snapshot in place even when the holder count is already satisfied.
 	before := pool.Status.DeepCopy()
-	if err := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter); err != nil {
-		logger.Error(err, "failed to create snapshots")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+
+	// buildErr is captured rather than returned early (#578) so the
+	// TemplateBuilt condition and the rest of the status update below always
+	// land, mirroring the husk path's best-effort treatment of a build
+	// failure: a failed build must still be visible on the pool object, not
+	// just in the reconcile log.
+	buildErr := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter)
+	if buildErr != nil {
+		logger.Error(buildErr, "failed to create snapshots")
 	}
 	readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 
@@ -378,6 +399,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	now := metav1.Now()
+	setCondition(&pool.Status.Conditions, templateBuiltCondition(buildErr, now))
 	setCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus(readySnapshots >= desired),
@@ -390,6 +412,9 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	if buildErr != nil {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 

@@ -42,6 +42,20 @@ const (
 	// a rebuild; two independent pods hitting the same crashloop on the same
 	// digest is evidence of a real template defect rather than pod-local noise.
 	minFailingHusks = 2
+
+	// forceRebuildAnnotation is the operator recovery lever (#584, #578): an
+	// operator sets it to any new value (a timestamp is the documented
+	// convention) to force an immediate template rebuild on the next husk-path
+	// reconcile, bypassing rebuildBackoff entirely. It retires the old hand
+	// recovery (deleting on-disk template artifacts and restarting forkd):
+	// `kubectl -n mitos annotate sandboxpool <pool> mitos.run/force-rebuild="$(date +%s)" --overwrite`.
+	forceRebuildAnnotation = "mitos.run/force-rebuild"
+
+	// templateBuiltMessageLimit bounds the TemplateBuilt condition message
+	// (#578) so an arbitrarily long build error (a forkd gRPC status, a kernel
+	// panic excerpt) never produces an oversized condition; a condition
+	// message is for an operator to skim, not to carry a full log.
+	templateBuiltMessageLimit = 512
 )
 
 // rebuildBackoff returns how long after LastRebuildTime the next automatic
@@ -167,13 +181,44 @@ func (r *SandboxPoolReconciler) driveTemplateHealth(ctx context.Context, pool *v
 		return
 	}
 
-	wrappedDEK, kekID, err := r.templateEncKey(ctx, pool, template, templateID)
-	if err != nil {
+	if err := r.triggerTemplateRebuild(ctx, pool, template, templateID, nodeFilter, dormantPods, digest); err != nil {
 		logger.Error(err, "resolve encryption key to force-rebuild a restore-failing template")
 		return
 	}
+
+	pool.Status.RebuildAttempts++
+	pool.Status.LastRebuildTime = &now
+	setCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:               "TemplateHealthy",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: now,
+		Reason:             "Rebuilding",
+		Message:            fmt.Sprintf("forced rebuild attempt %d triggered for restore-failing template digest %s", pool.Status.RebuildAttempts, digest),
+	})
+}
+
+// triggerTemplateRebuild forces the template snapshot to rebuild on every
+// current holder, ignoring the node's reuse-or-rebuild gate (#584), and then
+// deletes any dormant husk pod bound to digest that is crashlooping, so it
+// recreates against the fresh snapshot. A pod that is dormant but not (yet)
+// crashlooping is left alone. It is the shared rebuild primitive behind the
+// automatic backoff-bounded path (driveTemplateHealth) and the
+// operator-triggered force-rebuild annotation path (driveForceRebuild), so
+// the actual rebuild mechanics live in exactly one place.
+//
+// It returns an error only when the encryption key could not be resolved (a
+// rebuild cannot even be attempted then); a rebuildStaleSnapshots failure is
+// logged and swallowed here so the crashlooper cleanup below still runs on a
+// best-effort basis, matching the pre-refactor behavior of driveTemplateHealth.
+func (r *SandboxPoolReconciler) triggerTemplateRebuild(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, templateID string, nodeFilter map[string]bool, dormantPods []corev1.Pod, digest string) error {
+	logger := log.FromContext(ctx)
+
+	wrappedDEK, kekID, err := r.templateEncKey(ctx, pool, template, templateID)
+	if err != nil {
+		return err
+	}
 	if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true); err != nil {
-		logger.Error(err, "force-rebuild restore-failing template")
+		logger.Error(err, "force-rebuild template")
 	}
 
 	// Delete only the crashlooping pods carrying the BAD (current, presumed
@@ -188,14 +233,82 @@ func (r *SandboxPoolReconciler) driveTemplateHealth(ctx context.Context, pool *v
 			logger.Error(err, "delete crashlooping husk pod after forced rebuild", "pod", p.Name)
 		}
 	}
+	return nil
+}
 
-	pool.Status.RebuildAttempts++
-	pool.Status.LastRebuildTime = &now
+// driveForceRebuild checks pool.Annotations[forceRebuildAnnotation] against
+// pool.Status.ForceRebuildHandled and, on a change, forces an immediate
+// rebuild (#584, #578) that IGNORES rebuildBackoff entirely: an operator
+// setting the annotation is an explicit, human-triggered override, not
+// evidence toward the automatic backoff exponent. Unlike driveTemplateHealth's
+// automatic path, a forced rebuild does NOT increment RebuildAttempts and does
+// NOT stamp LastRebuildTime; instead Status.ForceRebuildHandled is set to the
+// annotation value, so one annotation edit triggers exactly one rebuild and a
+// repeat reconcile with the same value is a no-op.
+//
+// It reports whether it triggered a rebuild this call, so the caller can skip
+// the automatic driveTemplateHealth evaluation for the same reconcile: without
+// that, a forced rebuild would immediately be followed by a second, automatic
+// one evaluated against the pool's pre-rebuild TemplateDigest and dormantPods
+// (both captured before this reconcile's forced rebuild ran), double-counting
+// the attempt.
+func (r *SandboxPoolReconciler) driveForceRebuild(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, templateID string, nodeFilter map[string]bool, dormantPods []corev1.Pod, now metav1.Time) bool {
+	logger := log.FromContext(ctx)
+	value := pool.Annotations[forceRebuildAnnotation]
+	if value == "" || value == pool.Status.ForceRebuildHandled {
+		return false
+	}
+
+	if err := r.triggerTemplateRebuild(ctx, pool, template, templateID, nodeFilter, dormantPods, pool.Status.TemplateDigest); err != nil {
+		logger.Error(err, "resolve encryption key to force-rebuild template via annotation")
+		return false
+	}
+
+	pool.Status.ForceRebuildHandled = value
 	setCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               "TemplateHealthy",
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: now,
-		Reason:             "Rebuilding",
-		Message:            fmt.Sprintf("forced rebuild attempt %d triggered for restore-failing template digest %s", pool.Status.RebuildAttempts, digest),
+		Reason:             "ForceRebuilding",
+		Message:            fmt.Sprintf("force-rebuild requested via the %s annotation (value %s)", forceRebuildAnnotation, value),
 	})
+	return true
+}
+
+// templateBuiltCondition builds the TemplateBuilt condition (#578): True/Built
+// when the pool's template snapshot build succeeded this reconcile,
+// False/BuildFailed with buildErr's message (truncated to
+// templateBuiltMessageLimit) when it did not. Both the husk-mode and
+// raw-forkd reconcile paths call this with the error ensureTemplateBuilt
+// returned, so a build failure is always visible on the pool object even on
+// the raw-forkd path, which previously early-returned before any status
+// condition was set.
+func templateBuiltCondition(buildErr error, now metav1.Time) metav1.Condition {
+	if buildErr == nil {
+		return metav1.Condition{
+			Type:               "TemplateBuilt",
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: now,
+			Reason:             "Built",
+			Message:            "template snapshot build succeeded",
+		}
+	}
+	return metav1.Condition{
+		Type:               "TemplateBuilt",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: now,
+		Reason:             "BuildFailed",
+		Message:            truncateMessage(buildErr.Error(), templateBuiltMessageLimit),
+	}
+}
+
+// truncateMessage bounds s to at most n bytes so a long error never produces
+// an oversized condition message. It is a byte-level cut (not rune-aware):
+// the callers here are ASCII forkd/Kubernetes error text, and a Kubernetes
+// condition Message has no encoding requirement beyond being a string.
+func truncateMessage(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
