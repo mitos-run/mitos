@@ -40,6 +40,16 @@ type UsageAPIRunnable struct {
 	Token string
 }
 
+// NeedLeaderElection reports false: the internal usage API is a READ surface
+// and must serve on EVERY controller replica, because the Helm chart fronts it
+// with a ClusterIP Service that selects all replicas; a leader-gated listener
+// would round-robin the console into connection refusals on the non-leaders.
+// With the durable Postgres store every replica reads the same records. With
+// the in-memory store (DEV ONLY) only the leader (which runs the collector)
+// holds data, so a non-leader read can be empty; the durable store is the
+// production configuration. The collector (the WRITE side) stays leader-gated.
+func (u *UsageAPIRunnable) NeedLeaderElection() bool { return false }
+
 // Start serves the internal usage API until ctx is canceled. It builds the
 // org-scoped, bearer-gated handler over the shared store and listens on Addr.
 func (u *UsageAPIRunnable) Start(ctx context.Context) error {

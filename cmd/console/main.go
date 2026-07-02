@@ -36,10 +36,11 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
-	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/oidcauth"
+	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/pgstore"
 	"mitos.run/mitos/internal/telemetry"
+	"mitos.run/mitos/internal/usage"
 )
 
 func main() {
@@ -117,11 +118,14 @@ func main() {
 		spendCapStore = billing.NewMemSpendCapStore()
 	}
 
+	// The usage store the console reads: the controller's internal usage API
+	// (the SAME usage the collector recorded) when configured, in-memory in dev.
+	// Shared by the BFF usage view and the drawdown driver below.
+	usageStore := buildUsageStore(logger)
+
 	con := console.New(console.Deps{
 		Accounts: accounts,
-		// The usage store the console reads: the controller's internal usage API
-		// (the SAME usage the collector recorded) when configured, in-memory in dev.
-		Usage: buildUsageStore(logger),
+		Usage:    usageStore,
 		// The proof-snapshot and fork-tree sources: org-scoped cluster queries when
 		// in a cluster, in-memory otherwise.
 		Instruments: buildInstruments(logger),
@@ -158,6 +162,32 @@ func main() {
 		Sessions: sessionStoreAdapter{s: sessionStore},
 		Log:      logger,
 	})
+
+	// Usage drawdown driver (issue #602): the periodic loop that settles each
+	// org's metered usage against its prepaid credit via
+	// billing.Service.Drawdown. Without it the collector records usage but
+	// credits never move. Enabled by default (every 5m) when the usage store is
+	// the live controller-API-backed one; off when the store is the in-memory
+	// dev fallback (nothing real to settle); MITOS_CONSOLE_DRAWDOWN_INTERVAL
+	// overrides (a Go duration, or 0/off to disable). The service is built over
+	// the SAME credit ledger and status store the BFF billing view reads, and
+	// prices with the default rate table (billing.DefaultRates,
+	// docs/saas/pricing.md); a configurable price list is a documented
+	// follow-up. No billing provider is involved: Drawdown only prices the
+	// record and debits prepaid credit, idempotently per (org, sandbox, window).
+	// The driver logs counts only, never balances or costs.
+	_, usageLive := usageStore.(*usage.HTTPStore)
+	ddInterval, err := drawdownInterval(os.Getenv("MITOS_CONSOLE_DRAWDOWN_INTERVAL"), usageLive)
+	if err != nil {
+		log.Fatalf("drawdown: %v", err)
+	}
+	if ddInterval > 0 {
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: billing.DefaultRates()})
+		startDrawdownDriver(context.Background(), logger, ddInterval, store, usageStore, dd)
+		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
+	} else {
+		logger.Info("usage drawdown driver disabled (in-memory usage store or interval 0/off)")
+	}
 
 	// sessionSvc is constructed before the dev/prod branch so the internal
 	// machine-to-machine endpoints (mounted unconditionally below) can share it

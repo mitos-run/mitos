@@ -155,15 +155,27 @@ multi-tenant. See `docs/design/observability-and-billing-spine.md`.
 
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from
-client input. A sandbox is created in the org's hard-isolation namespace
-`mitos-org-<id>`; the controller stamps the trusted `mitos.run/org` label on the
-sandbox's husk pod, derived from that namespace via `tenant.OrgFromNamespace` (a
-client-set `mitos.run/org` on the input is ignored). The `OrgResolver` seam
-(`OrgFor(sandboxID) -> orgID`) is implemented live by `LabelOrgResolver`
-(`internal/usage/k8sresolver.go`), which reads that controller-stamped label off
-the husk pod. A self-host sandbox in a non-org namespace carries no org label and
-is left unattributed (kept in node-reconciliation totals, dropped from billable),
-never misbilled to a default org.
+client input. There are two attribution paths:
+
+- **Org tenancy** (per-org namespaces): a sandbox is created in the org's
+  hard-isolation namespace `mitos-org-<id>`; the controller stamps the trusted
+  `mitos.run/org` label on the sandbox's husk pod at POD CREATION, derived from
+  that namespace via `tenant.OrgFromNamespace` (a client-set `mitos.run/org` on
+  the input is ignored). The namespace-derived label is authoritative: a
+  claim-side label never overrides it.
+- **Single-tenant hosted** (one shared namespace): the pool and its husk pods
+  live in a shared namespace, so pod creation derives no org. The hosted gateway
+  stamps the `mitos.run/org` label on every Sandbox object it creates
+  (`internal/saas/controlplane`), and the controller copies that label onto the
+  husk pod at CLAIM time (issue #602), releasing it again if a failed activation
+  returns the pod to the dormant pool. Attribution therefore works without
+  per-org namespaces, but only for sandboxes created through the gateway.
+
+The `OrgResolver` seam (`OrgFor(sandboxID) -> orgID`) is implemented live by
+`LabelOrgResolver` (`internal/usage/k8sresolver.go`), which reads the
+controller-stamped label off the husk pod. A self-host sandbox with no org label
+on either path is left unattributed (kept in node-reconciliation totals, dropped
+from billable), never misbilled to a default org.
 
 ## Public usage API (org-scoped)
 
@@ -180,6 +192,42 @@ The response carries the per-window records, the rolled-up totals per billable
 unit, and a cost estimate computed from a `PriceList` (a simple per-unit rate
 table). Both E2B and Daytona lack a real usage API; this org-scoped, per-unit,
 auditable endpoint is a deliberate differentiator.
+
+## Turning it on (hosted deployment knobs)
+
+Metering is OFF by default; a self-host install renders and runs none of it.
+Three knobs turn the pipeline on end to end (issue #602):
+
+1. **Collector + internal usage API** (Helm: `controller.usage.collector: true`).
+   The chart renders `--usage-collector`, `--usage-collector-interval`
+   (`controller.usage.interval`, default `60s`), and `--usage-api-address`
+   (`controller.usage.apiAddress`, default `:8092`) on the controller, plus a
+   ClusterIP Service (`mitos-controller-usage`) for the usage API port. The API
+   serves on every controller replica (it is not leader-gated) so the Service is
+   safe with multiple replicas when the durable store is configured.
+2. **Durable store + bearer token** (Helm: `database.dsnSecretRef` and
+   `controller.usage.tokenSecret`). The controller sources `MITOS_DATABASE_DSN`
+   from the shared `database.dsnSecretRef` Secret (without it usage lives in
+   memory and is lost on restart: DEV ONLY) and `MITOS_USAGE_API_TOKEN` from
+   `controller.usage.tokenSecret` via secretKeyRef. An empty token makes the
+   usage API refuse every request (fail closed). The console gets the matching
+   `MITOS_USAGE_API_URL` (derived from the Service; `console.usage.url`
+   overrides) and `MITOS_USAGE_API_TOKEN` automatically.
+3. **Credit drawdown** (console env `MITOS_CONSOLE_DRAWDOWN_INTERVAL`). The
+   console runs a background driver that lists every org, reads the org's
+   recent finalized usage records over the internal usage API, and settles each
+   record against the prepaid credit ledger via `billing.Service.Drawdown`
+   (idempotent per record key, never negative), priced with the default rate
+   table (`billing.DefaultRates`, docs/saas/pricing.md; a configurable price
+   list is a documented follow-up). Default: every 5m when the live usage store
+   is configured, off otherwise; `0` or `off` disables. The driver logs counts
+   only, never balances or costs.
+
+Attribution rule (see "Collection seam and the org mapping"): with org tenancy
+the org derives from the per-org namespace at pod creation; a single-tenant
+hosted deployment relies on the claim-time label the controller copies from the
+gateway-stamped Sandbox object. Without one of the two, samples stay
+unattributed and are dropped from billable usage.
 
 ## Stripe seam
 

@@ -50,6 +50,11 @@ type Store interface {
 	PutOrg(ctx context.Context, o Organization) error
 	// GetOrg returns the organization by id, or ErrNotFound.
 	GetOrg(ctx context.Context, id string) (Organization, error)
+	// ListOrgs returns every organization, in no particular order. It is an
+	// OPERATOR/machine surface (the console's usage drawdown driver iterates
+	// the orgs to settle metered usage against prepaid credit, issue #602); it
+	// is never wired to a tenant-facing endpoint.
+	ListOrgs(ctx context.Context) ([]Organization, error)
 
 	// PutMembership stores a membership.
 	PutMembership(ctx context.Context, m Membership) error
@@ -155,6 +160,16 @@ func (s *MemStore) GetOrg(_ context.Context, id string) (Organization, error) {
 		return Organization{}, ErrNotFound
 	}
 	return o, nil
+}
+
+func (s *MemStore) ListOrgs(_ context.Context) ([]Organization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Organization, 0, len(s.orgs))
+	for _, o := range s.orgs {
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 func (s *MemStore) PutMembership(_ context.Context, m Membership) error {
