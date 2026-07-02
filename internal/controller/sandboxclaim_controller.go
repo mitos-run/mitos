@@ -751,7 +751,7 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// Winning the label patch is the gate to Activate, so a pod is activated by
 	// exactly one claim. On conflict we requeue so the next reconcile picks a
 	// different dormant pod.
-	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
+	if err := r.markHuskPodClaimed(ctx, pod, claim); err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
 			beforeStatus := claim.Status.DeepCopy()
