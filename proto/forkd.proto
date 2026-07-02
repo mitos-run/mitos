@@ -76,6 +76,13 @@ message CreateTemplateRequest {
   // StartWorkload RPC and gates the snapshot on its readiness. Empty means the
   // template has no serving workload (exec-only).
   WorkloadSpec workload = 9;
+  // force_rebuild, when true, skips the node's reuse-or-rebuild gate (#584)
+  // and always deletes and rebuilds the template, even if a healthy on-disk
+  // template already exists. The controller sets it when the template
+  // CONTENT changed (issue #475): digest verification proves the on-disk
+  // bytes are intact, not that they still match the requested spec. False
+  // (the default) lets the node reuse a verified on-disk template.
+  bool force_rebuild = 10;
 }
 
 // WorkloadSpec is the serving workload the controller declares for a template

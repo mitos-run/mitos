@@ -14,7 +14,12 @@ count or a low-water mark.
 ## Likely causes
 
 - Snapshot build is failing or stuck on the holder nodes (the `SnapshotsReady`
-  pool condition is not True).
+  pool condition is not True, or `TemplateBuilt` is `False/BuildFailed`).
+- A snapshot that built but does not RESTORE: every dormant husk pod bound to
+  it CrashLoopBackOffs forever. The pool's `TemplateHealthy` condition reports
+  this as `False/RestoreFailing` (self-healing has detected it, but is still
+  inside its backoff window) or `False/Rebuilding` (a rebuild is in flight).
+  See `docs/husk-pods.md` (Self-healing template rebuild, #584).
 - Husk pods are not at the desired replica count (the `HuskPodsReady` condition).
 - Claims are draining the warm pool faster than it refills (demand spike).
 - No KVM-labeled node is available to hold the pool's snapshot.
@@ -25,6 +30,11 @@ count or a low-water mark.
   `status.readySnapshots` to the desired count.
 - Pool `Ready` condition reason: `SnapshotsReady`, `HuskPodsReady` (healthy) vs a
   pending/failed reason. See `docs/conditions.md`.
+- `TemplateBuilt` condition: `True/Built` vs `False/BuildFailed` (the build
+  error itself, truncated to 512 characters).
+- `TemplateHealthy` condition: `True/Healthy` vs `False/RestoreFailing` or
+  `False/Rebuilding` (a restore-broken snapshot, self-healing already
+  detected and is acting on it).
 - `kubectl mitos ps` / `kubectl mitos top` to see whether holder nodes are
   present and have headroom.
 - Metrics: `mitos_pool_ready_snapshots{pool}` (the gauge driving this alert),
@@ -33,6 +43,18 @@ count or a low-water mark.
 
 ## Remediation
 
+- A restore-broken template usually self-heals: the controller detects two or
+  more crashlooping dormant husks on the current digest and forces a rebuild
+  with exponential backoff, no operator action needed. If it is stuck outside
+  the backoff window, or an immediate rebuild is wanted, force one directly:
+
+  ```
+  kubectl -n mitos annotate sandboxpool <pool> mitos.run/force-rebuild="$(date +%s)" --overwrite
+  ```
+
+  Any new annotation value triggers exactly one rebuild, bypassing the
+  backoff; this is now the documented recovery path and replaces the old hand
+  recovery of deleting on-disk template artifacts and restarting forkd.
 - Restore snapshot building: check forkd and the engine on the holder nodes
   (KVM health, snapshot artifacts).
 - Raise the pool's desired warm count if demand structurally exceeds it.

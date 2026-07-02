@@ -38,7 +38,10 @@ type ForkEngine interface {
 	// CreateTemplate builds a template snapshot. volumes are the template's
 	// declared volumes; the engine bakes one placeholder drive per volume into
 	// the snapshot. Nil leaves the template drive-less (only the rootfs).
-	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources) error
+	// forceRebuild, when true, skips the reuse-or-rebuild gate (#584) and always
+	// deletes and rebuilds; the controller sets it when the template CONTENT
+	// changed (issue #475).
+	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool) error
 	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over
 	// the peer's token-gated TLS surface, materializes it, verifies it, and
 	// records the digest. token is a credential and must never be logged.
