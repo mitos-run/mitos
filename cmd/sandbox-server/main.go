@@ -541,7 +541,11 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		// and appends init=/init to the boot args, which the prior
 		// TemplateManager-direct path did not, so an agent-at-/init rootfs no
 		// longer panics with "no working init found".
-		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workloadFromReq(req.Workload), vmResFromReq(req.Resources)); err != nil {
+		// forceRebuild is always false here: the standalone sandbox-server REST API
+		// does not yet expose a force-rebuild knob (issue #584 wires that through
+		// the k8s controller/forkd gRPC path only for now), so it always takes the
+		// reuse-or-rebuild gate's default reuse-if-healthy behavior.
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workloadFromReq(req.Workload), vmResFromReq(req.Resources), false); err != nil {
 			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return

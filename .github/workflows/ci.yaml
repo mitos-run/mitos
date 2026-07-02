@@ -400,6 +400,7 @@ jobs:
       - run: docker build -f Dockerfile.facade -t mitos-facade:ci .
       - run: docker build -f Dockerfile.console -t mitos-console:ci .
       - run: docker build -f Dockerfile.gateway -t mitos-gateway:ci .
+      - run: docker build -f Dockerfile.canary -t mitos-canary:ci .
       # The computer-use template image (headless Chromium + CDP relay, issue
       # #314). Build context is the repository root because the relay is compiled
       # from source. Smoke that the multi-stage build works, the launcher brings

@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"mitos.run/mitos/internal/cas"
@@ -268,6 +269,39 @@ func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, 
 	return r.ensureTemplateBuilt(ctx, pool, template, nodeFilter)
 }
 
+// DriveTemplateHealthForTest exposes driveTemplateHealth to the external
+// controller_test package so the restore-failing detection + backoff-bounded
+// forced rebuild (#584) can be envtested directly against a pool object,
+// without racing the suite's manager-level pool reconciler (which runs the
+// raw-forkd path against every pool) over the same status subresource the way
+// driving the full husk-mode Reconcile would.
+func (r *SandboxPoolReconciler) DriveTemplateHealthForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, dormantPods []corev1.Pod, warmReady bool, now metav1.Time) {
+	nodeFilter, _ := r.placementFilter(ctx, pool)
+	r.driveTemplateHealth(ctx, pool, template, poolTemplateID(pool), nodeFilter, dormantPods, warmReady, now)
+}
+
+// DriveForceRebuildForTest exposes driveForceRebuild to the external
+// controller_test package so the force-rebuild annotation path (#584, #578)
+// can be envtested directly, mirroring DriveTemplateHealthForTest. Returns
+// whether a rebuild was triggered.
+func (r *SandboxPoolReconciler) DriveForceRebuildForTest(ctx context.Context, pool *v1.SandboxPool, template *v1.PoolTemplateSpec, dormantPods []corev1.Pod, now metav1.Time) bool {
+	nodeFilter, _ := r.placementFilter(ctx, pool)
+	return r.driveForceRebuild(ctx, pool, template, poolTemplateID(pool), nodeFilter, dormantPods, now)
+}
+
+// TemplateBuiltConditionForTest exposes templateBuiltCondition to the
+// external controller_test package so the TemplateBuilt condition (#578) can
+// be asserted against a genuine ensureTemplateBuilt error from a fake forkd,
+// without racing the ambient manager-level pool reconciler via the full
+// Reconcile.
+func TemplateBuiltConditionForTest(buildErr error, now metav1.Time) metav1.Condition {
+	return templateBuiltCondition(buildErr, now)
+}
+
+// ForceRebuildAnnotationForTest exposes the forceRebuildAnnotation key to the
+// external controller_test package.
+const ForceRebuildAnnotationForTest = forceRebuildAnnotation
+
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake
 // forkd received. It records presence/length only, NEVER the key value, so a
 // test can assert the controller delivered a key without the value ever
@@ -425,7 +459,7 @@ func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, 
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}

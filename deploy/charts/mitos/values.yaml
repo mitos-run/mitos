@@ -229,13 +229,73 @@ facade:
       memory: "256Mi"
       cpu: "500m"
 
+# Synthetic canary (Deployment): continuously forks and execs a sandbox through
+# the same HostedBackend the SDKs use, and exports mitos_canary_up plus per-phase
+# metrics. Opt-in: it needs a scoped API key, so it stays off until an operator
+# supplies one (canary.apiKey or a pre-created secret named by apiKeySecretName).
+canary:
+  # Gate the whole canary (Deployment, Service, ServiceMonitor, optional Secret).
+  enabled: false
+  image:
+    repository: mitos-canary
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Template the canary forks each cycle. Must be a template the server can build
+  # on demand; the first cycle warms it. Keep it small for a fast, cheap probe.
+  pool: python
+  # Time between probe cycles.
+  interval: 60s
+  # Per-exec timeout, seconds.
+  execTimeoutSeconds: 30
+  # Whole-cycle deadline (create, exec, verify, terminate).
+  cycleTimeout: 120s
+  # Liveness fails if the probe loop has not ticked within this window (roughly
+  # three intervals): the loop is wedged and the pod should restart. A platform
+  # outage does NOT trip this; it keeps ticking and exporting up=0.
+  stalenessWindow: 3m
+  # Container port for /metrics, /healthz, /readyz.
+  metricsPort: 9102
+  # API base URL. Leave empty to auto-resolve the in-cluster gateway (tests the
+  # control plane). Set to https://api.mitos.run to probe the full external path
+  # including ingress and TLS.
+  baseURL: ""
+  # Name of the Secret holding the api key under the key `api-key`.
+  apiKeySecretName: mitos-canary-api-key
+  # When true, the Secret is assumed to exist already (created out of band) and
+  # the chart never renders it. When false and apiKey is set below, the chart
+  # renders the Secret. Leave apiKey empty and this false to supply the Secret
+  # yourself without the chart touching it.
+  apiKeySecretExternal: false
+  # A scoped mitos_live_ token. Prefer leaving this empty and creating the Secret
+  # out of band (GitOps sealed-secret, external-secrets, or kubectl) so the token
+  # never lands in values or git. Set only for a quick local install.
+  apiKey: ""
+  serviceMonitor:
+    # Render a ServiceMonitor (needs the Prometheus Operator and monitoring.enabled).
+    enabled: true
+    interval: 30s
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+
 # Monitoring artifacts: the PrometheusRule and the Grafana dashboard ConfigMap.
 # Opt-in; requires the Prometheus Operator CRDs and a Grafana sidecar.
 monitoring:
-  # Gate both the PrometheusRule and the dashboard ConfigMap.
+  # Gate the PrometheusRule, the dashboard ConfigMap, and the PodMonitors.
   enabled: false
   # Label value selected by the Prometheus Operator ruleSelector for the rule.
   prometheusRuleRelease: prometheus
+  # PodMonitors that make the control-plane metrics the alerts depend on actually
+  # get scraped. A Prometheus Operator does NOT honor prometheus.io/scrape pod
+  # annotations, so without these the alert rules evaluate on absent series.
+  podMonitors:
+    # Render PodMonitors for the controller and forkd (needs monitoring.enabled).
+    enabled: true
+    interval: 30s
 
 # Namespace the workloads install into.
 namespace:

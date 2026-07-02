@@ -1,0 +1,50 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.podMonitors.enabled }}
+# PodMonitors for the control-plane components that export the metrics the
+# PrometheusRule alerts on (mitos_claim_*, mitos_pool_*, mitos_fork_* from the
+# controller and forkd). Without these, a Prometheus Operator scrapes nothing
+# from mitos (it does NOT honor the prometheus.io/scrape pod annotations), so the
+# alert rules would evaluate on absent series and never fire. PodMonitors are
+# used rather than ServiceMonitors because neither the controller Deployment nor
+# the forkd DaemonSet fronts its metrics port with a Service; both expose a named
+# `metrics` container port that a PodMonitor scrapes directly.
+#
+# Both endpoints are plain HTTP: the controller runs controller-runtime metrics
+# with no secure serving, and forkd's :9091 is the plaintext operational mux.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mitos-controller
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    # Selected by a Prometheus Operator configured to match this release label,
+    # the same convention as the PrometheusRule.
+    release: {{ .Values.monitoring.prometheusRuleRelease }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitors.interval }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mitos-forkd
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    release: {{ .Values.monitoring.prometheusRuleRelease }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "forkd") | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitors.interval }}
+{{- end }}

@@ -355,6 +355,18 @@ type SandboxPoolStatus struct {
 	// silently ignored (issue #475). A content address, safe to log.
 	TemplateBuildHash string `json:"templateBuildHash,omitempty"`
 
+	// RebuildAttempts counts consecutive automatic rebuilds triggered because
+	// the template failed verification or restore (#584). Reset to zero when
+	// the pool's husks are healthy again. Bounds the backoff exponent.
+	RebuildAttempts int32 `json:"rebuildAttempts,omitempty"`
+	// LastRebuildTime is when the last automatic or forced rebuild was
+	// triggered; with RebuildAttempts it gates the exponential backoff.
+	LastRebuildTime *metav1.Time `json:"lastRebuildTime,omitempty"`
+	// ForceRebuildHandled records the last mitos.run/force-rebuild annotation
+	// value already acted on, so one annotation change triggers exactly one
+	// rebuild.
+	ForceRebuildHandled string `json:"forceRebuildHandled,omitempty"`
+
 	// DesiredWarm is the autoscaler's computed desired dormant pod count.
 	DesiredWarm int32 `json:"desiredWarm,omitempty"`
 

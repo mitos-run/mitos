@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.12.0](https://github.com/mitos-run/mitos/compare/v1.11.1...v1.12.0) (2026-07-01)
+
+
+### Features
+
+* **canary:** synthetic canary probing the fork+exec path with alerts ([#580](https://github.com/mitos-run/mitos/issues/580)) ([0f45cf7](https://github.com/mitos-run/mitos/commit/0f45cf7e24abba2c3494a8847277305d60fe88b1))
+* **doctor:** add data-dir free-space check; document data-disk selection ([#577](https://github.com/mitos-run/mitos/issues/577)) ([9a32b92](https://github.com/mitos-run/mitos/commit/9a32b92188934409f4885553122593fc1aa3e209))
+* **monitoring:** scrape control-plane metrics via PodMonitors ([#581](https://github.com/mitos-run/mitos/issues/581)) ([851d6c5](https://github.com/mitos-run/mitos/commit/851d6c5b74aa9bd350275cf7003c583f53b08273))
+
+
+### Bug Fixes
+
+* **sdk:** default to api.mitos.run, in-cluster-first resolution, robust onboarding ([#570](https://github.com/mitos-run/mitos/issues/570)) ([ccab707](https://github.com/mitos-run/mitos/commit/ccab707b749e7bc259a85087ff70321b3e22e84c))
+
 ## [1.11.1](https://github.com/mitos-run/mitos/compare/v1.11.0...v1.11.1) (2026-07-01)
 
 

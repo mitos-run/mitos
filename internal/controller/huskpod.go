@@ -1014,6 +1014,12 @@ type huskReconcileResult struct {
 	inUse    int32 // claimed/active pods (the demand signal)
 	scaledUp bool  // dormant count increased this reconcile
 	scaledDn bool  // dormant count decreased this reconcile
+
+	// dormantPods is the dormant (unclaimed, non-stale-digest) husk pod set as
+	// listed at the start of this reconcile, before any scale up/down churn. The
+	// pool reconcile passes it to templateRestoreFailing (#584) so a crashloop
+	// count is evaluated against live pod status without a second List call.
+	dormantPods []corev1.Pod
 }
 
 // countHuskPods lists the pool's husk pods and returns the current dormant and
@@ -1122,7 +1128,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 	if inUse < 0 {
 		inUse = 0
 	}
-	result := huskReconcileResult{dormant: existing, inUse: inUse}
+	result := huskReconcileResult{dormant: existing, inUse: inUse, dormantPods: dormant}
 
 	switch {
 	case existing < desired:

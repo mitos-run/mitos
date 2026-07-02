@@ -44,6 +44,12 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | --- | --- | --- |
 | `SnapshotsReady` | SandboxPool | The pool's template snapshot is built on the desired number of holder nodes. |
 | `HuskPodsReady` | SandboxPool | The warm husk pod pool is at the desired replica count with at least one snapshot node. |
+| `Built` | SandboxPool (`TemplateBuilt`) | `ensureTemplateBuilt` succeeded this reconcile: the pool's template snapshot build (or rebuild) completed without error. |
+| `BuildFailed` | SandboxPool (`TemplateBuilt`) | `ensureTemplateBuilt` returned an error this reconcile; the condition message carries the error (truncated to 512 characters). Covers both the husk-pod and raw-forkd reconcile paths (#578). |
+| `Healthy` | SandboxPool (`TemplateHealthy`) | The warm husk pods are ready and no dormant husk pod on the current template digest is crashlooping (#584). |
+| `RestoreFailing` | SandboxPool (`TemplateHealthy`) | Two or more dormant husk pods bound to the current template digest are in CrashLoopBackOff; the template is presumed restore-broken. A rebuild has not (yet) been triggered this reconcile because it is inside the backoff window (see `docs/husk-pods.md`). |
+| `Rebuilding` | SandboxPool (`TemplateHealthy`) | The automatic backoff-bounded rebuild was just triggered for a restore-failing template. |
+| `ForceRebuilding` | SandboxPool (`TemplateHealthy`) | The operator-triggered `mitos.run/force-rebuild` annotation just triggered an immediate rebuild, bypassing the backoff. |
 | `HuskActivated` | Sandbox (source.poolRef) | A dormant husk pod was activated in place for the sandbox. |
 | `ActivateFailed` | Sandbox (source.poolRef) | Activating a husk pod failed; the sandbox re-pends. |
 | `HuskPodRaced` | Sandbox (source.poolRef) | Two sandboxes raced for the same dormant husk pod; this one lost and retries. |

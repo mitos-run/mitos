@@ -1,0 +1,150 @@
+{{- if .Values.canary.enabled }}
+# Synthetic canary: continuously exercises the full user-facing sandbox path
+# (auth -> gateway -> controller -> forkd -> fork -> exec -> terminate) with the
+# same HostedBackend the SDKs use, and exports the result as Prometheus metrics.
+# When a real user would get fork_unavailable, the canary sees it first and
+# mitos_canary_up drops to 0. Opt-in via canary.enabled: it needs a scoped API
+# key, so it stays off for a default self-hosted install until an operator wires
+# the secret below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-canary
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: canary
+spec:
+  # Exactly one canary: a second would double the synthetic load and split the
+  # up signal. The probe is stateless, so a restart just resumes probing.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "canary") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mitos.selectorLabels" (dict "root" . "component" "canary") | nindent 8 }}
+      annotations:
+        # Fallback scrape path for prometheus.io/scrape-style discovery. Clusters
+        # running the Prometheus Operator use the ServiceMonitor below instead.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.canary.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- include "mitos.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: canary
+          image: {{ include "mitos.image" (dict "root" . "image" .Values.canary.image) }}
+          imagePullPolicy: {{ .Values.canary.image.pullPolicy }}
+          args:
+            - --listen=:{{ .Values.canary.metricsPort }}
+            - --pool={{ .Values.canary.pool }}
+            - --interval={{ .Values.canary.interval }}
+            - --exec-timeout={{ .Values.canary.execTimeoutSeconds }}
+            - --cycle-timeout={{ .Values.canary.cycleTimeout }}
+            {{- if .Values.canary.baseURL }}
+            - --base-url={{ .Values.canary.baseURL }}
+            {{- end }}
+            - --api-key-file=/etc/mitos-canary/api-key
+          env:
+            # Let HostedBackend resolve the in-cluster gateway automatically when
+            # no explicit base URL is set. The gateway Service injects
+            # MITOS_GATEWAY_SERVICE_HOST/PORT into pods in its namespace.
+            - name: MITOS_CANARY_STALENESS
+              value: {{ .Values.canary.stalenessWindow | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.canary.metricsPort }}
+          resources:
+            {{- toYaml .Values.canary.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Liveness is loop-alive only: a platform outage keeps the loop ticking
+          # and exporting mitos_canary_up=0, so it must NOT restart the pod (that
+          # would lose the very metrics the alerts read). /healthz fails only when
+          # the probe loop itself wedges.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: api-key
+              mountPath: /etc/mitos-canary
+              readOnly: true
+      volumes:
+        - name: api-key
+          secret:
+            # A scoped mitos_live_ token under the key `api-key`. Create it out of
+            # band (or via canary.apiKey below) so the token never lands in
+            # values or git.
+            secretName: {{ .Values.canary.apiKeySecretName }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-canary
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: canary
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "canary") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.canary.metricsPort }}
+      targetPort: metrics
+{{- if and .Values.canary.apiKey (not .Values.canary.apiKeySecretExternal) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.canary.apiKeySecretName }}
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: canary
+type: Opaque
+stringData:
+  api-key: {{ .Values.canary.apiKey | quote }}
+{{- end }}
+{{- if and .Values.canary.serviceMonitor.enabled .Values.monitoring.enabled }}
+---
+# ServiceMonitor for clusters running the Prometheus Operator. Selected by the
+# operator via the release label, same convention as the PrometheusRule.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mitos-canary
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: canary
+    release: {{ .Values.monitoring.prometheusRuleRelease }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "canary") | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.canary.serviceMonitor.interval }}
+{{- end }}
+{{- end }}

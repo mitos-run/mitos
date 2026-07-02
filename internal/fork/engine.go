@@ -2145,12 +2145,20 @@ func apparentSize(path string) int64 {
 	return fi.Size()
 }
 
-// CreateTemplate builds a template from an image ref or an existing rootfs file
-// path, boots it, runs each init command IN the VM (failing the build if any
-// command exits nonzero), snapshots it, then content-addresses the resulting
-// snapshot into the CAS store, pins its manifest, records the digest, and
-// writes the verified marker. The template is trusted at creation (this process
-// just built it), so no re-hash gate is applied here.
+// CreateTemplate reuses a healthy on-disk template when one exists, or builds
+// a template from an image ref or an existing rootfs file path, boots it,
+// runs each init command IN the VM (failing the build if any command exits
+// nonzero), snapshots it, then content-addresses the resulting snapshot into
+// the CAS store, pins its manifest, records the digest, and writes the
+// verified marker. The template is trusted at creation (this process just
+// built it), so no re-hash gate is applied to a freshly built template.
+//
+// Before building, CreateTemplate runs the reuse-or-rebuild gate (#584): with
+// forceRebuild false, an on-disk template whose recorded digest verifies and
+// whose artifacts pass the ownership invariants checkTemplateArtifactInvariants
+// enforces (#583) is reused as-is and this call returns immediately. Anything
+// else, or forceRebuild true, deletes the on-disk template first (see
+// shouldReuseTemplate) and falls through to a full rebuild.
 //
 // image is resolved by isImageRef: an existing file path takes the legacy copy
 // path unchanged; an OCI reference is pulled, the agent is injected, and a
@@ -2181,7 +2189,7 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources) (retErr error) {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool) (retErr error) {
 	// Path-traversal guard (CodeQL go/path-injection): id becomes a host path
 	// component (templates/<id>/...) through recordTemplateDigest and verify. The
 	// gRPC boundary validates it, but the sandbox-server REST handler does not, so
@@ -2196,6 +2204,39 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	if e.kernelStaged != nil {
 		if err := e.kernelStaged(e.kernelPath); err != nil {
 			return fmt.Errorf("create template %s: %w", id, err)
+		}
+	}
+
+	// Reuse-or-rebuild gate (#584): an on-disk template (typically discovered
+	// after a forkd restart, or left by a prior failed rollout) is reused ONLY
+	// when its recorded digest verifies AND its artifacts pass the ownership
+	// invariants the husk VMM needs (#583). Anything else is deleted and rebuilt
+	// in this same call, which retires the hand "rm -rf templates/*" recovery.
+	// forceRebuild skips reuse entirely: the controller sets it when the
+	// template CONTENT changed (issue #475), because digest verification proves
+	// integrity, not content identity.
+	if !forceRebuild {
+		reuse, verr := shouldReuseTemplate(e.dataDir, id, func(string) error {
+			if err := e.VerifyTemplate(id); err != nil {
+				return err
+			}
+			return checkTemplateArtifactInvariants(e.dataDir, id)
+		})
+		if reuse {
+			return nil
+		}
+		if verr != nil {
+			fmt.Fprintf(os.Stderr, "forkd: template %s on disk is unusable (%v); deleting and rebuilding\n", id, verr)
+		}
+	}
+	// Only pre-rebuild-delete when a template directory actually exists: a
+	// brand new id has nothing to clean up, and calling DeleteTemplate anyway
+	// would run its full teardown (including a crypto-shred on an encrypted
+	// engine) against a template that was never built. templateDir is the same
+	// helper verify.go uses to map id to its on-disk directory.
+	if _, err := os.Stat(templateDir(e.dataDir, id)); err == nil {
+		if err := e.DeleteTemplate(id); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "forkd: pre-rebuild delete of template %s: %v\n", id, err)
 		}
 	}
 

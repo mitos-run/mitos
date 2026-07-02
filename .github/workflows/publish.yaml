@@ -54,6 +54,8 @@ jobs:
             dockerfile: Dockerfile.console
           - name: mitos-gateway
             dockerfile: Dockerfile.gateway
+          - name: mitos-canary
+            dockerfile: Dockerfile.canary
           - name: mitos-frontdoor
             dockerfile: Dockerfile.frontdoor
           - name: mitos-computer-use
