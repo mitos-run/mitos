@@ -22,6 +22,8 @@ count or a low-water mark.
   See `docs/husk-pods.md` (Self-healing template rebuild, #584).
 - Husk pods are not at the desired replica count (the `HuskPodsReady` condition).
 - Claims are draining the warm pool faster than it refills (demand spike).
+- A pool with `spec.warm.min` below 2 has no headroom during a rebuild: a
+  single claim can starve the pool until the next husk activates.
 - No KVM-labeled node is available to hold the pool's snapshot.
 
 ## Diagnosis
