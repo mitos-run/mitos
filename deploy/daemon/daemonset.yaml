@@ -179,12 +179,19 @@ spec:
             - name: docker-config
               mountPath: /etc/forkd/docker
               readOnly: true
+          # Readiness is fail-closed on the required host device (/dev/kvm): if
+          # the device plugin or a node kernel module drops it, /readyz returns
+          # 503, this pod goes NotReady, and the controller stops routing forks
+          # here instead of every fork hanging (issue #571).
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 9091
             initialDelaySeconds: 5
             periodSeconds: 5
+          # Liveness stays on /healthz (process up), so a missing device parks the
+          # pod NotReady rather than crash-looping it; readiness recovers with no
+          # restart once the device returns.
           livenessProbe:
             httpGet:
               path: /healthz

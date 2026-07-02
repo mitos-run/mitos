@@ -16,8 +16,12 @@ func TestNodeInfoFromPod(t *testing.T) {
 			Name:   "forkd-abc12",
 			Labels: map[string]string{"app.kubernetes.io/component": "forkd"},
 		},
-		Spec:   corev1.PodSpec{NodeName: "worker-1"},
-		Status: corev1.PodStatus{PodIP: "10.0.3.7", Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{NodeName: "worker-1"},
+		Status: corev1.PodStatus{
+			PodIP:      "10.0.3.7",
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
 	}
 
 	info, ok := NodeInfoFromPod(pod, 9090, 9091, 9092)
@@ -45,6 +49,12 @@ func TestNodeInfoFromPodSkipsNotReady(t *testing.T) {
 		{Status: corev1.PodStatus{PodIP: "", Phase: corev1.PodRunning}, Spec: corev1.PodSpec{NodeName: "w"}},
 		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodPending}, Spec: corev1.PodSpec{NodeName: "w"}},
 		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodRunning}, Spec: corev1.PodSpec{NodeName: ""}},
+		// Running with an IP and a node but NOT Ready: forkd's /readyz is
+		// fail-closed on missing host devices, so a NotReady node must be kept
+		// out of fork placement (issue #571).
+		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}}, Spec: corev1.PodSpec{NodeName: "w"}},
+		// Running with no Ready condition reported yet: also not schedulable.
+		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodRunning}, Spec: corev1.PodSpec{NodeName: "w"}},
 	} {
 		if _, ok := NodeInfoFromPod(pod, 9090, 9091, 9092); ok {
 			t.Fatalf("expected not ok for pod %+v", pod.Status)
@@ -78,8 +88,12 @@ func TestSyncPodsRegistersAndRefreshesCapacity(t *testing.T) {
 			Name:   "forkd-xyz99",
 			Labels: map[string]string{"app.kubernetes.io/component": "forkd"},
 		},
-		Spec:   corev1.PodSpec{NodeName: "disc-worker"},
-		Status: corev1.PodStatus{PodIP: host, Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{NodeName: "disc-worker"},
+		Status: corev1.PodStatus{
+			PodIP:      host,
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
 	}
 
 	d.syncPods(context.Background(), []corev1.Pod{pod})
@@ -119,8 +133,12 @@ func TestSyncPodsDropsNodeOnRepeatedProbeFailure(t *testing.T) {
 			Name:   "forkd-dead",
 			Labels: map[string]string{"app.kubernetes.io/component": "forkd"},
 		},
-		Spec:   corev1.PodSpec{NodeName: "dead-worker"},
-		Status: corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{NodeName: "dead-worker"},
+		Status: corev1.PodStatus{
+			PodIP:      "127.0.0.1",
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
 	}
 
 	// First sync: one probe failure. Below the threshold, the node is still

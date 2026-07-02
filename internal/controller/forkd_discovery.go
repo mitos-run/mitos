@@ -155,13 +155,31 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) bo
 	return true
 }
 
-// NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod
-// is not running, has no IP, or has no node assignment yet. The CAS endpoint is
-// the same pod IP as the HTTP endpoint with the dedicated CAS port (casPort):
-// CAS distribution is served on its own TLS listener, a separate port from the
-// sandbox HTTP API.
+// podReady reports whether the pod's Ready condition is true. forkd's readiness
+// probe (/readyz) is fail-closed on the required host device (/dev/kvm), so a
+// device-missing forkd reports NotReady here.
+func podReady(pod corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod is
+// not running, has no IP, has no node assignment yet, or is not Ready. The Ready
+// gate is what makes forkd's fail-closed readiness effective for scheduling: a
+// node whose /readyz reports a missing host device is NotReady and is kept OUT
+// of the NodeRegistry, so no fork is ever placed where it would hang (issue
+// #571). The CAS endpoint is the same pod IP as the HTTP endpoint with the
+// dedicated CAS port (casPort): CAS distribution is served on its own TLS
+// listener, a separate port from the sandbox HTTP API.
 func NodeInfoFromPod(pod corev1.Pod, grpcPort, httpPort, casPort int) (*NodeInfo, bool) {
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || pod.Spec.NodeName == "" {
+		return nil, false
+	}
+	if !podReady(pod) {
 		return nil, false
 	}
 	return &NodeInfo{
