@@ -99,13 +99,14 @@ func TestExposeReconcilerSyncsReadyRoutes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, sb) })
 
-	// Status is a subresource; set it via Status().Update.
-	sb.Status.Phase = v1.SandboxReady
-	sb.Status.Endpoint = "10.0.0.7:9091"
-	sb.Status.SandboxID = "sbx-abc"
-	if err := k8sClient.Status().Update(ctx, sb); err != nil {
-		t.Fatalf("update sandbox status: %v", err)
-	}
+	// Status is a subresource; set it via Status().Update. Retry-on-conflict:
+	// the claim reconciler pends this sandbox (its pool object does not exist),
+	// so a stale-resourceVersion status write races it.
+	updateSandboxStatusWithRetry(t, sbName, ns, func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxReady
+		sb.Status.Endpoint = "10.0.0.7:9091"
+		sb.Status.SandboxID = "sbx-abc"
+	})
 
 	// Create the per-sandbox token Secret.
 	secret := &corev1.Secret{
@@ -155,14 +156,9 @@ func TestExposeReconcilerSyncsReadyRoutes(t *testing.T) {
 	}
 
 	// Now mark the sandbox not-Ready and reconcile again: the route must disappear.
-	var fresh v1.Sandbox
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbName, Namespace: ns}, &fresh); err != nil {
-		t.Fatalf("re-get sandbox: %v", err)
-	}
-	fresh.Status.Phase = v1.SandboxPending
-	if err := k8sClient.Status().Update(ctx, &fresh); err != nil {
-		t.Fatalf("update sandbox status to Pending: %v", err)
-	}
+	updateSandboxStatusWithRetry(t, sbName, ns, func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxPending
+	})
 
 	_, err = r.Reconcile(ctx, req)
 	if err != nil {
@@ -234,12 +230,13 @@ func TestExposeReconcilerNamespaceScopedTokens(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = k8sClient.Delete(ctx, sb) })
 
-		sb.Status.Phase = v1.SandboxReady
-		sb.Status.Endpoint = tn.ep
-		sb.Status.SandboxID = tn.sbID
-		if err := k8sClient.Status().Update(ctx, sb); err != nil {
-			t.Fatalf("update sandbox status in %s: %v", tn.ns, err)
-		}
+		// Retry-on-conflict: the claim reconciler pends this sandbox (its pool
+		// object does not exist), so a stale-resourceVersion write races it.
+		updateSandboxStatusWithRetry(t, dupName, tn.ns, func(sb *v1.Sandbox) {
+			sb.Status.Phase = v1.SandboxReady
+			sb.Status.Endpoint = tn.ep
+			sb.Status.SandboxID = tn.sbID
+		})
 
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: dupName + "-sandbox-token", Namespace: tn.ns},
@@ -311,12 +308,13 @@ func TestExposeReconcilerRequeueMissingSecret(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, sb) })
 
-	sb.Status.Phase = v1.SandboxReady
-	sb.Status.Endpoint = "10.0.0.8:9091"
-	sb.Status.SandboxID = "sbx-missing"
-	if err := k8sClient.Status().Update(ctx, sb); err != nil {
-		t.Fatalf("update sandbox status: %v", err)
-	}
+	// Retry-on-conflict: the claim reconciler pends this sandbox (its pool
+	// object does not exist), so a stale-resourceVersion write races it.
+	updateSandboxStatusWithRetry(t, sbName, ns, func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxReady
+		sb.Status.Endpoint = "10.0.0.8:9091"
+		sb.Status.SandboxID = "sbx-missing"
+	})
 
 	// Intentionally do NOT create the token Secret.
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: ns}}

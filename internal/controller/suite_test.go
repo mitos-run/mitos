@@ -15,8 +15,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/eventfeed"
@@ -102,6 +104,27 @@ func (r *bufferingRecorder) snapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.events...)
+}
+
+// updateSandboxStatusWithRetry applies a Sandbox status mutation under
+// RetryOnConflict, re-Getting the object each attempt. A test that Creates a
+// sandbox and immediately stamps its status from the stale Create response
+// loses the optimistic-lock race intermittently: the claim reconciler writes
+// metadata (the pool-missing stamp) and status (a PoolNotFound pend) on a
+// sandbox whose referenced pool does not exist, bumping the resourceVersion in
+// between (issue #630).
+func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate func(*v1.Sandbox)) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var sb v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
+			return err
+		}
+		mutate(&sb)
+		return k8sClient.Status().Update(ctx, &sb)
+	}); err != nil {
+		t.Fatalf("update sandbox %s/%s status: %v", namespace, name, err)
+	}
 }
 
 var (
