@@ -19,15 +19,15 @@ import mitos
 # the hosted production API endpoint https://api.mitos.run, so no base URL is
 # needed. (That is the API host; https://mitos.run itself serves the console.)
 sb = mitos.create("python")                 # Ready sandbox handle
+print(sb.run_code("6 * 7").text)            # 42, in a stateful kernel
 print(sb.exec("echo hello").stdout)         # hello
 sb.terminate()
 ```
 
-That is the whole thing: one `pip install mitos-run`, one import, one `create`, code
-execution, no second SDK to install. The stateful code interpreter
-(`sb.run_code(...)`) hangs off the same handle; it is fail-closed
-`KernelUnavailable` until the code-interpreter kernel ships in the hosted base
-image, so the first-run snippet above uses `exec`, which is always available. `mitos.create(image, api_key=..., base_url=...)`
+That is the whole thing: one `pip install mitos-run`, one import, one `create`, a
+stateful code interpreter, shell execution, no second SDK to install. The kernel
+keeps state across `run_code` calls (define `x` once, use it in the next call),
+and `sb.exec(...)` runs shell commands on the same handle. `mitos.create(image, api_key=..., base_url=...)`
 resolves the API key (argument, else `MITOS_API_KEY`) and the base URL (argument,
 else `MITOS_BASE_URL`, else the hosted API endpoint `https://api.mitos.run`), then returns
 a sandbox handle that exposes `exec`, `run_code`, `files`, `fork`, and `terminate`
