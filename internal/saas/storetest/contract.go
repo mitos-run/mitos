@@ -107,6 +107,45 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 	})
 
+	t.Run("ListOrgsReturnsEveryOrg", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		empty, err := s.ListOrgs(ctx)
+		if err != nil {
+			t.Fatalf("ListOrgs on empty store: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Errorf("ListOrgs on empty store returned %d orgs, want 0", len(empty))
+		}
+		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		want := map[string]saas.Organization{
+			"org-a": {ID: "org-a", Name: "Acme", CreatedAt: created, Personal: true},
+			"org-b": {ID: "org-b", Name: "Bravo", CreatedAt: created},
+		}
+		for _, o := range want {
+			if err := s.PutOrg(ctx, o); err != nil {
+				t.Fatalf("PutOrg %s: %v", o.ID, err)
+			}
+		}
+		got, err := s.ListOrgs(ctx)
+		if err != nil {
+			t.Fatalf("ListOrgs: %v", err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("ListOrgs returned %d orgs, want %d", len(got), len(want))
+		}
+		for _, o := range got {
+			w, ok := want[o.ID]
+			if !ok {
+				t.Errorf("ListOrgs returned unexpected org %q", o.ID)
+				continue
+			}
+			if o != w {
+				t.Errorf("ListOrgs org %s mismatch:\n got %+v\nwant %+v", o.ID, o, w)
+			}
+		}
+	})
+
 	t.Run("MembershipPutListAndReplace", func(t *testing.T) {
 		s := factory(t)
 		ctx := context.Background()
