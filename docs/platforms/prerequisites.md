@@ -127,3 +127,6 @@ actionable remediation per failing check (`/dev/kvm`, the `nf_tables` /
 the image pull secret, and the privileged PSA label). Run it on a KVM node or as
 an in-cluster Job; it exits non-zero if any check fails. See
 `host-prerequisites.md` for the host/kernel checklist it enforces.
+
+Once the install is healthy, `lifecycle.md` is the day-2 guide: upgrading, CRD
+schema changes, rolling back, backing up state, and uninstalling.
