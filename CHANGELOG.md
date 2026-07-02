@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.14.0](https://github.com/mitos-run/mitos/compare/v1.13.1...v1.14.0) (2026-07-02)
+
+
+### Features
+
+* **saas:** hosted pause and resume via the sandbox lifecycle proxy ([#609](https://github.com/mitos-run/mitos/issues/609)) ([5d9f7a7](https://github.com/mitos-run/mitos/commit/5d9f7a70c9aa8a54ff2861ffcf49ce4e2534fc35)), closes [#601](https://github.com/mitos-run/mitos/issues/601)
+* **saas:** wire usage metering end to end (claim-time org attribution, chart knobs, drawdown driver) ([#610](https://github.com/mitos-run/mitos/issues/610)) ([73516c1](https://github.com/mitos-run/mitos/commit/73516c12554203caa516a5b4093778e0976f6505))
+
+
+### Bug Fixes
+
+* **console:** first-run cli snippets use the real verb, mitos sandbox exec ([#606](https://github.com/mitos-run/mitos/issues/606)) ([82f9f6c](https://github.com/mitos-run/mitos/commit/82f9f6cd36e916aff9910b0ac1ce40d98543e85a))
+* **console:** first-run snippets are self-contained and produce real output ([#608](https://github.com/mitos-run/mitos/issues/608)) ([ae9414a](https://github.com/mitos-run/mitos/commit/ae9414a3a7711a135f952cc85fdbc5058a0c6b84))
+
 ## [1.13.1](https://github.com/mitos-run/mitos/compare/v1.13.0...v1.13.1) (2026-07-02)
 
 
