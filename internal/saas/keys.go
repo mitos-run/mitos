@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -225,7 +226,12 @@ func randomSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// randomID returns a short opaque url-safe id used for accounts, orgs, and keys.
+// randomID returns a short opaque id used for accounts, orgs, and keys. The
+// alphabet is lowercase base32 ([a-z2-7]) because org ids reach Kubernetes:
+// they are stamped on Sandbox objects as the tenant label value (must begin
+// and end alphanumeric) and, in org-tenancy mode, embedded in the org
+// namespace name (RFC1123: lowercase only). base64url ids gave ~6% of orgs a
+// leading or trailing '-'/'_' that no sandbox create could ever pass (#593).
 func randomID() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
@@ -233,5 +239,5 @@ func randomID() string {
 		// than panic so the process stays up. This never carries a secret.
 		return fmt.Sprintf("id-%d", time.Now().UnixNano())
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }

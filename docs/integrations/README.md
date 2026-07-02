@@ -35,6 +35,7 @@ reaches the same native ops: `exec`, `run_code`, `files`, and `fork`.
 | From | How | Doc |
 |---|---|---|
 | E2B | one-import shim `from mitos.e2b import Sandbox` | [../migrating-from-e2b.md](../migrating-from-e2b.md) |
+| Daytona | one-import shim `from mitos.daytona import Daytona` | [../migrating-from-daytona.md](../migrating-from-daytona.md) |
 
 ## The honest Codex note
 

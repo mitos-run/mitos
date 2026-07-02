@@ -166,8 +166,12 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		case isNamespaceMissing(err, ns):
 			return errResp(namespaceMissingErr(req.OrgID, ns)), nil
 		case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
-			return errResp(apierr.Get(apierr.CodeInvalidJSON).
-				WithCause("the sandbox spec was rejected by the api server as invalid")), nil
+			// The caller's JSON decoded fine; the OBJECT the gateway built from
+			// it failed api server validation (for example an org id that is not
+			// a valid label value, #593). Surface the validation message instead
+			// of blaming the request body, per the LLM-legible error rule (#28).
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause("the api server rejected the sandbox object as invalid: " + err.Error())), nil
 		default:
 			return errResp(apierr.Get(apierr.CodeInternal).
 				WithCause("could not create the sandbox object")), nil
