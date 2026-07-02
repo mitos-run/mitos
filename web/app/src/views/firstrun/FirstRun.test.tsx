@@ -320,11 +320,20 @@ describe('FirstRun step 1: masked key copy', () => {
 // ---- Step 1: no key fallback ------------------------------------------------
 
 describe('FirstRun step 1: no key stashed', () => {
-  it('shows a Create an API key link to /keys', async () => {
+  it('shows a primary Create an API key to continue link to /keys', async () => {
     render(<FirstRun uc="rollouts" />)
     await waitFor(() => {
-      const link = screen.getByRole('link', { name: /create an api key/i })
+      const link = screen.getByRole('link', { name: /create an api key to continue/i })
       expect(link).toHaveAttribute('href', '/keys')
+      // The action is the primary affordance: button-styled, not an inline link.
+      expect(link).toHaveClass('firstrun-create-key-btn')
+    })
+  })
+
+  it('explains why there is no key on record', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/shown only once, when it is created/i)).toBeInTheDocument()
     })
   })
 
