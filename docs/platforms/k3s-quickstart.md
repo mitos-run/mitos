@@ -175,3 +175,5 @@ console pod must be able to reach that URL.
   single-user Dex with a real identity provider and trusted TLS.
 - For the federated GitHub/Google Dex the chart ships, see the `dex.*` values in
   `deploy/charts/mitos/values.yaml`.
+- For day-2 operations (upgrading, CRD schema changes, rollback, backup,
+  uninstall), see `lifecycle.md`.
