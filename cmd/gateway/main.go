@@ -36,6 +36,7 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/controlplane"
 	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/saas/quota"
 	"mitos.run/mitos/internal/telemetry"
 )
 
@@ -96,8 +97,9 @@ func main() {
 
 	// Durable Postgres when a DSN is configured (flag or MITOS_DATABASE_DSN),
 	// in-memory otherwise (dev only). The DSN value is never logged. A bad DSN
-	// fails fast below.
-	store, closeStore, err := pgstore.ResolveStore(context.Background(), *databaseDSN, logger)
+	// fails fast below. The pool is kept so the kill-switch suspension store can
+	// share the same connection (mirroring cmd/console's durable-store wiring).
+	store, pool, closeStore, err := pgstore.ResolveStoreWithPool(context.Background(), *databaseDSN, logger)
 	if err != nil {
 		log.Fatalf("persistence: %v", err)
 	}
@@ -121,12 +123,25 @@ func main() {
 		}
 	}
 
+	// Kill-switch suspension store: durable and replica-shared over the SAME
+	// Postgres pool the key store uses when a database is configured, so a
+	// suspension survives restarts and binds every replica (issue #615). The
+	// short-TTL read cache keeps the per-request suspension check off Postgres;
+	// a suspension written on another replica takes effect here within the TTL.
+	// Without a database the store stays in-process (dev only) and
+	// buildQuotaEnforcer names that mode in the startup log.
+	var suspensions quota.SuspensionStore
+	if pool != nil {
+		suspensions = quota.NewCachedSuspensionStore(
+			pgstore.NewPgSuspensionStore(pool), quota.DefaultSuspensionCacheTTL, nil)
+	}
+
 	// Build the quota/abuse enforcement surface: the real quota.Enforcer wrapped in
 	// the gateway adapter when enabled (the hosted default), or the permissive
 	// AllowAllQuota when explicitly disabled. The same suspension store backs the
 	// enforcer, the abuse kill-switch, and the billing suspender, so a suspended org
 	// is blocked at the gateway. The mode is logged so the posture is never silent.
-	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops}
+	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions}
 	wiring := buildQuotaEnforcer(encfg)
 	logEnforcementMode(logger, encfg, wiring)
 	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
