@@ -95,6 +95,41 @@ func (s *ReportSource) Collect(ctx context.Context) ([]Sample, error) {
 	return out, nil
 }
 
+// MultiSource composes several SampleSources into one, unioning their samples on
+// each Collect. It lets the collector meter BOTH the raw-forkd node source and the
+// husk-pod source (issue #613) in a single CollectOnce. The two sources cover
+// DISJOINT sandbox sets (a sandbox is either a raw-forkd fork tracked by forkd's
+// engine or a husk-pod VM tracked by its own pod, never both), so the union is
+// exactly the fleet's samples with no double counting; cross-source timestamp skew
+// is harmless because Integrate groups by sandbox and no sandbox spans both.
+//
+// Each sub-source already SKIPS-AND-COUNTS its own unreachable endpoints, so a
+// sub-source Collect error is a programmer-level fault, not an unreachable
+// node/pod; MultiSource propagates it so the collector logs and retries next tick.
+type MultiSource struct {
+	sources []SampleSource
+}
+
+// NewMultiSource builds a MultiSource over the given sub-sources, in order.
+func NewMultiSource(sources ...SampleSource) *MultiSource {
+	return &MultiSource{sources: sources}
+}
+
+// Collect runs each sub-source's Collect and returns the concatenation of their
+// samples. A sub-source error aborts the cycle (returned to the collector), so a
+// real fault is visible rather than silently dropping half the bill.
+func (m *MultiSource) Collect(ctx context.Context) ([]Sample, error) {
+	var out []Sample
+	for _, src := range m.sources {
+		samples, err := src.Collect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, samples...)
+	}
+	return out, nil
+}
+
 // Collector ties a SampleSource to a UsageStore. On each cycle it scrapes
 // samples, integrates them into per-(sandbox, window) records, and upserts those
 // records. Because the integration is pure and the upsert replaces by key, a

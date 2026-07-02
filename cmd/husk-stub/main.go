@@ -53,6 +53,7 @@ import (
 	"mitos.run/mitos/internal/daemon"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/husk"
+	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/pki"
 	"mitos.run/mitos/internal/snapcompat"
 )
@@ -329,14 +330,14 @@ func run() error {
 	defer stop()
 
 	// The in-pod sandbox HTTP API (exec/files), reusing the SAME daemon.SandboxAPI
-	// forkd serves. After a successful activate the OnActivated hook registers the
-	// activated VM (by its host vsock path) and its per-sandbox bearer token, then
-	// serves the API on --sandbox-listen, bridging exec/files to the VM's guest
-	// agent over vsock and gating every request on the bearer token. This makes
-	// the endpoint the claim advertises (podIP:sandboxPort) actually reachable and
-	// token-gated, exactly as forkd does. The token is a secret and is never
-	// logged. The vsock UDS dir is the per-VM workdir (the agent UDS lives there);
-	// EnableUnixFallback is deliberately NOT set, matching forkd.
+	// forkd serves, PLUS an unauthenticated GET /v1/metering route so the usage
+	// collector can meter this pod's one VM (issue #613). The metering route is
+	// served from DORMANT (before activate) so a scrape during the warm window is a
+	// clean empty report, mirroring forkd's operational mux; the exec/files routes
+	// fail closed (401) until a sandbox+token is registered at activate. The token
+	// is a secret and is never logged. The vsock UDS dir is the per-VM workdir (the
+	// agent UDS lives there); EnableUnixFallback is deliberately NOT set, matching
+	// forkd.
 	sandboxAPI := daemon.NewSandboxAPI(*workdir)
 	// Single-sandbox mode: a husk pod serves exactly ONE VM, registered locally
 	// under huskSandboxID, but the SDK addresses this in-pod API with the claim's
@@ -348,7 +349,23 @@ func run() error {
 	// A wrong/absent token is still rejected and an untokened activate stays
 	// fail-closed.
 	sandboxAPI.SetSingleSandbox(huskSandboxID)
-	onActivated := makeSandboxServer(ctx, sandboxAPI, *sandboxListen)
+
+	// The metering source reads the stub's per-VM report. stub is assigned by
+	// husk.New below; the closure captures it by reference and the server is not
+	// reachable (no VM, empty report) until then, so a nil read is defensively
+	// mapped to the empty report.
+	var stub *husk.Stub
+	meteringSource := func() metering.Report {
+		if stub == nil {
+			return metering.Report{}
+		}
+		return stub.Metering()
+	}
+	onActivated, meteringSrv, err := startSandboxServer(ctx, sandboxAPI, *sandboxListen, meteringSource)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = meteringSrv.Close() }()
 
 	// Snapshot verify gate (fail-closed): detect this node's environment so the
 	// stub can run snapcompat.Check on the recorded manifest, and pass the mounted
@@ -366,7 +383,7 @@ func run() error {
 		}
 	}
 
-	stub := husk.New(cfg, husk.Options{
+	stub = husk.New(cfg, husk.Options{
 		OnActivated:     onActivated,
 		ManifestPath:    *manifest,
 		Env:             detectedEnv,
@@ -514,22 +531,72 @@ func run() error {
 	return nil
 }
 
-// makeSandboxServer returns the husk Stub OnActivated hook. On the first
-// successful activate it registers the activated VM (by its host vsock UDS path)
-// and its per-sandbox bearer token with the daemon.SandboxAPI, then starts the
-// token-gated sandbox HTTP API (exec/files) on listenAddr in a background
-// goroutine. Registration runs on every activate (a husk pod activates once, but
-// keeping it idempotent is cheap); the listener is started exactly once.
+// huskMeteringHandler serves this husk pod's CoW-aware metering report as JSON on
+// GET /v1/metering for the usage collector (issue #613). Like forkd's identical
+// endpoint it is pod-scoped operational data (the same access class as /metrics
+// and /healthz), NOT per-sandbox traffic, so it is mounted OUTSIDE the
+// per-sandbox bearer middleware: a sandbox token grants no extra access here and
+// none is required. src returns the empty report before activation and the
+// single-VM report after; the report never carries a secret value.
+func huskMeteringHandler(src func() metering.Report) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		report := src()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			fmt.Fprintf(os.Stderr, "husk-stub: encode metering report: %v\n", err)
+		}
+	})
+}
+
+// newSandboxMux builds the in-pod HTTP mux: the unauthenticated GET /v1/metering
+// route in front of the token-gated /v1 sandbox API (exec/files). Registering the
+// specific "GET /v1/metering" pattern before the "/" catch-all makes it take
+// precedence, so the metering scrape is never routed through the per-sandbox
+// bearer middleware, exactly as forkd's server.go mounts its identical endpoint
+// ahead of the /v1/ sandbox handler. Every other path (including the Connect
+// runtime paths the SDK uses) falls through to api.Handler() unchanged.
+func newSandboxMux(api *daemon.SandboxAPI, meteringSrc func() metering.Report) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("GET /v1/metering", huskMeteringHandler(meteringSrc))
+	mux.Handle("/", api.Handler())
+	return mux
+}
+
+// startSandboxServer starts the in-pod sandbox HTTP server (metering + the
+// token-gated exec/files API) on listenAddr NOW, during the dormant window, and
+// returns the husk Stub OnActivated hook plus the running server. Serving from
+// dormant means a metering scrape during the warm window is a clean empty report,
+// not a connection refusal, while the exec/files routes fail closed (401) until a
+// sandbox+token is registered at activate.
 //
-// The hook FAILS the activate (returns an error, so Activate reports OK=false)
-// when the VM cannot be registered (the guest agent vsock did not come up) or
-// when the listener cannot bind, because a VM whose sandbox API is not reachable
-// is not usable by a tenant. The bearer token is a SECRET: it is registered with
-// the API but NEVER logged here.
-func makeSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr string) func(vsockPath, token string) error {
-	var once sync.Once
-	var serveErr error
-	return func(vsockPath, token string) error {
+// FAIL CLOSED: if the listener cannot bind it returns an error so the pod exits
+// and the kubelet restarts it (the pod never goes Ready), rather than advertising
+// an endpoint that is not served. The returned OnActivated hook registers the
+// activated VM (by its host vsock UDS path) and its per-sandbox bearer token; it
+// returns an error (so Activate reports OK=false) when the VM cannot be
+// registered, because a VM whose sandbox API is not reachable is not usable by a
+// tenant. The bearer token is a SECRET: it is registered with the API but NEVER
+// logged here.
+func startSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr string, meteringSrc func() metering.Report) (func(vsockPath, token string) error, *http.Server, error) {
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on sandbox address %s: %w", listenAddr, err)
+	}
+	srv := &http.Server{Handler: newSandboxMux(api, meteringSrc), ReadHeaderTimeout: 10 * time.Second}
+	fmt.Fprintf(os.Stderr, "husk-stub: serving sandbox API (metering unauthenticated, exec/files token-gated) %s\n", listenAddr)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "husk-stub: sandbox API server: %v\n", err)
+		}
+	}()
+	// Shut the sandbox API down on stub shutdown (signal / ctx cancel), mirroring
+	// how the control server returns and the VM is torn down.
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+
+	onActivated := func(vsockPath, token string) error {
 		// Register the activated VM and its bearer token. RegisterToken with an
 		// empty token is a no-op: the API then fails closed (401) because
 		// EnableUnixFallback/AllowTokenless are NOT set, so an activate that
@@ -540,29 +607,9 @@ func makeSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr s
 		}
 		api.RegisterStreamPath(huskSandboxID, vsockPath)
 		api.RegisterToken(huskSandboxID, token)
-
-		once.Do(func() {
-			ln, err := net.Listen("tcp", listenAddr)
-			if err != nil {
-				serveErr = fmt.Errorf("listen on sandbox address %s: %w", listenAddr, err)
-				return
-			}
-			srv := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second}
-			fmt.Fprintf(os.Stderr, "husk-stub: serving token-gated sandbox API %s\n", listenAddr)
-			go func() {
-				if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					fmt.Fprintf(os.Stderr, "husk-stub: sandbox API server: %v\n", err)
-				}
-			}()
-			// Shut the sandbox API down on stub shutdown (signal / ctx cancel),
-			// mirroring how the control server returns and the VM is torn down.
-			go func() {
-				<-ctx.Done()
-				_ = srv.Close()
-			}()
-		})
-		return serveErr
+		return nil
 	}
+	return onActivated, srv, nil
 }
 
 // buildControlTLS reads the husk server certificate, key, and the control plane
