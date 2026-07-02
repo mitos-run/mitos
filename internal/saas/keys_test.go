@@ -219,3 +219,35 @@ func TestSaltChangesHash(t *testing.T) {
 		t.Error("different salts produced the same hash")
 	}
 }
+
+// TestSandboxesScopeImpliesReadOnly: the default onboarding key carries only
+// the sandboxes scope; the gateway's read-only ops (sandbox.list,
+// sandbox.status, template.list) require the read scope. Full lifecycle access
+// must imply read access or every default key is locked out of listing its own
+// sandboxes (#599).
+func TestSandboxesScopeImpliesReadOnly(t *testing.T) {
+	store := NewMemStore()
+	svc := NewKeyService(store)
+	ctx := context.Background()
+	newTestOrg(t, store, "org-scope")
+
+	created, err := svc.CreateKey(ctx, CreateKeyRequest{
+		OrgID: "org-scope", Name: "default", Scopes: []string{ScopeSandboxes},
+	})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	if _, err := svc.Verify(ctx, created.RawKey, ScopeReadOnly); err != nil {
+		t.Errorf("a sandboxes-scoped key must satisfy the read-only scope, got %v", err)
+	}
+
+	readOnly, err := svc.CreateKey(ctx, CreateKeyRequest{
+		OrgID: "org-scope", Name: "ro", Scopes: []string{ScopeReadOnly},
+	})
+	if err != nil {
+		t.Fatalf("CreateKey ro: %v", err)
+	}
+	if _, err := svc.Verify(ctx, readOnly.RawKey, ScopeSandboxes); !errors.Is(err, ErrKeyScope) {
+		t.Errorf("a read-only key must NOT satisfy the sandboxes scope, got %v", err)
+	}
+}
