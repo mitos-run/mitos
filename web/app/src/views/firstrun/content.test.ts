@@ -95,6 +95,9 @@ describe('snippets use the hosted surface a new signup can actually run', () => 
       expect(entry.snippets.cli).not.toContain('--ready')
       expect(entry.snippets.cli).not.toContain('--exec')
       expect(entry.snippets.cli).toContain('--pool')
+      // There is no top-level `mitos exec` verb; the real one is
+      // `mitos sandbox exec` (internal/agentcli/cli.go dispatch).
+      expect(entry.snippets.cli).not.toMatch(/\nmitos exec /)
     }
   })
 })

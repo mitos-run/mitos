@@ -43,7 +43,7 @@ await Promise.all(swarm.map((run) => run.exec("python rollout.py")))
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count 8
-mitos exec <fork-id> python rollout.py
+mitos sandbox exec <fork-id> python rollout.py
 `,
 }
 
@@ -65,7 +65,7 @@ console.log(result.stdout)
 `,
   cli: `\
 mitos sandbox create --pool python
-mitos exec <sandbox-id> python3 -c 'print(40 + 2)'
+mitos sandbox exec <sandbox-id> python3 -c 'print(40 + 2)'
 `,
 }
 
@@ -91,7 +91,7 @@ await Promise.all(
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count <n>
-mitos exec <fork-id> python eval_one.py --prompt <prompt>
+mitos sandbox exec <fork-id> python eval_one.py --prompt <prompt>
 `,
 }
 
@@ -115,7 +115,7 @@ await Promise.all(swarm.map((run) => run.exec("python task.py")))
   cli: `\
 mitos sandbox create --pool python
 mitos fork <sandbox-id> --count 4
-mitos exec <fork-id> python task.py
+mitos sandbox exec <fork-id> python task.py
 `,
 }
 
