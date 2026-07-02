@@ -116,6 +116,16 @@ jobs:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: sbom-${{ matrix.name }}.spdx.json
+          # On a release-tagged run this action otherwise attaches the SBOM to the
+          # GitHub Release, which needs contents: write; this job runs with
+          # contents: read (least privilege for an image publisher). That attach
+          # was failing every release with "Resource not accessible by
+          # integration" AFTER the image was already pushed, signed, and attested,
+          # so every release showed red while the images were fine. The
+          # authoritative SBOM is the digest-bound cosign attestation below (plus
+          # the workflow artifact); the release-page copy is redundant, so disable
+          # it rather than widen the token.
+          upload-release-assets: false
       - name: Cosign attest the SBOM by digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
