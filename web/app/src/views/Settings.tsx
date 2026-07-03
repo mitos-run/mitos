@@ -1,14 +1,14 @@
 // Account settings view: Profile, Security (sessions), and Appearance tabs.
 // Profile: editable display name / timezone / locale form + read-only email + memberships.
 // Security: sessions table with per-row revoke and a sign-out-everywhere button.
-// Appearance: reduced-motion toggle and density select applied immediately to the document.
+// Appearance: theme, reduced-motion, and density controls applied immediately to the document.
 import { useState } from 'react'
 import { Tabs, type TabDef } from '../ui/Tabs'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { useAccount, useUpdateAccount, useSessions, useRevokeSession, useRevokeAllSessions } from '../data/account-settings'
-import { getAppearance, setAppearance } from '../appearance'
+import { getAppearance, setAppearance, type Theme } from '../appearance'
 import { PageHeader } from '../ui/PageHeader'
 
 const TABS: TabDef[] = [
@@ -234,6 +234,12 @@ function AppearanceTab() {
     setAppearance(next)
   }
 
+  function onThemeChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const next = { ...prefs, theme: e.target.value as Theme }
+    setPrefs(next)
+    setAppearance(next)
+  }
+
   return (
     <section>
       <h2>Appearance</h2>
@@ -242,6 +248,17 @@ function AppearanceTab() {
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', maxWidth: 400 }}>
+        <div>
+          <label htmlFor="theme" style={{ display: 'block', marginBottom: 'var(--space-1)' }}>
+            Theme
+          </label>
+          <select id="theme" value={prefs.theme} onChange={onThemeChange} aria-label="Theme">
+            <option value="system">System</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </div>
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
           <input
             id="reduced-motion"

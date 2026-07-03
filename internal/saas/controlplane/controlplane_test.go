@@ -52,6 +52,15 @@ func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
+// poolIn builds a SandboxPool named name in the org namespace. create() now
+// pre-checks that the referenced pool exists before building the Sandbox, so
+// create tests that expect the object to be built must seed its pool.
+func poolIn(org, name string) *v1.SandboxPool {
+	return &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: tenant.NamespaceForOrg(org)},
+	}
+}
+
 // readySandbox builds a Ready sandbox in the org namespace with the org label,
 // plus its token Secret.
 func readySandbox(org, name, endpoint, token string) (*v1.Sandbox, *corev1.Secret) {
@@ -90,7 +99,7 @@ func decodeBody(t *testing.T, b []byte) map[string]any {
 // Sandbox in mitos-org-<org> with the org label and the right pool, polls to
 // Ready, and returns id+endpoint+token (the token comes from the Secret).
 func TestCreateBuildsSandboxAndReturnsTokenOnReady(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	// Flip the created sandbox to Ready and seed its token Secret in the
@@ -144,7 +153,7 @@ func TestCreateBuildsSandboxAndReturnsTokenOnReady(t *testing.T) {
 // TestCreateUsesDefaultPoolWhenUnset asserts a create with no pool/image uses the
 // configured default pool.
 func TestCreateUsesDefaultPoolWhenUnset(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "base"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second), WithDefaultPool("base"))
 	stop := flipToReadyWhenCreated(t, c, orgA, "1.2.3.4:9091", "tok")
 	defer stop()
@@ -173,6 +182,15 @@ func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	if resp.Status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
 	}
+	// The body is valid JSON, so the error must be invalid_input (a missing
+	// field), not invalid_json (a parse failure); issue #640B.
+	body := string(resp.Body)
+	if !strings.Contains(body, "invalid_input") {
+		t.Errorf("missing-pool error should be invalid_input, got: %s", body)
+	}
+	if strings.Contains(body, "invalid_json") {
+		t.Errorf("missing-pool error wrongly labeled invalid_json: %s", body)
+	}
 	var list v1.SandboxList
 	_ = c.List(context.Background(), &list)
 	if len(list.Items) != 0 {
@@ -180,10 +198,64 @@ func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	}
 }
 
+// TestUnknownOperationSaysRouteNotSandbox asserts an unmatched route (which
+// opFromPath maps to a nonexistent "sandbox.<method>" op) does not tell the
+// caller "no such sandbox": it hit a route the gateway does not expose, not a
+// missing sandbox. Issue #640C.
+func TestUnknownOperationSaysRouteNotSandbox(t *testing.T) {
+	cp := New(newFakeClient(t))
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.get", Path: "/v1/nonsense"})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if strings.Contains(body, "no such sandbox") {
+		t.Errorf("unknown route wrongly says 'no such sandbox': %s", body)
+	}
+	if !strings.Contains(body, "route or operation") {
+		t.Errorf("unknown route error should name the route/operation: %s", body)
+	}
+}
+
+// TestCreateUnknownPoolFailsFast asserts a create naming a pool that does not
+// exist in the tenant namespace returns an instant, LLM-legible 404 that names
+// the pool, and creates no Sandbox object. Without the pre-check the create
+// would build a Sandbox that only pends until the controller's bounded grace
+// expires while the caller blocks for the full ready timeout (issue #630).
+func TestCreateUnknownPoolFailsFast(t *testing.T) {
+	c := newFakeClient(t) // no pools seeded
+	// A long ready timeout would make a regression (create then poll) hang; the
+	// pre-check must return before any poll, so this stays fast regardless.
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"typo-not-a-pool"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if !strings.Contains(body, "typo-not-a-pool") {
+		t.Errorf("error does not name the pool: %s", body)
+	}
+	if !strings.Contains(body, "not_found") {
+		t.Errorf("error is not shaped as not_found: %s", body)
+	}
+	// No Sandbox was built for a rejected create.
+	var list v1.SandboxList
+	_ = c.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Errorf("created %d sandboxes for an unknown-pool request", len(list.Items))
+	}
+}
+
 // TestCreateFailedReturnsRejectionMessage asserts a Failed phase yields an
 // LLM-legible error carrying the rejection condition message.
 func TestCreateFailedReturnsRejectionMessage(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 	stop := flipWhenCreated(t, c, orgA, func(sb *v1.Sandbox) {
 		sb.Status.Phase = v1.SandboxFailed
@@ -206,7 +278,7 @@ func TestCreateFailedReturnsRejectionMessage(t *testing.T) {
 // TestCreateTimeoutReturnsClearError asserts a sandbox that never becomes Ready
 // times out with a 504-style error.
 func TestCreateTimeoutReturnsClearError(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(40*time.Millisecond))
 	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`)})
 	if resp.Status != http.StatusGatewayTimeout {
@@ -448,6 +520,176 @@ func TestProxyUnknownSandboxIsNotFound(t *testing.T) {
 	}
 }
 
+// ----- pause / resume lifecycle proxy (#601) -----
+
+// TestPauseResumeForwardToSandboxEndpoint asserts sandbox.pause and
+// sandbox.resume POST the daemon lifecycle routes on the org-owned sandbox
+// endpoint with the per-sandbox bearer token and the body {"sandbox": <name>},
+// and pass the upstream 2xx status and body through.
+func TestPauseResumeForwardToSandboxEndpoint(t *testing.T) {
+	cases := []struct {
+		op       string
+		route    string
+		upstream string
+	}{
+		{op: "sandbox.pause", route: "/v1/pause", upstream: `{"status":"paused"}`},
+		{op: "sandbox.resume", route: "/v1/resume", upstream: `{"status":"running"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			var gotMethod, gotPath, gotAuth, gotBody string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotPath = r.URL.Path
+				gotAuth = r.Header.Get("Authorization")
+				b, _ := io.ReadAll(r.Body)
+				gotBody = string(b)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.upstream))
+			}))
+			defer srv.Close()
+			endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+			sb, secret := readySandbox(orgA, "sb-hold", endpoint, "the-real-token")
+			c := newFakeClient(t, sb, secret)
+			cp := New(c, WithHTTPClient(srv.Client()))
+
+			resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+				OrgID: orgA, Op: tc.op, Path: tc.route, Body: []byte(`{"sandbox":"sb-hold"}`),
+			})
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+			if resp.Status != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+			}
+			if string(resp.Body) != tc.upstream {
+				t.Errorf("body = %q, want the upstream body %q", resp.Body, tc.upstream)
+			}
+			if gotMethod != http.MethodPost {
+				t.Errorf("upstream method = %q, want POST", gotMethod)
+			}
+			if gotPath != tc.route {
+				t.Errorf("upstream path = %q, want %q", gotPath, tc.route)
+			}
+			if gotAuth != "Bearer the-real-token" {
+				t.Errorf("upstream Authorization = %q, want the per-sandbox token", gotAuth)
+			}
+			if gotBody != `{"sandbox":"sb-hold"}` {
+				t.Errorf("upstream body = %q, want {\"sandbox\":\"sb-hold\"}", gotBody)
+			}
+		})
+	}
+}
+
+// TestPauseUpstreamErrorPassesThrough asserts a non-2xx daemon response (for
+// example a failed engine pause) is passed through with its status and body,
+// so the caller sees the daemon's actionable error, not a generic one.
+func TestPauseUpstreamErrorPassesThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"pause sandbox: snapshot failed"}`))
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	sb, secret := readySandbox(orgA, "sb-err", endpoint, "tok")
+	c := newFakeClient(t, sb, secret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-err"}`),
+	})
+	if resp.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the upstream 500 passed through; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "snapshot failed") {
+		t.Errorf("body = %q, want the upstream error body passed through", resp.Body)
+	}
+}
+
+// TestPauseCrossOrgIsNotFoundAndNeverReachesEndpoint asserts org A cannot pause
+// org B's sandbox: not_found, the endpoint is never hit, AND the response is
+// indistinguishable from a sandbox that does not exist at all (no oracle).
+func TestPauseCrossOrgIsNotFoundAndNeverReachesEndpoint(t *testing.T) {
+	var reached bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	sb, secret := readySandbox(orgB, "sb-bheld", endpoint, "tok")
+	c := newFakeClient(t, sb, secret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	cross, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-bheld"}`),
+	})
+	if cross.Status != http.StatusNotFound {
+		t.Fatalf("cross-org pause: status = %d, want 404", cross.Status)
+	}
+	if reached {
+		t.Fatal("cross-org pause REACHED the sandbox endpoint; the boundary failed")
+	}
+
+	// A truly missing id must be byte-for-byte indistinguishable modulo the id.
+	missing, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-ghost"}`),
+	})
+	if missing.Status != cross.Status {
+		t.Errorf("missing-id status = %d, cross-org status = %d; the two must not differ (oracle)", missing.Status, cross.Status)
+	}
+	crossBody := strings.ReplaceAll(string(cross.Body), "sb-bheld", "<id>")
+	missingBody := strings.ReplaceAll(string(missing.Body), "sb-ghost", "<id>")
+	if crossBody != missingBody {
+		t.Errorf("cross-org body %q differs from missing-id body %q; a probe can map ids", crossBody, missingBody)
+	}
+}
+
+// TestPauseNotReadySandboxIsClearError asserts pausing a sandbox with no
+// runtime endpoint yet returns an actionable error, mirroring the runtime
+// proxy's not-ready behavior.
+func TestPauseNotReadySandboxIsClearError(t *testing.T) {
+	sb, secret := readySandbox(orgA, "sb-cold", "", "tok")
+	sb.Status.Phase = v1.SandboxPending
+	sb.Status.Endpoint = ""
+	c := newFakeClient(t, sb, secret)
+	cp := New(c)
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-cold"}`),
+	})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404-style not-ready error; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "not Ready") {
+		t.Errorf("error body not actionable about readiness: %s", resp.Body)
+	}
+}
+
+// TestPauseBodyWithoutSandboxIsInvalidInput asserts a pause or resume body that
+// does not name a sandbox (missing field, empty value, or invalid JSON) is a
+// 400 invalid_input with remediation, not a forwarded request.
+func TestPauseBodyWithoutSandboxIsInvalidInput(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c)
+	for _, body := range []string{`{}`, `{"sandbox":""}`, `not json`, ``} {
+		for _, op := range []string{"sandbox.pause", "sandbox.resume"} {
+			resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+				OrgID: orgA, Op: op, Path: "/v1/pause", Body: []byte(body),
+			})
+			if resp.Status != http.StatusBadRequest {
+				t.Errorf("%s body=%q: status = %d, want 400; body = %s", op, body, resp.Status, resp.Body)
+			}
+			if !strings.Contains(string(resp.Body), "invalid_input") {
+				t.Errorf("%s body=%q: error code missing invalid_input: %s", op, body, resp.Body)
+			}
+		}
+	}
+}
+
 // TestTokenNeverAppearsInErrorOrNonCreateResponse asserts the per-sandbox token
 // is returned ONLY on create: status and list responses, and every error body,
 // are scanned and must not contain it.
@@ -583,7 +825,7 @@ func TestForwardUnknownOpReturnsNotFound(t *testing.T) {
 // after opFromPath maps it to sandbox.create: the SDK sends template, not pool
 // or image, so the create handler must check all three fields.
 func TestForkBodyTemplateFieldResolvesPool(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "python"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-fork")
@@ -614,7 +856,7 @@ func TestForkBodyTemplateFieldResolvesPool(t *testing.T) {
 // DirectSandbox constructor reads. Without them the SDK raises a KeyError even if
 // the gateway correctly routes the request.
 func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "python"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-shape")
@@ -650,7 +892,7 @@ func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
 // namespaces are not provisioned.
 func TestSingleTenantNamespaceAllOpsUseMitosNS(t *testing.T) {
 	const ns = "mitos"
-	c := newFakeClient(t)
+	c := newFakeClient(t, &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: ns}})
 	cp := New(c,
 		WithPollInterval(5*time.Millisecond),
 		WithReadyTimeout(2*time.Second),
@@ -759,7 +1001,7 @@ func TestSingleTenantNamespaceCrossOrgAuthzPreserved(t *testing.T) {
 // is a no-op: the per-org namespace is still used, preserving the
 // mitos-org-alpha default-mode behavior.
 func TestSingleTenantNamespaceEmptyIsNoOp(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c,
 		WithPollInterval(5*time.Millisecond),
 		WithReadyTimeout(2*time.Second),
@@ -892,6 +1134,7 @@ func TestCreateApiServerInvalidSurfacesValidationCause(t *testing.T) {
 	base := fakeclient.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithStatusSubresource(&v1.Sandbox{}).
+		WithObjects(poolIn(orgA, "default")).
 		Build()
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {

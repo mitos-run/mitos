@@ -9,6 +9,9 @@ import (
 const usage = `mitos: snapshot-fork sandboxes for AI agents
 
 Usage:
+  mitos init [--api-key K] [--check]             set up the hosted CLI: validate
+                                                    an api key, save it, print
+                                                    the first-fork next step
   mitos run <command> [--pool P] [--timeout N]   create a sandbox, run the
                                                     command, terminate, and exit
                                                     with the command's exit code
@@ -88,6 +91,13 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 		return cmdAuth(ctx, args[1:], authServiceFor(backend), out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
+	case "init":
+		// init needs the environment, the terminal, and a live key validator,
+		// which the pure CLI dispatcher does not wire; cmd/mitos intercepts init
+		// before agentcli.Run and calls CmdInit with the real seams. Reaching
+		// here means init was invoked through a path that did not wire them.
+		fmt.Fprint(errw, "init: run via the mitos binary, which wires the key validator and terminal\n")
+		return 1
 	case "doctor":
 		// doctor builds a real node + k8s probe (reads /dev, /proc, and the
 		// cluster), which the pure CLI dispatcher does not do; cmd/mitos

@@ -54,6 +54,21 @@ spec:
             - --org-default-cpu={{ .Values.controller.orgTenancy.defaultCPU }}
             - --org-default-memory={{ .Values.controller.orgTenancy.defaultMemory }}
             {{- end }}
+            {{- /*
+            Usage metering (issue #602): the collector scrapes every forkd
+            node's /v1/metering, attributes each sandbox to its org via the
+            trusted mitos.run/org husk-pod label, and serves the bearer-gated
+            internal usage API the console reads. The durable store DSN and the
+            bearer token ride secretKeyRef env below; the path carries only
+            ids, byte counts, and seconds, never secret values.
+            */}}
+            {{- if .Values.controller.usage.collector }}
+            - --usage-collector
+            - --usage-collector-interval={{ .Values.controller.usage.interval }}
+            {{- if .Values.controller.usage.apiAddress }}
+            - --usage-api-address={{ .Values.controller.usage.apiAddress }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -75,6 +90,27 @@ spec:
                   name: {{ .Values.expose.secretName }}
                   key: admin-token
             {{- end }}
+            {{- /*
+            Usage metering secrets (issue #602): the durable usage store DSN
+            (the shared database.dsnSecretRef pattern) and the internal usage
+            API bearer token. Both are SECRETS sourced via secretKeyRef ONLY.
+            Without the DSN the usage store is in-memory (DEV ONLY, lost on
+            restart); without the token the usage API fails closed.
+            */}}
+            {{- if .Values.controller.usage.collector }}
+            {{- include "mitos.database.env" . | nindent 12 }}
+            {{- include "mitos.usageToken.env" . | nindent 12 }}
+            {{- /*
+            Display price list for the internal usage API: the values map
+            renders as ONE JSON env value the binary parses strictly (unknown
+            keys and negative rates fail startup). Empty renders nothing and
+            the illustrative defaults apply. Not a secret.
+            */}}
+            {{- with .Values.controller.usage.priceList }}
+            - name: MITOS_USAGE_PRICELIST
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -83,6 +119,10 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+            {{- if and .Values.controller.usage.collector .Values.controller.usage.apiAddress }}
+            - name: usage-api
+              containerPort: {{ include "mitos.usageAPIPort" . }}
+            {{- end }}
             {{- if include "mitos.controllerWebhookEnabled" . }}
             - name: webhook
               containerPort: {{ .Values.admissionWebhook.port }}
@@ -119,3 +159,30 @@ spec:
           secret:
             secretName: mitos-controller-webhook-cert
       {{- end }}
+{{- if and .Values.controller.usage.collector .Values.controller.usage.apiAddress }}
+---
+{{- /*
+ClusterIP Service for the controller's INTERNAL usage API (issue #602) so the
+console can read the collected per-org usage at
+http://mitos-controller-usage.<namespace>.svc:<port>. The endpoint is
+machine-to-machine, bearer-gated, and fails closed without a valid token; it is
+never exposed outside the cluster by the chart. The UsageAPIRunnable serves on
+every controller replica (it is not leader-gated), so the Service is safe with
+controller.replicas > 1 when the durable Postgres store is configured.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitos-controller-usage
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  selector:
+    {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 4 }}
+  ports:
+    - name: usage-api
+      port: {{ include "mitos.usageAPIPort" . }}
+      targetPort: usage-api
+{{- end }}

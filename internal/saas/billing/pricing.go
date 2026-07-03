@@ -62,21 +62,24 @@ const (
 // Rates is the structured, configurable per-unit price table: the decoupled
 // per-second compute model in one place. The values in DefaultRates are
 // ILLUSTRATIVE and CONFIGURABLE, never published prices (the no-unverified-
-// claims rule). A hosted deployment overrides them from config; only the SHAPE
-// (decoupled vCPU + RAM per second, storage GiB-hours, metered egress) is
-// committed here. All rates are in account-currency MINOR UNITS (cents) per
-// unit so the cost computation stays in integer money end to end.
+// claims rule). A hosted deployment overrides them from config (the
+// MITOS_CONSOLE_RATES env parsed by ParseRatesConfig; the Helm value
+// console.billing.rates); only the SHAPE (decoupled vCPU + RAM per second,
+// storage GiB-hours, metered egress) is committed here. All rates are in
+// account-currency MINOR UNITS (cents) per unit so the cost computation stays
+// in integer money end to end. The json tags are the ParseRatesConfig wire
+// keys.
 type Rates struct {
 	// VCPUSecondMilliCents and the rest are quoted in MILLI-cents per unit
 	// (thousandths of a cent) because a single vCPU-second costs a tiny fraction
 	// of a cent; quoting in cents would round every per-second tick to zero. The
 	// CostCents accumulation sums milli-cents across all usage, then divides to
 	// cents once at the end, so sub-cent rates accumulate exactly.
-	VCPUSecondMilliCents     float64
-	MemGiBSecondMilliCents   float64
-	StorageGiBHourMilliCents float64
-	EgressGiBMilliCents      float64
-	GPUSecondMilliCents      float64
+	VCPUSecondMilliCents     float64 `json:"vcpu_second_milli_cents"`
+	MemGiBSecondMilliCents   float64 `json:"mem_gib_second_milli_cents"`
+	StorageGiBHourMilliCents float64 `json:"storage_gib_hour_milli_cents"`
+	EgressGiBMilliCents      float64 `json:"egress_gib_milli_cents"`
+	GPUSecondMilliCents      float64 `json:"gpu_second_milli_cents"`
 }
 
 // DefaultRates returns the illustrative, configurable default rate table. These

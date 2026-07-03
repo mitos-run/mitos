@@ -98,6 +98,33 @@ plaintext value. When unset, it renders nothing, and the binary falls back to
 in-memory persistence (dev only). The rendered fragment is a list entry intended
 to be nindent'd into a container's env list.
 */}}
+{{/*
+The internal usage API port, derived from controller.usage.apiAddress (":<port>"
+form, the same value passed to --usage-api-address). Used for the controller
+container port and the usage Service.
+*/}}
+{{- define "mitos.usageAPIPort" -}}
+{{- splitList ":" .Values.controller.usage.apiAddress | last -}}
+{{- end -}}
+
+{{/*
+The usage API bearer-token env entry (MITOS_USAGE_API_TOKEN), shared by the
+controller (which gates the internal usage API on it) and the console (which
+presents it). The token is a SECRET: it is sourced via secretKeyRef ONLY and
+never appears as plaintext in the rendered manifests. When
+controller.usage.tokenSecret.name is unset, it renders nothing and the usage
+API fails closed (refuses every request).
+*/}}
+{{- define "mitos.usageToken.env" -}}
+{{- if .Values.controller.usage.tokenSecret.name }}
+- name: MITOS_USAGE_API_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.controller.usage.tokenSecret.name | quote }}
+      key: {{ .Values.controller.usage.tokenSecret.key | default "usage-api-token" | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "mitos.database.env" -}}
 {{- if .Values.database.dsnSecretRef.name }}
 - name: MITOS_DATABASE_DSN

@@ -182,6 +182,31 @@ func (s *PgStore) GetOrg(ctx context.Context, id string) (saas.Organization, err
 	return o, nil
 }
 
+// ListOrgs returns every organization (issue #602: the console's usage
+// drawdown driver iterates the orgs). Operator/machine surface only.
+func (s *PgStore) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
+	const q = `SELECT id, name, created_at, personal FROM orgs`
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs: %w", err)
+	}
+	defer rows.Close()
+	var out []saas.Organization
+	for rows.Next() {
+		var o saas.Organization
+		var createdAt *time.Time
+		if err := rows.Scan(&o.ID, &o.Name, &createdAt, &o.Personal); err != nil {
+			return nil, fmt.Errorf("scan org: %w", err)
+		}
+		o.CreatedAt = timeVal(createdAt)
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list orgs rows: %w", err)
+	}
+	return out, nil
+}
+
 // PutMembership upserts a membership keyed on (org_id, account_id), matching the
 // MemStore "replace existing for this (org, account)" behavior.
 func (s *PgStore) PutMembership(ctx context.Context, m saas.Membership) error {

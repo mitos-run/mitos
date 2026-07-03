@@ -12,6 +12,9 @@ go build -o mitos ./cmd/mitos/
 ## Command reference
 
 ```
+mitos init [--api-key K] [--check]             set up the hosted CLI: validate
+                                                  an api key, save it, print
+                                                  the first-fork next step
 mitos run <command> [--pool P] [--timeout N]   create a sandbox, run the
                                                   command, terminate, exit with
                                                   the command's exit code
@@ -34,6 +37,43 @@ mitos dev down                                 delete the local kind dev cluster
 mitos doctor [-n namespace]                    run the node + install preflight
                                                   and print remediation
 ```
+
+### First-run setup: `mitos init`
+
+`mitos init` takes you from key-in-hand to a verified working setup in one
+command. It validates an API key against the gateway (by listing sandboxes, the
+cheapest authenticated call), saves the endpoint and key to
+`~/.config/mitos/config.json` (mode `0600`, honoring `MITOS_CONFIG_DIR`), and
+prints the first next step:
+
+```bash
+mitos init --api-key sk-...          # or set MITOS_API_KEY and run: mitos init
+# init: key sk-abc12...wxyz verified against https://api.mitos.run
+# saved to ~/.config/mitos/config.json; the CLI reads it whenever
+# --api-key and MITOS_API_KEY are unset
+#
+# You are ready. Create a sandbox and fork it:
+#
+#   mitos sandbox create --pool python   # create a sandbox, prints its id
+#   mitos fork <id> --count 2            # fork it into 2 live siblings
+```
+
+Run without a key on an interactive terminal, `mitos init` says where to get
+one (https://mitos.run/keys, or your deployment's console for a custom
+`--server`) and prompts you to paste it; the paste is read without echo. On a
+non-interactive stdin it prints the same guidance and exits with a usage error.
+
+`mitos init --check` re-validates the SAVED config and reports clearly; it is
+the hosted counterpart of the `mitos doctor` cluster preflight. It exits `0`
+when the saved key is valid, `1` when the gateway rejects it (with remediation:
+mint a new key and re-run `mitos init`), and `2` when no config is saved yet.
+
+The key value is never logged and never echoed back in full; every message
+shows at most a mask (prefix + last 4). After `mitos init`, every hosted verb
+resolves credentials with the precedence: `--api-key`/`--server` flags, then
+`MITOS_API_KEY`/`MITOS_BASE_URL`, then the config file. Cluster mode is
+selected only when none of the three provide an API key, so remove the config
+file (or keep using a kubeconfig-scoped shell) if you switch between modes.
 
 ### Authentication: `mitos auth login`
 
@@ -124,8 +164,8 @@ Set `MITOS_API_KEY` to route all sandbox verbs to the hosted mitos.run gateway.
 No kubeconfig, no Kubernetes, no nodes to manage.
 
 ```bash
-export MITOS_API_KEY=sk-...   # from https://mitos.run
-export MITOS_BASE_URL=https://mitos.run   # default; omit to use the default
+export MITOS_API_KEY=sk-...   # from https://mitos.run/keys
+export MITOS_BASE_URL=https://api.mitos.run   # the default; omit it entirely
 
 # Quickstart: create a sandbox, exec, fork, list, terminate.
 mitos sandbox create --pool python
@@ -146,12 +186,13 @@ mitos sandbox terminate sbx-abc123
 Alternatively, pass flags inline instead of using environment variables:
 
 ```bash
-mitos --api-key sk-... --server https://mitos.run sandbox create --pool python
+mitos --api-key sk-... --server https://api.mitos.run sandbox create --pool python
 ```
 
-Flag precedence (highest wins): `--api-key` flag, then `MITOS_API_KEY` env var.
-URL precedence: `--server` flag, then `MITOS_BASE_URL` env var, then
-`https://mitos.run`.
+Flag precedence (highest wins): `--api-key` flag, then `MITOS_API_KEY` env var,
+then the `api_key` saved by `mitos init` in `~/.config/mitos/config.json`.
+URL precedence: `--server` flag, then `MITOS_BASE_URL` env var, then the saved
+`endpoint`, then `https://api.mitos.run`.
 
 The api key value is NEVER logged or placed in any error message.
 
@@ -159,6 +200,7 @@ The api key value is NEVER logged or placed in any error message.
 
 | Verb | Hosted | Notes |
 |---|---|---|
+| `init [--check]` | yes | validate + save the key, verify the saved config |
 | `sandbox create --pool <template>` | yes | `--pool` names a template, not a pool |
 | `sandbox exec <id> <cmd>` | yes | Connect RPC via gateway |
 | `sandbox ls` | yes | GET /v1/sandboxes |
@@ -344,4 +386,6 @@ at the object level. `cp` and `port-forward` for operators are not yet available
 - `mitos pool create|refresh` beyond what `dev up` needs;
 - streaming exec / PTY (`exec_stream`) pending the Connect protocol;
 - a `curl | sh` installer and `get.mitos.run` distribution;
+- `mitos init` browser/device-flow login (no pasted key) and optional MCP
+  server / editor configuration;
 - shell completions and a code-interpreter-compatible API shim.
