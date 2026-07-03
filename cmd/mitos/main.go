@@ -11,7 +11,9 @@
 //
 // Hosted mode: set MITOS_API_KEY (or pass --api-key) to route sandbox verbs
 // to the hosted gateway instead of a cluster. MITOS_BASE_URL (or --server)
-// overrides the default endpoint. The api key value is NEVER logged.
+// overrides the default endpoint. `mitos init` validates a key and saves it to
+// the config file, which the CLI reads as the last fallback (flag > env >
+// file). The api key value is NEVER logged.
 //
 // Cluster mode: the connection is resolved from the standard kubeconfig
 // (KUBECONFIG, --kubeconfig, or in-cluster). The sandbox API bearer token is
@@ -58,6 +60,14 @@ func run(args []string) int {
 	// The dev subcommand orchestrates kind/kubectl and needs no cluster backend.
 	if rest[0] == "dev" {
 		return runDev(ctx, rest[1:])
+	}
+
+	// The init subcommand sets up the hosted CLI (validate an api key, save the
+	// config, print the first next step). It needs the environment, the
+	// terminal, and a live gateway call, none of which the pure dispatcher
+	// wires, so it is intercepted here like doctor and dev.
+	if rest[0] == "init" {
+		return runInitCmd(ctx, apiKey, serverURL, rest[1:])
 	}
 
 	// The doctor subcommand reads node state (/dev/kvm, /proc/modules, the staged
@@ -108,8 +118,9 @@ func run(args []string) int {
 }
 
 // resolveHostedCreds returns the effective api key and base URL for hosted mode,
-// applying the precedence: flag > env. A blank apiKey and blank serverURL from
-// flags means fall back to the environment. The function returns ("", "") when
+// applying the precedence: flag > env > the config file written by `mitos init`.
+// A blank apiKey and blank serverURL from flags means fall back to the
+// environment, then to the config file. The function returns ("", "") when
 // neither an api key nor a non-local server URL is present, signaling that the
 // caller should fall through to cluster mode. The key VALUE is never logged.
 func resolveHostedCreds(flagKey, flagURL string) (apiKey, baseURL string) {
@@ -123,6 +134,20 @@ func resolveHostedCreds(flagKey, flagURL string) (apiKey, baseURL string) {
 	apiKey = flagKey
 	if apiKey == "" {
 		apiKey = os.Getenv("MITOS_API_KEY")
+	}
+
+	// Last fallback: the config file `mitos init` wrote. A read error is treated
+	// as no config (the hosted verbs will then report the missing key with
+	// remediation); the key value is never logged either way.
+	if apiKey == "" || baseURL == "" {
+		if cfg, ok, err := agentcli.ReadCLIConfig(); err == nil && ok {
+			if apiKey == "" {
+				apiKey = cfg.APIKey
+			}
+			if baseURL == "" {
+				baseURL = cfg.Endpoint
+			}
+		}
 	}
 
 	// No key and no (non-local) server URL: cluster mode.

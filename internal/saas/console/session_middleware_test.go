@@ -2,8 +2,10 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"mitos.run/mitos/internal/saas"
@@ -65,6 +67,55 @@ func TestSessionMiddlewareRejectsMissingCookie(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+// TestSessionMiddlewareErrorIsSessionShaped asserts the 401 an unauthenticated
+// console request gets speaks about the browser SESSION, not the per-sandbox
+// bearer token. The default apierr.CodeUnauthorized message and remediation are
+// written for the sandbox API ("per-sandbox token from the <name>-sandbox-token
+// Secret"), which is nonsense on a console session endpoint and misleads any
+// human or agent that reads it (the #28 LLM-legible error rule). Covers both the
+// missing-cookie and the invalid-cookie paths.
+func TestSessionMiddlewareErrorIsSessionShaped(t *testing.T) {
+	h, _, _ := sessionSetup(t)
+	cases := map[string]*http.Cookie{
+		"missing cookie": nil,
+		"forged cookie":  {Name: SessionCookieName, Value: "forged"},
+	}
+	for name, cookie := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/console/keys", nil)
+			if cookie != nil {
+				r.AddCookie(cookie)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			var env struct {
+				Error struct {
+					Message     string `json:"message"`
+					Cause       string `json:"cause"`
+					Remediation string `json:"remediation"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode error body: %v (%s)", err, w.Body.String())
+			}
+			blob := strings.ToLower(env.Error.Message + " " + env.Error.Remediation)
+			for _, leak := range []string{"sandbox", "-sandbox-token secret"} {
+				if strings.Contains(blob, leak) {
+					t.Errorf("console 401 leaks sandbox-token language %q: message=%q remediation=%q",
+						leak, env.Error.Message, env.Error.Remediation)
+				}
+			}
+			if !strings.Contains(strings.ToLower(env.Error.Remediation), "session") &&
+				!strings.Contains(strings.ToLower(env.Error.Remediation), "log in") {
+				t.Errorf("console 401 remediation should point at logging in / a session, got %q", env.Error.Remediation)
+			}
+		})
 	}
 }
 

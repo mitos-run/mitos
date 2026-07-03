@@ -1,0 +1,55 @@
+{{- /*
+PodDisruptionBudgets for the long-running control-plane Deployments. Each is
+an explicit opt-in (<component>.podDisruptionBudget.enabled) because with a
+single replica a minAvailable-1 PDB blocks every node drain; enable it for any
+workload running more than one replica so a voluntary disruption always leaves
+minAvailable pods serving. A PDB is never rendered for a disabled workload:
+an orphan PDB selecting zero pods would wedge unrelated drains.
+*/}}
+{{- if .Values.controller.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mitos-controller
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  minAvailable: {{ .Values.controller.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+{{- end }}
+{{- if and .Values.gateway.enabled .Values.gateway.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mitos-gateway
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  minAvailable: {{ .Values.gateway.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "gateway") | nindent 6 }}
+{{- end }}
+{{- if and .Values.console.enabled .Values.console.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  minAvailable: {{ .Values.console.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "console") | nindent 6 }}
+{{- end }}

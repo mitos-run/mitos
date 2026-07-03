@@ -19,11 +19,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +40,7 @@ import (
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/controlplane"
 	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/saas/quota"
 	"mitos.run/mitos/internal/telemetry"
 )
 
@@ -96,8 +101,9 @@ func main() {
 
 	// Durable Postgres when a DSN is configured (flag or MITOS_DATABASE_DSN),
 	// in-memory otherwise (dev only). The DSN value is never logged. A bad DSN
-	// fails fast below.
-	store, closeStore, err := pgstore.ResolveStore(context.Background(), *databaseDSN, logger)
+	// fails fast below. The pool is kept so the kill-switch suspension store can
+	// share the same connection (mirroring cmd/console's durable-store wiring).
+	store, pool, closeStore, err := pgstore.ResolveStoreWithPool(context.Background(), *databaseDSN, logger)
 	if err != nil {
 		log.Fatalf("persistence: %v", err)
 	}
@@ -121,12 +127,25 @@ func main() {
 		}
 	}
 
+	// Kill-switch suspension store: durable and replica-shared over the SAME
+	// Postgres pool the key store uses when a database is configured, so a
+	// suspension survives restarts and binds every replica (issue #615). The
+	// short-TTL read cache keeps the per-request suspension check off Postgres;
+	// a suspension written on another replica takes effect here within the TTL.
+	// Without a database the store stays in-process (dev only) and
+	// buildQuotaEnforcer names that mode in the startup log.
+	var suspensions quota.SuspensionStore
+	if pool != nil {
+		suspensions = quota.NewCachedSuspensionStore(
+			pgstore.NewPgSuspensionStore(pool), quota.DefaultSuspensionCacheTTL, nil)
+	}
+
 	// Build the quota/abuse enforcement surface: the real quota.Enforcer wrapped in
 	// the gateway adapter when enabled (the hosted default), or the permissive
 	// AllowAllQuota when explicitly disabled. The same suspension store backs the
 	// enforcer, the abuse kill-switch, and the billing suspender, so a suspended org
 	// is blocked at the gateway. The mode is logged so the posture is never silent.
-	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops}
+	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions}
 	wiring := buildQuotaEnforcer(encfg)
 	logEnforcementMode(logger, encfg, wiring)
 	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
@@ -149,14 +168,35 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", gw)
 	mux.Handle("/sandbox.v1.Sandbox/", gw)
+	// Liveness stays a static 200 (the process is up); readiness is split out to
+	// /readyz so a draining replica is removed from the Service before its
+	// in-flight requests are cut. draining flips on SIGTERM/SIGINT below.
+	var draining atomic.Bool
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/readyz", newReadyzHandler(&draining))
 
 	logger.Info("gateway listening", "addr", *addr)
 	srv := &http.Server{Addr: *addr, Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+
+	// Graceful shutdown (same pattern and timeout as cmd/frontdoor): serve in a
+	// goroutine, then on SIGTERM/SIGINT flip readiness to 503 and drain in-flight
+	// requests (API calls, billing-relevant creates) inside a bounded timeout
+	// instead of dropping them on every rollout.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("gateway: listen: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	<-stop
+	draining.Store(true)
+	logger.Info("gateway shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }

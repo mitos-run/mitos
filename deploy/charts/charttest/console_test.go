@@ -27,12 +27,25 @@ func chartDir(t *testing.T) string {
 // constraint is satisfied independent of the host's client default.
 func render(t *testing.T, sets ...string) string {
 	t.Helper()
+	return renderFlag(t, "--set", sets...)
+}
+
+// renderJSON is render with --set-json overrides. Plain --set parses only
+// integers as numbers and stringifies floats, so a float value (e.g. a rate of
+// 1.28) needs --set-json to reach the rendered JSON env as a number.
+func renderJSON(t *testing.T, sets ...string) string {
+	t.Helper()
+	return renderFlag(t, "--set-json", sets...)
+}
+
+func renderFlag(t *testing.T, flag string, sets ...string) string {
+	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed; skipping chart render test")
 	}
 	args := []string{"template", "t", chartDir(t), "--kube-version", "1.31.0"}
 	for _, s := range sets {
-		args = append(args, "--set", s)
+		args = append(args, flag, s)
 	}
 	out, err := exec.Command("helm", args...).CombinedOutput()
 	if err != nil {
@@ -161,6 +174,123 @@ func TestPaddleSecretValuesNeverPlaintext(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Self-host SaaS operator knobs, promoted from extraEnv to first-class values:
+// signup credit, allowlist auto-allow domains, auth connectors, Paddle top-up
+// product/currency, anti-abuse (captcha, disposable-domain allow, per-IP
+// signup velocity), and the billing rate table. Each renders ONLY when set so
+// a default install carries none of the env and the binary defaults apply.
+
+// TestSelfHostKnobsAbsentByDefault asserts the default render carries NONE of
+// the operator-knob env vars, so a fresh install behaves exactly as before.
+func TestSelfHostKnobsAbsentByDefault(t *testing.T) {
+	out := render(t)
+	for _, env := range []string{
+		"MITOS_CONSOLE_SIGNUP_CREDIT_CENTS",
+		"MITOS_CONSOLE_AUTOALLOW_DOMAINS",
+		"MITOS_CONSOLE_AUTH_CONNECTORS",
+		"MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT",
+		"MITOS_CONSOLE_PADDLE_CURRENCY",
+		"MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY",
+		"MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET",
+		"MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL",
+		"MITOS_CONSOLE_DISPOSABLE_ALLOW",
+		"MITOS_CONSOLE_SIGNUP_IP_LIMIT",
+		"MITOS_CONSOLE_SIGNUP_IP_WINDOW",
+		"MITOS_CONSOLE_RATES",
+	} {
+		if strings.Contains(out, env) {
+			t.Fatalf("%s rendered by default; operator knobs must be opt-in", env)
+		}
+	}
+}
+
+// TestSignupCreditAndAllowlistKnobs asserts the signup credit, the auto-allow
+// domain list, and the auth connector list render as env when set (lists are
+// comma-joined, matching the binary's parsers).
+func TestSignupCreditAndAllowlistKnobs(t *testing.T) {
+	out := render(t,
+		"console.signupCreditCents=500",
+		"console.autoAllowDomains={corp.example.com,partner.io}",
+		"console.authConnectors={github,google}",
+	)
+	mustEnv(t, out, "MITOS_CONSOLE_SIGNUP_CREDIT_CENTS", "500")
+	mustEnv(t, out, "MITOS_CONSOLE_AUTOALLOW_DOMAINS", "corp.example.com,partner.io")
+	mustEnv(t, out, "MITOS_CONSOLE_AUTH_CONNECTORS", "github,google")
+}
+
+// TestPaddleTopUpKnobs asserts the top-up product id and currency render when
+// billing is enabled and set; both are plain config, not secrets.
+func TestPaddleTopUpKnobs(t *testing.T) {
+	out := render(t,
+		"console.billing.enabled=true",
+		"console.billing.paddle.topUpProduct=pro_topup",
+		"console.billing.paddle.currency=USD",
+	)
+	mustEnv(t, out, "MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT", "pro_topup")
+	mustEnv(t, out, "MITOS_CONSOLE_PADDLE_CURRENCY", "USD")
+}
+
+// TestPaddleTopUpKnobsGatedByBilling asserts the top-up env stays absent while
+// billing is off even when the values are set, matching the other Paddle env.
+func TestPaddleTopUpKnobsGatedByBilling(t *testing.T) {
+	out := render(t, "console.billing.paddle.topUpProduct=pro_topup")
+	if strings.Contains(out, "MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT") {
+		t.Fatal("MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT rendered with billing disabled")
+	}
+}
+
+// TestAntiAbuseKnobs asserts the captcha sitekey renders as plain env, the
+// captcha SECRET rides a secretKeyRef ONLY, and the disposable-allow and
+// velocity knobs render comma-joined / verbatim.
+func TestAntiAbuseKnobs(t *testing.T) {
+	out := render(t,
+		"console.antiAbuse.friendlyCaptcha.siteKey=FCSITE123",
+		"console.antiAbuse.friendlyCaptcha.secretRef.name=mitos-captcha",
+		"console.antiAbuse.friendlyCaptcha.url=https://eu-api.friendlycaptcha.eu",
+		"console.antiAbuse.disposableAllowDomains={mailinator.com}",
+		"console.antiAbuse.signupIPLimit=20",
+		"console.antiAbuse.signupIPWindow=30m",
+	)
+	mustEnv(t, out, "MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY", "FCSITE123")
+	mustNamedSecretKeyRef(t, out, "MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET", "mitos-captcha", "friendly-captcha-secret")
+	mustEnv(t, out, "MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL", "https://eu-api.friendlycaptcha.eu")
+	mustEnv(t, out, "MITOS_CONSOLE_DISPOSABLE_ALLOW", "mailinator.com")
+	mustEnv(t, out, "MITOS_CONSOLE_SIGNUP_IP_LIMIT", "20")
+	mustEnv(t, out, "MITOS_CONSOLE_SIGNUP_IP_WINDOW", "30m")
+}
+
+// TestSignupIPLimitZeroRenders asserts an explicit 0 renders (it disables the
+// per-IP cap in the binary), which is distinct from unset (binary default 10).
+func TestSignupIPLimitZeroRenders(t *testing.T) {
+	out := render(t, "console.antiAbuse.signupIPLimit=0")
+	mustEnv(t, out, "MITOS_CONSOLE_SIGNUP_IP_LIMIT", "0")
+}
+
+// TestCaptchaRequiresBothSiteKeyAndSecret asserts a half-configured captcha
+// (sitekey without a secret ref) renders NO captcha env, mirroring the binary,
+// which activates verification only when both are present.
+func TestCaptchaRequiresBothSiteKeyAndSecret(t *testing.T) {
+	out := render(t, "console.antiAbuse.friendlyCaptcha.siteKey=FCSITE123")
+	for _, env := range []string{"MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY", "MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET"} {
+		if strings.Contains(out, env) {
+			t.Fatalf("%s rendered without a captcha secret ref; captcha env requires both siteKey and secretRef.name", env)
+		}
+	}
+}
+
+// TestConsoleRatesRenderAsJSONEnv asserts console.billing.rates renders as ONE
+// JSON object in MITOS_CONSOLE_RATES, with the keys the binary's strict parser
+// accepts. Not gated by billing.enabled: the rate table also prices the credit
+// drawdown and the display estimate.
+func TestConsoleRatesRenderAsJSONEnv(t *testing.T) {
+	out := renderJSON(t,
+		`console.billing.rates={"vcpu_second_milli_cents":1.28,"egress_gib_milli_cents":9000}`,
+	)
+	mustContain(t, out, "- name: MITOS_CONSOLE_RATES")
+	mustContain(t, out, `\"vcpu_second_milli_cents\":1.28`)
+	mustContain(t, out, `\"egress_gib_milli_cents\":9000`)
 }
 
 // TestConsoleExtraEnv asserts arbitrary console.extraEnv entries pass through, so

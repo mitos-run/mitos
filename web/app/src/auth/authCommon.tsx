@@ -81,6 +81,14 @@ export function connectorHref(connector: string, next: string): string {
   return `/auth/login?${params.toString()}`
 }
 
+/** Build the generic /auth/login href (the identity provider's own chooser),
+ *  appending ?next= when present. Used when no social connector is configured
+ *  so signing in with an organization account is always one click away. */
+export function orgSignInHref(next: string): string {
+  if (!next) return '/auth/login'
+  return `/auth/login?${new URLSearchParams({ next }).toString()}`
+}
+
 // ---- Shared styles ---------------------------------------------------------
 // Injected once by AuthShell. Login and Signup add only their page-specific rules.
 
@@ -154,38 +162,55 @@ const providerMeta: Record<string, ProviderMeta> = {
   google: { label: 'Continue with Google', glyph: <GoogleGlyph /> },
 }
 
-// ---- useAuthConnectors ------------------------------------------------------
-// Fetches the configured social-login connectors from the public
-// GET /auth/connectors endpoint. Returns [] while loading or on error so the
-// "or" divider is hidden until the server answers; the email form is always
-// visible. The fetch is performed once per component mount; connectors change
-// only on redeploy. State is never updated after the component unmounts.
+// ---- useAuthConfig -----------------------------------------------------------
+// Fetches the pre-auth configuration from the public GET /auth/connectors
+// endpoint: the configured social-login connectors plus the server-controlled
+// signup flag. Returns { connectors: [], signup: null } while loading or on
+// error; signup stays null until the server has positively answered, so a
+// transient failure never hides an affordance the deployment offers. The fetch
+// is performed once per component mount; the values change only on redeploy.
+// State is never updated after the component unmounts.
 
-export function useAuthConnectors(): string[] {
-  const [connectors, setConnectors] = useState<string[]>([])
+export type AuthConfig = {
+  connectors: string[]
+  /** true/false once the server answered; null while loading or unreachable. */
+  signup: boolean | null
+}
+
+export function useAuthConfig(): AuthConfig {
+  const [config, setConfig] = useState<AuthConfig>({ connectors: [], signup: null })
   useEffect(() => {
     let live = true
     api
-      .authConnectors()
-      .then((c) => { if (live) setConnectors(c) })
-      .catch(() => { if (live) setConnectors([]) })
+      .authConfig()
+      .then((r) => {
+        if (live) {
+          setConfig({
+            connectors: r.connectors ?? [],
+            signup: typeof r.signup === 'boolean' ? r.signup : null,
+          })
+        }
+      })
+      .catch(() => { if (live) setConfig({ connectors: [], signup: null }) })
     return () => { live = false }
   }, [])
-  return connectors
+  return config
 }
 
 // ---- ProviderButtons --------------------------------------------------------
 // Renders one full-navigation <a> link per configured connector plus the
 // hairline "or" divider. When connectors is empty (server returned none or
 // the fetch is still in flight) nothing is rendered, so the email form stands
-// alone without an orphaned divider.
+// alone without an orphaned divider. Pass divider={false} when nothing renders
+// below the buttons (e.g. signup is disabled) so the "or" never dangles.
 
 export type ProviderButtonsProps = {
   next: string
   connectors: string[]
+  divider?: boolean
 }
 
-export function ProviderButtons({ next, connectors }: ProviderButtonsProps) {
+export function ProviderButtons({ next, connectors, divider = true }: ProviderButtonsProps) {
   if (connectors.length === 0) return null
   return (
     <>
@@ -207,11 +232,13 @@ export function ProviderButtons({ next, connectors }: ProviderButtonsProps) {
           )
         })}
       </div>
-      <div className="auth-divider" aria-hidden>
-        <hr className="auth-divider-line" />
-        <span className="auth-divider-label">or</span>
-        <hr className="auth-divider-line" />
-      </div>
+      {divider && (
+        <div className="auth-divider" aria-hidden>
+          <hr className="auth-divider-line" />
+          <span className="auth-divider-label">or</span>
+          <hr className="auth-divider-line" />
+        </div>
+      )}
     </>
   )
 }

@@ -23,18 +23,22 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"html/template"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/billingprovider"
 	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/oidcauth"
 	"mitos.run/mitos/internal/saas/onboarding"
@@ -79,9 +83,17 @@ func main() {
 	accounts := saas.NewAccountService(store, keys)
 
 	caps := capabilitiesFromEnv()
-	// One status store is shared by the BFF billing view and the billing webhook
-	// so a provider event (payment failed / canceled) is reflected in the console.
-	statusStore := billing.NewMemStatusStore()
+	// One status store is shared by the BFF billing view, the billing webhook,
+	// and the drawdown service, so a provider event (payment failed / canceled)
+	// is reflected in the console. Durable Postgres when configured (a past_due
+	// or suspended state set by a webhook must survive a restart, issue #614);
+	// in-memory is the dev-only fallback.
+	var statusStore billing.StatusStore
+	if pool != nil {
+		statusStore = pgstore.NewPgStatusStore(pool)
+	} else {
+		statusStore = billing.NewMemStatusStore()
+	}
 
 	// creditLedger is the single shared instance used by the onboarding grant
 	// path, the billing view, AND the billing webhook (so a cleared top-up from
@@ -95,7 +107,31 @@ func main() {
 		creditLedger = billing.NewMemCreditLedger()
 	}
 
-	bill := setupBilling(logger, statusStore, creditLedger)
+	// customers is the org to billing-customer map the webhook resolves incoming
+	// customer ids through and the portal/top-up links resolve orgs through.
+	// Durable Postgres when configured (after a restart the webhook must still
+	// map a customer_id back to its org, or paid top-ups and status syncs are
+	// dropped, issue #614); in-memory is the dev-only fallback.
+	var customers billingprovider.Customers
+	if pool != nil {
+		customers = pgstore.NewPgCustomers(pool)
+	} else {
+		customers = billingprovider.NewMemCustomers()
+	}
+
+	// Billing rate table: MITOS_CONSOLE_RATES (a JSON object mapping onto
+	// billing.Rates; Helm value console.billing.rates) REPLACES the built-in
+	// illustrative defaults when set. A malformed value fails startup (fail
+	// closed) rather than silently pricing usage at the wrong rates; the parse
+	// error carries the remediation text. The SAME table prices the billing
+	// view, the drawdown driver, and (via ToPriceList) the display cost
+	// estimate, so they never drift. See docs/saas/pricing.md.
+	rates, err := billing.ParseRatesConfig(os.Getenv("MITOS_CONSOLE_RATES"))
+	if err != nil {
+		log.Fatalf("MITOS_CONSOLE_RATES: %v", err)
+	}
+
+	bill := setupBilling(logger, statusStore, creditLedger, customers)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -118,6 +154,18 @@ func main() {
 		spendCapStore = billing.NewMemSpendCapStore()
 	}
 
+	// auditLog is the durable org audit trail when Postgres is configured
+	// (issue #616), in-memory otherwise (dev only). Without Postgres the
+	// recorded actions (key create/revoke, member changes, billing actions)
+	// are wiped on every restart, which undermines the audit view and export.
+	var auditLog console.AuditRecorder
+	if pool != nil {
+		auditLog = pgstore.NewPgAuditLog(pool)
+	} else {
+		logger.Warn("audit log is in-memory (dev only); audit events do not survive restarts")
+		auditLog = console.NewMemAuditLog()
+	}
+
 	// The usage store the console reads: the controller's internal usage API
 	// (the SAME usage the collector recorded) when configured, in-memory in dev.
 	// Shared by the BFF usage view and the drawdown driver below.
@@ -130,12 +178,19 @@ func main() {
 		// in a cluster, in-memory otherwise.
 		Instruments: buildInstruments(logger),
 		ForkTree:    buildForkTree(logger),
+		// The org audit trail: durable Postgres when configured, in-memory in
+		// dev. New wraps it with the sink dispatcher exactly as before.
+		Audit: auditLog,
 		Billing: console.BillingReader{
 			Ledger: creditLedger,
 			Status: statusStore,
 			Caps:   spendCapStore,
-			Rates:  billing.DefaultRates(),
+			Rates:  rates,
 		},
+		// The display price list derives from the SAME configured rate table
+		// the ledger bills with, so the estimate a user sees matches what is
+		// charged.
+		Prices: rates.ToPriceList(),
 		// The active secret backend selected from config (kube / openbao), falling
 		// back to in-memory in dev. Capabilities advertise the same providers.
 		Secrets: buildSecretStore(logger, caps),
@@ -171,19 +226,23 @@ func main() {
 	// dev fallback (nothing real to settle); MITOS_CONSOLE_DRAWDOWN_INTERVAL
 	// overrides (a Go duration, or 0/off to disable). The service is built over
 	// the SAME credit ledger and status store the BFF billing view reads, and
-	// prices with the default rate table (billing.DefaultRates,
-	// docs/saas/pricing.md); a configurable price list is a documented
-	// follow-up. No billing provider is involved: Drawdown only prices the
-	// record and debits prepaid credit, idempotently per (org, sandbox, window).
-	// The driver logs counts only, never balances or costs.
+	// prices with the SAME rate table (billing.DefaultRates unless
+	// MITOS_CONSOLE_RATES overrides it; docs/saas/pricing.md). No billing
+	// provider is involved: Drawdown only prices the record and debits prepaid
+	// credit, idempotently per (org, sandbox, window). The driver logs counts
+	// only, never balances or costs.
+	// rootCtx is canceled on shutdown so the drawdown driver's background loop
+	// stops cleanly instead of ticking into a dying process.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
 	_, usageLive := usageStore.(*usage.HTTPStore)
 	ddInterval, err := drawdownInterval(os.Getenv("MITOS_CONSOLE_DRAWDOWN_INTERVAL"), usageLive)
 	if err != nil {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: billing.DefaultRates()})
-		startDrawdownDriver(context.Background(), logger, ddInterval, store, usageStore, dd)
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates})
+		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
 	} else {
 		logger.Info("usage drawdown driver disabled (in-memory usage store or interval 0/off)")
@@ -250,13 +309,15 @@ func main() {
 		logger.Info("billing webhook mounted at /webhooks/billing")
 	}
 	// GET /auth/connectors is a PUBLIC, pre-auth endpoint that returns the list
-	// of configured social-login providers (e.g. ["github"]). The SPA fetches
-	// it before any session exists so the Login/Signup pages can show only the
-	// buttons for providers that are actually configured. The response carries
-	// NO org data: only provider names that came from a server-controlled env
-	// var. It is mounted OUTSIDE the session middleware so no cookie is needed.
-	// The endpoint is intentionally minimal: {"connectors":["github"]} or
-	// {"connectors":[]} when none are configured.
+	// of configured social-login providers (e.g. ["github"]) plus the
+	// server-controlled signup flag. The SPA fetches it before any session
+	// exists so the Login/Signup pages can show only the buttons for providers
+	// that are actually configured and can hide self-serve signup when the
+	// deployment disables it. The response carries NO org data: only
+	// server-controlled deployment configuration. It is mounted OUTSIDE the
+	// session middleware so no cookie is needed. The endpoint is intentionally
+	// minimal: {"connectors":["github"],"signup":true} or
+	// {"connectors":[],"signup":false} when nothing is configured.
 	mux.HandleFunc("GET /auth/connectors", newAuthConnectorsHandler(caps))
 
 	// The identity resolve endpoint is an INTERNAL machine-to-machine endpoint,
@@ -290,16 +351,41 @@ func main() {
 	} else {
 		logger.Warn("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN unset; POST /internal/approve-signup not mounted")
 	}
+	// Liveness stays a static 200 (the process is up); readiness is split out to
+	// /readyz, which pings the configured Postgres pool with a short timeout so a
+	// console with a dead database is removed from the Service instead of serving
+	// failures. With in-memory persistence (pool == nil) /readyz is always 200.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	var readyDB pgPinger
+	if pool != nil {
+		readyDB = pool
+	}
+	mux.HandleFunc("/readyz", newReadyzHandler(readyDB))
 
 	logger.Info("console listening", "addr", *addr, "dev", *dev)
 	srv := &http.Server{Addr: *addr, Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+
+	// Graceful shutdown (same pattern and timeout as cmd/frontdoor): serve in a
+	// goroutine, then on SIGTERM/SIGINT stop the background loops and drain
+	// in-flight requests (API calls, billing webhooks) inside a bounded timeout
+	// instead of dropping them on every rollout.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("console: listen: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	<-stop
+	logger.Info("console shutting down")
+	rootCancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }
 
 // sessionStoreAdapter bridges saas.Sessions to the console.SessionLister

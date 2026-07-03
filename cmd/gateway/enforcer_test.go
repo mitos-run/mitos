@@ -245,4 +245,41 @@ func TestBuildQuotaEnforcerEnabledRealEnforcer(t *testing.T) {
 	if err := w.enforcer.Check(context.Background(), "org-1", "sandbox.status"); err == nil {
 		t.Fatal("after kill-switch suspend, enforcer must deny (shared store), got allow")
 	}
+	// Without an injected durable store the fallback is in-process and the mode
+	// string must say so, so the dev-only posture is never silent.
+	if !strings.Contains(w.mode, "NOT durable") {
+		t.Errorf("mem-fallback mode = %q, want it to name the non-durable dev posture", w.mode)
+	}
+}
+
+// TestBuildQuotaEnforcerUsesInjectedSuspensionStore asserts the wiring enforces
+// against the INJECTED suspension store (main passes the durable Postgres store
+// behind the TTL cache when a database is configured): a suspension already
+// present in that store, as written by another replica or a previous process
+// lifetime, is denied here, and the kill-switch writes back to the same store.
+func TestBuildQuotaEnforcerUsesInjectedSuspensionStore(t *testing.T) {
+	ctx := context.Background()
+	shared := quota.NewMemSuspensionStore() // stands in for the shared durable store.
+	// "Another replica" (or a pre-restart lifetime) already suspended the org.
+	if err := shared.Suspend(ctx, quota.Suspension{OrgID: "org-1", Reason: quota.ReasonEmergencyStop, Note: "big red button"}); err != nil {
+		t.Fatalf("pre-seed suspend: %v", err)
+	}
+
+	w := buildQuotaEnforcer(enforcementConfig{enabled: true, suspensions: shared})
+	if w.suspensions != quota.SuspensionStore(shared) {
+		t.Fatalf("wiring store = %T, want the injected store", w.suspensions)
+	}
+	if err := w.enforcer.Check(ctx, "org-1", "sandbox.status"); err == nil {
+		t.Fatal("a suspension pre-seeded in the shared store must deny, got allow")
+	}
+	// The kill-switch lifts through the SAME store, so the org is admitted again.
+	if lifted, err := w.killSwitch.Lift(ctx, "org-1"); err != nil || !lifted {
+		t.Fatalf("lift = %v, %v; want true, nil", lifted, err)
+	}
+	if err := w.enforcer.Check(ctx, "org-1", "sandbox.status"); err != nil {
+		t.Fatalf("after lift the org must be admitted, got %v", err)
+	}
+	if !strings.Contains(w.mode, "durable") {
+		t.Errorf("injected-store mode = %q, want it to name the durable posture", w.mode)
+	}
 }

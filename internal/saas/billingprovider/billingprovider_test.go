@@ -30,7 +30,7 @@ func (errLedger) Entries(context.Context, string) ([]billing.LedgerEntry, error)
 func handleTopUp(t *testing.T, p Provider, ledger billing.CreditLedger, now func() time.Time) *httptest.ResponseRecorder {
 	t.Helper()
 	status := billing.NewMemStatusStore()
-	h := NewWebhookHandler(p, fakeCustomers{"cus_alice": "org-alice"}, status, ledger, now)
+	h := NewWebhookHandler(p, fakeCustomers{"cus_alice": "org-alice"}, nil, status, ledger, now)
 	r := httptest.NewRequest("POST", "/webhooks/billing", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

@@ -486,9 +486,21 @@ func main() {
 			if usageAPIToken == "" {
 				logger.Info("WARNING: --usage-api-address is set but MITOS_USAGE_API_TOKEN is empty; the internal usage API will refuse every request (fail closed)")
 			}
+			// Display price list: MITOS_USAGE_PRICELIST (a JSON object mapping
+			// onto usage.PriceList, dollars per unit; Helm value
+			// controller.usage.priceList) REPLACES the illustrative defaults
+			// when set, so the usage API's cost estimate can match the
+			// deployment's configured billing rates instead of drifting from
+			// them. A malformed value fails startup (fail closed); the parse
+			// error carries the remediation text. See docs/saas/pricing.md.
+			prices, err := usage.ParsePriceListConfig(os.Getenv("MITOS_USAGE_PRICELIST"))
+			if err != nil {
+				logger.Error(err, "invalid MITOS_USAGE_PRICELIST")
+				os.Exit(1)
+			}
 			if err := mgr.Add(&controller.UsageAPIRunnable{
 				Store:  usageStore,
-				Prices: usage.DefaultPriceList(),
+				Prices: prices,
 				Addr:   usageAPIAddr,
 				Token:  usageAPIToken,
 			}); err != nil {
