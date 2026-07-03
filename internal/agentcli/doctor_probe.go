@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -131,13 +130,11 @@ func (p *realProbe) GuestKernelStaged(context.Context) (bool, string, error) {
 // bytes available to an unprivileged writer (Bavail, not Bfree). Off a KVM node
 // the dir usually does not exist, which statfs reports as an error; the check
 // folds that into a WARN so a workstation run is not falsely blocked.
-func (p *realProbe) DataDirFree(context.Context) (uint64, string, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(p.dataDirPath, &st); err != nil {
-		return 0, p.dataDirPath, err
-	}
-	// Bsize and Bavail widths differ across platforms; convert explicitly.
-	return uint64(st.Bavail) * uint64(st.Bsize), p.dataDirPath, nil
+// The statfs syscall is unix-only, so the implementation lives in
+// doctor_probe_unix.go with a windows stub beside it; the goreleaser windows
+// target failed to compile on syscall.Statfs on every release before the split.
+func (p *realProbe) DataDirFree(ctx context.Context) (uint64, string, error) {
+	return p.dataDirFree(ctx)
 }
 
 func (p *realProbe) PKISecretPresent(ctx context.Context, name string) (bool, error) {
