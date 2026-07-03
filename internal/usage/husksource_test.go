@@ -22,6 +22,8 @@ func singleVMReport(vmID string) metering.Report {
 // TestHuskSourceCollectsClaimedPod asserts the husk source scrapes a claimed
 // pod's /v1/metering, converts its single-VM report to an org-tagged Sample, and
 // that the org came from the TRUSTED pod label (the lister), not from the report.
+// The pod carries NO APIID, so this doubles as the fallback case for issue #663:
+// with no API-visible id, the sample keeps the pod name as its SandboxID.
 func TestHuskSourceCollectsClaimedPod(t *testing.T) {
 	srv := meteringServer(t, singleVMReport("husk-pod-acme"))
 	defer srv.Close()
@@ -54,6 +56,76 @@ func TestHuskSourceCollectsClaimedPod(t *testing.T) {
 	}
 	if src.SkippedPods() != 0 {
 		t.Errorf("SkippedPods = %d, want 0", src.SkippedPods())
+	}
+}
+
+// TestHuskSourceEmitsAPIVisibleSandboxID is the issue #663 fix proof: a husk
+// pod's report is trusted only for its OWN vm-id (the pod name), but the Sample
+// the source emits must carry the API-VISIBLE sandbox id from the controller's
+// trusted claim label (HuskPod.APIID), so usage_records reconcile to the sb-...
+// id the customer saw, not the husk pod name.
+func TestHuskSourceEmitsAPIVisibleSandboxID(t *testing.T) {
+	// The pod reports its own vm-id, which is the POD NAME (--vm-id = POD_NAME).
+	srv := meteringServer(t, singleVMReport("python-husk-2blsp"))
+	defer srv.Close()
+
+	src := NewHuskSource(
+		staticHuskPods{{
+			VMID:     "python-husk-2blsp",
+			APIID:    "sb-82813f5c",
+			OrgID:    "acme",
+			Endpoint: srv.Listener.Addr().String(),
+		}},
+		nil,
+		srv.Client(),
+		"http",
+		nil,
+	)
+
+	samples, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(samples) != 1 {
+		t.Fatalf("want 1 sample, got %d: %+v", len(samples), samples)
+	}
+	if samples[0].SandboxID != "sb-82813f5c" {
+		t.Errorf("SandboxID = %q, want sb-82813f5c (the API-visible id from the trusted claim label)", samples[0].SandboxID)
+	}
+	if samples[0].OrgID != "acme" {
+		t.Errorf("OrgID = %q, want acme", samples[0].OrgID)
+	}
+}
+
+// TestHuskSourceAPIIDDoesNotWeakenVMIDTrust asserts the report-id trust check
+// stays keyed on the pod name even when an APIID is present: a pod whose report
+// carries any id other than its OWN vm-id (here, the API id itself) bills
+// NOTHING. The pod is untrusted for identity; only the controller's claim label
+// selects the billing id.
+func TestHuskSourceAPIIDDoesNotWeakenVMIDTrust(t *testing.T) {
+	// The pod tries to report under the API-visible id instead of its vm-id.
+	srv := meteringServer(t, singleVMReport("sb-82813f5c"))
+	defer srv.Close()
+
+	src := NewHuskSource(
+		staticHuskPods{{
+			VMID:     "python-husk-2blsp",
+			APIID:    "sb-82813f5c",
+			OrgID:    "acme",
+			Endpoint: srv.Listener.Addr().String(),
+		}},
+		nil,
+		srv.Client(),
+		"http",
+		nil,
+	)
+
+	samples, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(samples) != 0 {
+		t.Fatalf("a report id that is not the pod's own vm-id must be rejected even when it equals the APIID, got %+v", samples)
 	}
 }
 

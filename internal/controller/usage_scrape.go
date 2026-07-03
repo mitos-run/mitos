@@ -115,8 +115,10 @@ func (l *PodLabelLookup) LabelsForSandbox(sandboxID string) (map[string]string, 
 // It lists mitos.run/husk pods that are Running, carry a claim label
 // (mitos.run/claim, so they are actually claimed, not warm), have a PodIP, and
 // carry a NON-EMPTY trusted mitos.run/org label. It returns each pod's vm-id (the
-// pod name, which the pod reports as its single metering sample id), its org (the
-// trusted label), and its podIP:huskSandboxPort endpoint.
+// pod name, which the pod reports as its single metering sample id), its
+// API-visible sandbox id (the claim label value: the claiming Sandbox's name, the
+// id the customer saw; issue #663), its org (the trusted label), and its
+// podIP:huskSandboxPort endpoint.
 //
 // SECURITY: the org is the controller's OWN stamped label, derived from the
 // trusted per-org namespace (see buildHuskPod), NEVER client input; the pod is
@@ -150,7 +152,14 @@ func (l *HuskPodScrapeLister) ListHuskPods(ctx context.Context) ([]usage.HuskPod
 			continue
 		}
 		out = append(out, usage.HuskPod{
-			VMID:     p.Name,
+			VMID: p.Name,
+			// The API-visible sandbox id (issue #663): the mitos.run/claim label
+			// holds the claiming Sandbox's NAME, stamped by markHuskPodClaimed,
+			// which is exactly the id the API returned to the customer (the
+			// hosted gateway names the Sandbox sb-<hex> and returns that name as
+			// the id). It is the controller's OWN label, never pod input. The
+			// source falls back to VMID if this is somehow empty.
+			APIID:    p.Labels[huskClaimLabel],
 			OrgID:    org,
 			Endpoint: fmt.Sprintf("%s:%d", p.Status.PodIP, huskSandboxPort),
 		})
