@@ -437,6 +437,186 @@ async fn exec_pty_echo_returns_stdout_and_exit_zero() {
     );
 }
 
+/// Drive one interactive PTY session end to end and return (output, exit_code).
+///
+/// Mirrors the cmd/grpc-exec-smoke pty sequence (the #535 CI reproducer):
+/// open an interactive /bin/sh with PtyOptions, send an echo command as stdin
+/// bytes, send a resize frame, signal end-of-input with stdin_close(true),
+/// half-close, then collect Stdout frames until the ExecExit arrives.
+///
+/// `stdin_delay` controls how long to wait between the open frame and the
+/// first stdin frame: the smoke waits 200ms, but a client is allowed to send
+/// stdin immediately after open, so tests pass Duration::ZERO to hammer the
+/// spawn-then-immediate-stdin ordering.
+///
+/// Returns None when the server reports PTY exec as unimplemented (non-Linux
+/// hosts) so callers can skip gracefully.
+async fn run_interactive_pty_session(
+    client: &mut SandboxClient<tonic::transport::Channel>,
+    marker: &str,
+    stdin_delay: std::time::Duration,
+) -> Option<(String, Option<i32>)> {
+    use sandbox_agent::sandbox_v1::{self, exec_request, exec_response};
+    use tokio_stream::StreamExt;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+    let open = sandbox_v1::ExecRequest {
+        msg: Some(exec_request::Msg::Open(sandbox_v1::ExecOpen {
+            command: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            pty: Some(sandbox_v1::PtyOptions {
+                term: "xterm-256color".into(),
+                size: Some(sandbox_v1::WindowSize { cols: 80, rows: 24 }),
+            }),
+            timeout_seconds: 10,
+            ..Default::default()
+        })),
+    };
+    tx.send(open).await.unwrap();
+
+    // Feed the remaining client frames from a task so the response stream is
+    // consumed concurrently (the real smoke client behaves the same way).
+    let marker_owned = marker.to_string();
+    let feeder = tokio::spawn(async move {
+        if !stdin_delay.is_zero() {
+            tokio::time::sleep(stdin_delay).await;
+        }
+        // The command as stdin bytes: the interactive shell runs it.
+        let _ = tx
+            .send(sandbox_v1::ExecRequest {
+                msg: Some(exec_request::Msg::Stdin(
+                    format!("echo {marker_owned}\n").into_bytes(),
+                )),
+            })
+            .await;
+        // A resize frame must be accepted without error.
+        let _ = tx
+            .send(sandbox_v1::ExecRequest {
+                msg: Some(exec_request::Msg::Resize(sandbox_v1::WindowSize {
+                    cols: 120,
+                    rows: 40,
+                })),
+            })
+            .await;
+        // End of input: the PTY equivalent of ctrl-d; the shell must exit 0.
+        let _ = tx
+            .send(sandbox_v1::ExecRequest {
+                msg: Some(exec_request::Msg::StdinClose(true)),
+            })
+            .await;
+        // Dropping tx half-closes the client send side.
+    });
+
+    let stream = client
+        .exec(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await;
+
+    let stream = match stream {
+        Ok(r) => r.into_inner(),
+        Err(status) if status.code() == Code::Unimplemented => {
+            feeder.abort();
+            return None;
+        }
+        Err(e) => panic!("pty exec rpc failed unexpectedly: {e}"),
+    };
+
+    let mut output = String::new();
+    let mut exit_code: Option<i32> = None;
+    tokio::pin!(stream);
+    while let Some(msg) = stream.next().await {
+        match msg.unwrap().msg.unwrap() {
+            exec_response::Msg::Stdout(b) => {
+                output.push_str(&String::from_utf8_lossy(&b));
+            }
+            exec_response::Msg::Exit(e) => {
+                exit_code = Some(e.exit_code);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let _ = feeder.await;
+    Some((output, exit_code))
+}
+
+/// The interactive PTY session (the exact cmd/grpc-exec-smoke pty sequence,
+/// issue #535): ExecOpen with pty, then stdin bytes, resize, stdin_close.
+/// The session must NOT close early on the client's frames, the echo output
+/// must arrive, and stdin_close must end the shell with exit code 0 (never
+/// the 124 timeout: stdin_close is ctrl-d, not a no-op).
+#[tokio::test]
+async fn exec_pty_interactive_stdin_close_exits_zero() {
+    const SOCK: &str = "/tmp/agent-conformance-exec-pty-interactive.sock";
+    let mut client = start_server_and_client(SOCK).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        run_interactive_pty_session(
+            &mut client,
+            "pty-interactive-ok",
+            std::time::Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect(
+        "interactive PTY session must finish well before the exec timeout: \
+         stdin_close must deliver EOF to the shell, not be ignored",
+    );
+
+    let Some((output, exit_code)) = result else {
+        return; // PTY unsupported on this platform.
+    };
+    assert!(
+        output.contains("pty-interactive-ok"),
+        "expected echo output in PTY stream, got: {output:?}",
+    );
+    assert_eq!(
+        exit_code,
+        Some(0),
+        "stdin_close (ctrl-d) must end the interactive shell cleanly, \
+         got exit {exit_code:?}; output: {output:?}",
+    );
+}
+
+/// Hammer the spawn-then-immediate-stdin ordering (issue #535): a client may
+/// send its first stdin frame right behind the open frame, before the shell
+/// has produced any output. The session must never close early: every
+/// iteration must deliver the echo output and a clean exit 0.
+#[tokio::test]
+async fn exec_pty_immediate_stdin_never_closes_early() {
+    const SOCK: &str = "/tmp/agent-conformance-exec-pty-hammer.sock";
+    const ITERATIONS: usize = 50;
+    let mut client = start_server_and_client(SOCK).await;
+
+    for i in 0..ITERATIONS {
+        let marker = format!("pty-hammer-{i}-ok");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            run_interactive_pty_session(&mut client, &marker, std::time::Duration::ZERO),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "iteration {i}: PTY session did not finish (stream stuck or shell never got EOF)"
+            )
+        });
+
+        let Some((output, exit_code)) = result else {
+            return; // PTY unsupported on this platform.
+        };
+        assert!(
+            output.contains(&marker),
+            "iteration {i}: expected {marker:?} in PTY output, got: {output:?}",
+        );
+        assert_eq!(
+            exit_code,
+            Some(0),
+            "iteration {i}: PTY session must exit 0, got {exit_code:?}; output: {output:?}",
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // File RPC conformance tests (Task 2.2)
 // ---------------------------------------------------------------------------
