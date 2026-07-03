@@ -13,6 +13,7 @@ import { useCapabilities } from '../data/query'
 import { navRoutes, GROUP_ORDER, type NavGroupName, type RouteDef } from './routes'
 import { CommandPalette } from './CommandPalette'
 import { TopBar } from './TopBar'
+import { LoadingScreen } from '../ui/LoadingScreen'
 import type { Capabilities } from '../api'
 
 export function AppShell() {
@@ -67,11 +68,7 @@ export function AppShell() {
   }, [drawerOpen])
 
   if (!caps) {
-    return (
-      <main style={{ padding: 'var(--space-6)' }}>
-        <div className="t-dim">loading...</div>
-      </main>
-    )
+    return <LoadingScreen />
   }
 
   const routes = navRoutes(caps)
@@ -135,15 +132,14 @@ function NavSection({ group, routes }: { group: NavGroupName; routes: RouteDef[]
 }
 
 function OwnershipBadge({ caps }: { caps: Capabilities }) {
-  const selfHosted = caps.ownership === 'self-hosted'
+  // The badge exists to reassure self-hosters about data residency. On the
+  // hosted edition it would only restate where the user already knows they
+  // are, so it renders nothing.
+  if (caps.ownership !== 'self-hosted') return null
   return (
     <div className="card" style={{ marginTop: 'var(--space-6)', fontSize: 'var(--step--1)' }}>
-      <div style={{ color: 'var(--cyan)' }}>{selfHosted ? 'Self-hosted' : 'Hosted by Mitos'}</div>
-      <div className="t-dim">
-        {selfHosted
-          ? 'Your data never leaves your infrastructure.'
-          : 'Same engine and API; portable to self-host.'}
-      </div>
+      <div style={{ color: 'var(--cyan)' }}>Self-hosted</div>
+      <div className="t-dim">Your data never leaves your infrastructure.</div>
     </div>
   )
 }
