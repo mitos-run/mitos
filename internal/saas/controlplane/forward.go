@@ -121,6 +121,26 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)
+
+	// Fast-fail on an unknown pool. In the hosted control plane pools are
+	// pre-provisioned and stable, so a create naming a pool that does not exist
+	// in the tenant namespace is a typo, not a manifest-ordering race: return an
+	// instant, LLM-legible 404 instead of creating a Sandbox that can only pend
+	// until the controller's bounded grace expires (issue #630) while the caller
+	// blocks for the full ready timeout and then sees a misleading "did not
+	// become ready" 504. k.c is an uncached reader, so this Get is authoritative
+	// for the exact namespace the sandbox would be created in and the controller
+	// would resolve the poolRef in. A transient (non-NotFound) read error is NOT
+	// treated as absent: the create proceeds and the controller's bounded grace
+	// still governs the direct and GitOps-race paths.
+	var poolObj v1.SandboxPool
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: pool}, &poolObj); err != nil && apierrors.IsNotFound(err) {
+		return errResp(apierr.Get(apierr.CodeNotFound).
+			WithMessage(fmt.Sprintf("no such pool %q", pool)).
+			WithCause(fmt.Sprintf("no SandboxPool named %q exists in namespace %q", pool, ns)).
+			WithRemediation("Check the pool name for a typo and use a pool listed by GET /v1/templates, or create the SandboxPool before launching a sandbox from it.")), nil
+	}
+
 	name := generateName()
 
 	sb := &v1.Sandbox{
