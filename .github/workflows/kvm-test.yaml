@@ -559,15 +559,13 @@ jobs:
       # relative "vsock.sock" used for fork-correctness, which relies on Firecracker
       # cwd resolution): this phase boots a fresh single VM, not a forked restore.
       #
-      # NON-BLOCKING (continue-on-error) for now: the Rust agent is the
-      # production default (Phase D, #310) and test-agent gates the gRPC exec
-      # path above; grpc-exec-smoke additionally proves STREAMING and PTY
-      # semantics via a separate driver over the same vsock gRPC transport.
-      # Kept non-blocking until this phase has been green on KVM CI for one
-      # full run (tracked as a follow-up of issue #24). Remove continue-on-error
-      # once the transport is consistently proven end to end here.
+      # This phase GATES: no continue-on-error. It was non-blocking from its
+      # introduction, which masked an interactive-PTY failure on every recorded
+      # run for weeks (devpts was never mounted in the guest; issues #535 and
+      # #671): job conclusions read success while Phase 2 always failed. Both
+      # phases were proven green on KVM CI with the #670 guest fix, so a PTY
+      # regression must fail the required check, never hide.
       - name: gRPC runtime protocol proof, streaming Exec and interactive PTY over vsock gRPC
-        continue-on-error: true
         timeout-minutes: 8
         run: |
           set -e
