@@ -182,10 +182,38 @@ func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	if resp.Status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
 	}
+	// The body is valid JSON, so the error must be invalid_input (a missing
+	// field), not invalid_json (a parse failure); issue #640B.
+	body := string(resp.Body)
+	if !strings.Contains(body, "invalid_input") {
+		t.Errorf("missing-pool error should be invalid_input, got: %s", body)
+	}
+	if strings.Contains(body, "invalid_json") {
+		t.Errorf("missing-pool error wrongly labeled invalid_json: %s", body)
+	}
 	var list v1.SandboxList
 	_ = c.List(context.Background(), &list)
 	if len(list.Items) != 0 {
 		t.Errorf("created %d sandboxes for a rejected request", len(list.Items))
+	}
+}
+
+// TestUnknownOperationSaysRouteNotSandbox asserts an unmatched route (which
+// opFromPath maps to a nonexistent "sandbox.<method>" op) does not tell the
+// caller "no such sandbox": it hit a route the gateway does not expose, not a
+// missing sandbox. Issue #640C.
+func TestUnknownOperationSaysRouteNotSandbox(t *testing.T) {
+	cp := New(newFakeClient(t))
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.get", Path: "/v1/nonsense"})
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if strings.Contains(body, "no such sandbox") {
+		t.Errorf("unknown route wrongly says 'no such sandbox': %s", body)
+	}
+	if !strings.Contains(body, "route or operation") {
+		t.Errorf("unknown route error should name the route/operation: %s", body)
 	}
 }
 
