@@ -35,21 +35,26 @@ func (p portalLinker) PortalURL(ctx context.Context, orgID string) (string, erro
 	return p.provider.PortalURL(ctx, cust)
 }
 
-// checkoutURLer is the narrow seam for providers that support hosted checkout
+// checkoutCreator is the narrow seam for providers that support hosted checkout
 // for prepaid credit top-ups. Only the Paddle provider implements this; the
 // Stripe adapter does not, so top-up is unavailable when Stripe is selected.
-type checkoutURLer interface {
-	CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error)
+type checkoutCreator interface {
+	CreateCheckout(ctx context.Context, in billingprovider.TopUp) (billingprovider.Checkout, error)
 }
 
-// topUpLinker adapts a checkoutURLer + an org-customer map into the
+// topUpLinker adapts a checkoutCreator + an org-customer map into the
 // console.TopUpLinker seam. It resolves the org's billing customer ref before
 // forwarding to the provider. An org with no linked customer is
 // console.ErrNotFound (the BFF returns 404 and hides the affordance).
 // Provider keys and the returned URL are never logged; only org ids and counts.
 type topUpLinker struct {
-	provider  checkoutURLer
+	provider  checkoutCreator
 	customers billingprovider.OrgCustomers
+	// linker records the org <-> customer link the checkout response names,
+	// best effort: a failure is logged and never fails the checkout, because
+	// the webhook-time link (the reliable path) covers it. Nil disables it.
+	linker billingprovider.CustomerLinker
+	logger *slog.Logger
 }
 
 func (l topUpLinker) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error) {
@@ -61,7 +66,20 @@ func (l topUpLinker) CheckoutURL(ctx context.Context, in billingprovider.TopUp) 
 		return "", console.ErrNotFound
 	}
 	in.CustomerRef = cust
-	return l.provider.CheckoutURL(ctx, in)
+	co, err := l.provider.CreateCheckout(ctx, in)
+	if err != nil {
+		return "", err
+	}
+	// Checkout-time linking (best effort, issue #618): when the provider's
+	// create-transaction response names a customer that differs from the stored
+	// link, record it now so later portal/top-up calls use the fresh ref. Only
+	// the org id is logged on failure; never the checkout URL or any key.
+	if l.linker != nil && co.CustomerRef != "" && co.CustomerRef != cust {
+		if err := l.linker.Link(ctx, in.OrgID, co.CustomerRef); err != nil && l.logger != nil {
+			l.logger.Warn("checkout-time customer link failed; the webhook-time link will cover it", "org", in.OrgID, "err", err)
+		}
+	}
+	return co.URL, nil
 }
 
 // billingWiring is the result of setupBilling: the portal seam and the top-up
@@ -120,7 +138,7 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 		provider = pp
 		topUpProductID = os.Getenv("MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT")
 		topUpCurrency = envOr("MITOS_CONSOLE_PADDLE_CURRENCY", "EUR")
-		tu = topUpLinker{provider: pp, customers: customers}
+		tu = topUpLinker{provider: pp, customers: customers, linker: customers, logger: logger}
 	} else {
 		provider = stripe.New(stripe.Config{
 			SigningSecret: os.Getenv("MITOS_CONSOLE_STRIPE_WEBHOOK_SECRET"),
@@ -130,8 +148,11 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 
 	logger.Info("billing enabled", "provider", provider.Name())
 	return billingWiring{
-		portal:         portalLinker{provider: provider, customers: customers},
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, status, creditLedger, time.Now),
+		portal: portalLinker{provider: provider, customers: customers},
+		// customers is passed as BOTH the resolver and the linker: an event
+		// whose signature-verified custom_data names the org records the org
+		// <-> customer link before processing (the write half of #614/#618).
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,
