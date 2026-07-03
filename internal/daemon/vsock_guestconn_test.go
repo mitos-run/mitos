@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -311,8 +312,9 @@ func startFakeControlUDS(t *testing.T, sockPath string, sandbox sandboxv1.Sandbo
 // chanConnListener is a net.Listener that yields conns sent on its channel, used
 // to feed preamble-stripped guest conns to one grpc.Server.Serve loop.
 type chanConnListener struct {
-	conns chan net.Conn
-	done  chan struct{}
+	conns     chan net.Conn
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func (l *chanConnListener) Accept() (net.Conn, error) {
@@ -325,11 +327,12 @@ func (l *chanConnListener) Accept() (net.Conn, error) {
 }
 
 func (l *chanConnListener) Close() error {
-	select {
-	case <-l.done:
-	default:
-		close(l.done)
-	}
+	// Close is called concurrently by the test's teardown and by
+	// grpc.Server.Serve on its exit path. The previous select-then-close guard
+	// was racy: two goroutines could both observe done as open and both close
+	// it, panicking the whole package run with "close of closed channel"
+	// (issue #642). sync.Once makes it idempotent.
+	l.closeOnce.Do(func() { close(l.done) })
 	return nil
 }
 
