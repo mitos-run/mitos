@@ -129,6 +129,42 @@ func TestGatewayRejectsMissingKey(t *testing.T) {
 	}
 }
 
+// TestGatewayUnauthorizedIsApiKeyShaped asserts the 401 a hosted caller gets for
+// a missing or invalid api key speaks about the API KEY, not the per-sandbox
+// bearer token. The default apierr.CodeUnauthorized remediation names "the
+// <name>-sandbox-token Secret", which is nonsense for the gateway's org-api-key
+// auth and misleads every SDK user who mistypes or omits their key (the #28
+// LLM-legible error rule).
+func TestGatewayUnauthorizedIsApiKeyShaped(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	for name, bearer := range map[string]string{"missing": "", "forged": "mitos_live_forged"} {
+		t.Run(name, func(t *testing.T) {
+			rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", bearer, "{}")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			var env struct {
+				Error struct {
+					Message     string `json:"message"`
+					Remediation string `json:"remediation"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+			}
+			blob := strings.ToLower(env.Error.Message + " " + env.Error.Remediation)
+			if strings.Contains(blob, "sandbox") {
+				t.Errorf("gateway 401 leaks sandbox-token language: message=%q remediation=%q",
+					env.Error.Message, env.Error.Remediation)
+			}
+			if !strings.Contains(blob, "api key") {
+				t.Errorf("gateway 401 should name the api key, got message=%q remediation=%q",
+					env.Error.Message, env.Error.Remediation)
+			}
+		})
+	}
+}
+
 // TestGatewayRejectsForgedKey asserts a forged key yields unauthorized and does
 // not reach the control plane.
 func TestGatewayRejectsForgedKey(t *testing.T) {
@@ -468,6 +504,75 @@ func TestGatewayExistingSandboxesPathStillWorks(t *testing.T) {
 	}
 	if len(f.cp.got) != 1 || f.cp.got[0].Op != "sandbox.create" {
 		t.Errorf("op = %+v, want sandbox.create", f.cp.got)
+	}
+}
+
+// TestGatewayPauseMapsToSandboxPause asserts POST /v1/pause (the SDK
+// sandbox.pause() call, body {"sandbox": "<id>"}) routes as the "sandbox.pause"
+// op with the org taken from the verified key. Before #601 it fell through to
+// "sandbox.post", which the control plane rejects as an unknown operation.
+func TestGatewayPauseMapsToSandboxPause(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"status":"paused"}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/pause", f.rawA, `{"sandbox":"sb-x"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "sandbox.pause" {
+		t.Errorf("op = %q, want sandbox.pause", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayResumeMapsToSandboxResume asserts POST /v1/resume routes as the
+// "sandbox.resume" op with the org taken from the verified key.
+func TestGatewayResumeMapsToSandboxResume(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	f.cp.respBody = []byte(`{"status":"running"}`)
+	rec := doRequest(f.gw, http.MethodPost, "/v1/resume", f.rawA, `{"sandbox":"sb-x"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests, want 1", len(f.cp.got))
+	}
+	if f.cp.got[0].Op != "sandbox.resume" {
+		t.Errorf("op = %q, want sandbox.resume", f.cp.got[0].Op)
+	}
+	if f.cp.got[0].OrgID != "org-a" {
+		t.Errorf("OrgID = %q, want org-a (must come from the verified key)", f.cp.got[0].OrgID)
+	}
+}
+
+// TestGatewayPauseResumeRequireSandboxScope asserts pause and resume are
+// MUTATING ops: a read-only key is rejected with forbidden and never reaches
+// the control plane.
+func TestGatewayPauseResumeRequireSandboxScope(t *testing.T) {
+	store := NewMemStore()
+	newTestOrg(t, store, "org-a")
+	keys := NewKeyService(store)
+	created, err := keys.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Scopes: []string{ScopeReadOnly}})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	cp := &fakeControlPlane{respBody: []byte(`{}`)}
+	gw := NewGateway(keys, nil, cp, nil)
+	for _, path := range []string{"/v1/pause", "/v1/resume"} {
+		rec := doRequest(gw, http.MethodPost, path, created.RawKey, `{"sandbox":"sb-x"}`)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403 for a read-only key", path, rec.Code)
+		}
+		if code := decodeErr(t, rec); code != "forbidden" {
+			t.Errorf("%s: error code = %q, want forbidden", path, code)
+		}
+	}
+	if len(cp.got) != 0 {
+		t.Error("control plane reached despite a read-only key on pause/resume")
 	}
 }
 

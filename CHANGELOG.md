@@ -1,5 +1,64 @@
 # Changelog
 
+## [1.16.0](https://github.com/mitos-run/mitos/compare/v1.15.2...v1.16.0) (2026-07-03)
+
+
+### Features
+
+* **cli:** mitos init takes a new user from key-in-hand to a verified setup ([#639](https://github.com/mitos-run/mitos/issues/639)) ([fe1f9f4](https://github.com/mitos-run/mitos/commit/fe1f9f47a640230e1e0fbf767ecac0d5f2254227))
+* **console:** light theme following prefers-color-scheme with manual override ([#634](https://github.com/mitos-run/mitos/issues/634)) ([fcfacff](https://github.com/mitos-run/mitos/commit/fcfacffdc11e36ea44fea3e3272310768d24fad9)), closes [#621](https://github.com/mitos-run/mitos/issues/621)
+* **saas:** webhook and checkout write the org to billing-customer link ([#645](https://github.com/mitos-run/mitos/issues/645)) ([916fe09](https://github.com/mitos-run/mitos/commit/916fe0930b19b95def1fe91d1feeaff0a90e695f))
+
+
+### Bug Fixes
+
+* **saas:** durable audit log so the org audit trail survives console restarts ([#633](https://github.com/mitos-run/mitos/issues/633)) ([d40a701](https://github.com/mitos-run/mitos/commit/d40a701e537b8e669df939c1801ac4492148ab61)), closes [#616](https://github.com/mitos-run/mitos/issues/616)
+* **saas:** durable, replica-shared kill-switch suspension store ([#632](https://github.com/mitos-run/mitos/issues/632)) ([80a50d4](https://github.com/mitos-run/mitos/commit/80a50d46fdb7dfd0b4dbd19142fc1beaaccdad8c))
+* **saas:** graceful shutdown, real readiness, and PDBs for the hosted control plane ([#624](https://github.com/mitos-run/mitos/issues/624)) ([63b610b](https://github.com/mitos-run/mitos/commit/63b610b10600143283da6bbcb26957b3e8919246))
+
+## [1.15.2](https://github.com/mitos-run/mitos/compare/v1.15.1...v1.15.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** create error journey speaks accurately (missing field, unknown route) ([#649](https://github.com/mitos-run/mitos/issues/649)) ([8713bab](https://github.com/mitos-run/mitos/commit/8713bab59ada905499ae80e970a8096dbb68f338))
+
+## [1.15.1](https://github.com/mitos-run/mitos/compare/v1.15.0...v1.15.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** create fails fast and legibly on an unknown pool ([#646](https://github.com/mitos-run/mitos/issues/646)) ([206de66](https://github.com/mitos-run/mitos/commit/206de66e1f741303b2d343a460a0a8693b8e275a))
+
+## [1.15.0](https://github.com/mitos-run/mitos/compare/v1.14.0...v1.15.0) (2026-07-03)
+
+
+### Features
+
+* **saas:** self-host operator knobs as first-class Helm values, configurable billing rates ([#623](https://github.com/mitos-run/mitos/issues/623)) ([a8162b3](https://github.com/mitos-run/mitos/commit/a8162b36c2213babd87ea76abcecd944da123918))
+
+
+### Bug Fixes
+
+* **console:** plain-language copy, signup gating on self-host, and boot loading states ([#626](https://github.com/mitos-run/mitos/issues/626)) ([a25e000](https://github.com/mitos-run/mitos/commit/a25e000f6803e68b85a432fe4edb504ecbda6fa7))
+* **controller:** sandbox with a nonexistent pool fails terminally after a bounded grace period ([#637](https://github.com/mitos-run/mitos/issues/637)) ([2833fe7](https://github.com/mitos-run/mitos/commit/2833fe745e3a5b3a789fb8add6dfbda41b25f43f)), closes [#630](https://github.com/mitos-run/mitos/issues/630)
+* **saas:** auth 401s speak to their own auth context, not the sandbox token ([#638](https://github.com/mitos-run/mitos/issues/638)) ([8e439a6](https://github.com/mitos-run/mitos/commit/8e439a62a4c5363d6cbf703827127b02236cf207))
+* **saas:** billing status and org-customer map are durable in Postgres ([#629](https://github.com/mitos-run/mitos/issues/629)) ([e354f80](https://github.com/mitos-run/mitos/commit/e354f8013805ca8f1af086237cf256605758ce5d)), closes [#614](https://github.com/mitos-run/mitos/issues/614)
+
+## [1.14.0](https://github.com/mitos-run/mitos/compare/v1.13.1...v1.14.0) (2026-07-02)
+
+
+### Features
+
+* **saas:** hosted pause and resume via the sandbox lifecycle proxy ([#609](https://github.com/mitos-run/mitos/issues/609)) ([5d9f7a7](https://github.com/mitos-run/mitos/commit/5d9f7a70c9aa8a54ff2861ffcf49ce4e2534fc35)), closes [#601](https://github.com/mitos-run/mitos/issues/601)
+* **saas:** wire usage metering end to end (claim-time org attribution, chart knobs, drawdown driver) ([#610](https://github.com/mitos-run/mitos/issues/610)) ([73516c1](https://github.com/mitos-run/mitos/commit/73516c12554203caa516a5b4093778e0976f6505))
+
+
+### Bug Fixes
+
+* **console:** first-run cli snippets use the real verb, mitos sandbox exec ([#606](https://github.com/mitos-run/mitos/issues/606)) ([82f9f6c](https://github.com/mitos-run/mitos/commit/82f9f6cd36e916aff9910b0ac1ce40d98543e85a))
+* **console:** first-run snippets are self-contained and produce real output ([#608](https://github.com/mitos-run/mitos/issues/608)) ([ae9414a](https://github.com/mitos-run/mitos/commit/ae9414a3a7711a135f952cc85fdbc5058a0c6b84))
+
 ## [1.13.1](https://github.com/mitos-run/mitos/compare/v1.13.0...v1.13.1) (2026-07-02)
 
 

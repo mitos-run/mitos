@@ -87,7 +87,7 @@ export function Projects() {
               style={{
                 padding: 'var(--space-3) var(--space-4)',
                 borderRadius: '6px',
-                border: '1px solid var(--border, #e0e0e0)',
+                border: '1px solid var(--hairline)',
               }}
             >
               <div style={{ fontWeight: 600 }}>

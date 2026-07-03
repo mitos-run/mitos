@@ -44,13 +44,23 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 		return k.terminate(ctx, req)
 	case "sandbox.runtime":
 		return k.proxy(ctx, req)
+	case "sandbox.pause":
+		return k.lifecycle(ctx, req, "/v1/pause")
+	case "sandbox.resume":
+		return k.lifecycle(ctx, req, "/v1/resume")
 	case "template.ensure":
 		return k.ensureTemplate(ctx, req)
 	case "template.list":
 		return k.listTemplates(ctx, req)
 	default:
+		// An unmatched path reaches here as "sandbox.<method>" (opFromPath's
+		// fallback), which is not a sandbox at all: override the not_found default
+		// message ("no such sandbox") so the caller is not told a sandbox is
+		// missing when they hit a route the gateway does not expose (issue #640C).
 		return errResp(apierr.Get(apierr.CodeNotFound).
-			WithCause(fmt.Sprintf("unknown operation %q", req.Op))), nil
+			WithMessage("no such route or operation").
+			WithCause(fmt.Sprintf("the request did not map to a known gateway operation (resolved op %q)", req.Op)).
+			WithRemediation("Use a documented route: POST or GET /v1/sandboxes, GET or DELETE /v1/sandboxes/<id>, POST or GET /v1/templates, POST /v1/fork, or the runtime paths under /v1/sandboxes/<id>/.")), nil
 	}
 }
 
@@ -112,11 +122,34 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		pool = k.defaultPool
 	}
 	if pool == "" {
-		return errResp(apierr.Get(apierr.CodeInvalidJSON).
-			WithCause("the create request names neither a pool nor an image and no default pool is configured")), nil
+		// The body decoded fine; it just names no origin. That is a semantic
+		// input error, not a JSON parse failure (issue #640B).
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithCause("the create request sets none of pool, image, or template and the server has no default pool configured").
+			WithRemediation("Set \"pool\" (or \"image\"/\"template\") in the request body to an existing pool; list pools with GET /v1/templates.")), nil
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)
+
+	// Fast-fail on an unknown pool. In the hosted control plane pools are
+	// pre-provisioned and stable, so a create naming a pool that does not exist
+	// in the tenant namespace is a typo, not a manifest-ordering race: return an
+	// instant, LLM-legible 404 instead of creating a Sandbox that can only pend
+	// until the controller's bounded grace expires (issue #630) while the caller
+	// blocks for the full ready timeout and then sees a misleading "did not
+	// become ready" 504. k.c is an uncached reader, so this Get is authoritative
+	// for the exact namespace the sandbox would be created in and the controller
+	// would resolve the poolRef in. A transient (non-NotFound) read error is NOT
+	// treated as absent: the create proceeds and the controller's bounded grace
+	// still governs the direct and GitOps-race paths.
+	var poolObj v1.SandboxPool
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: pool}, &poolObj); err != nil && apierrors.IsNotFound(err) {
+		return errResp(apierr.Get(apierr.CodeNotFound).
+			WithMessage(fmt.Sprintf("no such pool %q", pool)).
+			WithCause(fmt.Sprintf("no SandboxPool named %q exists in namespace %q", pool, ns)).
+			WithRemediation("Check the pool name for a typo and use a pool listed by GET /v1/templates, or create the SandboxPool before launching a sandbox from it.")), nil
+	}
+
 	name := generateName()
 
 	sb := &v1.Sandbox{

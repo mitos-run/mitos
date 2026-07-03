@@ -147,7 +147,7 @@ export function Roles() {
       <section className="card">
         <h2 style={{ marginBottom: 'var(--space-4)' }}>New custom role</h2>
         <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
-          Only the 7 permissions listed in the matrix are accepted. The BFF rejects any other value.
+          Pick any combination of the 7 permissions in the matrix; only these values are accepted.
           Only owners and admins can save roles.
         </p>
         <form onSubmit={handleSave}>

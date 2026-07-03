@@ -33,6 +33,14 @@ controller:
     pullPolicy: IfNotPresent
   # Number of controller replicas. Multiple replicas run HA with leader election.
   replicas: 2
+  # PodDisruptionBudget for the controller Deployment. Opt-in: enable it when
+  # replicas > 1 so a node drain always leaves minAvailable controller pods
+  # serving (leader election keeps reconciliation on the survivor). With a
+  # single replica a minAvailable-1 PDB would block every drain, so the default
+  # is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   # Controller container resource requests and limits.
   resources:
     requests:
@@ -85,6 +93,57 @@ controller:
     defaultCPU: "32"
     # Default per-org aggregate memory limit ceiling (a Kubernetes quantity).
     defaultMemory: "64Gi"
+  # Usage metering (issues #164/#211/#602): the live per-org metering scraper
+  # and the bearer-gated internal usage API the hosted console reads. OFF by
+  # default: a self-host install that does not want metering renders none of it.
+  # When collector is true the chart renders --usage-collector,
+  # --usage-collector-interval, and --usage-api-address on the controller,
+  # sources MITOS_DATABASE_DSN from database.dsnSecretRef (the durable Postgres
+  # usage store; without it usage lives in memory and is LOST on restart, DEV
+  # ONLY, and with controller.replicas > 1 only the leader replica holds it),
+  # injects MITOS_USAGE_API_TOKEN from tokenSecret via secretKeyRef, adds a
+  # ClusterIP Service for the usage API port, and wires the console's
+  # MITOS_USAGE_API_URL + MITOS_USAGE_API_TOKEN to match. Attribution rule: with
+  # orgTenancy the org derives from the per-org namespace; a single-tenant
+  # (shared namespace) hosted deployment relies on the claim-time org label the
+  # controller copies from the Sandbox object the gateway stamped. Credit
+  # drawdown prices records with the billing rate table (billing.DefaultRates
+  # unless console.billing.rates overrides it); the usage API's display price
+  # list is configurable below via priceList.
+  usage:
+    # Run the collector and serve the internal usage API.
+    collector: false
+    # Interval between metering scrapes (--usage-collector-interval).
+    interval: "60s"
+    # Internal usage API listen address (--usage-api-address), ":<port>" form;
+    # the chart derives the container and Service port from it. The API serves
+    # ids, byte counts, and seconds only, never secret values, and fails closed
+    # without a valid bearer token.
+    apiAddress: ":8092"
+    # Existing Secret holding the internal usage API bearer token. Injected via
+    # secretKeyRef ONLY, never inline. An empty name renders no token env and
+    # the API then refuses every request (fail closed).
+    tokenSecret:
+      name: ""
+      key: "usage-api-token"
+    # Display price list for the internal usage API (MITOS_USAGE_PRICELIST), a
+    # map rendered as one JSON env value. When non-empty it REPLACES the
+    # built-in illustrative defaults ENTIRELY: an omitted key is a zero (free)
+    # rate, and an unknown key or a negative value fails controller startup
+    # (fail closed). Values are account-currency dollars per unit. Keep it
+    # consistent with console.billing.rates (milli-cents = dollars x 100000)
+    # so the display estimate and the billed cost never drift; see
+    # docs/saas/pricing.md. Set it in a values file or via --set-json: plain
+    # --set turns a fractional value into a string, which the strict parser
+    # rejects at startup. Example:
+    #
+    #   priceList:
+    #     vcpu_second: 0.0000128
+    #     mem_gib_second: 0.0000016
+    #     storage_gib_hour: 0.0001
+    #     egress_gib: 0.09
+    #     gpu_second: 0.0006
+    priceList: {}
   # Extra args appended verbatim to the controller container args.
   extraArgs: []
   # Extra env vars appended verbatim to the controller container. FORKD_NAMESPACE
@@ -382,6 +441,12 @@ console:
   # no longer matches (#427). Default to 1; running more than one for HA requires a
   # shared session store first (sticky sessions or a backed store).
   replicas: 1
+  # PodDisruptionBudget for the console Deployment. Opt-in: enable it only when
+  # replicas > 1 (see the replicas caveat above); with a single replica a
+  # minAvailable-1 PDB would block every node drain, so the default is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   resources:
     requests:
       memory: "64Mi"
@@ -393,6 +458,56 @@ console:
   # public self-serve untrusted multi-tenancy does not switch on until the
   # production gates pass; this is server-controlled, never a client flag.
   signup: false
+  # Free credit granted to a newly verified signup, in integer CENTS
+  # (MITOS_CONSOLE_SIGNUP_CREDIT_CENTS). 0 (the default) renders no env, so the
+  # binary's built-in default applies. Example: 500 grants $5.00.
+  signupCreditCents: 0
+  # Email domains whose signups bypass the manual allowlist approval
+  # (MITOS_CONSOLE_AUTOALLOW_DOMAINS, rendered comma-joined). Empty renders no
+  # env; the binary then defaults to ["mitos.run"]. A self-host deployment
+  # normally sets its own domain here, for example ["corp.example.com"].
+  autoAllowDomains: []
+  # Social-login connectors advertised at GET /auth/connectors
+  # (MITOS_CONSOLE_AUTH_CONNECTORS, rendered comma-joined). Known values:
+  # github, google; the binary silently drops anything else. Empty renders no
+  # env, so the SPA shows no social-login buttons.
+  authConnectors: []
+  # Signup anti-abuse knobs. Everything defaults off/empty so a self-host
+  # install renders none of these and the binary defaults apply.
+  antiAbuse:
+    # Friendly Captcha server-side verification. Active only when BOTH the
+    # sitekey and the secret ref are set; with either absent the signup handler
+    # passes through unchanged. The secret is injected via secretKeyRef ONLY,
+    # never as a plaintext value. Create the Secret out of band, for example:
+    #
+    #   kubectl create secret generic mitos-captcha \
+    #     --namespace mitos \
+    #     --from-literal=friendly-captcha-secret='...'
+    friendlyCaptcha:
+      # The public Friendly Captcha sitekey
+      # (MITOS_CONSOLE_FRIENDLY_CAPTCHA_SITEKEY). Not a secret.
+      siteKey: ""
+      # Reference an existing Secret holding the Friendly Captcha API secret
+      # (MITOS_CONSOLE_FRIENDLY_CAPTCHA_SECRET).
+      secretRef:
+        # Name of the Secret in the release namespace. Empty omits the env.
+        name: ""
+        # Key within that Secret holding the API secret.
+        key: "friendly-captcha-secret"
+      # Verification API base URL override (MITOS_CONSOLE_FRIENDLY_CAPTCHA_URL).
+      # Empty uses the binary's built-in default endpoint.
+      url: ""
+    # Email domains exempted from the disposable-email-domain blocklist
+    # (MITOS_CONSOLE_DISPOSABLE_ALLOW, rendered comma-joined), for staff or
+    # partner domains the embedded blocklist wrongly flags. Empty renders no
+    # env (no exemptions).
+    disposableAllowDomains: []
+    # Per-IP signup velocity cap (MITOS_CONSOLE_SIGNUP_IP_LIMIT and
+    # MITOS_CONSOLE_SIGNUP_IP_WINDOW). Empty renders no env; the binary then
+    # defaults to 10 signups per 1h per IP. Set signupIPLimit to "0" to disable
+    # the cap entirely; signupIPWindow is a Go duration string, e.g. "30m".
+    signupIPLimit: ""
+    signupIPWindow: ""
   # Browser-session OIDC. Self-host points this at the operator's issuer
   # (Dex/Keycloak/Google); hosted points it at our IdP.
   oidc:
@@ -406,6 +521,15 @@ console:
     # (installs without OIDC are unaffected); when OIDC is configured this MUST be
     # set or the login flow fails with an empty redirect_uri.
     redirectURL: ""
+  # Usage read side (issue #602): where the console reads per-org usage from.
+  usage:
+    # Base URL of the controller's internal usage API (MITOS_USAGE_API_URL).
+    # Empty derives the in-cluster Service URL
+    # (http://mitos-controller-usage.<namespace>.svc:<port>) when
+    # controller.usage.collector is true; set it only for a split or
+    # out-of-cluster deployment. The bearer token comes from
+    # controller.usage.tokenSecret (the same secretKeyRef the controller uses).
+    url: ""
   # Extra env vars appended verbatim to the console container, for env the chart
   # does not model (mirrors controller.extraEnv).
   extraEnv: []
@@ -456,6 +580,32 @@ console:
       # Paddle API host. Default is live; set to https://sandbox-api.paddle.com
       # for the sandbox. Empty uses the binary's built-in live default.
       baseURL: ""
+      # Paddle product id used for prepaid credit top-up checkout
+      # (MITOS_CONSOLE_PADDLE_TOPUP_PRODUCT). Not a secret. Empty renders no
+      # env and disables the top-up affordance (the endpoint returns 400).
+      topUpProduct: ""
+      # ISO currency code for top-up checkout (MITOS_CONSOLE_PADDLE_CURRENCY),
+      # for example "USD". Empty renders no env; the binary then defaults to
+      # EUR.
+      currency: ""
+    # Billing rate table override (MITOS_CONSOLE_RATES), a map rendered as one
+    # JSON env value. When non-empty it REPLACES the built-in illustrative
+    # defaults ENTIRELY: an omitted key is a zero (free) rate, and an unknown
+    # key or a negative value fails console startup (fail closed). All values
+    # are MILLI-cents (thousandths of a cent) per unit. The same table prices
+    # the credit drawdown, the billing view, and the display cost estimate.
+    # Keep controller.usage.priceList consistent with it (milli-cents =
+    # dollars x 100000); see docs/saas/pricing.md. Set it in a values file or
+    # via --set-json: plain --set turns a fractional value like 1.28 into a
+    # string, which the strict parser rejects at startup. Example:
+    #
+    #   rates:
+    #     vcpu_second_milli_cents: 1.28
+    #     mem_gib_second_milli_cents: 0.16
+    #     storage_gib_hour_milli_cents: 10
+    #     egress_gib_milli_cents: 9000
+    #     gpu_second_milli_cents: 60
+    rates: {}
   # Public self-serve onboarding (issue #215): the unauthenticated signup +
   # verify endpoints and the verification email. The public endpoints are mounted
   # only when console.signup is true (the #208 gate); this block configures HOW
@@ -502,6 +652,13 @@ gateway:
     tag: ""
     pullPolicy: IfNotPresent
   replicas: 2
+  # PodDisruptionBudget for the gateway Deployment. Opt-in: enable it when
+  # replicas > 1 so a node drain always leaves minAvailable gateway pods
+  # serving the public API. With a single replica a minAvailable-1 PDB would
+  # block every drain, so the default is off.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
   # Abuse-control enforcement (quotas, rate limits, and the kill-switch). Default
   # on for the hosted profile: a public multi-tenant front door must enforce
   # per-org quotas, per-org and per-IP rate limits, the per-sandbox size cap, and
@@ -516,10 +673,13 @@ gateway:
     # keys on the real client; a too-short or spoofed X-Forwarded-For fails closed
     # to RemoteAddr.
     trustedProxyHops: 0
-    # CAVEAT: the suspension (kill-switch) store is in-process for this slice, so a
-    # suspension does not survive a restart and is not shared across replicas. Run a
-    # single gateway replica for the kill-switch to be authoritative, or re-drive the
-    # abuse/billing signals after a restart, until the durable store follow-up lands.
+    # Kill-switch durability: when database.dsnSecretRef is set (the hosted
+    # profile), the suspension store is Postgres-backed, so a suspension survives
+    # gateway restarts and is shared across ALL replicas; a suspension written on
+    # one replica takes effect on the others within the store's short read-cache
+    # TTL (a few seconds). Without a database the store is in-process (DEV ONLY):
+    # it does not survive a restart and is not shared across replicas, so run a
+    # single replica or re-drive the abuse/billing signals after a restart.
   resources:
     requests:
       memory: "64Mi"

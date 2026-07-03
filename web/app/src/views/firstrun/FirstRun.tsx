@@ -163,22 +163,37 @@ const styles = `
 @media (prefers-reduced-motion: reduce) {
   .firstrun-copy-btn { transition: none; }
 }
-/* Create-key fallback */
+/* Create-key fallback: one explaining sentence, then the action as the
+   primary affordance (a button-styled link mirroring .btn-primary). */
 .firstrun-create-key-line {
   font-size: var(--step--1);
   color: var(--ink-3);
-  margin: 0;
+  margin: 0 0 var(--space-3);
   line-height: var(--lh-base);
 }
-.firstrun-create-key-link {
-  color: var(--magenta);
+.firstrun-create-key-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--r-md);
+  font: inherit;
+  font-size: var(--step--1);
+  background: var(--magenta);
+  color: var(--field);
   text-decoration: none;
+  transition: box-shadow var(--dur) var(--ease);
 }
-.firstrun-create-key-link:hover { text-decoration: underline; }
-.firstrun-create-key-link:focus-visible {
+.firstrun-create-key-btn:hover {
+  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px rgba(255, 69, 200, 0.5);
+}
+.firstrun-create-key-btn:focus-visible {
   outline: 2px solid var(--magenta);
   outline-offset: 2px;
-  border-radius: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .firstrun-create-key-btn { transition: none; }
 }
 /* Tab bar spacing inside step 2 */
 .firstrun-tab-bar {
@@ -402,13 +417,15 @@ export function FirstRun({ uc }: FirstRunProps) {
               )}
             </div>
           ) : (
-            <p className="firstrun-create-key-line">
-              No key on record.{' '}
-              <Link to="/keys" className="firstrun-create-key-link">
-                Create an API key
-              </Link>{' '}
-              to get started.
-            </p>
+            <div>
+              <p className="firstrun-create-key-line">
+                Your API key is shown only once, when it is created, so a key
+                from an earlier visit cannot be shown again.
+              </p>
+              <Link to="/keys" className="firstrun-create-key-btn">
+                Create an API key to continue
+              </Link>
+            </div>
           )}
 
           {/* Visually hidden live region for key-copy announcement. */}

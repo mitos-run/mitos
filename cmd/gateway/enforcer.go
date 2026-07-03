@@ -21,6 +21,11 @@ type enforcementConfig struct {
 	// gateway, governing how the client IP is resolved for the per-IP rate-limit
 	// bucket. See saas.TrustedProxyHops.
 	trustedProxyHops int
+	// suspensions is the kill-switch store to enforce against. main wires the
+	// durable, replica-shared Postgres store (wrapped in the short-TTL read cache)
+	// when a database is configured, so suspensions survive restarts and bind every
+	// replica. Nil falls back to an in-process MemSuspensionStore (dev only).
+	suspensions quota.SuspensionStore
 }
 
 // quotaWiring is the constructed enforcement surface: the saas.QuotaEnforcer the
@@ -39,9 +44,10 @@ type quotaWiring struct {
 	// breached hard spend cap or exhausted dunning suspends through the same store.
 	// Nil when enforcement is disabled.
 	billingSuspender *quota.BillingSuspender
-	// suspensions is the kill-switch store the enforcer reads. It is the in-process
-	// MemSuspensionStore for this slice; a durable store is a documented follow-up
-	// (see buildQuotaEnforcer). Nil when enforcement is disabled.
+	// suspensions is the kill-switch store the enforcer reads: the durable Postgres
+	// store (behind the short-TTL read cache) when a database is configured, the
+	// in-process MemSuspensionStore otherwise (see buildQuotaEnforcer). Nil when
+	// enforcement is disabled.
 	suspensions quota.SuspensionStore
 	// mode is a human-legible description of the enforcement mode for the startup
 	// log line, so an operator can always see whether enforcement is on.
@@ -51,18 +57,19 @@ type quotaWiring struct {
 // conservativeLiveUsage is the gateway's default LiveUsageSource until the real
 // cluster-backed live count (quota.LiveCounter over the controller's running-
 // sandbox set) is wired into the gateway binary. It reports ZERO live footprint,
-// which means the live concurrency and aggregate caps are inert at the front door:
-// they are re-checked authoritatively at the control plane, which sees the real
-// running set. The per-sandbox size cap, the per-org and per-IP request-rate
-// buckets, the creation-rate bucket, and the kill-switch ALL still apply, so this
-// default still bounds the dominant abuse vectors (request floods, create churn,
-// oversized single sandboxes, and suspended orgs). Wiring the real LiveCounter so
-// the front door also enforces live concurrency/aggregate is a clean follow-up.
+// which means the live concurrency and aggregate resource caps are NOT enforced
+// anywhere today: the control plane does NOT re-check them, so an org can exceed
+// its tier's concurrency and aggregate caps until the real live count is wired
+// (issue #615 part 2). The per-sandbox size cap, the per-org and per-IP
+// request-rate buckets, the creation-rate bucket, and the kill-switch ALL still
+// apply, so this default still bounds the dominant abuse vectors (request floods,
+// create churn, oversized single sandboxes, and suspended orgs); unbounded
+// steady-state accumulation of small sandboxes is the gap.
 //
-// This is an HONEST conservative default: it never under-reports a suspension or a
-// rate-limit (those do not depend on it) and it does not fabricate a live count it
-// cannot read; it simply leaves the live-footprint caps to the authoritative
-// control-plane check rather than guessing.
+// The controller's internal usage API (:8092) serves time-integrated usage
+// records, not an instantaneous per-org running count, so an adapter over it
+// would misreport live footprint; the honest fix is wiring quota.LiveCounter
+// over the controller's running-sandbox set (tracked in #615).
 type conservativeLiveUsage struct{}
 
 func (conservativeLiveUsage) Live(_ context.Context, _ string) (quota.LiveUsage, error) {
@@ -81,7 +88,7 @@ func freeTierResolver(_ context.Context, _ string) (quota.TierName, error) {
 // buildQuotaEnforcer constructs the gateway's quota/abuse enforcement surface from
 // the configuration. When enforcement is enabled it builds the real
 // quota.Enforcer over the default tier ladder, a conservative live-usage source,
-// and a shared in-process suspension store, then wraps it in the
+// and the configured suspension store, then wraps it in the
 // quota.GatewayAdapter whose IPOf seam reads the gateway-resolved client IP from
 // the request context (saas.ClientIPFromContext), so the per-IP rate-limit bucket
 // is charged against the trusted source address, never a spoofable header. The
@@ -92,19 +99,16 @@ func freeTierResolver(_ context.Context, _ string) (quota.TierName, error) {
 // store FIRST and returns an error if the store is unreachable; the gateway maps
 // that error to a deny (quota_exceeded), so an org whose suspension state cannot be
 // read is REFUSED, not silently allowed. Enforcement therefore fails CLOSED on a
-// store error. This is the correct posture for an anti-abuse gate: a transient
-// store outage must not become an open door for a possibly-suspended org. The
-// in-process MemSuspensionStore used here never errors; the fail-closed property
-// matters for the durable-store follow-up.
+// store error: a transient Postgres outage must not become an open door for a
+// possibly-suspended org (the short-TTL read cache keeps recently-checked orgs
+// served during a blip, bounded by the TTL).
 //
-// Durability tradeoff: the suspension store is in-process (MemSuspensionStore), so
-// suspensions do not survive a gateway restart and are not shared across replicas.
-// That is acceptable for this slice because the abuse-signal and billing suspend
-// paths are wired and tested in-process; a durable, replica-shared SuspensionStore
-// (the Postgres store behind the same interface) is a clean follow-up that does not
-// change this wiring. Until then, run the gateway as a single replica for the
-// kill-switch to be authoritative, or re-drive the abuse/billing signals after a
-// restart.
+// Durability: when main configures a database, cfg.suspensions is the Postgres
+// PgSuspensionStore behind quota.CachedSuspensionStore, so a suspension survives
+// gateway restarts and binds EVERY replica; a suspension written on one replica
+// takes effect on the others within the cache TTL (a few seconds). Without a
+// database (dev only) the store falls back to the in-process MemSuspensionStore,
+// which is neither durable nor replica-shared; the startup log names that mode.
 //
 // When enforcement is disabled, the gateway uses saas.AllowAllQuota (the permissive
 // stand-in) so a trusted single-tenant deployment can opt out; the mode is named in
@@ -117,7 +121,12 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 		}
 	}
 
-	sus := quota.NewMemSuspensionStore()
+	sus := cfg.suspensions
+	susMode := "durable Postgres kill-switch store, shared across replicas"
+	if sus == nil {
+		sus = quota.NewMemSuspensionStore()
+		susMode = "in-process kill-switch store, NOT durable and NOT shared across replicas (DEV ONLY; set a database DSN for a durable kill-switch)"
+	}
 	enf := quota.NewEnforcer(quota.Deps{
 		Tiers:       quota.DefaultTiers(),
 		TierOf:      freeTierResolver,
@@ -138,7 +147,7 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 		killSwitch:       ks,
 		billingSuspender: quota.NewBillingSuspender(ks),
 		suspensions:      sus,
-		mode:             "ENABLED (real quota.Enforcer; per-org and per-IP rate limits, per-sandbox size cap, creation-rate cap, and kill-switch)",
+		mode:             "ENABLED (real quota.Enforcer; per-org and per-IP rate limits, per-sandbox size cap, creation-rate cap, and kill-switch; " + susMode + ")",
 	}
 }
 

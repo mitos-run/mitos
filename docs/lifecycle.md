@@ -88,6 +88,13 @@ Exposed as:
 
 - `POST /v1/pause` and `POST /v1/resume` on forkd and the standalone
   sandbox-server, body `{"sandbox": "<id>"}`.
+- `POST /v1/pause` and `POST /v1/resume` on the hosted gateway, same body; the
+  gateway resolves the sandbox org-scoped and proxies the call to that
+  sandbox's runtime endpoint with the per-sandbox token. Hosted pause today
+  records the idle-hold state (the paused sandbox is never idle-reaped),
+  exactly like the standalone server: the hosted runtime endpoint sets no
+  engine pauser, so the live memory snapshot under pause is the KVM-gated
+  follow-up.
 - `sandbox.pause()` / `sandbox.resume()` in the Python SDK (sync and async) and
   `sandbox.pause()` / `sandbox.resume()` in the TypeScript SDK.
 

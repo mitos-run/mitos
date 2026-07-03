@@ -73,4 +73,21 @@ describe('Settings accessibility', () => {
     await waitFor(() => expect(screen.getByRole('table', { name: 'Sessions' })).toBeInTheDocument())
     expect(await axe(container)).toHaveNoViolations()
   })
+
+  it('has no axe violations on the Appearance tab under the light theme', async () => {
+    // Pin the light theme the same way the appearance module does; the token
+    // swap is pure CSS so the tree must stay structurally identical, and the
+    // audit must hold with the attribute present.
+    document.documentElement.dataset['theme'] = 'light'
+    try {
+      const user = userEvent.setup()
+      const { container } = await renderAt('/settings', caps)
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument())
+      await user.click(screen.getByRole('tab', { name: 'Appearance' }))
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Theme' })).toBeInTheDocument())
+      expect(await axe(container)).toHaveNoViolations()
+    } finally {
+      delete document.documentElement.dataset['theme']
+    }
+  })
 })

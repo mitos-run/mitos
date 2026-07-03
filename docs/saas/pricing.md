@@ -53,16 +53,46 @@ This keeps the directional economics honest and removes the abuse subsidy.
 
 Rates live as a structured config (`billing.Rates`), quoted in MILLI-cents per
 unit (thousandths of a cent) so a single per-second tick does not round to zero.
-The values in `billing.DefaultRates()` are ILLUSTRATIVE and CONFIGURABLE
-placeholders, NOT published prices (the no-unverified-claims rule). A hosted
-deployment overrides them from config. Only the SHAPE (decoupled per-second
-compute, storage GiB-hours, metered egress) is committed here.
+The values in `billing.DefaultRates()` are ILLUSTRATIVE placeholders, NOT
+published prices (the no-unverified-claims rule). A deployment overrides them
+from config (below). Only the SHAPE (decoupled per-second compute, storage
+GiB-hours, metered egress) is committed here.
+
+#### Configuring the rates
+
+The console reads `MITOS_CONSOLE_RATES`: a single JSON object mapping onto
+`billing.Rates` (parsed by `billing.ParseRatesConfig`), for example:
+
+    MITOS_CONSOLE_RATES='{"vcpu_second_milli_cents":1.28,"mem_gib_second_milli_cents":0.16,"storage_gib_hour_milli_cents":10,"egress_gib_milli_cents":9000,"gpu_second_milli_cents":60}'
+
+Semantics:
+
+- Unset (or empty) uses `billing.DefaultRates()`, exactly as before.
+- When set, the object REPLACES the default table ENTIRELY: an omitted key is a
+  zero (free) rate, never the default for that key.
+- Unknown keys, malformed JSON, and negative rates FAIL console startup with an
+  actionable error (fail closed); a bad override never silently falls back to
+  the defaults and bills at the wrong rates.
+
+The Helm chart exposes it as `console.billing.rates` (a map rendered to the
+JSON env value; use a values file or `--set-json`, since plain `--set`
+stringifies fractional numbers). The SAME parsed table prices the console
+billing view, the credit-drawdown driver, and (via `Rates.ToPriceList`) the
+display-cost estimate, so what a user sees, what draws down, and what would be
+billed never drift.
+
+The controller's internal usage API has the matching display-side override:
+`MITOS_USAGE_PRICELIST` (a JSON object mapping onto `usage.PriceList`, dollars
+per unit; Helm value `controller.usage.priceList`), with the same strict
+fail-closed parsing. Keep the two consistent: milli-cents per unit = dollars
+per unit x 100000.
 
 `billing.DefaultRates()` mirrors the magnitude of the placeholder
 `usage.DefaultPriceList` re-expressed in milli-cents, and `billing.FromPriceList`
-is the single bridge between the two so the usage API's display-cost estimate
-and the real billing rates derive from one table and never drift. This is the
-reconciliation of the `PriceList` placeholder to the billing model.
+/ `Rates.ToPriceList` are the bridges between the two so the usage API's
+display-cost estimate and the real billing rates derive from one table and
+never drift. This is the reconciliation of the `PriceList` placeholder to the
+billing model.
 
 Directional competitor figures (Modal, Daytona, E2B published per-second or
 per-resource prices) may be cited as vendor-published when comparing the model's
@@ -102,7 +132,9 @@ cannot silently drift.
 
 - Signup credit (`GrantSignupCredit`): the free credit at signup. The default is
   $100 (`DefaultSignupCredit`), within the $100-$200 self-serve bar.
-  Illustrative and configurable.
+  Illustrative and configurable: `MITOS_CONSOLE_SIGNUP_CREDIT_CENTS` (Helm
+  value `console.signupCreditCents`) overrides it per deployment in integer
+  cents, e.g. 500 grants $5.00.
 - Top-ups (`TopUp`): prepaid purchases on a Daytona-style ladder
   (`TopUpLadder`: $10/$25/$50/$100/$250, illustrative). Added after the payment
   clears.

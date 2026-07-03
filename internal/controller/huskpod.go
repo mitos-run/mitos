@@ -1497,16 +1497,46 @@ func (r *SandboxReconciler) selectDormantHuskPod(ctx context.Context, pool *v1.S
 // patch still merges cleanly with concurrent kubelet status writes (status is a
 // separate subresource), so the optimistic lock fires only on a genuine
 // metadata race, which is exactly the double-assignment it must prevent.
-func (r *SandboxReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claimName string) error {
+func (r *SandboxReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claim *v1.Sandbox) error {
 	patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
 	}
-	pod.Labels[huskClaimLabel] = claimName
+	pod.Labels[huskClaimLabel] = claim.Name
+	stampClaimOrgLabel(pod, claim)
 	if err := r.Patch(ctx, pod, patch); err != nil {
-		return fmt.Errorf("mark husk pod %s claimed by %s: %w", pod.Name, claimName, err)
+		return fmt.Errorf("mark husk pod %s claimed by %s: %w", pod.Name, claim.Name, err)
 	}
 	return nil
+}
+
+// stampClaimOrgLabel fills the metering attribution org on a husk pod at CLAIM
+// time (issue #602). The husk pod builder stamps mitos.run/org from the
+// TRUSTED per-org namespace (mitos-org-<id>), which covers org tenancy; but a
+// hosted SINGLE-TENANT deployment runs the pool and its husk pods in one shared
+// namespace, so those pods carry no org label and every usage sample the
+// collector scrapes is unattributed (dropped from billable). The hosted gateway
+// stamps the org label on every Sandbox it creates (internal/saas/controlplane),
+// so at the moment a claim wins a pod we copy that label over: fill when the
+// pod has none, override when it differs (a stale label from another org's
+// failed activation).
+//
+// Trust boundary: in a per-org namespace the NAMESPACE stays authoritative and
+// the claim label never overrides it; a tenant with direct access to its org
+// namespace could otherwise label its Sandbox with another org and bill them.
+// In a shared namespace only the control plane (the hosted gateway or the
+// operator) creates Sandboxes, so the claim's label is control-plane identity,
+// not tenant input. A claim without an org label stamps nothing: the pod stays
+// unattributed rather than being forced into a default org.
+func stampClaimOrgLabel(pod *corev1.Pod, claim *v1.Sandbox) {
+	if _, ok := tenant.OrgFromNamespace(pod.Namespace); ok {
+		return
+	}
+	org := claim.Labels[tenant.OrgLabelKey]
+	if org == "" {
+		return
+	}
+	pod.Labels[tenant.OrgLabelKey] = org
 }
 
 // unmarkHuskPodClaimed removes the mitos.run/claim label so a husk pod returns
@@ -1524,6 +1554,14 @@ func (r *SandboxReconciler) unmarkHuskPodClaimed(ctx context.Context, pod *corev
 	}
 	patch := client.MergeFrom(pod.DeepCopy())
 	delete(pod.Labels, huskClaimLabel)
+	// Also release a CLAIM-STAMPED attribution org (issue #602): in a shared
+	// (non-org) namespace the org label came from the failed claim, and a pod
+	// returned to the dormant pool must not carry it into a later claim that has
+	// none (a misattribution). In a per-org namespace the label is derived from
+	// the trusted namespace at pod creation and stays valid, so it is kept.
+	if _, ok := tenant.OrgFromNamespace(pod.Namespace); !ok {
+		delete(pod.Labels, tenant.OrgLabelKey)
+	}
 	if err := r.Patch(ctx, pod, patch); err != nil {
 		return fmt.Errorf("release husk pod %s claim label: %w", pod.Name, err)
 	}

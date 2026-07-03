@@ -266,8 +266,40 @@ func TestAPIKeyNeverInErrors(t *testing.T) {
 	}
 }
 
-// TestCheckoutURL asserts CheckoutURL POSTs a transaction to Paddle with the
-// correct bearer auth, verified request body shape, and parses the checkout URL.
+// TestVerifyWebhookCarriesOrgID asserts the org id embedded in the
+// signature-verified custom_data at checkout is surfaced on the neutral Event
+// (Event.OrgID), so the webhook handler can record the org <-> customer link
+// on the very first event for a new customer (issue #618).
+func TestVerifyWebhookCarriesOrgID(t *testing.T) {
+	body := `{"event_type":"transaction.completed","data":{"id":"txn_1","customer_id":"ctm_x","custom_data":{"kind":"credit_topup","org_id":"orgA","amount_cents":"2500"}}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.OrgID != "orgA" {
+		t.Fatalf("OrgID = %q, want \"orgA\"", ev.OrgID)
+	}
+	if ev.CustomerRef != "ctm_x" {
+		t.Fatalf("CustomerRef = %q, want \"ctm_x\"", ev.CustomerRef)
+	}
+}
+
+// TestVerifyWebhookOrgIDAbsent asserts an event without custom_data leaves
+// Event.OrgID empty (the handler then resolves the org via the stored link).
+func TestVerifyWebhookOrgIDAbsent(t *testing.T) {
+	body := `{"event_type":"subscription.canceled","data":{"customer_id":"ctm_x"}}`
+	ev, err := verify(t, secret, now, body)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if ev.OrgID != "" {
+		t.Fatalf("OrgID = %q, want empty when custom_data is absent", ev.OrgID)
+	}
+}
+
+// TestCheckoutURL asserts CreateCheckout POSTs a transaction to Paddle with the
+// correct bearer auth, verified request body shape, and parses the checkout URL
+// plus the customer id the transaction was created for.
 func TestCheckoutURL(t *testing.T) {
 	const apiKey = "pdl_live_checkoutkey"
 	const productID = "pro_topup"
@@ -287,12 +319,12 @@ func TestCheckoutURL(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"id":"txn_x","checkout":{"url":"https://example/checkout?_ptxn=txn_x"}}}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"txn_x","customer_id":"ctm_42","checkout":{"url":"https://example/checkout?_ptxn=txn_x"}}}`))
 	}))
 	defer srv.Close()
 
 	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
-	url, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+	co, err := p.CreateCheckout(context.Background(), billingprovider.TopUp{
 		CustomerRef: customerRef,
 		OrgID:       orgID,
 		AmountCents: amountCents,
@@ -300,10 +332,13 @@ func TestCheckoutURL(t *testing.T) {
 		Currency:    "EUR",
 	})
 	if err != nil {
-		t.Fatalf("CheckoutURL: %v", err)
+		t.Fatalf("CreateCheckout: %v", err)
 	}
-	if url != "https://example/checkout?_ptxn=txn_x" {
-		t.Fatalf("url = %q, want checkout URL", url)
+	if co.URL != "https://example/checkout?_ptxn=txn_x" {
+		t.Fatalf("url = %q, want checkout URL", co.URL)
+	}
+	if co.CustomerRef != "ctm_42" {
+		t.Fatalf("CustomerRef = %q, want \"ctm_42\" from the response body", co.CustomerRef)
 	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %q, want POST", gotMethod)
@@ -376,16 +411,23 @@ func TestCheckoutURLOmitsEmptyCustomerRef(t *testing.T) {
 	defer srv.Close()
 
 	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
-	if _, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+	co, err := p.CreateCheckout(context.Background(), billingprovider.TopUp{
 		OrgID:       "org_abc",
 		AmountCents: 1000,
 		ProductID:   "pro_topup",
 		Currency:    "EUR",
-	}); err != nil {
-		t.Fatalf("CheckoutURL: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("CreateCheckout: %v", err)
 	}
 	if _, present := gotBody["customer_id"]; present {
 		t.Fatalf("customer_id should be absent for empty CustomerRef, got %v", gotBody["customer_id"])
+	}
+	// The stub response carries no customer_id (a first-time buyer: Paddle
+	// creates the customer only when the hosted checkout collects an email),
+	// so the parsed CustomerRef must be empty; the webhook path links later.
+	if co.CustomerRef != "" {
+		t.Fatalf("CustomerRef = %q, want empty when the response carries none", co.CustomerRef)
 	}
 }
 
@@ -400,7 +442,7 @@ func TestCheckoutURLNon2xx(t *testing.T) {
 	defer srv.Close()
 
 	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
-	_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+	_, err := p.CreateCheckout(context.Background(), billingprovider.TopUp{
 		OrgID:       "org_abc",
 		AmountCents: 5000,
 		ProductID:   "pro_topup",
@@ -425,7 +467,7 @@ func TestCheckoutURLEmptyURL(t *testing.T) {
 	defer srv.Close()
 
 	p := New(Config{APIKey: apiKey, BaseURL: srv.URL})
-	_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+	_, err := p.CreateCheckout(context.Background(), billingprovider.TopUp{
 		OrgID:       "org_abc",
 		AmountCents: 5000,
 		ProductID:   "pro_topup",
@@ -545,7 +587,7 @@ func TestCheckoutURLKeyNeverInErrors(t *testing.T) {
 
 	for _, base := range []string{bad.URL, malformed.URL, emptyURL.URL, "http://127.0.0.1:1"} {
 		p := New(Config{APIKey: apiKey, BaseURL: base, HTTPClient: &http.Client{Timeout: time.Second}})
-		_, err := p.CheckoutURL(context.Background(), billingprovider.TopUp{
+		_, err := p.CreateCheckout(context.Background(), billingprovider.TopUp{
 			OrgID:       "org_abc",
 			AmountCents: 5000,
 			ProductID:   "pro_topup",

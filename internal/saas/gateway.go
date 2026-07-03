@@ -180,9 +180,30 @@ func opFromPath(method, path string) string {
 	// {"pool":"<name>"} or {"image":"<name>"}. The create handler resolves all three.
 	case p == "fork" && method == http.MethodPost:
 		return "sandbox.create"
+	// Pause and resume: the SDK calls POST /v1/pause and POST /v1/resume with the
+	// body {"sandbox":"<id>"} (issue #601). Both are mutating lifecycle verbs, so
+	// the requiredScopeFor default (the sandboxes scope) is correct. The control
+	// plane proxies them to the per-sandbox runtime endpoint, which already serves
+	// the routes (internal/daemon/lifecycle_api.go).
+	case p == "pause" && method == http.MethodPost:
+		return "sandbox.pause"
+	case p == "resume" && method == http.MethodPost:
+		return "sandbox.resume"
 	default:
 		return "sandbox." + strings.ToLower(method)
 	}
+}
+
+// apiKeyUnauthorized is the gateway's 401 for a missing or invalid ORG api key.
+// It reuses the generic unauthorized code but replaces the catalogue message and
+// remediation, which describe the per-sandbox bearer token ("the
+// <name>-sandbox-token Secret") and mislead a hosted SDK caller whose auth is an
+// org api key, not a sandbox token (the #28 LLM-legible error rule). The caller
+// adds the specific cause.
+func apiKeyUnauthorized() apierr.Error {
+	return apierr.Get(apierr.CodeUnauthorized).
+		WithMessage("the request is not authenticated: missing or invalid api key").
+		WithRemediation("Send Authorization: Bearer <your mitos api key> (it starts with mitos_live_); create or manage keys in the console.")
 }
 
 // ServeHTTP is the gateway handler. The pipeline is: extract the bearer key;
@@ -196,7 +217,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	raw, ok := bearerToken(r)
 	if !ok {
-		g.fail(w, apierr.Get(apierr.CodeUnauthorized).
+		g.fail(w, apiKeyUnauthorized().
 			WithCause("no bearer api key was presented"))
 		return
 	}
@@ -338,7 +359,7 @@ func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
 	default:
 		// Malformed, unknown, expired, revoked all collapse to unauthorized so the
 		// response does not reveal which one applies.
-		g.fail(w, apierr.Get(apierr.CodeUnauthorized).
+		g.fail(w, apiKeyUnauthorized().
 			WithCause("the api key is missing, invalid, expired, or revoked"))
 	}
 }

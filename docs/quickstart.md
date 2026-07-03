@@ -81,7 +81,10 @@ and run the same lifecycle in a shell:
 # Install (requires a Go toolchain).
 go install mitos.run/mitos/cmd/mitos@latest
 
-export MITOS_API_KEY=sk-...   # from https://mitos.run
+# One-time setup: validate the key (from https://mitos.run/keys) and save it,
+# so every later command works without environment variables. Run it with no
+# flag to be prompted, or keep using: export MITOS_API_KEY=sk-...
+mitos init --api-key sk-...
 
 # Create a sandbox (--pool names a template in hosted mode).
 ID=$(mitos sandbox create --pool python)

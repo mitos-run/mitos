@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
+	"mitos.run/mitos/internal/tenant"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -434,6 +435,64 @@ func TestHuskClaimNoDormantPodPends(t *testing.T) {
 	}
 	if _, ok := act.lastReq(); ok {
 		t.Error("activator should not be called when no dormant pod exists")
+	}
+}
+
+// TestHuskClaimStampsOrgLabelOnClaimedPod is the issue #602 attribution test:
+// a hosted single-tenant deployment runs the pool and its husk pods in ONE
+// shared namespace, so the pods carry no namespace-derived mitos.run/org label
+// and every usage sample was unattributed (dropped from billable). The hosted
+// gateway stamps the Sandbox object's labels with the org; the claim path must
+// copy that trusted label onto the pod it claims so the usage collector's
+// LabelOrgResolver attributes the sandbox.
+func TestHuskClaimStampsOrgLabelOnClaimedPod(t *testing.T) {
+	pod := makeDormantHuskPod(t, "husk-org-pool", "10.1.2.44")
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: true, VsockPath: "/run/husk/vm/vsock", LatencyMs: 1.0}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-org-pool", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, pool) })
+
+	// The claim carries the org label the hosted gateway stamps on every Sandbox
+	// it creates (internal/saas/controlplane). "default" is a shared, non-org
+	// namespace, so without claim-time stamping the pod would stay unattributed.
+	claim := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "husk-org-claim",
+			Namespace: "default",
+			Labels: map[string]string{
+				controller.HuskTestClaimLabel: "true",
+				tenant.OrgLabelKey:            "org-e2e",
+			},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "husk-org-pool"}}},
+	}
+	if err := k8sClient.Create(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, claim) })
+
+	waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxReady
+	})
+
+	var claimedPod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: "default"}, &claimedPod); err != nil {
+		t.Fatal(err)
+	}
+	if got := claimedPod.Labels[tenant.OrgLabelKey]; got != "org-e2e" {
+		t.Errorf("claimed husk pod org label = %q, want org-e2e (claim-time attribution, issue #602)", got)
 	}
 }
 

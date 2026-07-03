@@ -120,6 +120,11 @@ enforces org-scoping NOW behind two seams:
 - The `TemplateLister` over the `SandboxPool` CRDs (inline `spec.template`).
 - Real Stripe invoice objects in the billing view (today it shows the credit
   ledger entries).
-- A durable (Postgres) audit log behind the `AuditRecorder` seam.
+- Retention ENFORCEMENT for the audit log: the console stores the per-org
+  retention policy (days) and the durable Postgres audit log
+  (`pgstore.PgAuditLog`, wired when a database DSN is configured) keeps the
+  trail across restarts, but the pruning sweep that applies the policy is the
+  controller GC follow-up (issue #163). Nothing prunes today, in-memory or
+  durable.
 - Session-cookie auth and the gateway mount that attaches the verified org
   context in production.

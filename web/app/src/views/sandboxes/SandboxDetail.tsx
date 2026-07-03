@@ -1,7 +1,8 @@
 // One sandbox, inspected. A tabbed detail view: Overview and Logs are real;
 // Fork tree shows the org-wide tree (no per-sandbox BFF endpoint yet; a
 // scoped endpoint is tracked as a follow-up); Terminal, Filesystem, Metrics,
-// and Spending are honest placeholders. Reads the $id route param.
+// and Spending are honest coming-soon states with a today alternative where
+// one exists. Reads the $id route param.
 import { useState } from 'react'
 import { useParams } from '@tanstack/react-router'
 import { useSandbox, useSetSandboxProject } from '../../data/sandboxes'
@@ -63,13 +64,13 @@ export function SandboxDetail() {
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0} style={{ marginTop: 'var(--space-5)' }}>
         {tab === 'overview' && <OverviewTab sb={sb} />}
         {tab === 'logs' && <LogsTab id={sb.id} />}
-        {tab === 'terminal' && <PlaceholderTab title="Terminal" surface="the existing PTY transport" />}
-        {tab === 'files' && <PlaceholderTab title="Filesystem" surface="the existing files API" />}
-        {tab === 'metrics' && <PlaceholderTab title="Metrics" surface="the guest telemetry pipeline" />}
-        {tab === 'spending' && <PlaceholderTab title="Spending" surface="the usage and cost pipeline" />}
+        {tab === 'terminal' && <PlaceholderTab title="Terminal" body="An interactive terminal for this sandbox is coming to the console. Until then, run commands from your own terminal with the CLI: mitos sandbox exec." />}
+        {tab === 'files' && <PlaceholderTab title="Filesystem" body="A file browser for this sandbox is coming to the console. Until then, read and write files with the SDK or the CLI." />}
+        {tab === 'metrics' && <PlaceholderTab title="Metrics" body="Live CPU and memory charts for this sandbox are coming to the console." />}
+        {tab === 'spending' && <PlaceholderTab title="Spending" body="A per-sandbox spending breakdown is coming to the console. Org-wide numbers are on the Usage page today." />}
         {tab === 'forks' && (
           <>
-            <p className="t-dim" style={{ marginBottom: 'var(--space-4)' }}>Org-wide fork tree. Per-sandbox scoping requires a new BFF endpoint and ships in a later phase.</p>
+            <p className="t-dim" style={{ marginBottom: 'var(--space-4)' }}>Showing every fork in your organization. A view scoped to just this sandbox is coming.</p>
             <ForkTree />
           </>
         )}

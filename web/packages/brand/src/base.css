@@ -27,8 +27,8 @@ html, body {
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.02) 50%, transparent 51%),
-    radial-gradient(1px 1px at 70% 60%, rgba(255, 255, 255, 0.02) 50%, transparent 51%);
+    radial-gradient(1px 1px at 20% 30%, var(--grain) 50%, transparent 51%),
+    radial-gradient(1px 1px at 70% 60%, var(--grain) 50%, transparent 51%);
 }
 
 h1, h2, h3 {
@@ -69,7 +69,7 @@ a { color: var(--cyan); }
 }
 .btn-primary:hover {
   /* additive, white-cored glow via screen blend; never animate blur radius */
-  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px rgba(255, 69, 200, 0.5);
+  box-shadow: 0 0 0 1px var(--magenta), 0 0 16px color-mix(in srgb, var(--magenta) 50%, transparent);
 }
 .btn-ghost {
   background: transparent;
@@ -123,7 +123,7 @@ a { color: var(--cyan); }
 .nav-link-active { color: var(--ink); background: var(--field-2); }
 
 .palette-backdrop {
-  position: fixed; inset: 0; background: rgba(4, 5, 10, 0.6);
+  position: fixed; inset: 0; background: var(--scrim);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh;
 }
 .palette {
@@ -229,7 +229,7 @@ a { color: var(--cyan); }
     position: fixed;
     inset: 0;
     z-index: var(--z-backdrop, 250);
-    background: rgba(4, 5, 10, 0.6);
+    background: var(--scrim);
   }
 
   /* Hide the inline nav brand on desktop (TopBar shows it on mobile). */
@@ -634,8 +634,8 @@ html[data-reduce-motion="1"] * {
 }
 
 /* ---- Global top bar: continues the marketing site nav. Translucent 64px bar,
-   backdrop blur, hairline bottom border. Token-driven; one raw background value
-   matches the site rgba(4,5,10,.55) which is already used in .palette-backdrop. */
+   backdrop blur, hairline bottom border. Token-driven; --topbar-bg matches the
+   site rgba(4,5,10,.55) in the dark theme. */
 
 /* Full-width translucent bar; its inner row is constrained to --maxw and
    centered so the brand and account align with the page content beneath. */
@@ -644,7 +644,7 @@ html[data-reduce-motion="1"] * {
   top: 0;
   z-index: 100;
   backdrop-filter: blur(12px);
-  background: rgba(4,5,10,.55);
+  background: var(--topbar-bg);
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -775,7 +775,7 @@ html[data-reduce-motion="1"] * {
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-lg);
   padding: var(--space-2) 0;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px var(--pop-shadow);
 }
 
 /* Identity block: display name + email, separated by a hairline. */
