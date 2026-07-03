@@ -38,6 +38,21 @@ describe('AppShell', () => {
     await renderAt('/sandboxes', caps)
     await waitFor(() => expect(screen.getByText('Self-hosted')).toBeInTheDocument())
   })
+
+  it('shows no ownership badge on the hosted edition', async () => {
+    const hosted: Capabilities = { ...caps, ownership: 'hosted' }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(hosted), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ sandboxes: [], secrets: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/sandboxes', hosted)
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Sandboxes' })).toBeInTheDocument())
+    expect(screen.queryByText('Self-hosted')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Hosted by Mitos/)).not.toBeInTheDocument()
+  })
 })
 
 describe('AppShell responsive drawer', () => {

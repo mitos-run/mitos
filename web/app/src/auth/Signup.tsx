@@ -12,7 +12,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button } from '@mitos/brand'
 import { post } from '../api'
-import { AuthShell, ProviderButtons, resolveNext, useAuthConnectors } from './authCommon'
+import { AuthShell, ProviderButtons, resolveNext, useAuthConfig } from './authCommon'
 
 // ---- Page-specific styles --------------------------------------------------
 
@@ -65,7 +65,7 @@ export type SignupProps = {
 
 export function Signup({ next, initialEmail }: SignupProps) {
   const resolvedNext = resolveNext(next)
-  const connectors = useAuthConnectors()
+  const { connectors, signup } = useAuthConfig()
 
   // Resolve ?email= query param for the Login-to-Signup email handoff.
   const emailDefault =
@@ -103,6 +103,36 @@ export function Signup({ next, initialEmail }: SignupProps) {
     setSignupState('idle')
     setEmail('')
     setSubmittedEmail('')
+  }
+
+  // Server-controlled gate: when the deployment disables self-serve signup the
+  // route stays reachable (never a dead end) but renders a friendly state that
+  // points at the administrator and the organization sign-in instead of a form
+  // that could only fail.
+  if (signup === false) {
+    return (
+      <AuthShell
+        title="Accounts are handled by your administrator"
+        subtitle="Self-serve signup is not enabled on this console."
+      >
+        <style>{styles}</style>
+        <p
+          style={{
+            margin: '0 0 var(--space-5)',
+            fontSize: 'var(--step--1)',
+            color: 'var(--ink-2)',
+            textAlign: 'center',
+            lineHeight: 'var(--lh-base)',
+          }}
+        >
+          Ask your administrator to invite you. Already have an account? Sign in
+          with your organization account.
+        </p>
+        <a href="/login" className="auth-link-btn">
+          Go to sign in
+        </a>
+      </AuthShell>
+    )
   }
 
   return (
