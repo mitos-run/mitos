@@ -685,8 +685,10 @@ class AsyncDirectSandbox:
         )
 
     async def fork(self, n: int = 1, id: Optional[str] = None) -> list["AsyncDirectSandbox"]:
-        """Fork into n independent sibling sandboxes on the server. Each child is
-        a READY AsyncDirectSandbox with its own id; the source keeps running."""
+        """Fork this RUNNING sandbox into n independent sibling sandboxes (issue
+        #596). A LIVE fork: each child inherits this sandbox's live memory AND its
+        current on-disk filesystem, not a re-fork of the cold template. Each child
+        is a READY AsyncDirectSandbox with its own id; the source keeps running."""
         children: list[AsyncDirectSandbox] = []
         for i in range(n):
             child_id = None
@@ -698,9 +700,15 @@ class AsyncDirectSandbox:
     async def _fork_one(self, child_id: Optional[str]) -> "AsyncDirectSandbox":
         if child_id is None:
             child_id = f"sandbox-{uuid.uuid4().hex[:8]}"
+        # Live fork of THIS running sandbox: POST to the per-sandbox fork route so
+        # the server checkpoints this sandbox (memory + on-disk filesystem) and
+        # boots the child from it. template stays in the body for hosted-gateway
+        # compatibility (the gateway maps this route to sandbox.create, which reads
+        # template as the pool); pause_source freezes the parent across the
+        # checkpoint so memory and disk are captured consistently.
         resp = await self._http.post(
-            f"{self._server_url}/v1/fork",
-            json={"template": self.template, "id": child_id},
+            f"{self._server_url}/v1/sandboxes/{self.id}/fork",
+            json={"id": child_id, "template": self.template, "pause_source": True},
             headers=self._auth_headers(),
         )
         raise_for_status(resp, token=self._api_key)
