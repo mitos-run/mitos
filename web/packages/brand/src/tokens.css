@@ -28,7 +28,7 @@
   /* ---- Ink: white at opacity, never gray hex ---- */
   --ink: rgba(236, 240, 250, 0.94);
   --ink-2: rgba(236, 240, 250, 0.62);
-  --ink-3: rgba(236, 240, 250, 0.40);
+  --ink-3: rgba(236, 240, 250, 0.49); /* 4.6:1 on --field, 4.7:1 on --field-1/-2 (AA small text; was 0.40 = 3.4:1) */
 
   /* ---- Signal channels: color = meaning only ---- */
   --magenta: #FF45C8;          /* PRIMARY signature: division / spindle / fork */
