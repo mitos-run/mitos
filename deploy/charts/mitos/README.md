@@ -132,6 +132,14 @@ Every per-component `image.tag` defaults to `""`, which resolves to the chart
 all of them at once. `deploy/charts/mitos/values.yaml` is the authoritative,
 fully commented reference; the tables below cover the major knobs.
 
+The chart ships a `values.schema.json`: every install, upgrade, template, and
+lint validates your values against it, so an unknown or misspelled key (for
+example `console.typoKey`) fails immediately instead of deploying silently
+misconfigured. Free-form passthrough maps (`resources`, `commonLabels`,
+ingress `annotations`, `extraEnv`, `nodeSelector`, `tolerations`,
+`imagePullSecrets`, `controller.usage.priceList`, `console.billing.rates`)
+still accept arbitrary keys by design.
+
 ### Images and core components
 
 | Key | Default | Description |
