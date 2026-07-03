@@ -44,11 +44,16 @@ func (f *fakeRecordLister) ListRecords(_ context.Context, orgID string, from, to
 type fakeDrawdowner struct {
 	keys []string
 	err  error
+	// results maps a record key (org|sandbox|window) to the result Drawdown
+	// returns for it, so a test can simulate per-record settled cents and
+	// carried remainders. A record with no mapped result returns the zero result.
+	results map[string]billing.DrawdownResult
 }
 
 func (f *fakeDrawdowner) Drawdown(_ context.Context, rec usage.UsageRecord) (billing.DrawdownResult, error) {
-	f.keys = append(f.keys, rec.OrgID+"|"+rec.SandboxID+"|"+rec.Window.UTC().Format(time.RFC3339))
-	return billing.DrawdownResult{}, f.err
+	key := rec.OrgID + "|" + rec.SandboxID + "|" + rec.Window.UTC().Format(time.RFC3339)
+	f.keys = append(f.keys, key)
+	return f.results[key], f.err
 }
 
 func testLogger() *slog.Logger {
@@ -152,5 +157,43 @@ func TestDrawdownIntervalResolution(t *testing.T) {
 		if got != c.want {
 			t.Errorf("drawdownInterval(%q, live=%t) = %v, want %v", c.raw, c.live, got, c.want)
 		}
+	}
+}
+
+// TestRunDrawdownOnceReportsSettledCents pins the issue #662/#665 visibility
+// contract: the cycle stats carry the AGGREGATE settled cents (sum of every
+// record's FromCredit) and the aggregate carried milli-cent remainder (each
+// org's remainder after its last settled record), so a system that settles
+// zero forever is visible in the drawdown log line instead of looking healthy.
+func TestRunDrawdownOnceReportsSettledCents(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	w1 := now.Add(-10 * time.Minute)
+	w2 := now.Add(-9 * time.Minute)
+	orgs := &fakeOrgLister{orgs: []saas.Organization{{ID: "org-a"}, {ID: "org-b"}}}
+	store := &fakeRecordLister{records: map[string][]usage.UsageRecord{
+		"org-a": {
+			{OrgID: "org-a", SandboxID: "sb-1", Window: w1},
+			{OrgID: "org-a", SandboxID: "sb-1", Window: w2},
+		},
+		"org-b": {
+			{OrgID: "org-b", SandboxID: "sb-2", Window: w1},
+		},
+	}}
+	key := func(org, sb string, w time.Time) string { return org + "|" + sb + "|" + w.UTC().Format(time.RFC3339) }
+	svc := &fakeDrawdowner{results: map[string]billing.DrawdownResult{
+		key("org-a", "sb-1", w1): {Cost: 1, FromCredit: 1, CarriedMilliCents: 100},
+		key("org-a", "sb-1", w2): {Cost: 0, FromCredit: 0, CarriedMilliCents: 177},
+		key("org-b", "sb-2", w1): {Cost: 2, FromCredit: 2, CarriedMilliCents: -300},
+	}}
+
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+
+	if stats.settledCents != 3 {
+		t.Errorf("settledCents = %d, want 3 (1 from org-a + 2 from org-b)", stats.settledCents)
+	}
+	// Per org, the LAST settled record's carried remainder is the org's current
+	// remainder; the stat is the sum across orgs: 177 + (-300).
+	if stats.carriedMilli != -123 {
+		t.Errorf("carriedMilli = %d, want -123 (org-a 177 + org-b -300)", stats.carriedMilli)
 	}
 }

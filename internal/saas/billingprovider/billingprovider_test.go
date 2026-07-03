@@ -24,6 +24,10 @@ func (errLedger) Balance(context.Context, string) (billing.Money, error) { retur
 func (errLedger) Entries(context.Context, string) ([]billing.LedgerEntry, error) {
 	return nil, nil
 }
+func (errLedger) Remainder(context.Context, string) (int64, error) { return 0, nil }
+func (errLedger) AppendWithRemainder(context.Context, billing.LedgerEntry, int64) error {
+	return errors.New("ledger unavailable")
+}
 
 // handleTopUp builds a WebhookHandler with the given provider and ledger, POSTs
 // an empty body, and returns the response recorder.

@@ -56,3 +56,39 @@ func TestQuantityForEgressIsGiB(t *testing.T) {
 		t.Errorf("egress quantity = %v GiB, want 2", q)
 	}
 }
+
+// TestCostMilliCentsPricesSubCentWindows asserts the milli-cent pricer keeps
+// the sub-cent cost of a realistic one-minute window instead of rounding it to
+// zero: 60 vCPU-seconds at the default 1.28 milli-cents/vCPU-s is 76.8
+// milli-cents, which CostCents rounds to 0 but CostMilliCents must report as
+// 77 (nearest milli-cent). This is the pricing half of issue #662.
+func TestCostMilliCentsPricesSubCentWindows(t *testing.T) {
+	rates := DefaultRates()
+	rec := usage.UsageRecord{OrgID: "o1", SandboxID: "s1", Window: time.Unix(0, 0).UTC(), VCPUSeconds: 60}
+	if got := rates.CostMilliCents(rec); got != 77 {
+		t.Errorf("CostMilliCents = %d, want 77 (76.8 rounded to nearest)", got)
+	}
+	if got := rates.CostCents(rec); got != 0 {
+		t.Errorf("CostCents = %d, want 0 (the whole-cent view of a sub-cent window)", int64(got))
+	}
+}
+
+// TestCostCentsDerivesFromMilliCents asserts the two pricers agree: the cent
+// cost is always the milli-cent cost rounded half up, so the spend estimate the
+// console shows and the drawdown's accumulator never disagree on a record.
+func TestCostCentsDerivesFromMilliCents(t *testing.T) {
+	rates := DefaultRates()
+	recs := []usage.UsageRecord{
+		{VCPUSeconds: 60},
+		{VCPUSeconds: 3600, MemGiBSeconds: 7200, EgressBytes: int64(1) << 30},
+		{VCPUSeconds: 1_000_000},
+		{GPUSeconds: 7},
+	}
+	for i, rec := range recs {
+		m := rates.CostMilliCents(rec)
+		want := Money((m + 500) / 1000)
+		if got := rates.CostCents(rec); got != want {
+			t.Errorf("rec %d: CostCents = %d, want %d ((%d milli + 500) / 1000)", i, int64(got), int64(want), m)
+		}
+	}
+}
