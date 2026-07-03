@@ -137,6 +137,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// truthful code lets Stripe retry and does not mask the fault as auth).
 		if errors.Is(err, ErrWebhookSignature) {
 			apierr.Encode(w, apierr.Get(apierr.CodeUnauthorized).
+				WithMessage("the webhook signature did not verify").
+				WithRemediation("Sign the request with the configured provider webhook secret; this endpoint accepts only genuine provider-signed webhooks.").
 				WithCause("the webhook signature did not verify"))
 			return
 		}
