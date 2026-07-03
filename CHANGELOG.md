@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.3](https://github.com/mitos-run/mitos/compare/v1.19.2...v1.19.3) (2026-07-03)
+
+
+### Bug Fixes
+
+* **daemon:** exec ws accepts origin-bearing clients; bearer token is the gate ([#680](https://github.com/mitos-run/mitos/issues/680)) ([66cf371](https://github.com/mitos-run/mitos/commit/66cf3714da0aed6264700bb782f2bb8c5588aecb))
+
 ## [1.19.2](https://github.com/mitos-run/mitos/compare/v1.19.1...v1.19.2) (2026-07-03)
 
 
