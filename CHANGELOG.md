@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/mitos-run/mitos/compare/v1.17.0...v1.18.0) (2026-07-03)
+
+
+### Features
+
+* **husk:** expose per-VM metering so the usage collector meters husk sandboxes ([#627](https://github.com/mitos-run/mitos/issues/627)) ([2dc0c53](https://github.com/mitos-run/mitos/commit/2dc0c53abafefada7fc6da92f0fcec5b2eed534b))
+
 ## [1.17.0](https://github.com/mitos-run/mitos/compare/v1.16.0...v1.17.0) (2026-07-03)
 
 
