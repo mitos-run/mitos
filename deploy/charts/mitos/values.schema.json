@@ -1,0 +1,1053 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "mitos chart values",
+  "description": "Schema for the mitos Helm chart values. Unknown keys fail at install time so a misspelled value cannot deploy silently misconfigured. Maps the chart intends as free-form passthrough (resources, labels, annotations, extraEnv, tolerations, nodeSelector, rate tables) stay open.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "componentImage": {
+      "description": "Per-component image reference, composed as image.registry/repository:tag.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "description": "Image repository appended to image.registry.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "Image tag; empty defaults to the chart appVersion (or global.imageTag when set).",
+          "type": "string"
+        },
+        "pullPolicy": {
+          "description": "Image pull policy for the container.",
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "secretRef": {
+      "description": "Reference to an existing Secret by name and key; values are injected via secretKeyRef only, never inline.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Name of the Secret in the release namespace; empty omits the env.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Key within that Secret holding the value.",
+          "type": "string"
+        }
+      }
+    },
+    "resources": {
+      "description": "Kubernetes container resource requests and limits, rendered verbatim (may include extended resources such as mitos.run/kvm).",
+      "type": "object"
+    },
+    "podDisruptionBudget": {
+      "description": "Opt-in PodDisruptionBudget; enable only when replicas > 1 so node drains are never blocked.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Render the PodDisruptionBudget.",
+          "type": "boolean"
+        },
+        "minAvailable": {
+          "description": "minAvailable for the PDB; an integer count or a percentage string.",
+          "type": ["integer", "string"]
+        }
+      }
+    },
+    "ingress": {
+      "description": "Optional Ingress for the component.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Render the Ingress resource.",
+          "type": "boolean"
+        },
+        "className": {
+          "description": "ingressClassName for the Ingress.",
+          "type": "string"
+        },
+        "host": {
+          "description": "Hostname the Ingress serves.",
+          "type": "string"
+        },
+        "annotations": {
+          "description": "Annotations applied verbatim to the Ingress resource.",
+          "type": "object"
+        }
+      }
+    },
+    "issuerRef": {
+      "description": "cert-manager issuer reference.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Name of the ClusterIssuer or Issuer.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Kind of the issuer reference.",
+          "type": "string",
+          "enum": ["ClusterIssuer", "Issuer"]
+        }
+      }
+    },
+    "extraEnv": {
+      "description": "Extra env var entries appended verbatim to the container.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "rateMap": {
+      "description": "Map of rate keys to numeric values, rendered as one JSON env value; unknown keys fail the binary at startup.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    }
+  },
+  "properties": {
+    "image": {
+      "description": "Image settings shared by every component.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registry": {
+          "description": "Container registry that hosts every mitos image.",
+          "type": "string"
+        }
+      }
+    },
+    "global": {
+      "description": "Global overrides applied across all components.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "imageTag": {
+          "description": "When set, this tag overrides every per-component image.tag.",
+          "type": "string"
+        }
+      }
+    },
+    "nameOverride": {
+      "description": "Override for the chart name used in resource names.",
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "description": "Override for the fully qualified release name used in resource names.",
+      "type": "string"
+    },
+    "controller": {
+      "description": "Controller Deployment: reconciles the mitos.run CRDs and drives forkd.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": { "$ref": "#/definitions/componentImage" },
+        "replicas": {
+          "description": "Number of controller replicas; multiple replicas run HA with leader election.",
+          "type": "integer"
+        },
+        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "enableHuskPods": {
+          "description": "Render --enable-husk-pods so each SandboxPool maintains a warm pool of pre-scheduled husk pods.",
+          "type": "boolean"
+        },
+        "huskDataDir": {
+          "description": "Value for --husk-data-dir, the node template snapshot root the husk pods mount; must match forkd's --data-dir.",
+          "type": "string"
+        },
+        "huskDnsUpstream": {
+          "description": "Value for --husk-dns-upstream; empty omits the flag, a comma-separated resolver list enables name-based egress allowlists.",
+          "type": "string"
+        },
+        "kvmResourceName": {
+          "description": "The extended resource name husk pods request for KVM scheduling.",
+          "type": "string"
+        },
+        "namespacedSecretsRBAC": {
+          "description": "When true, the controller's cluster-wide Secrets grant is removed in favor of per-namespace bindings.",
+          "type": "boolean"
+        },
+        "poolSecretsClusterRoleName": {
+          "description": "Name of the chart-provisioned ClusterRole the controller binds per pool namespace for Secrets access.",
+          "type": "string"
+        },
+        "orgTenancy": {
+          "description": "Per-org namespace tenancy, the hosted-SaaS multi-tenant boundary (issue #288).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render --enable-org-tenancy so the controller runs the OrgReconciler.",
+              "type": "boolean"
+            },
+            "defaultMaxSandboxes": {
+              "description": "Default per-org sandbox and pod count ceiling for an Org's ResourceQuota.",
+              "type": "integer"
+            },
+            "defaultCPU": {
+              "description": "Default per-org aggregate CPU limit ceiling, a Kubernetes quantity.",
+              "type": ["string", "integer", "number"]
+            },
+            "defaultMemory": {
+              "description": "Default per-org aggregate memory limit ceiling, a Kubernetes quantity.",
+              "type": "string"
+            }
+          }
+        },
+        "usage": {
+          "description": "Usage metering: the per-org metering scraper and the bearer-gated internal usage API.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "collector": {
+              "description": "Run the collector and serve the internal usage API.",
+              "type": "boolean"
+            },
+            "interval": {
+              "description": "Interval between metering scrapes (--usage-collector-interval).",
+              "type": "string"
+            },
+            "apiAddress": {
+              "description": "Internal usage API listen address in :port form; the container and Service port derive from it.",
+              "type": "string"
+            },
+            "tokenSecret": { "$ref": "#/definitions/secretRef" },
+            "priceList": { "$ref": "#/definitions/rateMap" }
+          }
+        },
+        "extraArgs": {
+          "description": "Extra args appended verbatim to the controller container args.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "extraEnv": { "$ref": "#/definitions/extraEnv" }
+      }
+    },
+    "huskStub": {
+      "description": "huskStub image: the image husk pods run, passed to the controller via --husk-stub-image.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": { "$ref": "#/definitions/componentImage" }
+      }
+    },
+    "forkd": {
+      "description": "forkd DaemonSet: the per-node privileged snapshot builder on nodes labeled mitos.run/kvm=true.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": { "$ref": "#/definitions/componentImage" },
+        "priorityClassName": {
+          "description": "Priority class so forkd is never evicted under resource pressure; empty disables.",
+          "type": "string"
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "dataDir": {
+          "description": "Value for forkd --data-dir and the data hostPath mountPath.",
+          "type": "string"
+        },
+        "enableNetworking": {
+          "description": "Render --enable-networking so forkd bakes the eth0 placeholder NIC into every husk template snapshot.",
+          "type": "boolean"
+        },
+        "seccompProfile": {
+          "description": "forkd container seccomp profile, rendered verbatim into securityContext.seccompProfile (issue #525).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "description": "Seccomp profile type.",
+              "type": "string",
+              "enum": ["RuntimeDefault", "Unconfined", "Localhost"]
+            },
+            "localhostProfile": {
+              "description": "Path of the Localhost seccomp profile relative to the kubelet seccomp root.",
+              "type": "string"
+            }
+          }
+        },
+        "extraCapabilities": {
+          "description": "Extra Linux capabilities added to forkd's hardened base set; the base set is not removable here.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "nodeSelector": {
+          "description": "nodeSelector pinning forkd to KVM nodes.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "description": "Tolerations so forkd lands on dedicated, tainted KVM workers; rendered verbatim.",
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "devicePlugin": {
+      "description": "KVM device plugin DaemonSet: advertises mitos.run/kvm only where /dev/kvm exists.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the device plugin DaemonSet.",
+          "type": "boolean"
+        },
+        "image": { "$ref": "#/definitions/componentImage" }
+      }
+    },
+    "kernelProvisioner": {
+      "description": "Kernel provisioner DaemonSet: stages the guest kernel into the node hostPath on KVM nodes.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the kernel-stage DaemonSet.",
+          "type": "boolean"
+        },
+        "kernelUrl": {
+          "description": "The guest kernel image URL the init container downloads.",
+          "type": "string"
+        },
+        "kernelSha256": {
+          "description": "Expected SHA256 hex of the kernel at kernelUrl; when set the init container fails closed on mismatch.",
+          "type": "string"
+        }
+      }
+    },
+    "admissionWebhook": {
+      "description": "Validating admission webhook that binds Sandbox.spec.serviceAccount to RBAC.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Render the webhook configuration and service.",
+          "type": "boolean"
+        },
+        "port": {
+          "description": "Container and Service port the controller serves the webhook on.",
+          "type": "integer"
+        },
+        "failurePolicy": {
+          "description": "Webhook failure policy; Fail rejects a claim if the webhook is unreachable.",
+          "type": "string",
+          "enum": ["Fail", "Ignore"]
+        }
+      }
+    },
+    "apiV2": {
+      "description": "Retained no-op placeholder from the completed v1 migration so existing values files do not fail.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "poolConversionWebhook": {
+          "description": "No-op placeholder; mitos.run/v1 is the only served group-version.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "No-op; retained for values-file compatibility.",
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "facade": {
+      "description": "Facade Deployment: the agents.x-k8s.io conformance facade, opt-in.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the facade Deployment plus its ServiceAccount and RBAC.",
+          "type": "boolean"
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "defaultPool": {
+          "description": "The mitos.run pool a Sandbox binds to when it carries no bridge annotation.",
+          "type": "string"
+        },
+        "clusterDomain": {
+          "description": "The cluster DNS domain the facade uses to build in-cluster URLs.",
+          "type": "string"
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "canary": {
+      "description": "Synthetic canary Deployment: continuously forks and execs a sandbox and exports mitos_canary_up.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the whole canary: Deployment, Service, ServiceMonitor, optional Secret.",
+          "type": "boolean"
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "pool": {
+          "description": "Template the canary forks each cycle; keep it small for a fast, cheap probe.",
+          "type": "string"
+        },
+        "interval": {
+          "description": "Time between probe cycles.",
+          "type": "string"
+        },
+        "execTimeoutSeconds": {
+          "description": "Per-exec timeout in seconds.",
+          "type": "integer"
+        },
+        "cycleTimeout": {
+          "description": "Whole-cycle deadline covering create, exec, verify, terminate.",
+          "type": "string"
+        },
+        "stalenessWindow": {
+          "description": "Liveness fails if the probe loop has not ticked within this window.",
+          "type": "string"
+        },
+        "metricsPort": {
+          "description": "Container port for /metrics, /healthz, /readyz.",
+          "type": "integer"
+        },
+        "baseURL": {
+          "description": "API base URL; empty auto-resolves the in-cluster gateway.",
+          "type": "string"
+        },
+        "apiKeySecretName": {
+          "description": "Name of the Secret holding the api key under the key api-key.",
+          "type": "string"
+        },
+        "apiKeySecretExternal": {
+          "description": "When true, the Secret is assumed to exist already and the chart never renders it.",
+          "type": "boolean"
+        },
+        "apiKey": {
+          "description": "A scoped mitos_live_ token; prefer leaving empty and creating the Secret out of band.",
+          "type": "string"
+        },
+        "serviceMonitor": {
+          "description": "ServiceMonitor for the canary; needs the Prometheus Operator and monitoring.enabled.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render a ServiceMonitor.",
+              "type": "boolean"
+            },
+            "interval": {
+              "description": "Scrape interval.",
+              "type": "string"
+            }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "monitoring": {
+      "description": "Monitoring artifacts: the PrometheusRule, the Grafana dashboard ConfigMap, and the PodMonitors.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the PrometheusRule, the dashboard ConfigMap, and the PodMonitors.",
+          "type": "boolean"
+        },
+        "prometheusRuleRelease": {
+          "description": "Label value selected by the Prometheus Operator ruleSelector for the rule.",
+          "type": "string"
+        },
+        "podMonitors": {
+          "description": "PodMonitors that make the control-plane metrics the alerts depend on actually get scraped.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render PodMonitors for the controller and forkd.",
+              "type": "boolean"
+            },
+            "interval": {
+              "description": "Scrape interval.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "namespace": {
+      "description": "Namespace the workloads install into.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The namespace name; all namespaced resources are placed here.",
+          "type": "string"
+        },
+        "create": {
+          "description": "Render the Namespace object with the PodSecurity admission labels forkd requires.",
+          "type": "boolean"
+        }
+      }
+    },
+    "imagePullSecret": {
+      "description": "Optional dockerconfigjson Secret for a private mirror of the mitos images.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "description": "Render the dockerconfigjson Secret named below.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The Secret name rendered when create=true.",
+          "type": "string"
+        },
+        "dockerconfigjson": {
+          "description": "The base64-encoded dockerconfigjson value.",
+          "type": "string"
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "description": "Image pull secret names attached to every workload pod spec, rendered verbatim.",
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "commonLabels": {
+      "description": "Extra labels merged onto every resource the chart renders.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "database": {
+      "description": "Durable persistence for the front door: bring your own managed Postgres, referenced as a Secret.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dsnSecretRef": { "$ref": "#/definitions/secretRef" }
+      }
+    },
+    "console": {
+      "description": "Console Deployment: the hosted or self-hosted web console; one image serves both editions.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Render the console Deployment, Service, optional Ingress, ServiceAccount, and RBAC.",
+          "type": "boolean"
+        },
+        "edition": {
+          "description": "Runtime edition value; community for self-host, hosted for the SaaS.",
+          "type": "string",
+          "enum": ["community", "hosted"]
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "replicas": {
+          "description": "Console replicas; more than one requires a shared session store first.",
+          "type": "integer"
+        },
+        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "signup": {
+          "description": "Self-serve org signup; defaults off (waitlist mode), server-controlled per the #208 gate.",
+          "type": "boolean"
+        },
+        "signupCreditCents": {
+          "description": "Free credit granted to a newly verified signup, in integer cents; 0 renders no env.",
+          "type": "integer"
+        },
+        "autoAllowDomains": {
+          "description": "Email domains whose signups bypass the manual allowlist approval, rendered comma-joined.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "authConnectors": {
+          "description": "Social-login connectors advertised at GET /auth/connectors; known values are github and google.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "antiAbuse": {
+          "description": "Signup anti-abuse knobs; everything defaults off or empty.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "friendlyCaptcha": {
+              "description": "Friendly Captcha server-side verification; active only when both sitekey and secret ref are set.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "siteKey": {
+                  "description": "The public Friendly Captcha sitekey; not a secret.",
+                  "type": "string"
+                },
+                "secretRef": { "$ref": "#/definitions/secretRef" },
+                "url": {
+                  "description": "Verification API base URL override; empty uses the binary's built-in default endpoint.",
+                  "type": "string"
+                }
+              }
+            },
+            "disposableAllowDomains": {
+              "description": "Email domains exempted from the disposable-email-domain blocklist, rendered comma-joined.",
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "signupIPLimit": {
+              "description": "Per-IP signup velocity cap; empty renders no env, 0 disables the cap entirely.",
+              "type": ["string", "integer"]
+            },
+            "signupIPWindow": {
+              "description": "Per-IP signup velocity window, a Go duration string such as 30m.",
+              "type": "string"
+            }
+          }
+        },
+        "oidc": {
+          "description": "Browser-session OIDC; self-host points this at the operator's issuer.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "issuerURL": {
+              "description": "OIDC issuer URL the console trusts.",
+              "type": "string"
+            },
+            "clientID": {
+              "description": "OIDC client ID registered at the issuer.",
+              "type": "string"
+            },
+            "clientSecretRef": {
+              "description": "Name of an existing Secret with key client-secret; empty omits it.",
+              "type": "string"
+            },
+            "redirectURL": {
+              "description": "The OAuth redirect_uri the console sends to the IdP, normally https://<console-host>/auth/callback.",
+              "type": "string"
+            }
+          }
+        },
+        "usage": {
+          "description": "Usage read side: where the console reads per-org usage from.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "description": "Base URL of the controller's internal usage API; empty derives the in-cluster Service URL.",
+              "type": "string"
+            }
+          }
+        },
+        "extraEnv": { "$ref": "#/definitions/extraEnv" },
+        "secrets": {
+          "description": "Secret-store providers advertised in capabilities and wired into the binary.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kube": {
+              "description": "The kube provider materializes org secrets as org-namespaced Secrets.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "Enable the kube secret provider.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "openbao": {
+              "description": "The OpenBao or Vault external provider.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "Enable the OpenBao provider.",
+                  "type": "boolean"
+                },
+                "address": {
+                  "description": "OpenBao server address.",
+                  "type": "string"
+                },
+                "perOrg": {
+                  "description": "Per-tenant isolation mode: path or namespace.",
+                  "type": "string",
+                  "enum": ["path", "namespace"]
+                }
+              }
+            }
+          }
+        },
+        "billing": {
+          "description": "Billing surface; hosted sets true, community keeps it off so the billing routes never mount.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enable the billing surface.",
+              "type": "boolean"
+            },
+            "paddle": {
+              "description": "Paddle Merchant of Record configuration; secrets ride secretKeyRef only.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "apiKeySecretRef": { "$ref": "#/definitions/secretRef" },
+                "webhookSecretRef": { "$ref": "#/definitions/secretRef" },
+                "baseURL": {
+                  "description": "Paddle API host; empty uses the binary's built-in live default.",
+                  "type": "string"
+                },
+                "topUpProduct": {
+                  "description": "Paddle product id used for prepaid credit top-up checkout; empty disables the top-up affordance.",
+                  "type": "string"
+                },
+                "currency": {
+                  "description": "ISO currency code for top-up checkout; empty defaults to EUR in the binary.",
+                  "type": "string"
+                }
+              }
+            },
+            "rates": { "$ref": "#/definitions/rateMap" }
+          }
+        },
+        "onboarding": {
+          "description": "Public self-serve onboarding: verification email delivery and optional tenant provisioning.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "verifyURL": {
+              "description": "The base URL the verification link points at; required when SMTP is configured.",
+              "type": "string"
+            },
+            "clusterProvisioning": {
+              "description": "When true, a verified signup creates the cluster-scoped Org custom resource.",
+              "type": "boolean"
+            },
+            "smtp": {
+              "description": "SMTP delivery for the verification email; credentials come from a Secret only.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "description": "SMTP host; empty uses the dev log sender and no real email is delivered.",
+                  "type": "string"
+                },
+                "port": {
+                  "description": "SMTP port.",
+                  "type": "integer"
+                },
+                "from": {
+                  "description": "From address for the verification email.",
+                  "type": "string"
+                },
+                "credentialsSecretRef": {
+                  "description": "Name of an existing Secret with keys username and password; empty omits the auth env.",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "ingress": { "$ref": "#/definitions/ingress" }
+      }
+    },
+    "gateway": {
+      "description": "Gateway Deployment: the public customer API front door with API-key auth, org resolution, and quota.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Render the gateway Deployment, Service, and RBAC.",
+          "type": "boolean"
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "replicas": {
+          "description": "Number of gateway replicas.",
+          "type": "integer"
+        },
+        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
+        "enforce": {
+          "description": "Abuse-control enforcement: quotas, rate limits, and the kill-switch.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enforce per-org quotas, rate limits, the size cap, and the kill-switch before forwarding.",
+              "type": "boolean"
+            },
+            "trustedProxyHops": {
+              "description": "Number of trusted reverse-proxy hops used to resolve the client IP; 0 keys on RemoteAddr.",
+              "type": "integer"
+            }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "singleTenantNamespace": {
+          "description": "When non-empty, pins all sandbox operations to this fixed namespace instead of per-org namespaces.",
+          "type": "string"
+        },
+        "ingress": { "$ref": "#/definitions/ingress" }
+      }
+    },
+    "telemetry": {
+      "description": "Product telemetry: privacy-first, opt-in, off-by-default pipeline of non-PII product-usage events.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Opt-in switch; default false renders no telemetry env.",
+          "type": "boolean"
+        },
+        "optOut": {
+          "description": "Force-disable even if enabled=true; an explicit per-deploy opt-out.",
+          "type": "boolean"
+        },
+        "endpoint": {
+          "description": "The collector endpoint the network sink POSTs JSON to; required when enabled, empty fails closed.",
+          "type": "string"
+        },
+        "saltSecretRef": { "$ref": "#/definitions/secretRef" },
+        "tokenSecretRef": { "$ref": "#/definitions/secretRef" }
+      }
+    },
+    "expose": {
+      "description": "Expose proxy Deployment: terminates TLS for wildcard sandbox preview URLs and proxies to the sandbox.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the expose-proxy Deployment, Service, and optional Ingress and Certificate.",
+          "type": "boolean"
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "replicas": {
+          "description": "Number of proxy replicas.",
+          "type": "integer"
+        },
+        "domain": {
+          "description": "The expose domain, for example mitos.app; required when expose.enabled is true.",
+          "type": "string"
+        },
+        "service": {
+          "description": "Service settings for the proxy.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "description": "Service type.",
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+            }
+          }
+        },
+        "ingress": {
+          "description": "Optional Ingress for the expose proxy.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Gate the Ingress resource for the expose proxy.",
+              "type": "boolean"
+            },
+            "className": {
+              "description": "ingressClassName for the Ingress.",
+              "type": "string"
+            },
+            "annotations": {
+              "description": "Annotations applied verbatim to the Ingress resource.",
+              "type": "object"
+            }
+          }
+        },
+        "tls": {
+          "description": "TLS for the wildcard preview domain.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "certManager": {
+              "description": "cert-manager issues a wildcard Certificate via the named issuer.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "Render a cert-manager Certificate for the wildcard domain.",
+                  "type": "boolean"
+                },
+                "issuerRef": { "$ref": "#/definitions/issuerRef" }
+              }
+            },
+            "secretName": {
+              "description": "The TLS Secret mounted into the proxy at /tls.",
+              "type": "string"
+            }
+          }
+        },
+        "secretName": {
+          "description": "Name of the Secret holding the signing-secret, admin-token, and related keys, created out of band.",
+          "type": "string"
+        },
+        "oidc": {
+          "description": "OIDC relying-party configuration for the central auth origin; empty issuer means token-only mode.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "issuer": {
+              "description": "OIDC discovery issuer URL; empty disables OIDC.",
+              "type": "string"
+            },
+            "clientID": {
+              "description": "OIDC client ID registered at the issuer.",
+              "type": "string"
+            }
+          }
+        },
+        "identityResolve": {
+          "description": "Identity resolve endpoint: the in-cluster console service that maps a verified email to org IDs.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resolveURL": {
+              "description": "URL of the resolve endpoint; empty skips the resolve hop.",
+              "type": "string"
+            }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "dex": {
+      "description": "Dex in-cluster OIDC federator: federates GitHub and Google into a single OIDC issuer the console trusts.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the Dex ConfigMap, Deployment, and Service.",
+          "type": "boolean"
+        },
+        "image": {
+          "description": "Pinned full Dex image reference.",
+          "type": "string"
+        },
+        "issuer": {
+          "description": "OIDC issuer URL Dex advertises; must match the ingress path Dex is reachable at.",
+          "type": "string"
+        },
+        "console": {
+          "description": "Static OIDC client registered in Dex for the console.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clientID": {
+              "description": "OIDC client ID; set console.oidc.clientID to the same value.",
+              "type": "string"
+            },
+            "redirectURL": {
+              "description": "The OAuth redirect_uri Dex registers for the console.",
+              "type": "string"
+            }
+          }
+        },
+        "connectorsSecret": {
+          "description": "Name of an existing Secret holding the GitHub and Google OAuth credentials.",
+          "type": "string"
+        },
+        "consoleClientSecret": {
+          "description": "Name of an existing Secret holding the console static-client secret under key client-secret.",
+          "type": "string"
+        }
+      }
+    },
+    "frontdoor": {
+      "description": "Front-door reverse proxy: single-origin entry point routing marketing and console paths.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the frontdoor Deployment and Service.",
+          "type": "boolean"
+        },
+        "replicas": {
+          "description": "Number of frontdoor replicas.",
+          "type": "integer"
+        },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "marketingURL": {
+          "description": "In-cluster URL of the marketing static-site Service; empty derives the default.",
+          "type": "string"
+        },
+        "consoleURL": {
+          "description": "In-cluster URL of the console Service; empty derives the default.",
+          "type": "string"
+        },
+        "sessionResolveURL": {
+          "description": "In-cluster URL of the console session-resolve endpoint; empty derives the default.",
+          "type": "string"
+        },
+        "marketingPagesAddrs": {
+          "description": "GitHub Pages anycast IP:port addresses for the marketing upstream; empty means in-cluster mode.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "edge": {
+      "description": "Cilium Gateway-API edge resources: Gateway, Certificate, HTTPRoutes, CiliumNetworkPolicy.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate all edge-gateway resources.",
+          "type": "boolean"
+        },
+        "gatewayClassName": {
+          "description": "GatewayClass name used by the Cilium Gateway-API integration.",
+          "type": "string"
+        },
+        "hostname": {
+          "description": "Primary hostname for the edge gateway and certificate.",
+          "type": "string"
+        },
+        "tls": {
+          "description": "TLS for the edge gateway listener.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "description": "Name of the TLS Secret created by cert-manager and referenced by the Gateway listener.",
+              "type": "string"
+            },
+            "issuerRef": { "$ref": "#/definitions/issuerRef" }
+          }
+        }
+      }
+    },
+    "marketing": {
+      "description": "Marketing static site: serves the Astro-built public marketing pages behind the front-door.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Gate the marketing Deployment and Service.",
+          "type": "boolean"
+        },
+        "replicas": {
+          "description": "Number of marketing replicas.",
+          "type": "integer"
+        },
+        "containerPort": {
+          "description": "Container port the marketing image listens on.",
+          "type": "integer"
+        },
+        "image": {
+          "description": "Full OCI image reference for the marketing static site; required when marketing.enabled is true.",
+          "type": "string"
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    }
+  }
+}
