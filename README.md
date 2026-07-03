@@ -102,7 +102,9 @@ Same engine, same API, more on-ramps. Depth is one click into [the docs](https:/
 
 The Go SDK ships in its own nested module (`github.com/mitos-run/mitos/sdk/go`), so importing it never pulls the controller into your build.
 
-**On a cluster you run.** The two-tier `AgentRun` path drives the CRDs directly:
+**Self-hosting? Same code.** The Helm chart deploys the same gateway the hosted service runs, so the quickstart above works unchanged against your own cluster: point `MITOS_BASE_URL` at your gateway and keep everything else. Hosted and self-hosted are one experience; only the URL and who operates it differ.
+
+**Kubernetes-native control, when you want it.** For platform teams that manage pools declaratively (GitOps, RBAC-scoped automation, operators), the two-tier `AgentRun` path skips the gateway and drives the `mitos.run/v1` CRDs through the Kubernetes API directly:
 
 ```python
 from mitos import AgentRun
