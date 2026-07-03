@@ -77,12 +77,13 @@ func makeForkSourceClaim(t *testing.T, name, poolName string, srcPod *corev1.Pod
 		t.Fatalf("create claim: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, claim) })
-	claim.Status.Phase = v1.SandboxReady
-	claim.Status.Node = srcPod.Spec.NodeName
-	claim.Status.SandboxID = srcPod.Name
-	if err := k8sClient.Status().Update(ctx, claim); err != nil {
-		t.Fatalf("update claim status: %v", err)
-	}
+	// Retry-on-conflict: the claim reconciler pends this claim (its pool object
+	// does not exist), so a stale-resourceVersion status write races it.
+	updateSandboxStatusWithRetry(t, claim.Name, claim.Namespace, func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxReady
+		sb.Status.Node = srcPod.Spec.NodeName
+		sb.Status.SandboxID = srcPod.Name
+	})
 	return claim
 }
 
