@@ -52,6 +52,14 @@ const pendingSinceAnnotation = "mitos.run/capacity-pending-since"
 // once a node frees up or a new node joins.
 const capacityPendingRequeue = 5 * time.Second
 
+// poolMissingSinceAnnotation stamps, in RFC3339, the instant the reconciler
+// first observed the claim's referenced SandboxPool missing. Like
+// pendingSinceAnnotation it is the durable anchor for a bounded-wait deadline:
+// the pool may simply not have been applied yet (a manifest ordering race), so
+// the claim pends for a grace period before failing terminally (issue #630).
+// Cleared once the pool exists, so a later pool deletion starts a fresh clock.
+const poolMissingSinceAnnotation = "mitos.run/pool-missing-since"
+
 // huskHealthRequeue is how often a Ready husk claim re-checks its backing pod's
 // readiness so its Ready condition reflects a node/pod outage (the endpoint is
 // unreachable) instead of falsely staying Ready (#177). A pod watch would detect
@@ -382,14 +390,30 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 		return ctrl.Result{}, nil
 	}
 
-	// Find the pool
+	// Find the pool. A missing pool is NOT a reconcile error: erroring here
+	// retried forever under the controller-runtime backoff with no terminal
+	// state (issue #630). Instead the claim pends for a bounded grace period
+	// (the pool may be applied moments after the sandbox), then fails
+	// terminally with an actionable PoolNotFound condition.
 	var pool v1.SandboxPool
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: claim.Namespace,
 		Name:      claim.Spec.Source.PoolRef.Name,
 	}, &pool); err != nil {
-		logger.Error(err, "pool not found", "pool", claim.Spec.Source.PoolRef.Name)
+		if apierrors.IsNotFound(err) {
+			return r.reconcilePoolMissing(ctx, claim)
+		}
+		logger.Error(err, "get pool", "pool", claim.Spec.Source.PoolRef.Name)
 		return ctrl.Result{}, err
+	}
+
+	// The pool exists: clear any pool-missing stamp so a later deletion of the
+	// pool starts a fresh grace clock.
+	if claim.Annotations[poolMissingSinceAnnotation] != "" {
+		delete(claim.Annotations, poolMissingSinceAnnotation)
+		if err := r.Update(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Resolve the inline template (ADR 0007). The pool's spec.template is the
@@ -1054,6 +1078,84 @@ func (r *SandboxReconciler) reconcileNoCapacity(ctx context.Context, claim *v1.S
 	// requeues regardless. The waited-duration text in the message is rounded to
 	// the second, so a re-pend within the same second compares equal and is
 	// skipped, while a real progression of the wait writes.
+	_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
+	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+}
+
+// reconcilePoolMissing handles a claim whose referenced SandboxPool does not
+// exist (issue #630). The pool may simply not have been applied yet (a
+// manifest ordering race), so the claim pends with an actionable PoolNotFound
+// condition and retries for a bounded grace period, reusing the same bound as
+// the capacity wait (--max-pending-duration, default 5m). A pool that never
+// appears within the bound fails the claim TERMINALLY: phase Failed, no
+// further steady-state requeues (the terminal early-return in reconcilePoolRef
+// short-circuits later reconciles), and FinishedAt stamped so the GC TTL pass
+// reaps it like every other Failed sandbox (#163). The first-missing instant
+// is anchored on the poolMissingSinceAnnotation, mirroring the
+// capacity-pending machinery: durable across reconciles and controller
+// restarts, and cleared by reconcilePoolRef once the pool exists.
+func (r *SandboxReconciler) reconcilePoolMissing(ctx context.Context, claim *v1.Sandbox) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	now := r.now()
+	poolName := claim.Spec.Source.PoolRef.Name
+
+	// Stamp the first-missing instant on the metadata annotation if absent.
+	missingSince := now
+	if stamp := claim.Annotations[poolMissingSinceAnnotation]; stamp != "" {
+		if parsed, perr := time.Parse(time.RFC3339, stamp); perr == nil {
+			missingSince = parsed
+		}
+	} else {
+		if claim.Annotations == nil {
+			claim.Annotations = map[string]string{}
+		}
+		claim.Annotations[poolMissingSinceAnnotation] = now.Format(time.RFC3339)
+		if err := r.Update(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	waited := now.Sub(missingSince)
+	maxWait := r.maxPendingDuration()
+
+	// Bounded fail: the pool never appeared within the grace period. Surface an
+	// actionable terminal error (issue #28: LLM-legible) and stamp FinishedAt so
+	// the GC TTL pass reaps the claim.
+	if waited >= maxWait {
+		recordClaimError(poolName, "pool")
+		finished := metav1.NewTime(now)
+		claim.Status.Phase = v1.SandboxFailed
+		claim.Status.FinishedAt = &finished
+		setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: finished,
+			Reason:             "PoolNotFound",
+			Message: fmt.Sprintf(
+				"the referenced SandboxPool %q does not exist in namespace %q (missing for %s, past the %s grace period); create the pool or delete this sandbox, then recreate the sandbox once the pool exists",
+				poolName, claim.Namespace, waited.Round(time.Second), maxWait,
+			),
+		})
+		_ = r.Status().Update(ctx, claim)
+		logger.Info("claim failed: referenced pool not found past bounded wait", "claim", claim.Name, "pool", poolName, "waited", waited.Round(time.Second), "maxWait", maxWait)
+		return ctrl.Result{}, nil
+	}
+
+	// Within the grace period: pend with backpressure and retry. The status
+	// write is elided on a no-op re-pend (writeClaimStatusIfChanged).
+	beforeStatus := claim.Status.DeepCopy()
+	claim.Status.Phase = v1.SandboxPending
+	recordClaimPending()
+	setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(now),
+		Reason:             "PoolNotFound",
+		Message: fmt.Sprintf(
+			"the referenced SandboxPool %q does not exist in namespace %q; the sandbox will retry (waited %s of the %s grace period); create the pool or delete this sandbox",
+			poolName, claim.Namespace, waited.Round(time.Second), maxWait,
+		),
+	})
 	_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
 	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 }

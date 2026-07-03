@@ -52,6 +52,15 @@ func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
+// poolIn builds a SandboxPool named name in the org namespace. create() now
+// pre-checks that the referenced pool exists before building the Sandbox, so
+// create tests that expect the object to be built must seed its pool.
+func poolIn(org, name string) *v1.SandboxPool {
+	return &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: tenant.NamespaceForOrg(org)},
+	}
+}
+
 // readySandbox builds a Ready sandbox in the org namespace with the org label,
 // plus its token Secret.
 func readySandbox(org, name, endpoint, token string) (*v1.Sandbox, *corev1.Secret) {
@@ -90,7 +99,7 @@ func decodeBody(t *testing.T, b []byte) map[string]any {
 // Sandbox in mitos-org-<org> with the org label and the right pool, polls to
 // Ready, and returns id+endpoint+token (the token comes from the Secret).
 func TestCreateBuildsSandboxAndReturnsTokenOnReady(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	// Flip the created sandbox to Ready and seed its token Secret in the
@@ -144,7 +153,7 @@ func TestCreateBuildsSandboxAndReturnsTokenOnReady(t *testing.T) {
 // TestCreateUsesDefaultPoolWhenUnset asserts a create with no pool/image uses the
 // configured default pool.
 func TestCreateUsesDefaultPoolWhenUnset(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "base"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second), WithDefaultPool("base"))
 	stop := flipToReadyWhenCreated(t, c, orgA, "1.2.3.4:9091", "tok")
 	defer stop()
@@ -180,10 +189,45 @@ func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	}
 }
 
+// TestCreateUnknownPoolFailsFast asserts a create naming a pool that does not
+// exist in the tenant namespace returns an instant, LLM-legible 404 that names
+// the pool, and creates no Sandbox object. Without the pre-check the create
+// would build a Sandbox that only pends until the controller's bounded grace
+// expires while the caller blocks for the full ready timeout (issue #630).
+func TestCreateUnknownPoolFailsFast(t *testing.T) {
+	c := newFakeClient(t) // no pools seeded
+	// A long ready timeout would make a regression (create then poll) hang; the
+	// pre-check must return before any poll, so this stays fast regardless.
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"typo-not-a-pool"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if !strings.Contains(body, "typo-not-a-pool") {
+		t.Errorf("error does not name the pool: %s", body)
+	}
+	if !strings.Contains(body, "not_found") {
+		t.Errorf("error is not shaped as not_found: %s", body)
+	}
+	// No Sandbox was built for a rejected create.
+	var list v1.SandboxList
+	_ = c.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Errorf("created %d sandboxes for an unknown-pool request", len(list.Items))
+	}
+}
+
 // TestCreateFailedReturnsRejectionMessage asserts a Failed phase yields an
 // LLM-legible error carrying the rejection condition message.
 func TestCreateFailedReturnsRejectionMessage(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 	stop := flipWhenCreated(t, c, orgA, func(sb *v1.Sandbox) {
 		sb.Status.Phase = v1.SandboxFailed
@@ -206,7 +250,7 @@ func TestCreateFailedReturnsRejectionMessage(t *testing.T) {
 // TestCreateTimeoutReturnsClearError asserts a sandbox that never becomes Ready
 // times out with a 504-style error.
 func TestCreateTimeoutReturnsClearError(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(40*time.Millisecond))
 	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`)})
 	if resp.Status != http.StatusGatewayTimeout {
@@ -753,7 +797,7 @@ func TestForwardUnknownOpReturnsNotFound(t *testing.T) {
 // after opFromPath maps it to sandbox.create: the SDK sends template, not pool
 // or image, so the create handler must check all three fields.
 func TestForkBodyTemplateFieldResolvesPool(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "python"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-fork")
@@ -784,7 +828,7 @@ func TestForkBodyTemplateFieldResolvesPool(t *testing.T) {
 // DirectSandbox constructor reads. Without them the SDK raises a KeyError even if
 // the gateway correctly routes the request.
 func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "python"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
 	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-shape")
@@ -820,7 +864,7 @@ func TestCreateResponseIncludesTemplateIDAndForkTimeMs(t *testing.T) {
 // namespaces are not provisioned.
 func TestSingleTenantNamespaceAllOpsUseMitosNS(t *testing.T) {
 	const ns = "mitos"
-	c := newFakeClient(t)
+	c := newFakeClient(t, &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: ns}})
 	cp := New(c,
 		WithPollInterval(5*time.Millisecond),
 		WithReadyTimeout(2*time.Second),
@@ -929,7 +973,7 @@ func TestSingleTenantNamespaceCrossOrgAuthzPreserved(t *testing.T) {
 // is a no-op: the per-org namespace is still used, preserving the
 // mitos-org-alpha default-mode behavior.
 func TestSingleTenantNamespaceEmptyIsNoOp(t *testing.T) {
-	c := newFakeClient(t)
+	c := newFakeClient(t, poolIn(orgA, "default"))
 	cp := New(c,
 		WithPollInterval(5*time.Millisecond),
 		WithReadyTimeout(2*time.Second),
@@ -1062,6 +1106,7 @@ func TestCreateApiServerInvalidSurfacesValidationCause(t *testing.T) {
 	base := fakeclient.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithStatusSubresource(&v1.Sandbox{}).
+		WithObjects(poolIn(orgA, "default")).
 		Build()
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
