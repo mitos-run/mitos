@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.16.0](https://github.com/mitos-run/mitos/compare/v1.15.2...v1.16.0) (2026-07-03)
+
+
+### Features
+
+* **cli:** mitos init takes a new user from key-in-hand to a verified setup ([#639](https://github.com/mitos-run/mitos/issues/639)) ([fe1f9f4](https://github.com/mitos-run/mitos/commit/fe1f9f47a640230e1e0fbf767ecac0d5f2254227))
+* **console:** light theme following prefers-color-scheme with manual override ([#634](https://github.com/mitos-run/mitos/issues/634)) ([fcfacff](https://github.com/mitos-run/mitos/commit/fcfacffdc11e36ea44fea3e3272310768d24fad9)), closes [#621](https://github.com/mitos-run/mitos/issues/621)
+* **saas:** webhook and checkout write the org to billing-customer link ([#645](https://github.com/mitos-run/mitos/issues/645)) ([916fe09](https://github.com/mitos-run/mitos/commit/916fe0930b19b95def1fe91d1feeaff0a90e695f))
+
+
+### Bug Fixes
+
+* **saas:** durable audit log so the org audit trail survives console restarts ([#633](https://github.com/mitos-run/mitos/issues/633)) ([d40a701](https://github.com/mitos-run/mitos/commit/d40a701e537b8e669df939c1801ac4492148ab61)), closes [#616](https://github.com/mitos-run/mitos/issues/616)
+* **saas:** durable, replica-shared kill-switch suspension store ([#632](https://github.com/mitos-run/mitos/issues/632)) ([80a50d4](https://github.com/mitos-run/mitos/commit/80a50d46fdb7dfd0b4dbd19142fc1beaaccdad8c))
+* **saas:** graceful shutdown, real readiness, and PDBs for the hosted control plane ([#624](https://github.com/mitos-run/mitos/issues/624)) ([63b610b](https://github.com/mitos-run/mitos/commit/63b610b10600143283da6bbcb26957b3e8919246))
+
 ## [1.15.2](https://github.com/mitos-run/mitos/compare/v1.15.1...v1.15.2) (2026-07-03)
 
 
