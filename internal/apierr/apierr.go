@@ -119,6 +119,25 @@ func (e Error) WithCause(cause string) Error {
 	return e
 }
 
+// WithMessage returns a copy of e with the human-facing message replaced. It
+// does not mutate e, so a Catalogue entry can be reused for a caller whose
+// context differs from the default (for example a session endpoint reusing the
+// generic unauthorized code but describing a browser session, not a sandbox
+// token). The message must never contain a secret value.
+func (e Error) WithMessage(message string) Error {
+	e.Message = message
+	return e
+}
+
+// WithRemediation returns a copy of e with the remediation replaced, so a caller
+// can point at the action that actually resolves ITS failure instead of the
+// catalogue default. It does not mutate e. The remediation must never contain a
+// secret value.
+func (e Error) WithRemediation(remediation string) Error {
+	e.Remediation = remediation
+	return e
+}
+
 // WithContext returns a copy of e with the context map set. The context must
 // never contain a secret value.
 func (e Error) WithContext(ctx map[string]any) Error {
