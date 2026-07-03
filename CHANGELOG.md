@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.2](https://github.com/mitos-run/mitos/compare/v1.15.1...v1.15.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** create error journey speaks accurately (missing field, unknown route) ([#649](https://github.com/mitos-run/mitos/issues/649)) ([8713bab](https://github.com/mitos-run/mitos/commit/8713bab59ada905499ae80e970a8096dbb68f338))
+
 ## [1.15.1](https://github.com/mitos-run/mitos/compare/v1.15.0...v1.15.1) (2026-07-03)
 
 
