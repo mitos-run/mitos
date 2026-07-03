@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.17.0](https://github.com/mitos-run/mitos/compare/v1.16.0...v1.17.0) (2026-07-03)
+
+
+### Features
+
+* **fork:** live-state fork carries the source filesystem and running kernel (not the template) ([#611](https://github.com/mitos-run/mitos/issues/611)) ([c4ab5f5](https://github.com/mitos-run/mitos/commit/c4ab5f536083d734ba9bb879383221ea84f1e452))
+
+
+### Bug Fixes
+
+* **brand:** dark --ink-3 label token meets AA small-text contrast ([#652](https://github.com/mitos-run/mitos/issues/652)) ([38d4357](https://github.com/mitos-run/mitos/commit/38d43575be710f20ef8e0b03616c633eb31384fb)), closes [#635](https://github.com/mitos-run/mitos/issues/635)
+* **cli:** windows build of mitos, statfs check split behind build tags ([#654](https://github.com/mitos-run/mitos/issues/654)) ([194c5ac](https://github.com/mitos-run/mitos/commit/194c5ac9b834e19849af001bc9d971c21ccfb9b8))
+
 ## [1.16.0](https://github.com/mitos-run/mitos/compare/v1.15.2...v1.16.0) (2026-07-03)
 
 
