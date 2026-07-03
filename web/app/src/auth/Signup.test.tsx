@@ -9,6 +9,7 @@ import { Signup } from './Signup'
 function mockFetch({
   connectors = [] as string[],
   signupStatus = 202,
+  signup = undefined as boolean | undefined,
 } = {}) {
   vi.stubGlobal(
     'fetch',
@@ -17,7 +18,7 @@ function mockFetch({
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ connectors }),
+          json: async () => ({ connectors, ...(signup === undefined ? {} : { signup }) }),
         })
       }
       if (url === '/onboarding/signup' && opts?.method === 'POST') {
@@ -214,6 +215,26 @@ describe('Signup page', () => {
       })
       vi.unstubAllGlobals()
     }
+  })
+
+  it('renders the signup form when the server enables signup', async () => {
+    mockFetch({ signup: true })
+    render(<Signup />)
+    await waitFor(() => {
+      expect(screen.getByRole('textbox', { name: /email/i })).toBeInTheDocument()
+    })
+  })
+
+  it('renders the administrator message instead of the form when signup is disabled', async () => {
+    mockFetch({ signup: false })
+    render(<Signup />)
+    await waitFor(() => {
+      expect(screen.getByText(/handled by your administrator/i)).toBeInTheDocument()
+    })
+    // No signup form, no dead end: a way back to sign in is offered.
+    expect(screen.queryByRole('textbox', { name: /email/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /send me a sign-in link/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /go to sign in/i })).toHaveAttribute('href', '/login')
   })
 
   it('clicking "Use a different email" resets back to the form', async () => {
