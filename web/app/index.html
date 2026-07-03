@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mitos console</title>
+    <script>
+      // Pin a stored explicit theme before first paint so a manual override
+      // does not flash the system theme. Mirrors src/appearance.ts; keep the
+      // storage key and accepted values in sync.
+      try {
+        var mitosTheme = JSON.parse(localStorage.getItem('mitos-appearance') || '{}').theme
+        if (mitosTheme === 'dark' || mitosTheme === 'light') {
+          document.documentElement.dataset.theme = mitosTheme
+        }
+      } catch (e) { /* restricted storage: fall back to prefers-color-scheme */ }
+    </script>
   </head>
   <body>
     <div id="root"></div>
