@@ -10,6 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"mitos.run/mitos/internal/tenant"
+	"mitos.run/mitos/internal/usage"
 )
 
 // TestRegistryNodeListerExposesHTTPEndpoints asserts the NodeLister adapter yields
@@ -63,7 +66,7 @@ func huskPod(name, org, ns string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			Labels:    map[string]string{huskLabel: "true", "mitos.run/org": org},
+			Labels:    map[string]string{huskLabel: "true", tenant.OrgLabelKey: org},
 		},
 	}
 }
@@ -110,5 +113,82 @@ func TestPodLabelLookupListsOncePerCycle(t *testing.T) {
 
 	if cc.lists != 1 {
 		t.Fatalf("husk pods listed %d times for one cycle, want exactly 1 (the O(n^2) per-sandbox list is the bug)", cc.lists)
+	}
+}
+
+// scrapablePod builds a Running, claimed, org-labeled husk pod with a PodIP: the
+// exact shape HuskPodScrapeLister must return for the usage.HuskSource to scrape.
+func scrapablePod(name, org, podIP string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "mitos-org-" + org,
+			Labels: map[string]string{
+				huskLabel:       "true",
+				huskClaimLabel:  name,
+				"mitos.run/org": org,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: podIP},
+	}
+}
+
+// TestHuskPodScrapeListerSelectsClaimedOrgLabeledPods asserts the lister returns
+// each Running, claimed, org-labeled husk pod's vm-id (pod name), trusted org, and
+// podIP:huskSandboxPort endpoint, and OMITS pods that are unclaimed, unattributed
+// (no org label), not Running, or have no PodIP: only a billable claimed pod is
+// scraped, and org comes from the trusted label, never client input.
+func TestHuskPodScrapeListerSelectsClaimedOrgLabeledPods(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unclaimed warm pod (no claim label): must be omitted.
+	warm := huskPod("sb-warm", "acme", "mitos-org-acme")
+	// Claimed but no org label (self-host single-tenant): must be omitted.
+	noOrg := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb-selfhost",
+			Namespace: "default",
+			Labels:    map[string]string{huskLabel: "true", huskClaimLabel: "sb-selfhost"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.9"},
+	}
+	// Claimed + org labeled but no PodIP yet: must be omitted.
+	noIP := scrapablePod("sb-noip", "acme", "")
+
+	cl := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			scrapablePod("sb-acme", "acme", "10.0.0.1"),
+			scrapablePod("sb-globex", "globex", "10.0.0.2"),
+			warm, noOrg, noIP,
+		).
+		Build()
+
+	lister := &HuskPodScrapeLister{Client: cl}
+	got, err := lister.ListHuskPods(context.Background())
+	if err != nil {
+		t.Fatalf("ListHuskPods: %v", err)
+	}
+
+	byVM := map[string]usage.HuskPod{}
+	for _, p := range got {
+		byVM[p.VMID] = p
+	}
+	if len(byVM) != 2 {
+		t.Fatalf("want 2 scrapable pods, got %d: %+v", len(byVM), got)
+	}
+	if p := byVM["sb-acme"]; p.OrgID != "acme" || p.Endpoint != "10.0.0.1:9091" {
+		t.Errorf("sb-acme = %+v, want org acme endpoint 10.0.0.1:9091", p)
+	}
+	if p := byVM["sb-globex"]; p.OrgID != "globex" || p.Endpoint != "10.0.0.2:9091" {
+		t.Errorf("sb-globex = %+v, want org globex endpoint 10.0.0.2:9091", p)
+	}
+	for _, absent := range []string{"sb-warm", "sb-selfhost", "sb-noip"} {
+		if _, ok := byVM[absent]; ok {
+			t.Errorf("%s must be omitted (unclaimed / no org / no PodIP)", absent)
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/guestgrpc"
+	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/snapcompat"
 	"mitos.run/mitos/internal/volume"
@@ -1224,6 +1225,38 @@ func (s *Stub) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
+}
+
+// Metering returns this husk pod's CoW-aware metering report for the usage
+// collector's GET /v1/metering scrape (issue #613). In production every sandbox
+// VM runs inside its OWN husk pod, which forkd's engine never tracks, so without
+// this a husk pod reports nothing and hosted meters nothing.
+//
+// Before a successful activate (StateNew/StateDormant, the warm window) it is the
+// EMPTY report, identical to metering.Aggregate(nil), so a scrape during the warm
+// window is a clean empty body, never a 5xx. After activate it is a single-sample
+// report for this pod's ONE VM: the sample's ID is the pod's vm-id (s.cfg.ID), the
+// SAME id the controller maps to an org via the trusted mitos.run/org husk-pod
+// label, so the collector can attribute the usage. Template is empty: a husk pod
+// holds exactly one VM, so there is no intra-report CoW group to amortize.
+//
+// SECRET-FREE: the report carries ONLY the vm-id and numeric byte/second counts,
+// never argv, env, file bytes, or the per-sandbox bearer token.
+func (s *Stub) Metering() metering.Report {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != StateActive {
+		// A dormant/warm pod meters nothing yet: the empty report keeps a scrape a
+		// clean empty body rather than an error.
+		return metering.Report{}
+	}
+	// TODO(#613): memory sampling. The firecracker child PID is reachable (the
+	// production vmm promotes firecracker.Client.PID, so a type assertion could
+	// read it) and internal/fork.readMemoryStats reads /proc/<pid>/smaps_rollup,
+	// but reusing that reader would mean exporting it from the security-sensitive
+	// internal/fork package. vCPU-seconds (billed from the Sample's presence over
+	// time) is the priority; memory bytes are a fast-follow, reported as 0 for now.
+	return metering.Aggregate([]metering.Sample{{ID: s.cfg.ID}})
 }
 
 // ErrVMMDead is returned by MonitorVMM when the Firecracker VMM has been

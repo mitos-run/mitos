@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"mitos.run/mitos/internal/tenant"
 	"mitos.run/mitos/internal/usage"
 )
 
@@ -102,4 +104,56 @@ func (l *PodLabelLookup) LabelsForSandbox(sandboxID string) (map[string]string, 
 	defer l.mu.RUnlock()
 	labels, ok := l.byName[sandboxID]
 	return labels, ok
+}
+
+// HuskPodScrapeLister adapts the controller's cached client to usage.HuskPodLister
+// so the live usage.HuskSource (issue #613) can scrape each CLAIMED husk pod's
+// in-pod GET /v1/metering. In production every sandbox VM runs inside its own husk
+// pod, which forkd's engine never tracks, so the forkd node source reports nothing
+// for it; this lister points the husk source at the pods themselves.
+//
+// It lists mitos.run/husk pods that are Running, carry a claim label
+// (mitos.run/claim, so they are actually claimed, not warm), have a PodIP, and
+// carry a NON-EMPTY trusted mitos.run/org label. It returns each pod's vm-id (the
+// pod name, which the pod reports as its single metering sample id), its org (the
+// trusted label), and its podIP:huskSandboxPort endpoint.
+//
+// SECURITY: the org is the controller's OWN stamped label, derived from the
+// trusted per-org namespace (see buildHuskPod), NEVER client input; the pod is
+// untrusted for org. A pod with no org label (self-host single-tenant) is omitted,
+// so it stays out of the billable samples rather than being forced into an org.
+type HuskPodScrapeLister struct {
+	Client client.Client
+}
+
+// ListHuskPods lists the claimed, org-labeled, Running husk pods cluster-wide and
+// returns their vm-id, org, and podIP:port endpoint. A List error is returned to
+// the caller so the collection cycle fails loudly and retries; swallowing it
+// would make an API or RBAC fault indistinguishable from an empty fleet and
+// silently zero the bill. Pod names and IPs are not secrets.
+func (l *HuskPodScrapeLister) ListHuskPods(ctx context.Context) ([]usage.HuskPod, error) {
+	var pods corev1.PodList
+	if err := l.Client.List(ctx, &pods,
+		client.MatchingLabels{huskLabel: "true"},
+		client.HasLabels{huskClaimLabel},
+	); err != nil {
+		return nil, fmt.Errorf("list husk pods: %w", err)
+	}
+	out := make([]usage.HuskPod, 0, len(pods.Items))
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
+			continue
+		}
+		org := p.Labels[tenant.OrgLabelKey]
+		if org == "" {
+			continue
+		}
+		out = append(out, usage.HuskPod{
+			VMID:     p.Name,
+			OrgID:    org,
+			Endpoint: fmt.Sprintf("%s:%d", p.Status.PodIP, huskSandboxPort),
+		})
+	}
+	return out, nil
 }
