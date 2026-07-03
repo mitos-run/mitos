@@ -152,3 +152,42 @@ func TestExecWSRejectsBadToken(t *testing.T) {
 
 // ensure fmt is used (kept for parity with sibling test files that format ids).
 var _ = fmt.Sprintf
+
+// TestExecWSAcceptsCrossOriginClients asserts an origin-bearing handshake is
+// accepted (issue #678). The Python SDK and any browser client send an Origin
+// header the backend Host (pod IP:port) can never match, and the library's
+// default same-origin check 403ed every such client at upgrade in production.
+// Auth here is the bearer token, not cookies, so origin adds no CSRF value.
+func TestExecWSAcceptsCrossOriginClients(t *testing.T) {
+	_, srv := newPtyAPI(t, "sekret")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, _, err := websocket.Dial(ctx, wsExecURL(srv.URL, "sb1"), &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": {"Bearer sekret"},
+			// A public API origin, deliberately mismatching the test server host.
+			"Origin": {"https://api.mitos.run"},
+		},
+		Subprotocols: []string{execWSSubprotocol},
+	})
+	if err != nil {
+		t.Fatalf("dial with cross-origin header: %v (the exec ws must not enforce same-origin; auth is the bearer token)", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Prove the session is usable, not merely accepted: open a PTY and see the
+	// echo round-trip.
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Open{Open: &sandboxv1.ExecOpen{
+			Pty: &sandboxv1.PtyOptions{Size: &sandboxv1.WindowSize{Cols: 80, Rows: 24}},
+		}},
+	})
+	writeFrame(ctx, t, c, false, &sandboxv1.ExecRequest{
+		Msg: &sandboxv1.ExecRequest_Stdin{Stdin: []byte("origin-ok\n")},
+	})
+	_, resp := readResponse(ctx, t, c)
+	if string(resp.GetStdout()) != "origin-ok\n" {
+		t.Fatalf("stdout = %q, want %q", resp.GetStdout(), "origin-ok\n")
+	}
+}
