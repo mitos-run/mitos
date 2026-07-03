@@ -11,7 +11,7 @@ import (
 // staticHuskPods is a fixed HuskPodLister for the husk-source tests.
 type staticHuskPods []HuskPod
 
-func (p staticHuskPods) ListHuskPods() []HuskPod { return []HuskPod(p) }
+func (p staticHuskPods) ListHuskPods(context.Context) ([]HuskPod, error) { return []HuskPod(p), nil }
 
 // singleVMReport is a husk pod's own metering report: exactly one sample whose id
 // is the pod's vm-id, matching what husk.Stub.Metering() produces.

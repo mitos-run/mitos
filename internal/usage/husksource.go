@@ -27,9 +27,12 @@ type HuskPod struct {
 // controller wires the usage collector, so internal/usage must not import
 // internal/controller): the controller's concrete adapter lists mitos.run/husk
 // pods carrying a non-empty trusted mitos.run/org label and returns each pod's
-// vm-id, org, and podIP:port. An empty slice yields no samples, not an error.
+// vm-id, org, and podIP:port. An empty slice with a nil error means genuinely no
+// pods; a listing FAILURE returns the error so the cycle fails loudly instead of
+// silently under-metering (an API/RBAC fault must never read as an empty fleet).
+// The context carries the collector's cancellation into the Kubernetes List.
 type HuskPodLister interface {
-	ListHuskPods() []HuskPod
+	ListHuskPods(ctx context.Context) ([]HuskPod, error)
 }
 
 // HuskSource is the live SampleSource that meters husk-pod sandboxes (issue #613).
@@ -99,8 +102,15 @@ func NewHuskSource(
 // Collect itself never returns an error for an unreachable pod.
 func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 	at := s.now()
+	pods, err := s.pods.ListHuskPods(ctx)
+	if err != nil {
+		// A total listing failure fails the cycle loudly: the collector logs it
+		// and retries next cycle. Returning empty here would silently zero the
+		// bill for the whole fleet, the exact failure mode issue #613 closes.
+		return nil, fmt.Errorf("list husk pods: %w", err)
+	}
 	var out []Sample
-	for _, pod := range s.pods.ListHuskPods() {
+	for _, pod := range pods {
 		if pod.OrgID == "" || pod.VMID == "" {
 			// An unattributed pod (no trusted org label) or one with no vm-id is not
 			// billable. Skip it without counting it as a scrape failure.

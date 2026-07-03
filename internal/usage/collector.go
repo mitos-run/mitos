@@ -123,7 +123,9 @@ func (m *MultiSource) Collect(ctx context.Context) ([]Sample, error) {
 	for _, src := range m.sources {
 		samples, err := src.Collect(ctx)
 		if err != nil {
-			return nil, err
+			// Name the failing sub-source (by type) so the collector's cycle log
+			// says WHICH half of the union failed, node or husk.
+			return nil, fmt.Errorf("sample source %T: %w", src, err)
 		}
 		out = append(out, samples...)
 	}

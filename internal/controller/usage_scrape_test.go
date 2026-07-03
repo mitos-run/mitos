@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"mitos.run/mitos/internal/tenant"
 	"mitos.run/mitos/internal/usage"
 )
 
@@ -65,7 +66,7 @@ func huskPod(name, org, ns string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			Labels:    map[string]string{huskLabel: "true", "mitos.run/org": org},
+			Labels:    map[string]string{huskLabel: "true", tenant.OrgLabelKey: org},
 		},
 	}
 }
@@ -167,7 +168,10 @@ func TestHuskPodScrapeListerSelectsClaimedOrgLabeledPods(t *testing.T) {
 		Build()
 
 	lister := &HuskPodScrapeLister{Client: cl}
-	got := lister.ListHuskPods()
+	got, err := lister.ListHuskPods(context.Background())
+	if err != nil {
+		t.Fatalf("ListHuskPods: %v", err)
+	}
 
 	byVM := map[string]usage.HuskPod{}
 	for _, p := range got {

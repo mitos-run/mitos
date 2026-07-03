@@ -46,6 +46,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -351,15 +352,18 @@ func run() error {
 	sandboxAPI.SetSingleSandbox(huskSandboxID)
 
 	// The metering source reads the stub's per-VM report. stub is assigned by
-	// husk.New below; the closure captures it by reference and the server is not
-	// reachable (no VM, empty report) until then, so a nil read is defensively
-	// mapped to the empty report.
+	// husk.New below, AFTER the sandbox server goroutine is already serving
+	// /v1/metering, so the handoff must be an atomic publication: a plain
+	// captured pointer would be a data race between the server goroutine's read
+	// and main's later assignment. Until publication the source reports empty
+	// (dormant pod, no VM yet).
 	var stub *husk.Stub
+	var publishedStub atomic.Pointer[husk.Stub]
 	meteringSource := func() metering.Report {
-		if stub == nil {
-			return metering.Report{}
+		if s := publishedStub.Load(); s != nil {
+			return s.Metering()
 		}
-		return stub.Metering()
+		return metering.Report{}
 	}
 	onActivated, meteringSrv, err := startSandboxServer(ctx, sandboxAPI, *sandboxListen, meteringSource)
 	if err != nil {
@@ -408,6 +412,8 @@ func run() error {
 		// from it. Empty disables the workspace ops (fail-closed).
 		CASDir: *casDir,
 	})
+	// Publish the constructed stub to the already-serving metering source.
+	publishedStub.Store(stub)
 
 	// In-pod egress filter wiring (the husk isolation guarantee). When enabled,
 	// the stub programs the VM's tap + default-deny nftables egress chain in THIS
@@ -582,7 +588,16 @@ func startSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr 
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen on sandbox address %s: %w", listenAddr, err)
 	}
-	srv := &http.Server{Handler: newSandboxMux(api, meteringSrc), ReadHeaderTimeout: 10 * time.Second}
+	// ReadHeaderTimeout bounds header parsing and IdleTimeout reaps keep-alive
+	// connections between requests. Read and Write timeouts are deliberately NOT
+	// set: this mux serves long-lived streaming exec and file transfers, and a
+	// blanket deadline would sever them mid-stream (forkd's :9091 server makes
+	// the same call).
+	srv := &http.Server{
+		Handler:           newSandboxMux(api, meteringSrc),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	fmt.Fprintf(os.Stderr, "husk-stub: serving sandbox API (metering unauthenticated, exec/files token-gated) %s\n", listenAddr)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {

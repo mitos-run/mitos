@@ -127,17 +127,17 @@ type HuskPodScrapeLister struct {
 }
 
 // ListHuskPods lists the claimed, org-labeled, Running husk pods cluster-wide and
-// returns their vm-id, org, and podIP:port endpoint. A List error yields an empty
-// slice (no pods scraped this cycle) rather than a partial or stale result: a
-// transient miss must never bill a pod to the wrong org. Pod names and IPs are not
-// secrets.
-func (l *HuskPodScrapeLister) ListHuskPods() []usage.HuskPod {
+// returns their vm-id, org, and podIP:port endpoint. A List error is returned to
+// the caller so the collection cycle fails loudly and retries; swallowing it
+// would make an API or RBAC fault indistinguishable from an empty fleet and
+// silently zero the bill. Pod names and IPs are not secrets.
+func (l *HuskPodScrapeLister) ListHuskPods(ctx context.Context) ([]usage.HuskPod, error) {
 	var pods corev1.PodList
-	if err := l.Client.List(context.Background(), &pods,
+	if err := l.Client.List(ctx, &pods,
 		client.MatchingLabels{huskLabel: "true"},
 		client.HasLabels{huskClaimLabel},
 	); err != nil {
-		return nil
+		return nil, fmt.Errorf("list husk pods: %w", err)
 	}
 	out := make([]usage.HuskPod, 0, len(pods.Items))
 	for i := range pods.Items {
@@ -155,5 +155,5 @@ func (l *HuskPodScrapeLister) ListHuskPods() []usage.HuskPod {
 			Endpoint: fmt.Sprintf("%s:%d", p.Status.PodIP, huskSandboxPort),
 		})
 	}
-	return out
+	return out, nil
 }
