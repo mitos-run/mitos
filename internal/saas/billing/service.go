@@ -167,21 +167,60 @@ func (s *Service) PushUsage(ctx context.Context, rec usage.UsageRecord) (int, er
 
 // DrawdownResult reports how a usage record's cost was settled against the
 // org's prepaid credit: how much credit covered it and how much remains to be
-// invoiced (the metered overage Stripe bills).
+// invoiced (the metered overage Stripe bills). Cost is the WHOLE-CENT amount
+// this settle produced, including the org's carried sub-cent remainder from
+// earlier windows (issue #662), so a run of sub-cent windows reports Cost 0
+// until the accumulated carry rounds to a cent.
 type DrawdownResult struct {
 	Cost       Money
 	FromCredit Money
 	Remaining  Money // billed via metered usage beyond credit.
+	// CarriedMilliCents is the org's drawdown remainder after this settle: the
+	// signed sub-cent milli-cents carried into the next window. Negative means
+	// round-half-up settled a cent slightly ahead of usage (the org prepaid up to
+	// half a cent that offsets what accrues next).
+	CarriedMilliCents int64
 }
 
-// Drawdown prices a usage record and draws it down against the org's prepaid
-// credit balance, capping the debit at the available balance so the ledger
-// NEVER goes negative. The portion not covered by credit (Remaining) is what the
-// metered Stripe push bills. The drawdown is idempotent on the usage record key:
-// replaying the same record is a no-op (ErrDuplicateEntry is swallowed) so a
-// retried settlement never double-debits.
+// Drawdown prices a usage record in MILLI-cents, folds it into the org's
+// carried sub-cent remainder, and settles the whole-cent part against the
+// org's prepaid credit, capping the debit at the available balance so the
+// ledger NEVER goes negative. Pricing per record in whole cents made steady
+// small sandboxes unbillable (issue #662: a 1-vCPU minute is 76.8 milli-cents,
+// rounded to 0 forever); the accumulator settles 1 cent as soon as the running
+// total rounds to one, and the ledger schema stays cents-based.
+//
+// The settle rounds HALF UP (matching CostCents), so the carried remainder is
+// signed in (-500, 500) and the cumulative debits track cumulative usage
+// within half a cent at every point in time.
+//
+// Idempotency and atomicity: EVERY record with a nonzero milli-cent cost
+// writes a ledger entry keyed by the (org, sandbox, window) usage key, even
+// when the settled amount is 0 cents; that entry is both the debit and the
+// processed-window marker. The entry and the new remainder commit in ONE
+// atomic ledger step (AppendWithRemainder), and a replay hits
+// ErrDuplicateEntry BEFORE any state moves, so a replayed window can neither
+// double-debit nor double-count into the carry. Concurrent drawdown drivers
+// settling the SAME org can still interleave the remainder read and write
+// (last write wins, skewing the carry by under a cent per race, never the
+// debits); the console runs one sequential driver, so this does not occur in
+// the shipped wiring.
 func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (DrawdownResult, error) {
-	cost := s.rates.CostCents(rec)
+	costMilli := s.rates.CostMilliCents(rec)
+	if costMilli == 0 {
+		// A zero-usage record settles nothing and marks nothing: re-pricing it on
+		// the next tick is free, and an idle org's ledger stays empty.
+		return DrawdownResult{}, nil
+	}
+	carried, err := s.ledger.Remainder(ctx, rec.OrgID)
+	if err != nil {
+		return DrawdownResult{}, fmt.Errorf("read drawdown remainder: %w", err)
+	}
+	totalMilli := carried + costMilli
+	// Round half up to whole cents. totalMilli >= carried + 1 > -500, so the
+	// shifted numerator is non-negative and Go's truncating division floors it.
+	cost := Money((totalMilli + 500) / 1000)
+	newCarry := totalMilli - int64(cost)*1000
 	bal, err := s.ledger.Balance(ctx, rec.OrgID)
 	if err != nil {
 		return DrawdownResult{}, fmt.Errorf("balance: %w", err)
@@ -193,32 +232,30 @@ func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (Drawdown
 	if fromCredit < 0 {
 		fromCredit = 0
 	}
-	if fromCredit > 0 {
-		err := s.ledger.Append(ctx, LedgerEntry{
-			OrgID:  rec.OrgID,
-			Kind:   KindUsageDrawdown,
-			Amount: -fromCredit,
-			Key:    usageKey(rec),
-			At:     s.now(),
-			Note:   "usage drawdown",
-		})
-		if err == ErrDuplicateEntry {
-			// Idempotent replay: the credit was already debited on the first call.
-			// Recover the credit portion from the existing ledger entry so the
-			// returned split matches the first call. Returning FromCredit:0
-			// (Remaining:cost) here would tell the caller to re-bill the WHOLE cost
-			// via Stripe even though credit already covered part of it: a double-bill.
-			prior, perr := s.priorDrawdownCredit(ctx, rec)
-			if perr != nil {
-				return DrawdownResult{}, perr
-			}
-			return DrawdownResult{Cost: cost, FromCredit: prior, Remaining: cost - prior}, nil
+	err = s.ledger.AppendWithRemainder(ctx, LedgerEntry{
+		OrgID:  rec.OrgID,
+		Kind:   KindUsageDrawdown,
+		Amount: -fromCredit,
+		Key:    usageKey(rec),
+		At:     s.now(),
+		Note:   "usage drawdown",
+	}, newCarry)
+	if err == ErrDuplicateEntry {
+		// Idempotent replay: this window was already settled and the remainder
+		// already advanced; nothing moved on this call. Report the credit the
+		// FIRST call debited (recovered from its ledger entry) and Remaining 0: a
+		// replay must never instruct the caller to bill anything again, and the
+		// original carry-inclusive split is not reconstructible from the record.
+		prior, perr := s.priorDrawdownCredit(ctx, rec)
+		if perr != nil {
+			return DrawdownResult{}, perr
 		}
-		if err != nil {
-			return DrawdownResult{}, fmt.Errorf("append drawdown: %w", err)
-		}
+		return DrawdownResult{Cost: prior, FromCredit: prior, Remaining: 0, CarriedMilliCents: carried}, nil
 	}
-	return DrawdownResult{Cost: cost, FromCredit: fromCredit, Remaining: cost - fromCredit}, nil
+	if err != nil {
+		return DrawdownResult{}, fmt.Errorf("append drawdown: %w", err)
+	}
+	return DrawdownResult{Cost: cost, FromCredit: fromCredit, Remaining: cost - fromCredit, CarriedMilliCents: newCarry}, nil
 }
 
 // priorDrawdownCredit returns the credit amount debited by the already-recorded

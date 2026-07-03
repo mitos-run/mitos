@@ -2,8 +2,10 @@ package pgstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mitos.run/mitos/internal/saas/billing"
 )
@@ -32,6 +34,60 @@ func (l *PgCreditLedger) Append(ctx context.Context, e billing.LedgerEntry) erro
 	}
 	if err != nil {
 		return fmt.Errorf("append ledger entry: %w", err)
+	}
+	return nil
+}
+
+// Remainder returns the org's carried drawdown remainder in milli-cents
+// (migration 0010, issue #662). An org with no row reads as zero, exactly like
+// the in-memory ledger.
+func (l *PgCreditLedger) Remainder(ctx context.Context, orgID string) (int64, error) {
+	const q = `SELECT milli_cents FROM drawdown_remainders WHERE org_id = $1`
+	var m int64
+	err := l.pool.QueryRow(ctx, q, orgID).Scan(&m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read drawdown remainder: %w", err)
+	}
+	return m, nil
+}
+
+// AppendWithRemainder inserts the entry and upserts the org's drawdown
+// remainder in ONE transaction: either both land or neither does. A duplicate
+// non-empty Key rolls the whole transaction back and returns
+// billing.ErrDuplicateEntry with the remainder untouched, which is what makes a
+// replayed drawdown window unable to double-debit or double-count the carry.
+func (l *PgCreditLedger) AppendWithRemainder(ctx context.Context, e billing.LedgerEntry, remainderMilliCents int64) error {
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin drawdown settle: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const insert = `
+        INSERT INTO credit_ledger (org_id, kind, amount, idem_key, at, note)
+        VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err = tx.Exec(ctx, insert, e.OrgID, string(e.Kind), int64(e.Amount), e.Key, e.At, e.Note)
+	if e.Key != "" && isUniqueViolation(err) {
+		return billing.ErrDuplicateEntry
+	}
+	if err != nil {
+		return fmt.Errorf("append ledger entry: %w", err)
+	}
+
+	const upsert = `
+        INSERT INTO drawdown_remainders (org_id, milli_cents, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (org_id) DO UPDATE SET
+            milli_cents = EXCLUDED.milli_cents,
+            updated_at  = now()`
+	if _, err := tx.Exec(ctx, upsert, e.OrgID, remainderMilliCents); err != nil {
+		return fmt.Errorf("set drawdown remainder: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit drawdown settle: %w", err)
 	}
 	return nil
 }

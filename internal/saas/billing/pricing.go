@@ -17,7 +17,11 @@
 // (an env-resolved handle), counts and ids only are logged.
 package billing
 
-import "mitos.run/mitos/internal/usage"
+import (
+	"math"
+
+	"mitos.run/mitos/internal/usage"
+)
 
 // Money is an integer count of the account currency's minor unit (cents for
 // USD), the standard Stripe representation. Using an integer minor unit avoids
@@ -149,22 +153,34 @@ func AllMeters() []MeterUnit {
 	return []MeterUnit{MeterVCPUSecond, MeterMemGiBSecond, MeterStorageGiBHour, MeterEgressGiB, MeterGPUSecond}
 }
 
-// CostCents computes the exact integer-cent cost of one usage record under a
-// rate table. It accumulates each dimension's contribution in milli-cents
-// (float, but bounded and summed before any rounding) and rounds the TOTAL to
-// the nearest cent exactly once, so sub-cent per-tick rates never round to zero
-// mid-accumulation. This is the function the spend-cap and the credit-drawdown
-// both price usage with, so a record costs the same to the cap as to the ledger.
-func (r Rates) CostCents(rec usage.UsageRecord) Money {
+// CostMilliCents computes the integer MILLI-cent cost of one usage record
+// under a rate table: each dimension's contribution is accumulated as a float
+// and the total is rounded to the nearest milli-cent exactly once. This is the
+// drawdown's pricing unit (issue #662): a realistic one-minute window of a
+// small sandbox costs a fraction of a cent, so pricing in whole cents rounded
+// every window to zero and made steady compute unbillable. The per-org
+// accumulator in Service.Drawdown sums these milli-cent costs and settles
+// whole cents against the ledger, which stays cents-based.
+func (r Rates) CostMilliCents(rec usage.UsageRecord) int64 {
 	milliCents := QuantityFor(MeterVCPUSecond, rec)*r.VCPUSecondMilliCents +
 		QuantityFor(MeterMemGiBSecond, rec)*r.MemGiBSecondMilliCents +
 		QuantityFor(MeterStorageGiBHour, rec)*r.StorageGiBHourMilliCents +
 		QuantityFor(MeterEgressGiB, rec)*r.EgressGiBMilliCents +
 		QuantityFor(MeterGPUSecond, rec)*r.GPUSecondMilliCents
-	// milli-cents -> cents, round to nearest.
-	cents := (milliCents + 500) / 1000
-	if cents < 0 {
-		cents = 0
+	m := int64(math.Round(milliCents))
+	if m < 0 {
+		m = 0
 	}
-	return Money(int64(cents))
+	return m
+}
+
+// CostCents computes the integer-cent cost of one usage record under a rate
+// table: the milli-cent cost rounded to the nearest cent exactly once, so
+// sub-cent per-tick rates never round to zero mid-accumulation. It is DERIVED
+// from CostMilliCents so the console's spend estimate and the drawdown's
+// accumulator can never disagree on a record's price. Note a single sub-cent
+// window legitimately rounds to 0 here; the drawdown does NOT use this view
+// per record (it accumulates milli-cents across windows, issue #662).
+func (r Rates) CostCents(rec usage.UsageRecord) Money {
+	return Money((r.CostMilliCents(rec) + 500) / 1000)
 }

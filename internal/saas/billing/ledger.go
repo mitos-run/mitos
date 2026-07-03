@@ -48,9 +48,16 @@ type LedgerEntry struct {
 var ErrDuplicateEntry = errors.New("billing: ledger entry with this key already exists")
 
 // CreditLedger is the per-org append-only credit ledger. The in-memory
-// implementation is the tested default; a durable store is a documented
-// follow-up behind the same interface. Balance is always the signed sum of
-// entries, so the ledger cannot drift. It NEVER stores a payment secret.
+// implementation is the tested default; the durable implementation is
+// pgstore.PgCreditLedger. Balance is always the signed sum of entries, so the
+// ledger cannot drift. It NEVER stores a payment secret.
+//
+// The ledger also owns each org's carried DRAWDOWN REMAINDER (issue #662): the
+// signed sub-cent milli-cent balance left over after the accumulator settles
+// whole cents. It lives on the ledger, not in a separate store, so an
+// implementation can commit a debit and its remainder in ONE atomic step
+// (AppendWithRemainder); with two stores a crash between the writes would skew
+// the carry.
 type CreditLedger interface {
 	// Append adds an entry. If an entry with the same non-empty Key already exists
 	// for the org, it returns ErrDuplicateEntry and changes nothing (idempotency).
@@ -61,23 +68,41 @@ type CreditLedger interface {
 	Balance(ctx context.Context, orgID string) (Money, error)
 	// Entries returns the org's entries in append order, for audit and statements.
 	Entries(ctx context.Context, orgID string) ([]LedgerEntry, error)
+	// Remainder returns the org's carried drawdown remainder in milli-cents. An
+	// org with no recorded remainder reads as 0. The value is signed: the
+	// round-half-up settle in Service.Drawdown keeps it in (-500, 500); a
+	// negative value means the org prepaid a sub-cent that offsets future usage.
+	Remainder(ctx context.Context, orgID string) (int64, error)
+	// AppendWithRemainder appends e and sets the org's drawdown remainder in one
+	// ATOMIC step: on ErrDuplicateEntry (the replayed-window case) NEITHER the
+	// entries nor the remainder change, so a replayed drawdown cannot
+	// double-count the carry, and no crash can land the debit without its
+	// remainder (or vice versa).
+	AppendWithRemainder(ctx context.Context, e LedgerEntry, remainderMilliCents int64) error
 }
 
 // MemCreditLedger is the in-memory CreditLedger. Safe for concurrent use.
 type MemCreditLedger struct {
-	mu      sync.Mutex
-	byOrg   map[string][]LedgerEntry
-	seenKey map[string]bool // org+"\x00"+key -> exists, the idempotency guard.
+	mu        sync.Mutex
+	byOrg     map[string][]LedgerEntry
+	seenKey   map[string]bool  // org+"\x00"+key -> exists, the idempotency guard.
+	remainder map[string]int64 // org -> carried drawdown remainder, milli-cents.
 }
 
 // NewMemCreditLedger returns an empty ledger.
 func NewMemCreditLedger() *MemCreditLedger {
-	return &MemCreditLedger{byOrg: map[string][]LedgerEntry{}, seenKey: map[string]bool{}}
+	return &MemCreditLedger{byOrg: map[string][]LedgerEntry{}, seenKey: map[string]bool{}, remainder: map[string]int64{}}
 }
 
 func (l *MemCreditLedger) Append(_ context.Context, e LedgerEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendLocked(e)
+}
+
+// appendLocked is Append under an already-held mutex, shared by Append and
+// AppendWithRemainder so the duplicate-key check has exactly one home.
+func (l *MemCreditLedger) appendLocked(e LedgerEntry) error {
 	if e.Key != "" {
 		k := e.OrgID + "\x00" + e.Key
 		if l.seenKey[k] {
@@ -86,6 +111,25 @@ func (l *MemCreditLedger) Append(_ context.Context, e LedgerEntry) error {
 		l.seenKey[k] = true
 	}
 	l.byOrg[e.OrgID] = append(l.byOrg[e.OrgID], e)
+	return nil
+}
+
+func (l *MemCreditLedger) Remainder(_ context.Context, orgID string) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.remainder[orgID], nil
+}
+
+// AppendWithRemainder appends e and sets the org's drawdown remainder under one
+// mutex hold: a duplicate key changes nothing, so a replayed drawdown can
+// neither double-debit nor double-count the carry.
+func (l *MemCreditLedger) AppendWithRemainder(_ context.Context, e LedgerEntry, remainderMilliCents int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.appendLocked(e); err != nil {
+		return err
+	}
+	l.remainder[e.OrgID] = remainderMilliCents
 	return nil
 }
 
