@@ -27,6 +27,10 @@ export type Capabilities = {
 
 export type AuthConnectorsResponse = {
   connectors: string[]
+  // signup mirrors the server-controlled caps.signup flag over the public
+  // pre-auth endpoint (the authenticated /console/capabilities is not readable
+  // before login in production). Absent on older servers.
+  signup?: boolean
 }
 
 export type Instruments = {
@@ -159,10 +163,11 @@ export async function post<T>(path: string, body: unknown): Promise<T | null> {
 
 export const api = {
   capabilities: () => get<Capabilities>('/console/capabilities'),
-  // authConnectors fetches the public /auth/connectors endpoint which returns
-  // the configured social-login providers without requiring a session. The SPA
-  // reads this before login to decide which social buttons to render.
-  authConnectors: () => get<AuthConnectorsResponse>('/auth/connectors').then((r) => r.connectors ?? []),
+  // authConfig fetches the public /auth/connectors endpoint which returns the
+  // configured social-login providers and the server-controlled signup flag
+  // without requiring a session. The SPA reads this before login to decide
+  // which social buttons to render and whether to offer self-serve signup.
+  authConfig: () => get<AuthConnectorsResponse>('/auth/connectors'),
   instruments: () => get<Instruments>('/console/instruments'),
   secrets: () => get<{ secrets: SecretView[] }>('/console/secrets').then((r) => r.secrets ?? []),
   createSecret: async (name: string, value: string) => {

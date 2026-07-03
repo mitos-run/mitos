@@ -23,7 +23,7 @@ export function Usage() {
 
   return (
     <section>
-      <PageHeader title="Usage" lede="Consumption metrics for the current billing period. All numbers come directly from the BFF." />
+      <PageHeader title="Usage" lede="Consumption for the current billing period. These numbers are measured live from your sandboxes; nothing here is estimated." />
 
       {isLoading ? (
         <Skeleton rows={3} />
