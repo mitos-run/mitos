@@ -180,6 +180,11 @@ type DrawdownResult struct {
 	// round-half-up settled a cent slightly ahead of usage (the org prepaid up to
 	// half a cent that offsets what accrues next).
 	CarriedMilliCents int64
+	// Replayed reports that this window was ALREADY settled by an earlier call:
+	// nothing moved on this one. The drawdown driver counts a replayed result
+	// separately and never adds its FromCredit to the cycle's settled total
+	// (issue #672: settledCents must reflect only appends that actually landed).
+	Replayed bool
 }
 
 // Drawdown prices a usage record in MILLI-cents, folds it into the org's
@@ -195,16 +200,17 @@ type DrawdownResult struct {
 // within half a cent at every point in time.
 //
 // Idempotency and atomicity: EVERY record with a nonzero milli-cent cost
-// writes a ledger entry keyed by the (org, sandbox, window) usage key, even
-// when the settled amount is 0 cents; that entry is both the debit and the
-// processed-window marker. The entry and the new remainder commit in ONE
-// atomic ledger step (AppendWithRemainder), and a replay hits
-// ErrDuplicateEntry BEFORE any state moves, so a replayed window can neither
-// double-debit nor double-count into the carry. Concurrent drawdown drivers
-// settling the SAME org can still interleave the remainder read and write
-// (last write wins, skewing the carry by under a cent per race, never the
-// debits); the console runs one sequential driver, so this does not occur in
-// the shipped wiring.
+// writes a processed-window marker keyed by the (org, sandbox, window) usage
+// key, plus a ledger entry under the same key when the settled amount is
+// nonzero (a zero-cent settle marks the window without a customer-visible
+// zero-amount ledger row, issue #672). The marker, the entry, and the new
+// remainder commit in ONE atomic ledger step (SettleWindow, the issue #666
+// AppendWithRemainder path extended), and a replay hits ErrDuplicateEntry
+// BEFORE any state moves, so a replayed window can neither double-debit nor
+// double-count into the carry. Concurrent drawdown drivers settling the SAME
+// org can still interleave the remainder read and write (last write wins,
+// skewing the carry by under a cent per race, never the debits); the console
+// runs one sequential driver, so this does not occur in the shipped wiring.
 func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (DrawdownResult, error) {
 	costMilli := s.rates.CostMilliCents(rec)
 	if costMilli == 0 {
@@ -232,14 +238,14 @@ func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (Drawdown
 	if fromCredit < 0 {
 		fromCredit = 0
 	}
-	err = s.ledger.AppendWithRemainder(ctx, LedgerEntry{
+	err = s.ledger.SettleWindow(ctx, LedgerEntry{
 		OrgID:  rec.OrgID,
 		Kind:   KindUsageDrawdown,
 		Amount: -fromCredit,
 		Key:    usageKey(rec),
 		At:     s.now(),
 		Note:   "usage drawdown",
-	}, newCarry)
+	}, newCarry, ProcessedWindow{OrgID: rec.OrgID, SandboxID: rec.SandboxID, Window: rec.Window})
 	if err == ErrDuplicateEntry {
 		// Idempotent replay: this window was already settled and the remainder
 		// already advanced; nothing moved on this call. Report the credit the
@@ -250,7 +256,7 @@ func (s *Service) Drawdown(ctx context.Context, rec usage.UsageRecord) (Drawdown
 		if perr != nil {
 			return DrawdownResult{}, perr
 		}
-		return DrawdownResult{Cost: prior, FromCredit: prior, Remaining: 0, CarriedMilliCents: carried}, nil
+		return DrawdownResult{Cost: prior, FromCredit: prior, Remaining: 0, CarriedMilliCents: carried, Replayed: true}, nil
 	}
 	if err != nil {
 		return DrawdownResult{}, fmt.Errorf("append drawdown: %w", err)
@@ -278,14 +284,30 @@ func (s *Service) priorDrawdownCredit(ctx context.Context, rec usage.UsageRecord
 			return 0, nil
 		}
 	}
-	// No matching entry: the first call debited nothing (fromCredit was 0), so the
-	// duplicate guard cannot have fired on a drawdown entry; treat as zero credit.
+	// No matching entry: the first call debited nothing (a zero-cent settle
+	// writes only the processed-window marker, no ledger row), so the replayed
+	// window's prior credit is zero.
 	return 0, nil
 }
 
 // usageKey is the (org, sandbox, window) ledger idempotency key for a drawdown.
 func usageKey(rec usage.UsageRecord) string {
-	return fmt.Sprintf("drawdown:%s|%s|%s", rec.OrgID, rec.SandboxID, rec.Window.UTC().Format(time.RFC3339Nano))
+	return DrawdownKey(rec.OrgID, rec.SandboxID, rec.Window)
+}
+
+// SettledWindowKeys exposes the ledger's already-settled window keys (the
+// union of processed-window markers and legacy keyed usage_drawdown rows) so
+// the drawdown driver can skip settled windows BEFORE pricing them (issue
+// #672). since bounds the read to the driver's lookback.
+func (s *Service) SettledWindowKeys(ctx context.Context, orgID string, since time.Time) (map[string]bool, error) {
+	return s.ledger.SettledWindowKeys(ctx, orgID, since)
+}
+
+// PruneProcessedWindows drops processed-window markers whose window is before
+// olderThan; the drawdown driver calls it once per cycle with the start of its
+// lookback so the marker set stays bounded.
+func (s *Service) PruneProcessedWindows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return s.ledger.PruneProcessedWindows(ctx, olderThan)
 }
 
 // EnforceSpendCap checks an org's period spend against its caps and fires the

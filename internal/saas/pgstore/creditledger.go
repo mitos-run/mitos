@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,27 +55,43 @@ func (l *PgCreditLedger) Remainder(ctx context.Context, orgID string) (int64, er
 	return m, nil
 }
 
-// AppendWithRemainder inserts the entry and upserts the org's drawdown
-// remainder in ONE transaction: either both land or neither does. A duplicate
-// non-empty Key rolls the whole transaction back and returns
-// billing.ErrDuplicateEntry with the remainder untouched, which is what makes a
+// SettleWindow commits one drawdown settle in ONE transaction (issue #672,
+// extending the issue #666 AppendWithRemainder path): the processed-window
+// marker, the org's drawdown remainder, and, only when the amount is nonzero,
+// the ledger entry. A duplicate marker (the replayed-window case) or a
+// duplicate non-empty entry key (a window settled before the marker table
+// existed) rolls the whole transaction back and returns
+// billing.ErrDuplicateEntry with everything untouched, which is what makes a
 // replayed drawdown window unable to double-debit or double-count the carry.
-func (l *PgCreditLedger) AppendWithRemainder(ctx context.Context, e billing.LedgerEntry, remainderMilliCents int64) error {
+func (l *PgCreditLedger) SettleWindow(ctx context.Context, e billing.LedgerEntry, remainderMilliCents int64, w billing.ProcessedWindow) error {
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin drawdown settle: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	const insert = `
-        INSERT INTO credit_ledger (org_id, kind, amount, idem_key, at, note)
-        VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err = tx.Exec(ctx, insert, e.OrgID, string(e.Kind), int64(e.Amount), e.Key, e.At, e.Note)
-	if e.Key != "" && isUniqueViolation(err) {
+	const mark = `
+        INSERT INTO processed_usage_windows (org_id, sandbox_id, window_at)
+        VALUES ($1, $2, $3)`
+	_, err = tx.Exec(ctx, mark, w.OrgID, w.SandboxID, w.Window)
+	if isUniqueViolation(err) {
 		return billing.ErrDuplicateEntry
 	}
 	if err != nil {
-		return fmt.Errorf("append ledger entry: %w", err)
+		return fmt.Errorf("mark processed window: %w", err)
+	}
+
+	if e.Amount != 0 {
+		const insert = `
+        INSERT INTO credit_ledger (org_id, kind, amount, idem_key, at, note)
+        VALUES ($1, $2, $3, $4, $5, $6)`
+		_, err = tx.Exec(ctx, insert, e.OrgID, string(e.Kind), int64(e.Amount), e.Key, e.At, e.Note)
+		if e.Key != "" && isUniqueViolation(err) {
+			return billing.ErrDuplicateEntry
+		}
+		if err != nil {
+			return fmt.Errorf("append ledger entry: %w", err)
+		}
 	}
 
 	const upsert = `
@@ -90,6 +107,67 @@ func (l *PgCreditLedger) AppendWithRemainder(ctx context.Context, e billing.Ledg
 		return fmt.Errorf("commit drawdown settle: %w", err)
 	}
 	return nil
+}
+
+// SettledWindowKeys returns the org's already-settled drawdown keys since the
+// given instant: the processed-window markers (by window time) unioned with
+// the keyed usage_drawdown ledger rows (by settle time). The ledger half keeps
+// windows settled BEFORE migration 0011 deduplicated across the deploy (their
+// only trace is the ledger row) and is removable once one drawdown lookback
+// horizon has passed since that deploy. A settle always happens after its
+// window closes, so at >= since never hides a row whose window is in scope.
+func (l *PgCreditLedger) SettledWindowKeys(ctx context.Context, orgID string, since time.Time) (map[string]bool, error) {
+	out := map[string]bool{}
+
+	const markers = `
+        SELECT sandbox_id, window_at FROM processed_usage_windows
+        WHERE org_id = $1 AND window_at >= $2`
+	rows, err := l.pool.Query(ctx, markers, orgID, since)
+	if err != nil {
+		return nil, fmt.Errorf("read processed windows: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sandboxID string
+		var window time.Time
+		if err := rows.Scan(&sandboxID, &window); err != nil {
+			return nil, fmt.Errorf("scan processed window: %w", err)
+		}
+		out[billing.DrawdownKey(orgID, sandboxID, window)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate processed windows: %w", err)
+	}
+
+	const legacy = `
+        SELECT idem_key FROM credit_ledger
+        WHERE org_id = $1 AND kind = $2 AND idem_key <> '' AND at >= $3`
+	lrows, err := l.pool.Query(ctx, legacy, orgID, string(billing.KindUsageDrawdown), since)
+	if err != nil {
+		return nil, fmt.Errorf("read settled ledger keys: %w", err)
+	}
+	defer lrows.Close()
+	for lrows.Next() {
+		var key string
+		if err := lrows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan settled ledger key: %w", err)
+		}
+		out[key] = true
+	}
+	if err := lrows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate settled ledger keys: %w", err)
+	}
+	return out, nil
+}
+
+// PruneProcessedWindows deletes markers whose window is before olderThan and
+// returns how many were removed.
+func (l *PgCreditLedger) PruneProcessedWindows(ctx context.Context, olderThan time.Time) (int64, error) {
+	tag, err := l.pool.Exec(ctx, `DELETE FROM processed_usage_windows WHERE window_at < $1`, olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("prune processed windows: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // Balance returns the signed sum of the org's ledger entries. An org with no
