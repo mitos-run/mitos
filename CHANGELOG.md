@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.1](https://github.com/mitos-run/mitos/compare/v1.19.0...v1.19.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** drawdown skips settled windows before pricing; markers leave the ledger ([#675](https://github.com/mitos-run/mitos/issues/675)) ([d6880ec](https://github.com/mitos-run/mitos/commit/d6880ec5cd85d845b6fc37b1169445afcb7e3569)), closes [#672](https://github.com/mitos-run/mitos/issues/672)
+* **saas:** usage records carry the API-visible sandbox id, not the husk pod name ([#673](https://github.com/mitos-run/mitos/issues/673)) ([d163f2e](https://github.com/mitos-run/mitos/commit/d163f2ef8b91c9260f151fd2163e7d06c88dbee1)), closes [#663](https://github.com/mitos-run/mitos/issues/663)
+
 ## [1.19.0](https://github.com/mitos-run/mitos/compare/v1.18.0...v1.19.0) (2026-07-03)
 
 

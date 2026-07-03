@@ -12,12 +12,16 @@ import (
 )
 
 // HuskPod is one claimed, org-labeled husk pod the HuskSource scrapes. VMID is
-// the pod's vm-id (the id the pod reports as its single metering Sample AND the
-// id the controller maps to an org); OrgID is the owning org from the TRUSTED
+// the pod's vm-id (the pod NAME: the id the pod reports as its single metering
+// Sample AND the id the controller maps to an org); APIID is the API-VISIBLE
+// sandbox id from the TRUSTED controller-stamped mitos.run/claim label (the
+// claiming Sandbox's name, the id the customer saw; issue #663), NEVER from
+// anything the pod returns; OrgID is the owning org from the TRUSTED
 // mitos.run/org pod label, NEVER from anything the pod returns; Endpoint is the
 // pod's in-pod sandbox HTTP endpoint (podIP:port) serving GET /v1/metering.
 type HuskPod struct {
 	VMID     string
+	APIID    string
 	OrgID    string
 	Endpoint string
 }
@@ -131,6 +135,20 @@ func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 			return "", false
 		}
 		samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
+		// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
+		// claim label (issue #663), so usage_records reconcile to the sb-... id
+		// the customer saw, never the internal husk pod name. The trust check
+		// above stays keyed on the pod's vm-id: the pod cannot choose its billing
+		// id, only the controller's label does. Fallback: a pod whose lister
+		// carried no APIID (label absent; pre-#663 lister or a bespoke self-host
+		// lister) keeps the pod name, preserving the old behavior rather than
+		// dropping the sample. The Sample's Node field keeps the pod name (the
+		// vm-id), so support can still map a record back to the pod.
+		if pod.APIID != "" {
+			for i := range samples {
+				samples[i].SandboxID = pod.APIID
+			}
+		}
 		out = append(out, samples...)
 	}
 	return out, nil

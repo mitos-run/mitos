@@ -25,8 +25,14 @@ func (errLedger) Entries(context.Context, string) ([]billing.LedgerEntry, error)
 	return nil, nil
 }
 func (errLedger) Remainder(context.Context, string) (int64, error) { return 0, nil }
-func (errLedger) AppendWithRemainder(context.Context, billing.LedgerEntry, int64) error {
+func (errLedger) SettleWindow(context.Context, billing.LedgerEntry, int64, billing.ProcessedWindow) error {
 	return errors.New("ledger unavailable")
+}
+func (errLedger) SettledWindowKeys(context.Context, string, time.Time) (map[string]bool, error) {
+	return nil, errors.New("ledger unavailable")
+}
+func (errLedger) PruneProcessedWindows(context.Context, time.Time) (int64, error) {
+	return 0, errors.New("ledger unavailable")
 }
 
 // handleTopUp builds a WebhookHandler with the given provider and ledger, POSTs
