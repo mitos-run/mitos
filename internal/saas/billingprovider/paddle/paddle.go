@@ -139,6 +139,10 @@ func (p *Provider) VerifyWebhook(r *http.Request, body []byte) (billingprovider.
 	out := billingprovider.Event{
 		Status:      statusFor(ev.EventType),
 		CustomerRef: ev.Data.CustomerID,
+		// The org id we embedded in custom_data at checkout, surfaced so the
+		// webhook handler can record the org <-> customer link on the first
+		// event for a new customer (issue #618). "" when absent.
+		OrgID: ev.Data.CustomData.OrgID,
 	}
 	// A credit top-up rides on the same transaction.completed / transaction.paid
 	// event types as a subscription payment. It is a one-off prepaid purchase and
@@ -242,14 +246,19 @@ func (p *Provider) verifySignature(header string, body []byte) error {
 	return nil
 }
 
-// CheckoutURL creates a Paddle transaction for a prepaid credit top-up and
-// returns its hosted checkout URL. It POSTs to /transactions with the verified
-// Paddle body shape: a single inline price item, collection_mode automatic,
-// and custom_data carrying org_id and amount_cents for reconciliation.
-// The API key is sent as a bearer token and is never surfaced in any error.
-func (p *Provider) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (string, error) {
+// CreateCheckout creates a Paddle transaction for a prepaid credit top-up and
+// returns its hosted checkout URL plus the customer id the transaction was
+// created for. It POSTs to /transactions with the verified Paddle body shape: a
+// single inline price item, collection_mode automatic, and custom_data carrying
+// org_id and amount_cents for reconciliation. The response's data.customer_id
+// echoes the request's customer_id when one was sent and is null for a guest
+// checkout (Paddle creates the customer only when the hosted checkout collects
+// an email), so Checkout.CustomerRef may be empty; the webhook-time link covers
+// that case. The API key is sent as a bearer token and is never surfaced in any
+// error.
+func (p *Provider) CreateCheckout(ctx context.Context, in billingprovider.TopUp) (billingprovider.Checkout, error) {
 	if p.apiKey == "" {
-		return "", errors.New("paddle: checkout not configured (no API key)")
+		return billingprovider.Checkout{}, errors.New("paddle: checkout not configured (no API key)")
 	}
 	centsStr := strconv.FormatInt(in.AmountCents, 10)
 	type unitPrice struct {
@@ -307,42 +316,43 @@ func (p *Provider) CheckoutURL(ctx context.Context, in billingprovider.TopUp) (s
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("paddle: marshal checkout request: %w", err)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: marshal checkout request: %w", err)
 	}
 	reqURL := p.baseURL + "/transactions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("paddle: build checkout request: %w", err)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: build checkout request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("paddle: checkout request: %w", err)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: checkout request: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("paddle: read checkout response: %w", err)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: read checkout response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("paddle: checkout API returned status %d", resp.StatusCode)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: checkout API returned status %d", resp.StatusCode)
 	}
 	var out struct {
 		Data struct {
-			ID       string `json:"id"`
-			Checkout struct {
+			ID         string `json:"id"`
+			CustomerID string `json:"customer_id"`
+			Checkout   struct {
 				URL string `json:"url"`
 			} `json:"checkout"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return "", fmt.Errorf("paddle: malformed checkout response: %w", err)
+		return billingprovider.Checkout{}, fmt.Errorf("paddle: malformed checkout response: %w", err)
 	}
 	if out.Data.Checkout.URL == "" {
-		return "", errors.New("paddle: checkout url missing; set a default payment link")
+		return billingprovider.Checkout{}, errors.New("paddle: checkout url missing; set a default payment link")
 	}
-	return out.Data.Checkout.URL, nil
+	return billingprovider.Checkout{URL: out.Data.Checkout.URL, CustomerRef: out.Data.CustomerID}, nil
 }
 
 // PortalURL returns a Paddle-hosted customer portal URL ("manage subscription")
