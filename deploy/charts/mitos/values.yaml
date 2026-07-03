@@ -673,10 +673,13 @@ gateway:
     # keys on the real client; a too-short or spoofed X-Forwarded-For fails closed
     # to RemoteAddr.
     trustedProxyHops: 0
-    # CAVEAT: the suspension (kill-switch) store is in-process for this slice, so a
-    # suspension does not survive a restart and is not shared across replicas. Run a
-    # single gateway replica for the kill-switch to be authoritative, or re-drive the
-    # abuse/billing signals after a restart, until the durable store follow-up lands.
+    # Kill-switch durability: when database.dsnSecretRef is set (the hosted
+    # profile), the suspension store is Postgres-backed, so a suspension survives
+    # gateway restarts and is shared across ALL replicas; a suspension written on
+    # one replica takes effect on the others within the store's short read-cache
+    # TTL (a few seconds). Without a database the store is in-process (DEV ONLY):
+    # it does not survive a restart and is not shared across replicas, so run a
+    # single replica or re-drive the abuse/billing signals after a restart.
   resources:
     requests:
       memory: "64Mi"
