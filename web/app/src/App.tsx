@@ -9,6 +9,7 @@ import { UnauthorizedError } from './api'
 import { queryClient, useCapabilities } from './data/query'
 import { createPreAuthRouter } from './auth/preauthRouter'
 import { createConsoleRouter } from './router'
+import { LoadingScreen } from './ui/LoadingScreen'
 import { ToastProvider } from './ui/Toast'
 
 function RoutedConsole() {
@@ -18,7 +19,7 @@ function RoutedConsole() {
   const consoleRouter = useMemo(() => (caps ? createConsoleRouter(caps) : null), [caps])
   if (error instanceof UnauthorizedError) return <RouterProvider router={preAuthRouter} />
   if (error) return <main style={{ padding: 32 }}><div className="t-dim">console unavailable: {String(error)}</div></main>
-  if (!caps || !consoleRouter) return <main style={{ padding: 32 }}><div className="t-dim">loading...</div></main>
+  if (!caps || !consoleRouter) return <LoadingScreen />
   return <RouterProvider router={consoleRouter} />
 }
 
