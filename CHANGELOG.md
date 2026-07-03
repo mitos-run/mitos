@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.0](https://github.com/mitos-run/mitos/compare/v1.18.0...v1.19.0) (2026-07-03)
+
+
+### Features
+
+* **chart:** values.schema.json rejects unknown keys at install time ([#667](https://github.com/mitos-run/mitos/issues/667)) ([d30c633](https://github.com/mitos-run/mitos/commit/d30c6334b6c345c62fa82b33de9691c9e4241686))
+
+
+### Bug Fixes
+
+* **saas:** drawdown accumulates usage in milli-cents so sub-cent windows bill ([#666](https://github.com/mitos-run/mitos/issues/666)) ([c2976c5](https://github.com/mitos-run/mitos/commit/c2976c5b8416a77f0760a6d88f3b4e5544312c83)), closes [#662](https://github.com/mitos-run/mitos/issues/662)
+
 ## [1.18.0](https://github.com/mitos-run/mitos/compare/v1.17.0...v1.18.0) (2026-07-03)
 
 
