@@ -270,7 +270,7 @@ func (c *Console) caller(r *http.Request) (accountID, orgID string, err apierr.E
 	orgID, hasOrg := OrgFromContext(r.Context())
 	accountID, hasCaller := CallerFromContext(r.Context())
 	if !hasOrg || !hasCaller {
-		return "", "", apierr.Get(apierr.CodeUnauthorized).
+		return "", "", sessionUnauthorized().
 			WithCause("no authenticated org context is attached to the request"), false
 	}
 	// noErr is the zero value returned on the success path; callers ignore the

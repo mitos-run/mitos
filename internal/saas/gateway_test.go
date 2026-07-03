@@ -129,6 +129,42 @@ func TestGatewayRejectsMissingKey(t *testing.T) {
 	}
 }
 
+// TestGatewayUnauthorizedIsApiKeyShaped asserts the 401 a hosted caller gets for
+// a missing or invalid api key speaks about the API KEY, not the per-sandbox
+// bearer token. The default apierr.CodeUnauthorized remediation names "the
+// <name>-sandbox-token Secret", which is nonsense for the gateway's org-api-key
+// auth and misleads every SDK user who mistypes or omits their key (the #28
+// LLM-legible error rule).
+func TestGatewayUnauthorizedIsApiKeyShaped(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	for name, bearer := range map[string]string{"missing": "", "forged": "mitos_live_forged"} {
+		t.Run(name, func(t *testing.T) {
+			rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", bearer, "{}")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			var env struct {
+				Error struct {
+					Message     string `json:"message"`
+					Remediation string `json:"remediation"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+			}
+			blob := strings.ToLower(env.Error.Message + " " + env.Error.Remediation)
+			if strings.Contains(blob, "sandbox") {
+				t.Errorf("gateway 401 leaks sandbox-token language: message=%q remediation=%q",
+					env.Error.Message, env.Error.Remediation)
+			}
+			if !strings.Contains(blob, "api key") {
+				t.Errorf("gateway 401 should name the api key, got message=%q remediation=%q",
+					env.Error.Message, env.Error.Remediation)
+			}
+		})
+	}
+}
+
 // TestGatewayRejectsForgedKey asserts a forged key yields unauthorized and does
 // not reach the control plane.
 func TestGatewayRejectsForgedKey(t *testing.T) {
