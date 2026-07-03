@@ -116,8 +116,12 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		pool = k.defaultPool
 	}
 	if pool == "" {
-		return errResp(apierr.Get(apierr.CodeInvalidJSON).
-			WithCause("the create request names neither a pool nor an image and no default pool is configured")), nil
+		// The body decoded fine (it is valid JSON); the pool field is just absent.
+		// CodeInvalidJSON ("the request body is not valid JSON") would misleadingly
+		// blame the JSON syntax, so surface an invalid_input naming the missing field
+		// (#28 LLM-legible errors).
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithCause("the create request must set \"pool\" (or \"image\"/\"template\"); none was provided and no default pool is configured")), nil
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)

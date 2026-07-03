@@ -165,13 +165,26 @@ func TestCreateUsesDefaultPoolWhenUnset(t *testing.T) {
 }
 
 // TestCreateNoPoolNoDefaultRejected asserts a create with neither pool nor a
-// default is a 400-style LLM-legible error and creates nothing.
+// default is a 400-style LLM-legible error and creates nothing. The body decoded
+// fine (it is valid JSON), so the error must be invalid_input naming the missing
+// pool field, NOT invalid_json (which would misleadingly blame the JSON syntax,
+// the #28 LLM-legible error rule).
 func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	c := newFakeClient(t)
 	cp := New(c, WithPollInterval(5*time.Millisecond))
 	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(`{}`)})
 	if resp.Status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if !strings.Contains(body, "invalid_input") {
+		t.Errorf("error code must be invalid_input for a valid-JSON body missing the pool field, got: %s", body)
+	}
+	if strings.Contains(body, "invalid_json") || strings.Contains(body, "not valid JSON") {
+		t.Errorf("error must not blame the JSON syntax when the body decoded fine: %s", body)
+	}
+	if !strings.Contains(body, "pool") {
+		t.Errorf("error cause must name the missing pool field: %s", body)
 	}
 	var list v1.SandboxList
 	_ = c.List(context.Background(), &list)

@@ -267,6 +267,29 @@ func (r *SandboxReconciler) now() time.Time {
 	return time.Now()
 }
 
+// poolConfirmRequeue is how long a claim waits to re-check a pool the cached
+// client reported missing but the uncached apiserver has not confirmed absent (an
+// informer-cache lag for a just-created pool). Short so a real typo still fails
+// within a moment, not the full create ready-timeout.
+const poolConfirmRequeue = 500 * time.Millisecond
+
+// poolAbsentUncached reports whether the pool is CONFIRMED absent by reading the
+// uncached apiserver directly (r.APIReader), so a transient informer-cache lag on
+// the cached client is not mistaken for a caller typo. It returns true ONLY on a
+// definitive NotFound from the uncached reader; a found pool, or a transient
+// (non-NotFound) uncached error, returns false so the caller requeues rather than
+// failing the claim. A nil APIReader (a bare unit-test reconciler with no manager)
+// trusts the cached NotFound and returns true, matching the APIReader fallback
+// documented on the struct field.
+func (r *SandboxReconciler) poolAbsentUncached(ctx context.Context, namespace, name string) bool {
+	if r.APIReader == nil {
+		return true
+	}
+	var pool v1.SandboxPool
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &pool)
+	return apierrors.IsNotFound(err)
+}
+
 // recordHuskDemand stamps a claim arrival for the claim's pool into the shared
 // demand tracker, the autoscaler's signal that warm capacity is being consumed.
 // It is best-effort: a nil tracker is a no-op. It records only the pool key and a
@@ -388,7 +411,49 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 		Namespace: claim.Namespace,
 		Name:      claim.Spec.Source.PoolRef.Name,
 	}, &pool); err != nil {
-		logger.Error(err, "pool not found", "pool", claim.Spec.Source.PoolRef.Name)
+		// A genuinely missing pool is a caller typo: fail the claim fast and
+		// terminally with an actionable condition rather than requeuing forever
+		// (which would leave the control-plane create hanging the full ready-timeout
+		// and surface a misleading generic timeout). But a NotFound from the CACHED
+		// client can also be a transient informer-cache lag for a pool that was JUST
+		// created (create-pool-then-create-sandbox); failing on that would wrongly
+		// reject a valid sandbox. So a cached NotFound is confirmed against the
+		// uncached apiserver: a true typo is NotFound there too (fail fast), while a
+		// cache-lag pool is found and we requeue to let the cache catch up. A
+		// NON-NotFound (transient apiserver) error keeps the requeue behavior.
+		// (#28 LLM-legible errors; the no-dead-ends journey rule.)
+		if apierrors.IsNotFound(err) {
+			if !r.poolAbsentUncached(ctx, claim.Namespace, claim.Spec.Source.PoolRef.Name) {
+				// Not confirmed absent (cache lag, or a transient uncached read
+				// error): requeue shortly rather than fail. The informer catches up
+				// within a cache sync; the create keeps waiting, it does not fail.
+				logger.V(1).Info("pool not in cache yet; requeuing to confirm before failing",
+					"pool", claim.Spec.Source.PoolRef.Name, "namespace", claim.Namespace)
+				return ctrl.Result{RequeueAfter: poolConfirmRequeue}, nil
+			}
+			logger.Info("pool not found, failing claim", "pool", claim.Spec.Source.PoolRef.Name, "namespace", claim.Namespace)
+			now := metav1.NewTime(r.now())
+			claim.Status.Phase = v1.SandboxFailed
+			// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+			// without it ttlFinished skips the claim forever (etcd leak), the same
+			// as the other terminal-Failed paths below.
+			claim.Status.FinishedAt = &now
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+				Reason:             "PoolNotFound",
+				Message: fmt.Sprintf(
+					"no such pool %q in namespace %q; create the SandboxPool or correct the poolRef name, then recreate the sandbox",
+					claim.Spec.Source.PoolRef.Name, claim.Namespace,
+				),
+			})
+			if err := r.Status().Update(ctx, claim); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "pool lookup failed", "pool", claim.Spec.Source.PoolRef.Name)
 		return ctrl.Result{}, err
 	}
 
