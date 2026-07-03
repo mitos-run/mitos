@@ -53,8 +53,14 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 	case "template.list":
 		return k.listTemplates(ctx, req)
 	default:
+		// An unmatched path reaches here as "sandbox.<method>" (opFromPath's
+		// fallback), which is not a sandbox at all: override the not_found default
+		// message ("no such sandbox") so the caller is not told a sandbox is
+		// missing when they hit a route the gateway does not expose (issue #640C).
 		return errResp(apierr.Get(apierr.CodeNotFound).
-			WithCause(fmt.Sprintf("unknown operation %q", req.Op))), nil
+			WithMessage("no such route or operation").
+			WithCause(fmt.Sprintf("the request did not map to a known gateway operation (resolved op %q)", req.Op)).
+			WithRemediation("Use a documented route: POST or GET /v1/sandboxes, GET or DELETE /v1/sandboxes/<id>, POST or GET /v1/templates, POST /v1/fork, or the runtime paths under /v1/sandboxes/<id>/.")), nil
 	}
 }
 
@@ -116,8 +122,11 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		pool = k.defaultPool
 	}
 	if pool == "" {
-		return errResp(apierr.Get(apierr.CodeInvalidJSON).
-			WithCause("the create request names neither a pool nor an image and no default pool is configured")), nil
+		// The body decoded fine; it just names no origin. That is a semantic
+		// input error, not a JSON parse failure (issue #640B).
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithCause("the create request sets none of pool, image, or template and the server has no default pool configured").
+			WithRemediation("Set \"pool\" (or \"image\"/\"template\") in the request body to an existing pool; list pools with GET /v1/templates.")), nil
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)
