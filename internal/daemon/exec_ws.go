@@ -142,6 +142,15 @@ func (api *SandboxAPI) handleExecWS(w http.ResponseWriter, r *http.Request) {
 
 	c, wsErr := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols: []string{execWSSubprotocol},
+		// The library's default same-origin check is deliberately disabled
+		// (issue #678): auth on this endpoint is the per-sandbox bearer token
+		// (ptyAuth above) and no cookies exist, so an origin check adds no
+		// CSRF protection. It only 403s legitimate origin-bearing clients: the
+		// backend Host is the pod IP and port, which no client Origin (the
+		// gateway-forwarded api host, a browser app, the Python SDK's default
+		// header) can ever match. The bearer token is the sole and sufficient
+		// gate; without it the request never reaches this Accept.
+		InsecureSkipVerify: true,
 	})
 	if wsErr != nil {
 		// websocket.Accept already wrote the failure status.
