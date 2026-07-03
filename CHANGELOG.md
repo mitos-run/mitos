@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/mitos-run/mitos/compare/v1.15.0...v1.15.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** create fails fast and legibly on an unknown pool ([#646](https://github.com/mitos-run/mitos/issues/646)) ([206de66](https://github.com/mitos-run/mitos/commit/206de66e1f741303b2d343a460a0a8693b8e275a))
+
 ## [1.15.0](https://github.com/mitos-run/mitos/compare/v1.14.0...v1.15.0) (2026-07-03)
 
 
