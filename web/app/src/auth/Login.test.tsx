@@ -3,9 +3,10 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Login } from './Login'
 
 // mockConnectors stubs fetch so that GET /auth/connectors returns the given
-// connector list. Other fetch calls fall through to the test's own stub or
-// return a generic rejection so they do not accidentally succeed.
-function mockConnectors(connectors: string[]) {
+// connector list and, when provided, the server-controlled signup flag. Other
+// fetch calls fall through to the test's own stub or return a generic
+// rejection so they do not accidentally succeed.
+function mockConnectors(connectors: string[], signup?: boolean) {
   vi.stubGlobal(
     'fetch',
     vi.fn().mockImplementation((url: string) => {
@@ -13,7 +14,7 @@ function mockConnectors(connectors: string[]) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ connectors }),
+          json: async () => ({ connectors, ...(signup === undefined ? {} : { signup }) }),
         })
       }
       return Promise.reject(new Error(`unexpected fetch: ${url}`))
@@ -71,6 +72,29 @@ describe('Login page', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /sign up with email/i })).toBeInTheDocument()
     })
+  })
+
+  it('shows the signup CTA when the server enables signup', async () => {
+    mockConnectors(['github'], true)
+    render(<Login />)
+    await screen.findByRole('link', { name: /Continue with GitHub/i })
+    expect(screen.getByRole('button', { name: /sign up with email/i })).toBeInTheDocument()
+  })
+
+  it('hides the signup CTA and email form when the server disables signup', async () => {
+    mockConnectors(['github'], false)
+    render(<Login />)
+    await screen.findByRole('link', { name: /Continue with GitHub/i })
+    expect(screen.queryByRole('button', { name: /sign up with email/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: /email/i })).not.toBeInTheDocument()
+  })
+
+  it('offers organization sign-in when signup is disabled and no social providers exist', async () => {
+    mockConnectors([], false)
+    render(<Login />)
+    const orgLink = await screen.findByRole('link', { name: /sign in with your organization account/i })
+    expect(orgLink).toHaveAttribute('href', '/auth/login')
+    expect(screen.queryByRole('button', { name: /sign up with email/i })).not.toBeInTheDocument()
   })
 
   it('propagates ?next= to provider connector hrefs', async () => {

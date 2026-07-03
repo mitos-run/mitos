@@ -1,6 +1,7 @@
 // Sandbox detail tab panels. Overview, Logs, and Fork tree read real BFF data;
-// Terminal, Filesystem, Metrics, and Spending render an honest placeholder naming
-// the surface they will read (those need new BFF endpoints, a later phase).
+// Terminal, Filesystem, Metrics, and Spending render an honest coming-soon
+// state. That copy is user-facing: plain language, what to use today, and no
+// internal endpoint or roadmap-phase references.
 import type { SandboxView } from '../../api'
 import { fmtBytes } from '../../api'
 import { useSandboxLogs } from '../../data/sandboxes'
@@ -27,6 +28,6 @@ export function LogsTab({ id }: { id: string }) {
   return <pre className="logs mono">{data}</pre>
 }
 
-export function PlaceholderTab({ title, surface }: { title: string; surface: string }) {
-  return <EmptyState title={`${title} ships in a later phase`} body={`It will stream over ${surface}. The transport exists; the console tab is a follow-up.`} />
+export function PlaceholderTab({ title, body }: { title: string; body: string }) {
+  return <EmptyState title={title} body={body} />
 }
