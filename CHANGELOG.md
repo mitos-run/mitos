@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.15.1](https://github.com/mitos-run/mitos/compare/v1.15.0...v1.15.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** create fails fast and legibly on an unknown pool ([#646](https://github.com/mitos-run/mitos/issues/646)) ([206de66](https://github.com/mitos-run/mitos/commit/206de66e1f741303b2d343a460a0a8693b8e275a))
+
+## [1.15.0](https://github.com/mitos-run/mitos/compare/v1.14.0...v1.15.0) (2026-07-03)
+
+
+### Features
+
+* **saas:** self-host operator knobs as first-class Helm values, configurable billing rates ([#623](https://github.com/mitos-run/mitos/issues/623)) ([a8162b3](https://github.com/mitos-run/mitos/commit/a8162b36c2213babd87ea76abcecd944da123918))
+
+
+### Bug Fixes
+
+* **console:** plain-language copy, signup gating on self-host, and boot loading states ([#626](https://github.com/mitos-run/mitos/issues/626)) ([a25e000](https://github.com/mitos-run/mitos/commit/a25e000f6803e68b85a432fe4edb504ecbda6fa7))
+* **controller:** sandbox with a nonexistent pool fails terminally after a bounded grace period ([#637](https://github.com/mitos-run/mitos/issues/637)) ([2833fe7](https://github.com/mitos-run/mitos/commit/2833fe745e3a5b3a789fb8add6dfbda41b25f43f)), closes [#630](https://github.com/mitos-run/mitos/issues/630)
+* **saas:** auth 401s speak to their own auth context, not the sandbox token ([#638](https://github.com/mitos-run/mitos/issues/638)) ([8e439a6](https://github.com/mitos-run/mitos/commit/8e439a62a4c5363d6cbf703827127b02236cf207))
+* **saas:** billing status and org-customer map are durable in Postgres ([#629](https://github.com/mitos-run/mitos/issues/629)) ([e354f80](https://github.com/mitos-run/mitos/commit/e354f8013805ca8f1af086237cf256605758ce5d)), closes [#614](https://github.com/mitos-run/mitos/issues/614)
+
 ## [1.14.0](https://github.com/mitos-run/mitos/compare/v1.13.1...v1.14.0) (2026-07-02)
 
 
