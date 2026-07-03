@@ -23,10 +23,12 @@
 // Concurrency model (PTY):
 //   A reader task drains the PTY master and sends ExecResponse::Stdout frames.
 //   A writer task reads the client stream and writes stdin bytes to the master;
-//   resize messages call sys::pty::set_winsize via a separately duped master fd.
-//   A wait/watchdog task awaits the reader task completion, a client-disconnect
-//   signal, or a timeout; it kills the process group, reaps the child, and sends
-//   ExecExit. All tasks are join-awaited before returning.
+//   resize messages call sys::pty::set_winsize via a separately duped master fd;
+//   stdin_close(true) writes ctrl-d (VEOF) to the master, the terminal
+//   equivalent of closing stdin, while keeping the master open so remaining
+//   output drains. A wait/watchdog task awaits the reader task completion, a
+//   client-disconnect signal, or a timeout; it kills the process group, reaps
+//   the child, and sends ExecExit. All tasks are join-awaited before returning.
 //
 // No unsafe code in this module: all syscalls are delegated to sys/pty.rs.
 
@@ -770,7 +772,24 @@ async fn exec_pty(
                             ws.rows,
                         );
                     }
-                    Some(ReqMsg::StdinClose(_)) | Some(ReqMsg::Open(_)) | None => {}
+                    Some(ReqMsg::StdinClose(true)) => {
+                        // End of input on a PTY: deliver ctrl-d (the default
+                        // VEOF control character, 0x04) through the line
+                        // discipline, exactly as if the user typed it. In
+                        // canonical mode the foreground process reads EOF; in
+                        // raw mode the application receives the byte itself.
+                        // The master MUST stay open: output produced after the
+                        // EOF (the shell's exit banner, a final prompt) still
+                        // drains to the client, and the exit frame is sent by
+                        // the watchdog once the child really exits. Ignoring
+                        // this frame left interactive shells waiting for input
+                        // until the exec timeout (issue #535).
+                        if master_write_afd.get_ref().write_all(&[0x04]).is_err() {
+                            client_gone_writer.cancel();
+                            break;
+                        }
+                    }
+                    Some(ReqMsg::StdinClose(false)) | Some(ReqMsg::Open(_)) | None => {}
                 },
                 // Ok(None): clean half-close; not a disconnect.
                 Ok(None) => {

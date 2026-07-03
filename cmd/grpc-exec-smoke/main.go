@@ -204,6 +204,36 @@ func runStreaming(client sandboxv1.SandboxClient) {
 	fmt.Println("================================")
 }
 
+// sendOrFail sends one ExecRequest frame and exits with a diagnosable message
+// on failure. gRPC returns a bare io.EOF from SendMsg whenever the server has
+// already terminated the RPC; the real terminal status is only observable via
+// RecvMsg. Without this, a server-side failure (for example the guest agent
+// failing openpty because devpts is not mounted, issue #535) surfaces as an
+// opaque "EOF" and the root cause is invisible in CI logs.
+func sendOrFail(stream sandboxv1.Sandbox_ExecClient, what string, req *sandboxv1.ExecRequest) {
+	err := stream.Send(req)
+	if err == nil {
+		return
+	}
+	if err == io.EOF {
+		// Drain any buffered frames; the RPC is already terminated so Recv
+		// returns the terminal status (or a clean io.EOF) promptly.
+		for {
+			_, rerr := stream.Recv()
+			if rerr == io.EOF {
+				fmt.Fprintf(os.Stderr, "FAIL %s: server closed the stream (clean EOF) before the frame was accepted\n", what)
+				os.Exit(1)
+			}
+			if rerr != nil {
+				fmt.Fprintf(os.Stderr, "FAIL %s: server terminated the stream: %v\n", what, rerr)
+				os.Exit(1)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "FAIL %s: %v\n", what, err)
+	os.Exit(1)
+}
+
 // runPTY proves the PTY-in-Exec path over vsock gRPC:
 //  1. Open an ExecOpen with a PtyOptions set (initial 80x24 window).
 //  2. Write "echo grpc-pty-ok" + newline as stdin bytes so the shell runs it.
@@ -226,7 +256,7 @@ func runPTY(client sandboxv1.SandboxClient) {
 	}
 
 	// 1. Open with PTY (80x24 window, default shell /bin/sh).
-	if err := stream.Send(&sandboxv1.ExecRequest{
+	sendOrFail(stream, "ExecRequest PTY open send", &sandboxv1.ExecRequest{
 		Msg: &sandboxv1.ExecRequest_Open{
 			Open: &sandboxv1.ExecOpen{
 				Command: "/bin/sh",
@@ -237,44 +267,32 @@ func runPTY(client sandboxv1.SandboxClient) {
 				TimeoutSeconds: 15,
 			},
 		},
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL ExecRequest PTY open send: %v\n", err)
-		os.Exit(1)
-	}
+	})
 
 	// Give the shell a moment to start its prompt before we send input.
 	time.Sleep(200 * time.Millisecond)
 
 	// 2. Send the command as stdin bytes.
-	if err := stream.Send(&sandboxv1.ExecRequest{
+	sendOrFail(stream, "send PTY stdin (command)", &sandboxv1.ExecRequest{
 		Msg: &sandboxv1.ExecRequest_Stdin{
 			Stdin: []byte("echo grpc-pty-ok\n"),
 		},
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL send PTY stdin (command): %v\n", err)
-		os.Exit(1)
-	}
+	})
 
 	// Small pause so the shell can run the echo before we send ctrl-d.
 	time.Sleep(200 * time.Millisecond)
 
 	// 6. Send a window resize before closing (proves the resize frame path).
-	if err := stream.Send(&sandboxv1.ExecRequest{
+	sendOrFail(stream, "send PTY resize", &sandboxv1.ExecRequest{
 		Msg: &sandboxv1.ExecRequest_Resize{
 			Resize: &sandboxv1.WindowSize{Cols: 120, Rows: 40},
 		},
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL send PTY resize: %v\n", err)
-		os.Exit(1)
-	}
+	})
 
 	// 3. Signal EOF on stdin (ctrl-d closes the shell session).
-	if err := stream.Send(&sandboxv1.ExecRequest{
+	sendOrFail(stream, "send PTY stdin_close", &sandboxv1.ExecRequest{
 		Msg: &sandboxv1.ExecRequest_StdinClose{StdinClose: true},
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL send PTY stdin_close: %v\n", err)
-		os.Exit(1)
-	}
+	})
 	if err := stream.CloseSend(); err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL CloseSend PTY: %v\n", err)
 		os.Exit(1)
