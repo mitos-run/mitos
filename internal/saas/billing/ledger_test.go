@@ -265,22 +265,23 @@ func TestDrawdownZeroUsageWritesNothing(t *testing.T) {
 	}
 }
 
-// TestMemLedgerAppendWithRemainderAtomicOnDuplicate asserts the combined
-// append-and-set-remainder is all-or-nothing: a duplicate idempotency key
-// returns ErrDuplicateEntry and leaves BOTH the entries and the remainder
+// TestMemLedgerSettleWindowAtomicOnDuplicate asserts the combined
+// marker-entry-remainder settle is all-or-nothing: a replayed window returns
+// ErrDuplicateEntry and leaves the entries, the remainder, and the marker set
 // exactly as they were. This is the invariant that makes a replayed drawdown
-// unable to double-count the carry.
-func TestMemLedgerAppendWithRemainderAtomicOnDuplicate(t *testing.T) {
+// unable to double-debit or double-count the carry.
+func TestMemLedgerSettleWindowAtomicOnDuplicate(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemCreditLedger()
 	now := fixedNow()
 
-	e := LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: 0, Key: "w1", At: now, Note: "usage drawdown"}
-	if err := l.AppendWithRemainder(ctx, e, 100); err != nil {
-		t.Fatalf("first append: %v", err)
+	w := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now}
+	e := LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: -1, Key: w.Key(), At: now, Note: "usage drawdown"}
+	if err := l.SettleWindow(ctx, e, 100, w); err != nil {
+		t.Fatalf("first settle: %v", err)
 	}
-	if err := l.AppendWithRemainder(ctx, e, 900); err != ErrDuplicateEntry {
-		t.Fatalf("duplicate append err = %v, want ErrDuplicateEntry", err)
+	if err := l.SettleWindow(ctx, e, 900, w); err != ErrDuplicateEntry {
+		t.Fatalf("duplicate settle err = %v, want ErrDuplicateEntry", err)
 	}
 	rem, err := l.Remainder(ctx, "org1")
 	if err != nil {
@@ -292,5 +293,240 @@ func TestMemLedgerAppendWithRemainderAtomicOnDuplicate(t *testing.T) {
 	entries, _ := l.Entries(ctx, "org1")
 	if len(entries) != 1 {
 		t.Errorf("entries after duplicate = %d, want 1", len(entries))
+	}
+	bal, _ := l.Balance(ctx, "org1")
+	if bal != -1 {
+		t.Errorf("balance after duplicate = %d, want -1 (the single debit)", int64(bal))
+	}
+}
+
+// TestMemLedgerSettleWindowDuplicateLedgerKeyLeavesMarkerUnset covers the
+// deploy transition: a window settled BEFORE the marker mechanism has only its
+// keyed ledger row. If a settle for that window slips past the skip set, the
+// keyed ledger insert must reject it and the marker must NOT land either (the
+// whole settle is one atomic step).
+func TestMemLedgerSettleWindowDuplicateLedgerKeyLeavesMarkerUnset(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+
+	w := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now}
+	// The pre-marker deploy wrote the keyed ledger row via plain Append.
+	old := LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: -2, Key: w.Key(), At: now, Note: "usage drawdown"}
+	if err := l.Append(ctx, old); err != nil {
+		t.Fatalf("legacy append: %v", err)
+	}
+
+	e := LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: -2, Key: w.Key(), At: now, Note: "usage drawdown"}
+	if err := l.SettleWindow(ctx, e, 250, w); err != ErrDuplicateEntry {
+		t.Fatalf("settle over legacy key err = %v, want ErrDuplicateEntry", err)
+	}
+	rem, _ := l.Remainder(ctx, "org1")
+	if rem != 0 {
+		t.Errorf("remainder after rejected settle = %d, want 0 (untouched)", rem)
+	}
+	keys, err := l.SettledWindowKeys(ctx, "org1", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("settled keys: %v", err)
+	}
+	// The window is still settled (the legacy ledger row says so), but only via
+	// the ledger half; the failed settle must not have half-written a marker
+	// alongside a rolled-back debit.
+	if !keys[w.Key()] {
+		t.Errorf("settled keys missing the legacy ledger key %q", w.Key())
+	}
+	entries, _ := l.Entries(ctx, "org1")
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want 1 (the legacy row only)", len(entries))
+	}
+}
+
+// TestMemLedgerZeroAmountSettleWritesMarkerNotEntry pins the issue #672 ledger
+// hygiene: a zero-cent settle (sub-cent usage folding into the carry) marks
+// the window processed and advances the remainder WITHOUT a customer-visible
+// zero-amount ledger row.
+func TestMemLedgerZeroAmountSettleWritesMarkerNotEntry(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+
+	w := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now}
+	e := LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: 0, Key: w.Key(), At: now, Note: "usage drawdown"}
+	if err := l.SettleWindow(ctx, e, 77, w); err != nil {
+		t.Fatalf("zero-amount settle: %v", err)
+	}
+	entries, _ := l.Entries(ctx, "org1")
+	if len(entries) != 0 {
+		t.Errorf("zero-amount settle wrote %d ledger entries, want 0", len(entries))
+	}
+	rem, _ := l.Remainder(ctx, "org1")
+	if rem != 77 {
+		t.Errorf("remainder = %d, want 77", rem)
+	}
+	// The marker still deduplicates a replay.
+	if err := l.SettleWindow(ctx, e, 154, w); err != ErrDuplicateEntry {
+		t.Fatalf("replayed zero-amount settle err = %v, want ErrDuplicateEntry", err)
+	}
+	keys, _ := l.SettledWindowKeys(ctx, "org1", now.Add(-time.Hour))
+	if !keys[w.Key()] {
+		t.Errorf("settled keys missing the marker key %q", w.Key())
+	}
+}
+
+// TestMemLedgerSettledWindowKeysUnionsMarkersAndLegacyRows asserts the skip
+// set consults BOTH dedup mechanisms during the transition horizon: windows
+// settled before the marker table (keyed ledger rows) AND windows settled
+// after (markers), each filtered to the since bound.
+func TestMemLedgerSettledWindowKeysUnionsMarkersAndLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+
+	// A legacy pre-marker settle: keyed ledger row only.
+	legacyKey := DrawdownKey("org1", "sb1", now.Add(-10*time.Minute))
+	if err := l.Append(ctx, LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: 0, Key: legacyKey, At: now}); err != nil {
+		t.Fatalf("legacy append: %v", err)
+	}
+	// A post-deploy settle: marker (zero amount, so no ledger row).
+	w := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now.Add(-5 * time.Minute)}
+	if err := l.SettleWindow(ctx, LedgerEntry{OrgID: "org1", Kind: KindUsageDrawdown, Amount: 0, Key: w.Key(), At: now}, 10, w); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	// A non-drawdown keyed entry must never enter the skip set.
+	if err := l.Append(ctx, LedgerEntry{OrgID: "org1", Kind: KindTopUp, Amount: 500, Key: "topup:pi_1", At: now}); err != nil {
+		t.Fatalf("topup append: %v", err)
+	}
+
+	keys, err := l.SettledWindowKeys(ctx, "org1", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("settled keys: %v", err)
+	}
+	if !keys[legacyKey] {
+		t.Errorf("missing legacy ledger key %q", legacyKey)
+	}
+	if !keys[w.Key()] {
+		t.Errorf("missing marker key %q", w.Key())
+	}
+	if keys["topup:pi_1"] {
+		t.Errorf("top-up key leaked into the settled-window skip set")
+	}
+	if len(keys) != 2 {
+		t.Errorf("settled keys = %d, want 2", len(keys))
+	}
+
+	// The since bound excludes older state: a since after everything yields none.
+	none, err := l.SettledWindowKeys(ctx, "org1", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("settled keys (future since): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("settled keys with future since = %d, want 0", len(none))
+	}
+}
+
+// TestMemLedgerPruneProcessedWindows asserts pruning removes only markers
+// whose window predates the horizon and reports the removed count.
+func TestMemLedgerPruneProcessedWindows(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+
+	oldW := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now.Add(-3 * time.Hour)}
+	newW := ProcessedWindow{OrgID: "org1", SandboxID: "sb1", Window: now.Add(-5 * time.Minute)}
+	for _, w := range []ProcessedWindow{oldW, newW} {
+		if err := l.SettleWindow(ctx, LedgerEntry{OrgID: w.OrgID, Kind: KindUsageDrawdown, Amount: 0, Key: w.Key(), At: now}, 0, w); err != nil {
+			t.Fatalf("settle %v: %v", w.Window, err)
+		}
+	}
+
+	n, err := l.PruneProcessedWindows(ctx, now.Add(-2*time.Hour))
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("pruned = %d, want 1", n)
+	}
+	keys, _ := l.SettledWindowKeys(ctx, "org1", time.Time{})
+	if keys[oldW.Key()] {
+		t.Errorf("pruned marker %q still present", oldW.Key())
+	}
+	if !keys[newW.Key()] {
+		t.Errorf("in-horizon marker %q was pruned", newW.Key())
+	}
+}
+
+// TestDrawdownReplayIsFlagged asserts a replayed Drawdown reports
+// Replayed=true (so the driver counts it out of settledCents) while a first
+// settle reports Replayed=false.
+func TestDrawdownReplayIsFlagged(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+	if err := GrantSignupCredit(ctx, l, "org1", USD(100), now); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc := NewService(Config{Stripe: NewFakeStripe(), Ledger: l, Rates: DefaultRates(), Now: fixedNow})
+	rec := usage.UsageRecord{OrgID: "org1", SandboxID: "sb1", Window: now, VCPUSeconds: 100_000} // $1.28.
+
+	first, err := svc.Drawdown(ctx, rec)
+	if err != nil {
+		t.Fatalf("first drawdown: %v", err)
+	}
+	if first.Replayed {
+		t.Errorf("first drawdown reported Replayed=true, want false")
+	}
+	replay, err := svc.Drawdown(ctx, rec)
+	if err != nil {
+		t.Fatalf("replay drawdown: %v", err)
+	}
+	if !replay.Replayed {
+		t.Errorf("replayed drawdown reported Replayed=false, want true")
+	}
+	if replay.FromCredit != first.FromCredit || replay.Remaining != 0 {
+		t.Errorf("replay = %+v, want prior FromCredit %d and Remaining 0", replay, int64(first.FromCredit))
+	}
+}
+
+// TestDrawdownZeroCentSettleKeepsLedgerClean is the issue #672 acceptance at
+// the service level: sub-cent windows that settle 0 cents no longer write
+// zero-amount usage_drawdown ledger rows; only the windows that actually move
+// money appear in the customer-visible ledger.
+func TestDrawdownZeroCentSettleKeepsLedgerClean(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemCreditLedger()
+	now := fixedNow()
+	if err := GrantSignupCredit(ctx, l, "org1", USD(5), now); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc := NewService(Config{Stripe: NewFakeStripe(), Ledger: l, Rates: DefaultRates(), Now: fixedNow})
+
+	// 10 sub-cent minutes settle exactly 1 cent (see
+	// TestDrawdownAccumulatesSubCentUsage): exactly ONE drawdown row.
+	for m := 0; m < 10; m++ {
+		if _, err := svc.Drawdown(ctx, minuteRecord("org1", "sb1", m)); err != nil {
+			t.Fatalf("drawdown minute %d: %v", m, err)
+		}
+	}
+	entries, _ := l.Entries(ctx, "org1")
+	var drawdownRows, zeroRows int
+	for _, e := range entries {
+		if e.Kind != KindUsageDrawdown {
+			continue
+		}
+		drawdownRows++
+		if e.Amount == 0 {
+			zeroRows++
+		}
+	}
+	if drawdownRows != 1 {
+		t.Errorf("usage_drawdown rows = %d, want 1 (only the settled cent)", drawdownRows)
+	}
+	if zeroRows != 0 {
+		t.Errorf("zero-amount usage_drawdown rows = %d, want 0 (issue #672)", zeroRows)
+	}
+	// Every priced window is still marked processed.
+	keys, _ := l.SettledWindowKeys(ctx, "org1", time.Time{})
+	if len(keys) != 10 {
+		t.Errorf("settled window keys = %d, want 10", len(keys))
 	}
 }
