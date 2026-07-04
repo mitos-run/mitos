@@ -10,10 +10,11 @@ usage metering wiring): the org list, an org's usage record list, an org's
 settled-window read, a per-record settle, or the marker prune. Each failure
 is counted and skipped without aborting the cycle, so a nonzero rate means
 SOME metered usage is not settling against prepaid credit while the rest
-still does. A system that meters usage while no money moves is the issue
-#662 failure signature (there it was per-record rounding; here it is failing
-operations, but the customer-visible symptom is the same). At the default 5m cadence a 30m window is about 6
-cycles: persistent, not one flaky tick. Threshold is environment-tunable.
+still does. A system that meters usage while no money moves is the
+issue #662 failure signature (there it was per-record rounding; here it is
+failing operations, but the customer-visible symptom is the same). At the
+default 5m cadence a 30m window is about 6 cycles: persistent, not one flaky
+tick. Threshold is environment-tunable.
 
 ## Likely causes
 
