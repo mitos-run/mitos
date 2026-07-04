@@ -19,7 +19,16 @@ import (
 func serveMetrics(ctx context.Context, logger *slog.Logger, addr string, reg *prometheus.Registry) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	srv := &http.Server{Addr: addr, Handler: mux}
+	// Timeouts bound a slow or stuck scraper (gosec G112): the listener is
+	// cluster-internal, but a Server without ReadHeaderTimeout still holds a
+	// goroutine per dangling connection.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

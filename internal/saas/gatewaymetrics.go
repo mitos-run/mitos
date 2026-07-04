@@ -76,13 +76,13 @@ func (m *GatewayMetrics) observeAuthDenial(reason string) {
 }
 
 // codeClass buckets an HTTP status into its class label ("2xx", "5xx", ...).
-// An out-of-range status (a misbehaving upstream) is reported verbatim rather
-// than dropped, still bounded in practice.
+// An out-of-range status (a misbehaving upstream) collapses to the single
+// "other" label so a garbage status can never mint unbounded series.
 func codeClass(status int) string {
 	if status >= 100 && status < 600 {
 		return strconv.Itoa(status/100) + "xx"
 	}
-	return strconv.Itoa(status)
+	return "other"
 }
 
 // WithGatewayMetrics wires a GatewayMetrics into the gateway. When absent (the

@@ -48,11 +48,14 @@ jobs:
         # Same tarball and version as the manifests job in ci.yaml. It
         # validates the PromQL in the chart's PrometheusRule (including the
         # SaaS group, which exists ONLY in the chart, unlike the engine rules
-        # mirrored in deploy/monitoring/), so a bad expression fails CI.
+        # mirrored in deploy/monitoring/), so a bad expression fails CI. The
+        # download is pinned by sha256 (the value from the release's
+        # sha256sums.txt for v2.53.1) so a tampered tarball fails the job.
         run: |
           set -euo pipefail
           curl -sSLo /tmp/prometheus.tar.gz \
             https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
+          echo "2234aa0f66d9f9b854144f6faaaed72a316df7a680d9dad7cb48e49a6fa5332c  /tmp/prometheus.tar.gz" | sha256sum -c -
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           sudo install /tmp/prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/promtool
           promtool --version

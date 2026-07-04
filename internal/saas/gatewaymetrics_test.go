@@ -111,3 +111,24 @@ func TestGatewayWithoutMetricsIsSafe(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestCodeClassBoundsGarbageStatus asserts an out-of-range status collapses to
+// the single "other" label (a misbehaving upstream can never mint unbounded
+// code_class series), while in-range statuses bucket by class.
+func TestCodeClassBoundsGarbageStatus(t *testing.T) {
+	cases := map[int]string{
+		101: "1xx", 200: "2xx", 302: "3xx", 404: "4xx", 599: "5xx",
+		0: "other", 42: "other", 600: "other", 7777: "other", -1: "other",
+	}
+	for status, want := range cases {
+		if got := codeClass(status); got != want {
+			t.Errorf("codeClass(%d) = %q, want %q", status, got, want)
+		}
+	}
+	m := NewGatewayMetrics()
+	m.MustRegister(prometheus.NewRegistry())
+	m.observeStatus(7777)
+	if got := testutil.ToFloat64(m.requests.WithLabelValues("other")); got != 1 {
+		t.Errorf("requests{other} = %v, want 1", got)
+	}
+}

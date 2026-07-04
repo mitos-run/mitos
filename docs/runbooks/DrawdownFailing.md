@@ -5,11 +5,14 @@
 `sum(rate(mitos_drawdown_cycle_errors_total[30m])) > 0` sustained for 30m.
 
 `mitos_drawdown_cycle_errors_total` counts failed operations inside the
-console's usage drawdown driver (issue #602): the org list, an org's usage
-record list, an org's settled-window read, a per-record settle, or the marker
-prune. Each failure is counted and skipped without aborting the cycle, so a
-nonzero rate means SOME metered usage is not settling against prepaid credit
-while the rest still does. At the default 5m cadence a 30m window is about 6
+console's usage drawdown driver (introduced by issue #602, the end-to-end
+usage metering wiring): the org list, an org's usage record list, an org's
+settled-window read, a per-record settle, or the marker prune. Each failure
+is counted and skipped without aborting the cycle, so a nonzero rate means
+SOME metered usage is not settling against prepaid credit while the rest
+still does. A system that meters usage while no money moves is the issue
+#662 failure signature (there it was per-record rounding; here it is failing
+operations, but the customer-visible symptom is the same). At the default 5m cadence a 30m window is about 6
 cycles: persistent, not one flaky tick. Threshold is environment-tunable.
 
 ## Likely causes
@@ -36,10 +39,18 @@ cycles: persistent, not one flaky tick. Threshold is environment-tunable.
 
 ## Remediation
 
-- Fix the failing dependency (usage API service, token Secret, Postgres). No
-  data is lost: the driver's 2h lookback re-lists unsettled records every
-  tick, and settlement is idempotent per (org, sandbox, window), so recovery
-  back-settles automatically and can never double-debit.
+- Fix the failing dependency (usage API service, token Secret, Postgres).
+  Back-settling is automatic ONLY within the driver's lookback window (a
+  compile-time constant, `drawdownLookback` = 2h in `cmd/console/drawdown.go`):
+  every tick re-lists that window, so records that failed less than 2h ago
+  settle on the next clean cycle with no action. Records whose window fell
+  OUT of the lookback while the failure persisted are NOT replayed
+  automatically; settling them is a deliberate operation for the billing
+  owner (a one-off console run with a widened lookback constant is the
+  documented path). Any replay, automatic or manual, is safe: the
+  processed-window markers (`processed_usage_windows`, issue #672) and the
+  ledger's (org, sandbox, window) idempotency key make double-debit
+  impossible regardless of how often a record is re-listed.
 - A single poisoned org/record: inspect that org's usage records via the
   usage API; the failing record's key is in the logs.
 - Verify recovery: the cycle log shows `errors=0` and nonzero `settledCents`
