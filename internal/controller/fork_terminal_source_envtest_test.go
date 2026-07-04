@@ -1,14 +1,19 @@
 package controller_test
 
 // Envtest coverage for issue #698: a fork whose SOURCE sandbox reaches a
-// terminal phase (Terminated or Failed) or disappears must fail TERMINALLY
-// instead of parking in the 1 second requeue loop forever. Terminal means: a
-// SourceTerminated condition with an actionable message, phase Failed, a
-// mirrored Ready=False condition (so the gateway's failureReason surfaces the
-// cause), FinishedAt stamped for the GC TTL pass, the fork's child pods deleted
-// so their mitos.run/kvm and memory requests return to the scheduler, and NO
-// further requeues (repeated reconciles are no-ops). A source that is merely
-// not-yet-Ready (Pending) must still be waited for, never falsely failed.
+// terminal phase (Terminated or Failed) or disappears must stop its FAN-OUT
+// terminally instead of parking in the 1 second requeue loop forever. The
+// SOURCE of truth for what stops versus what survives: a child once activated
+// is an INDEPENDENT sandbox (it holds its own copy of the source memory), so
+// only the never-activated pending child pods are deleted; activated children
+// and their Status.Children entries survive. With no survivors the fork is
+// terminal all the way: phase Failed, FinishedAt for the GC TTL pass, a
+// SourceTerminated condition mirrored on Ready=False (so the gateway's
+// failureReason surfaces the cause). With survivors the phase stays
+// non-terminal (the GC TTL pass must never reap the fork object out from
+// under its running children). In both shapes there are NO further requeues
+// (repeated reconciles are no-ops). A source that is merely not-yet-Ready
+// (Pending) must still be waited for, never falsely failed.
 
 import (
 	"context"
@@ -77,13 +82,18 @@ func TestHuskForkSourceTerminatedFailsTerminallyAndReapsChildren(t *testing.T) {
 	makeForkSourceClaim(t, srcName, poolName, srcPod)
 	installOKForkTransports(t)
 
+	ttlZero := int32(0)
 	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      forkName,
 			Namespace: "default",
 			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
 		},
-		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcName}}, Replicas: 2},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcName}},
+			Replicas: 2,
+			Lifetime: &v1.SandboxLifetime{TTLSecondsAfterFinished: &ttlZero},
+		},
 	}
 	if err := k8sClient.Create(ctx, fork); err != nil {
 		t.Fatalf("create fork: %v", err)
@@ -144,6 +154,151 @@ func TestHuskForkSourceTerminatedFailsTerminallyAndReapsChildren(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	if after := getFork(t, forkName).ResourceVersion; after != rv {
 		t.Fatalf("terminally failed fork must be reconcile-stable; resourceVersion moved %s -> %s", rv, after)
+	}
+
+	// With NO surviving children the fork is fully terminal (Failed +
+	// FinishedAt) and, with ttlSecondsAfterFinished=0, the GC TTL pass reaps
+	// the object instead of leaking it in etcd forever.
+	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry, EnableHuskPods: true}
+	gc.RunOnce(ctx)
+	var reaped v1.Sandbox
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &reaped)
+	if err == nil && reaped.DeletionTimestamp == nil {
+		t.Fatalf("GC TTL pass must reap a fully terminal fork with ttlSecondsAfterFinished=0")
+	}
+}
+
+// TestHuskForkSourceTerminatedPartialFanOutKeepsActiveChildren is the
+// partial-fan-out semantic: a child, ONCE ACTIVATED, is an independent sandbox
+// (its memory was copied at fork time), so source death stops the FAN-OUT,
+// never the born children. With 2 of 3 children active when the source
+// terminates, the two active child pods must survive untouched, only the
+// never-activated pending pod is deleted, ReadyReplicas stays 2 and
+// Status.Children keeps both entries, the SourceTerminated condition names the
+// stopped fan-out (2 of 3), and the fork must NOT be stamped Failed or
+// FinishedAt: a Failed+FinishedAt fork is GC TTL-eligible, and deleting the
+// fork object would take the surviving children down through their owner refs.
+// A real GC pass is driven to prove the survivors outlive it.
+func TestHuskForkSourceTerminatedPartialFanOutKeepsActiveChildren(t *testing.T) {
+	poolName := uniqueName("pool-partial")
+	srcName := uniqueName("src-partial")
+	forkName := uniqueName("partial")
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.4.5")
+	makeForkSourceClaim(t, srcName, poolName, srcPod)
+	installOKForkTransports(t)
+
+	ttlZero := int32(0)
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{
+			Source:   v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcName}},
+			Replicas: 3,
+			Lifetime: &v1.SandboxLifetime{TTLSecondsAfterFinished: &ttlZero},
+		},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	// Drive EXACTLY slots 0 and 1 to Ready (activated); slot 2 stays pending.
+	activeName := map[string]bool{forkName + "-fork-0": true, forkName + "-fork-1": true}
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren(forkName))
+		for i := range pods.Items {
+			if activeName[pods.Items[i].Name] {
+				forceHuskPodReady(t, &pods.Items[i])
+			}
+		}
+		if len(pods.Items) != 3 {
+			return false
+		}
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 2
+	})
+
+	// The source reaches its terminal phase mid fan-out.
+	updateSandboxStatusWithRetry(t, srcName, "default", func(sb *v1.Sandbox) {
+		sb.Status.Phase = v1.SandboxTerminated
+	})
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return meta.IsStatusConditionTrue(got.Status.Conditions, "SourceTerminated")
+	})
+
+	got := getFork(t, forkName)
+	if got.Status.ReadyReplicas != 2 || len(got.Status.Children) != 2 {
+		t.Fatalf("active children must be kept: readyReplicas=%d children=%d, want 2/2",
+			got.Status.ReadyReplicas, len(got.Status.Children))
+	}
+	if got.Status.Phase == v1.SandboxFailed {
+		t.Fatalf("a fork with surviving children must not be stamped Failed (GC would reap it and its children)")
+	}
+	if got.Status.FinishedAt != nil {
+		t.Fatalf("FinishedAt must not be stamped while children survive")
+	}
+	src := meta.FindStatusCondition(got.Status.Conditions, "SourceTerminated")
+	if !strings.Contains(src.Message, "2 of 3") {
+		t.Fatalf("SourceTerminated message must name the stopped fan-out (2 of 3); got %q", src.Message)
+	}
+
+	// The pending pod is released (deleted outright, or Terminating while the
+	// apiserver waits out the grace period); the two ACTIVE children survive
+	// untouched.
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
+			return false
+		}
+		activeAlive := 0
+		pendingAlive := 0
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if activeName[p.Name] {
+				if p.DeletionTimestamp != nil {
+					t.Fatalf("active child pod %s was deleted; activated children must outlive the source", p.Name)
+				}
+				activeAlive++
+				continue
+			}
+			if p.DeletionTimestamp == nil {
+				pendingAlive++
+			}
+		}
+		return activeAlive == 2 && pendingAlive == 0
+	})
+
+	// A real GC pass must leave the fork and its survivors alone: the fork is
+	// TTL-eligible-if-terminal (ttlSecondsAfterFinished=0), so this pass would
+	// reap it if the terminal path had stamped Failed+FinishedAt. EnableHuskPods
+	// matches the husk run mode (markNodeLost is a no-op there).
+	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry, EnableHuskPods: true}
+	gc.RunOnce(ctx)
+
+	after := getFork(t, forkName)
+	if after.DeletionTimestamp != nil {
+		t.Fatalf("GC must not reap a fork with surviving children")
+	}
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
+		t.Fatalf("list children after GC: %v", err)
+	}
+	for i := range pods.Items {
+		if activeName[pods.Items[i].Name] && pods.Items[i].DeletionTimestamp != nil {
+			t.Fatalf("active child pod %s deleted after GC pass", pods.Items[i].Name)
+		}
 	}
 }
 

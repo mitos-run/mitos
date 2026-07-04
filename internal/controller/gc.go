@@ -433,8 +433,11 @@ func nodeLostReforkCount(c *v1.Sandbox) int {
 // triggers the terminate finalizer, which is bounded and tolerant. A claim
 // with no FinishedAt is skipped, and a claim already being deleted is left to
 // its finalizer. A claim freshly stamped terminal earlier in this same pass has
-// FinishedAt=now, so it is too young to delete here; SandboxForks have no
-// FinishedAt today, so TTL of forks is a follow-up.
+// FinishedAt=now, so it is too young to delete here. A fromSandbox fork whose
+// fan-out stopped with NO surviving children stamps Failed+FinishedAt (issue
+// #698) and is reaped here; a fork with surviving children deliberately stays
+// non-terminal without FinishedAt, because deleting the fork object would take
+// its running children down through their owner refs.
 func (g *GarbageCollector) ttlFinished(ctx context.Context, logger logr.Logger, sandboxes []v1.Sandbox) {
 	now := time.Now()
 	for i := range sandboxes {

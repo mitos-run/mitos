@@ -143,22 +143,41 @@ a sandbox without terminating it; expiry never auto-pauses.
 ## Forks and a terminal source
 
 A `source.fromSandbox` fork depends on its source's running VM: the fork copies
-the source's live memory, so the source must be `Ready` at fork time.
+the source's live memory, so the source must be `Ready` at fork time. A child,
+once activated, is an INDEPENDENT sandbox: it holds its own copy of the source
+memory and keeps running no matter what happens to the source. Source death
+stops the FAN-OUT, never the born children.
 
 - Source not yet `Ready` (still `Pending`/`Restoring`): the fork WAITS and
   retries. It does not fail; the source is expected to come up (or to fail on
   its own bounded path, which converts the wait into the terminal case below).
 - Source in a terminal phase (`Terminated` or `Failed`), or the source object
-  deleted: the fork fails TERMINALLY. The memory it would copy no longer
-  exists, so waiting can never succeed. The controller sets phase `Failed`, a
+  deleted: the FAN-OUT stops TERMINALLY. The memory it would copy no longer
+  exists, so waiting can never succeed. The controller sets a
   `SourceTerminated` condition (reason `SourceTerminated`, `SourceFailed`, or
   `SourceGone`) with an actionable message, mirrors it on `Ready=False` so the
-  gateway and SDKs surface the cause instead of an eternal pending, stamps
-  `finishedAt` for the GC TTL pass, and DELETES the fork's already-created
-  child pods so their `mitos.run/kvm` and memory requests return to the
-  scheduler (child pods are owner-referenced to the fork, not to any pool, so
-  nothing else would ever release them). A fork mid-Prepare when its source is
-  reaped converges to the same terminal state on its next reconcile.
+  gateway and SDKs surface the cause instead of an eternal pending, and
+  DELETES only the fork's never-activated pending child pods so their
+  `mitos.run/kvm` and memory requests return to the scheduler (child pods are
+  owner-referenced to the fork, not to any pool, so nothing else would ever
+  release them). A fork mid-Prepare when its source is reaped converges to the
+  same terminal state on its next reconcile.
 
-The terminal failure is recorded once and never requeued; the remediation is to
-create a fresh sandbox from the pool and fork that.
+The terminal outcome has two honest shapes:
+
+- No child had been activated: the fork failed outright. Phase `Failed`,
+  `finishedAt` stamped, and the GC TTL pass reaps the fork object like every
+  other failed sandbox.
+- Some children were already activated (say 2 of 3): those children keep
+  running and their `status.children` entries and `readyReplicas` are kept.
+  The fork is NOT stamped `Failed` and `finishedAt` is NOT set, deliberately:
+  the GC TTL pass deletes terminal sandboxes, and deleting the fork object
+  would take the surviving children down through their owner references. The
+  fork keeps its fan-out phase (`Restoring`: not every requested replica
+  exists) and the `SourceTerminated` condition is the authoritative signal
+  that the fan-out has permanently stopped ("stopped at 2 of 3 children").
+  The surviving children live until the fork object is deleted.
+
+The terminal outcome is recorded once and never requeued; the remediation is to
+create a fresh sandbox from the pool (or fork a Ready sandbox) for more
+children.
