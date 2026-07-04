@@ -196,6 +196,11 @@ func main() {
 	// Shared by the BFF usage view and the drawdown driver below.
 	usageStore := buildUsageStore(logger)
 
+	// sandboxControl is built once and shared by Deps.Sandboxes and the log
+	// streamer below: the log streamer's authorization check must consult the
+	// SAME org-scoped control the rest of the BFF uses.
+	sandboxControl := buildSandboxControl(logger)
+
 	con := console.New(console.Deps{
 		Accounts:    accounts,
 		Invitations: invitations,
@@ -222,7 +227,10 @@ func main() {
 		Secrets: buildSecretStore(logger, caps),
 		// The live-sandbox control: the org-scoped cluster query when in a cluster,
 		// in-memory otherwise. Shares the org→namespace boundary with secrets.
-		Sandboxes: buildSandboxControl(logger),
+		Sandboxes: sandboxControl,
+		// Log streaming: honestly unsupported (501) in a real cluster today (no
+		// live transport exists yet); the in-memory default outside a cluster.
+		Logs: buildLogStreamer(logger, sandboxControl),
 		// The manage-subscription portal link (provider-neutral); nil keeps the
 		// console's no-portal default (community edition).
 		Portal: bill.portal,
