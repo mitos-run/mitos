@@ -23,6 +23,9 @@ vi.mock('../data/account', () => ({
   useBilling: vi.fn(),
   useAudit: vi.fn(),
 }))
+vi.mock('../data/account-settings', () => ({
+  useAccount: vi.fn(),
+}))
 vi.mock('../data/query', () => ({
   useCapabilities: vi.fn(),
 }))
@@ -36,6 +39,7 @@ vi.mock('../data/firstActivity', () => ({
 import { useInstruments } from '../data/instruments'
 import { useSandboxes } from '../data/sandboxes'
 import { useBilling, useAudit } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { useCapabilities } from '../data/query'
 import { useFirstActivity } from '../data/firstActivity'
 
@@ -43,6 +47,7 @@ const mockUseInstruments = useInstruments as ReturnType<typeof vi.fn>
 const mockUseSandboxes = useSandboxes as ReturnType<typeof vi.fn>
 const mockUseBilling = useBilling as ReturnType<typeof vi.fn>
 const mockUseAudit = useAudit as ReturnType<typeof vi.fn>
+const mockUseAccount = useAccount as ReturnType<typeof vi.fn>
 const mockUseCapabilities = useCapabilities as ReturnType<typeof vi.fn>
 const mockUseFirstActivity = useFirstActivity as ReturnType<typeof vi.fn>
 
@@ -101,6 +106,7 @@ beforeEach(() => {
   mockUseSandboxes.mockReturnValue({ data: sandboxesData, isLoading: false, error: null })
   mockUseBilling.mockReturnValue({ data: billingData, isLoading: false, error: null })
   mockUseAudit.mockReturnValue({ data: auditData, isLoading: false, error: null })
+  mockUseAccount.mockReturnValue({ data: { account_id: 'me', email: 'me@example.com', display_name: '', memberships: [] }, isLoading: false })
   mockUseCapabilities.mockReturnValue({ data: capsNoBilling, isLoading: false, error: null })
   // Stable default for useFirstActivity so FirstRun does not error when it mounts.
   mockUseFirstActivity.mockReturnValue({ data: { active: false }, isLoading: false })

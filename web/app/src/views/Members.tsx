@@ -1,10 +1,12 @@
 // Members view: table of org members with account, role badge + role select
 // (accessible, per-row), and joined date. Supports loading, empty, and error states.
 import { useMembers, useSetRole } from '../data/org'
+import { useAccount } from '../data/account-settings'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { Role } from '../api'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
@@ -12,9 +14,13 @@ const ROLES: Role[] = ['owner', 'admin', 'billing', 'member', 'viewer']
 
 export function Members() {
   const { data: members = [], isLoading, isError } = useMembers()
+  const { data: account } = useAccount()
   const setRole = useSetRole()
   const { notify } = useToast()
-  const { query, setQuery, filtered } = useTableFilter(members, (m) => `${m.account_id} ${m.role}`)
+  const { query, setQuery, filtered } = useTableFilter(
+    members,
+    (m) => `${m.account_id} ${m.display_name ?? ''} ${m.email ?? ''} ${m.role}`,
+  )
 
   function onRoleChange(accountId: string, role: Role) {
     setRole.mutate(
@@ -85,7 +91,7 @@ export function Members() {
                       ))}
                     </select>
                   </td>
-                  <td className="t-dim">{new Date(m.created_at).toLocaleDateString()}</td>
+                  <td className="t-dim">{fmtAbsolute(m.created_at, account?.locale, account?.timezone)}</td>
                 </tr>
                 )
               })}

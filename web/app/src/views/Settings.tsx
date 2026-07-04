@@ -11,6 +11,7 @@ import { useAccount, useUpdateAccount, useSessions, useRevokeSession, useRevokeA
 import { setAppearance, type Theme } from '../appearance'
 import { useAppearance } from '../useAppearance'
 import { PageHeader } from '../ui/PageHeader'
+import { fmtAbsolute } from '../lib/dates'
 
 const TABS: TabDef[] = [
   { key: 'profile', label: 'Profile' },
@@ -131,7 +132,7 @@ function ProfileTab() {
                     <td>
                       <span className={`role-badge role-${m.role}`}>{m.role}</span>
                     </td>
-                    <td className="t-dim">{new Date(m.created_at).toLocaleDateString()}</td>
+                    <td className="t-dim">{fmtAbsolute(m.created_at, account.locale, account.timezone)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -147,6 +148,7 @@ function ProfileTab() {
 
 function SecurityTab() {
   const { data: sessions = [], isLoading, isError } = useSessions()
+  const { data: account } = useAccount()
   const revokeSession = useRevokeSession()
   const revokeAll = useRevokeAllSessions()
   const { notify } = useToast()
@@ -193,7 +195,7 @@ function SecurityTab() {
               {sessions.map((s) => (
                 <tr key={s.id}>
                   <td>{s.label}</td>
-                  <td className="t-dim">{new Date(s.created_at).toLocaleDateString()}</td>
+                  <td className="t-dim">{fmtAbsolute(s.created_at, account?.locale, account?.timezone)}</td>
                   <td>{s.current ? <span className="t-dim">Current</span> : null}</td>
                   <td>
                     {!s.current && (

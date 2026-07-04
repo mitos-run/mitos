@@ -75,7 +75,18 @@ export type ForkTree = { org_id: string; nodes: ForkNode[] }
 
 export type KeyView = { id: string; name: string; prefix: string; scopes: string[]; created_at: string; expires_at?: string; revoked_at?: string; revoked: boolean }
 export type CreateKeyResult = { org_id: string; raw_key: string; key: KeyView }
-export type AuditEvent = { org_id: string; actor_id: string; action: string; target: string; detail: string; at: string }
+export type AuditEvent = {
+  org_id: string
+  actor_id: string
+  actor_name?: string
+  actor_type?: 'user' | 'api_key' | 'system'
+  action: string
+  target: string
+  target_type?: string
+  target_name?: string
+  detail: string
+  at: string
+}
 export type TemplateView = { name: string; org_id: string; description: string; image: string; updated_at: string }
 export type UsageResponse = { org_id: string; records: unknown[]; totals: Record<string, number>; cost: Record<string, number> }
 export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }>; topup_available: boolean }

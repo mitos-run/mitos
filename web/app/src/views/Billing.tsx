@@ -4,10 +4,12 @@
 // billing" button. Gated on c.billing.
 import { useState } from 'react'
 import { useBilling, useSetSpendCap } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { api } from '../api'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { StatTile } from '../ui/StatTile'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 
 function fmtDollars(cents: number): string {
@@ -36,6 +38,7 @@ const TOPUP_TIERS: Array<{ cents: number; label: string }> = [
 
 export function Billing() {
   const { data, isLoading } = useBilling()
+  const { data: account } = useAccount()
   const setSpendCap = useSetSpendCap()
 
   // Spend-cap form state: dollar amounts the user types; API receives integer cents.
@@ -283,7 +286,7 @@ export function Billing() {
                 <tbody>
                   {data.ledger_entries.map((entry, i) => (
                     <tr key={i}>
-                      <td className="t-dim">{entry.ts ? new Date(entry.ts).toLocaleString() : '-'}</td>
+                      <td className="t-dim">{entry.ts ? fmtAbsolute(entry.ts, account?.locale, account?.timezone) : '-'}</td>
                       <td className="mono">{entry.cents != null ? fmtDollars(entry.cents) : '-'}</td>
                       <td>{entry.reason ?? '-'}</td>
                     </tr>

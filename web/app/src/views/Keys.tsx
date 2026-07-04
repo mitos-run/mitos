@@ -2,11 +2,13 @@
 // raw key reveal (CopyOnce; never refetched), and optimistic revoke per row.
 import { useState } from 'react'
 import { useKeys, useCreateKey, useRevokeKey } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { CopyOnce } from '../ui/CopyOnce'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import type { CreateKeyResult } from '../api'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
@@ -18,6 +20,7 @@ const TTL_OPTIONS = [
 
 export function Keys() {
   const { data: keys = [], isLoading } = useKeys()
+  const { data: account } = useAccount()
   const createKey = useCreateKey()
   const revokeKey = useRevokeKey()
   const { notify } = useToast()
@@ -163,7 +166,7 @@ export function Keys() {
                   <td>{k.name}</td>
                   <td className="mono">{k.prefix}</td>
                   <td>{k.scopes.join(', ')}</td>
-                  <td className="t-dim">{new Date(k.created_at).toLocaleDateString()}</td>
+                  <td className="t-dim">{fmtAbsolute(k.created_at, account?.locale, account?.timezone)}</td>
                   <td>
                     {k.revoked ? (
                       <span className="t-dim">revoked</span>

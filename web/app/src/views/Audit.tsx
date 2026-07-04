@@ -1,13 +1,21 @@
 // Audit view: filterable event table, retention and export panel, sinks panel.
-// Columns: Time, Actor, Action, Target, Detail.
-// Filter covers actor_id, action, target, and detail (case-insensitive).
+// Columns: Time, Actor, Action, Target, Detail. Actor shows the resolved
+// display name with the raw account id as a dim mono subline (falling back to
+// just the id when no name was resolved); Action always shows the raw
+// category.operation code as a dim mono badge, for machine-grep parity even
+// though Actor/Target now show human names; Target shows target_name,
+// falling back to the raw target id.
+// Filter covers actor_id, actor_name, action, target, target_name, and detail
+// (case-insensitive).
 import { useState } from 'react'
 import { useAudit } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { useAuditRetention, useSetRetention, useAuditSinks, useAddSink, useDeleteSink } from '../data/audit'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { api, type SinkType } from '../api'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
@@ -198,7 +206,11 @@ function SinksPanel() {
 
 export function Audit() {
   const { data: events = [], isLoading } = useAudit()
-  const { query, setQuery, filtered } = useTableFilter(events, (e) => `${e.actor_id} ${e.action} ${e.target} ${e.detail}`)
+  const { data: account } = useAccount()
+  const { query, setQuery, filtered } = useTableFilter(
+    events,
+    (e) => `${e.actor_id} ${e.actor_name ?? ''} ${e.action} ${e.target} ${e.target_name ?? ''} ${e.detail}`,
+  )
 
   return (
     <section>
@@ -230,10 +242,21 @@ export function Audit() {
             <tbody>
               {filtered.map((e, i) => (
                 <tr key={i}>
-                  <td className="t-dim">{new Date(e.at).toLocaleString()}</td>
-                  <td className="mono">{e.actor_id}</td>
-                  <td className="mono">{e.action}</td>
-                  <td className="mono">{e.target}</td>
+                  <td className="t-dim">{fmtAbsolute(e.at, account?.locale, account?.timezone)}</td>
+                  <td>
+                    {e.actor_name ? (
+                      <>
+                        <div>{e.actor_name}</div>
+                        <div className="mono t-dim" style={{ fontSize: 'var(--step--2)' }}>{e.actor_id}</div>
+                      </>
+                    ) : (
+                      <span className="mono">{e.actor_id}</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="mono t-dim" style={{ fontSize: 'var(--step--2)' }}>{e.action}</span>
+                  </td>
+                  <td>{e.target_name ? e.target_name : <span className="mono">{e.target}</span>}</td>
                   <td>{e.detail}</td>
                 </tr>
               ))}
