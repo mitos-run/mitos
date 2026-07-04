@@ -1372,10 +1372,21 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 		}
 	}
 
-	// The backing VM is gone: close the usage tail window at this instant
-	// (issue #682). Best-effort; a duplicate record from the later object
-	// delete is deduplicated by the collector's finalized guard.
-	r.recordClaimHuskTerminations(ctx, claim)
+	// Husk path: the claim's backing VM lives in the claimed husk pod, which
+	// terminateOnNode above never touches (forkd does not track husk pods), so
+	// a lifetime terminate must delete the pod itself or the VM keeps running
+	// and keeps being scraped and billed until object deletion (issue #688).
+	// List the claimed husk pods and record the usage tail on them FIRST, while
+	// claim.Status.Phase is still pre-Terminated so the one-event guard in
+	// recordHuskTerminations passes (mirrors reconcileDelete's
+	// record-before-delete order). No-op in raw-forkd mode: no pod carries the
+	// label.
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		logger.Error(err, "list claimed husk pods on lifetime expiry; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
 
 	now := metav1.Now()
 	claim.Status.Phase = v1.SandboxTerminated
@@ -1389,6 +1400,24 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 	})
 	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Delete the claimed husk pod AFTER the Terminated phase is durable, not
+	// before: deleting it first fires the huskPodToClaim pod-delete watch while
+	// the claim still reads Ready on the apiserver, and a concurrent reconcile's
+	// checkHuskPodLost/rependOnHuskPodLost then mistakes this deliberate release
+	// for unexpected pod loss and re-pends the claim (Phase Pending, endpoint
+	// cleared), racing our own Status().Update; on a pool with no spare warm
+	// slot that re-pend never resolves. rependOnHuskPodLost only fires for a
+	// Ready claim, so persisting Terminated first closes the race. A pod-delete
+	// failure here still leaves the claim correctly Terminated (billing already
+	// closed); the pod is swept by reconcileDelete's identical claimed-husk-pod
+	// cleanup when the claim's own GC-driven object deletion arrives later.
+	for i := range claimedHusk.Items {
+		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "delete claimed husk pod on lifetime expiry", "pod", claimedHusk.Items[i].Name)
+			return ctrl.Result{}, err
+		}
 	}
 	logger.Info("claim terminated by lifetime policy", "claim", claim.Name, "reason", reason)
 	return ctrl.Result{}, nil
