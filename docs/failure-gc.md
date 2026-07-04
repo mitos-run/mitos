@@ -52,11 +52,23 @@ A Ready claim with `spec.timeout` set reaches the terminal `Terminated` phase
 once `StartedAt + timeout` passes. The reaper terminates the VM, stamps
 `FinishedAt`, and sets a `Terminated` condition with reason `MaxLifetimeExceeded`
 (`terminateLifetime(..., "MaxLifetimeExceeded", ...)`,
-`sandboxclaim_controller.go:1183`). maxLifetime does not depend on a reachable
+`sandboxclaim_controller.go`). maxLifetime does not depend on a reachable
 forkd for the decision.
 
-- Bound: terminal within a reconcile after the deadline.
-- Proving test: `TestClaimMaxLifetimeReaped`.
+In HUSK mode the backing VM lives in the claim's husk pod, which forkd never
+tracks, so the raw-mode `terminateOnNode` reap is a no-op for it. The lifetime
+reaper therefore DELETES the claimed husk pod right after the terminal phase is
+stamped, exactly as object deletion does: the VM stops, the warm slot refills
+via the pool reconcile, and the usage scrape lister drops the pod so billing
+ends at the terminate instant (issue #688). `Terminated` always means the VM
+stopped. If the pod delete fails or the controller crashes between the stamp
+and the delete, the reconcile of the Terminated claim retries the reap until
+the pod is gone; the reap after the stamp records no second usage event.
+
+- Bound: terminal within a reconcile after the deadline; the husk pod delete is
+  in the same reconcile, retried on the Terminated claim until it lands.
+- Proving tests: `TestClaimMaxLifetimeReaped`,
+  `TestHuskClaimLifetimeTerminateDeletesPod`.
 
 ### idleTimeout: an inactive Ready claim is reaped
 

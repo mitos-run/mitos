@@ -394,8 +394,18 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 		return res, err
 	}
 
-	// Terminal phases: don't retry.
+	// Terminal phases: don't retry. A Terminated claim must never leave its
+	// backing husk pod running (issue #688): terminateLifetime deletes the pod
+	// after stamping the phase, and this reap is the self-heal for a crash or a
+	// failed delete between the stamp and the reap. Idempotent and usually a
+	// NotFound no-op; it records no usage event (the claim is Terminated, its
+	// one event was recorded at the terminate instant).
 	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
+		if claim.Status.Phase == v1.SandboxTerminated {
+			if err := r.reapClaimHuskPods(ctx, claim); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -1223,31 +1233,13 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 
-	// Husk path: the claim's backing VM lives in the husk pod this claim activated,
-	// labeled with the claim name. Delete it to reap the VM and FREE THE WARM-POOL
-	// SLOT: a husk pod is single-use (once a tenant ran in it, it cannot be
-	// re-dormanted safely), so releasing the claim deletes the pod and the pool
-	// reconcile refills a fresh dormant pod. Without this the pod lingers
-	// claimed-but-idle and the pool never recovers the slot. No-op in raw-forkd
-	// mode (no pod carries the label); terminateOnNode below covers that path.
-	var claimedHusk corev1.PodList
-	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
-		logger.Error(err, "list claimed husk pods on delete; will retry", "claim", claim.Name)
-		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
-	}
-	// Record the usage termination BEFORE deleting the pods, so the collector
-	// can bill the half-open [last scrape, terminate] window (issue #682). A
-	// claim already Terminated (lifetime expiry) recorded its event at the TRUE
-	// terminate instant and the hook skips it here: one claim, one event.
-	// Best-effort and idempotent downstream: a retried delete records again and
-	// the collector's finalized guard keeps a vm-id from ever billing twice. The
-	// instant comes from the reconciler clock (r.now()) so tests can freeze it.
-	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
-	for i := range claimedHusk.Items {
-		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "delete claimed husk pod on release", "pod", claimedHusk.Items[i].Name)
-			return ctrl.Result{}, err
-		}
+	// Husk path: the claim's backing VM lives in the husk pod this claim
+	// activated; reap it (record the usage tail, then delete the pod). No-op in
+	// raw-forkd mode (no pod carries the label); terminateOnNode below covers
+	// that path.
+	if err := r.reapClaimHuskPods(ctx, claim); err != nil {
+		logger.Error(err, "reap claimed husk pods on delete; will retry", "claim", claim.Name)
+		return ctrl.Result{}, err
 	}
 
 	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
@@ -1262,6 +1254,38 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// reapClaimHuskPods reaps the husk pods this claim activated (labeled
+// mitos.run/claim=<name>): it records the usage termination tail for each
+// org-labeled pod FIRST, then deletes the pods. The order matters: the
+// collector needs the event to bill the half-open [last scrape, terminate]
+// window (issue #682), and the event fields come from the pod labels the
+// delete removes. Deleting the pod is what actually STOPS the in-pod VM
+// (forkd never tracks husk pods, so terminateOnNode is a no-op for them,
+// issue #688), drops the pod from the usage scrape lister's billable set, and
+// FREES THE WARM-POOL SLOT: a husk pod is single-use (once a tenant ran in
+// it, it cannot be re-dormanted safely), so the pool reconcile refills a
+// fresh dormant pod.
+//
+// One claim, one event: a claim already Terminated recorded its event at the
+// TRUE terminate instant and recordHuskTerminations skips it here, so the
+// object-delete reap and any retried reap delete pods without recording
+// again. Idempotent: pods already gone are NotFound no-ops, and in raw-forkd
+// mode no pod carries the label. The instant comes from the reconciler clock
+// (r.now()) so tests can freeze it.
+func (r *SandboxReconciler) reapClaimHuskPods(ctx context.Context, claim *v1.Sandbox) error {
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		return fmt.Errorf("list claimed husk pods: %w", err)
+	}
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
+	for i := range claimedHusk.Items {
+		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete claimed husk pod %s: %w", claimedHusk.Items[i].Name, err)
+		}
+	}
+	return nil
 }
 
 // reconcileLifetime drives a Ready claim to the terminal Terminated phase when
@@ -1372,9 +1396,11 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 		}
 	}
 
-	// The backing VM is gone: close the usage tail window at this instant
-	// (issue #682). Best-effort; a duplicate record from the later object
-	// delete is deduplicated by the collector's finalized guard.
+	// Close the usage tail window at this instant, BEFORE the phase is stamped
+	// (issue #682): recordHuskTerminations records only for a not-yet-Terminated
+	// claim, so this is the claim's ONE event, at the true terminate instant.
+	// Best-effort; a duplicate record from a requeued terminate (the stamp below
+	// failing) is deduplicated by the collector's finalized guard.
 	r.recordClaimHuskTerminations(ctx, claim)
 
 	now := metav1.Now()
@@ -1388,6 +1414,21 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 		Message:            message,
 	})
 	if err := r.Status().Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// A husk-backed claim's VM lives in its claimed husk pod, which forkd never
+	// tracks, so terminateOnNode above did NOT stop it. Delete the pod so
+	// Terminated actually means the VM stopped: the memory and warm slot are
+	// released and the usage scrape lister drops the pod, so billing ends at
+	// the terminate instant recorded above (issue #688). This runs AFTER the
+	// terminal phase is durable so a retry can never observe Ready with a
+	// vanished pod and re-pend the claim into a fresh VM; the event record
+	// above is skipped on any later reap (the claim is Terminated). A delete
+	// error requeues, and the Terminated branch of reconcilePoolRef retries
+	// the reap until the pod is gone.
+	if err := r.reapClaimHuskPods(ctx, claim); err != nil {
+		logger.Error(err, "reap claimed husk pods on lifetime expiry; will retry", "claim", claim.Name)
 		return ctrl.Result{}, err
 	}
 	logger.Info("claim terminated by lifetime policy", "claim", claim.Name, "reason", reason)
