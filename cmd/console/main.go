@@ -241,7 +241,14 @@ func main() {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates})
+		// Suspend: billing-driven suspensions (a breached hard spend cap, an
+		// exhausted dunning sequence) must land in the SAME durable suspensions
+		// table the gateway kill-switch reads (issue #615); without this seam the
+		// service computed the suspension and dropped it. Caps is the shared
+		// spend-cap store the BFF writes, so enforcement sees the org's real
+		// caps instead of an empty in-memory default.
+		billingSuspender, _ := newBillingSuspender(pool, logger)
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates, Caps: spendCapStore, Suspend: billingSuspender})
 		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
 	} else {

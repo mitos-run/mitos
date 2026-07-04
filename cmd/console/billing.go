@@ -8,12 +8,37 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/billingprovider"
 	"mitos.run/mitos/internal/saas/billingprovider/paddle"
 	"mitos.run/mitos/internal/saas/billingprovider/stripe"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/saas/quota"
 )
+
+// newBillingSuspender builds the billing.Suspender the console's billing
+// service drives (issue #615 residual wiring): a billing-driven suspension
+// (hard spend cap, exhausted dunning) goes through the quota kill-switch into
+// a suspension store. With a Postgres pool that store is the SHARED durable
+// suspensions table (migration 0008), the exact table the gateway's
+// kill-switch enforcement reads, so a console-side suspend blocks the org at
+// every gateway replica within the gateway's suspension-cache TTL (a few
+// seconds). Without a pool (dev only) the store is in-process: the suspension
+// is recorded but no other process sees it, and the log names that gap.
+// The returned store is exposed for tests and any future console read path.
+func newBillingSuspender(pool *pgxpool.Pool, logger *slog.Logger) (billing.Suspender, quota.SuspensionStore) {
+	var store quota.SuspensionStore
+	if pool != nil {
+		store = pgstore.NewPgSuspensionStore(pool)
+	} else {
+		logger.Warn("billing suspensions are in-process (dev only); a billing-driven suspend does NOT reach the gateway kill-switch without a database DSN")
+		store = quota.NewMemSuspensionStore()
+	}
+	return quota.NewBillingSuspender(quota.NewKillSwitch(store, nil)), store
+}
 
 // portalLinker adapts a billingprovider.Provider + an org-customer map into the
 // console.PortalLinker seam: it resolves the org's customer ref, then asks the
