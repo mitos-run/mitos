@@ -9,9 +9,14 @@ package controller_test
 // never on first builds or deficit copies.
 
 import (
+	gocontext "context"
+	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	gstatus "google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "mitos.run/mitos/api/v1"
@@ -101,6 +106,53 @@ func TestTemplateBuildGenerationBumpsOnInPlaceRebuildsOnly(t *testing.T) {
 	}
 	if got := pool.Status.TemplateBuildGeneration; got != 2 {
 		t.Fatalf("generation after forced rebuild = %d, want 2", got)
+	}
+}
+
+// A PARTIAL rebuild (one holder rebuilt, another failed) must still bump the
+// generation: the rebuilt node's husks now hold clones of OLD artifacts and
+// must be reaped even though the rebuild as a whole reported an error. Leaving
+// the generation stale on partial success is exactly the #679 hazard on the
+// nodes that DID rebuild.
+func TestTemplateBuildGenerationBumpsOnPartialRebuild(t *testing.T) {
+	c := k8sClient
+	const goodNode = "gen-part-good"
+	const badNode = "gen-part-bad"
+
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gen-part-pool", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+
+	reg := controller.NewNodeRegistry()
+	stopGood, _, err := controller.StartFakeForkdNodeEncRecording(reg, goodNode, "gen-part-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stopGood)
+	failing := func(ctx gocontext.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if strings.HasSuffix(info.FullMethod, "CreateTemplate") {
+			return nil, gstatus.Error(codes.Internal, "injected build failure")
+		}
+		return handler(ctx, req)
+	}
+	stopBad, err := controller.StartFakeForkdNodeWithInterceptor(reg, badNode, failing, "gen-part-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stopBad)
+
+	r := &controller.SandboxPoolReconciler{Client: c, NodeRegistry: reg}
+
+	pool.Annotations = map[string]string{"mitos.run/force-rebuild": "partial-1"}
+	if !r.DriveForceRebuildForTest(ctx, pool, pool.Spec.Template, nil, metav1.Now()) {
+		t.Fatal("driveForceRebuild did not trigger on a fresh annotation value")
+	}
+	if got := pool.Status.TemplateBuildGeneration; got != 1 {
+		t.Fatalf("generation after PARTIAL rebuild = %d, want 1 (the rebuilt holder's husks must be reapable)", got)
 	}
 }
 

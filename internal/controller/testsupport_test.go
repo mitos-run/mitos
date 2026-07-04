@@ -433,6 +433,13 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 	return startFakeForkdNodeOpts(registry, nodeName, serverTLS, clientTLS, nil, templates...)
 }
 
+// StartFakeForkdNodeWithInterceptor exposes the interceptor variant to the
+// external controller_test package, so a test can make ONE node's RPCs fail
+// (for example a partial rebuild, issue #679 generation-bump semantics).
+func StartFakeForkdNodeWithInterceptor(registry *NodeRegistry, nodeName string, interceptor grpc.UnaryServerInterceptor, templates ...string) (stop func(), err error) {
+	return startFakeForkdNodeWithInterceptor(registry, nodeName, interceptor, templates...)
+}
+
 // StartFakeForkdNodeWithAPI is StartFakeForkdNodeRecording that also returns the
 // node's SandboxAPI, so a test can inject the work-aware idle signals (issue
 // #218) the controller reads through ListSandboxes: MarkPaused to hold a

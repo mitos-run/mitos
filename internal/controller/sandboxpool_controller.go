@@ -569,13 +569,19 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	// snapshot, not a stale holder. force=true: this replaces a known-stale
 	// snapshot, so the node's reuse-or-rebuild gate must not skip it (#584).
 	if contentChanged {
-		if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true); err != nil {
+		rebuilt, err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true)
+		// Bump the build generation whenever ANY holder was rebuilt in place,
+		// even when others failed: the rebuilt nodes' dormant husk pods hold
+		// clones of the OLD artifacts and must be reaped (issue #679). The
+		// failed holders retry on the next reconcile (TemplateBuildHash is only
+		// recorded below on full success), which may bump again; a double bump
+		// only re-reaps warm pods, it never bills or breaks correctness.
+		if rebuilt > 0 {
+			pool.Status.TemplateBuildGeneration++
+		}
+		if err != nil {
 			return fmt.Errorf("rebuild template snapshot %s after a content change: %w", templateID, err)
 		}
-		// The artifacts were rebuilt in place: bump the build generation so
-		// dormant husk pods created against the old artifacts are reaped even
-		// when no digest was known at their creation (issue #679).
-		pool.Status.TemplateBuildGeneration++
 		// A rebuild does not change the holder count, but recompute so the deficit
 		// math below reflects any holder that failed its rebuild.
 		readySnapshots = r.readySnapshotCountOn(templateID, nodeFilter)
@@ -634,8 +640,9 @@ func (r *SandboxPoolReconciler) templateEncKey(ctx context.Context, pool *v1.San
 // callers of rebuildStaleSnapshots pass force=true, because in both cases the
 // existing on-disk snapshot is known-bad and must not be silently reused by the
 // node's reuse-or-rebuild gate (#584).
-func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templateID string, template *v1.PoolTemplateSpec, wrappedDEK []byte, kekID string, nodeFilter map[string]bool, force bool) error {
+func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templateID string, template *v1.PoolTemplateSpec, wrappedDEK []byte, kekID string, nodeFilter map[string]bool, force bool) (int, error) {
 	var errs []error
+	rebuilt := 0
 	for _, node := range r.NodeRegistry.NodesWithTemplate(templateID) {
 		if nodeFilter != nil && !nodeFilter[node.Name] {
 			continue
@@ -645,9 +652,16 @@ func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templ
 		}
 		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, forkdWorkload(template.Workload), forkdResources(template.Resources), force); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
+			continue
 		}
+		rebuilt++
 	}
-	return errors.Join(errs...)
+	// rebuilt counts holders whose artifacts WERE replaced in place. Callers
+	// bump the pool's TemplateBuildGeneration whenever it is nonzero, even
+	// alongside an error: a partial rebuild still leaves the rebuilt nodes'
+	// dormant husks holding clones of the OLD artifacts (issue #679), so the
+	// reap must fire for them regardless of the failed holders.
+	return rebuilt, errors.Join(errs...)
 }
 
 // createSnapshotsOnNodes ensures the template is present on up to deficit
