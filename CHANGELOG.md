@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.5](https://github.com/mitos-run/mitos/compare/v1.19.4...v1.19.5) (2026-07-04)
+
+
+### Bug Fixes
+
+* **usage:** concurrent husk scrape, terminate-time final sample, cycle summary with settled cents ([#687](https://github.com/mitos-run/mitos/issues/687)) ([b7da3fa](https://github.com/mitos-run/mitos/commit/b7da3fa3f193c79d0b0160efd49c38f84a4b8a6f))
+* **usage:** cycle-failure counter, reconciler-clock termination stamps, honest error-path stats ([#692](https://github.com/mitos-run/mitos/issues/692)) ([9e0ca82](https://github.com/mitos-run/mitos/commit/9e0ca82caddf352e4c5cfb0face28c6a1c59169c)), closes [#682](https://github.com/mitos-run/mitos/issues/682)
+
 ## [1.19.4](https://github.com/mitos-run/mitos/compare/v1.19.3...v1.19.4) (2026-07-04)
 
 
