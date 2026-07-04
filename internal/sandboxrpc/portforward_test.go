@@ -186,7 +186,12 @@ func TestPortForwardGuestNilReturnsFollowup(t *testing.T) {
 	}); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("send open: %v", err)
 	}
-	_ = stream.CloseRequest()
+	// Same narrow tolerance as the Send above and the RunCode sibling test: a
+	// CloseRequest racing the termination may wrap io.EOF; anything else is a
+	// genuine failure this test must not mask.
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("close request: %v", err)
+	}
 	_, err := stream.Receive()
 	if err == nil {
 		t.Fatal("expected error from nil Guest, got nil")
