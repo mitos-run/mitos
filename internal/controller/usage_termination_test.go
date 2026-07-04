@@ -243,3 +243,80 @@ func TestTerminateLifetimeDeletesClaimedHuskPodsAndRecordsTail(t *testing.T) {
 		t.Fatalf("phase = %q, want Terminated", after.Status.Phase)
 	}
 }
+
+// TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase covers the review
+// finding on issue #688: if the claimed husk pod delete inside terminateLifetime
+// ever fails with a transient non-NotFound error AFTER the Terminated status
+// already persisted, nothing previously retried the delete, because
+// reconcilePoolRef's terminal-phase early return skipped straight past
+// terminateLifetime forever. The still-Running, still-labeled pod kept being
+// scraped and billed as live usage until the claim's GC TTL deleted the object.
+// This asserts the terminal-phase branch itself now sweeps a lingering claimed
+// pod, and that doing so records NO new termination event (the claim already
+// closed its billing tail when it first went Terminated; recordHuskTerminations'
+// one-event phase guard must swallow a second call).
+func TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	started := metav1.NewTime(time.Date(2026, 7, 4, 11, 0, 0, 0, time.UTC))
+	finished := metav1.NewTime(time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC))
+	claim := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb-688-sweep", Namespace: "mitos-org-acme"},
+		Spec: v1.SandboxSpec{
+			Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "sweep-pool"}},
+		},
+		Status: v1.SandboxStatus{
+			Phase:      v1.SandboxTerminated,
+			StartedAt:  &started,
+			FinishedAt: &finished,
+		},
+	}
+	// A lingering claimed husk pod: the earlier terminate's delete transiently
+	// failed (or never ran), so the VM is still Running even though the claim
+	// already reads Terminated.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "python-husk-688-sweep",
+			Namespace: "mitos-org-acme",
+			Labels: map[string]string{
+				huskLabel:          "true",
+				huskClaimLabel:     "sb-688-sweep",
+				tenant.OrgLabelKey: "acme",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cl := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim, pod).
+		WithStatusSubresource(&v1.Sandbox{}).
+		Build()
+	frozen := time.Date(2026, 7, 4, 13, 0, 0, 0, time.UTC)
+	r := &SandboxReconciler{
+		Client:            cl,
+		UsageTerminations: usage.NewTerminationLog(),
+		Now:               func() time.Time { return frozen },
+	}
+
+	if _, err := r.reconcilePoolRef(context.Background(), claim); err != nil {
+		t.Fatalf("reconcilePoolRef: %v", err)
+	}
+
+	var pods corev1.PodList
+	if err := cl.List(context.Background(), &pods, client.InNamespace("mitos-org-acme")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("lingering claimed husk pod not swept on terminal-phase reconcile; %d pods remain", len(pods.Items))
+	}
+
+	if got := r.UsageTerminations.Drain(); len(got) != 0 {
+		t.Fatalf("terminal-phase sweep recorded %d new termination(s), want 0 (phase guard should swallow it): %+v", len(got), got)
+	}
+}

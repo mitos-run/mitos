@@ -394,8 +394,27 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 		return res, err
 	}
 
-	// Terminal phases: don't retry.
+	// Terminal phases: don't retry provisioning. A husk-backed claim can still
+	// have a lingering CLAIMED, RUNNING pod here even though the phase already
+	// reads terminal: terminateLifetime records the tail and stamps Terminated
+	// before it deletes the pod (see terminateLifetime's ordering comment), so a
+	// transient non-NotFound delete error after that stamp left nothing to retry
+	// the delete, since this early return used to skip straight past
+	// terminateLifetime forever (issue #688 review finding). The husk activation
+	// path can also fail the claim (SandboxFailed) AFTER the pod is already
+	// claimed and running, for example the token-secret-write failure in
+	// reconcileHuskClaim, with no usage tail ever recorded for that pod; the
+	// sweep below closes that gap too. Sweep on every terminal-phase reconcile:
+	// it is one label-selector List, empty in raw-forkd mode (no pod carries the
+	// label) and a no-op once the pod is already gone. A lingering Running pod
+	// keeps re-enqueuing this claim via the huskPodToClaim pod watch, so a
+	// transient list/delete error here converges on retry instead of leaking
+	// forever like the bug this replaces.
 	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
+		if err := r.sweepClaimedHuskPods(ctx, claim); err != nil {
+			logger.Error(err, "sweep lingering claimed husk pods for terminal claim; will retry", "claim", claim.Name)
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -1349,6 +1368,37 @@ func (r *SandboxReconciler) reconcileLifetime(ctx context.Context, claim *v1.San
 	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
+// sweepClaimedHuskPods lists the claim's claimed husk pods, records a usage
+// termination for each org-labeled one, then deletes them (tolerating
+// NotFound). It is the terminal-phase backstop for issue #688: a claim can
+// reach Terminated or Failed while a claimed husk pod is still Running, either
+// because an earlier pod delete failed transiently after the phase already
+// persisted, or because the husk activation path failed the claim after the
+// pod was claimed and activated but before any tail was ever recorded. Calling
+// recordHuskTerminations here is safe for an already-Terminated claim: its
+// one-event phase guard makes the call a no-op, since the true terminate
+// instant already recorded the tail. For a Failed claim with no prior tail
+// record, this call is what actually closes the billing window. A list or
+// delete error is returned so the caller's terminal-phase reconcile retries;
+// the lingering Running pod's own watch keeps re-enqueuing the claim, so the
+// retry converges.
+func (r *SandboxReconciler) sweepClaimedHuskPods(ctx context.Context, claim *v1.Sandbox) error {
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		return fmt.Errorf("list claimed husk pods for terminal claim %s: %w", claim.Name, err)
+	}
+	if len(claimedHusk.Items) == 0 {
+		return nil
+	}
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
+	for i := range claimedHusk.Items {
+		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete claimed husk pod %s for terminal claim %s: %w", claimedHusk.Items[i].Name, claim.Name, err)
+		}
+	}
+	return nil
+}
+
 // terminateLifetime reaps the claim's backing VM and stamps the terminal
 // Terminated phase with a FinishedAt time and a Terminated condition. The
 // finalizer stays in place; the bounded terminateOnNode keeps later delete
@@ -1409,10 +1459,18 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 	// for unexpected pod loss and re-pends the claim (Phase Pending, endpoint
 	// cleared), racing our own Status().Update; on a pool with no spare warm
 	// slot that re-pend never resolves. rependOnHuskPodLost only fires for a
-	// Ready claim, so persisting Terminated first closes the race. A pod-delete
-	// failure here still leaves the claim correctly Terminated (billing already
-	// closed); the pod is swept by reconcileDelete's identical claimed-husk-pod
-	// cleanup when the claim's own GC-driven object deletion arrives later.
+	// Ready claim, so persisting Terminated first closes the race. The tail
+	// usage record above is what actually closes BILLING (it is what stops the
+	// half-open scrape window from growing); this delete is what stops the VM,
+	// and live scrape billing (HuskPodScrapeLister filters only on pod state,
+	// never claim phase) keeps counting this pod as running until it is
+	// actually deleted. A pod-delete failure here returns the error, which
+	// requeues the reconcile; the requeued pass reads the now-durable Terminated
+	// phase and takes reconcilePoolRef's terminal-phase early return, whose
+	// sweepClaimedHuskPods call is the retry that guarantees this delete
+	// eventually happens (issue #688 review finding) rather than relying solely
+	// on reconcileDelete's identical cleanup at the claim's later GC-driven
+	// object deletion.
 	for i := range claimedHusk.Items {
 		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "delete claimed husk pod on lifetime expiry", "pod", claimedHusk.Items[i].Name)
