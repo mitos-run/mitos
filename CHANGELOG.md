@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.4](https://github.com/mitos-run/mitos/compare/v1.19.3...v1.19.4) (2026-07-04)
+
+
+### Bug Fixes
+
+* **guest:** init skips kernel-premounted targets, ending the false /dev ERROR ([#683](https://github.com/mitos-run/mitos/issues/683)) ([24d766c](https://github.com/mitos-run/mitos/commit/24d766cb05958b767ca773188a7fa93c5e09346b))
+
 ## [1.19.3](https://github.com/mitos-run/mitos/compare/v1.19.2...v1.19.3) (2026-07-03)
 
 
