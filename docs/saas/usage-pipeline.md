@@ -199,6 +199,17 @@ in-memory and best-effort: a controller restart or a node-loss drain loses the
 tail sample, which under-bills that tail and nothing else; recording never
 blocks or fails a terminate.
 
+The terminate instant is also the **billing boundary** (issue #688): for a
+husk-backed sandbox, every terminate path, including lifetime and idle expiry,
+DELETES the claim's husk pod right after recording the event and stamping the
+terminal phase, so the scrape lister (which selects claimed, org-labeled,
+Running pods, never claim phase) stops returning the sandbox on the next
+cycle. A raw-forkd claim has no husk pod; its VM is reaped via terminateOnNode
+and was never scraped by the husk lister. A Terminated sandbox
+therefore never accrues live samples past its recorded terminate event; the
+tail between the last scrape and that instant is carried by the single
+termination event above, and nothing after it is billed.
+
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from
 client input. There are two attribution paths:

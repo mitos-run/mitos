@@ -129,14 +129,14 @@ and the Daytona interaction-only idle timer (background jobs killed mid-run).
 When a sandbox crosses its bound it is TERMINATED, not paused: the backing VM is
 reaped and the claim reaches the terminal `Terminated` phase with a condition
 carrying the reason (`MaxLifetimeExceeded`, `IdleTimeout`, or `TimeoutExpired`).
+`Terminated` means the VM actually stopped, in both run modes: raw-forkd mode
+terminates the VM on its node, and husk mode deletes the claimed husk pod (the
+VM lives inside it), which releases the memory, refills the warm-pool slot, and
+ends usage metering at the terminate instant: the final billing sample closes
+the tail window between the last usage scrape and termination, never at the
+later object deletion. The sandbox object itself is NOT deleted on expiry; it
+stays readable in the terminal phase until its owner deletes it.
 A subsequent call against a reaped sandbox returns the typed `idle_timeout` error
 (`docs/api/errors.md`), whose remediation points at creating a fresh sandbox or
 calling `set_timeout` earlier to keep it alive. Pause is the explicit way to hold
 a sandbox without terminating it; expiry never auto-pauses.
-
-On expiry the claim's backing VM is actually stopped at the terminate instant:
-in husk mode the claimed pod is deleted (the warm pool refills the slot), in
-raw-forkd mode the node engine terminates the VM. Terminated therefore also
-marks the end of metered usage; the final billing sample is recorded at the
-terminate instant, closing the tail window between the last usage scrape and
-termination, never at the later object deletion.

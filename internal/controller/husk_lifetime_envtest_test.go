@@ -4,7 +4,7 @@ package controller_test
 // whose TTL (Spec.Lifetime.TTL, maxLifetime) expires must reach Terminated
 // AND its claimed husk pod must actually be deleted, not merely orphaned
 // Running while the claim reads terminal. terminateLifetime and
-// sweepClaimedHuskPods (internal/controller/sandboxclaim_controller.go) are
+// reapClaimHuskPods (internal/controller/sandboxclaim_controller.go) are
 // unit and regression tested in isolation; this test drives the real husk
 // pool reconciler and the suite's husk-mode claim reconciler (scoped via
 // HuskTestClaimLabel) end to end, modeled on the setup sequence in

@@ -177,12 +177,21 @@ func TestPortForwardGuestNilReturnsFollowup(t *testing.T) {
 
 	ctx := context.Background()
 	stream := client.PortForward(ctx)
+	// The guest-nil handler terminates the RPC without ever reading the request
+	// stream, so this open write races the termination. Per the connect-go
+	// contract, a Send that loses that race returns an error wrapping io.EOF
+	// and the real server error is surfaced by Receive below (issue #695).
 	if err := stream.Send(&sandboxv1.Frame{
 		Msg: &sandboxv1.Frame_Open{Open: &sandboxv1.PortForwardOpen{Port: 3000}},
-	}); err != nil {
+	}); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("send open: %v", err)
 	}
-	_ = stream.CloseRequest()
+	// Same narrow tolerance as the Send above and the RunCode sibling test: a
+	// CloseRequest racing the termination may wrap io.EOF; anything else is a
+	// genuine failure this test must not mask.
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("close request: %v", err)
+	}
 	_, err := stream.Receive()
 	if err == nil {
 		t.Fatal("expected error from nil Guest, got nil")

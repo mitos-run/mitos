@@ -52,35 +52,45 @@ A Ready claim with `spec.timeout` set reaches the terminal `Terminated` phase
 once `StartedAt + timeout` passes. The reaper terminates the VM, stamps
 `FinishedAt`, and sets a `Terminated` condition with reason `MaxLifetimeExceeded`
 (`terminateLifetime(..., "MaxLifetimeExceeded", ...)`,
-`sandboxclaim_controller.go:1183`). maxLifetime does not depend on a reachable
+`sandboxclaim_controller.go`). maxLifetime does not depend on a reachable
 forkd for the decision.
 
-`terminateLifetime` is shared by the idleTimeout reap path below, and in husk
-mode it deletes the claim's backing husk pod at the terminate instant. This
-matters because forkd never tracks husk pods, so `terminateOnNode` alone
-cannot stop the VM: without the delete, a reaped claim would sit `Terminated`
-while its pod kept running and kept being billed. The tail usage record is
-taken on the listed pod before the pod delete and before the phase is stamped
-Terminated, so the guard that skips a Terminated claim on the later object
-delete cannot double-record it. The pool then refills the freed slot.
-Raw-forkd claims carry no such pod, so this step is a no-op there.
+In HUSK mode the backing VM lives in the claim's husk pod, which forkd never
+tracks, so the raw-mode `terminateOnNode` reap is a no-op for it. The lifetime
+reaper (`terminateLifetime`, shared by the idleTimeout reap path below)
+therefore DELETES the claimed husk pod right after the terminal phase is
+stamped, exactly as object deletion does: the VM stops, the warm slot refills
+via the pool reconcile, and the usage scrape lister drops the pod so billing
+ends at the terminate instant (issue #688). `Terminated` always means the VM
+stopped. The tail usage record is taken on the listed pod before the pod
+delete and before the phase is stamped Terminated, so the guard that skips a
+Terminated claim on the later object delete cannot double-record it. Raw-forkd
+claims carry no such pod, so this step is a no-op there.
 
-The terminal-phase sweep is the safety net. If the pod delete fails
-transiently after the Terminated phase has persisted, every subsequent
-reconcile of the terminal claim sweeps its lingering claimed pods
-(`sweepClaimedHuskPods`, called from `reconcilePoolRef`'s terminal-phase early
-return), and the lingering Running pod's own watch keeps re-enqueuing the
-claim, so the retry converges rather than waiting for the claim's eventual
-object deletion.
+The terminal-phase reap is the safety net. If the pod delete fails or the
+controller crashes between the stamp and the delete, every subsequent
+reconcile of the terminal claim reaps its lingering claimed pods
+(`reapClaimHuskPods`, called from `reconcilePoolRef`'s terminal-phase early
+return) until the pod is gone; the reap after the stamp records no second
+usage event. A lingering unchanged Running pod emits no new watch event on
+its own, so it is the workqueue's backoff on the returned reap error (plus
+any real pod event) that converges the retry, rather than waiting for the
+claim's eventual object deletion. The same terminal-phase reap covers a claim
+that FAILED after its husk pod was already claimed and running (a
+post-activation failure): no terminate hook ever recorded a tail for that
+pod, so here the reap's usage record is what closes the billing window.
 
 - Bound: terminal within a reconcile after the deadline; the claimed husk pod
   deleted in the terminate reconcile, and on a transient delete failure within
-  a watch-driven follow-up reconcile via the terminal-phase sweep.
+  a backoff-driven follow-up reconcile via the terminal-phase reap.
 - Proving tests: `TestClaimMaxLifetimeReaped`,
   `TestTerminateLifetimeDeletesClaimedHuskPodsAndRecordsTail`,
   `TestTerminateLifetimeThenDeleteRecordsExactlyOneTail`,
   `TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase`,
-  `TestHuskClaimLifetimeExpiryDeletesClaimedPod`.
+  `TestFailedClaimSweepRecordsOneTailTermination`,
+  `TestReapClaimHuskPodsRecordsTailThenDeletes`,
+  `TestHuskClaimLifetimeExpiryDeletesClaimedPod`,
+  `TestHuskClaimLifetimeTerminateDeletesPod`.
 
 ### idleTimeout: an inactive Ready claim is reaped
 
