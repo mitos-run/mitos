@@ -70,18 +70,21 @@ func (r *SandboxReconciler) recordHuskTerminations(claim *v1.Sandbox, pods []cor
 
 // recordClaimHuskTerminations lists the claim's claimed husk pods (by the
 // mitos.run/claim label the controller stamped) and records a termination for
-// each org-labeled one, stamped now. It is the hook for terminate paths that
+// each org-labeled one, stamped with the reconciler's clock (r.now(), so tests
+// can freeze the release instant). It is the hook for terminate paths that
 // have not already listed the pods (lifetime/idle expiry). A list failure is
 // logged at V(1) and skipped: best-effort, the terminate must proceed and the
-// cost is one under-billed tail.
+// cost is one under-billed tail. The logged error is apiserver text: it
+// carries no secret values.
 func (r *SandboxReconciler) recordClaimHuskTerminations(ctx context.Context, claim *v1.Sandbox) {
 	if r.UsageTerminations == nil {
 		return
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
-		log.FromContext(ctx).V(1).Info("list husk pods for usage termination; tail window not recorded", "claim", claim.Name)
+		log.FromContext(ctx).V(1).Info("list husk pods for usage termination; tail window not recorded",
+			"claim", claim.Name, "err", err.Error())
 		return
 	}
-	r.recordHuskTerminations(claim, pods.Items, time.Now())
+	r.recordHuskTerminations(claim, pods.Items, r.now())
 }

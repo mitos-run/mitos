@@ -66,7 +66,12 @@ func TestRecordClaimHuskTerminations(t *testing.T) {
 	}
 
 	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(billable, unattributed, other).Build()
-	r := &SandboxReconciler{Client: cl, UsageTerminations: usage.NewTerminationLog()}
+	frozen := time.Date(2026, 7, 4, 10, 1, 40, 0, time.UTC)
+	r := &SandboxReconciler{
+		Client:            cl,
+		UsageTerminations: usage.NewTerminationLog(),
+		Now:               func() time.Time { return frozen },
+	}
 
 	r.recordClaimHuskTerminations(context.Background(), claim)
 
@@ -87,8 +92,8 @@ func TestRecordClaimHuskTerminations(t *testing.T) {
 	if !got.StartedAt.Equal(started.Time) {
 		t.Errorf("StartedAt = %v, want the claim's %v", got.StartedAt, started.Time)
 	}
-	if got.At.IsZero() {
-		t.Error("At is zero, want the release instant")
+	if !got.At.Equal(frozen) {
+		t.Errorf("At = %v, want the reconciler clock's release instant %v (the r.now() seam, so tests can freeze it)", got.At, frozen)
 	}
 }
 

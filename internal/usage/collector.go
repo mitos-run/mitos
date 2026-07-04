@@ -189,10 +189,11 @@ type CycleStats struct {
 	// Samples is how many samples this cycle's scrape returned (before
 	// buffering), the liveness signal for the scrape path.
 	Samples int
-	// Records is how many per-(sandbox, window) records the cycle recomputed and
-	// upserted from the rolling buffer.
+	// Records is how many per-(sandbox, window) records were ACTUALLY upserted
+	// this cycle: on success every recomputed record, on an upsert failure only
+	// the records that landed before it.
 	Records int
-	// Orgs is how many distinct org ids those records span.
+	// Orgs is how many distinct org ids those upserted records span.
 	Orgs int
 }
 
@@ -201,32 +202,32 @@ type CycleStats struct {
 // the idempotency tests drive directly. It appends the scrape to the rolling
 // buffer, prunes samples past the retention horizon, and integrates the buffer
 // so the rate units accumulate across cycles while staying idempotent on
-// (sandbox, window). On error the returned stats cover only the work done up to
-// the failure.
+// (sandbox, window). On error the returned stats cover exactly the work DONE
+// before the failure (Duration is always the real wall time of the attempt;
+// Records and Orgs count only what was upserted).
 func (c *Collector) CollectOnce(ctx context.Context) (CycleStats, error) {
 	start := time.Now()
 	var stats CycleStats
 	samples, err := c.src.Collect(ctx)
 	if err != nil {
+		stats.Duration = time.Since(start)
 		return stats, fmt.Errorf("collect samples: %w", err)
 	}
 	stats.Samples = len(samples)
 	c.buf = append(c.buf, samples...)
 	c.pruneBuffer()
 	recs := Integrate(c.buf, c.cfg)
-	stats.Records = len(recs)
-	// One pass over the records: count distinct orgs for the cycle summary and
-	// upsert as we go. On an upsert error the org count covers the records
-	// walked so far, consistent with "stats cover the work done up to the
-	// failure".
+	// One pass over the records: upsert, then count the record and its org, so
+	// on an upsert error the stats hold only the work that actually landed.
 	orgs := map[string]bool{}
 	for _, r := range recs {
-		orgs[r.OrgID] = true
 		if err := c.store.UpsertRecord(ctx, r); err != nil {
 			stats.Orgs = len(orgs)
 			stats.Duration = time.Since(start)
 			return stats, fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
 		}
+		stats.Records++
+		orgs[r.OrgID] = true
 	}
 	stats.Orgs = len(orgs)
 	if c.OnTotals != nil {
