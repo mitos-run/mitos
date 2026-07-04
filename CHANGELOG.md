@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.2](https://github.com/mitos-run/mitos/compare/v1.20.1...v1.20.2) (2026-07-04)
+
+
+### Bug Fixes
+
+* **controller:** fail a fork terminally when its source terminated or vanished ([#700](https://github.com/mitos-run/mitos/issues/700)) ([a539930](https://github.com/mitos-run/mitos/commit/a539930a57a459b3dda5f34f88442fb4163a00d1))
+
 ## [1.20.1](https://github.com/mitos-run/mitos/compare/v1.20.0...v1.20.1) (2026-07-04)
 
 
