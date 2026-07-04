@@ -971,3 +971,26 @@ marketing:
   image: ""
   # Marketing container resource requests and limits.
   resources: {}
+
+# Network policy profiles (CiliumNetworkPolicy; requires the Cilium CNI, in
+# line with the NetworkPolicy-enforcing-CNI requirement in
+# docs/threat-model.md). These are CONTROL-PLANE policies; the husk/sandbox
+# egress isolation is separate and always on (controller-managed).
+networkPolicy:
+  controlPlane:
+    # Opt-in egress lockdown for the controller, console, and gateway: flips
+    # them to default-deny egress with every legitimate flow enumerated (DNS
+    # with L7 visibility, kube-apiserver/host/remote-node, intra-namespace).
+    # When console.onboarding.smtp.host is set, a SECOND console-only policy
+    # additionally allows that SMTP host and port, derived from the same
+    # values that configure the sender so the network allow can never drift
+    # from the config that needs it. All or nothing by design: the SMTP allow
+    # never renders without the baseline profile, because any egress policy
+    # selecting an endpoint flips it to default-deny and a lone SMTP rule
+    # would cut the console off from DNS, the database, and the apiserver.
+    enabled: false
+    # Extra egress rules appended verbatim to the shared control-plane
+    # policy: deployment-specific flows the chart cannot know, e.g. an
+    # in-cluster OIDC issuer namespace. Each entry is a CiliumNetworkPolicy
+    # egress rule object.
+    extraEgress: []
