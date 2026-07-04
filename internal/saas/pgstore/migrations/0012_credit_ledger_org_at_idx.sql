@@ -4,4 +4,12 @@
 -- org's lifetime history. Without this index that read is a per-org seq scan
 -- whose cost grows with ledger lifetime; with it the read is bounded by the
 -- month's rows.
+--
+-- Deliberately a PLAIN (blocking) CREATE INDEX, never CONCURRENTLY: the
+-- embedded migration runner applies each file inside a transaction
+-- (applyMigration in migrate.go), and CREATE INDEX CONCURRENTLY cannot run in
+-- a transaction block, so the CONCURRENTLY form would ERROR at startup and the
+-- fail-closed migration gate would keep the console down. The blocking build
+-- is fine at current credit_ledger sizes (a few rows per org per settle
+-- cycle); the write lock lasts well under a second.
 CREATE INDEX IF NOT EXISTS credit_ledger_org_at_idx ON credit_ledger (org_id, at);

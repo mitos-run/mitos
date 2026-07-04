@@ -188,21 +188,7 @@ func (l *PgCreditLedger) Entries(ctx context.Context, orgID string) ([]billing.L
 	if err != nil {
 		return nil, fmt.Errorf("ledger entries: %w", err)
 	}
-	defer rows.Close()
-	var out []billing.LedgerEntry
-	for rows.Next() {
-		var e billing.LedgerEntry
-		var kind string
-		var amount int64
-		if err := rows.Scan(&e.OrgID, &kind, &amount, &e.Key, &e.At, &e.Note); err != nil {
-			return nil, fmt.Errorf("scan ledger entry: %w", err)
-		}
-		e.Kind = billing.EntryKind(kind)
-		e.Amount = billing.Money(amount)
-		e.At = e.At.UTC()
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return scanLedgerEntries(rows)
 }
 
 // EntriesSince implements billing.ScopedLedgerReader: the org's entries with
@@ -215,6 +201,12 @@ func (l *PgCreditLedger) EntriesSince(ctx context.Context, orgID string, since t
 	if err != nil {
 		return nil, fmt.Errorf("ledger entries since: %w", err)
 	}
+	return scanLedgerEntries(rows)
+}
+
+// scanLedgerEntries drains one ledger SELECT (the shared row shape of Entries
+// and EntriesSince) into LedgerEntry values, closing rows.
+func scanLedgerEntries(rows pgx.Rows) ([]billing.LedgerEntry, error) {
 	defer rows.Close()
 	var out []billing.LedgerEntry
 	for rows.Next() {
