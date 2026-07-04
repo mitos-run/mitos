@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.20.0](https://github.com/mitos-run/mitos/compare/v1.19.5...v1.20.0) (2026-07-04)
+
+
+### Features
+
+* **saas:** alerting for the hosted control plane (gateway, billing webhooks, drawdown, collector, console) ([#693](https://github.com/mitos-run/mitos/issues/693)) ([33fbbc4](https://github.com/mitos-run/mitos/commit/33fbbc45813c3c85ae77664e2aac10f7ffa1aff8))
+
+
+### Bug Fixes
+
+* **controller:** husk pods are reapable after every rebuild, digest or no digest ([#686](https://github.com/mitos-run/mitos/issues/686)) ([c8f32ce](https://github.com/mitos-run/mitos/commit/c8f32ce73daf8aec3b7408544ba54d051b7e19d5))
+* **saas:** enforce live concurrency at the gateway; console suspensions reach the shared store ([#689](https://github.com/mitos-run/mitos/issues/689)) ([32b33d1](https://github.com/mitos-run/mitos/commit/32b33d1b611da51f3d05e49c0cedd29274b42e4f))
+
 ## [1.19.5](https://github.com/mitos-run/mitos/compare/v1.19.4...v1.19.5) (2026-07-04)
 
 
