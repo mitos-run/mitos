@@ -123,7 +123,7 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
             </div>
 
             <div className="form-row" style={{ marginBottom: 'var(--space-4)' }}>
-              <label htmlFor="new-sandbox-vcpus">vCPUs</label>
+              <label htmlFor="new-sandbox-vcpus">Requested vCPUs</label>
               <select id="new-sandbox-vcpus" value={vcpus} onChange={(e) => setVcpus(Number(e.target.value))}>
                 {VCPU_OPTIONS.map((v) => (
                   <option key={v} value={v}>
@@ -133,8 +133,8 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
               </select>
             </div>
 
-            <div className="form-row" style={{ marginBottom: 'var(--space-4)' }}>
-              <label htmlFor="new-sandbox-mem">Memory</label>
+            <div className="form-row" style={{ marginBottom: 'var(--space-2)' }}>
+              <label htmlFor="new-sandbox-mem">Requested memory</label>
               <select id="new-sandbox-mem" value={memGiB} onChange={(e) => setMemGiB(Number(e.target.value))}>
                 {MEM_GIB_OPTIONS.map((m) => (
                   <option key={m} value={m}>
@@ -143,6 +143,9 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
                 ))}
               </select>
             </div>
+            <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginTop: 0, marginBottom: 'var(--space-4)' }}>
+              Sizing is a request. Sandboxes currently run the template's resources; per-sandbox sizing is coming.
+            </p>
 
             {projects.length > 0 && (
               <div className="form-row" style={{ marginBottom: 'var(--space-5)' }}>

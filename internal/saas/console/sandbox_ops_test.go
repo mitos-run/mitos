@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func (f *fixture) reqBody(t *testing.T, method, target, body, acct, org string) *httptest.ResponseRecorder {
@@ -203,6 +204,96 @@ func TestExecSandboxSucceedsAndAuditsTruncatedCommandOnly(t *testing.T) {
 	}
 	if len(detail) > len("executed: ")+auditCmdPreviewLen {
 		t.Fatalf("audit detail longer than the 80-char preview budget: %q", detail)
+	}
+}
+
+// TestExecSandboxZeroTimeoutDefaultsToThirty asserts the handler applies a
+// default 30s timeout before calling the SandboxControl seam when the
+// caller's timeout_s is 0, instead of forwarding 0 (which would mean
+// "unbounded" against a real backend and could let a single command run
+// forever holding shared BFF resources).
+func TestExecSandboxZeroTimeoutDefaultsToThirty(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi","timeout_s":0}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if got := f.sandboxes.LastTimeoutSec("sb-alice-1"); got != 30 {
+		t.Fatalf("backend received timeout_s = %d, want the 30s default", got)
+	}
+}
+
+// TestExecSandboxNonZeroTimeoutPassesThrough asserts an explicit, in-bounds
+// timeout_s is forwarded unchanged (the default only kicks in for 0).
+func TestExecSandboxNonZeroTimeoutPassesThrough(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi","timeout_s":5}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if got := f.sandboxes.LastTimeoutSec("sb-alice-1"); got != 5 {
+		t.Fatalf("backend received timeout_s = %d, want the caller's explicit 5", got)
+	}
+}
+
+// TestExecSandboxTruncatesLargeOutputWithMarker is the load-bearing
+// unbounded-output test: a backend that returns more than 256 KiB of stdout
+// or stderr must have its response truncated with a trailing marker line, so
+// a high-output command cannot exhaust the shared BFF's memory when it is
+// serialized and held in the response body.
+func TestExecSandboxTruncatesLargeOutputWithMarker(t *testing.T) {
+	f := newFixture(t)
+	big := strings.Repeat("x", maxExecOutputBytes+100)
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: big, Stderr: big, ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	if len(resp.Stdout) > maxExecOutputBytes+len(truncatedOutputMarker) {
+		t.Fatalf("stdout not truncated: got %d bytes", len(resp.Stdout))
+	}
+	if !strings.HasSuffix(resp.Stdout, truncatedOutputMarker) {
+		t.Fatalf("stdout missing the truncation marker: tail=%q", resp.Stdout[max(0, len(resp.Stdout)-60):])
+	}
+	if len(resp.Stderr) > maxExecOutputBytes+len(truncatedOutputMarker) {
+		t.Fatalf("stderr not truncated: got %d bytes", len(resp.Stderr))
+	}
+	if !strings.HasSuffix(resp.Stderr, truncatedOutputMarker) {
+		t.Fatalf("stderr missing the truncation marker: tail=%q", resp.Stderr[max(0, len(resp.Stderr)-60):])
+	}
+}
+
+// TestExecSandboxOutputUnderLimitIsUnchanged asserts short output is
+// returned verbatim, with no marker appended.
+func TestExecSandboxOutputUnderLimitIsUnchanged(t *testing.T) {
+	f := newFixture(t)
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: "hi\n", Stderr: "", ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	if resp.Stdout != "hi\n" || resp.Stderr != "" {
+		t.Fatalf("small output was mutated: %+v", resp)
+	}
+}
+
+// TestExecSandboxTruncationIsRuneSafe asserts the truncation never splits a
+// multi-byte UTF-8 rune, even when the byte cutoff lands in the middle of
+// one.
+func TestExecSandboxTruncationIsRuneSafe(t *testing.T) {
+	f := newFixture(t)
+	// Filler puts the maxExecOutputBytes-th byte in the middle of a run of
+	// 2-byte runes, which a byte-naive truncation would split.
+	filler := strings.Repeat("a", maxExecOutputBytes-1)
+	big := filler + strings.Repeat("é", 8) // e-acute, 2 bytes each in UTF-8
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: big, ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	trimmed := strings.TrimSuffix(resp.Stdout, truncatedOutputMarker)
+	if !utf8.ValidString(trimmed) {
+		t.Fatalf("truncated stdout is not valid UTF-8: a multi-byte rune was split")
 	}
 }
 

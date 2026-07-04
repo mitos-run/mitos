@@ -50,6 +50,19 @@ describe('NewSandboxModal', () => {
     await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
   })
 
+  it('labels the sizing selects as requests and explains sizing is not yet enforced per sandbox', async () => {
+    mockFetch()
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toBeInTheDocument())
+    expect(screen.getByLabelText(/^requested vcpus$/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/^requested memory$/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /sizing is a request\. sandboxes currently run the template's resources; per-sandbox sizing is coming\./i,
+      ),
+    ).toBeInTheDocument()
+  })
+
   it('offers exactly the static vcpu and memory options', async () => {
     mockFetch()
     wrap(<NewSandboxModal onClose={() => {}} />)

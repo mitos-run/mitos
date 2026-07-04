@@ -7,6 +7,16 @@
 // background (document.hidden), reopening a fresh one when it becomes visible
 // again, so a backgrounded tab is not silently burning a connection and
 // server-side SSE goroutine forever.
+//
+// Before ever creating an EventSource, the hook probes the stream URL with a
+// plain fetch (Accept: text/event-stream). EventSource cannot tell a hard
+// "this deployment does not implement live streaming" (HTTP 501) apart from
+// a transient network drop; left alone it just retries forever, which reads
+// to the user as a perpetual "reconnecting" state that will never resolve.
+// The probe lets a genuine 501 be reported once as `unsupported` with no
+// EventSource ever opened (so there is no reconnect loop to speak of),
+// while any other status (or a probe failure, treated as transient) falls
+// through to opening the stream exactly as before.
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
@@ -15,11 +25,17 @@ export type LogStreamState = {
   // connected reflects the EventSource's OWN readyState, not just "we tried":
   // true only while the browser reports the stream open.
   connected: boolean
+  // unsupported is true once the pre-flight probe has detected a hard 501
+  // from the stream endpoint: this deployment's transport does not
+  // implement live log streaming. No EventSource is created and none will
+  // be retried while this stays true for the current id/live pair.
+  unsupported: boolean
 }
 
 export function useLogStream(id: string, live: boolean): LogStreamState {
   const [lines, setLines] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
+  const [unsupported, setUnsupported] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -27,7 +43,10 @@ export function useLogStream(id: string, live: boolean): LogStreamState {
     // changes, so switching sandboxes never shows a stale tail.
     setLines([])
     setConnected(false)
+    setUnsupported(false)
     if (!live || !id) return
+
+    let cancelled = false
 
     function open() {
       const es = new EventSource(api.logStreamURL(id))
@@ -49,14 +68,35 @@ export function useLogStream(id: string, live: boolean): LogStreamState {
       }
     }
 
-    if (!document.hidden) open()
-    document.addEventListener('visibilitychange', onVisibilityChange)
+    function startStreaming() {
+      if (!document.hidden) open()
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+
+    fetch(api.logStreamURL(id), { headers: { Accept: 'text/event-stream' } })
+      .then((r) => {
+        if (cancelled) return
+        if (r.status === 501) {
+          setUnsupported(true)
+          return
+        }
+        startStreaming()
+      })
+      .catch(() => {
+        // The probe itself failing (e.g. a network error) is a transient
+        // condition, not "unsupported": fall back to opening the stream
+        // directly so EventSource's own retry logic can take over.
+        if (cancelled) return
+        startStreaming()
+      })
+
     return () => {
+      cancelled = true
       document.removeEventListener('visibilitychange', onVisibilityChange)
       esRef.current?.close()
       esRef.current = null
     }
   }, [id, live])
 
-  return { lines, connected }
+  return { lines, connected, unsupported }
 }

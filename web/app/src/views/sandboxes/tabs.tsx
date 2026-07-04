@@ -11,10 +11,16 @@ import { useLogStream } from '../../data/useLogStream'
 import { EmptyState } from '../../ui/EmptyState'
 import { Skeleton } from '../../ui/Skeleton'
 
+// OverviewTab's vcpu/mem rows are labelled "Requested" because the Sandbox
+// CRD has no per-sandbox resource override: Create only records what the
+// New Sandbox modal's selects asked for as informational annotations (see
+// internal/saas/console/clustersandbox/clustersandbox.go viewOf), and every
+// sandbox actually runs its template's resources. Presenting these as plain
+// "vCPUs"/"Memory" would imply provisioning that does not exist yet.
 export function OverviewTab({ sb }: { sb: SandboxView }) {
   const rows: [string, string][] = [
     ['Template', sb.template], ['Node', sb.node], ['Phase', sb.phase],
-    ['vCPUs', String(sb.vcpus)], ['Memory', fmtBytes(sb.mem_bytes)], ['Created', sb.created_at || '-'],
+    ['Requested vCPUs', String(sb.vcpus)], ['Requested memory', fmtBytes(sb.mem_bytes)], ['Created', sb.created_at || '-'],
   ]
   return (
     <dl className="kv">
@@ -23,22 +29,48 @@ export function OverviewTab({ sb }: { sb: SandboxView }) {
   )
 }
 
+// SnapshotPane renders the one-shot GET .../logs result: loading, error, empty,
+// and loaded states. Shared by LogsTab's non-live view and by its unsupported
+// (501) live view, which falls back to showing the snapshot underneath an
+// honest notice instead of leaving the pane blank.
+function SnapshotPane({ snapshot }: { snapshot: ReturnType<typeof useSandboxLogs> }) {
+  if (snapshot.isError) {
+    return <EmptyState title="Logs unavailable" body="The log stream could not be read for this sandbox." />
+  }
+  if (snapshot.isLoading) return <Skeleton rows={5} />
+  if (!snapshot.data) return <EmptyState title="No logs yet" body="This sandbox has not emitted any log lines." />
+  return <pre className="logs mono">{snapshot.data}</pre>
+}
+
 // LogsTab shows the one-shot log snapshot by default (GET .../logs, unchanged
 // behavior); the Live toggle switches to useLogStream's EventSource tail
 // (GET .../logs/stream, SSE) so the pane keeps appending new lines while open.
 // Turning Live off (or leaving the tab) closes the stream via useLogStream's
 // own cleanup.
+//
+// A deployment whose transport does not implement live streaming reports a
+// hard 501, which useLogStream turns into `unsupported` instead of an
+// eternal "reconnecting" state (EventSource itself cannot tell a 501 apart
+// from a transient drop, so left alone it would retry forever). That state
+// gets its own honest notice here, with the snapshot still rendered
+// underneath it, rather than a perpetual spinner.
 export function LogsTab({ id }: { id: string }) {
   const [live, setLive] = useState(false)
   const snapshot = useSandboxLogs(id)
   const stream = useLogStream(id, live)
 
+  const statusText = !live
+    ? 'Snapshot'
+    : stream.unsupported
+      ? 'Live: not available'
+      : stream.connected
+        ? 'Live: connected'
+        : 'Live: reconnecting...'
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
-        <span className="t-dim" style={{ fontSize: 'var(--step--1)' }}>
-          {live ? (stream.connected ? 'Live: connected' : 'Live: reconnecting...') : 'Snapshot'}
-        </span>
+        <span className="t-dim" style={{ fontSize: 'var(--step--1)' }}>{statusText}</span>
         <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--step--1)' }}>
           <input
             type="checkbox"
@@ -49,7 +81,17 @@ export function LogsTab({ id }: { id: string }) {
           Live
         </label>
       </div>
-      {live ? (
+      {live && stream.unsupported ? (
+        <div>
+          <EmptyState
+            title="Live log streaming is not available"
+            body="Live log streaming is not available on this deployment yet. The snapshot below still works."
+          />
+          <div style={{ marginTop: 'var(--space-4)' }}>
+            <SnapshotPane snapshot={snapshot} />
+          </div>
+        </div>
+      ) : live ? (
         stream.lines.length === 0 ? (
           <EmptyState
             title={stream.connected ? 'No log lines yet' : 'Connecting...'}
@@ -58,14 +100,8 @@ export function LogsTab({ id }: { id: string }) {
         ) : (
           <pre className="logs mono">{stream.lines.join('\n')}</pre>
         )
-      ) : snapshot.isError ? (
-        <EmptyState title="Logs unavailable" body="The log stream could not be read for this sandbox." />
-      ) : snapshot.isLoading ? (
-        <Skeleton rows={5} />
-      ) : !snapshot.data ? (
-        <EmptyState title="No logs yet" body="This sandbox has not emitted any log lines." />
       ) : (
-        <pre className="logs mono">{snapshot.data}</pre>
+        <SnapshotPane snapshot={snapshot} />
       )}
     </div>
   )

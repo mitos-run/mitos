@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/saas"
@@ -28,14 +29,52 @@ var (
 const (
 	// maxForkCount bounds POST .../fork's count.
 	maxForkCount = 16
-	// maxExecTimeoutSec bounds POST .../exec's timeout_s. 0 means "the backend's
-	// own default applies", matching the mitos CLI's `sandbox exec` convention.
+	// maxExecTimeoutSec bounds POST .../exec's timeout_s: the caller-facing
+	// range stays 0..60. An explicit 0 no longer means "no timeout" against
+	// the backend: handleExecSandbox substitutes defaultExecTimeoutSec so a
+	// caller can never make a shared-BFF-mediated command run unbounded.
 	maxExecTimeoutSec = 60
+	// defaultExecTimeoutSec is the timeout handleExecSandbox forwards to the
+	// SandboxControl seam when the caller's timeout_s is 0. Without this, 0
+	// would reach the real backend as "run forever" (mcp.HTTPBackend.Exec's
+	// documented behavior, shared with the CLI and not changed here), and an
+	// org member's runaway command could hold the console's exec goroutine
+	// and its stdout/stderr buffers open indefinitely.
+	defaultExecTimeoutSec = 30
 	// auditCmdPreviewLen is how much of an exec'd command lands in the audit
 	// detail: enough to identify the action, never the full command (which
 	// could embed a secret value pasted by the caller) and never env/secrets.
 	auditCmdPreviewLen = 80
+	// maxExecOutputBytes bounds how much of exec's stdout/stderr the console
+	// returns to the caller. A command that floods output over the sandbox's
+	// own transport (mcp.HTTPBackend.Exec buffers the full stream in memory,
+	// a seam shared with the CLI that this fix deliberately does not touch)
+	// must not be allowed to balloon the console's response and hold that
+	// memory for the life of the request; each stream is capped
+	// independently, not their sum.
+	maxExecOutputBytes = 256 * 1024
 )
+
+// truncatedOutputMarker is appended (on its own line) to stdout or stderr
+// when either was cut off at maxExecOutputBytes, so the caller can tell
+// truncated output apart from a command that genuinely produced exactly that
+// much text.
+const truncatedOutputMarker = "\n[output truncated at 256 KiB]"
+
+// truncateOutput returns s capped at maxExecOutputBytes, with
+// truncatedOutputMarker appended when it was cut. The cut point is backed off
+// to the nearest rune boundary so a multi-byte UTF-8 rune straddling the
+// limit is never split into invalid bytes.
+func truncateOutput(s string) string {
+	if len(s) <= maxExecOutputBytes {
+		return s
+	}
+	cut := maxExecOutputBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + truncatedOutputMarker
+}
 
 // createSandboxRequest is the body of POST /console/sandboxes.
 type createSandboxRequest struct {
@@ -222,6 +261,16 @@ type execSandboxResponse struct {
 // belong to the org (404) and the caller must hold PermUseResources on its
 // project (403). The audit detail carries only the first 80 characters of the
 // command, NEVER the full command, environment, or any secret value.
+//
+// Two bounds protect the shared BFF process from a single command, without
+// touching internal/mcp (the exec transport shared with the CLI): a
+// timeout_s of 0 is NOT forwarded to the backend as "no timeout" (which the
+// CLI's convention makes an unbounded run); it is replaced with
+// defaultExecTimeoutSec here, so an org member cannot make a command run
+// forever. And the returned stdout/stderr are each truncated independently
+// at maxExecOutputBytes with a trailing marker line, so a command that
+// floods output cannot exhaust this process's memory when the result is
+// buffered and serialized.
 func (c *Console) handleExecSandbox(w http.ResponseWriter, r *http.Request) {
 	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
@@ -266,7 +315,14 @@ func (c *Console) handleExecSandbox(w http.ResponseWriter, r *http.Request) {
 			WithCause(fmt.Sprintf("timeout_s must be between 0 and %d", maxExecTimeoutSec)))
 		return
 	}
-	res, err := c.deps.Sandboxes.Exec(r.Context(), orgID, id, req.Cmd, req.TimeoutS)
+	// A caller's timeout_s of 0 is NOT forwarded as-is: substitute the
+	// console's own default so a runaway command against a real backend
+	// cannot hold this handler (and the shared BFF process) open forever.
+	timeoutSec := req.TimeoutS
+	if timeoutSec == 0 {
+		timeoutSec = defaultExecTimeoutSec
+	}
+	res, err := c.deps.Sandboxes.Exec(r.Context(), orgID, id, req.Cmd, timeoutSec)
 	if err != nil {
 		c.failSandbox(w, err)
 		return
@@ -277,7 +333,14 @@ func (c *Console) handleExecSandbox(w http.ResponseWriter, r *http.Request) {
 		Detail: "executed: " + truncateRunes(req.Cmd, auditCmdPreviewLen),
 		At:     c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, execSandboxResponse{Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode})
+	// Stdout/stderr are capped independently at maxExecOutputBytes before
+	// they are serialized into the response, so a high-output command cannot
+	// exhaust the console's memory (see maxExecOutputBytes's doc).
+	writeJSON(w, http.StatusOK, execSandboxResponse{
+		Stdout:   truncateOutput(res.Stdout),
+		Stderr:   truncateOutput(res.Stderr),
+		ExitCode: res.ExitCode,
+	})
 }
 
 // truncateRunes returns s truncated to at most n runes (never splitting a

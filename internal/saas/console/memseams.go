@@ -36,6 +36,11 @@ type MemSandboxControl struct {
 	// handler-level tests (they assert plumbing, not command semantics).
 	execResults map[string]ExecResult
 	execErrs    map[string]error
+	// lastTimeoutSec records the timeoutSec Exec was last called with, per
+	// sandbox id: a test helper proving the handler's default-timeout policy
+	// (0 becomes 30) is applied BEFORE this seam is called, not left to each
+	// backend to reimplement.
+	lastTimeoutSec map[string]int
 }
 
 // NewMemSandboxControl returns an empty in-memory sandbox control.
@@ -165,7 +170,13 @@ func (m *MemSandboxControl) SetExecErr(sandboxID string, err error) {
 // Exec runs cmd in the org's sandbox. sandboxID must belong to org (ErrNotFound
 // otherwise); the result is whatever was scripted via SetExecResult/SetExecErr,
 // defaulting to a zero-value success (exit 0, no output) when unscripted.
-func (m *MemSandboxControl) Exec(_ context.Context, orgID, sandboxID, _ string, _ int) (ExecResult, error) {
+func (m *MemSandboxControl) Exec(_ context.Context, orgID, sandboxID, _ string, timeoutSec int) (ExecResult, error) {
+	m.mu.Lock()
+	if m.lastTimeoutSec == nil {
+		m.lastTimeoutSec = map[string]int{}
+	}
+	m.lastTimeoutSec[sandboxID] = timeoutSec
+	m.mu.Unlock()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sb, ok := m.byID[sandboxID]
@@ -176,6 +187,15 @@ func (m *MemSandboxControl) Exec(_ context.Context, orgID, sandboxID, _ string, 
 		return ExecResult{}, err
 	}
 	return m.execResults[sandboxID], nil
+}
+
+// LastTimeoutSec returns the timeoutSec MemSandboxControl.Exec was last
+// called with for sandboxID (test helper; zero if Exec was never called for
+// that id).
+func (m *MemSandboxControl) LastTimeoutSec(sandboxID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastTimeoutSec[sandboxID]
 }
 
 // MemTemplateLister is the in-memory TemplateLister tested default.
