@@ -355,6 +355,15 @@ type SandboxPoolStatus struct {
 	// silently ignored (issue #475). A content address, safe to log.
 	TemplateBuildHash string `json:"templateBuildHash,omitempty"`
 
+	// TemplateBuildGeneration counts how many times the pool's template
+	// artifacts have been rebuilt IN PLACE (a content-change rebuild, a forced
+	// rebuild, or an automatic restore-failure rebuild). Deficit builds that
+	// copy the same artifacts to more nodes do not increment it. Every husk
+	// pod is stamped with the generation it was created under, so pods whose
+	// rootfs CoW clone predates the current artifacts are reapable even when
+	// no snapshot digest was known at creation time (issue #679).
+	TemplateBuildGeneration int64 `json:"templateBuildGeneration,omitempty"`
+
 	// RebuildAttempts counts consecutive automatic rebuilds triggered because
 	// the template failed verification or restore (#584). Reset to zero when
 	// the pool's husks are healthy again. Bounds the backoff exponent.

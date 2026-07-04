@@ -1012,6 +1012,17 @@ spec:
               restoringCount:
                 format: int32
                 type: integer
+              templateBuildGeneration:
+                description: |-
+                  TemplateBuildGeneration counts how many times the pool's template
+                  artifacts have been rebuilt IN PLACE (a content-change rebuild, a forced
+                  rebuild, or an automatic restore-failure rebuild). Deficit builds that
+                  copy the same artifacts to more nodes do not increment it. Every husk
+                  pod is stamped with the generation it was created under, so pods whose
+                  rootfs CoW clone predates the current artifacts are reapable even when
+                  no snapshot digest was known at creation time (issue #679).
+                format: int64
+                type: integer
               templateBuildHash:
                 description: |-
                   TemplateBuildHash records the build identity (a content hash of the template

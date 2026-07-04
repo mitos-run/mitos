@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,6 +66,12 @@ const (
 	// is pinned to, so the reconcile compares the pod's stamped digest against THAT
 	// node's current recorded digest (per-node digests differ, issue #175).
 	huskSnapshotNodeAnnotation = "mitos.run/snapshot-node"
+	// huskBuildGenerationAnnotation records the pool's TemplateBuildGeneration a
+	// warm husk pod was created under. After an in-place template rebuild bumps
+	// the pool's generation, pods stamped with an older generation (or with no
+	// stamp at all, the pre-#679 fallback fleet) reference old artifacts and are
+	// reaped, digest or no digest (issue #679).
+	huskBuildGenerationAnnotation = "mitos.run/template-build-generation"
 
 	// huskForkLabel marks a husk pod as a fork CHILD and carries the owning
 	// SandboxFork name, so a reconcile can list exactly this fork's children and
@@ -712,13 +719,24 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		}
 	}
 
-	// Stamp the per-node digest + node on a warm pod pinned to exactly one snapshot
-	// node, so a later reconcile can reap it if that node's snapshot is rebuilt
-	// under a new digest (issue #461). The fallback path (no single pinned node) and
-	// fork children (no SnapshotNodes) get no stamp and are never reaped.
-	annotations := map[string]string{}
-	if len(opts.SnapshotNodes) == 1 && opts.ExpectedDigest != "" {
+	// Stamp the digest on EVERY warm pod created while a digest is known, so the
+	// stale-digest reap (issue #461) covers all creation paths, not only the
+	// single-pinned-node one (issue #679). The node annotation is only stamped
+	// when the pod is pinned to exactly one snapshot node; otherwise the reap
+	// falls back to spec.nodeName once the scheduler has placed the pod. The
+	// build generation is stamped unconditionally: it is the rebuild-reap signal
+	// for pods created when NO digest was known anywhere (the fallback fleet
+	// that hit prod in #679). Fork children never pass through this builder's
+	// pool scale-up caller with a stale-generation risk: they activate from a
+	// fork snapshot, not the template, and carry no huskPoolLabel, so the pool
+	// reap never sees them.
+	annotations := map[string]string{
+		huskBuildGenerationAnnotation: strconv.FormatInt(pool.Status.TemplateBuildGeneration, 10),
+	}
+	if opts.ExpectedDigest != "" {
 		annotations[huskTemplateDigestAnnotation] = opts.ExpectedDigest
+	}
+	if len(opts.SnapshotNodes) == 1 && opts.ExpectedDigest != "" {
 		annotations[huskSnapshotNodeAnnotation] = opts.SnapshotNodes[0]
 	}
 
@@ -1099,6 +1117,19 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			logger.Info("reaped husk pod with stale snapshot digest", "pod", p.Name, "node", p.Annotations[huskSnapshotNodeAnnotation])
 			continue
 		}
+		// Issue #679: the digest reap only covers pods that were stamped with a
+		// digest. Pods created when NO digest was known (the fallback fleet) are
+		// covered by the build generation instead: an in-place rebuild bumps the
+		// pool's generation, and any dormant pod stamped with an older one (or
+		// not stamped at all, the pre-#679 legacy fleet) holds a rootfs clone of
+		// the OLD artifacts and must be replaced.
+		if huskPodStaleByGeneration(&p, pool.Status.TemplateBuildGeneration) {
+			if err := r.Delete(ctx, &p); err != nil && !apierrors.IsNotFound(err) {
+				return huskReconcileResult{}, fmt.Errorf("delete stale-generation husk pod %s/%s: %w", p.Namespace, p.Name, err)
+			}
+			logger.Info("reaped husk pod with stale build generation", "pod", p.Name, "podGeneration", p.Annotations[huskBuildGenerationAnnotation], "poolGeneration", pool.Status.TemplateBuildGeneration)
+			continue
+		}
 		kept = append(kept, p)
 	}
 	owned = kept
@@ -1349,7 +1380,14 @@ func (r *SandboxPoolReconciler) huskPodHasStaleDigest(p *corev1.Pod, templateID 
 		return false
 	}
 	stamped := p.Annotations[huskTemplateDigestAnnotation]
+	// The node to compare against: the stamped pin when the pod was pinned to a
+	// single snapshot node, otherwise the node the scheduler actually placed the
+	// pod on (the multi-node and fallback paths, issue #679). An unscheduled pod
+	// is undecidable and never reaped here.
 	node := p.Annotations[huskSnapshotNodeAnnotation]
+	if node == "" {
+		node = p.Spec.NodeName
+	}
 	if stamped == "" || node == "" || r.NodeRegistry == nil {
 		return false
 	}
@@ -1358,6 +1396,25 @@ func (r *SandboxPoolReconciler) huskPodHasStaleDigest(p *corev1.Pod, templateID 
 		return false
 	}
 	return current != stamped
+}
+
+// huskPodStaleByGeneration reports whether a DORMANT husk pod was created under
+// an older template build generation than the pool's current one (issue #679).
+// It is the rebuild-reap signal that works with no digest at all: after an
+// in-place rebuild bumps the pool's generation, a pod stamped with an older
+// generation (or not stamped at all, the pre-#679 fallback fleet) holds a
+// rootfs CoW clone of the OLD artifacts; activating the new snapshot against it
+// is exactly the mem-vs-rootfs skew the reap exists to prevent. A claimed pod
+// is never stale (it holds a tenant VM). Before any rebuild (generation 0) an
+// unstamped pod is fine: its clone is from the only build there has ever been.
+func huskPodStaleByGeneration(p *corev1.Pod, poolGeneration int64) bool {
+	if p.Labels[huskClaimLabel] != "" {
+		return false
+	}
+	if poolGeneration == 0 {
+		return false
+	}
+	return p.Annotations[huskBuildGenerationAnnotation] != strconv.FormatInt(poolGeneration, 10)
 }
 
 // refillObservedAnnotation marks a husk pod whose create-to-Ready refill latency
