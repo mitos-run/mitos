@@ -320,3 +320,69 @@ func TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase(t *testing.T) {
 		t.Fatalf("terminal-phase sweep recorded %d new termination(s), want 0 (phase guard should swallow it): %+v", len(got), got)
 	}
 }
+
+// TestTerminateLifetimeThenDeleteRecordsExactlyOneTail pins the issue #688
+// coupling warning called out alongside #687: a lifetime terminate records the
+// one true tail event and deletes the claimed husk pod, and the later object
+// delete's own record step, which reconciles the claim after it already reads
+// Terminated, must not synthesize a second billing event for the same claim.
+func TestTerminateLifetimeThenDeleteRecordsExactlyOneTail(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	started := metav1.NewTime(time.Date(2026, 7, 4, 11, 0, 0, 0, time.UTC))
+	claim := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb-688b", Namespace: "mitos-org-acme"},
+		Status: v1.SandboxStatus{
+			Phase:     v1.SandboxReady,
+			StartedAt: &started,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "python-husk-688b",
+			Namespace: "mitos-org-acme",
+			Labels: map[string]string{
+				huskLabel:          "true",
+				huskClaimLabel:     "sb-688b",
+				tenant.OrgLabelKey: "acme",
+			},
+		},
+	}
+	cl := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim, pod).
+		WithStatusSubresource(&v1.Sandbox{}).
+		Build()
+	frozen := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	r := &SandboxReconciler{
+		Client:            cl,
+		UsageTerminations: usage.NewTerminationLog(),
+		Now:               func() time.Time { return frozen },
+	}
+
+	// 1. Lifetime terminate: records the one tail event and deletes the pod.
+	if _, err := r.terminateLifetime(context.Background(), claim, "IdleTimeout", "idle"); err != nil {
+		t.Fatalf("terminateLifetime: %v", err)
+	}
+	if n := len(r.UsageTerminations.Drain()); n != 1 {
+		t.Fatalf("tail events after terminate = %d, want 1", n)
+	}
+
+	// 2. Simulate the later object delete's record step on the now-Terminated
+	// claim: the phase guard must swallow it (one claim, one event), and the
+	// pod list is empty anyway because Task 1 deleted it.
+	var after v1.Sandbox
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &after); err != nil {
+		t.Fatal(err)
+	}
+	r.recordClaimHuskTerminations(context.Background(), &after)
+	if n := len(r.UsageTerminations.Drain()); n != 0 {
+		t.Fatalf("tail events after delete-time re-record = %d, want 0", n)
+	}
+}
