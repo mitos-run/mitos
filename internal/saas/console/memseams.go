@@ -3,14 +3,23 @@ package console
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // ErrNotFound is returned by the seams when a requested record does not exist OR
 // belongs to a different org than the caller. The two cases are deliberately
 // indistinguishable so a caller cannot probe another org's id space.
 var ErrNotFound = errors.New("console: record not found")
+
+// ErrUnsupported is returned by a seam whose real backend does not exist on
+// this deployment yet (a documented follow-up), distinct from ErrNotFound: the
+// operation is understood but genuinely cannot be carried out here. The
+// console maps it to HTTP 501 so the SPA shows an honest "not available yet"
+// state instead of a silent no-op or a fabricated success.
+var ErrUnsupported = errors.New("console: operation not supported by this deployment")
 
 // MemSandboxControl is the in-memory SandboxControl used as the tested default
 // and by the unit suite. It is the seam the real control-plane query plugs into;
@@ -19,6 +28,14 @@ var ErrNotFound = errors.New("console: record not found")
 type MemSandboxControl struct {
 	mu   sync.RWMutex
 	byID map[string]SandboxView
+	seq  int
+
+	// execResults / execErrs let a test script a canned Exec outcome per
+	// sandbox id via SetExecResult/SetExecErr; an unscripted sandbox returns a
+	// zero-value ExecResult (exit 0, no output), which is enough for the
+	// handler-level tests (they assert plumbing, not command semantics).
+	execResults map[string]ExecResult
+	execErrs    map[string]error
 }
 
 // NewMemSandboxControl returns an empty in-memory sandbox control.
@@ -71,6 +88,94 @@ func (m *MemSandboxControl) Terminate(_ context.Context, orgID, sandboxID string
 	}
 	delete(m.byID, sandboxID)
 	return nil
+}
+
+// Create provisions a new sandbox for org from req.Template, assigning it a
+// unique id and recording the requested VCPUs/MemGiB on its view (the fake has
+// full fidelity here; a real adapter may not be able to enforce the sizing,
+// see clustersandbox.Control.Create).
+func (m *MemSandboxControl) Create(_ context.Context, orgID string, req CreateSandboxRequest) (SandboxView, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq++
+	sb := SandboxView{
+		ID:        fmt.Sprintf("sbx-%d", m.seq),
+		OrgID:     orgID,
+		Template:  req.Template,
+		Phase:     "Pending",
+		VCPUs:     req.VCPUs,
+		MemBytes:  int64(req.MemGiB) << 30,
+		CreatedAt: time.Now(),
+	}
+	m.byID[sb.ID] = sb
+	return sb, nil
+}
+
+// Fork creates count new sandboxes forked from sandboxID and returns their
+// ids in creation order. sandboxID must belong to org (ErrNotFound otherwise);
+// each child inherits the source's template and sizing, mirroring what a real
+// fork carries forward from its source snapshot.
+func (m *MemSandboxControl) Fork(_ context.Context, orgID, sandboxID string, count int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src, ok := m.byID[sandboxID]
+	if !ok || src.OrgID != orgID {
+		return nil, ErrNotFound
+	}
+	ids := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		m.seq++
+		id := fmt.Sprintf("%s-fork-%d", sandboxID, m.seq)
+		m.byID[id] = SandboxView{
+			ID:        id,
+			OrgID:     orgID,
+			Template:  src.Template,
+			Phase:     "Pending",
+			VCPUs:     src.VCPUs,
+			MemBytes:  src.MemBytes,
+			CreatedAt: time.Now(),
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// SetExecResult scripts the ExecResult MemSandboxControl.Exec returns for
+// sandboxID (test/wiring helper).
+func (m *MemSandboxControl) SetExecResult(sandboxID string, res ExecResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.execResults == nil {
+		m.execResults = map[string]ExecResult{}
+	}
+	m.execResults[sandboxID] = res
+}
+
+// SetExecErr scripts the error MemSandboxControl.Exec returns for sandboxID,
+// e.g. ErrUnsupported (test/wiring helper).
+func (m *MemSandboxControl) SetExecErr(sandboxID string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.execErrs == nil {
+		m.execErrs = map[string]error{}
+	}
+	m.execErrs[sandboxID] = err
+}
+
+// Exec runs cmd in the org's sandbox. sandboxID must belong to org (ErrNotFound
+// otherwise); the result is whatever was scripted via SetExecResult/SetExecErr,
+// defaulting to a zero-value success (exit 0, no output) when unscripted.
+func (m *MemSandboxControl) Exec(_ context.Context, orgID, sandboxID, _ string, _ int) (ExecResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sb, ok := m.byID[sandboxID]
+	if !ok || sb.OrgID != orgID {
+		return ExecResult{}, ErrNotFound
+	}
+	if err, ok := m.execErrs[sandboxID]; ok {
+		return ExecResult{}, err
+	}
+	return m.execResults[sandboxID], nil
 }
 
 // MemTemplateLister is the in-memory TemplateLister tested default.

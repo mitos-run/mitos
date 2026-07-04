@@ -228,9 +228,13 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/billing/topup", c.handleBillingTopUp)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
+	mux.HandleFunc("POST /console/sandboxes", c.handleCreateSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
+	mux.HandleFunc("POST /console/sandboxes/{id}/fork", c.handleForkSandbox)
+	mux.HandleFunc("POST /console/sandboxes/{id}/exec", c.handleExecSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
+	mux.HandleFunc("GET /console/sandboxes/{id}/logs/stream", c.handleSandboxLogsStream)
 	mux.HandleFunc("PUT /console/sandboxes/{id}/project", c.handleSetSandboxProject)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
 	mux.HandleFunc("DELETE /console/members/{accountID}", c.handleRemoveMember)
@@ -1106,15 +1110,32 @@ func (c *Console) failAccount(w http.ResponseWriter, err error, _ string) {
 }
 
 // failSandbox maps a sandbox-control error to the public envelope. A not-found
-// (which also covers a cross-org sandbox id) is not_found.
+// (which also covers a cross-org sandbox id) is not_found; ErrUnsupported (the
+// verb has no real backend on this deployment yet, a documented follow-up, not
+// a fabricated success) is 501 so the SPA can show an honest state instead of a
+// silent no-op.
 func (c *Console) failSandbox(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrNotFound) {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
 			WithCause("the sandbox does not exist or is not in this organization"))
-		return
+	case errors.Is(err, ErrUnsupported):
+		// Built directly rather than via apierr.Catalogue: that catalogue is
+		// normative for the forkd/sandbox-server runtime API (doc-synced by
+		// TestDocCatalogueIsInSyncWithCode), a different surface than this
+		// console BFF's own error shape. Reusing apierr.Error/Encode here just
+		// keeps the wire envelope consistent with every other console error.
+		apierr.Encode(w, apierr.Error{
+			Code:        "not_implemented",
+			Message:     "this operation is not available on this deployment yet",
+			Cause:       err.Error(),
+			Remediation: "This is a documented follow-up, not a misconfiguration; check docs/saas/console.md for status or ask the operator.",
+			Status:      http.StatusNotImplemented,
+		})
+	default:
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
+			WithCause("the sandbox request could not be served"))
 	}
-	apierr.Encode(w, apierr.Get(apierr.CodeInternal).
-		WithCause("the sandbox request could not be served"))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

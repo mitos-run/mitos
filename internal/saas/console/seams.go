@@ -77,16 +77,45 @@ type SandboxView struct {
 	ProjectID string `json:"project_id"`
 }
 
-// SandboxControl is the live-sandbox seam the console inspects and terminates
-// running sandboxes through. The REAL implementation queries the control plane
-// (the controller's claim/sandbox records) scoped to one org; this slice ships
-// an injectable interface and an in-memory fake so the BFF shapes the view and
-// enforces org scoping NOW, and the cluster query is a documented follow-up.
+// CreateSandboxRequest is the input to SandboxControl.Create: the template
+// (pool) to provision the sandbox from, plus the requested vCPU/memory sizing.
+// The console handler validates VCPUs/MemGiB against its static bounds (issue
+// #322) before calling Create; a real adapter may not be able to enforce the
+// requested sizing itself (see clustersandbox.Control.Create's own doc for why)
+// but the seam still carries the request so an adapter that CAN enforce it
+// (the in-memory fake, and any future control-plane surface) has the value.
+// ProjectID is intentionally NOT here: project assignment is a separate,
+// separately-permissioned write (ResourceProjectStore.SetProject), performed by
+// the handler after Create succeeds, not by the seam itself.
+type CreateSandboxRequest struct {
+	Template string
+	VCPUs    int32
+	MemGiB   int32
+}
+
+// ExecResult is the outcome of SandboxControl.Exec: exactly the shape the
+// console's POST .../exec endpoint returns to the SPA. It carries no secret:
+// Stdout/Stderr are the command's own output, never an env var or credential.
+type ExecResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+// SandboxControl is the live-sandbox seam the console inspects, creates, forks,
+// execs in, and terminates running sandboxes through. The REAL implementation
+// queries the control plane (the controller's claim/sandbox records) scoped to
+// one org; this slice ships an injectable interface and an in-memory fake so
+// the BFF shapes the view and enforces org scoping NOW, and the cluster query
+// is a documented follow-up.
 //
 // Every method takes an orgID and the implementation MUST scope its effect to
-// that org: List returns only the org's sandboxes; Get and Terminate refuse a
-// sandbox that does not belong to the org (returning ErrNotFound), so the BFF's
-// org-scoping is enforced even if a caller learns another org's sandbox id.
+// that org: List returns only the org's sandboxes; Get, Terminate, Fork, and
+// Exec refuse a sandbox that does not belong to the org (returning
+// ErrNotFound), so the BFF's org-scoping is enforced even if a caller learns
+// another org's sandbox id. A method whose real backend genuinely does not
+// exist on this deployment yet (no fabricated success) returns ErrUnsupported,
+// which the console maps to HTTP 501.
 type SandboxControl interface {
 	// List returns the org's running sandboxes.
 	List(ctx context.Context, orgID string) ([]SandboxView, error)
@@ -97,6 +126,19 @@ type SandboxControl interface {
 	// Terminate terminates one of the org's sandboxes. It returns ErrNotFound if
 	// the sandbox does not exist or belongs to a different org.
 	Terminate(ctx context.Context, orgID, sandboxID string) error
+	// Create provisions a new sandbox for org from req.Template and returns its
+	// view. The caller (the console handler) has already validated req against
+	// the static vcpu/mem bounds; Create itself does not re-derive them.
+	Create(ctx context.Context, orgID string, req CreateSandboxRequest) (SandboxView, error)
+	// Fork creates count new sandboxes, each forked from sandboxID, and returns
+	// their ids in creation order. Returns ErrNotFound if sandboxID does not
+	// exist or belongs to a different org; count has already been bounded
+	// (1..16) by the caller.
+	Fork(ctx context.Context, orgID, sandboxID string, count int) ([]string, error)
+	// Exec runs cmd inside the org's sandbox, bounded by timeoutSec (0 means the
+	// backend's own default applies), and returns its result. Returns
+	// ErrNotFound if sandboxID does not exist or belongs to a different org.
+	Exec(ctx context.Context, orgID, sandboxID, cmd string, timeoutSec int) (ExecResult, error)
 }
 
 // LogStreamer is the documented seam for live sandbox log streaming. The console
