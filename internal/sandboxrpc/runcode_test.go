@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -218,12 +219,16 @@ func TestRunCodeGuestNilReturnsFollowup(t *testing.T) {
 	ctx := context.Background()
 
 	stream := client.RunCode(ctx)
+	// The guest-nil handler terminates the RPC without ever reading the request
+	// stream, so this open write races the termination. Per the connect-go
+	// contract, a Send that loses that race returns an error wrapping io.EOF
+	// and the real server error is surfaced by Receive below (issue #695).
 	if err := stream.Send(&sandboxv1.RunCodeRequest{
 		Msg: &sandboxv1.RunCodeRequest_Open{Open: &sandboxv1.RunCodeOpen{Code: "1+1"}},
-	}); err != nil {
+	}); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("send open: %v", err)
 	}
-	if err := stream.CloseRequest(); err != nil {
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("close request: %v", err)
 	}
 
@@ -238,6 +243,45 @@ func TestRunCodeGuestNilReturnsFollowup(t *testing.T) {
 	}
 	if connErr.Code() != connect.CodeUnimplemented {
 		t.Fatalf("code = %v, want CodeUnimplemented", connErr.Code())
+	}
+}
+
+// TestRunCodeGuestNilRacedSendStillSurfacesFollowup pins the issue #695 race
+// deterministically. The guest-nil handler terminates the RPC without reading
+// the request stream, so a client write can land after the termination and
+// fail with an error wrapping io.EOF ("write envelope: EOF"). The first Send
+// fires the HTTP request; the sleep lets the handler terminate the RPC; the
+// second Send then deterministically hits the closed stream, reproducing the
+// window that the first Send only hits under CI load. The connect-go contract
+// requires that such a raced Send wraps io.EOF and that Receive still surfaces
+// the real followup error, which is exactly what this test asserts.
+func TestRunCodeGuestNilRacedSendStillSurfacesFollowup(t *testing.T) {
+	svc := &Service{}
+	client, _ := newTestServer(t, svc)
+
+	stream := client.RunCode(context.Background())
+	if err := stream.Send(&sandboxv1.RunCodeRequest{
+		Msg: &sandboxv1.RunCodeRequest_Open{Open: &sandboxv1.RunCodeOpen{Code: "1+1"}},
+	}); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("send open: %v", err)
+	}
+	// Give the handler time to return the followup error and terminate the RPC.
+	time.Sleep(100 * time.Millisecond)
+	if err := stream.Send(&sandboxv1.RunCodeRequest{
+		Msg: &sandboxv1.RunCodeRequest_Stdin{Stdin: []byte("x")},
+	}); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("raced send must wrap io.EOF per the connect-go contract, got: %v", err)
+	}
+	if err := stream.CloseRequest(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("close request: %v", err)
+	}
+
+	_, err := stream.Receive()
+	if err == nil {
+		t.Fatal("expected error from nil Guest, got nil")
+	}
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Fatalf("code = %v, want CodeUnimplemented", connect.CodeOf(err))
 	}
 }
 
