@@ -191,13 +191,26 @@ VM, so a successful activate is terminal for that stub.
 
 A template snapshot is stored by templateID (the pool name), so rebuilding a pool
 under the same name overwrites its mem in place and produces a new content-
-addressed digest. A warm husk pod records the digest and node it verifies against
-(annotations `mitos.run/template-digest` and `mitos.run/snapshot-node`). On
-reconcile the controller reaps any DORMANT pod whose stamped digest no longer
-matches its node's current recorded digest, and the warm-pool deficit logic
-refills the slot against the fresh snapshot. Claimed (activating or active) pods
-are never reaped. It ensures that once a rebuild has happened, warm husks
-converge instead of CrashLoopBackOff on a stale digest.
+addressed digest. A warm husk pod records the digest it verifies against
+(annotation `mitos.run/template-digest`, stamped whenever a digest is known at
+creation, on every creation path since #679) and, when pinned to exactly one
+snapshot node, that node (`mitos.run/snapshot-node`; otherwise the reap uses the
+node the scheduler placed the pod on). On reconcile the controller reaps any
+DORMANT pod whose stamped digest no longer matches its node's current recorded
+digest, and the warm-pool deficit logic refills the slot against the fresh
+snapshot. Claimed (activating or active) pods are never reaped.
+
+Pods created when NO digest was known anywhere (for example a pool running with
+the unverified-snapshots escape hatch) are covered by the build generation
+instead (#679): the pool status field `templateBuildGeneration` counts in-place
+rebuilds (a content-change rebuild, a forced rebuild, an automatic
+restore-failure rebuild; deficit copies do not count), every husk pod is stamped
+with the generation it was created under
+(`mitos.run/template-build-generation`), and a dormant pod stamped with an older
+generation, or not stamped at all, is reaped after the next rebuild. Together
+the two mechanisms ensure that once a rebuild has happened, warm husks converge
+instead of CrashLoopBackOff on a stale digest, and that a claim never activates
+a new mem snapshot against a rootfs CoW clone taken from the old artifacts.
 
 ### Template-content edits re-trigger the build (#475)
 

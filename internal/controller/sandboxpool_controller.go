@@ -572,6 +572,10 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 		if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true); err != nil {
 			return fmt.Errorf("rebuild template snapshot %s after a content change: %w", templateID, err)
 		}
+		// The artifacts were rebuilt in place: bump the build generation so
+		// dormant husk pods created against the old artifacts are reaped even
+		// when no digest was known at their creation (issue #679).
+		pool.Status.TemplateBuildGeneration++
 		// A rebuild does not change the holder count, but recompute so the deficit
 		// math below reflects any holder that failed its rebuild.
 		readySnapshots = r.readySnapshotCountOn(templateID, nodeFilter)
