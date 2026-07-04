@@ -65,11 +65,21 @@ Terminated, so the guard that skips a Terminated claim on the later object
 delete cannot double-record it. The pool then refills the freed slot.
 Raw-forkd claims carry no such pod, so this step is a no-op there.
 
+The terminal-phase sweep is the safety net. If the pod delete fails
+transiently after the Terminated phase has persisted, every subsequent
+reconcile of the terminal claim sweeps its lingering claimed pods
+(`sweepClaimedHuskPods`, called from `reconcilePoolRef`'s terminal-phase early
+return), and the lingering Running pod's own watch keeps re-enqueuing the
+claim, so the retry converges rather than waiting for the claim's eventual
+object deletion.
+
 - Bound: terminal within a reconcile after the deadline; the claimed husk pod
-  gone in the same reconcile.
+  deleted in the terminate reconcile, and on a transient delete failure within
+  a watch-driven follow-up reconcile via the terminal-phase sweep.
 - Proving tests: `TestClaimMaxLifetimeReaped`,
   `TestTerminateLifetimeDeletesClaimedHuskPodsAndRecordsTail`,
   `TestTerminateLifetimeThenDeleteRecordsExactlyOneTail`,
+  `TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase`,
   `TestHuskClaimLifetimeExpiryDeletesClaimedPod`.
 
 ### idleTimeout: an inactive Ready claim is reaped
