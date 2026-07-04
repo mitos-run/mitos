@@ -9,6 +9,10 @@
 // index.html applies the resolved theme (stored value, or 'dark' when nothing is
 // stored / storage fails) before first paint; keep it in sync.
 // Guard every localStorage call with try/catch for SSR or restricted contexts.
+// setAppearance() notifies subscribe() listeners after persisting + applying,
+// so every mounted control (TopBar's ThemeToggle, Settings' AppearanceTab)
+// observes the same value instead of each holding its own stale copy. See
+// useAppearance.ts for the React hook built on top of subscribe().
 
 export type Density = 'comfortable' | 'compact'
 
@@ -64,8 +68,31 @@ export function setAppearance(a: Appearance): void {
     // Storage unavailable: still apply to document
   }
   applyToDocument(a)
+  notify()
 }
 
 export function applyAppearanceOnLoad(): void {
   applyToDocument(getAppearance())
+}
+
+// --- Subscription registry ---
+// Framework-free pub/sub so React (or anything else) can observe changes
+// without appearance.ts depending on React. useAppearance.ts wraps this in a
+// useSyncExternalStore-based hook.
+
+type Listener = () => void
+
+const listeners = new Set<Listener>()
+
+export function subscribe(listener: Listener): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+function notify(): void {
+  for (const listener of listeners) {
+    listener()
+  }
 }

@@ -1,7 +1,7 @@
 // Behavior tests for ThemeToggle: cycling order, persistence via
 // setAppearance, and the dynamic aria-label announcing current + next theme.
 import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeToggle } from './ThemeToggle'
 import { getAppearance, setAppearance } from '../appearance'
@@ -54,5 +54,26 @@ describe('ThemeToggle', () => {
     render(<ThemeToggle />)
     await userEvent.click(screen.getByRole('button', { name: /theme:/i }))
     expect(document.documentElement.dataset['theme']).toBe('light')
+  })
+
+  it('reflects an external setAppearance change instead of showing a stale local copy (desync fix)', () => {
+    render(<ThemeToggle />)
+    act(() => {
+      setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    })
+    expect(screen.getByRole('button', { name: 'Theme: light. Activate for system.' })).toBeInTheDocument()
+  })
+
+  it('cycle() advances from the true current theme after an external change, not the theme at mount time', async () => {
+    render(<ThemeToggle />)
+    // Simulate another mounted control (Settings' AppearanceTab) changing the
+    // theme while this ThemeToggle is still on the page.
+    act(() => {
+      setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    })
+    await userEvent.click(screen.getByRole('button', { name: /theme:/i }))
+    // light -> system, NOT dark -> light (which is what a stale mount-time
+    // "dark" local copy would have produced).
+    expect(getAppearance().theme).toBe('system')
   })
 })

@@ -172,26 +172,35 @@ a { color: var(--cyan); }
   align-items: center;
 }
 
-.menu-button {
+/* Shared 44x44 quiet icon-button base for .menu-button and .theme-toggle
+   (see .theme-toggle below): box model and focus treatment are identical;
+   each keeps its own display, color, transition, and hover rules. */
+.menu-button,
+.theme-toggle {
   min-width: 44px;
   min-height: 44px;
-  display: none; /* hidden on desktop; shown by the mobile media query below */
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  color: var(--ink);
   cursor: pointer;
   border-radius: var(--r-sm);
   padding: var(--space-2);
+}
+
+.menu-button:focus-visible,
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.menu-button {
+  display: none; /* hidden on desktop; shown by the mobile media query below */
+  color: var(--ink);
   transition: background var(--dur) var(--ease);
 }
 
 .menu-button:hover { background: var(--field-1); }
-.menu-button:focus-visible {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
-}
 
 /* Retired: .top-bar mobile-brand rules. TopBar (.topbar) now owns the brand
    and the hamburger at all breakpoints. The .top-bar class is no longer used. */
@@ -687,30 +696,17 @@ html[data-reduce-motion="1"] * {
 .topbar-help:hover { color: var(--ink-2); }
 
 /* Theme toggle: quiet icon button, same footprint and focus treatment as
-   .menu-button, always visible (unlike the mobile-only menu button). */
+   .menu-button (shared rule above), always visible (unlike the mobile-only
+   menu button). */
 .theme-toggle {
-  min-width: 44px;
-  min-height: 44px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
   color: var(--ink-3);
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  padding: var(--space-2);
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
 .theme-toggle:hover {
   background: var(--field-1);
   color: var(--ink-2);
-}
-
-.theme-toggle:focus-visible {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
 }
 
 /* Search trigger: looks like a quiet input field. Hairline border, field fill,

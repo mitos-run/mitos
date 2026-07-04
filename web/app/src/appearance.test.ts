@@ -1,7 +1,7 @@
 // Behavior tests for the appearance module: round-trip localStorage persistence
 // and document.documentElement.dataset side-effects.
-import { describe, it, expect, beforeEach } from 'vitest'
-import { getAppearance, setAppearance, applyAppearanceOnLoad } from './appearance'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { getAppearance, setAppearance, applyAppearanceOnLoad, subscribe } from './appearance'
 
 beforeEach(() => {
   localStorage.clear()
@@ -70,5 +70,35 @@ describe('appearance', () => {
   it('falls back to the default (dark) theme when the stored value is invalid', () => {
     localStorage.setItem('mitos-appearance', JSON.stringify({ theme: 'sepia' }))
     expect(getAppearance().theme).toBe('dark')
+  })
+
+  it('returns the dark default when localStorage.getItem throws', () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage unavailable')
+    })
+    try {
+      const got = getAppearance()
+      expect(got).toEqual({ reducedMotion: false, density: 'comfortable', theme: 'dark' })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe('appearance subscribe', () => {
+  it('notifies subscribers after setAppearance persists and applies', () => {
+    const listener = vi.fn()
+    subscribe(listener)
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(document.documentElement.dataset['theme']).toBe('light')
+  })
+
+  it('stops notifying once unsubscribed', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribe(listener)
+    unsubscribe()
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(listener).not.toHaveBeenCalled()
   })
 })

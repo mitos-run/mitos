@@ -3,8 +3,8 @@
 // dark and light pin it explicitly. The icon and aria-label both reflect the
 // theme that is about to become active, so a screen reader user hears what the
 // button currently shows and what activating it will do next.
-import { useState } from 'react'
 import { getAppearance, setAppearance, type Theme } from '../appearance'
+import { useAppearance } from '../useAppearance'
 
 const NEXT: Record<Theme, Theme> = { dark: 'light', light: 'system', system: 'dark' }
 
@@ -39,13 +39,18 @@ function Glyph({ theme }: { theme: Theme }) {
 }
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>(() => getAppearance().theme)
+  // Shared with every other mounted control (e.g. Settings' AppearanceTab)
+  // via useAppearance's useSyncExternalStore subscription, so this always
+  // reflects the true current theme instead of a stale local copy.
+  const { theme } = useAppearance()
 
   function cycle() {
-    const next = NEXT[theme]
+    // Read fresh rather than closing over the rendered `theme`: a click can
+    // race a re-render, and cycling must always advance from the true
+    // current value, not whatever this component last rendered.
     const current = getAppearance()
+    const next = NEXT[current.theme]
     setAppearance({ ...current, theme: next })
-    setTheme(next)
   }
 
   return (
