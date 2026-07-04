@@ -144,12 +144,13 @@ func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, 
 	// scrape pool this is set by the slowest pool lane, and a sustained rise is
 	// the degradation signal #617 alerting watches.
 	usageMetrics.ObserveCycle(stats)
-	if skipped := nodeSource.SkippedNodes(); skipped > 0 {
-		logger.V(1).Info("usage collection skipped unreachable nodes", "skippedNodesCumulative", skipped)
-	}
-	if skipped := huskSource.SkippedPods(); skipped > 0 {
-		logger.V(1).Info("usage collection skipped unreachable husk pods", "skippedHuskPodsCumulative", skipped)
-	}
+	logger.Info("usage collection cycle",
+		"samples", stats.Samples,
+		"records", stats.Records,
+		"orgs", stats.Orgs,
+		"durationMs", stats.Duration.Milliseconds(),
+		"skippedNodesCumulative", nodeSource.SkippedNodes(),
+		"skippedHuskPodsCumulative", huskSource.SkippedPods())
 }
 
 // usageMetrics is the per-org usage Prometheus view, registered ONCE on the

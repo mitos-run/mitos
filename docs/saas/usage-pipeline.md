@@ -160,8 +160,13 @@ serialized N unreachable pods into N x the per-request timeout during a partial
 outage. With the pool the cycle duration is set by the slowest pool lane, not
 the fleet size. All samples in one cycle still share a single scrape timestamp,
 and unreachable pods are still skip-and-counted. Every completed cycle exports
-its wall duration as the `mitos_usage_collect_cycle_duration_seconds` gauge, so
-a slowing scrape path is alertable (issue #617).
+its wall duration as the `mitos_usage_collect_cycle_duration_seconds` gauge and
+logs a one-line summary at default verbosity (samples, records, orgs, duration,
+cumulative skip counters), so a healthy pipeline is visibly healthy, a
+zero-collecting one is visibly broken, and a slowing scrape path is alertable
+(issue #617). The console-side drawdown line reports `settledCents` and
+`carriedMilliCents` per cycle (issue #672), the money half of the same
+visibility gap.
 
 **Terminate-time final sample** (issue #682, was #664): scraping once per
 window leaves the presence between the LAST scrape and terminate unrecorded (a
