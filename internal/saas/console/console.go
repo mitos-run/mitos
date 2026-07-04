@@ -40,7 +40,13 @@ type BillingReader struct {
 // A nil seam is filled with its in-memory tested default so a caller can stand
 // up a working, org-scoped BFF with just the account service.
 type Deps struct {
-	Accounts    *saas.AccountService
+	Accounts *saas.AccountService
+	// Invitations is the org invitation seam (create/list/revoke/resend/
+	// lookup/accept). Nil (the default) means invitations are NOT enabled on
+	// this deployment: the invite endpoints return a clean "not enabled"
+	// response instead of panicking. The production binary wires this from
+	// the SAME saas.Store the AccountService uses.
+	Invitations *saas.InvitationService
 	Usage       usage.UsageStore
 	Prices      usage.PriceList
 	Billing     BillingReader
@@ -115,8 +121,9 @@ type Deps struct {
 // ONLY the caller's org data. It never logs or returns a key value except the
 // one-time raw key on create.
 type Console struct {
-	deps Deps
-	mux  *http.ServeMux
+	deps            Deps
+	mux             *http.ServeMux
+	inviteRateLimit *inviteRateLimiter
 }
 
 // New builds a Console, filling in in-memory seam defaults and a default price
@@ -200,7 +207,7 @@ func New(deps Deps) *Console {
 	// the default dispatcher; tests inject a sinkFunc via NewDispatchingRecorder.
 	deps.Audit = NewDispatchingRecorder(deps.Audit, deps.Sinks, newWebhookSink()).
 		withLog(deps.Log)
-	c := &Console{deps: deps}
+	c := &Console{deps: deps, inviteRateLimit: newInviteRateLimiter(inviteRateLimitPerOrg, inviteRateLimitWindow)}
 	c.routes()
 	return c
 }
@@ -226,6 +233,11 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
 	mux.HandleFunc("PUT /console/sandboxes/{id}/project", c.handleSetSandboxProject)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
+	mux.HandleFunc("DELETE /console/members/{accountID}", c.handleRemoveMember)
+	mux.HandleFunc("GET /console/invites", c.handleListInvites)
+	mux.HandleFunc("POST /console/invites", c.handleCreateInvite)
+	mux.HandleFunc("DELETE /console/invites/{id}", c.handleRevokeInvite)
+	mux.HandleFunc("POST /console/invites/{id}/resend", c.handleResendInvite)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
 	mux.HandleFunc("GET /console/audit/retention", c.handleGetRetention)
