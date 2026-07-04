@@ -6,7 +6,7 @@
 // assertion lives in the 'ForkTree route' describe block below.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
-import { waitFor, screen } from '@testing-library/react'
+import { waitFor, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createRootRoute,
@@ -15,6 +15,7 @@ import {
 } from '@tanstack/react-router'
 import { ForkTree } from './ForkTree'
 import { renderAt } from '../../test/utils'
+import { ToastProvider } from '../../ui/Toast'
 import type { Capabilities } from '../../api'
 
 const caps: Capabilities = {
@@ -37,7 +38,9 @@ function renderForkTree() {
   const router = createRouter({ routeTree: rootRoute.addChildren([]) })
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <ToastProvider>
+        <RouterProvider router={router} />
+      </ToastProvider>
     </QueryClientProvider>,
   )
 }
@@ -146,5 +149,54 @@ describe('ForkTree route', () => {
     // Node id links deep-link to the sandbox detail view.
     const link = screen.getByRole('link', { name: /fork-a/i })
     expect(link).toHaveAttribute('href', '/sandboxes/fork-a')
+  })
+})
+
+describe('ForkTree node detail panel', () => {
+  it('opens a side panel with id, phase, and byte fields when a row Details button is activated (keyboard reachable)', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const detailsButtons = screen.getAllByRole('button', { name: /view details/i })
+    expect(detailsButtons.length).toBe(2)
+    // A real <button> is keyboard-focusable and Enter/Space just works; a
+    // click stands in for that activation here.
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    expect(panel).toHaveTextContent('Running')
+    expect(within(panel).getByRole('link', { name: /open/i })).toHaveAttribute('href', '/sandboxes/fork-a')
+    expect(within(panel).getByRole('button', { name: /^fork/i })).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: /terminate/i })).toBeInTheDocument()
+  })
+
+  it('closes the panel via the Close button', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for root/i }))
+    expect(screen.getByRole('region', { name: /details for sandbox root/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /close details/i }))
+    expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
+  })
+
+  it('Fork posts to the fork endpoint with the chosen count', async () => {
+    let forkBody: unknown = null
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/forktree')) {
+        return Promise.resolve(new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.includes('/fork') && method === 'POST') {
+        forkBody = init?.body ? JSON.parse(String(init.body)) : null
+        return Promise.resolve(new Response(JSON.stringify({ org_id: 'o1', source: 'fork-a', ids: ['fork-a-fork-1', 'fork-a-fork-2'] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const countInput = screen.getByLabelText(/^fork$/i)
+    fireEvent.change(countInput, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: /^fork 2/i }))
+    await waitFor(() => expect(forkBody).toEqual({ count: 2 }))
   })
 })
