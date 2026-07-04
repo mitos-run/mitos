@@ -238,6 +238,11 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/invites", c.handleCreateInvite)
 	mux.HandleFunc("DELETE /console/invites/{id}", c.handleRevokeInvite)
 	mux.HandleFunc("POST /console/invites/{id}/resend", c.handleResendInvite)
+	// NOTE: GET /console/invites/lookup is deliberately NOT registered here.
+	// It is PUBLIC (pre-auth) and is mounted by the binary directly on the
+	// top-level mux, outside this Console's session-middleware wrapping; see
+	// Console.LookupInvite and cmd/console/main.go.
+	mux.HandleFunc("POST /console/invites/accept", c.handleAcceptInvite)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
 	mux.HandleFunc("GET /console/audit/retention", c.handleGetRetention)

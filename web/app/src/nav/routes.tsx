@@ -20,6 +20,7 @@ import { Settings } from '../views/Settings'
 import { Retention } from '../views/Retention'
 import { Roles } from '../views/Roles'
 import { ProjectDetail } from '../views/projects/ProjectDetail'
+import { AcceptInvite } from '../auth/AcceptInvite'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing']
@@ -59,6 +60,11 @@ export const ROUTES: RouteDef[] = [
   // Account settings is reached from the top-bar account menu, not the sidebar;
   // the route stays registered (and palette-searchable) but hidden from nav.
   { path: '/settings', label: 'Settings', group: 'Govern', element: () => <Settings />, hidden: true },
+  // Invite-accept confirm screen: reached only via an invite link, never the
+  // sidebar. The SAME component renders the pre-auth summary
+  // (auth/preauthRouter.tsx); here authenticated=true selects the
+  // confirm-join screen instead.
+  { path: '/invite/accept', label: 'Accept invite', group: 'Govern', element: () => <AcceptInvite authenticated />, hidden: true, when: (c) => c.teams },
 ]
 
 export function visibleRoutes(caps: Capabilities): RouteDef[] {

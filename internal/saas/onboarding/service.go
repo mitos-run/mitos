@@ -258,6 +258,18 @@ type PendingSignup struct {
 	// verify time. The pending record is NOT marked Verified, so a later approve
 	// and re-verify with the same token can still provision.
 	Waitlisted bool
+	// InviteTokenHash is the sha256 hash of a pending org-invite token carried
+	// from an invite-accept CTA that sent the visitor to sign up fresh
+	// (rather than through the session-required POST /console/invites/accept
+	// path). Empty when the signup carried no invite context. Only the HASH
+	// is stored, matching TokenHash above and saas.Invitation.TokenHash: the
+	// raw invite token is never persisted. At Verify time, a non-empty value
+	// is looked up directly (saas.Store.GetInvitationByTokenHash uses the
+	// identical hash), so the account additionally auto-joins that
+	// invitation's org, in addition to its own Personal org, PROVIDED the
+	// invite is still pending and the verified email satisfies
+	// saas.InviteEmailMatches.
+	InviteTokenHash string
 }
 
 // WaitlistEntry records a signup captured while the funnel is in waitlist mode.
@@ -479,6 +491,20 @@ type SignupResult struct {
 // signup_started event. It NEVER logs the email or the token. An invalid or
 // absent useCase is stored as "".
 func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResult, error) {
+	return s.signUp(ctx, email, useCase, "")
+}
+
+// SignUpWithInvite behaves exactly like SignUp but additionally carries the
+// hash of a pending org-invite token through to Verify, so a fresh signup
+// whose email was already invited to an org auto-joins that org on
+// verification (see PendingSignup.InviteTokenHash). inviteToken is the RAW
+// token from the invite link; only its hash is ever persisted. An empty
+// inviteToken behaves identically to SignUp.
+func (s *Service) SignUpWithInvite(ctx context.Context, email, useCase, inviteToken string) (SignupResult, error) {
+	return s.signUp(ctx, email, useCase, inviteToken)
+}
+
+func (s *Service) signUp(ctx context.Context, email, useCase, inviteToken string) (SignupResult, error) {
 	if email == "" {
 		return SignupResult{}, ErrInvalidEmail
 	}
@@ -523,6 +549,12 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(s.tokenTTL),
 		UseCase:        validateUseCase(useCase),
+	}
+	if inviteToken != "" {
+		// Only the HASH is stored, in the identical form
+		// saas.Store.GetInvitationByTokenHash keys on, so Verify can look it
+		// up directly without ever handling the raw invite token again.
+		pending.InviteTokenHash = hashString(inviteToken)
 	}
 	if err := s.pending.PutPending(ctx, pending); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: store pending: %w", err)
@@ -693,6 +725,13 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		return VerifyResult{}, fmt.Errorf("onboarding verify: mark verified: %w", err)
 	}
 
+	// Auto-join a pending org invite carried through from signup, in ADDITION
+	// to the Personal org just provisioned above. Best-effort: any failure
+	// here (unknown/removed invite, expired, email mismatch) never fails the
+	// signup itself; the user still gets their account and can accept the
+	// invite explicitly later via POST /console/invites/accept.
+	s.autoJoinPendingInvite(ctx, pending, acct, now)
+
 	// The funnel subject transitions from the pending id to the account id; record
 	// both events under the pending id so the funnel can be followed from
 	// signup_started through verified and key_issued.
@@ -706,6 +745,41 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		GrantedCredit: s.credit,
 		UseCase:       pending.UseCase,
 	}, nil
+}
+
+// autoJoinPendingInvite looks up the invitation pending.InviteTokenHash
+// refers to (a no-op when empty, i.e. the common case of a signup with no
+// invite context) and, if it is still effectively pending and acct's email
+// satisfies saas.InviteEmailMatches against the invite's address, adds acct
+// as a member of the invitation's org at its role and marks the invitation
+// accepted. Every failure path (unknown invite, expired, mismatch, or a
+// store error) is swallowed: this is a best-effort UX nicety layered on top
+// of the REQUIRED signup flow, never a reason to fail Verify. The explicit
+// POST /console/invites/accept endpoint remains the primary, always-
+// available accept path.
+func (s *Service) autoJoinPendingInvite(ctx context.Context, pending PendingSignup, acct saas.Account, now time.Time) {
+	if pending.InviteTokenHash == "" {
+		return
+	}
+	inv, err := s.store.GetInvitationByTokenHash(ctx, pending.InviteTokenHash)
+	if err != nil {
+		return
+	}
+	if inv.EffectiveState(now) != saas.InvitationPending {
+		return
+	}
+	if !saas.InviteEmailMatches(inv.Email, acct.Email) {
+		return
+	}
+	if err := s.store.PutMembership(ctx, saas.Membership{
+		AccountID: acct.ID,
+		OrgID:     inv.OrgID,
+		Role:      inv.Role,
+		CreatedAt: now,
+	}); err != nil {
+		return
+	}
+	_ = s.store.UpdateInvitationState(ctx, inv.ID, saas.InvitationAccepted)
 }
 
 // JoinWaitlist returns the recorded waitlist entries (operator surface for the

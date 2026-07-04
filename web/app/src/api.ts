@@ -93,6 +93,29 @@ export type BillingView = { org_id: string; status: string; balance_cents: numbe
 
 export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
 export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string; email?: string; display_name?: string }
+
+export type InvitationState = 'pending' | 'accepted' | 'expired' | 'revoked'
+export type InvitationView = {
+  id: string
+  org_id: string
+  email: string
+  role: Role
+  state: InvitationState
+  inviter_id: string
+  inviter_name: string
+  created_at: string
+  expires_at: string
+}
+// InviteLookupView is the PUBLIC, pre-auth summary returned by
+// GET /console/invites/lookup. email_hint is partially masked (e.g.
+// "jo***@example.com"); the full email is never returned before accept.
+export type InviteLookupView = {
+  org_name: string
+  inviter_name: string
+  email_hint: string
+  role: Role
+  state: InvitationState
+}
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
 export type ProjectMembership = { account_id: string; project_id: string; role: Role }
 
@@ -251,6 +274,51 @@ export const api = {
     })
     if (!r.ok) throw new Error(`set role: ${r.status}`)
   },
+  removeMember: async (accountId: string) => {
+    const r = await fetch(`/console/members/${encodeURIComponent(accountId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`remove member: ${r.status}`)
+  },
+  invites: () => get<{ org_id: string; invitations: InvitationView[] }>('/console/invites').then((r) => r.invitations ?? []),
+  createInvite: async (email: string, role: Role) => {
+    const r = await fetch('/console/invites', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, role }),
+    })
+    if (!r.ok) {
+      const body = await r.json().catch(() => null)
+      throw new Error(body?.error?.cause ?? `create invite: ${r.status}`)
+    }
+    return (await r.json()) as InvitationView
+  },
+  revokeInvite: async (id: string) => {
+    const r = await fetch(`/console/invites/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke invite: ${r.status}`)
+  },
+  resendInvite: async (id: string) => {
+    const r = await fetch(`/console/invites/${encodeURIComponent(id)}/resend`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!r.ok) throw new Error(`resend invite: ${r.status}`)
+    return (await r.json()) as InvitationView
+  },
+  // inviteLookup is the PUBLIC pre-auth call: no credentials are required
+  // (and none are sent), matching the server route mounted outside session
+  // auth.
+  inviteLookup: async (token: string) => {
+    const r = await fetch(`/console/invites/lookup?token=${encodeURIComponent(token)}`)
+    if (!r.ok) throw new Error(`invite lookup: ${r.status}`)
+    return (await r.json()) as InviteLookupView
+  },
+  acceptInvite: (token: string) => post<{ org_id: string; role: Role }>('/console/invites/accept', { token }),
   projects: () => get<{ org_id: string; projects: ProjectView[] }>('/console/projects').then((r) => r.projects ?? []),
   createProject: async (name: string, description: string) => {
     const r = await fetch('/console/projects', {

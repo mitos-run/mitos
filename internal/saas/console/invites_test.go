@@ -260,6 +260,139 @@ func TestRemoveMemberLastOwnerRefused(t *testing.T) {
 	}
 }
 
+func TestLookupInviteIsPublicAndMasksEmail(t *testing.T) {
+	f := newInviteFixture(t)
+	w := f.req(t, "POST", "/console/invites", `{"email":"lookup-me@example.com"}`, f.aliceID, f.orgID)
+	var view InvitationView
+	decode(t, w, &view)
+	token := f.sender.LastToken("lookup-me@example.com")
+
+	// LookupInvite is called directly (as main.go mounts it), with NO caller
+	// context attached at all: it must not require a session.
+	r := httptest.NewRequest("GET", "/console/invites/lookup?token="+token, nil)
+	rr := httptest.NewRecorder()
+	f.con.LookupInvite(rr, r)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var look InviteLookupView
+	decode(t, rr, &look)
+	if look.EmailHint == "lookup-me@example.com" {
+		t.Error("lookup must not return the full email")
+	}
+	if look.OrgName == "" {
+		t.Error("lookup should resolve the org name")
+	}
+	if look.State != saas.InvitationPending {
+		t.Errorf("State = %q, want pending", look.State)
+	}
+}
+
+func TestLookupInviteUnknownTokenIs404(t *testing.T) {
+	f := newInviteFixture(t)
+	r := httptest.NewRequest("GET", "/console/invites/lookup?token=bogus", nil)
+	rr := httptest.NewRecorder()
+	f.con.LookupInvite(rr, r)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAcceptInviteRequiresSession(t *testing.T) {
+	f := newInviteFixture(t)
+	w := f.req(t, "POST", "/console/invites", `{"email":"accept-me@example.com"}`, f.aliceID, f.orgID)
+	var view InvitationView
+	decode(t, w, &view)
+	token := f.sender.LastToken("accept-me@example.com")
+
+	// No caller context attached: unauthenticated.
+	r := httptest.NewRequest("POST", "/console/invites/accept", strings.NewReader(`{"token":"`+token+`"}`))
+	rr := httptest.NewRecorder()
+	f.con.ServeHTTP(rr, r)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAcceptInviteJoinsOrgAndAudits(t *testing.T) {
+	f := newInviteFixture(t)
+	w := f.req(t, "POST", "/console/invites", `{"email":"dave-invites@example.com","role":"admin"}`, f.aliceID, f.orgID)
+	var view InvitationView
+	decode(t, w, &view)
+	token := f.sender.LastToken("dave-invites@example.com")
+
+	// dave is an EXISTING account (a member of bob's org) whose email exactly
+	// matches the invite; his session is for bob's org (accept must still
+	// join HIM to alice's org, the invite's org, not his session's org).
+	ctx := t.Context()
+	keys := saas.NewKeyService(f.store)
+	accounts := saas.NewAccountService(f.store, keys)
+	dave, _, err := accounts.SignUp(ctx, "dave-invites@example.com")
+	if err != nil {
+		t.Fatalf("SignUp dave: %v", err)
+	}
+
+	wa := f.req(t, "POST", "/console/invites/accept", `{"token":"`+token+`"}`, dave.ID, f.bobOrgID)
+	if wa.Code != http.StatusOK {
+		t.Fatalf("accept status = %d body=%s", wa.Code, wa.Body.String())
+	}
+	var resp struct {
+		OrgID string    `json:"org_id"`
+		Role  saas.Role `json:"role"`
+	}
+	decode(t, wa, &resp)
+	if resp.OrgID != f.orgID {
+		t.Errorf("accept joined org %q, want %q (the invite's org)", resp.OrgID, f.orgID)
+	}
+	if resp.Role != saas.RoleAdmin {
+		t.Errorf("accept role = %q, want admin", resp.Role)
+	}
+
+	mems, err := f.store.ListOrgMembers(ctx, f.orgID)
+	if err != nil {
+		t.Fatalf("ListOrgMembers: %v", err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.AccountID == dave.ID && m.Role == saas.RoleAdmin {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dave was not added as an admin member of alice's org")
+	}
+
+	events, err := f.con.deps.Audit.List(ctx, f.orgID, 10)
+	if err != nil {
+		t.Fatalf("audit list: %v", err)
+	}
+	foundAudit := false
+	for _, e := range events {
+		if e.Action == "invite.accept" && e.ActorID == dave.ID {
+			foundAudit = true
+		}
+	}
+	if !foundAudit {
+		t.Errorf("no invite.accept audit event found: %+v", events)
+	}
+}
+
+func TestAcceptInviteEmailMismatchForbidden(t *testing.T) {
+	f := newInviteFixture(t)
+	// Invite a gmail.com address: the consumer-domain rule requires an EXACT
+	// match, so bob (whose account email is on a different domain entirely)
+	// cannot accept it.
+	w := f.req(t, "POST", "/console/invites", `{"email":"only-for-carol@gmail.com"}`, f.aliceID, f.orgID)
+	var view InvitationView
+	decode(t, w, &view)
+	token := f.sender.LastToken("only-for-carol@gmail.com")
+
+	wa := f.req(t, "POST", "/console/invites/accept", `{"token":"`+token+`"}`, f.bobID, f.bobOrgID)
+	if wa.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s, want 403", wa.Code, wa.Body.String())
+	}
+}
+
 func TestInvitesUnavailableWhenNotConfigured(t *testing.T) {
 	con := New(Deps{Accounts: saas.NewAccountService(saas.NewMemStore(), saas.NewKeyService(saas.NewMemStore()))})
 	w := doReq(t, con, "GET", "/console/invites", "", "acct", "org")

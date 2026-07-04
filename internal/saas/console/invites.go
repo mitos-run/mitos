@@ -253,6 +253,95 @@ func (c *Console) handleResendInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.invitationView(r.Context(), inv, c.deps.Now()))
 }
 
+// --- Public lookup (pre-auth) ---
+
+// InviteLookupView is the PUBLIC, unauthenticated response for
+// GET /console/invites/lookup. It carries no secret and reveals nothing an
+// unauthenticated holder of the link could not already infer.
+type InviteLookupView struct {
+	OrgName     string               `json:"org_name"`
+	InviterName string               `json:"inviter_name"`
+	EmailHint   string               `json:"email_hint"`
+	Role        saas.Role            `json:"role"`
+	State       saas.InvitationState `json:"state"`
+}
+
+// LookupInvite is a PUBLIC handler: the binary mounts it directly on the top-
+// level mux OUTSIDE the session middleware (exactly like GET
+// /auth/connectors), NOT through Console's own /console/ mux, so it never
+// requires a session. It resolves an invite token to its public summary so
+// the pre-auth accept page can render "X invited you to Y" before the
+// viewer signs in.
+func (c *Console) LookupInvite(w http.ResponseWriter, r *http.Request) {
+	if c.deps.Invitations == nil {
+		c.invitationsUnavailable(w)
+		return
+	}
+	token := r.URL.Query().Get("token")
+	res, err := c.deps.Invitations.LookupInvite(r.Context(), token)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+			WithCause("this invitation link is invalid or has expired"))
+		return
+	}
+	writeJSON(w, http.StatusOK, InviteLookupView{
+		OrgName: res.OrgName, InviterName: res.InviterName, EmailHint: res.EmailHint,
+		Role: res.Role, State: res.State,
+	})
+}
+
+// --- Accept (session required, POST /console/invites/accept) ---
+
+type acceptInviteRequest struct {
+	Token string `json:"token"`
+}
+
+func (c *Console) handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
+	if c.deps.Invitations == nil {
+		c.invitationsUnavailable(w)
+		return
+	}
+	accountID, _, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	var req acceptInviteRequest
+	if err := decodeBody(r, &req); err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).WithCause("the accept body is not valid JSON"))
+		return
+	}
+	acct, err := c.deps.Accounts.GetAccount(r.Context(), accountID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the caller's account could not be read"))
+		return
+	}
+	inv, err := c.deps.Invitations.AcceptInvite(r.Context(), accountID, acct.Email, req.Token)
+	if err != nil {
+		switch {
+		case errors.Is(err, saas.ErrNotFound):
+			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).WithCause("this invitation link is invalid"))
+		case errors.Is(err, saas.ErrInviteExpired):
+			apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).WithCause("this invitation has expired"))
+		case errors.Is(err, saas.ErrInviteNotPending):
+			apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).WithCause("this invitation has already been used"))
+		case errors.Is(err, saas.ErrInviteEmailMismatch):
+			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+				WithCause("this invitation was sent to a different email address"))
+		default:
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the invitation could not be accepted"))
+		}
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID: inv.OrgID, ActorID: accountID,
+		Action: "invite.accept", Target: inv.ID, TargetType: "invite", TargetName: inv.Email,
+		Detail: "accepted invitation to join as " + string(inv.Role),
+		At:     c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": inv.OrgID, "role": inv.Role})
+}
+
 // --- Member removal (DELETE /console/members/{accountID}) ---
 
 func (c *Console) handleRemoveMember(w http.ResponseWriter, r *http.Request) {

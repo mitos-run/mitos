@@ -358,6 +358,15 @@ func main() {
 	// {"connectors":[],"signup":false} when nothing is configured.
 	mux.HandleFunc("GET /auth/connectors", newAuthConnectorsHandler(caps))
 
+	// GET /console/invites/lookup is the PUBLIC pre-auth counterpart to the
+	// session-gated /console/invites/accept: the console SPA's accept page
+	// calls it before a session exists to render "X invited you to Y". It is
+	// an EXACT path match, which the enhanced ServeMux always prefers over
+	// the "/console/" prefix pattern above, so it reaches con.LookupInvite
+	// directly rather than the session-middleware-wrapped Console mux (both
+	// the -dev and production branches route here identically).
+	mux.HandleFunc("GET /console/invites/lookup", con.LookupInvite)
+
 	// The identity resolve endpoint is an INTERNAL machine-to-machine endpoint,
 	// bearer-gated by a shared secret. It is mounted OUTSIDE the session
 	// middleware (no browser session involved) and OUTSIDE the dev/prod
