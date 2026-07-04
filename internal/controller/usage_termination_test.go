@@ -326,6 +326,12 @@ func TestReconcilePoolRefSweepsLingeringHuskPodOnTerminalPhase(t *testing.T) {
 // one true tail event and deletes the claimed husk pod, and the later object
 // delete's own record step, which reconciles the claim after it already reads
 // Terminated, must not synthesize a second billing event for the same claim.
+// To make step 2 exercise the phase guard rather than an empty pod list (the
+// terminate already deleted the fixture pod), the test plants a fresh
+// LINGERING claimed husk pod before the re-record, simulating a pod that
+// survived a failed delete: with a non-empty pod list, only the
+// claim.Status.Phase == SandboxTerminated guard in recordHuskTerminations
+// stands between the claim and a double-billed tail.
 func TestTerminateLifetimeThenDeleteRecordsExactlyOneTail(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -374,12 +380,34 @@ func TestTerminateLifetimeThenDeleteRecordsExactlyOneTail(t *testing.T) {
 		t.Fatalf("tail events after terminate = %d, want 1", n)
 	}
 
-	// 2. Simulate the later object delete's record step on the now-Terminated
-	// claim: the phase guard must swallow it (one claim, one event), and the
-	// pod list is empty anyway because Task 1 deleted it.
+	// 2. Plant a fresh LINGERING claimed husk pod (same labels the fixture pod
+	// carried), simulating a pod that survived a failed delete. Without it the
+	// re-record below would trivially record nothing because the pod list is
+	// empty; with it, only the Terminated phase guard prevents a second event.
+	lingering := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "python-husk-688b-lingering",
+			Namespace: "mitos-org-acme",
+			Labels: map[string]string{
+				huskLabel:          "true",
+				huskClaimLabel:     "sb-688b",
+				tenant.OrgLabelKey: "acme",
+			},
+		},
+	}
+	if err := cl.Create(context.Background(), lingering); err != nil {
+		t.Fatalf("create lingering pod: %v", err)
+	}
+
+	// 3. Simulate the later object delete's record step on the now-Terminated
+	// claim: the pod list is NON-EMPTY (the lingering pod), so the phase guard
+	// alone must swallow the re-record (one claim, one event).
 	var after v1.Sandbox
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &after); err != nil {
 		t.Fatal(err)
+	}
+	if after.Status.Phase != v1.SandboxTerminated {
+		t.Fatalf("phase = %q, want Terminated before the re-record", after.Status.Phase)
 	}
 	r.recordClaimHuskTerminations(context.Background(), &after)
 	if n := len(r.UsageTerminations.Drain()); n != 0 {
