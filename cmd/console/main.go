@@ -131,7 +131,14 @@ func main() {
 		log.Fatalf("MITOS_CONSOLE_RATES: %v", err)
 	}
 
-	bill := setupBilling(logger, statusStore, creditLedger, customers)
+	// billingSuspender routes EVERY billing-driven suspension (a provider
+	// webhook reporting the subscription suspended, a breached hard spend cap
+	// in the drawdown cycle) into the shared suspensions table the gateway
+	// kill-switch reads (issue #615); see newBillingSuspender. Built once and
+	// shared by the webhook and the drawdown service below.
+	billingSuspender, _ := newBillingSuspender(pool, logger)
+
+	bill := setupBilling(logger, statusStore, creditLedger, customers, billingSuspender)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -241,13 +248,13 @@ func main() {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		// Suspend: billing-driven suspensions (a breached hard spend cap, an
-		// exhausted dunning sequence) must land in the SAME durable suspensions
-		// table the gateway kill-switch reads (issue #615); without this seam the
-		// service computed the suspension and dropped it. Caps is the shared
-		// spend-cap store the BFF writes, so enforcement sees the org's real
-		// caps instead of an empty in-memory default.
-		billingSuspender, _ := newBillingSuspender(pool, logger)
+		// Suspend: the SAME billingSuspender the webhook uses, so a hard spend
+		// cap breached in the drawdown cycle lands in the durable suspensions
+		// table the gateway kill-switch reads (issue #615); without this seam
+		// the service computed the suspension and dropped it. The driver calls
+		// EnforceSpendCapFromLedger after settling each active org. Caps is the
+		// shared spend-cap store the BFF writes, so enforcement sees the org's
+		// real caps instead of an empty in-memory default.
 		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates, Caps: spendCapStore, Suspend: billingSuspender})
 		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())

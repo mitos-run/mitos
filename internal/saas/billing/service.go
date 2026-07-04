@@ -357,6 +357,46 @@ func (s *Service) SetSpendCap(ctx context.Context, cap SpendCap) error {
 	return s.caps.Set(ctx, cap)
 }
 
+// EnforceSpendCapFromLedger derives the org's period spend from the credit
+// ledger and enforces the spend cap over it: the period is the current
+// CALENDAR MONTH (UTC), and the spend is the sum of the org's usage-drawdown
+// debits in that period. It is the PRODUCTION caller of EnforceSpendCap: the
+// console's drawdown driver runs it after settling an org's usage each cycle,
+// so a breached hard cap suspends the org (issue #615) instead of the cap
+// being computed by nothing.
+//
+// HONEST LIMIT: drawdown debits are prepaid-credit spend. Metered overage
+// beyond credit is not yet included, because pre-#618 no invoice source
+// exists (the drawdown caps its debit at the available balance and nothing
+// bills the remainder); once overage billing lands, its invoiced amount must
+// be folded into this sum. Until then the hard cap binds prepaid spend, which
+// is the only money that moves.
+//
+// An org with NO configured cap short-circuits before any ledger read, so
+// uncapped orgs never pay a per-cycle Entries scan.
+func (s *Service) EnforceSpendCapFromLedger(ctx context.Context, orgID string) (suspended bool, err error) {
+	cap, ok, err := s.caps.Get(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get spend cap: %w", err)
+	}
+	if !ok || (cap.HardCap <= 0 && cap.SoftCap <= 0) {
+		return false, nil
+	}
+	entries, err := s.ledger.Entries(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read ledger for spend cap: %w", err)
+	}
+	now := s.now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var spend Money
+	for _, e := range entries {
+		if e.Kind == KindUsageDrawdown && e.Amount < 0 && !e.At.UTC().Before(periodStart) {
+			spend += -e.Amount
+		}
+	}
+	return s.EnforceSpendCap(ctx, orgID, spend)
+}
+
 // applyDunning runs the dunning state machine for an org over one event and
 // applies the side effects: a transition INTO suspended drives the #213
 // kill-switch; any transition persists the new status. It returns the new

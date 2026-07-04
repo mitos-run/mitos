@@ -1,6 +1,6 @@
 // Package billingprovider abstracts the payment backend behind a provider seam,
 // the same way console.SecretStore abstracts the secret backend. Stripe is one
-// provider; a Merchant of Record (Polar, Paddle, Lemon Squeezy) is another —
+// provider; a Merchant of Record (Polar, Paddle, Lemon Squeezy) is another,
 // and an MoR is the likely end state, since it becomes the legal seller and
 // handles global sales-tax/VAT so Mitos does not have to. The console reads
 // billing through the provider-neutral BillingReader seam and never names a
@@ -122,6 +122,7 @@ type WebhookHandler struct {
 	linker    CustomerLinker
 	status    billing.StatusStore
 	ledger    billing.CreditLedger
+	suspender billing.Suspender
 	now       func() time.Time
 }
 
@@ -133,6 +134,23 @@ func NewWebhookHandler(p Provider, customers CustomerResolver, linker CustomerLi
 		now = time.Now
 	}
 	return &WebhookHandler{provider: p, customers: customers, linker: linker, status: status, ledger: ledger, now: now}
+}
+
+// WithSuspender wires the #213 kill-switch seam into the webhook (issue #615):
+// an event whose normalized status is suspended (subscription canceled or
+// paused, payment retries exhausted) then SUSPENDS the org through s on the
+// transition INTO suspended, so the org fails closed at the gateway instead of
+// only its billing status flipping. The suspend fires BEFORE the status is
+// applied and a suspend failure is a 5xx (the provider retries); the
+// transition gate keeps webhook redeliveries from churning the suspension
+// record. Nil (the default) keeps the status-only behavior (community edition
+// without a wired kill-switch). Recovery is deliberately NOT auto-lifted here:
+// a payment-succeeded event flips the billing status back to active, but
+// lifting the kill-switch suspension is the operator's review decision (see
+// docs/saas/pricing.md).
+func (h *WebhookHandler) WithSuspender(s billing.Suspender) *WebhookHandler {
+	h.suspender = s
+	return h
 }
 
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +207,27 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		w.WriteHeader(http.StatusOK) // unknown customer: ack so retries stop
 		return
+	}
+	// Transition INTO suspended drives the kill-switch BEFORE the status is
+	// applied: if the suspension write fails the whole event is a 5xx and the
+	// provider retries with the status still unflipped, so the transition gate
+	// cannot swallow the retry and the org can never read as suspended in
+	// billing while the gateway still admits it. The gate (current status not
+	// already suspended) keeps redeliveries from churning the suspension time.
+	// The note is non-secret; no payment detail crosses this seam.
+	if h.suspender != nil && ev.Status == billing.StatusSuspended {
+		cur, err := h.status.Status(r.Context(), orgID)
+		if err != nil {
+			http.Error(w, "status read failed", http.StatusInternalServerError)
+			return
+		}
+		if cur != billing.StatusSuspended {
+			if err := h.suspender.Suspend(r.Context(), orgID, "dunning",
+				"billing provider reported the subscription suspended (canceled, paused, or payment retries exhausted)", false); err != nil {
+				http.Error(w, "suspend failed", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 	if err := h.status.SetStatus(r.Context(), orgID, ev.Status); err != nil {
 		http.Error(w, "status update failed", http.StatusInternalServerError)

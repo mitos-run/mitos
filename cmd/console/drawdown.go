@@ -54,10 +54,16 @@ type drawdownRecordLister interface {
 // SettledWindowKeys and PruneProcessedWindows carry the issue #672 fix: the
 // driver skips already-settled windows BEFORE pricing them and prunes markers
 // that fell out of the lookback, so a tick prices only genuinely new usage.
+// EnforceSpendCapFromLedger is the issue #615 spend-cap production path: the
+// driver evaluates each active org's cap right after settling its usage (the
+// only moment period spend can newly cross the cap), so a breached hard cap
+// SUSPENDS the org through the shared suspension store the gateway reads,
+// instead of the cap being computed by nothing.
 type drawdowner interface {
 	Drawdown(ctx context.Context, rec usage.UsageRecord) (billing.DrawdownResult, error)
 	SettledWindowKeys(ctx context.Context, orgID string, since time.Time) (map[string]bool, error)
 	PruneProcessedWindows(ctx context.Context, olderThan time.Time) (int64, error)
+	EnforceSpendCapFromLedger(ctx context.Context, orgID string) (bool, error)
 }
 
 // drawdownInterval resolves the driver cadence from the raw
@@ -111,6 +117,10 @@ type drawdownStats struct {
 	// pruned is how many processed-window markers aged out of the lookback and
 	// were removed this cycle.
 	pruned int64
+	// suspended counts orgs suspended this cycle by the post-settle spend-cap
+	// evaluation (issue #615): a nonzero value means a hard cap fired and the
+	// org now fails closed at the gateway.
+	suspended int
 }
 
 // runDrawdownOnce settles one cycle: list every org, fetch each org's usage
@@ -183,6 +193,26 @@ func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgL
 		if orgSettled {
 			stats.carriedMilli += orgCarried
 		}
+		// Spend-cap evaluation for every ACTIVE org (any records in the lookback,
+		// settled or replayed): settling is the only moment period spend can newly
+		// cross the cap, and the lookback keeps a recently-active org in scope so
+		// a cap evaluation that failed one tick retries on the next. Idle orgs
+		// skip the scan (an uncapped or inactive org never pays it). A breached
+		// HARD cap suspends the org into the SAME durable suspensions table the
+		// gateway kill-switch reads, so the org fails closed at the gateway within
+		// the gateway's suspension-cache TTL (a few seconds). The suspend is
+		// idempotent, so re-evaluating a breached org on later ticks is harmless.
+		// Only the org id (non-secret) and counts are logged; never a balance.
+		capSuspended, err := svc.EnforceSpendCapFromLedger(ctx, org.ID)
+		if err != nil {
+			logger.Warn("usage drawdown: spend cap evaluation failed", "org", org.ID, "err", err.Error())
+			stats.failed++
+			continue
+		}
+		if capSuspended {
+			stats.suspended++
+			logger.Info("usage drawdown: hard spend cap breached; org suspended", "org", org.ID)
+		}
 	}
 	// Markers whose window predates the lookback can never be listed again;
 	// drop them so the marker set stays bounded. A prune failure only delays
@@ -198,7 +228,7 @@ func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgL
 		"orgs", stats.orgs, "records", stats.records, "drawnDown", stats.drawn,
 		"replayedRecords", stats.replayed, "errors", stats.failed,
 		"settledCents", stats.settledCents, "carriedMilliCents", stats.carriedMilli,
-		"prunedMarkers", stats.pruned)
+		"prunedMarkers", stats.pruned, "suspendedOrgs", stats.suspended)
 	return stats
 }
 

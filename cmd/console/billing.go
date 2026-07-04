@@ -142,7 +142,13 @@ type billingWiring struct {
 // pgstore.PgCustomers when Postgres is configured, in-memory otherwise (DEV
 // ONLY: an in-memory map cannot survive a restart, so a webhook arriving after
 // a redeploy would drop its status sync).
-func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers) billingWiring {
+//
+// suspender is the kill-switch seam (issue #615): a webhook event whose
+// normalized status is suspended drives it on the transition into suspended,
+// so the org fails closed at the gateway (via the shared suspensions table)
+// and not only in its billing status. main passes the newBillingSuspender
+// adapter over the same store the drawdown spend-cap path uses.
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, suspender billing.Suspender) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
@@ -177,7 +183,10 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 		// customers is passed as BOTH the resolver and the linker: an event
 		// whose signature-verified custom_data names the org records the org
 		// <-> customer link before processing (the write half of #614/#618).
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now),
+		// WithSuspender: a suspended-status event drives the kill-switch into
+		// the shared suspensions table, so the gateway blocks the org within
+		// its suspension-cache TTL (a few seconds).
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithSuspender(suspender),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,
