@@ -3,6 +3,7 @@ package saas
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -86,6 +87,38 @@ type Store interface {
 	// RevokeApiKey marks the key revoked at the given time. It is idempotent; a
 	// second revoke is a no-op. Returns ErrNotFound for an unknown id.
 	RevokeApiKey(ctx context.Context, id string, at time.Time) error
+
+	// CreateInvitation stores a new org invitation. It performs no email-based
+	// dedup itself (InvitationService decides whether a still-pending
+	// invitation already covers this email before calling this method).
+	CreateInvitation(ctx context.Context, inv Invitation) error
+	// ListInvitations returns every invitation ever created for orgID, in any
+	// state, most-recently-created first. It never returns another org's
+	// invitations, and returns an empty slice for an unknown org.
+	ListInvitations(ctx context.Context, orgID string) ([]Invitation, error)
+	// GetInvitationByTokenHash returns the invitation whose stored token hash
+	// equals hash, or ErrNotFound. This is the accept-flow lookup: the caller
+	// hashes the raw token from the invite link before calling this method;
+	// the raw value itself is never stored.
+	GetInvitationByTokenHash(ctx context.Context, hash string) (Invitation, error)
+	// UpdateInvitationState transitions the STORED state of the invitation
+	// identified by id (for example pending -> accepted). It returns
+	// ErrNotFound for an unknown id. Expiry is never written here: an expired
+	// invitation's stored state stays "pending" and expiry is computed lazily
+	// at read time by Invitation.EffectiveState; only an explicit transition
+	// (accept) calls this method.
+	UpdateInvitationState(ctx context.Context, id string, state InvitationState) error
+	// RemoveInvitation permanently deletes the invitation identified by id. It
+	// returns ErrNotFound for an unknown id. Used by revoke (the row is
+	// deleted rather than soft-marked) and by resend (the old row is removed
+	// and a fresh one with a new token takes its place).
+	RemoveInvitation(ctx context.Context, id string) error
+
+	// DeleteMembership removes accountID's membership in orgID. It returns
+	// ErrNotFound if no such membership exists, and ErrLastOwner if removing
+	// it would leave the organization without an owner (mirroring
+	// SetMembershipRole's sole-owner protection).
+	DeleteMembership(ctx context.Context, orgID, accountID string) error
 }
 
 // MemStore is the in-memory Store used as the tested default and by the unit
@@ -93,24 +126,28 @@ type Store interface {
 // everything in maps and loses all data on process exit. The Postgres store is a
 // documented follow-up; this is the seam it plugs into.
 type MemStore struct {
-	mu       sync.RWMutex
-	accounts map[string]Account
-	byEmail  map[string]string // email -> account id
-	orgs     map[string]Organization
-	members  map[string][]Membership // account id -> memberships
-	keys     map[string]ApiKey       // key id -> key
-	byHash   map[string]string       // hash -> key id
+	mu          sync.RWMutex
+	accounts    map[string]Account
+	byEmail     map[string]string // email -> account id
+	orgs        map[string]Organization
+	members     map[string][]Membership // account id -> memberships
+	keys        map[string]ApiKey       // key id -> key
+	byHash      map[string]string       // hash -> key id
+	invitations map[string]Invitation   // invitation id -> invitation
+	inviteHash  map[string]string       // token hash -> invitation id
 }
 
 // NewMemStore returns an empty in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		accounts: map[string]Account{},
-		byEmail:  map[string]string{},
-		orgs:     map[string]Organization{},
-		members:  map[string][]Membership{},
-		keys:     map[string]ApiKey{},
-		byHash:   map[string]string{},
+		accounts:    map[string]Account{},
+		byEmail:     map[string]string{},
+		orgs:        map[string]Organization{},
+		members:     map[string][]Membership{},
+		keys:        map[string]ApiKey{},
+		byHash:      map[string]string{},
+		invitations: map[string]Invitation{},
+		inviteHash:  map[string]string{},
 	}
 }
 
@@ -302,5 +339,103 @@ func (s *MemStore) RevokeApiKey(_ context.Context, id string, at time.Time) erro
 	}
 	k.RevokedAt = at
 	s.keys[id] = k
+	return nil
+}
+
+func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.invitations[inv.ID]; ok {
+		return ErrConflict
+	}
+	s.invitations[inv.ID] = inv
+	s.inviteHash[inv.TokenHash] = inv.ID
+	return nil
+}
+
+func (s *MemStore) ListInvitations(_ context.Context, orgID string) ([]Invitation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []Invitation{}
+	for _, inv := range s.invitations {
+		if inv.OrgID == orgID {
+			out = append(out, inv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemStore) GetInvitationByTokenHash(_ context.Context, hash string) (Invitation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.inviteHash[hash]
+	if !ok {
+		return Invitation{}, ErrNotFound
+	}
+	return s.invitations[id], nil
+}
+
+func (s *MemStore) UpdateInvitationState(_ context.Context, id string, state InvitationState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inv, ok := s.invitations[id]
+	if !ok {
+		return ErrNotFound
+	}
+	inv.State = state
+	s.invitations[id] = inv
+	return nil
+}
+
+func (s *MemStore) RemoveInvitation(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inv, ok := s.invitations[id]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(s.invitations, id)
+	delete(s.inviteHash, inv.TokenHash)
+	return nil
+}
+
+// DeleteMembership removes accountID's membership in orgID, refusing
+// (ErrLastOwner) to remove the org's sole remaining owner. Mirrors
+// SetMembershipRole's sole-owner protection.
+func (s *MemStore) DeleteMembership(_ context.Context, orgID, accountID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	list, ok := s.members[accountID]
+	if !ok {
+		return ErrNotFound
+	}
+	idx := -1
+	var target Membership
+	for i, m := range list {
+		if m.OrgID == orgID {
+			idx = i
+			target = m
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrNotFound
+	}
+	if target.Role == RoleOwner {
+		ownerCount := 0
+		for _, l := range s.members {
+			for _, m := range l {
+				if m.OrgID == orgID && m.Role == RoleOwner {
+					ownerCount++
+				}
+			}
+		}
+		if ownerCount <= 1 {
+			return ErrLastOwner
+		}
+	}
+	s.members[accountID] = append(append([]Membership{}, list[:idx]...), list[idx+1:]...)
 	return nil
 }

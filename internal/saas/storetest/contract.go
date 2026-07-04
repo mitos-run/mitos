@@ -430,6 +430,117 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 			t.Errorf("revoke unknown id: got %v, want ErrNotFound", err)
 		}
 	})
+
+	t.Run("InvitationCreateGetByHashAndList", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		inv := saas.Invitation{
+			ID: "inv-1", OrgID: "org-1", Email: "carol@example.com", Role: saas.RoleAdmin,
+			TokenHash: "hash-inv-1", State: saas.InvitationPending, InviterID: "acc-owner",
+			CreatedAt: created, ExpiresAt: created.Add(7 * 24 * time.Hour),
+		}
+		if err := s.CreateInvitation(ctx, inv); err != nil {
+			t.Fatalf("CreateInvitation: %v", err)
+		}
+		got, err := s.GetInvitationByTokenHash(ctx, "hash-inv-1")
+		if err != nil {
+			t.Fatalf("GetInvitationByTokenHash: %v", err)
+		}
+		if got != inv {
+			t.Errorf("GetInvitationByTokenHash mismatch:\n got %+v\nwant %+v", got, inv)
+		}
+		if _, err := s.GetInvitationByTokenHash(ctx, "nope"); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("GetInvitationByTokenHash unknown: got %v, want ErrNotFound", err)
+		}
+
+		list, err := s.ListInvitations(ctx, "org-1")
+		if err != nil {
+			t.Fatalf("ListInvitations: %v", err)
+		}
+		if len(list) != 1 || list[0] != inv {
+			t.Fatalf("ListInvitations:\n got %+v\nwant [%+v]", list, inv)
+		}
+		other, err := s.ListInvitations(ctx, "org-other")
+		if err != nil {
+			t.Fatalf("ListInvitations other org: %v", err)
+		}
+		if len(other) != 0 {
+			t.Errorf("ListInvitations for unrelated org leaked rows: %+v", other)
+		}
+	})
+
+	t.Run("InvitationUpdateStateAndRemove", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		inv := saas.Invitation{ID: "inv-2", OrgID: "org-1", Email: "dave@example.com", TokenHash: "hash-inv-2", State: saas.InvitationPending}
+		must(t, s.CreateInvitation(ctx, inv))
+
+		if err := s.UpdateInvitationState(ctx, "inv-2", saas.InvitationAccepted); err != nil {
+			t.Fatalf("UpdateInvitationState: %v", err)
+		}
+		got, err := s.GetInvitationByTokenHash(ctx, "hash-inv-2")
+		if err != nil {
+			t.Fatalf("GetInvitationByTokenHash after update: %v", err)
+		}
+		if got.State != saas.InvitationAccepted {
+			t.Errorf("state after update = %q, want accepted", got.State)
+		}
+		if err := s.UpdateInvitationState(ctx, "ghost", saas.InvitationAccepted); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("UpdateInvitationState unknown id: got %v, want ErrNotFound", err)
+		}
+
+		if err := s.RemoveInvitation(ctx, "inv-2"); err != nil {
+			t.Fatalf("RemoveInvitation: %v", err)
+		}
+		if _, err := s.GetInvitationByTokenHash(ctx, "hash-inv-2"); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("GetInvitationByTokenHash after remove: got %v, want ErrNotFound", err)
+		}
+		if err := s.RemoveInvitation(ctx, "inv-2"); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("RemoveInvitation already-removed: got %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("DeleteMembershipNotFound", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		if err := s.DeleteMembership(ctx, "org-1", "ghost"); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("DeleteMembership on missing membership: got %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("DeleteMembershipLastOwnerRefused", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		must(t, s.PutMembership(ctx, saas.Membership{AccountID: "owner-1", OrgID: "org-1", Role: saas.RoleOwner}))
+		if err := s.DeleteMembership(ctx, "org-1", "owner-1"); !errors.Is(err, saas.ErrLastOwner) {
+			t.Errorf("removing sole owner: got %v, want ErrLastOwner", err)
+		}
+		list, err := s.ListOrgMembers(ctx, "org-1")
+		if err != nil {
+			t.Fatalf("ListOrgMembers: %v", err)
+		}
+		if len(list) != 1 {
+			t.Errorf("refused delete still mutated membership list: %+v", list)
+		}
+	})
+
+	t.Run("DeleteMembershipRemovesNonSoleOwner", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		must(t, s.PutMembership(ctx, saas.Membership{AccountID: "owner-1", OrgID: "org-1", Role: saas.RoleOwner}))
+		must(t, s.PutMembership(ctx, saas.Membership{AccountID: "member-1", OrgID: "org-1", Role: saas.RoleMember}))
+		if err := s.DeleteMembership(ctx, "org-1", "member-1"); err != nil {
+			t.Fatalf("DeleteMembership: %v", err)
+		}
+		list, err := s.ListOrgMembers(ctx, "org-1")
+		if err != nil {
+			t.Fatalf("ListOrgMembers: %v", err)
+		}
+		if len(list) != 1 || list[0].AccountID != "owner-1" {
+			t.Errorf("after delete: got %+v, want only owner-1", list)
+		}
+	})
 }
 
 // must fails the test if err is non-nil.
