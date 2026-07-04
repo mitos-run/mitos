@@ -48,28 +48,51 @@ pub fn is_mounted(mount_path: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn is_mounted_linux(mount_path: &str) -> bool {
-    use std::io::BufRead;
+    mounted_fstype(mount_path).is_some()
+}
 
-    let f = match std::fs::File::open("/proc/mounts") {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let reader = std::io::BufReader::new(f);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
+/// Return the filesystem type mounted at `mount_path`, or None when nothing
+/// is mounted there (or /proc/mounts cannot be read, so the caller falls
+/// through to a mount attempt that fails loudly rather than silently skipping).
+///
+/// PID-1 init uses this to detect targets the kernel already mounted before
+/// the agent ran: with CONFIG_DEVTMPFS_MOUNT the kernel automounts devtmpfs
+/// on /dev, so init's own devtmpfs mount would return EBUSY (issue #668).
+///
+/// On non-Linux platforms always returns None (mount is a no-op there).
+pub fn mounted_fstype(mount_path: &str) -> Option<String> {
+    let content = read_proc_mounts()?;
+    fstype_from_mounts(&content, mount_path)
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_mounts() -> Option<String> {
+    std::fs::read_to_string("/proc/mounts").ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_proc_mounts() -> Option<String> {
+    None
+}
+
+/// Parse /proc/mounts content: return the fstype (field 3) of the line whose
+/// mount target (field 2) equals `mount_path` exactly. When several lines
+/// match (overmounts), the LAST one wins: /proc/mounts is ordered oldest
+/// first and the most recent mount is the visible one. Separated from the
+/// /proc/mounts read so it is unit-testable on any host.
+fn fstype_from_mounts(content: &str, mount_path: &str) -> Option<String> {
+    let mut found = None;
+    for line in content.lines() {
         let mut fields = line.split_ascii_whitespace();
-        // Field 0: device, field 1: mount target.
+        // Field 0: device, field 1: mount target, field 2: fstype.
         let _device = fields.next();
         if let Some(target) = fields.next()
             && target == mount_path
         {
-            return true;
+            found = fields.next().map(str::to_string);
         }
     }
-    false
+    found
 }
 
 /// Mount a filesystem.
@@ -156,6 +179,50 @@ fn sethostname_linux(name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MOUNTS: &str = "\
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+devtmpfs /dev devtmpfs rw,nosuid,size=12448k,nr_inodes=31112,mode=755 0 0
+/dev/vda / ext4 rw,relatime 0 0
+tmpfs /tmp tmpfs rw,relatime 0 0
+";
+
+    #[test]
+    fn fstype_from_mounts_finds_dev_devtmpfs() {
+        assert_eq!(
+            fstype_from_mounts(MOUNTS, "/dev"),
+            Some("devtmpfs".to_string())
+        );
+    }
+
+    #[test]
+    fn fstype_from_mounts_none_for_unmounted_path() {
+        assert_eq!(fstype_from_mounts(MOUNTS, "/run"), None);
+    }
+
+    #[test]
+    fn fstype_from_mounts_matches_exact_target_only() {
+        // "/de" and "/dev/pts" must not match the "/dev" entry.
+        assert_eq!(fstype_from_mounts(MOUNTS, "/de"), None);
+        assert_eq!(fstype_from_mounts(MOUNTS, "/dev/pts"), None);
+    }
+
+    #[test]
+    fn fstype_from_mounts_ignores_malformed_lines() {
+        assert_eq!(fstype_from_mounts("devtmpfs /dev\n\n", "/dev"), None);
+    }
+
+    #[test]
+    fn fstype_from_mounts_last_overmount_wins() {
+        // /proc/mounts is ordered oldest first; the visible mount at a
+        // target is the most recent line.
+        let content = "devtmpfs /dev devtmpfs rw 0 0\ntmpfs /dev tmpfs rw 0 0\n";
+        assert_eq!(
+            fstype_from_mounts(content, "/dev"),
+            Some("tmpfs".to_string())
+        );
+    }
 
     #[test]
     fn mount_no_op_on_non_linux_or_bad_target() {
