@@ -1,7 +1,7 @@
 // Behavior tests for the appearance module: round-trip localStorage persistence
 // and document.documentElement.dataset side-effects.
 import { describe, it, expect, beforeEach } from 'vitest'
-import { getAppearance, setAppearance } from './appearance'
+import { getAppearance, setAppearance, applyAppearanceOnLoad } from './appearance'
 
 beforeEach(() => {
   localStorage.clear()
@@ -34,11 +34,16 @@ describe('appearance', () => {
     expect(document.documentElement.dataset['density']).toBe('compact')
   })
 
-  it('returns defaults when nothing is stored', () => {
+  it('returns defaults when nothing is stored, with theme defaulting to dark', () => {
     const got = getAppearance()
     expect(got.reducedMotion).toBe(false)
     expect(got.density).toBe('comfortable')
-    expect(got.theme).toBe('system')
+    expect(got.theme).toBe('dark')
+  })
+
+  it('applies dataset.theme = dark when nothing is stored (brand default, not OS preference)', () => {
+    applyAppearanceOnLoad()
+    expect(document.documentElement.dataset['theme']).toBe('dark')
   })
 
   it('round-trips theme through setAppearance -> getAppearance', () => {
@@ -62,8 +67,8 @@ describe('appearance', () => {
     expect(document.documentElement.dataset['theme']).toBeUndefined()
   })
 
-  it('falls back to the system theme when the stored value is invalid', () => {
+  it('falls back to the default (dark) theme when the stored value is invalid', () => {
     localStorage.setItem('mitos-appearance', JSON.stringify({ theme: 'sepia' }))
-    expect(getAppearance().theme).toBe('system')
+    expect(getAppearance().theme).toBe('dark')
   })
 })

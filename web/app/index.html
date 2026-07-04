@@ -5,15 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mitos console</title>
     <script>
-      // Pin a stored explicit theme before first paint so a manual override
-      // does not flash the system theme. Mirrors src/appearance.ts; keep the
-      // storage key and accepted values in sync.
+      // Resolve the theme before first paint so nothing flashes the wrong
+      // palette. Mirrors src/appearance.ts DEFAULTS; keep the storage key and
+      // accepted values in sync. Dark is the brand default: no stored theme,
+      // an unrecognized value, or a storage failure all resolve to 'dark'.
+      // Only an explicitly stored 'system' removes data-theme so
+      // prefers-color-scheme decides.
       try {
         var mitosTheme = JSON.parse(localStorage.getItem('mitos-appearance') || '{}').theme
-        if (mitosTheme === 'dark' || mitosTheme === 'light') {
-          document.documentElement.dataset.theme = mitosTheme
+        if (mitosTheme === 'system') {
+          delete document.documentElement.dataset.theme
+        } else if (mitosTheme === 'light') {
+          document.documentElement.dataset.theme = 'light'
+        } else {
+          document.documentElement.dataset.theme = 'dark'
         }
-      } catch (e) { /* restricted storage: fall back to prefers-color-scheme */ }
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark'
+      }
     </script>
   </head>
   <body>

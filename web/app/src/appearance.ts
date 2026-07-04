@@ -1,9 +1,13 @@
 // Appearance preferences: reduced-motion toggle, layout density, and theme.
 // Persisted to localStorage; applied immediately to document.documentElement.dataset
 // so that CSS can react without a React re-render cycle.
-// Theme: 'system' removes data-theme so the @media (prefers-color-scheme) default
-// in @mitos/brand tokens.css decides; 'dark'/'light' pin data-theme explicitly.
-// index.html applies a stored explicit theme before first paint; keep it in sync.
+// Theme: dark is the brand default (DEFAULTS.theme), so a first-time visitor with
+// no stored preference gets data-theme="dark" regardless of OS preference.
+// 'system' is a selectable opt-out that removes data-theme so the
+// @media (prefers-color-scheme) default in @mitos/brand tokens.css decides;
+// 'dark'/'light' pin data-theme explicitly.
+// index.html applies the resolved theme (stored value, or 'dark' when nothing is
+// stored / storage fails) before first paint; keep it in sync.
 // Guard every localStorage call with try/catch for SSR or restricted contexts.
 
 export type Density = 'comfortable' | 'compact'
@@ -18,7 +22,7 @@ export type Appearance = {
 
 const STORAGE_KEY = 'mitos-appearance'
 
-const DEFAULTS: Appearance = { reducedMotion: false, density: 'comfortable', theme: 'system' }
+const DEFAULTS: Appearance = { reducedMotion: false, density: 'comfortable', theme: 'dark' }
 
 export function getAppearance(): Appearance {
   try {
