@@ -466,12 +466,21 @@ func main() {
 		} else {
 			logger.Info("usage store: in-memory (DEV ONLY, usage is lost on restart; set --usage-database-dsn for durable Postgres)")
 		}
+		// Claim-release usage terminations (issue #682): the sandbox reconciler
+		// records an event at claim release/lifetime terminate, and the
+		// collector's husk source drains it to bill the [last scrape, terminate]
+		// tail window. The log is created only when the collector runs (the
+		// reconciler's nil default records nothing, so self-host pays nothing),
+		// and this assignment happens before mgr.Start, so no reconcile races it.
+		usageTerminations := usage.NewTerminationLog()
+		sandboxReconciler.UsageTerminations = usageTerminations
 		if err := mgr.Add(&controller.UsageCollectorRunnable{
-			Registry:   nodeRegistry,
-			Client:     mgr.GetClient(),
-			Cadence:    usageCollectorInterval,
-			HTTPScheme: "http",
-			Store:      usageStore,
+			Registry:     nodeRegistry,
+			Client:       mgr.GetClient(),
+			Cadence:      usageCollectorInterval,
+			HTTPScheme:   "http",
+			Store:        usageStore,
+			Terminations: usageTerminations,
 		}); err != nil {
 			logger.Error(err, "unable to add usage collector")
 			os.Exit(1)

@@ -44,6 +44,14 @@ type UsageCollectorRunnable struct {
 	// (or a future durable store) can inspect or substitute it; defaults to an
 	// in-memory store.
 	Store usage.UsageStore
+
+	// Terminations, when set, is the claim-release event log shared with the
+	// SandboxReconciler (issue #682): the reconciler records a termination at
+	// claim release, and the husk source drains it each cycle to emit the final
+	// sample that closes the [last scrape, terminate] window. Nil disables the
+	// tail accounting (samples then end at the last scrape, the pre-#682
+	// behavior).
+	Terminations *usage.TerminationLog
 }
 
 // Start runs the collector loop until ctx is canceled. It builds the live
@@ -81,6 +89,10 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 		u.HTTPScheme,
 		nil,
 	)
+	// Claim-release final samples (issue #682): the SandboxReconciler records a
+	// termination per released husk pod into this shared log; the husk source
+	// drains it each cycle to close the [last scrape, terminate] tail window.
+	huskSource.SetTerminations(u.Terminations)
 	source := usage.NewMultiSource(nodeSource, huskSource)
 
 	store := u.Store
@@ -111,10 +123,13 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 	}
 }
 
-// cycle runs one scrape-integrate-upsert-publish cycle and logs a COUNT of skipped
-// nodes and skipped husk pods (never node/pod identity or error text) on a
-// transient cycle error. The two skip counters are the degradation signals an
-// operator alerts on.
+// cycle runs one scrape-integrate-upsert-publish cycle. A SUCCESSFUL cycle
+// emits a one-line summary at default verbosity (issue #682, was #665: a
+// healthy pipeline must be visibly healthy, and a zero-collecting one must not
+// look identical to it); a failed cycle logs the error. Both lines carry
+// COUNTS and a duration only, never node/pod identity, org ids, error values,
+// or secrets. The cumulative skip counters on the summary are the degradation
+// signals an operator alerts on.
 func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, collector *usage.Collector, nodeSource *usage.NodeRegistrySource, huskSource *usage.HuskSource) {
 	stats, err := collector.CollectOnce(ctx)
 	if err != nil {

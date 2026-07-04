@@ -81,7 +81,25 @@ type HuskSource struct {
 	// source's lifetime. It is a process counter the wiring surfaces as a metric or
 	// logged count; it never carries pod identity or error text.
 	skipped atomic.Int64
+
+	// terminations, when set (SetTerminations), is drained each Collect to emit
+	// a FINAL sample per released claim, closing the half-open window between
+	// the last scrape and terminate (issue #682, was #664). last remembers each
+	// pod's newest emitted sample (keyed by vm-id) so the final sample carries
+	// the last MEASURED levels; finalized remembers vm-ids already given their
+	// final sample so a duplicate termination event (lifetime expiry followed
+	// by object delete) can never bill twice. Both maps are touched only from
+	// Collect (the single collector goroutine) and pruned on a bounded horizon.
+	terminations *TerminationLog
+	last         map[string]Sample
+	finalized    map[string]time.Time
 }
+
+// terminationStateRetention bounds how long the source remembers a pod's last
+// sample and a finalized vm-id after it stops being scraped. Termination
+// events arrive within a reconcile of the release (seconds), so minutes of
+// memory is plenty; the bound keeps both maps from growing with fleet churn.
+const terminationStateRetention = 15 * time.Minute
 
 // NewHuskSource builds the live husk-pod source. vcpus may be nil (every sandbox
 // treated as 1 vCPU, matching the collector default). client may be nil (a default
@@ -169,7 +187,98 @@ func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 	for _, samples := range results {
 		out = append(out, samples...)
 	}
+	out = s.appendFinalSamples(out, billable, results, at)
 	return out, nil
+}
+
+// SetTerminations wires the claim-release event log (issue #682, was #664).
+// When set, each Collect drains the log and emits a final sample per released
+// claim; nil (the default) disables the tracking entirely, so a wiring that
+// never terminates through the controller (tests, bespoke listers) pays
+// nothing. Call before the first Collect; not safe to swap concurrently.
+func (s *HuskSource) SetTerminations(log *TerminationLog) { s.terminations = log }
+
+// appendFinalSamples remembers this cycle's newest sample per pod, then drains
+// the termination log and appends one FINAL sample per released claim:
+//
+//   - A pod scraped before (a last sample within the retention horizon) gets a
+//     CLONE of its last measured sample stamped at the release instant. The
+//     ordinary Integrate path then bills the [last scrape, terminate] tail at
+//     the last measured level, holds at most MaxHold across a scrape gap, and
+//     the cloned cumulative counters delta to zero: no invented egress.
+//   - A pod NEVER scraped (terminated before its first scrape: the sub-minute
+//     job) gets a synthesized start/end pair over [StartedAt, At] carrying only
+//     the KNOWN allocation (vCPUs); memory and disk were never measured and
+//     stay zero (customer-favorable). The start is clamped to At-MaxHold so a
+//     stale StartedAt (scrape history lost across a controller restart) can
+//     never rewrite long-settled windows.
+//
+// A vm-id is finalized at most once (the finalized guard): a duplicate
+// termination event can only under-bill, never double-bill. An unattributed
+// event (no org) is dropped: it was never billable. Runs on the single
+// collector goroutine; both maps are private to it.
+func (s *HuskSource) appendFinalSamples(out []Sample, billable []HuskPod, results [][]Sample, at time.Time) []Sample {
+	if s.terminations == nil {
+		return out
+	}
+	if s.last == nil {
+		s.last = map[string]Sample{}
+		s.finalized = map[string]time.Time{}
+	}
+	for i, pod := range billable {
+		if len(results[i]) > 0 {
+			s.last[pod.VMID] = results[i][len(results[i])-1]
+		}
+	}
+	maxHold := DefaultConfig().MaxHold
+	for _, t := range s.terminations.Drain() {
+		if t.VMID == "" || t.OrgID == "" || t.At.IsZero() {
+			continue
+		}
+		if _, done := s.finalized[t.VMID]; done {
+			continue
+		}
+		s.finalized[t.VMID] = at
+		if lastSample, ok := s.last[t.VMID]; ok {
+			delete(s.last, t.VMID)
+			if t.At.After(lastSample.Timestamp) {
+				final := lastSample
+				final.Timestamp = t.At
+				out = append(out, final)
+			}
+			continue
+		}
+		// Never scraped: synthesize the pair from control-plane facts only.
+		if t.StartedAt.IsZero() {
+			continue
+		}
+		start := t.StartedAt
+		if minStart := t.At.Add(-maxHold); start.Before(minStart) {
+			start = minStart
+		}
+		if !t.At.After(start) {
+			continue
+		}
+		id := t.APIID
+		if id == "" {
+			id = t.VMID
+		}
+		first := Sample{OrgID: t.OrgID, SandboxID: id, Node: t.VMID, Timestamp: start, VCPUs: s.vcpus(id)}
+		last := first
+		last.Timestamp = t.At
+		out = append(out, first, last)
+	}
+	for vm, sample := range s.last {
+		if at.Sub(sample.Timestamp) > terminationStateRetention {
+			delete(s.last, vm)
+		}
+	}
+	for vm, ts := range s.finalized {
+		if at.Sub(ts) > terminationStateRetention {
+			delete(s.finalized, vm)
+		}
+	}
+	return out
 }
 
 // podSamples scrapes one billable husk pod and converts its report to

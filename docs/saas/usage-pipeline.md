@@ -163,6 +163,29 @@ and unreachable pods are still skip-and-counted. Every completed cycle exports
 its wall duration as the `mitos_usage_collect_cycle_duration_seconds` gauge, so
 a slowing scrape path is alertable (issue #617).
 
+**Terminate-time final sample** (issue #682, was #664): scraping once per
+window leaves the presence between the LAST scrape and terminate unrecorded (a
+sandbox alive ~100s billed 60 vcpu-seconds; a sub-minute job billed nothing).
+The sandbox reconciler records a `usage.Termination` per claimed, org-labeled
+husk pod at claim release and lifetime terminate (it knows the exact instant),
+and the husk source drains those events each cycle to emit a FINAL sample:
+
+- a pod scraped before gets a clone of its last measured sample stamped at the
+  release instant, so `Integrate` bills the `[last scrape, terminate]` tail at
+  the last measured level (bounded by `MaxHold`, and the cloned cumulative
+  counters delta to zero: no invented egress);
+- a pod that terminated before its first scrape gets a synthesized start/end
+  pair over `[StartedAt, terminate]` carrying ONLY the known vCPU allocation;
+  memory and disk were never measured and stay zero (customer-favorable), and
+  the start is clamped to `terminate - MaxHold` so a stale StartedAt can never
+  rewrite long-settled windows.
+
+A vm-id is finalized at most once (a duplicate event, for example lifetime
+expiry followed by the object delete, is dropped), so the tail can only be
+billed once. The event log is in-memory and best-effort: a controller restart
+or a node-loss drain loses the tail sample, which under-bills that tail and
+nothing else; recording never blocks or fails a terminate.
+
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from
 client input. There are two attribution paths:
