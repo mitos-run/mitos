@@ -89,6 +89,9 @@ type Gateway struct {
 	// TrustedProxyHops.
 	trustedHops TrustedProxyHops
 	tel         *telemetry.Emitter
+	// metrics counts request outcomes and auth denials for the #617 SaaS
+	// alerts. Nil (the default) disables all observation.
+	metrics *GatewayMetrics
 }
 
 // NewGateway builds a gateway. A nil quota enforcer defaults to AllowAllQuota
@@ -217,6 +220,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	raw, ok := bearerToken(r)
 	if !ok {
+		g.metrics.observeAuthDenial(denialMissingKey)
 		g.fail(w, apiKeyUnauthorized().
 			WithCause("no bearer api key was presented"))
 		return
@@ -322,6 +326,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/json")
 	}
+	g.metrics.observeStatus(status)
 	w.WriteHeader(status)
 	if resp.BodyStream != nil {
 		// Stream the response without buffering (this carries a streamed Connect
@@ -354,11 +359,13 @@ func curatedRuntimeHeaders(in http.Header) http.Header {
 func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrKeyScope), errors.Is(err, ErrKeyWrongOrg):
+		g.metrics.observeAuthDenial(denialForbidden)
 		g.fail(w, apierr.Get(apierr.CodeForbidden).
 			WithCause("the key is valid but not permitted for this action"))
 	default:
 		// Malformed, unknown, expired, revoked all collapse to unauthorized so the
 		// response does not reveal which one applies.
+		g.metrics.observeAuthDenial(denialUnauthorized)
 		g.fail(w, apiKeyUnauthorized().
 			WithCause("the api key is missing, invalid, expired, or revoked"))
 	}
@@ -392,8 +399,11 @@ func quotaEnvelope(qErr error, op string) apierr.Error {
 		WithContext(map[string]any{"op": op})
 }
 
-// fail writes the error envelope. It never includes any secret value.
+// fail writes the error envelope. It never includes any secret value. Every
+// error path funnels here, so this is the single request-outcome observation
+// point for failures (the success write in ServeHTTP is the other).
 func (g *Gateway) fail(w http.ResponseWriter, e apierr.Error) {
+	g.metrics.observeStatus(e.Status)
 	apierr.Encode(w, e)
 }
 
