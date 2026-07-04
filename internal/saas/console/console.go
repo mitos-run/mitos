@@ -359,12 +359,14 @@ func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "key.create",
-		Target:  created.Record.ID,
-		Detail:  "created api key " + created.Record.Prefix,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "key.create",
+		Target:     created.Record.ID,
+		TargetType: "key",
+		TargetName: created.Record.Name,
+		Detail:     "created api key " + created.Record.Prefix,
+		At:         c.deps.Now(),
 	})
 	// The raw key is returned EXACTLY ONCE here and is never stored, logged, or
 	// returned again. Every later read shows only the masked prefix.
@@ -383,17 +385,31 @@ func (c *Console) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keyID := r.PathValue("id")
+	// Resolve the key's own name before revoking it, best-effort, so the audit
+	// event's TargetName is more legible than the bare id. A lookup failure (or
+	// the key already being gone) just leaves TargetName empty.
+	var keyName string
+	if keys, err := c.deps.Accounts.ListKeys(r.Context(), accountID, orgID); err == nil {
+		for _, k := range keys {
+			if k.ID == keyID {
+				keyName = k.Name
+				break
+			}
+		}
+	}
 	if err := c.deps.Accounts.RevokeKey(r.Context(), accountID, keyID); err != nil {
 		c.failAccount(w, err, "the key could not be revoked for this organization")
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "key.revoke",
-		Target:  keyID,
-		Detail:  "revoked api key " + keyID,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "key.revoke",
+		Target:     keyID,
+		TargetType: "key",
+		TargetName: keyName,
+		Detail:     "revoked api key " + keyID,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "revoked": keyID})
 }
@@ -674,12 +690,13 @@ func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "sandbox.terminate",
-		Target:  id,
-		Detail:  "terminated sandbox " + id,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "sandbox.terminate",
+		Target:     id,
+		TargetType: "sandbox",
+		Detail:     "terminated sandbox " + id,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "terminated": id})
 }
@@ -815,12 +832,14 @@ func (c *Console) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "project.create",
-		Target:  p.ID,
-		Detail:  "created project " + p.Name,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "project.create",
+		Target:     p.ID,
+		TargetType: "project",
+		TargetName: p.Name,
+		Detail:     "created project " + p.Name,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusCreated, p)
 }
@@ -857,13 +876,22 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Resolve the TARGET account's own name (not the actor's) best-effort, so
+	// the audit sentence can read "changed Carol's role" instead of a bare
+	// account id.
+	var targetName string
+	if acct, err := c.deps.Accounts.GetAccount(r.Context(), targetID); err == nil {
+		targetName = displayNameOrEmail(acct)
+	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "member.role",
-		Target:  targetID,
-		Detail:  "set role " + string(req.Role),
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "member.role",
+		Target:     targetID,
+		TargetType: "member",
+		TargetName: targetName,
+		Detail:     "set role " + string(req.Role),
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "account_id": targetID, "role": req.Role})
 }
@@ -915,12 +943,17 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "audit.sink.create",
-		Target:  cfg.ID,
-		Detail:  "created audit sink type " + cfg.Type,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "audit.sink.create",
+		Target:     cfg.ID,
+		TargetType: "sink",
+		// TargetName is the sink TYPE, never its Endpoint: the endpoint URL may
+		// carry an opaque token in its path or query (see webhookSink's own
+		// no-log rule), so it must never land in the audit trail.
+		TargetName: cfg.Type,
+		Detail:     "created audit sink type " + cfg.Type,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusCreated, cfg)
 }
@@ -934,6 +967,15 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// Resolve the sink's type before deleting it, best-effort, for TargetName
+	// (never the Endpoint; see the create handler's comment on why).
+	var targetName string
+	for _, cfg := range c.deps.Sinks.List(r.Context(), orgID) {
+		if cfg.ID == id {
+			targetName = cfg.Type
+			break
+		}
+	}
 	if err := c.deps.Sinks.Delete(r.Context(), orgID, id); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
@@ -945,12 +987,14 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "audit.sink.delete",
-		Target:  id,
-		Detail:  "deleted audit sink " + id,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "audit.sink.delete",
+		Target:     id,
+		TargetType: "sink",
+		TargetName: targetName,
+		Detail:     "deleted audit sink " + id,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "deleted": id})
 }
@@ -984,14 +1028,35 @@ func validateSinkRequest(req createSinkRequest) error {
 // --- helpers ---
 
 // audit records an event best-effort; an audit failure never fails the user
-// action but is logged.
+// action but is logged. It fills in ActorType (defaulting to "user") and, when
+// ActorName is unset, resolves it from the actor's account (display name,
+// falling back to email) via a single best-effort lookup. A lookup failure
+// (account deleted, store hiccup) leaves ActorName empty rather than failing
+// the action: the audit event is always recorded.
 func (c *Console) audit(ctx context.Context, ev AuditEvent) {
 	if c.deps.Audit == nil {
 		return
 	}
+	if ev.ActorType == "" {
+		ev.ActorType = "user"
+	}
+	if ev.ActorName == "" && ev.ActorID != "" && c.deps.Accounts != nil {
+		if acct, err := c.deps.Accounts.GetAccount(ctx, ev.ActorID); err == nil {
+			ev.ActorName = displayNameOrEmail(acct)
+		}
+	}
 	if err := c.deps.Audit.Record(ctx, ev); err != nil {
 		c.deps.Log.Warn("console audit record failed", "org", ev.OrgID, "action", ev.Action, "err", err.Error())
 	}
+}
+
+// displayNameOrEmail returns acct's DisplayName, falling back to its Email
+// when no display name has been set (the common case right after sign-up).
+func displayNameOrEmail(acct saas.Account) string {
+	if acct.DisplayName != "" {
+		return acct.DisplayName
+	}
+	return acct.Email
 }
 
 // failAccount maps an account-service error to the public envelope. A wrong-org /

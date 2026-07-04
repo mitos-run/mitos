@@ -140,6 +140,11 @@ func TestSecretMutationAudited(t *testing.T) {
 	if !contains(actions, "secret.create") || !contains(actions, "secret.delete") {
 		t.Fatalf("audit actions = %v, want secret.create and secret.delete", actions)
 	}
+	for _, ev := range events {
+		if ev.TargetType != "secret" || ev.TargetName != "K" {
+			t.Errorf("event %s: TargetType/TargetName = %q/%q, want secret/K", ev.Action, ev.TargetType, ev.TargetName)
+		}
+	}
 }
 
 func contains(ss []string, want string) bool {

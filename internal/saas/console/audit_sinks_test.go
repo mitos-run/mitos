@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -325,4 +326,60 @@ func (s *stubSinkRegistry) Delete(_ context.Context, orgID, id string) error {
 		}
 	}
 	return ErrNotFound
+}
+
+// TestSinkCreateAndDeleteAuditCarryTargetType asserts audit.sink.create and
+// audit.sink.delete both set TargetType "sink". TargetName is resolved to the
+// sink's type (never its Endpoint, which may carry an opaque token in the
+// path or query, per webhookSink's own no-log rule).
+func TestSinkCreateAndDeleteAuditCarryTargetType(t *testing.T) {
+	accounts, acctA, _, orgA, _ := newSinksAccountService(t)
+	reg := NewMemSinkRegistry()
+	audit := NewMemAuditLog()
+	c := New(Deps{Accounts: accounts, Sinks: reg, Audit: audit})
+
+	post := httptest.NewRequest(
+		"POST", "/console/audit/sinks",
+		strings.NewReader(`{"type":"webhook","endpoint":"https://siem.example/hook?token=abc123"}`),
+	).WithContext(WithCaller(context.Background(), acctA, orgA))
+	rr := httptest.NewRecorder()
+	c.ServeHTTP(rr, post)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create sink status %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var created SinkConfig
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created sink: %v", err)
+	}
+
+	del := httptest.NewRequest("DELETE", "/console/audit/sinks/"+created.ID, nil).
+		WithContext(WithCaller(context.Background(), acctA, orgA))
+	rrDel := httptest.NewRecorder()
+	c.ServeHTTP(rrDel, del)
+	if rrDel.Code != http.StatusOK {
+		t.Fatalf("delete sink status %d, body=%s", rrDel.Code, rrDel.Body.String())
+	}
+
+	events, err := audit.List(context.Background(), orgA)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	var sawCreate, sawDelete bool
+	for _, ev := range events {
+		if ev.TargetType != "sink" {
+			t.Errorf("event %s: TargetType = %q, want sink", ev.Action, ev.TargetType)
+		}
+		if strings.Contains(ev.TargetName, "token") || strings.Contains(ev.TargetName, "siem.example") {
+			t.Errorf("event %s: TargetName leaked the endpoint URL: %q", ev.Action, ev.TargetName)
+		}
+		switch ev.Action {
+		case "audit.sink.create":
+			sawCreate = true
+		case "audit.sink.delete":
+			sawDelete = true
+		}
+	}
+	if !sawCreate || !sawDelete {
+		t.Fatalf("expected both audit.sink.create and audit.sink.delete events, got %+v", events)
+	}
 }

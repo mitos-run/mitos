@@ -141,13 +141,26 @@ type TemplateLister interface {
 // AuditEvent is one immutable, non-secret line in an org's audit log: who did
 // what, when. It NEVER carries a key value or any secret; Detail is a non-secret,
 // human-legible summary (for example "created key abc12" or "revoked key xyz").
+//
+// ActorName and TargetName are best-effort, human-legible labels resolved at
+// record time (see Console.audit): ActorName from the actor's account
+// (display name, falling back to email), TargetName from whatever the call
+// site already has in hand (a key's name, a project's name, and so on). Both
+// may be empty (an account lookup failure, or no name being available for the
+// target kind); the console UI falls back to the raw id when empty. ActorType
+// is one of "user", "api_key", "system"; TargetType is one of "session",
+// "key", "sandbox", "member", "project", "secret", "sink", "profile", "org".
 type AuditEvent struct {
-	OrgID   string    `json:"org_id"`
-	ActorID string    `json:"actor_id"`
-	Action  string    `json:"action"`
-	Target  string    `json:"target"`
-	Detail  string    `json:"detail"`
-	At      time.Time `json:"at"`
+	OrgID      string    `json:"org_id"`
+	ActorID    string    `json:"actor_id"`
+	ActorName  string    `json:"actor_name"`
+	ActorType  string    `json:"actor_type"`
+	Action     string    `json:"action"`
+	Target     string    `json:"target"`
+	TargetType string    `json:"target_type"`
+	TargetName string    `json:"target_name"`
+	Detail     string    `json:"detail"`
+	At         time.Time `json:"at"`
 }
 
 // AuditRecorder is the org-scoped audit-log seam. No audit log existed in the

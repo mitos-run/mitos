@@ -210,6 +210,15 @@ type ProfileUpdate struct {
 	Locale      string
 }
 
+// GetAccount returns the account by id with no membership check: a plain,
+// read-only lookup. It is used for best-effort display-name resolution (the
+// console audit log's actor and target names) where the caller is not
+// necessarily the account itself, so the membership-guarded Profile is not
+// the right seam.
+func (s *AccountService) GetAccount(ctx context.Context, id string) (Account, error) {
+	return s.store.GetAccount(ctx, id)
+}
+
 // Profile returns the account and its memberships for accountID. It is the
 // read side of the profile surface: the console profile page calls this to
 // populate the form.
