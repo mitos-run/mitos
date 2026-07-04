@@ -28,6 +28,11 @@ type Metrics struct {
 	memGiBSecs  *prometheus.GaugeVec
 	egressBytes *prometheus.GaugeVec
 	gpuSeconds  *prometheus.GaugeVec
+	// cycleSeconds is the wall duration of the most recent collection cycle
+	// (issue #682, was #656). It is a plain gauge (no labels): the alerting
+	// signal for #617 is "the cycle is slowing down", which a last-value gauge
+	// answers directly at the 1-per-cadence sample rate.
+	cycleSeconds prometheus.Gauge
 }
 
 // NewMetrics builds the per-org usage metric vectors. They are unregistered; the
@@ -63,6 +68,10 @@ func NewMetrics() *Metrics {
 			Name: "mitos_usage_gpu_seconds_total",
 			Help: "Cumulative GPU-seconds of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart, where the durable store is the system of record.",
 		}, []string{"org"}),
+		cycleSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "mitos_usage_collect_cycle_duration_seconds",
+			Help: "Wall duration of the most recent usage collection cycle (scrape, integrate, upsert) in seconds. The husk scrape fans out over a bounded worker pool, so this is set by the slowest pool lane, not the fleet size; a sustained rise means unreachable pods or fleet growth.",
+		}),
 	}
 }
 
@@ -70,7 +79,14 @@ func NewMetrics() *Metrics {
 // metrics registry). It panics on a duplicate registration, the standard
 // fail-fast for a misconfigured wiring.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes, m.gpuSeconds)
+	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes, m.gpuSeconds, m.cycleSeconds)
+}
+
+// ObserveCycle records one completed collection cycle's stats: today only the
+// wall duration, the signal #617 alerting watches for a slowing scrape path.
+// The stats carry counts and a duration only, never an id or a secret.
+func (m *Metrics) ObserveCycle(stats CycleStats) {
+	m.cycleSeconds.Set(stats.Duration.Seconds())
 }
 
 // Observe sets the per-org gauges from the store's CUMULATIVE per-org Totals. It
