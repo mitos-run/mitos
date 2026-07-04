@@ -1240,8 +1240,9 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 	// claim already Terminated (lifetime expiry) recorded its event at the TRUE
 	// terminate instant and the hook skips it here: one claim, one event.
 	// Best-effort and idempotent downstream: a retried delete records again and
-	// the collector's finalized guard keeps a vm-id from ever billing twice.
-	r.recordHuskTerminations(claim, claimedHusk.Items, time.Now())
+	// the collector's finalized guard keeps a vm-id from ever billing twice. The
+	// instant comes from the reconciler clock (r.now()) so tests can freeze it.
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
 	for i := range claimedHusk.Items {
 		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "delete claimed husk pod on release", "pod", claimedHusk.Items[i].Name)

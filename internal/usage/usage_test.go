@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -240,6 +241,74 @@ func TestCollectOnceReturnsCycleStats(t *testing.T) {
 	}
 	if stats.Duration <= 0 {
 		t.Errorf("Duration = %v, want a positive wall duration", stats.Duration)
+	}
+}
+
+// failAtStore wraps a UsageStore and fails the Nth UpsertRecord call, so the
+// error-path stats contract can be pinned.
+type failAtStore struct {
+	inner  UsageStore
+	failAt int
+	calls  int
+}
+
+func (s *failAtStore) UpsertRecord(ctx context.Context, rec UsageRecord) error {
+	s.calls++
+	if s.calls == s.failAt {
+		return fmt.Errorf("store unavailable")
+	}
+	return s.inner.UpsertRecord(ctx, rec)
+}
+
+func (s *failAtStore) ListRecords(ctx context.Context, orgID string, from, to time.Time) ([]UsageRecord, error) {
+	return s.inner.ListRecords(ctx, orgID, from, to)
+}
+
+// TestCollectOnceErrorPathStats pins the documented contract that on error the
+// returned CycleStats cover exactly the work DONE before the failure: a failed
+// scrape still reports a wall duration, and a mid-cycle upsert failure reports
+// only the records and orgs actually upserted, never the full intended count.
+func TestCollectOnceErrorPathStats(t *testing.T) {
+	ctx := context.Background()
+
+	// Scrape failure: no samples, no records, but the duration is still real.
+	c := NewCollector(staticSampleSource{err: fmt.Errorf("source down")}, NewMemUsageStore(), DefaultConfig())
+	stats, err := c.CollectOnce(ctx)
+	if err == nil {
+		t.Fatal("want a collect error")
+	}
+	if stats.Duration <= 0 {
+		t.Errorf("Duration = %v on a scrape failure, want a positive wall duration", stats.Duration)
+	}
+	if stats.Samples != 0 || stats.Records != 0 || stats.Orgs != 0 {
+		t.Errorf("stats = %+v on a scrape failure, want zero work counts", stats)
+	}
+
+	// Upsert failure on the second of two records: exactly one record (and its
+	// org) was actually upserted.
+	samples := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 0), VCPUs: 1},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 30), VCPUs: 1},
+		{OrgID: "orgB", SandboxID: "sbx2", Timestamp: at(baseTime, 0), VCPUs: 1},
+		{OrgID: "orgB", SandboxID: "sbx2", Timestamp: at(baseTime, 30), VCPUs: 1},
+	}
+	store := &failAtStore{inner: NewMemUsageStore(), failAt: 2}
+	c = NewCollector(staticSampleSource{samples: samples}, store, DefaultConfig())
+	stats, err = c.CollectOnce(ctx)
+	if err == nil {
+		t.Fatal("want an upsert error")
+	}
+	if stats.Samples != 4 {
+		t.Errorf("Samples = %d, want 4 (the scrape succeeded)", stats.Samples)
+	}
+	if stats.Records != 1 {
+		t.Errorf("Records = %d, want 1 (only the record upserted BEFORE the failure)", stats.Records)
+	}
+	if stats.Orgs != 1 {
+		t.Errorf("Orgs = %d, want 1 (only the org whose record actually landed)", stats.Orgs)
+	}
+	if stats.Duration <= 0 {
+		t.Errorf("Duration = %v on an upsert failure, want a positive wall duration", stats.Duration)
 	}
 }
 

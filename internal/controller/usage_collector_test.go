@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"mitos.run/mitos/internal/usage"
 )
@@ -63,4 +64,52 @@ func TestUsageCycleLogsSummaryAtDefaultVerbosity(t *testing.T) {
 		}
 	}
 	t.Fatalf("no healthy-cycle summary at default verbosity; got lines: %v", lines)
+}
+
+// cycleFailuresTotal reads the current mitos_usage_collect_cycle_failures_total
+// value from the controller-runtime metrics registry (0 if the family has not
+// been emitted yet).
+func cycleFailuresTotal(t *testing.T) float64 {
+	t.Helper()
+	mfs, err := ctrlmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "mitos_usage_collect_cycle_failures_total" {
+			return mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+// TestUsageCycleFailureIncrementsFailureMetric asserts a FAILED collection
+// cycle increments mitos_usage_collect_cycle_failures_total. The duration
+// gauge is only set on success, so under a sustained failure it freezes at the
+// last healthy value; the failure counter is what lets #617 alert on a failing
+// collector from metrics alone.
+func TestUsageCycleFailureIncrementsFailureMetric(t *testing.T) {
+	logger := funcr.New(func(_, _ string) {}, funcr.Options{})
+
+	// A fake client whose scheme lacks corev1 makes the husk pod List fail,
+	// which fails the whole cycle loudly (the issue #613 contract).
+	cl := fakeclient.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	nodeSource := usage.NewNodeRegistrySource(
+		RegistryNodeLister{Registry: NewNodeRegistry()},
+		usage.StaticOrgs{}, nil, nil, "", nil,
+	)
+	huskSource := usage.NewHuskSource(&HuskPodScrapeLister{Client: cl}, nil, nil, "", nil)
+	collector := usage.NewCollector(
+		usage.NewMultiSource(nodeSource, huskSource),
+		usage.NewMemUsageStore(),
+		usage.DefaultConfig(),
+	)
+
+	before := cycleFailuresTotal(t)
+	u := &UsageCollectorRunnable{}
+	u.cycle(context.Background(), logger, collector, nodeSource, huskSource)
+
+	if got := cycleFailuresTotal(t); got != before+1 {
+		t.Fatalf("mitos_usage_collect_cycle_failures_total = %v after a failed cycle, want %v", got, before+1)
+	}
 }

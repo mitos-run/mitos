@@ -135,6 +135,10 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, collector *usage.Collector, nodeSource *usage.NodeRegistrySource, huskSource *usage.HuskSource) {
 	stats, err := collector.CollectOnce(ctx)
 	if err != nil {
+		// Count the failure BEFORE logging: the duration gauge is set only on
+		// success, so under a sustained failure it freezes at the last healthy
+		// value; this counter is what lets #617 alert from metrics alone.
+		usageMetrics.ObserveCycleFailure()
 		// The cycle error carries only ids/window text from the store path, never a
 		// secret; still log it sparingly.
 		logger.Error(err, "usage collection cycle failed",
