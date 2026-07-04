@@ -210,6 +210,39 @@ func TestStoreUpsertIdempotent(t *testing.T) {
 	}
 }
 
+// TestCollectOnceReturnsCycleStats asserts CollectOnce reports what one cycle
+// did (samples scraped, records upserted, distinct orgs, wall duration) so the
+// controller wiring can emit a healthy-cycle summary at default verbosity and a
+// cycle-duration metric (issue #682, was #665/#656; feeds #617 alerting).
+func TestCollectOnceReturnsCycleStats(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemUsageStore()
+	samples := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 0), VCPUs: 1},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 30), VCPUs: 1},
+		{OrgID: "orgB", SandboxID: "sbx2", Timestamp: at(baseTime, 0), VCPUs: 1},
+		{OrgID: "orgB", SandboxID: "sbx2", Timestamp: at(baseTime, 30), VCPUs: 1},
+	}
+	c := NewCollector(&staticSource{samples: samples}, store, DefaultConfig())
+
+	stats, err := c.CollectOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Samples != 4 {
+		t.Errorf("Samples = %d, want 4", stats.Samples)
+	}
+	if stats.Records != 2 {
+		t.Errorf("Records = %d, want 2 (one window per sandbox)", stats.Records)
+	}
+	if stats.Orgs != 2 {
+		t.Errorf("Orgs = %d, want 2", stats.Orgs)
+	}
+	if stats.Duration <= 0 {
+		t.Errorf("Duration = %v, want a positive wall duration", stats.Duration)
+	}
+}
+
 // TestRunCollectorIdempotentReplay drives the collector twice over the same
 // overlapping samples and asserts the store holds the same records (no double
 // bill) after the second pass: the end-to-end idempotency on (sandbox, window).
@@ -224,14 +257,14 @@ func TestRunCollectorIdempotentReplay(t *testing.T) {
 	src := &staticSource{samples: samples}
 	c := NewCollector(src, store, DefaultConfig())
 
-	if err := c.CollectOnce(ctx); err != nil {
+	if _, err := c.CollectOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := store.ListRecords(ctx, "orgA", time.Time{}, time.Time{})
 
 	// Replay the exact same samples (duplicate scrape / restart): records must not
 	// change.
-	if err := c.CollectOnce(ctx); err != nil {
+	if _, err := c.CollectOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	second, _ := store.ListRecords(ctx, "orgA", time.Time{}, time.Time{})

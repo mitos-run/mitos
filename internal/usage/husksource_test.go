@@ -2,6 +2,11 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,6 +214,97 @@ func TestHuskSourceSkipsUnattributedPod(t *testing.T) {
 	}
 	if src.SkippedPods() != 0 {
 		t.Errorf("SkippedPods = %d, want 0 (an unattributed pod is not a scrape failure)", src.SkippedPods())
+	}
+}
+
+// TestHuskSourceScrapesConcurrentlyBounded is the issue #682 (was #656) fix
+// proof: the husk source scrapes claimed pods through a BOUNDED worker pool, so
+// the cycle duration is set by the slowest pool lane, not by the fleet size.
+// Twelve pods whose handlers each hold the request briefly must overlap in
+// flight (peak concurrency at least 2; the sequential implementation pins the
+// peak at 1) while never exceeding the pool bound. The single shared scrape
+// timestamp per cycle and the zero-skip accounting must survive the fan-out.
+func TestHuskSourceScrapesConcurrentlyBounded(t *testing.T) {
+	const podCount = 12
+
+	var inflight, peak atomic.Int64
+	pods := make(staticHuskPods, 0, podCount)
+	for i := 0; i < podCount; i++ {
+		vmID := fmt.Sprintf("husk-conc-%d", i)
+		report := singleVMReport(vmID)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/metering", func(w http.ResponseWriter, _ *http.Request) {
+			cur := inflight.Add(1)
+			for {
+				p := peak.Load()
+				if cur <= p || peak.CompareAndSwap(p, cur) {
+					break
+				}
+			}
+			// Hold the request long enough that a concurrent implementation
+			// overlaps requests; a sequential one never does.
+			time.Sleep(50 * time.Millisecond)
+			inflight.Add(-1)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(report); err != nil {
+				t.Errorf("encode report: %v", err)
+			}
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		pods = append(pods, HuskPod{VMID: vmID, OrgID: "acme", Endpoint: srv.Listener.Addr().String()})
+	}
+
+	scrapedAt := time.Date(2026, 7, 4, 9, 0, 0, 0, time.UTC)
+	src := NewHuskSource(pods, nil, &http.Client{}, "http", func() time.Time { return scrapedAt })
+
+	samples, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(samples) != podCount {
+		t.Fatalf("want %d samples, got %d", podCount, len(samples))
+	}
+	for _, s := range samples {
+		if !s.Timestamp.Equal(scrapedAt) {
+			t.Fatalf("sample %s timestamp = %v, want the single shared cycle instant %v", s.SandboxID, s.Timestamp, scrapedAt)
+		}
+	}
+	if src.SkippedPods() != 0 {
+		t.Errorf("SkippedPods = %d, want 0", src.SkippedPods())
+	}
+	if got := peak.Load(); got < 2 {
+		t.Errorf("peak in-flight scrapes = %d, want at least 2 (sequential scraping serializes the cycle; issue #682)", got)
+	}
+	if got := peak.Load(); got > huskScrapeConcurrency {
+		t.Errorf("peak in-flight scrapes = %d, want at most the pool bound %d", got, huskScrapeConcurrency)
+	}
+}
+
+// TestHuskSourceConcurrentScrapePreservesSkipAndCount asserts the worker-pool
+// fan-out keeps the skip-and-count semantics: unreachable pods are skipped and
+// counted while every healthy pod still bills, exactly as in the sequential
+// implementation.
+func TestHuskSourceConcurrentScrapePreservesSkipAndCount(t *testing.T) {
+	good := meteringServer(t, singleVMReport("husk-ok"))
+	defer good.Close()
+
+	pods := staticHuskPods{
+		{VMID: "husk-dead-1", OrgID: "acme", Endpoint: "127.0.0.1:1"},
+		{VMID: "husk-ok", OrgID: "acme", Endpoint: good.Listener.Addr().String()},
+		{VMID: "husk-dead-2", OrgID: "acme", Endpoint: "127.0.0.1:1"},
+	}
+	src := NewHuskSource(pods, nil, &http.Client{}, "http", nil)
+
+	samples, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Collect must not fail on unreachable pods: %v", err)
+	}
+	if len(samples) != 1 || samples[0].SandboxID != "husk-ok" {
+		t.Fatalf("want exactly the healthy pod's sample, got %+v", samples)
+	}
+	if src.SkippedPods() != 2 {
+		t.Errorf("SkippedPods = %d, want 2", src.SkippedPods())
 	}
 }
 

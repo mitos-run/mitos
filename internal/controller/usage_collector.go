@@ -116,7 +116,8 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 // transient cycle error. The two skip counters are the degradation signals an
 // operator alerts on.
 func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, collector *usage.Collector, nodeSource *usage.NodeRegistrySource, huskSource *usage.HuskSource) {
-	if err := collector.CollectOnce(ctx); err != nil {
+	stats, err := collector.CollectOnce(ctx)
+	if err != nil {
 		// The cycle error carries only ids/window text from the store path, never a
 		// secret; still log it sparingly.
 		logger.Error(err, "usage collection cycle failed",
@@ -124,6 +125,10 @@ func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, 
 			"skippedHuskPods", huskSource.SkippedPods())
 		return
 	}
+	// Export the cycle duration (issue #682, was #656): with the bounded husk
+	// scrape pool this is set by the slowest pool lane, and a sustained rise is
+	// the degradation signal #617 alerting watches.
+	usageMetrics.ObserveCycle(stats)
 	if skipped := nodeSource.SkippedNodes(); skipped > 0 {
 		logger.V(1).Info("usage collection skipped unreachable nodes", "skippedNodesCumulative", skipped)
 	}

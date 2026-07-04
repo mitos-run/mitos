@@ -153,6 +153,16 @@ counted, never failing the whole cycle. The collector runs behind the
 deployment that does not want metering is unaffected; it is turned on for hosted
 multi-tenant. See `docs/design/observability-and-billing-spine.md`.
 
+The husk-pod source (`HuskSource`, `internal/usage/husksource.go`) scrapes each
+CLAIMED husk pod's own in-pod `GET /v1/metering` through a BOUNDED worker pool
+(8 concurrent scrapes; issue #682): fleet size is per-VM, so a sequential scrape
+serialized N unreachable pods into N x the per-request timeout during a partial
+outage. With the pool the cycle duration is set by the slowest pool lane, not
+the fleet size. All samples in one cycle still share a single scrape timestamp,
+and unreachable pods are still skip-and-counted. Every completed cycle exports
+its wall duration as the `mitos_usage_collect_cycle_duration_seconds` gauge, so
+a slowing scrape path is alertable (issue #617).
+
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from
 client input. There are two attribution paths:

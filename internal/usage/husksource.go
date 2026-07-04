@@ -5,11 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"mitos.run/mitos/internal/metering"
 )
+
+// huskScrapeConcurrency bounds the number of in-flight husk-pod scrapes per
+// cycle (issue #682, was #656). Fleet size is per-VM (one husk pod per
+// sandbox), so a sequential scrape serialized N unreachable pods into
+// N x scrapeTimeout during a partial outage, delaying metering for the healthy
+// fleet. With the bounded pool the cycle duration is set by the slowest pool
+// lane, not the fleet size, while the bound keeps the controller from opening
+// an unbounded number of connections into tenant pod networks at once.
+const huskScrapeConcurrency = 8
 
 // HuskPod is one claimed, org-labeled husk pod the HuskSource scrapes. VMID is
 // the pod's vm-id (the pod NAME: the id the pod reports as its single metering
@@ -104,6 +114,14 @@ func NewHuskSource(
 // one cycle share an instant (the property Integrate's windowing relies on). A
 // pod that is unreachable, errors, or returns a non-200 is skipped and counted;
 // Collect itself never returns an error for an unreachable pod.
+//
+// The scrapes fan out over a bounded worker pool (huskScrapeConcurrency; issue
+// #682) so the cycle duration is set by the slowest pool lane, never by the
+// fleet size: N unreachable pods no longer serialize into N x scrapeTimeout.
+// The single shared scrape timestamp and the skip-and-count semantics are
+// unchanged; results keep the lister's pod order. Collect itself is meant for
+// ONE caller (the collector loop): the injected vcpus func must be safe for
+// concurrent use (the nil default is).
 func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 	at := s.now()
 	pods, err := s.pods.ListHuskPods(ctx)
@@ -113,45 +131,84 @@ func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 		// bill for the whole fleet, the exact failure mode issue #613 closes.
 		return nil, fmt.Errorf("list husk pods: %w", err)
 	}
-	var out []Sample
+	billable := pods[:0:0]
 	for _, pod := range pods {
 		if pod.OrgID == "" || pod.VMID == "" {
 			// An unattributed pod (no trusted org label) or one with no vm-id is not
 			// billable. Skip it without counting it as a scrape failure.
 			continue
 		}
-		report, ok := s.scrape(ctx, pod)
-		if !ok {
-			s.skipped.Add(1)
-			continue
+		billable = append(billable, pod)
+	}
+
+	results := make([][]Sample, len(billable))
+	workers := huskScrapeConcurrency
+	if len(billable) < workers {
+		workers = len(billable)
+	}
+	if workers > 0 {
+		next := make(chan int)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range next {
+					results[i] = s.podSamples(ctx, billable[i], at)
+				}
+			}()
 		}
-		// Attribute ONLY this pod's own vm-id to its org, from the TRUSTED label.
-		// Any other sample id the (untrusted) pod returns resolves unattributed and
-		// is dropped, so a pod can bill only its own vm-id/org (defense in depth).
-		orgOf := func(sandboxID string) (string, bool) {
-			if sandboxID == pod.VMID {
-				return pod.OrgID, true
-			}
-			return "", false
+		for i := range billable {
+			next <- i
 		}
-		samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
-		// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
-		// claim label (issue #663), so usage_records reconcile to the sb-... id
-		// the customer saw, never the internal husk pod name. The trust check
-		// above stays keyed on the pod's vm-id: the pod cannot choose its billing
-		// id, only the controller's label does. Fallback: a pod whose lister
-		// carried no APIID (label absent; pre-#663 lister or a bespoke self-host
-		// lister) keeps the pod name, preserving the old behavior rather than
-		// dropping the sample. The Sample's Node field keeps the pod name (the
-		// vm-id), so support can still map a record back to the pod.
-		if pod.APIID != "" {
-			for i := range samples {
-				samples[i].SandboxID = pod.APIID
-			}
-		}
+		close(next)
+		wg.Wait()
+	}
+
+	var out []Sample
+	for _, samples := range results {
 		out = append(out, samples...)
 	}
 	return out, nil
+}
+
+// podSamples scrapes one billable husk pod and converts its report to
+// org-tagged Samples stamped with the cycle's shared timestamp. A failed scrape
+// is skip-and-counted (nil samples), never an error: one bad pod must not zero
+// out the bill for the healthy fleet. It is called from the Collect worker
+// pool, so it touches only the pod, the atomic skip counter, and the injected
+// seams; it never writes shared source state.
+func (s *HuskSource) podSamples(ctx context.Context, pod HuskPod, at time.Time) []Sample {
+	report, ok := s.scrape(ctx, pod)
+	if !ok {
+		s.skipped.Add(1)
+		return nil
+	}
+	// Attribute ONLY this pod's own vm-id to its org, from the TRUSTED label.
+	// Any other sample id the (untrusted) pod returns resolves unattributed and
+	// is dropped, so a pod can bill only its own vm-id/org (defense in depth).
+	orgOf := func(sandboxID string) (string, bool) {
+		if sandboxID == pod.VMID {
+			return pod.OrgID, true
+		}
+		return "", false
+	}
+	samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
+	// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
+	// claim label (issue #663), so usage_records reconcile to the sb-... id
+	// the customer saw, never the internal husk pod name. The trust check
+	// above stays keyed on the pod's vm-id: the pod cannot choose its billing
+	// id, only the controller's label does. Fallback: a pod whose lister
+	// carried no APIID (label absent; pre-#663 lister or a bespoke self-host
+	// lister) keeps the pod name, preserving the old behavior rather than
+	// dropping the sample. The Sample's Node field keeps the pod name (the
+	// vm-id), so support can still map a record back to the pod.
+	if pod.APIID != "" {
+		for i := range samples {
+			samples[i].SandboxID = pod.APIID
+		}
+	}
+	return samples
 }
 
 // scrape GETs GET /v1/metering from one husk pod and decodes the Report. It
