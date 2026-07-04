@@ -114,6 +114,9 @@ spec:
           imagePullPolicy: {{ .Values.console.image.pullPolicy }}
           args:
             - --addr=:8080
+            # Cluster-internal metrics listener (issue #617); scraped by the
+            # console PodMonitor, never exposed through the Service or Ingress.
+            - --metrics-addr=:9100
           env:
             # Capabilities the binary serves at /console/capabilities. ONE bundle,
             # behavior driven entirely by these server-controlled values.
@@ -325,6 +328,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 9100
           resources:
             {{- toYaml .Values.console.resources | nindent 12 }}
           securityContext:

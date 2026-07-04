@@ -146,9 +146,14 @@ type billingWiring struct {
 // suspender is the kill-switch seam (issue #615): a webhook event whose
 // normalized status is suspended drives it on the transition into suspended,
 // so the org fails closed at the gateway (via the shared suspensions table)
-// and not only in its billing status. main passes the newBillingSuspender
-// adapter over the same store the drawdown spend-cap path uses.
-func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, suspender billing.Suspender) billingWiring {
+// and not only in its billing status; the same adapter's SuspensionLifter
+// half drives the payment-driven recovery lifts. main passes the
+// newBillingSuspender adapter over the same store the drawdown spend-cap
+// path uses.
+//
+// webhookMetrics (nil-safe) counts signature-verification failures and 5xx
+// handler errors for the #617 billing alerts; it carries no payload detail.
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, suspender billing.Suspender, webhookMetrics *billingprovider.WebhookMetrics) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
@@ -184,9 +189,11 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 		// whose signature-verified custom_data names the org records the org
 		// <-> customer link before processing (the write half of #614/#618).
 		// WithSuspender: a suspended-status event drives the kill-switch into
-		// the shared suspensions table, so the gateway blocks the org within
-		// its suspension-cache TTL (a few seconds).
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithSuspender(suspender),
+		// the shared suspensions table (and payment events drive the
+		// reason-scoped lifts), so the gateway blocks and readmits the org
+		// within its suspension-cache TTL. WithMetrics counts verify failures
+		// and 5xx errors for the #617 alerts.
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithSuspender(suspender).WithMetrics(webhookMetrics),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,

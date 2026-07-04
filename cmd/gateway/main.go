@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -90,6 +91,7 @@ func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS str
 
 func main() {
 	addr := flag.String("addr", ":8080", "public listen address")
+	metricsAddr := flag.String("metrics-addr", ":9100", "Prometheus metrics listen address (a SEPARATE cluster-internal listener; /metrics is never mounted on the public mux). Empty disables the metrics listener.")
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
@@ -181,7 +183,14 @@ func main() {
 		_ = tel.Shutdown(ctx)
 	}()
 
-	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger, saas.WithTelemetry(tel)).
+	// Request-outcome and auth-denial counters for the #617 SaaS alerts, served
+	// on their own cluster-internal listener below, never on the public mux.
+	// Labels are bounded classes only; no key, org, or path detail is exported.
+	metricsRegistry := prometheus.NewRegistry()
+	gatewayMetrics := saas.NewGatewayMetrics()
+	gatewayMetrics.MustRegister(metricsRegistry)
+
+	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger, saas.WithTelemetry(tel), saas.WithGatewayMetrics(gatewayMetrics)).
 		WithTrustedProxyHops(saas.TrustedProxyHops(*trustedProxyHops))
 
 	mux := http.NewServeMux()
@@ -196,6 +205,13 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", newReadyzHandler(&draining))
+
+	// rootCtx stops the metrics listener on shutdown, alongside the main server.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if *metricsAddr != "" {
+		serveMetrics(rootCtx, logger, *metricsAddr, metricsRegistry)
+	}
 
 	logger.Info("gateway listening", "addr", *addr)
 	srv := &http.Server{Addr: *addr, Handler: mux}
@@ -214,6 +230,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	<-stop
 	draining.Store(true)
+	rootCancel()
 	logger.Info("gateway shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

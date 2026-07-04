@@ -52,7 +52,7 @@ func TestDrawdownCycleSuspendsBreachedCapInSharedStore(t *testing.T) {
 		"org-hot": {{OrgID: "org-hot", SandboxID: "sb-1", Window: now.Add(-10 * time.Minute), VCPUSeconds: 3600}},
 	}}
 
-	stats := runDrawdownOnce(ctx, logger, orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(ctx, logger, orgs, store, svc, 2*time.Hour, now, nil)
 	if stats.drawn != 1 || stats.failed != 0 {
 		t.Fatalf("stats = %+v, want drawn=1 failed=0", stats)
 	}
