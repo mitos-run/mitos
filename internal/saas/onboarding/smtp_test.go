@@ -16,6 +16,7 @@ func newTestSMTP(t *testing.T) (*SMTPEmailSender, *capturedSMTP) {
 		Password:      "s3cr3t-smtp-password",
 		From:          "no-reply@mitos.run",
 		VerifyBaseURL: "https://app.mitos.run/auth/verify",
+		InviteBaseURL: "https://app.mitos.run/invite/accept",
 	})
 	if err != nil {
 		t.Fatalf("new smtp sender: %v", err)
@@ -169,6 +170,61 @@ func TestSMTPSenderApprovedComposesHeaders(t *testing.T) {
 	// It must NOT claim the account is already provisioned (nothing is at send time).
 	if strings.Contains(body, "are ready now") {
 		t.Fatalf("approval email must not claim the account is ready before signup: %q", body)
+	}
+}
+
+// TestSMTPSenderInviteComposesSubjectAndLink asserts SendInvite composes the
+// exact subject line the product spec calls for ("<inviter> invited you to
+// <org> on Mitos") and a body carrying the accept link with the raw token.
+func TestSMTPSenderInviteComposesSubjectAndLink(t *testing.T) {
+	s, cap := newTestSMTP(t)
+	if err := s.SendInvite(context.Background(), "invitee@example.com", "Acme", "Alice", "tok-invite-1"); err != nil {
+		t.Fatalf("send invite: %v", err)
+	}
+	if len(cap.to) != 1 || cap.to[0] != "invitee@example.com" {
+		t.Fatalf("envelope to %v, want [invitee@example.com]", cap.to)
+	}
+	body := string(cap.msg)
+	if !strings.Contains(body, "Subject: Alice invited you to Acme on Mitos") {
+		t.Fatalf("message missing exact subject: %q", body)
+	}
+	if !strings.Contains(body, "token=tok-invite-1") {
+		t.Fatalf("message missing accept link with token: %q", body)
+	}
+	if !strings.Contains(body, "https://app.mitos.run/invite/accept") {
+		t.Fatalf("message missing invite base url: %q", body)
+	}
+}
+
+// TestSMTPSenderInviteRequiresBaseURL asserts a sender with no InviteBaseURL
+// configured refuses to send an invite (fails closed) rather than emitting a
+// broken link, while still working for verification email (unaffected).
+func TestSMTPSenderInviteRequiresBaseURL(t *testing.T) {
+	s, err := NewSMTPEmailSender(SMTPConfig{
+		Host: "smtp.example.com", From: "no-reply@mitos.run",
+		VerifyBaseURL: "https://app.mitos.run/auth/verify",
+	})
+	if err != nil {
+		t.Fatalf("new smtp sender: %v", err)
+	}
+	cap := &capturedSMTP{}
+	s.dial = cap.dial
+	if err := s.SendInvite(context.Background(), "x@example.com", "Acme", "Alice", "tok"); err == nil {
+		t.Fatal("expected an error when InviteBaseURL is not configured")
+	}
+}
+
+// TestSMTPSenderInviteNeverLeaksTokenOnError asserts a dialer failure's error
+// never contains the raw invite token.
+func TestSMTPSenderInviteNeverLeaksTokenOnError(t *testing.T) {
+	s, cap := newTestSMTP(t)
+	cap.err = errors.New("connection refused")
+	err := s.SendInvite(context.Background(), "x@example.com", "Acme", "Alice", "tok-super-secret")
+	if err == nil {
+		t.Fatal("expected delivery error")
+	}
+	if strings.Contains(err.Error(), "tok-super-secret") {
+		t.Fatalf("token leaked into error: %v", err)
 	}
 }
 

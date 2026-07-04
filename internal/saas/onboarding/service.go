@@ -81,6 +81,11 @@ type EmailSender interface {
 	// their first fork. It carries no secret; the email is delivered to the
 	// user's inbox and is never logged.
 	SendApproved(ctx context.Context, email string) error
+	// SendInvite delivers an org-invitation email carrying token (the raw
+	// invite token; a secret, never logged or stored). Implementations
+	// mirror saas.InviteEmailSender's signature so the SAME concrete sender
+	// backs both the onboarding funnel and the console invites seam.
+	SendInvite(ctx context.Context, email, orgName, inviterName, token string) error
 }
 
 // FakeEmailSender is the in-memory EmailSender used in tests. It captures the
@@ -91,6 +96,7 @@ type FakeEmailSender struct {
 	mu       sync.Mutex
 	sent     map[string]string // email -> last token sent
 	approved map[string]bool   // email -> approval sent
+	invited  map[string]string // email -> last invite token sent
 }
 
 // NewFakeEmailSender returns an empty fake sender.
@@ -98,6 +104,7 @@ func NewFakeEmailSender() *FakeEmailSender {
 	return &FakeEmailSender{
 		sent:     map[string]string{},
 		approved: map[string]bool{},
+		invited:  map[string]string{},
 	}
 }
 
@@ -123,6 +130,23 @@ func (f *FakeEmailSender) LastToken(email string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sent[email]
+}
+
+// SendInvite records the raw invite token for email so a test can retrieve
+// it, standing in for a human reading the invite email.
+func (f *FakeEmailSender) SendInvite(_ context.Context, email, _, _, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invited[email] = token
+	return nil
+}
+
+// LastInviteToken returns the most recent invite token sent to email, or ""
+// if none. This is a TEST helper standing in for the user reading the email.
+func (f *FakeEmailSender) LastInviteToken(email string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.invited[email]
 }
 
 // Approved returns true when SendApproved has been called for email. This is a

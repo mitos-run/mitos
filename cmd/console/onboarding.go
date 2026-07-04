@@ -233,6 +233,12 @@ func buildEmailSender(logger *slog.Logger) onboarding.EmailSender {
 		Password:      os.Getenv("MITOS_SMTP_PASSWORD"),
 		From:          os.Getenv("MITOS_SMTP_FROM"),
 		VerifyBaseURL: os.Getenv("MITOS_ONBOARDING_VERIFY_URL"),
+		// InviteBaseURL is a sibling of VerifyBaseURL for the invite accept
+		// flow (e.g. https://app.mitos.run/invite/accept). Left unset,
+		// SendInvite fails closed with a configuration error rather than a
+		// broken link; a deployment that never enables team invites need not
+		// set this.
+		InviteBaseURL: os.Getenv("MITOS_ONBOARDING_INVITE_URL"),
 	})
 	if err != nil {
 		// A misconfigured SMTP block falls back to the dev sender with a warning
@@ -317,5 +323,12 @@ func (d devLogEmailSender) SendVerification(_ context.Context, _ string, _ strin
 func (d devLogEmailSender) SendApproved(_ context.Context, _ string) error {
 	// Never log the email; only that a send occurred.
 	d.log.Info("dev email sender: approved email suppressed (configure SMTP to deliver real mail)")
+	return nil
+}
+
+func (d devLogEmailSender) SendInvite(_ context.Context, _, _, _, _ string) error {
+	// Never log the email, org name, inviter name, or token; only that a
+	// send occurred.
+	d.log.Info("dev email sender: invite email suppressed (configure SMTP to deliver real mail)")
 	return nil
 }

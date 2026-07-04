@@ -21,6 +21,7 @@ func (errSendApproved) SendVerification(_ context.Context, _, _ string) error { 
 func (errSendApproved) SendApproved(_ context.Context, _ string) error {
 	return errors.New("smtp: connection refused")
 }
+func (errSendApproved) SendInvite(_ context.Context, _, _, _, _ string) error { return nil }
 
 // fixedNow is the deterministic clock injected in tests. Using a concrete time
 // makes Add calls reproducible regardless of wall-clock drift.

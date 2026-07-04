@@ -84,6 +84,12 @@ func main() {
 	defer closeStore()
 	keys := saas.NewKeyService(store)
 	accounts := saas.NewAccountService(store, keys)
+	// invitations shares the SAME durable store as accounts/orgs/memberships,
+	// so an accepted invite's membership and the invitation row itself are
+	// both backed by Postgres when configured (in-memory in dev). The email
+	// sender is the same SMTP-or-dev-log seam onboarding uses; SendInvite
+	// fails closed if MITOS_ONBOARDING_INVITE_URL is not set.
+	invitations := saas.NewInvitationService(store, buildEmailSender(logger))
 
 	caps := capabilitiesFromEnv()
 	// One status store is shared by the BFF billing view, the billing webhook,
@@ -191,8 +197,9 @@ func main() {
 	usageStore := buildUsageStore(logger)
 
 	con := console.New(console.Deps{
-		Accounts: accounts,
-		Usage:    usageStore,
+		Accounts:    accounts,
+		Invitations: invitations,
+		Usage:       usageStore,
 		// The proof-snapshot and fork-tree sources: org-scoped cluster queries when
 		// in a cluster, in-memory otherwise.
 		Instruments: buildInstruments(logger),

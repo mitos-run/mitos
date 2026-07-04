@@ -29,6 +29,13 @@ type SMTPConfig struct {
 	// VerifyBaseURL is the base the verify link is built from; the token is added
 	// as a query parameter. For example https://app.mitos.run/auth/verify.
 	VerifyBaseURL string
+	// InviteBaseURL is the base the invite accept link is built from; the raw
+	// invite token is added as a query parameter, mirroring VerifyBaseURL. For
+	// example https://app.mitos.run/invite/accept. Optional: unset means
+	// SendInvite fails closed with a configuration error rather than
+	// composing a broken link, so a deployment that never enables invites
+	// need not set this.
+	InviteBaseURL string
 	// TLSServerName overrides the TLS server name used for STARTTLS verification.
 	// Empty defaults to Host. Used in tests to point at 127.0.0.1 while presenting
 	// a cert for another name.
@@ -93,6 +100,45 @@ func (s *SMTPEmailSender) SendVerification(ctx context.Context, email, token str
 		return fmt.Errorf("smtp email sender: deliver verification: %w", err)
 	}
 	return nil
+}
+
+// SendInvite composes the "invited to an org" email and delivers it over
+// SMTP. The subject is the exact product copy: "<inviter> invited you to
+// <org> on Mitos". The raw invite token appears only in the accept link in
+// the body delivered to the recipient's inbox; it is never logged or placed
+// in a returned error. Fails closed (a configuration error, never a broken
+// link) when InviteBaseURL is not configured.
+func (s *SMTPEmailSender) SendInvite(ctx context.Context, email, orgName, inviterName, token string) error {
+	if s.cfg.InviteBaseURL == "" {
+		return fmt.Errorf("smtp email sender: invite base url is not configured")
+	}
+	link, err := verifyLink(s.cfg.InviteBaseURL, token)
+	if err != nil {
+		return fmt.Errorf("smtp email sender: build invite link: %w", err)
+	}
+	msg := buildInviteMessage(s.cfg.From, email, orgName, inviterName, link)
+	if err := s.dial(ctx, s.cfg, s.cfg.From, []string{email}, msg); err != nil {
+		return fmt.Errorf("smtp email sender: deliver invite: %w", err)
+	}
+	return nil
+}
+
+// buildInviteMessage composes a minimal RFC 5322 plain-text invite email.
+// The subject line is the exact product copy the console spec calls for. No
+// em or en dashes; plain, on-brand voice.
+func buildInviteMessage(from, to, orgName, inviterName, link string) []byte {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + inviterName + " invited you to " + orgName + " on Mitos\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(inviterName + " invited you to join " + orgName + " on Mitos.\r\n\r\n")
+	b.WriteString("Accept the invitation:\r\n\r\n")
+	b.WriteString(link + "\r\n\r\n")
+	b.WriteString("This link is single-use and expires in 7 days. If you were not expecting this, ignore this email.\r\n")
+	return []byte(b.String())
 }
 
 // SendApproved composes the "you are in" approval email and delivers it over
