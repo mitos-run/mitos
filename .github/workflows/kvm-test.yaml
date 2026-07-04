@@ -528,6 +528,16 @@ jobs:
             exit 1
           }
 
+          # The guest kernel automounts devtmpfs on /dev (CONFIG_DEVTMPFS_MOUNT),
+          # so a correct init must skip that mount instead of logging an ERROR
+          # for the EBUSY (issue #668): that ERROR appeared in every boot and got
+          # real CI failures misattributed to the guest. Regression-gate it.
+          if grep -q "mount /dev: Resource busy" $WORKDIR/serial.log; then
+            echo "FAIL: guest init logged a false ERROR for the kernel-premounted /dev (issue #668)"
+            exit 1
+          fi
+          echo "OK: no false 'mount /dev' ERROR in the boot serial log (issue #668)"
+
           kill $FC_PID 2>/dev/null || true
 
       # gRPC runtime protocol proof (issue #24 stage 5, Task 5.4). This phase
