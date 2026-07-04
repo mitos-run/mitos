@@ -686,6 +686,33 @@ html[data-reduce-motion="1"] * {
 
 .topbar-help:hover { color: var(--ink-2); }
 
+/* Theme toggle: quiet icon button, same footprint and focus treatment as
+   .menu-button, always visible (unlike the mobile-only menu button). */
+.theme-toggle {
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: var(--space-2);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.theme-toggle:hover {
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
 /* Search trigger: looks like a quiet input field. Hairline border, field fill,
    dim placeholder text, kbd shortcut in a faint pill. Not a real input. */
 .search-trigger {
