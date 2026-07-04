@@ -78,11 +78,11 @@ Land first; it is the smallest and it is an active billing-honesty bug.
   unsuspends on the next drawdown cycle. If the current dunning state
   machine lacks the transition, add it. A suspended org must not be a dead
   end (journey rules).
-- #614: `PgStatusStore` and `PgCustomers` in `internal/saas/pgstore` with
-  migrations, following the existing patterns (`PgCreditLedger`,
-  `PgSpendCapStore`, `PgSuspensionStore`); wired in `cmd/console` when
-  Postgres is configured; in-memory stays the dev fallback. Tests cover
-  restart survival for both stores.
+- #614 status correction (found during planning): `PgStatusStore`,
+  `PgCustomers`, migration 0007, and the console wiring ALREADY shipped on
+  main, with restart-survival tests; so did resume-on-top-up (the
+  `SuspensionLifter` seam). This workstream therefore narrows to the
+  default cap, the onboarding seed, and resume-on-cap-change.
 - Tests: unit tests for default-cap resolution precedence (no row, row
   lower, row higher), an integration-shaped test that an org with no
   explicit cap suspends when its ledger spend passes the default, and the
