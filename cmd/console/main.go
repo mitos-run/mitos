@@ -35,6 +35,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"mitos.run/mitos/cmd/console/spa"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
@@ -49,6 +51,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8090", "console listen address")
+	metricsAddr := flag.String("metrics-addr", ":9100", "Prometheus metrics listen address (a SEPARATE cluster-internal listener; /metrics is never mounted on the public mux). Empty disables the metrics listener.")
 	dev := flag.Bool("dev", false, "enable the local dev auth shim (X-Console-Account / X-Console-Org headers); NEVER enable in production")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	flag.Parse()
@@ -131,7 +134,23 @@ func main() {
 		log.Fatalf("MITOS_CONSOLE_RATES: %v", err)
 	}
 
-	bill := setupBilling(logger, statusStore, creditLedger, customers)
+	// billingSuspender routes EVERY billing-driven suspension (a provider
+	// webhook reporting the subscription suspended, a breached hard spend cap
+	// in the drawdown cycle) into the shared suspensions table the gateway
+	// kill-switch reads, and its SuspensionLifter half drives the
+	// payment-driven recovery lifts (issue #615); see newBillingSuspender.
+	// Built once and shared by the webhook and the drawdown service below.
+	billingSuspender, _ := newBillingSuspender(pool, logger)
+
+	// Metrics registry for the #617 SaaS alerts: the billing webhook counters,
+	// the drawdown driver series, and the readiness-probe Postgres failure
+	// counter. Served on its own cluster-internal listener below, never on the
+	// public mux. Only counts and timestamps are exported, never a value.
+	metricsRegistry := prometheus.NewRegistry()
+	webhookMetrics := billingprovider.NewWebhookMetrics()
+	webhookMetrics.MustRegister(metricsRegistry)
+
+	bill := setupBilling(logger, statusStore, creditLedger, customers, billingSuspender, webhookMetrics)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -241,8 +260,20 @@ func main() {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates})
-		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd)
+		// Suspend: the SAME billingSuspender the webhook uses, so a hard spend
+		// cap breached in the drawdown cycle lands in the durable suspensions
+		// table the gateway kill-switch reads (issue #615); without this seam
+		// the service computed the suspension and dropped it. The driver calls
+		// EnforceSpendCapFromLedger after settling each active org. Caps is the
+		// shared spend-cap store the BFF writes, so enforcement sees the org's
+		// real caps instead of an empty in-memory default.
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates, Caps: spendCapStore, Suspend: billingSuspender})
+		// The drawdown metrics are registered ONLY when the driver is enabled:
+		// the DrawdownStalled alert watches last-success staleness, and a
+		// deployment with the driver off must expose no series to go stale.
+		ddMetrics := newDrawdownMetrics()
+		ddMetrics.mustRegister(metricsRegistry)
+		startDrawdownDriver(rootCtx, logger, ddInterval, store, usageStore, dd, ddMetrics)
 		logger.Info("usage drawdown driver enabled", "interval", ddInterval.String())
 	} else {
 		logger.Info("usage drawdown driver disabled (in-memory usage store or interval 0/off)")
@@ -360,10 +391,20 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	var readyDB pgPinger
+	var pingFailures prometheus.Counter
 	if pool != nil {
 		readyDB = pool
+		// The counter is registered only when a durable Postgres is configured:
+		// in-memory persistence has no database to be unreachable, so the
+		// ConsolePostgresUnreachable alert must see no series at all.
+		pingFailures = newDBPingFailuresCounter()
+		metricsRegistry.MustRegister(pingFailures)
 	}
-	mux.HandleFunc("/readyz", newReadyzHandler(readyDB))
+	mux.HandleFunc("/readyz", newReadyzHandler(readyDB, pingFailures))
+
+	if *metricsAddr != "" {
+		serveMetrics(rootCtx, logger, *metricsAddr, metricsRegistry)
+	}
 
 	logger.Info("console listening", "addr", *addr, "dev", *dev)
 	srv := &http.Server{Addr: *addr, Handler: mux}

@@ -153,6 +153,63 @@ counted, never failing the whole cycle. The collector runs behind the
 deployment that does not want metering is unaffected; it is turned on for hosted
 multi-tenant. See `docs/design/observability-and-billing-spine.md`.
 
+The husk-pod source (`HuskSource`, `internal/usage/husksource.go`) scrapes each
+CLAIMED husk pod's own in-pod `GET /v1/metering` through a BOUNDED worker pool
+(8 concurrent scrapes; issue #682): fleet size is per-VM, so a sequential scrape
+serialized N unreachable pods into N x the per-request timeout during a partial
+outage. With the pool the cycle duration is set by the slowest pool lane, not
+the fleet size. All live samples in one cycle still share a single scrape
+timestamp, and unreachable pods are still skip-and-counted. Every completed
+cycle exports its wall duration as the
+`mitos_usage_collect_cycle_duration_seconds` gauge and logs a one-line summary
+at default verbosity (samples, records, orgs, duration, cumulative skip
+counters). Zero samples with no claimed pods is a normal quiet fleet; the
+summary makes an UNEXPECTEDLY zero-collecting pipeline (zero samples while
+sandboxes are running) visible in one line, and the gauge makes a slowing
+scrape path alertable (issue #617). The duration gauge is set only on success,
+so failed cycles additionally increment the
+`mitos_usage_collect_cycle_failures_total` counter: alert on its rate for a
+collector that is erroring rather than slowing. The console-side drawdown line
+reports `settledCents` and `carriedMilliCents` per cycle (issue #672), the
+money half of the same visibility gap.
+
+**Terminate-time final sample** (issue #682, was #664): scraping once per
+window leaves the presence between the LAST scrape and terminate unrecorded (a
+sandbox alive ~100s billed 60 vcpu-seconds; a sub-minute job billed nothing).
+The sandbox reconciler records a `usage.Termination` per claimed, org-labeled
+husk pod at claim release and lifetime terminate (it knows the exact instant),
+and the husk source drains those events each cycle to emit a FINAL sample:
+
+- a pod scraped before gets a clone of its last measured sample stamped at the
+  release instant, so `Integrate` bills the `[last scrape, terminate]` tail at
+  the last measured level (bounded by `MaxHold`, and the cloned cumulative
+  counters delta to zero: no invented egress);
+- a pod that terminated before its first scrape gets a synthesized start/end
+  pair over `[StartedAt, terminate]` carrying ONLY the known vCPU allocation;
+  memory and disk were never measured and stay zero (customer-favorable), and
+  the start is clamped to `terminate - MaxHold` so a stale StartedAt can never
+  rewrite long-settled windows.
+
+One claim records ONE event, at the true terminate instant: a claim already
+Terminated (lifetime expiry) recorded its event then, and the later object
+delete records nothing. Downstream, a vm-id is finalized at most once (the
+collector's guard, the second line of defense for a requeued terminate that
+records twice), so the tail can only be billed once. The event log is
+in-memory and best-effort: a controller restart or a node-loss drain loses the
+tail sample, which under-bills that tail and nothing else; recording never
+blocks or fails a terminate.
+
+The terminate instant is also the **billing boundary** (issue #688): for a
+husk-backed sandbox, every terminate path, including lifetime and idle expiry,
+DELETES the claim's husk pod right after recording the event and stamping the
+terminal phase, so the scrape lister (which selects claimed, org-labeled,
+Running pods, never claim phase) stops returning the sandbox on the next
+cycle. A raw-forkd claim has no husk pod; its VM is reaped via terminateOnNode
+and was never scraped by the husk lister. A Terminated sandbox
+therefore never accrues live samples past its recorded terminate event; the
+tail between the last scrape and that instant is carried by the single
+termination event above, and nothing after it is billed.
+
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from
 client input. There are two attribution paths:

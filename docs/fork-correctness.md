@@ -63,10 +63,18 @@ rootfs (`<dataDir>/husk-rootfs/<source-pod-name>/rootfs.ext4`, threaded as
 would rebind the child to a disk that does not match its restored memory: any
 data the source wrote since boot would be lost in children and the
 cached-vs-on-disk mismatch could corrupt the child fs. This mirrors the raw-forkd
-`ForkRunning` path, which threads `source.rootfsPath` into the fork so memory and
-disk stay consistent. The clone is still per-child (keyed by the child pod name),
-so children remain independent; only the clone SOURCE is the source rootfs.
-Verified by `internal/controller` `TestBuildHuskPodForkChildClonesFromSourceRootfs`.
+`ForkRunning` path (`internal/fork/engine.go`), which clones the child's rootfs
+from the SOURCE's OWN writable rootfs clone (`source.rootfsClone`,
+`<dataDir>/sandboxes/<source-id>/rootfs.ext4`), captured while the source is
+paused, so memory and disk stay consistent. Issue #596: before that fix the
+raw-forkd path threaded `source.rootfsPath` (the read-only TEMPLATE the source
+was cloned from), so raw-forkd children silently lost every on-disk write the
+source made; the husk path was already correct. The clone is still per-child
+(keyed by the child pod name), so children remain independent; only the clone
+SOURCE is the source rootfs. Verified by `internal/controller`
+`TestBuildHuskPodForkChildClonesFromSourceRootfs`, by `internal/fork`
+`TestLiveForkRootfsBaseIsSourceClone`, and end to end on KVM by
+`cmd/live-state-fork-smoke`.
 
 Single coherent fork point. The source VM is snapshotted EXACTLY ONCE per
 `Sandbox` with `source.fromSandbox` (guarded by `Status.ForkSnapshotTaken`, persisted so it survives a

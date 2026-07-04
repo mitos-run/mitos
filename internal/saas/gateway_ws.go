@@ -76,6 +76,10 @@ func (g *Gateway) proxyRuntimeWebSocket(ctx context.Context, w http.ResponseWrit
 
 	g.log.Info("gateway ws proxy", "org", orgID, "sandbox", target.SandboxID)
 
+	// failed is set by the ErrorHandler so a backend failure (already counted
+	// through g.fail) is not double-counted; a proxy that returns without a
+	// backend error completed the 101 upgrade and is counted as 1xx.
+	var failed bool
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
@@ -94,10 +98,14 @@ func (g *Gateway) proxyRuntimeWebSocket(ctx context.Context, w http.ResponseWrit
 			// A backend dial/handshake failure must not leak internals. Map it to a
 			// generic bad_gateway-style envelope; the token is never in err here.
 			g.log.Info("gateway ws proxy backend error", "org", orgID, "sandbox", target.SandboxID, "err", err.Error())
+			failed = true
 			g.fail(w, apierr.Get(apierr.CodeInternal).
 				WithCause("the sandbox runtime endpoint could not be reached"))
 		},
 		ErrorLog: slog.NewLogLogger(g.log.Handler(), slog.LevelInfo),
 	}
 	rp.ServeHTTP(w, r)
+	if !failed {
+		g.metrics.observeStatus(http.StatusSwitchingProtocols)
+	}
 }

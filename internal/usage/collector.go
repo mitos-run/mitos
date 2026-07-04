@@ -95,6 +95,43 @@ func (s *ReportSource) Collect(ctx context.Context) ([]Sample, error) {
 	return out, nil
 }
 
+// MultiSource composes several SampleSources into one, unioning their samples on
+// each Collect. It lets the collector meter BOTH the raw-forkd node source and the
+// husk-pod source (issue #613) in a single CollectOnce. The two sources cover
+// DISJOINT sandbox sets (a sandbox is either a raw-forkd fork tracked by forkd's
+// engine or a husk-pod VM tracked by its own pod, never both), so the union is
+// exactly the fleet's samples with no double counting; cross-source timestamp skew
+// is harmless because Integrate groups by sandbox and no sandbox spans both.
+//
+// Each sub-source already SKIPS-AND-COUNTS its own unreachable endpoints, so a
+// sub-source Collect error is a programmer-level fault, not an unreachable
+// node/pod; MultiSource propagates it so the collector logs and retries next tick.
+type MultiSource struct {
+	sources []SampleSource
+}
+
+// NewMultiSource builds a MultiSource over the given sub-sources, in order.
+func NewMultiSource(sources ...SampleSource) *MultiSource {
+	return &MultiSource{sources: sources}
+}
+
+// Collect runs each sub-source's Collect and returns the concatenation of their
+// samples. A sub-source error aborts the cycle (returned to the collector), so a
+// real fault is visible rather than silently dropping half the bill.
+func (m *MultiSource) Collect(ctx context.Context) ([]Sample, error) {
+	var out []Sample
+	for _, src := range m.sources {
+		samples, err := src.Collect(ctx)
+		if err != nil {
+			// Name the failing sub-source (by type) so the collector's cycle log
+			// says WHICH half of the union failed, node or husk.
+			return nil, fmt.Errorf("sample source %T: %w", src, err)
+		}
+		out = append(out, samples...)
+	}
+	return out, nil
+}
+
 // Collector ties a SampleSource to a UsageStore. On each cycle it scrapes
 // samples, integrates them into per-(sandbox, window) records, and upserts those
 // records. Because the integration is pure and the upsert replaces by key, a
@@ -139,30 +176,67 @@ func NewCollector(src SampleSource, store UsageStore, cfg Config) *Collector {
 // windows fall out of the buffer and are never re-walked.
 func (c *Collector) retention() time.Duration { return c.cfg.Window + c.cfg.MaxHold }
 
-// CollectOnce runs a single scrape-buffer-integrate-upsert cycle. It is the unit
-// the Run loop calls on each tick and the unit the idempotency tests drive
-// directly. It appends the scrape to the rolling buffer, prunes samples past the
-// retention horizon, and integrates the buffer so the rate units accumulate
-// across cycles while staying idempotent on (sandbox, window).
-func (c *Collector) CollectOnce(ctx context.Context) error {
+// CycleStats summarizes what one CollectOnce cycle did, so the wiring can log a
+// healthy-cycle summary at default verbosity and export a cycle-duration metric
+// (issue #682, was #665/#656; the series #617 alerting watches). It carries
+// COUNTS and a duration only: no sandbox ids, org ids, or secrets, so it is
+// safe to log verbatim.
+type CycleStats struct {
+	// Duration is the wall time of the whole cycle: scrape, integrate, upsert.
+	// With the bounded husk scrape pool it is set by the slowest pool lane, not
+	// the fleet size; a sustained rise means unreachable pods or fleet growth.
+	Duration time.Duration
+	// Samples is how many samples this cycle's scrape returned (before
+	// buffering), the liveness signal for the scrape path.
+	Samples int
+	// Records is how many per-(sandbox, window) records were ACTUALLY upserted
+	// this cycle: on success every recomputed record, on an upsert failure only
+	// the records that landed before it.
+	Records int
+	// Orgs is how many distinct org ids those upserted records span.
+	Orgs int
+}
+
+// CollectOnce runs a single scrape-buffer-integrate-upsert cycle and reports
+// its CycleStats. It is the unit the Run loop calls on each tick and the unit
+// the idempotency tests drive directly. It appends the scrape to the rolling
+// buffer, prunes samples past the retention horizon, and integrates the buffer
+// so the rate units accumulate across cycles while staying idempotent on
+// (sandbox, window). On error the returned stats cover exactly the work DONE
+// before the failure (Duration is always the real wall time of the attempt;
+// Records and Orgs count only what was upserted).
+func (c *Collector) CollectOnce(ctx context.Context) (CycleStats, error) {
+	start := time.Now()
+	var stats CycleStats
 	samples, err := c.src.Collect(ctx)
 	if err != nil {
-		return fmt.Errorf("collect samples: %w", err)
+		stats.Duration = time.Since(start)
+		return stats, fmt.Errorf("collect samples: %w", err)
 	}
+	stats.Samples = len(samples)
 	c.buf = append(c.buf, samples...)
 	c.pruneBuffer()
 	recs := Integrate(c.buf, c.cfg)
+	// One pass over the records: upsert, then count the record and its org, so
+	// on an upsert error the stats hold only the work that actually landed.
+	orgs := map[string]bool{}
 	for _, r := range recs {
 		if err := c.store.UpsertRecord(ctx, r); err != nil {
-			return fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
+			stats.Orgs = len(orgs)
+			stats.Duration = time.Since(start)
+			return stats, fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
 		}
+		stats.Records++
+		orgs[r.OrgID] = true
 	}
+	stats.Orgs = len(orgs)
 	if c.OnTotals != nil {
 		if tp, ok := c.store.(TotalsProvider); ok {
 			c.OnTotals(tp.TotalsByOrg())
 		}
 	}
-	return nil
+	stats.Duration = time.Since(start)
+	return stats, nil
 }
 
 // pruneBuffer drops samples older than the retention horizon, measured from the
@@ -205,7 +279,7 @@ func (c *Collector) Run(ctx context.Context, cadence time.Duration, onError func
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := c.CollectOnce(ctx); err != nil && onError != nil {
+			if _, err := c.CollectOnce(ctx); err != nil && onError != nil {
 				onError(err)
 			}
 		}

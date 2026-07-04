@@ -50,10 +50,10 @@ func TestCollectorEmitsPerOrgMetric(t *testing.T) {
 	// Two scrape cycles in the same window: the second is a re-scrape of the same
 	// report. Idempotency means the store and the gauge land on the same per-org
 	// totals, not double them.
-	if err := c.CollectOnce(context.Background()); err != nil {
+	if _, err := c.CollectOnce(context.Background()); err != nil {
 		t.Fatalf("first CollectOnce: %v", err)
 	}
-	if err := c.CollectOnce(context.Background()); err != nil {
+	if _, err := c.CollectOnce(context.Background()); err != nil {
 		t.Fatalf("second CollectOnce: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestMetricStoreFedCumulativeAcrossWindowsQuietOrgRetained(t *testing.T) {
 
 	var prevAcme, prevGlobex float64
 	for cyc := 0; cyc < 3; cyc++ {
-		if err := coll.CollectOnce(ctx); err != nil {
+		if _, err := coll.CollectOnce(ctx); err != nil {
 			t.Fatalf("cycle %d: %v", cyc, err)
 		}
 		totals := store.TotalsByOrg()
@@ -222,6 +222,70 @@ func TestMetricStoreFedCumulativeAcrossWindowsQuietOrgRetained(t *testing.T) {
 		t.Fatalf("globex cumulative dropped to %v after going quiet; the quiet org was lost", finalGlobex)
 	}
 	assertGaugeEquals(t, reg, "globex", finalGlobex)
+}
+
+// TestObserveCycleExportsCycleDuration asserts the cycle-duration gauge (issue
+// #682, was #656; the series #617 alerting watches) is exported and set to the
+// most recent cycle's wall duration in seconds.
+func TestObserveCycleExportsCycleDuration(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics()
+	m.MustRegister(reg)
+
+	m.ObserveCycle(CycleStats{Duration: 1500 * time.Millisecond})
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var got float64
+	var found bool
+	for _, mf := range mfs {
+		if mf.GetName() == "mitos_usage_collect_cycle_duration_seconds" {
+			found = true
+			got = mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	if !found {
+		t.Fatal("mitos_usage_collect_cycle_duration_seconds not exported")
+	}
+	if got != 1.5 {
+		t.Errorf("cycle duration gauge = %v, want 1.5", got)
+	}
+}
+
+// TestObserveCycleFailureIncrementsCounter asserts the cycle-failure counter
+// (issue #682 review follow-up) is exported and counts every failed cycle. The
+// duration gauge is set only on success, so under a sustained failure it
+// freezes at the last healthy value; this counter is the metrics-only signal
+// #617 alerting needs for a failing collector.
+func TestObserveCycleFailureIncrementsCounter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics()
+	m.MustRegister(reg)
+
+	read := func() float64 {
+		t.Helper()
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		for _, mf := range mfs {
+			if mf.GetName() == "mitos_usage_collect_cycle_failures_total" {
+				return mf.GetMetric()[0].GetCounter().GetValue()
+			}
+		}
+		return 0
+	}
+
+	m.ObserveCycleFailure()
+	if got := read(); got != 1 {
+		t.Fatalf("cycle failures after one failure = %v, want 1", got)
+	}
+	m.ObserveCycleFailure()
+	if got := read(); got != 2 {
+		t.Fatalf("cycle failures after two failures = %v, want 2", got)
+	}
 }
 
 // gaugeValue reads the value of mitos_usage_vcpu_seconds_total for the given org

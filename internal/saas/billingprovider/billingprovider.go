@@ -1,6 +1,6 @@
 // Package billingprovider abstracts the payment backend behind a provider seam,
 // the same way console.SecretStore abstracts the secret backend. Stripe is one
-// provider; a Merchant of Record (Polar, Paddle, Lemon Squeezy) is another —
+// provider; a Merchant of Record (Polar, Paddle, Lemon Squeezy) is another,
 // and an MoR is the likely end state, since it becomes the legal seller and
 // handles global sales-tax/VAT so Mitos does not have to. The console reads
 // billing through the provider-neutral BillingReader seam and never names a
@@ -122,7 +122,17 @@ type WebhookHandler struct {
 	linker    CustomerLinker
 	status    billing.StatusStore
 	ledger    billing.CreditLedger
-	now       func() time.Time
+	suspender billing.Suspender
+	// lifter is the recovery half of the kill-switch seam, set by WithSuspender
+	// when the suspender also implements billing.SuspensionLifter (the
+	// production quota.BillingSuspender does): a paid top-up lifts spend_cap,
+	// an active-status transition lifts dunning. Reason-scoped; manual holds
+	// survive.
+	lifter billing.SuspensionLifter
+	now    func() time.Time
+	// metrics counts verify failures and 5xx handler errors for the #617
+	// billing alerts. Nil (the default) disables all observation.
+	metrics *WebhookMetrics
 }
 
 // NewWebhookHandler builds the webhook endpoint for a provider. A nil linker
@@ -135,6 +145,28 @@ func NewWebhookHandler(p Provider, customers CustomerResolver, linker CustomerLi
 	return &WebhookHandler{provider: p, customers: customers, linker: linker, status: status, ledger: ledger, now: now}
 }
 
+// WithSuspender wires the #213 kill-switch seam into the webhook (issue #615):
+// an event whose normalized status is suspended (subscription canceled or
+// paused, payment retries exhausted) then SUSPENDS the org through s on the
+// transition INTO suspended, so the org fails closed at the gateway instead of
+// only its billing status flipping. The suspend fires BEFORE the status is
+// applied and a suspend failure is a 5xx (the provider retries); the
+// transition gate keeps webhook redeliveries from churning the suspension
+// record. Nil (the default) keeps the status-only behavior (community edition
+// without a wired kill-switch). When s also implements
+// billing.SuspensionLifter (the production quota.BillingSuspender does), the
+// recovery half is wired too: a cleared paid top-up lifts a spend_cap
+// suspension and an active-status transition lifts a dunning suspension, both
+// reason-scoped; a manual-hold suspension survives every automated lift and
+// clears only through the operator hook (see docs/saas/pricing.md).
+func (h *WebhookHandler) WithSuspender(s billing.Suspender) *WebhookHandler {
+	h.suspender = s
+	if l, ok := s.(billing.SuspensionLifter); ok {
+		h.lifter = l
+	}
+	return h
+}
+
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBytes))
 	if err != nil {
@@ -144,6 +176,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev, err := h.provider.VerifyWebhook(r, body)
 	if err != nil {
 		// Refuse forged/replayed/malformed events. Never mutate billing state.
+		h.metrics.observeVerifyFailure()
 		http.Error(w, "webhook verification failed", http.StatusBadRequest)
 		return
 	}
@@ -157,6 +190,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (the same posture as the customer-lookup failure below, issue #614).
 	if h.linker != nil && ev.OrgID != "" && ev.CustomerRef != "" {
 		if err := h.linker.Link(r.Context(), ev.OrgID, ev.CustomerRef); err != nil {
+			h.metrics.observeHandlerError()
 			http.Error(w, "customer link failed", http.StatusInternalServerError)
 			return
 		}
@@ -169,8 +203,43 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ev.TopUp != nil && h.ledger != nil && ev.TopUp.OrgID != "" && ev.TopUp.AmountCents > 0 {
 		if err := billing.TopUp(r.Context(), h.ledger, ev.TopUp.OrgID, billing.Money(ev.TopUp.AmountCents), ev.TopUp.Ref, h.now()); err != nil {
 			if !errors.Is(err, billing.ErrDuplicateEntry) {
+				h.metrics.observeHandlerError()
 				http.Error(w, "credit top-up failed", http.StatusInternalServerError)
 				return
+			}
+		}
+		// Recovery (issue #615): the org paid, so a spend_cap suspension lifts
+		// (the spend window resets at this payment, see
+		// billing.Service.EnforceSpendCapFromLedger, so the next drawdown cycle
+		// does not re-suspend for pre-payment spend). Attempted on redeliveries
+		// too: LiftReason is idempotent, and gating it on a fresh credit could
+		// strand the lift if the first delivery failed after crediting. A lift
+		// failure is a 5xx so the provider retries; a manual hold survives (the
+		// lift reports false and the ack proceeds; a held org paying is fine).
+		if h.lifter != nil {
+			lifted, err := h.lifter.LiftReason(r.Context(), ev.TopUp.OrgID, "spend_cap")
+			if err != nil {
+				h.metrics.observeHandlerError()
+				http.Error(w, "suspension lift failed", http.StatusInternalServerError)
+				return
+			}
+			if lifted {
+				// The spend-cap breach also set the billing status to suspended;
+				// restore it so the console and the dunning machine agree with
+				// the lifted kill-switch.
+				cur, err := h.status.Status(r.Context(), ev.TopUp.OrgID)
+				if err != nil {
+					h.metrics.observeHandlerError()
+					http.Error(w, "status read failed", http.StatusInternalServerError)
+					return
+				}
+				if cur == billing.StatusSuspended {
+					if err := h.status.SetStatus(r.Context(), ev.TopUp.OrgID, billing.StatusActive); err != nil {
+						h.metrics.observeHandlerError()
+						http.Error(w, "status update failed", http.StatusInternalServerError)
+						return
+					}
+				}
 			}
 		}
 	}
@@ -183,6 +252,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A lookup FAILURE must not be acked as "unknown customer": a 5xx makes
 		// the provider retry, so a transient store error (e.g. right after a
 		// restart) cannot permanently drop a status sync. No detail is echoed.
+		h.metrics.observeHandlerError()
 		http.Error(w, "customer lookup failed", http.StatusInternalServerError)
 		return
 	}
@@ -190,7 +260,45 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // unknown customer: ack so retries stop
 		return
 	}
+	// Transition INTO suspended drives the kill-switch BEFORE the status is
+	// applied: if the suspension write fails the whole event is a 5xx and the
+	// provider retries with the status still unflipped, so the transition gate
+	// cannot swallow the retry and the org can never read as suspended in
+	// billing while the gateway still admits it. The gate (current status not
+	// already suspended) keeps redeliveries from churning the suspension time.
+	// The note is non-secret; no payment detail crosses this seam.
+	// Recovery (issue #615): a payment-recovered subscription (normalized
+	// status active) lifts a dunning suspension. Attempted regardless of the
+	// stored status (LiftReason is an idempotent no-op when not suspended, and
+	// gating on the status store could strand a lift across a store skew). A
+	// lift failure is a 5xx BEFORE the status flips, so the provider retries
+	// and the org can never read active in billing while the gateway still
+	// blocks it. Manual holds survive (reason-scoped lift).
+	if h.lifter != nil && ev.Status == billing.StatusActive {
+		if _, err := h.lifter.LiftReason(r.Context(), orgID, "dunning"); err != nil {
+			h.metrics.observeHandlerError()
+			http.Error(w, "suspension lift failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	if h.suspender != nil && ev.Status == billing.StatusSuspended {
+		cur, err := h.status.Status(r.Context(), orgID)
+		if err != nil {
+			h.metrics.observeHandlerError()
+			http.Error(w, "status read failed", http.StatusInternalServerError)
+			return
+		}
+		if cur != billing.StatusSuspended {
+			if err := h.suspender.Suspend(r.Context(), orgID, "dunning",
+				"billing provider reported the subscription suspended (canceled, paused, or payment retries exhausted)", false); err != nil {
+				h.metrics.observeHandlerError()
+				http.Error(w, "suspend failed", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 	if err := h.status.SetStatus(r.Context(), orgID, ev.Status); err != nil {
+		h.metrics.observeHandlerError()
 		http.Error(w, "status update failed", http.StatusInternalServerError)
 		return
 	}

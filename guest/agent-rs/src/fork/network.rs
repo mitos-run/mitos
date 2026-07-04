@@ -147,10 +147,10 @@ fn apply_linux(cfg: &NetworkConfig, iface: &str, resolv_conf_path: &str) {
     // and clients re-dial through the per-fork egress proxy. Best-effort: log
     // and continue on error, matching the overall "fail-open for observability"
     // style of this function.
-    if cfg.reset_upstreams {
-        if let Err(e) = crate::sys::netlink::flush_neighbors(iface) {
-            eprintln!("sandbox-agent: flush neighbors on {iface}: {e}");
-        }
+    if cfg.reset_upstreams
+        && let Err(e) = crate::sys::netlink::flush_neighbors(iface)
+    {
+        eprintln!("sandbox-agent: flush neighbors on {iface}: {e}");
     }
 
     let addr_str = format!("{guest_ip}/{prefix_len}");

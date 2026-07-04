@@ -227,8 +227,17 @@ func (r *SandboxPoolReconciler) triggerTemplateRebuild(ctx context.Context, pool
 	if err != nil {
 		return err
 	}
-	if err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true); err != nil {
+	rebuilt, err := r.rebuildStaleSnapshots(ctx, templateID, template, wrappedDEK, kekID, nodeFilter, true)
+	if err != nil {
 		logger.Error(err, "force-rebuild template")
+	}
+	// Bump the build generation whenever ANY holder was rebuilt in place, even
+	// alongside per-node failures: the rebuilt nodes' dormant husk pods hold
+	// clones of the OLD artifacts and must be reaped, digest or no digest
+	// (issue #679). Only a rebuild that replaced nothing leaves the generation
+	// alone, so warm pods are never churned for artifacts that did not change.
+	if rebuilt > 0 {
+		pool.Status.TemplateBuildGeneration++
 	}
 
 	// Delete only the crashlooping pods carrying the BAD (current, presumed

@@ -1,5 +1,87 @@
 # Changelog
 
+## [1.20.0](https://github.com/mitos-run/mitos/compare/v1.19.5...v1.20.0) (2026-07-04)
+
+
+### Features
+
+* **saas:** alerting for the hosted control plane (gateway, billing webhooks, drawdown, collector, console) ([#693](https://github.com/mitos-run/mitos/issues/693)) ([33fbbc4](https://github.com/mitos-run/mitos/commit/33fbbc45813c3c85ae77664e2aac10f7ffa1aff8))
+
+
+### Bug Fixes
+
+* **controller:** husk pods are reapable after every rebuild, digest or no digest ([#686](https://github.com/mitos-run/mitos/issues/686)) ([c8f32ce](https://github.com/mitos-run/mitos/commit/c8f32ce73daf8aec3b7408544ba54d051b7e19d5))
+* **saas:** enforce live concurrency at the gateway; console suspensions reach the shared store ([#689](https://github.com/mitos-run/mitos/issues/689)) ([32b33d1](https://github.com/mitos-run/mitos/commit/32b33d1b611da51f3d05e49c0cedd29274b42e4f))
+
+## [1.19.5](https://github.com/mitos-run/mitos/compare/v1.19.4...v1.19.5) (2026-07-04)
+
+
+### Bug Fixes
+
+* **usage:** concurrent husk scrape, terminate-time final sample, cycle summary with settled cents ([#687](https://github.com/mitos-run/mitos/issues/687)) ([b7da3fa](https://github.com/mitos-run/mitos/commit/b7da3fa3f193c79d0b0160efd49c38f84a4b8a6f))
+* **usage:** cycle-failure counter, reconciler-clock termination stamps, honest error-path stats ([#692](https://github.com/mitos-run/mitos/issues/692)) ([9e0ca82](https://github.com/mitos-run/mitos/commit/9e0ca82caddf352e4c5cfb0face28c6a1c59169c)), closes [#682](https://github.com/mitos-run/mitos/issues/682)
+
+## [1.19.4](https://github.com/mitos-run/mitos/compare/v1.19.3...v1.19.4) (2026-07-04)
+
+
+### Bug Fixes
+
+* **guest:** init skips kernel-premounted targets, ending the false /dev ERROR ([#683](https://github.com/mitos-run/mitos/issues/683)) ([24d766c](https://github.com/mitos-run/mitos/commit/24d766cb05958b767ca773188a7fa93c5e09346b))
+
+## [1.19.3](https://github.com/mitos-run/mitos/compare/v1.19.2...v1.19.3) (2026-07-03)
+
+
+### Bug Fixes
+
+* **daemon:** exec ws accepts origin-bearing clients; bearer token is the gate ([#680](https://github.com/mitos-run/mitos/issues/680)) ([66cf371](https://github.com/mitos-run/mitos/commit/66cf3714da0aed6264700bb782f2bb8c5588aecb))
+
+## [1.19.2](https://github.com/mitos-run/mitos/compare/v1.19.1...v1.19.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **agent-rs:** mount devpts and honor PTY stdin_close so interactive PTY works ([#670](https://github.com/mitos-run/mitos/issues/670)) ([b4efde5](https://github.com/mitos-run/mitos/commit/b4efde527600e9236e62ddabbec750d739d0a4c5))
+
+## [1.19.1](https://github.com/mitos-run/mitos/compare/v1.19.0...v1.19.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **saas:** drawdown skips settled windows before pricing; markers leave the ledger ([#675](https://github.com/mitos-run/mitos/issues/675)) ([d6880ec](https://github.com/mitos-run/mitos/commit/d6880ec5cd85d845b6fc37b1169445afcb7e3569)), closes [#672](https://github.com/mitos-run/mitos/issues/672)
+* **saas:** usage records carry the API-visible sandbox id, not the husk pod name ([#673](https://github.com/mitos-run/mitos/issues/673)) ([d163f2e](https://github.com/mitos-run/mitos/commit/d163f2ef8b91c9260f151fd2163e7d06c88dbee1)), closes [#663](https://github.com/mitos-run/mitos/issues/663)
+
+## [1.19.0](https://github.com/mitos-run/mitos/compare/v1.18.0...v1.19.0) (2026-07-03)
+
+
+### Features
+
+* **chart:** values.schema.json rejects unknown keys at install time ([#667](https://github.com/mitos-run/mitos/issues/667)) ([d30c633](https://github.com/mitos-run/mitos/commit/d30c6334b6c345c62fa82b33de9691c9e4241686))
+
+
+### Bug Fixes
+
+* **saas:** drawdown accumulates usage in milli-cents so sub-cent windows bill ([#666](https://github.com/mitos-run/mitos/issues/666)) ([c2976c5](https://github.com/mitos-run/mitos/commit/c2976c5b8416a77f0760a6d88f3b4e5544312c83)), closes [#662](https://github.com/mitos-run/mitos/issues/662)
+
+## [1.18.0](https://github.com/mitos-run/mitos/compare/v1.17.0...v1.18.0) (2026-07-03)
+
+
+### Features
+
+* **husk:** expose per-VM metering so the usage collector meters husk sandboxes ([#627](https://github.com/mitos-run/mitos/issues/627)) ([2dc0c53](https://github.com/mitos-run/mitos/commit/2dc0c53abafefada7fc6da92f0fcec5b2eed534b))
+
+## [1.17.0](https://github.com/mitos-run/mitos/compare/v1.16.0...v1.17.0) (2026-07-03)
+
+
+### Features
+
+* **fork:** live-state fork carries the source filesystem and running kernel (not the template) ([#611](https://github.com/mitos-run/mitos/issues/611)) ([c4ab5f5](https://github.com/mitos-run/mitos/commit/c4ab5f536083d734ba9bb879383221ea84f1e452))
+
+
+### Bug Fixes
+
+* **brand:** dark --ink-3 label token meets AA small-text contrast ([#652](https://github.com/mitos-run/mitos/issues/652)) ([38d4357](https://github.com/mitos-run/mitos/commit/38d43575be710f20ef8e0b03616c633eb31384fb)), closes [#635](https://github.com/mitos-run/mitos/issues/635)
+* **cli:** windows build of mitos, statfs check split behind build tags ([#654](https://github.com/mitos-run/mitos/issues/654)) ([194c5ac](https://github.com/mitos-run/mitos/commit/194c5ac9b834e19849af001bc9d971c21ccfb9b8))
+
 ## [1.16.0](https://github.com/mitos-run/mitos/compare/v1.15.2...v1.16.0) (2026-07-03)
 
 

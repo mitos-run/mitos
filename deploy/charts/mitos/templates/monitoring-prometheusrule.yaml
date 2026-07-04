@@ -107,6 +107,265 @@ spec:
               bare-metal target, not this threshold; this budget is
               environment-tunable. See the runbook for what drives fork latency.
             runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ForkLatencyHigh.md"
+{{- if or .Values.gateway.enabled .Values.console.enabled .Values.controller.usage.collector }}
+
+    - name: mitos-saas
+      # SaaS control-plane alerts (issue #617): the gateway front door, the
+      # billing webhook, the metering-to-credit pipeline (usage collector and
+      # drawdown driver), and console/Postgres availability. Rules render only
+      # for the components this install enables, so a self-host deployment
+      # without the hosted surfaces carries no dead rules. Thresholds are
+      # environment-tunable starting points, not established SLOs.
+      rules:
+{{- if .Values.gateway.enabled }}
+        - alert: GatewayErrorRateHigh
+          # 5xx share of all gateway responses. The 5m rate window and 10m hold
+          # mirror ClaimErrorRateHigh (sustained structural failure, not a
+          # blip). The 0.1 req/s traffic floor stops a single failed request on
+          # a near-idle deployment from being 100 percent and paging.
+          expr: |
+            (
+              sum(rate(mitos_gateway_requests_total{code_class="5xx"}[5m]))
+                /
+              sum(rate(mitos_gateway_requests_total[5m]))
+            ) > 0.05
+            and
+            sum(rate(mitos_gateway_requests_total[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gateway 5xx rate above 5 percent of traffic"
+            description: >
+              More than 5 percent of public gateway responses have been 5xx over
+              the last 5m, sustained for 10m (current ratio
+              {{`{{ printf "%.3f" $value }}`}}). Customers are receiving internal
+              errors from the API front door. Threshold is environment-tunable.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/GatewayErrorRateHigh.md"
+
+        - alert: GatewayAuthDenialSpike
+          # The healthy baseline is near zero: deployed SDKs hold valid keys.
+          # 1 denial/s sustained for 10m is far above any organic retry noise
+          # and means key scanning, a revoked or expired key still deployed in
+          # an integration, or an auth regression after a rollout.
+          expr: |
+            sum(rate(mitos_gateway_auth_denials_total[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gateway authentication denials spiking"
+            description: >
+              The gateway is denying authentication at
+              {{`{{ printf "%.2f" $value }}`}}/s over 5m, sustained for 10m. The
+              baseline is near zero, so this is credential scanning or probing,
+              a revoked/expired key still deployed in a customer integration,
+              or an auth regression. Quota and rate-limit denials are excluded
+              from this series. Threshold is environment-tunable.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/GatewayAuthDenialSpike.md"
+{{- end }}
+{{- if .Values.console.enabled }}
+
+        - alert: BillingWebhookVerifyFailures
+          # Legitimate verify-failure volume is zero, so ANY sustained rate is
+          # actionable: either forged/replayed traffic is probing the endpoint,
+          # or, the urgent case, a rotated/mismatched webhook secret is
+          # rejecting EVERY legitimate provider event, silently dropping paid
+          # top-ups and billing status syncs. The 15m window and hold filter
+          # out a single malformed delivery.
+          expr: |
+            sum(rate(mitos_billing_webhook_verify_failures_total[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Billing webhook signature verification is failing"
+            description: >
+              Billing webhook requests have been failing signature verification
+              for 15m ({{`{{ printf "%.4f" $value }}`}}/s). If the provider
+              dashboard shows failed deliveries, the webhook secret is
+              mismatched and top-ups plus status syncs are NOT landing; if not,
+              the endpoint is being probed with forged events.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/BillingWebhookVerifyFailures.md"
+
+        - alert: BillingWebhookErrorRateHigh
+          # 5xx on a verified event means a store failure behind the handler.
+          # The provider retries, so nothing is lost YET; sustained failures
+          # for 15m mean top-ups and status changes are queueing at the
+          # provider instead of landing, and retries eventually exhaust.
+          expr: |
+            sum(rate(mitos_billing_webhook_errors_total[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Billing webhook handler is failing verified events"
+            description: >
+              Signature-verified billing webhook events have been answered 5xx
+              for 15m ({{`{{ printf "%.4f" $value }}`}}/s): the customer link,
+              top-up credit, customer lookup, or status write is failing
+              (usually Postgres). The provider is retrying, so fix the store
+              before the retry budget exhausts and billing state is dropped.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/BillingWebhookErrorRateHigh.md"
+
+        - alert: DrawdownFailing
+          # Any sustained per-operation failure rate inside drawdown cycles
+          # means some metered usage is not settling against prepaid credit
+          # (revenue leaks silently, issue #662's signature). The driver's
+          # 5m cadence makes a 30m window about 6 cycles: persistent, not a
+          # single flaky tick.
+          expr: |
+            sum(rate(mitos_drawdown_cycle_errors_total[30m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Usage drawdown cycles keep failing operations"
+            description: >
+              The drawdown driver has had failing operations (org list, usage
+              record list, settled-window read, per-record settle, or marker
+              prune) for 30m. Some metered usage is not being settled against
+              prepaid credit; the lookback will replay it once the cause is
+              fixed, so fix the failing dependency (usage API or Postgres).
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/DrawdownFailing.md"
+
+        - alert: DrawdownStalled
+          # No fully clean drawdown cycle for 30m = 6 missed cycles at the
+          # default 5m interval: the loop is wedged, the console cannot reach
+          # the usage API, or every cycle is erroring. The gauge is stamped at
+          # driver start, so a console that never completes a clean cycle
+          # fires this on schedule, and the series only exists when the driver
+          # is enabled (a metering-less self-host never fires it). The 15m hold
+          # avoids paging on one slow or restart-skipped cycle.
+          expr: |
+            time() - mitos_drawdown_last_success_timestamp_seconds > 1800
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Usage drawdown driver has not completed a clean cycle in 30m"
+            description: >
+              No drawdown cycle has completed without errors for over 30m (6
+              cycles at the default 5m interval). Prepaid credits are not being
+              drawn down against metered usage: the settle loop is wedged, the
+              controller usage API is unreachable, or every cycle is failing
+              (see DrawdownFailing). Usage records keep accumulating and will
+              settle on recovery via the idempotent lookback replay.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/DrawdownStalled.md"
+
+        - alert: OrgCreditExhausted
+          # Volume signal, not a single boundary record: at the 5m drawdown
+          # cadence, 12 exhausted settles in an hour is roughly one org
+          # settling beyond its prepaid credit every cycle for the whole hour.
+          # The unbacked remainder is not billed anywhere until metered billing
+          # exists, so sustained volume is unpaid consumption (or missing
+          # enforcement by the spend-cap/suspension path).
+          expr: |
+            sum(increase(mitos_drawdown_credit_exhausted_total[1h])) > 12
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Orgs are consuming beyond their prepaid credit at volume"
+            description: >
+              {{`{{ printf "%.0f" $value }}`}} usage records in the last hour
+              settled with a cost exceeding the org's remaining prepaid credit,
+              sustained for 1h. The unbacked remainder is unpaid consumption:
+              check which orgs are exhausted, whether the suspension/spend-cap
+              enforcement should have engaged, and whether top-up is working.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/OrgCreditExhausted.md"
+
+        - alert: ConsolePostgresUnreachable
+          # Driven by the kubelet /readyz probe (10s period), so the failure
+          # rate is a continuous reachability signal. 10m sustained is far past
+          # any transient failover blip and means the durable store behind
+          # accounts, keys, sessions, billing, and the credit ledger is down:
+          # a hard SaaS outage, hence critical.
+          expr: |
+            sum(rate(mitos_console_db_ping_failures_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Console cannot reach its Postgres database"
+            description: >
+              The console readiness probe has been failing its Postgres ping
+              for 10m. Accounts, API keys, sessions, billing state, and the
+              credit ledger are all unavailable; the console is out of the
+              Service and the gateway's durable reads are almost certainly
+              failing too. Check the database, the DSN Secret, and the network
+              path.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ConsolePostgresUnreachable.md"
+{{- if .Values.monitoring.podMonitors.enabled }}
+
+        - alert: ConsoleUnavailable
+          # Every console scrape target is down, or none exists to scrape.
+          # `up` comes from the mitos-console PodMonitor, so this rule renders
+          # only when PodMonitors do. 5m matches CanaryDown: users cannot log
+          # in, manage keys, or top up right now, hence critical.
+          expr: |
+            max(up{namespace="{{ include "mitos.namespace" . }}", container="console"}) == 0
+              or
+            absent(up{namespace="{{ include "mitos.namespace" . }}", container="console"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Console is unreachable (all replicas down or unscrapable)"
+            description: >
+              No console replica has answered its metrics scrape for 5m: the
+              pods are down, crash-looping, or missing entirely. Users cannot
+              sign in, manage keys, or top up credit, and the billing webhook
+              endpoint is down with it. Check the mitos-console Deployment and
+              its readiness (a failing Postgres also pulls it from the
+              Service; see ConsolePostgresUnreachable).
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/ConsoleUnavailable.md"
+{{- end }}
+{{- end }}
+{{- if .Values.controller.usage.collector }}
+
+        - alert: UsageCollectorFailing
+          # Cycle failures at the 60s default cadence: any sustained rate over
+          # 15m is around 15 consecutive failed cycles, not a transient scrape
+          # miss. Failed cycles mean per-org usage records (the billing input)
+          # are not being written.
+          expr: |
+            sum(rate(mitos_usage_collect_cycle_failures_total[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Usage collector cycles are failing"
+            description: >
+              The controller's usage collector has been failing cycles for 15m
+              ({{`{{ printf "%.4f" $value }}`}}/s). Metered usage records (the
+              input to billing and credit drawdown) are not being recorded for
+              the failing windows. Check the controller logs and forkd
+              /v1/metering reachability.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/UsageCollectorFailing.md"
+
+        - alert: UsageCollectorStalled
+          # The duration gauge is set ONLY on a successful cycle, and a wall
+          # duration is never bit-identical across cycles, so zero changes over
+          # 30m (about 30 cycles at the 60s default cadence) means no cycle
+          # has SUCCEEDED in that window: the loop is wedged or every cycle is
+          # failing; the failure counter alone cannot see a wedged loop.
+          expr: |
+            changes(mitos_usage_collect_cycle_duration_seconds[30m]) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Usage collector has not completed a successful cycle in 30m"
+            description: >
+              The usage collection cycle-duration gauge has not changed for
+              30m: no collection cycle has succeeded in that window (wedged
+              loop, or every cycle failing; compare UsageCollectorFailing). No
+              new usage is being metered, so billing and drawdown are falling
+              behind. Restarting the controller restarts the collector loop.
+            runbook_url: "https://github.com/mitos-run/mitos/blob/main/docs/runbooks/UsageCollectorStalled.md"
+{{- end }}
+{{- end }}
 
     - name: mitos-distribution
       rules:

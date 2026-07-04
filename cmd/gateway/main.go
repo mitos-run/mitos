@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -68,26 +70,28 @@ func newScheme() *runtime.Scheme {
 }
 
 // newControlPlane builds the real control plane over an in-cluster
-// controller-runtime client.
-func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, error) {
+// controller-runtime client. The client is returned alongside so main can wire
+// the SAME client into the quota enforcer's live sandbox counter.
+func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, client.Client, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("load kubeconfig for the control-plane client: %w", err)
 	}
 	c, err := client.New(cfg, client.Options{Scheme: newScheme()})
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("build controller-runtime client: %w", err)
 	}
 	opts := []controlplane.Option{controlplane.WithReadyTimeout(readyTimeout)}
 	if defaultPool != "" {
 		opts = append(opts, controlplane.WithDefaultPool(defaultPool))
 	}
 	opts = append(opts, controlplane.WithSingleTenantNamespace(singleTenantNS))
-	return controlplane.New(c, opts...), nil
+	return controlplane.New(c, opts...), c, nil
 }
 
 func main() {
 	addr := flag.String("addr", ":8080", "public listen address")
+	metricsAddr := flag.String("metrics-addr", ":9100", "Prometheus metrics listen address (a SEPARATE cluster-internal listener; /metrics is never mounted on the public mux). Empty disables the metrics listener.")
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
@@ -110,16 +114,33 @@ func main() {
 	defer closeStore()
 	keys := saas.NewKeyService(store)
 
+	// liveUsage is the enforcer's live-usage input: the cluster-backed sandbox
+	// counter when the real control plane is in use (issue #615 seam 2), so the
+	// concurrency cap is enforced against what the org is ACTUALLY running.
+	// With the dev stub there is no cluster client and it stays nil; the
+	// enforcer then reports the live caps as not enforced.
+	var liveUsage quota.LiveUsageSource
 	var cp saas.ControlPlane
 	if *allowStub {
 		logger.Warn("gateway running with the DEV stub control plane; no sandboxes are created (--allow-stub)")
 		cp = stubControlPlane{}
 	} else {
-		real, err := newControlPlane(*readyTimeout, *defaultPool, *singleTenantNS)
+		real, k8sClient, err := newControlPlane(*readyTimeout, *defaultPool, *singleTenantNS)
 		if err != nil {
 			log.Fatalf("build control plane: %v", err)
 		}
 		cp = real
+		// The counter shares the control plane's client and namespace model
+		// (per-org, or the pinned single-tenant namespace) so it counts exactly
+		// where the control plane creates.
+		counter := controlplane.NewLiveCounter(k8sClient, *singleTenantNS)
+		liveUsage = quota.NewLiveCounterSource(counter)
+		// One startup self-check so a persistent RBAC/scheme misconfiguration
+		// (which would fail-closed-deny EVERY create while reads keep working)
+		// is loud at boot; a failure logs remediation and keeps serving.
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+		probeLiveCounter(probeCtx, counter, logger)
+		cancelProbe()
 		if *singleTenantNS != "" {
 			logger.Info("gateway using the real control plane in single-tenant mode", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool, "single_tenant_namespace", *singleTenantNS)
 		} else {
@@ -145,7 +166,7 @@ func main() {
 	// AllowAllQuota when explicitly disabled. The same suspension store backs the
 	// enforcer, the abuse kill-switch, and the billing suspender, so a suspended org
 	// is blocked at the gateway. The mode is logged so the posture is never silent.
-	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions}
+	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions, live: liveUsage}
 	wiring := buildQuotaEnforcer(encfg)
 	logEnforcementMode(logger, encfg, wiring)
 	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
@@ -162,7 +183,14 @@ func main() {
 		_ = tel.Shutdown(ctx)
 	}()
 
-	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger, saas.WithTelemetry(tel)).
+	// Request-outcome and auth-denial counters for the #617 SaaS alerts, served
+	// on their own cluster-internal listener below, never on the public mux.
+	// Labels are bounded classes only; no key, org, or path detail is exported.
+	metricsRegistry := prometheus.NewRegistry()
+	gatewayMetrics := saas.NewGatewayMetrics()
+	gatewayMetrics.MustRegister(metricsRegistry)
+
+	gw := saas.NewGateway(keys, wiring.enforcer, cp, logger, saas.WithTelemetry(tel), saas.WithGatewayMetrics(gatewayMetrics)).
 		WithTrustedProxyHops(saas.TrustedProxyHops(*trustedProxyHops))
 
 	mux := http.NewServeMux()
@@ -177,6 +205,13 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", newReadyzHandler(&draining))
+
+	// rootCtx stops the metrics listener on shutdown, alongside the main server.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if *metricsAddr != "" {
+		serveMetrics(rootCtx, logger, *metricsAddr, metricsRegistry)
+	}
 
 	logger.Info("gateway listening", "addr", *addr)
 	srv := &http.Server{Addr: *addr, Handler: mux}
@@ -195,6 +230,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	<-stop
 	draining.Store(true)
+	rootCancel()
 	logger.Info("gateway shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -38,6 +38,13 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 	if !ok {
 		return notFound(id), nil
 	}
+	// Terminal phases answer with the typed error BEFORE any dial: the claim
+	// keeps its stale endpoint after the VM stopped (issue #688), and dialing
+	// it would surface a generic 502 where docs/lifecycle.md promises the typed
+	// idle_timeout error for a reaped sandbox.
+	if aerr := terminalRuntimeError(sb); aerr != nil {
+		return errResp(*aerr), nil
+	}
 	if sb.Status.Endpoint == "" {
 		return errResp(apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", id))), nil

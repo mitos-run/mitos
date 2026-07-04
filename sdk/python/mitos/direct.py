@@ -549,12 +549,16 @@ class DirectSandbox:
         return url
 
     def fork(self, n: int = 1, id: Optional[str] = None) -> list["DirectSandbox"]:
-        """Fork this sandbox into n independent sibling copies on the server.
+        """Fork this RUNNING sandbox into n independent sibling copies (issue
+        #596).
 
-        On the standalone server a fork re-forks the same template into a fresh,
-        independent sandbox (the snapshot-fork engine reseeds each child's CRNG
-        before it is served). Each child is a READY DirectSandbox with its own
-        id. Returns the list of children; the source keeps running.
+        On the standalone server this is a LIVE fork: the server checkpoints this
+        sandbox while it is paused, so each child inherits this sandbox's live
+        memory AND its current on-disk filesystem, not a re-fork of the cold
+        template. Files written and kernels left running in the parent are present
+        in every child. The snapshot-fork engine reseeds each child's CRNG before
+        it is served. Each child is a READY DirectSandbox with its own id. Returns
+        the list of children; the source keeps running.
         """
         children: list[DirectSandbox] = []
         for i in range(n):
@@ -576,10 +580,19 @@ class DirectSandbox:
             idempotency_key = uuid.uuid4().hex
         headers = self._auth_headers()
         headers["Idempotency-Key"] = idempotency_key
+        # Live fork of THIS running sandbox: POST to the per-sandbox fork route so
+        # the server checkpoints this sandbox (memory + on-disk filesystem) and
+        # boots the child from it, instead of re-forking the cold template. The
+        # template is still sent in the body for hosted-gateway compatibility: the
+        # gateway maps this route to sandbox.create, whose control-plane handler
+        # reads the template as the pool (the true hosted live-fork route is a
+        # follow-up; the cluster SDK already live-forks on hosted). pause_source
+        # keeps the parent frozen across the checkpoint so its memory and disk are
+        # captured consistently.
         resp = _fork_post(
             self._http,
-            f"{self._server_url}/v1/fork",
-            {"template": self.template, "id": child_id},
+            f"{self._server_url}/v1/sandboxes/{self.id}/fork",
+            {"id": child_id, "template": self.template, "pause_source": True},
             headers,
         )
         raise_for_status(resp, token=self._api_key)

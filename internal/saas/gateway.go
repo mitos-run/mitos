@@ -89,6 +89,9 @@ type Gateway struct {
 	// TrustedProxyHops.
 	trustedHops TrustedProxyHops
 	tel         *telemetry.Emitter
+	// metrics counts request outcomes and auth denials for the #617 SaaS
+	// alerts. Nil (the default) disables all observation.
+	metrics *GatewayMetrics
 }
 
 // NewGateway builds a gateway. A nil quota enforcer defaults to AllowAllQuota
@@ -153,6 +156,18 @@ func opFromPath(method, path string) string {
 		return "sandbox.status"
 	case strings.HasPrefix(p, "sandboxes/") && method == http.MethodDelete:
 		return "sandbox.terminate"
+	// Live fork (issue #596): the flat SDK forks a running sandbox via
+	// POST /v1/sandboxes/<id>/fork (DirectSandbox._fork_one). On the STANDALONE
+	// server that path is a true live fork of the running source. On the hosted
+	// gateway there is no live-fork control-plane op yet, so map it to
+	// sandbox.create to keep the flat SDK working: the create handler reads the
+	// body's template as the pool, exactly as POST /v1/fork does today, so hosted
+	// behavior is unchanged (a template claim). Routing this to the live
+	// FromSandbox controller path is a documented follow-up; the cluster SDK
+	// already live-forks on hosted. Without this case the POST falls through to
+	// "sandbox.post" and the control plane rejects it as an unknown operation.
+	case strings.HasPrefix(p, "sandboxes/") && strings.HasSuffix(p, "/fork") && method == http.MethodPost:
+		return "sandbox.create"
 	// Template operations: the SDK calls POST /v1/templates (ensure_template) before
 	// forking, and GET /v1/templates (list_templates) to discover available pools.
 	// Without these cases both fall through to "sandbox.<method>", which the control
@@ -205,6 +220,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	raw, ok := bearerToken(r)
 	if !ok {
+		g.metrics.observeAuthDenial(denialMissingKey)
 		g.fail(w, apiKeyUnauthorized().
 			WithCause("no bearer api key was presented"))
 		return
@@ -310,6 +326,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/json")
 	}
+	g.metrics.observeStatus(status)
 	w.WriteHeader(status)
 	if resp.BodyStream != nil {
 		// Stream the response without buffering (this carries a streamed Connect
@@ -342,11 +359,13 @@ func curatedRuntimeHeaders(in http.Header) http.Header {
 func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrKeyScope), errors.Is(err, ErrKeyWrongOrg):
+		g.metrics.observeAuthDenial(denialForbidden)
 		g.fail(w, apierr.Get(apierr.CodeForbidden).
 			WithCause("the key is valid but not permitted for this action"))
 	default:
 		// Malformed, unknown, expired, revoked all collapse to unauthorized so the
 		// response does not reveal which one applies.
+		g.metrics.observeAuthDenial(denialUnauthorized)
 		g.fail(w, apiKeyUnauthorized().
 			WithCause("the api key is missing, invalid, expired, or revoked"))
 	}
@@ -380,8 +399,11 @@ func quotaEnvelope(qErr error, op string) apierr.Error {
 		WithContext(map[string]any{"op": op})
 }
 
-// fail writes the error envelope. It never includes any secret value.
+// fail writes the error envelope. It never includes any secret value. Every
+// error path funnels here, so this is the single request-outcome observation
+// point for failures (the success write in ServeHTTP is the other).
 func (g *Gateway) fail(w http.ResponseWriter, e apierr.Error) {
+	g.metrics.observeStatus(e.Status)
 	apierr.Encode(w, e)
 }
 

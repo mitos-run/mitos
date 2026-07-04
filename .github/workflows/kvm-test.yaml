@@ -25,6 +25,7 @@ on:
       - 'cmd/net-fork-smoke/**'
       - 'cmd/grpc-exec-smoke/**'
       - 'cmd/live-fork-egress-smoke/**'
+      - 'cmd/live-state-fork-smoke/**'
       - 'internal/egressproxy/**'
       - 'internal/guestnet/**'
       - 'internal/husk/**'
@@ -527,6 +528,16 @@ jobs:
             exit 1
           }
 
+          # The guest kernel automounts devtmpfs on /dev (CONFIG_DEVTMPFS_MOUNT),
+          # so a correct init must skip that mount instead of logging an ERROR
+          # for the EBUSY (issue #668): that ERROR appeared in every boot and got
+          # real CI failures misattributed to the guest. Regression-gate it.
+          if grep -q "mount /dev: Resource busy" $WORKDIR/serial.log; then
+            echo "FAIL: guest init logged a false ERROR for the kernel-premounted /dev (issue #668)"
+            exit 1
+          fi
+          echo "OK: no false 'mount /dev' ERROR in the boot serial log (issue #668)"
+
           kill $FC_PID 2>/dev/null || true
 
       # gRPC runtime protocol proof (issue #24 stage 5, Task 5.4). This phase
@@ -558,15 +569,13 @@ jobs:
       # relative "vsock.sock" used for fork-correctness, which relies on Firecracker
       # cwd resolution): this phase boots a fresh single VM, not a forked restore.
       #
-      # NON-BLOCKING (continue-on-error) for now: the Rust agent is the
-      # production default (Phase D, #310) and test-agent gates the gRPC exec
-      # path above; grpc-exec-smoke additionally proves STREAMING and PTY
-      # semantics via a separate driver over the same vsock gRPC transport.
-      # Kept non-blocking until this phase has been green on KVM CI for one
-      # full run (tracked as a follow-up of issue #24). Remove continue-on-error
-      # once the transport is consistently proven end to end here.
+      # This phase GATES: no continue-on-error. It was non-blocking from its
+      # introduction, which masked an interactive-PTY failure on every recorded
+      # run for weeks (devpts was never mounted in the guest; issues #535 and
+      # #671): job conclusions read success while Phase 2 always failed. Both
+      # phases were proven green on KVM CI with the #670 guest fix, so a PTY
+      # regression must fail the required check, never hide.
       - name: gRPC runtime protocol proof, streaming Exec and interactive PTY over vsock gRPC
-        continue-on-error: true
         timeout-minutes: 8
         run: |
           set -e
@@ -1585,6 +1594,92 @@ jobs:
           echo "================================"
           echo "  Networked live fork through the egress proxy proven:"
           echo "  child egresses on a fresh connection, parent keep-alive held"
+          echo "================================"
+
+      # Live-state fork carries the source state (issue #596). This is the
+      # acceptance gate for the load-bearing fix: a LIVE fork (Engine.ForkRunning)
+      # must boot the child on a copy-on-write clone of the SOURCE's OWN writable
+      # rootfs (captured while the source is paused, consistent with the memory
+      # checkpoint), NOT on the read-only template. Before the fix the child
+      # booted on the template and lost every on-disk write the running source
+      # made. cmd/live-state-fork-smoke drives fork.NewEngine as forkd does, boots
+      # a source, writes a DISK marker to the source ext4 rootfs (fsync'd to the
+      # block device) and a MEMORY marker to a guest tmpfs (pure RAM), live-forks
+      # the source, and asserts the child reads BOTH back plus a reseeded CRNG.
+      # The DISK marker is the discriminating proof: absent if the child boots on
+      # the template (the old bug), present if it boots on the source rootfs clone
+      # (the fix). The persistent-run_code-kernel variable (x = 21) is the
+      # SDK-level analog of the memory marker and needs a python-capable guest, so
+      # it is exercised at the SDK layer; the tmpfs marker proves the same
+      # memory-carry property on a plain busybox guest so this gate runs in
+      # standard KVM CI. Exit 2 is a setup/boot flake (retried); exit 1 is an
+      # assertion failure (a real defect, never retried).
+      - name: Live-state fork carries the source filesystem and memory, not the template
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          WORKDIR=/tmp/mitos-test/live-state-fork-build
+          mkdir -p $WORKDIR/mnt
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=192 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,etc,run}
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/busybox $WORKDIR/mnt/bin/busybox 2>/dev/null || \
+            sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+              "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # The smoke writes markers (printf, sync), mounts a tmpfs (mount, mkdir),
+          # and reads them back (cat) via the guest shell.
+          for cmd in sh cat echo printf ls sync mount mkdir; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/live-state-fork-smoke ./cmd/live-state-fork-smoke/
+
+          run_smoke() {
+            rm -rf /tmp/mitos-test/live-state-fork-data
+            sudo /tmp/live-state-fork-smoke \
+              --image $WORKDIR/rootfs.ext4 \
+              --data-dir /tmp/mitos-test/live-state-fork-data \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/mitos-test/vmlinux \
+              --agent-bin /tmp/mitos-test/agent
+          }
+
+          attempt=1
+          max=3
+          while true; do
+            echo "=== live-state-fork-smoke attempt ${attempt}/${max} ==="
+            set +e
+            run_smoke
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+            if [ "$rc" -eq 1 ]; then
+              echo "FAIL: live-state-fork acceptance assertion failed (rc=1); this is a real defect, hard-failing the job"
+              exit 1
+            fi
+            # rc=2 is a setup/boot error (e.g. a transient nested-KVM boot flake).
+            if [ "$attempt" -ge "$max" ]; then
+              echo "FAIL: live-state-fork-smoke setup/boot kept flaking after ${max} attempts (rc=2)"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+
+          echo "================================"
+          echo "  Live-state fork proven:"
+          echo "  child inherits the source filesystem AND memory, not the template"
           echo "================================"
 
       # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE

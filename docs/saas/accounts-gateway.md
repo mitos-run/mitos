@@ -97,12 +97,67 @@ with the doc, the JSON Schema, and `llms.txt` (the error-catalogue sync tests st
 A missing, malformed, unknown, expired, or revoked key all collapse to
 `unauthorized` so a probe cannot distinguish them.
 
+## Quota enforcement status (what is real today)
+
+The gateway is the ONLY enforcement point for the hosted tier caps; the
+control plane does NOT re-check them. `cmd/gateway` wires the real
+`quota.Enforcer` by default (`--enforce-quota=true`) and the startup log names
+the exact mode. Honest per-cap status (issue #615):
+
+- Kill-switch suspensions: ENFORCED. The gateway reads the durable Postgres
+  `suspensions` table (behind a short-TTL fail-closed cache), the same table
+  the console's billing paths write, so a billing-driven or abuse-driven
+  suspend binds every replica within the cache TTL (a few seconds). Two
+  billing paths fire it in production: the drawdown cycle evaluates each
+  active org's HARD spend cap right after settling its usage
+  (`billing.Service.EnforceSpendCapFromLedger`: period spend is the calendar
+  month's usage-drawdown debits; metered overage is not yet included since no
+  invoice source exists pre-#618), and the provider webhook suspends on the
+  transition into the suspended status (subscription canceled or paused,
+  payment retries exhausted). Recovery is payment-driven and reason-scoped: a
+  cleared paid top-up lifts a spend_cap suspension (the spend window resets at
+  the payment) and an active-status transition lifts a dunning suspension;
+  the automated lift can never touch another reason or any manual-hold
+  suspension, which clear only through the operator hook.
+- Request-rate and creation-rate caps: ENFORCED, per org and per source IP.
+- Concurrent-sandbox cap: ENFORCED at the gateway from LIVE Kubernetes state.
+  `controlplane.LiveCounter` counts the org's Sandbox objects in a
+  non-terminal phase (namespace plus org label scoped, the same model the
+  control plane uses, including single-tenant mode) on every create, counting
+  `spec.replicas` per object (a fork fan-out of N is N VMs). A count failure
+  DENIES the create (fail closed): an unreachable apiserver never reads as
+  "zero live sandboxes"; the gateway runs one startup self-check so a
+  persistent RBAC or scheme misconfiguration (which would deny every create)
+  is loud at boot. Honest limits: admission is check-then-create with NO
+  reservation, so a parallel create burst can overshoot the cap by up to the
+  tier's creation-rate burst; Terminating counts as live (it holds capacity),
+  so a wedged teardown consumes a slot until resolved; a create asking for
+  `replicas: N` is admitted as +1 rather than +N (the body is not parsed at
+  enforcement time; the fan-out is counted from the next create on); each
+  create costs one uncached org-scoped LIST against the apiserver, fine at
+  current fleet sizes.
+- Per-sandbox size caps (vCPU, memory, storage): NOT yet enforced. The
+  gateway adapter's `SizeOf` seam is unwired, so a create is checked with a
+  zero spec and the size cap cannot trip.
+- Aggregate resource caps (vCPU, memory, storage across the org): NOT yet
+  enforced. Sandboxes carry no per-create resource fields, so honest
+  aggregates need each sandbox's pool-resolved footprint; the live counter
+  deliberately reports zero for these rather than guessing. Wiring `SizeOf`,
+  the pool-resolved aggregates, admission-side replicas (+N at create time),
+  and a cached or paginated counter is the deferred remainder of issue #615.
+- Tier resolution: every org currently resolves to the FREE tier (the
+  tightest caps, deny-by-default egress). A plan-backed resolver is pending
+  the issue #615 / #618 product decisions; failing to the smallest tier is
+  the deliberate interim posture, never a default to a wider one.
+
 ## Seams for the rest of the offering
 
 - Store seam (`Store`): usage and the Postgres migration follow-up.
-- Quota seam (`QuotaEnforcer`, default `AllowAllQuota`): the real
-  enforcer is a follow-up; the gateway already calls `Check` after authn and org-resolution and
-  before forwarding.
+- Quota seam (`QuotaEnforcer`): the real `quota.Enforcer` is wired by default
+  in `cmd/gateway` (see the status section above); `AllowAllQuota` remains the
+  explicit opt-out for trusted single-tenant deployments and the bypass is
+  logged at startup. The gateway calls `Check` after authn and org-resolution
+  and before forwarding.
 - Control-plane forward seam (`ControlPlane`): the real target forwards over the
   internal mTLS plane to the controller; this layer ships an injectable interface
   and a stub binary target.

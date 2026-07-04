@@ -736,6 +736,14 @@ type Sandbox struct {
 	// the snapshot this sandbox was restored from; live-forks inherit it
 	// so the jailer chroot of every descendant can link it in.
 	rootfsPath string
+	// rootfsClone is the host path of THIS sandbox's OWN writable rootfs
+	// copy-on-write clone (sandboxes/<id>/rootfs.ext4), the file the running
+	// guest actually reads and writes. It is the CoW base a LIVE fork
+	// (ForkRunning) hands its children so they inherit the source's live
+	// on-disk filesystem, not the read-only template the source was cloned
+	// from. Empty when the snapshot has no on-disk rootfs (e.g. mock paths),
+	// in which case live forks fall back to rootfsPath.
+	rootfsClone string
 	// netID is this sandbox's per-fork network identity when networking is
 	// enabled and the fork requested it; the zero value (empty TapName) means
 	// no host network was set up and Terminate skips teardown.
@@ -1528,8 +1536,12 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		fcClient:   fcClient,
 		VsockPath:  vsockPath,
 		rootfsPath: rootfsPath,
-		volumes:    opts.Volumes,
-		uffd:       uffd,
+		// Record THIS fork's own writable clone so a later live fork of it can
+		// use it as the CoW base (carrying this sandbox's live filesystem to its
+		// children). Empty when there is no on-disk rootfs (mock paths).
+		rootfsClone: rootfsClone,
+		volumes:     opts.Volumes,
+		uffd:        uffd,
 	}
 	var guestNet *vsock.NotifyForkedNetwork
 	if fnet != nil {
@@ -1584,6 +1596,23 @@ func liveForkOpts(source *Sandbox) ForkOpts {
 		opts.Network = source.netOpts
 	}
 	return opts
+}
+
+// liveForkRootfsBase returns the copy-on-write base a LIVE fork (ForkRunning)
+// must hand its children: the SOURCE's OWN writable rootfs clone
+// (source.rootfsClone), the file the running source has been reading and
+// writing. Booting the child on the source's clone (captured while the source
+// is PAUSED, so consistent with the memory checkpoint) is what carries the
+// source's live filesystem into the fork. It falls back to source.rootfsPath
+// (the read-only template) only when there is no on-disk clone, i.e. a snapshot
+// with no rootfs such as the mock paths, where rootfsPath is itself empty; that
+// keeps those paths unchanged. Booting on rootfsPath for a real sandbox is the
+// bug this closes: it silently drops every on-disk write the source made.
+func liveForkRootfsBase(source *Sandbox) string {
+	if source.rootfsClone != "" {
+		return source.rootfsClone
+	}
+	return source.rootfsPath
 }
 
 // ForkRunning checkpoints a running sandbox and creates a new fork from it.
@@ -1662,10 +1691,19 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	// source has netOpts nil, so the live fork carries no network, exactly as
 	// before. The gate above already refused the networked+no-proxy case.
 	forkOpts := liveForkOpts(source)
-	// Thread the original template rootfs through: the checkpoint's
-	// embedded drive path still points at it, and the new VM's chroot
-	// needs it linked in.
-	res, err := e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, forkOpts, false)
+	// Boot the child on the SOURCE's OWN writable rootfs clone, not the
+	// read-only template. The source is PAUSED here (memory and disk are both
+	// frozen), so reflink-cloning its live rootfs.ext4 as the child's CoW base
+	// captures the exact filesystem state that pairs with the memory checkpoint.
+	// This is the fix: the previous behavior passed source.rootfsPath (the
+	// template), so the child booted on the template filesystem and lost every
+	// on-disk write the source made. Falls back to rootfsPath when the source
+	// has no on-disk clone (mock paths), leaving those paths unchanged. e.fork
+	// reflink-clones this base into the child's own per-fork clone and rebinds
+	// the "rootfs" drive to it while paused, so the child never writes through
+	// the source's inode.
+	forkBase := liveForkRootfsBase(source)
+	res, err := e.fork(sourceSandboxID+"-live", newSandboxID, forkBase, forkOpts, false)
 	if err != nil {
 		return nil, err
 	}

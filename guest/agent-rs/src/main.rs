@@ -23,9 +23,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+// The tonic server wrappers are only consumed by the vsock serve path; the
+// non-vsock stub build does not reference them.
+#[cfg(feature = "vsock")]
 use sandbox_agent::control_v1::control_server::ControlServer;
 use sandbox_agent::env::ConfiguredEnv;
 use sandbox_agent::kernel::KernelManager;
+#[cfg(feature = "vsock")]
 use sandbox_agent::sandbox_v1::sandbox_server::SandboxServer;
 use sandbox_agent::service::control::ControlService;
 use sandbox_agent::service::SandboxService;

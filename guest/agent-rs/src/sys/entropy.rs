@@ -100,15 +100,15 @@ pub fn reseed_crng(entropy: &[u8]) -> bool {
 pub fn seed_crng_at_boot() -> bool {
     #[cfg(target_os = "linux")]
     {
-        if let Some(seed) = read_hwrng(64) {
-            if reseed_crng(&seed) {
-                return true;
-            }
+        if let Some(seed) = read_hwrng(64)
+            && reseed_crng(&seed)
+        {
+            return true;
         }
-        if let Some(seed) = rdrand_bytes(64) {
-            if reseed_crng(&seed) {
-                return true;
-            }
+        if let Some(seed) = rdrand_bytes(64)
+            && reseed_crng(&seed)
+        {
+            return true;
         }
         false
     }

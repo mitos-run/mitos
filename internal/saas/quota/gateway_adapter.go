@@ -11,11 +11,14 @@ import (
 // (saas.QuotaEnforcer). The seam is intentionally narrow: Check(ctx, orgID, op)
 // returns an error to deny. The adapter widens the gateway call into a quota
 // Request: it derives the caller IP from the request context (via IPOf) for the
-// per-IP rate limit, and, because the gateway's op-only seam carries no body, it
-// uses the tier's MAX sandbox size as the create shape so a create is admitted
-// against the size/aggregate caps conservatively. The body-derived exact size is
-// re-checked at the control plane, which sees the real spec; this front-door
-// check is the cheap early reject.
+// per-IP rate limit and the requested sandbox shape from SizeOf (when wired).
+//
+// HONEST LIMIT (issue #615): this front-door check is the ONLY enforcement
+// point for the tier caps; the control plane does NOT re-check them. With
+// SizeOf unwired (the shipped gateway today) a create is checked with a ZERO
+// spec, so only the live concurrency cap can trip; the per-sandbox size cap
+// and the aggregate resource caps are NOT enforced until SizeOf and the
+// pool-resolved live footprint are wired (deferred follow-ups).
 //
 // The adapter maps each typed enforcer denial to the right public apierr code:
 //   - suspension and unknown-tier -> forbidden (the org may not act at all).

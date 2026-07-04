@@ -29,6 +29,13 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 			WithCause(fmt.Sprintf("no sandbox %q exists for this organization", id))
 		return saas.RuntimeTarget{}, &e
 	}
+	// Terminal phases answer with the typed error BEFORE any dial, mirroring
+	// proxy(): a Terminated claim keeps its stale endpoint after the VM stopped
+	// (issue #688), so the PTY must get the documented idle_timeout error, not
+	// a WebSocket dial failure against a dead pod IP.
+	if aerr := terminalRuntimeError(sb); aerr != nil {
+		return saas.RuntimeTarget{}, aerr
+	}
 	if sb.Status.Endpoint == "" {
 		e := apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", id))
