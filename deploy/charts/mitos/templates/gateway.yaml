@@ -35,6 +35,9 @@ spec:
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           args:
             - --addr=:8080
+            # Cluster-internal metrics listener (issue #617); scraped by the
+            # gateway PodMonitor, never exposed through the public Service.
+            - --metrics-addr=:9100
             - --enforce-quota={{ .Values.gateway.enforce.enabled }}
             - --trusted-proxy-hops={{ int .Values.gateway.enforce.trustedProxyHops }}
           {{- if or .Values.database.dsnSecretRef.name (and .Values.telemetry.enabled .Values.telemetry.endpoint) .Values.gateway.singleTenantNamespace }}
@@ -49,6 +52,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 9100
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext:

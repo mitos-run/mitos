@@ -44,3 +44,34 @@ jobs:
             -f deploy/charts/mitos/values/talos.yaml)
           echo "$out" | grep -q 'FOWNER' || { echo "talos profile did not add CAP_FOWNER"; exit 1; }
           echo "$out" | grep -q 'type: Unconfined' || { echo "talos profile did not set Unconfined seccomp"; exit 1; }
+      - name: Install promtool
+        # Same tarball and version as the manifests job in ci.yaml. It
+        # validates the PromQL in the chart's PrometheusRule (including the
+        # SaaS group, which exists ONLY in the chart, unlike the engine rules
+        # mirrored in deploy/monitoring/), so a bad expression fails CI.
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prometheus.tar.gz \
+            https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          sudo install /tmp/prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/promtool
+          promtool --version
+      - name: promtool validates the chart PrometheusRule
+        # Render every rule group the chart can emit (monitoring + canary +
+        # usage collector on; gateway and console default on), extract
+        # .spec.groups to the bare {groups: [...]} document promtool expects,
+        # and check it. Also assert the monitoring toggle really gates the
+        # rule: with monitoring off the template must render nothing.
+        run: |
+          set -euo pipefail
+          helm template mitos deploy/charts/mitos --namespace mitos --kube-version 1.31.0 \
+            --set monitoring.enabled=true \
+            --set canary.enabled=true \
+            --set controller.usage.collector=true \
+            --show-only templates/monitoring-prometheusrule.yaml > /tmp/mitos-chart-rule.yaml
+          python3 -c 'import yaml; d=yaml.safe_load(open("/tmp/mitos-chart-rule.yaml")); yaml.safe_dump({"groups": d["spec"]["groups"]}, open("/tmp/mitos-chart-rules.yaml","w"))'
+          promtool check rules /tmp/mitos-chart-rules.yaml
+          if helm template mitos deploy/charts/mitos --namespace mitos --kube-version 1.31.0 \
+            --show-only templates/monitoring-prometheusrule.yaml > /dev/null 2>&1; then
+            echo "monitoring.enabled=false still rendered the PrometheusRule"; exit 1
+          fi

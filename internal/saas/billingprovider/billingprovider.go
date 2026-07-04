@@ -123,6 +123,9 @@ type WebhookHandler struct {
 	status    billing.StatusStore
 	ledger    billing.CreditLedger
 	now       func() time.Time
+	// metrics counts verify failures and 5xx handler errors for the #617
+	// billing alerts. Nil (the default) disables all observation.
+	metrics *WebhookMetrics
 }
 
 // NewWebhookHandler builds the webhook endpoint for a provider. A nil linker
@@ -144,6 +147,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev, err := h.provider.VerifyWebhook(r, body)
 	if err != nil {
 		// Refuse forged/replayed/malformed events. Never mutate billing state.
+		h.metrics.observeVerifyFailure()
 		http.Error(w, "webhook verification failed", http.StatusBadRequest)
 		return
 	}
@@ -157,6 +161,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (the same posture as the customer-lookup failure below, issue #614).
 	if h.linker != nil && ev.OrgID != "" && ev.CustomerRef != "" {
 		if err := h.linker.Link(r.Context(), ev.OrgID, ev.CustomerRef); err != nil {
+			h.metrics.observeHandlerError()
 			http.Error(w, "customer link failed", http.StatusInternalServerError)
 			return
 		}
@@ -169,6 +174,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ev.TopUp != nil && h.ledger != nil && ev.TopUp.OrgID != "" && ev.TopUp.AmountCents > 0 {
 		if err := billing.TopUp(r.Context(), h.ledger, ev.TopUp.OrgID, billing.Money(ev.TopUp.AmountCents), ev.TopUp.Ref, h.now()); err != nil {
 			if !errors.Is(err, billing.ErrDuplicateEntry) {
+				h.metrics.observeHandlerError()
 				http.Error(w, "credit top-up failed", http.StatusInternalServerError)
 				return
 			}
@@ -183,6 +189,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A lookup FAILURE must not be acked as "unknown customer": a 5xx makes
 		// the provider retry, so a transient store error (e.g. right after a
 		// restart) cannot permanently drop a status sync. No detail is echoed.
+		h.metrics.observeHandlerError()
 		http.Error(w, "customer lookup failed", http.StatusInternalServerError)
 		return
 	}
@@ -191,6 +198,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.status.SetStatus(r.Context(), orgID, ev.Status); err != nil {
+		h.metrics.observeHandlerError()
 		http.Error(w, "status update failed", http.StatusInternalServerError)
 		return
 	}

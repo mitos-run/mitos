@@ -354,6 +354,37 @@ The dashboard and the PrometheusRule alerts are packaged BOTH as the
 `SnapshotDistributionLagHigh` alert ships in both layers; its metric is
 populated only on the multi-node distribution path.
 
+### SaaS control-plane alerts (chart only, issue #617)
+
+The chart's PrometheusRule additionally carries a `mitos-saas` group covering
+the hosted control plane: gateway 5xx rate and auth-denial spikes
+(`mitos_gateway_requests_total`, `mitos_gateway_auth_denials_total`), billing
+webhook signature failures and handler errors
+(`mitos_billing_webhook_verify_failures_total`,
+`mitos_billing_webhook_errors_total`), drawdown driver failures and stalls
+(`mitos_drawdown_cycle_errors_total`,
+`mitos_drawdown_last_success_timestamp_seconds`), org credit exhaustion
+volume (`mitos_drawdown_credit_exhausted_total`), usage collector failures
+and stalls (`mitos_usage_collect_cycle_failures_total`,
+`mitos_usage_collect_cycle_duration_seconds` staleness), Postgres
+reachability as seen by the console readiness probe
+(`mitos_console_db_ping_failures_total`), and console availability (`up` from
+the console PodMonitor). Each alert links a runbook in `docs/runbooks/`.
+
+The group lives ONLY in the chart (the canary precedent): the gateway and
+console ship only via the chart, and every rule is gated on the component
+that emits its series (`gateway.enabled`, `console.enabled`,
+`controller.usage.collector`), so a self-host install without the hosted
+surfaces renders no dead rules. The gateway and console export these metrics
+on a separate cluster-internal listener (`--metrics-addr`, :9100), scraped by
+their own PodMonitors; the public Services never expose it. The chart-rendered
+rule (including this group) is promtool-validated in the helm-lint workflow.
+
+Deliberately absent: a gateway-side database probe metric (the gateway readyz
+has no DB ping today; console reachability stands in for the shared database)
+and a gateway-unavailable rule (a dead gateway exports nothing; `CanaryDown`
+is the user-path signal for that).
+
 ## Observability layers: the guest telemetry bridge (Hubble and OpenCost dropped)
 
 Layer 3 (the guest telemetry bridge) is built. Layers 1 (Hubble flow logs) and 2

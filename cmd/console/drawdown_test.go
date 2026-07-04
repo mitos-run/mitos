@@ -109,7 +109,7 @@ func TestRunDrawdownOnceDrawsDownEveryRecord(t *testing.T) {
 	}}
 	svc := &fakeDrawdowner{}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if len(svc.keys) != 3 {
 		t.Fatalf("Drawdown called %d times, want 3 (once per record): %v", len(svc.keys), svc.keys)
@@ -143,7 +143,7 @@ func TestRunDrawdownOnceCountsFailuresAndContinues(t *testing.T) {
 	}}
 	svc := &fakeDrawdowner{err: errors.New("ledger down")}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, time.Hour, now, nil)
 
 	if len(svc.keys) != 2 {
 		t.Fatalf("Drawdown called %d times, want 2 (a failed drawdown must not abort the cycle)", len(svc.keys))
@@ -215,7 +215,7 @@ func TestRunDrawdownOnceReportsSettledCents(t *testing.T) {
 		key("org-b", "sb-2", w1): {Cost: 2, FromCredit: 2, CarriedMilliCents: -300},
 	}}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if stats.settledCents != 3 {
 		t.Errorf("settledCents = %d, want 3 (1 from org-a + 2 from org-b)", stats.settledCents)
@@ -252,7 +252,7 @@ func TestRunDrawdownOnceSkipsSettledWindowsBeforePricing(t *testing.T) {
 		},
 	}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if len(svc.keys) != 1 {
 		t.Fatalf("Drawdown called %d times, want 1 (the settled window must be skipped before pricing): %v", len(svc.keys), svc.keys)
@@ -284,7 +284,7 @@ func TestRunDrawdownOnceCountsSettleTimeReplays(t *testing.T) {
 		"org-a|sb-1|" + w1.UTC().Format(time.RFC3339): {Cost: 5, FromCredit: 5, CarriedMilliCents: 100, Replayed: true},
 	}}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if stats.replayed != 1 || stats.drawn != 0 {
 		t.Errorf("stats = %+v, want replayed=1 drawn=0", stats)
@@ -308,7 +308,7 @@ func TestRunDrawdownOnceSkipSetErrorDefersOrg(t *testing.T) {
 	}}
 	svc := &fakeDrawdowner{settledErr: errors.New("ledger down")}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, time.Hour, now, nil)
 
 	if len(svc.keys) != 0 {
 		t.Fatalf("Drawdown called %d times, want 0 (org must be deferred when the skip set is unreadable)", len(svc.keys))
@@ -327,7 +327,7 @@ func TestRunDrawdownOncePrunesAgedMarkers(t *testing.T) {
 	store := &fakeRecordLister{}
 	svc := &fakeDrawdowner{pruned: 7}
 
-	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if len(svc.pruneOlderThan) != 1 || !svc.pruneOlderThan[0].Equal(now.Add(-2*time.Hour)) {
 		t.Fatalf("prune calls = %v, want exactly one at the lookback start %v", svc.pruneOlderThan, now.Add(-2*time.Hour))
@@ -337,7 +337,7 @@ func TestRunDrawdownOncePrunesAgedMarkers(t *testing.T) {
 	}
 
 	failing := &fakeDrawdowner{pruneErr: errors.New("db down")}
-	stats = runDrawdownOnce(context.Background(), testLogger(), orgs, store, failing, 2*time.Hour, now)
+	stats = runDrawdownOnce(context.Background(), testLogger(), orgs, store, failing, 2*time.Hour, now, nil)
 	if stats.failed != 1 {
 		t.Errorf("stats after prune failure = %+v, want failed=1", stats)
 	}
@@ -378,14 +378,14 @@ func TestRunDrawdownReplayAcrossTicksBillsOnce(t *testing.T) {
 		"org-a": {centRecord("org-a", "sb-1", w1), centRecord("org-a", "sb-1", w2)},
 	}}
 
-	tick1 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now)
+	tick1 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 	if tick1.drawn != 2 || tick1.replayed != 0 || tick1.settledCents != 256 {
 		t.Fatalf("tick 1 = %+v, want drawn=2 replayed=0 settledCents=256", tick1)
 	}
 
 	// Tick 2 re-lists both settled windows (the lookback overlap) plus one new.
 	store.records["org-a"] = append(store.records["org-a"], centRecord("org-a", "sb-1", w3))
-	tick2 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(5*time.Minute))
+	tick2 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(5*time.Minute), nil)
 	if tick2.drawn != 1 || tick2.replayed != 2 {
 		t.Fatalf("tick 2 = %+v, want drawn=1 replayed=2", tick2)
 	}
@@ -394,7 +394,7 @@ func TestRunDrawdownReplayAcrossTicksBillsOnce(t *testing.T) {
 	}
 
 	// Tick 3 is a pure replay: nothing new, nothing settled, nothing debited.
-	tick3 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(10*time.Minute))
+	tick3 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(10*time.Minute), nil)
 	if tick3.drawn != 0 || tick3.replayed != 3 || tick3.settledCents != 0 {
 		t.Fatalf("tick 3 = %+v, want drawn=0 replayed=3 settledCents=0", tick3)
 	}
@@ -431,7 +431,7 @@ func TestRunDrawdownLateArrivingWindowSettlesOnce(t *testing.T) {
 		"org-a": {centRecord("org-a", "sb-1", wNew)},
 	}}
 
-	tick1 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now)
+	tick1 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 	if tick1.drawn != 1 || tick1.settledCents != 128 {
 		t.Fatalf("tick 1 = %+v, want drawn=1 settledCents=128", tick1)
 	}
@@ -442,13 +442,13 @@ func TestRunDrawdownLateArrivingWindowSettlesOnce(t *testing.T) {
 		centRecord("org-a", "sb-1", wLate),
 		centRecord("org-a", "sb-1", wNew),
 	}
-	tick2 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(5*time.Minute))
+	tick2 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(5*time.Minute), nil)
 	if tick2.drawn != 1 || tick2.replayed != 1 || tick2.settledCents != 128 {
 		t.Fatalf("tick 2 = %+v, want drawn=1 replayed=1 settledCents=128 (the late window settles once)", tick2)
 	}
 
 	// And only once: the next tick replays both.
-	tick3 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(10*time.Minute))
+	tick3 := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now.Add(10*time.Minute), nil)
 	if tick3.drawn != 0 || tick3.replayed != 2 || tick3.settledCents != 0 {
 		t.Fatalf("tick 3 = %+v, want drawn=0 replayed=2 settledCents=0", tick3)
 	}
@@ -488,7 +488,7 @@ func TestRunDrawdownSkipsWindowsSettledBeforeMarkerTable(t *testing.T) {
 	store := &fakeRecordLister{records: map[string][]usage.UsageRecord{
 		"org-a": {centRecord("org-a", "sb-1", w1)},
 	}}
-	stats := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now)
+	stats := runDrawdownOnce(ctx, testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
 
 	if stats.drawn != 0 || stats.replayed != 1 || stats.settledCents != 0 {
 		t.Fatalf("stats = %+v, want drawn=0 replayed=1 settledCents=0 (legacy-settled window must be skipped)", stats)

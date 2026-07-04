@@ -119,12 +119,13 @@ type drawdownStats struct {
 // settling a window mid-accumulation would lock in a partial cost), and draw
 // each record down against the org's credit. A failing org or record is
 // counted and skipped, never aborting the rest of the cycle.
-func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgLister, store drawdownRecordLister, svc drawdowner, lookback time.Duration, now time.Time) drawdownStats {
+func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgLister, store drawdownRecordLister, svc drawdowner, lookback time.Duration, now time.Time, m *drawdownMetrics) drawdownStats {
 	var stats drawdownStats
 	list, err := orgs.ListOrgs(ctx)
 	if err != nil {
 		logger.Error("usage drawdown: list orgs failed", "err", err.Error())
 		stats.failed++
+		m.observeCycle(stats, now)
 		return stats
 	}
 	stats.orgs = len(list)
@@ -176,6 +177,11 @@ func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgL
 			}
 			stats.drawn++
 			stats.settledCents += int64(res.FromCredit)
+			if res.Remaining > 0 {
+				// The record's cost exceeded the org's remaining prepaid
+				// credit: the OrgCreditExhausted alert's volume signal.
+				m.observeCreditExhausted()
+			}
 			// The org's current remainder is the one after its LAST settled record.
 			orgCarried = res.CarriedMilliCents
 			orgSettled = true
@@ -199,13 +205,17 @@ func runDrawdownOnce(ctx context.Context, logger *slog.Logger, orgs drawdownOrgL
 		"replayedRecords", stats.replayed, "errors", stats.failed,
 		"settledCents", stats.settledCents, "carriedMilliCents", stats.carriedMilli,
 		"prunedMarkers", stats.pruned)
+	m.observeCycle(stats, now)
 	return stats
 }
 
 // startDrawdownDriver runs the drawdown loop in the background until ctx is
 // canceled, one cycle every interval. The first cycle runs after one interval
 // (not at startup) so a crash-looping console does not hammer the usage API.
-func startDrawdownDriver(ctx context.Context, logger *slog.Logger, interval time.Duration, orgs drawdownOrgLister, store drawdownRecordLister, svc drawdowner) {
+// The metrics last-success gauge is stamped with the start time so the
+// DrawdownStalled staleness is measured from boot until the first clean cycle.
+func startDrawdownDriver(ctx context.Context, logger *slog.Logger, interval time.Duration, orgs drawdownOrgLister, store drawdownRecordLister, svc drawdowner, m *drawdownMetrics) {
+	m.markStarted(time.Now())
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -214,7 +224,7 @@ func startDrawdownDriver(ctx context.Context, logger *slog.Logger, interval time
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runDrawdownOnce(ctx, logger, orgs, store, svc, drawdownLookback, time.Now())
+				runDrawdownOnce(ctx, logger, orgs, store, svc, drawdownLookback, time.Now(), m)
 			}
 		}
 	}()

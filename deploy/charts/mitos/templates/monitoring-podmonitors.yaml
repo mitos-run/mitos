@@ -47,4 +47,51 @@ spec:
     - port: metrics
       path: /metrics
       interval: {{ .Values.monitoring.podMonitors.interval }}
+{{- if .Values.gateway.enabled }}
+---
+# The SaaS-layer metrics (issue #617): the gateway exports request-outcome and
+# auth-denial counters on a cluster-internal metrics listener (:9100), separate
+# from the public :8080 surface.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mitos-gateway
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    release: {{ .Values.monitoring.prometheusRuleRelease }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "gateway") | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitors.interval }}
+{{- end }}
+{{- if .Values.console.enabled }}
+---
+# The console exports the billing webhook, drawdown driver, and Postgres
+# readiness-failure counters on its cluster-internal metrics listener (:9100).
+# The ConsoleUnavailable alert additionally rides this scrape's `up` series, so
+# it is only rendered when this PodMonitor is.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mitos-console
+  namespace: {{ include "mitos.namespace" . }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    release: {{ .Values.monitoring.prometheusRuleRelease }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mitos.selectorLabels" (dict "root" . "component" "console") | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitors.interval }}
+{{- end }}
 {{- end }}

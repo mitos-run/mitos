@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // pgPinger is the narrow readiness seam over the durable Postgres pool
@@ -24,12 +26,20 @@ const readyzPingTimeout = 2 * time.Second
 // is a fixed actionable message; the ping error text is NEVER echoed because
 // pgx connect errors embed DSN-derived host/user detail and this endpoint is
 // unauthenticated.
-func newReadyzHandler(db pgPinger) http.HandlerFunc {
+//
+// pingFailures (nil-safe) counts failed pings for the ConsolePostgresUnreachable
+// alert (issue #617): the kubelet probe cadence turns it into a continuous
+// database reachability signal without a dedicated prober. Only the count is
+// exported, never the error detail.
+func newReadyzHandler(db pgPinger, pingFailures prometheus.Counter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if db != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), readyzPingTimeout)
 			defer cancel()
 			if err := db.Ping(ctx); err != nil {
+				if pingFailures != nil {
+					pingFailures.Inc()
+				}
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte("not ready: postgres is unreachable; check the database Service, the DSN Secret, and network connectivity"))
 				return

@@ -117,7 +117,9 @@ type billingWiring struct {
 // pgstore.PgCustomers when Postgres is configured, in-memory otherwise (DEV
 // ONLY: an in-memory map cannot survive a restart, so a webhook arriving after
 // a redeploy would drop its status sync).
-func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers) billingWiring {
+// webhookMetrics (nil-safe) counts signature-verification failures and 5xx
+// handler errors for the #617 billing alerts; it carries no payload detail.
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, webhookMetrics *billingprovider.WebhookMetrics) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
@@ -152,7 +154,7 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 		// customers is passed as BOTH the resolver and the linker: an event
 		// whose signature-verified custom_data names the org records the org
 		// <-> customer link before processing (the write half of #614/#618).
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now),
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithMetrics(webhookMetrics),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,
