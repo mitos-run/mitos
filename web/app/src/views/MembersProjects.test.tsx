@@ -114,6 +114,22 @@ describe('Members view', () => {
     expect(screen.getByText('alice')).toBeInTheDocument()
     expect(screen.queryByText('bob')).not.toBeInTheDocument()
   })
+
+  it('shows the display name and email when the server provides them', async () => {
+    mockFetch({
+      members: {
+        org_id: 'o1',
+        members: [
+          { account_id: 'alice', org_id: 'o1', role: 'owner', created_at: '2026-01-01T00:00:00Z', display_name: 'Alice Anderson', email: 'alice@acme.dev' },
+        ],
+      },
+    })
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('Alice Anderson')).toBeInTheDocument())
+    expect(screen.getByText('alice@acme.dev')).toBeInTheDocument()
+    // The raw account id is no longer the primary label once a name is known.
+    expect(screen.queryByText('alice')).not.toBeInTheDocument()
+  })
 })
 
 describe('Projects view', () => {

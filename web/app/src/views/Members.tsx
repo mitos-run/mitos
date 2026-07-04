@@ -48,9 +48,20 @@ export function Members() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((m) => (
+              {filtered.map((m) => {
+                // The server joins each member's account for a name and email;
+                // fall back to the bare account id when neither is known (an
+                // older server, or a lookup miss).
+                const primary = m.display_name || m.email || m.account_id
+                const secondary = m.display_name && m.email ? m.email : undefined
+                return (
                 <tr key={m.account_id}>
-                  <td>{m.account_id}</td>
+                  <td>
+                    <div>{primary}</div>
+                    {secondary && (
+                      <div className="t-dim" style={{ fontSize: 'var(--step--2)' }}>{secondary}</div>
+                    )}
+                  </td>
                   <td>
                     <span className={`role-badge role-${m.role}`}>
                       {m.role}
@@ -76,7 +87,8 @@ export function Members() {
                   </td>
                   <td className="t-dim">{new Date(m.created_at).toLocaleDateString()}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>

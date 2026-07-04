@@ -81,7 +81,7 @@ export type UsageResponse = { org_id: string; records: unknown[]; totals: Record
 export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }>; topup_available: boolean }
 
 export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
-export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
+export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string; email?: string; display_name?: string }
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
 export type ProjectMembership = { account_id: string; project_id: string; role: Role }
 

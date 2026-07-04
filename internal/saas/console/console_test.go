@@ -516,6 +516,35 @@ func TestMembersRefusesCrossOrg(t *testing.T) {
 	}
 }
 
+// TestMembersIncludeEmailAndDisplayName asserts the server joins each member's
+// account record so the UI can show a name and email instead of a bare
+// account id (the same join the audit actor lookup uses). alice never sets a
+// DisplayName by default, so her row's DisplayName is empty until updated.
+func TestMembersIncludeEmailAndDisplayName(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.accounts.UpdateProfile(context.Background(), f.aliceAcct, saas.ProfileUpdate{DisplayName: "Alice A"}); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	w := f.req(t, "GET", "/console/members", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Members []MemberView `json:"members"`
+	}
+	decode(t, w, &resp)
+	if len(resp.Members) != 1 {
+		t.Fatalf("members = %+v, want exactly 1", resp.Members)
+	}
+	m := resp.Members[0]
+	if m.Email != "alice@example.com" {
+		t.Errorf("Email = %q, want alice@example.com", m.Email)
+	}
+	if m.DisplayName != "Alice A" {
+		t.Errorf("DisplayName = %q, want Alice A", m.DisplayName)
+	}
+}
+
 // --- Audit ---
 
 func TestAuditReturnsOnlyCallerOrg(t *testing.T) {

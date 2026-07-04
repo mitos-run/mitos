@@ -703,12 +703,18 @@ func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request)
 
 // --- Org / members / audit (over #210 plus the audit seam) ---
 
-// MemberView is the console shape of one org membership.
+// MemberView is the console shape of one org membership. Email and
+// DisplayName are joined from the member's account (best-effort, the same
+// lookup the audit actor/target names use); a lookup failure leaves both
+// empty rather than failing the whole list, so one bad row never breaks the
+// members view.
 type MemberView struct {
-	AccountID string    `json:"account_id"`
-	OrgID     string    `json:"org_id"`
-	Role      saas.Role `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	AccountID   string    `json:"account_id"`
+	OrgID       string    `json:"org_id"`
+	Role        saas.Role `json:"role"`
+	CreatedAt   time.Time `json:"created_at"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
 }
 
 func (c *Console) handleListMembers(w http.ResponseWriter, r *http.Request) {
@@ -724,7 +730,12 @@ func (c *Console) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]MemberView, 0, len(members))
 	for _, m := range members {
-		out = append(out, MemberView{AccountID: m.AccountID, OrgID: m.OrgID, Role: m.Role, CreatedAt: m.CreatedAt})
+		mv := MemberView{AccountID: m.AccountID, OrgID: m.OrgID, Role: m.Role, CreatedAt: m.CreatedAt}
+		if acct, err := c.deps.Accounts.GetAccount(r.Context(), m.AccountID); err == nil {
+			mv.Email = acct.Email
+			mv.DisplayName = acct.DisplayName
+		}
+		out = append(out, mv)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "members": out})
 }
