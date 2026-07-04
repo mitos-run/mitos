@@ -23,16 +23,26 @@ type Decision struct {
 // marketingSegments are the first-segment values that map to the marketing
 // upstream with no session requirement.
 var marketingSegments = map[string]bool{
-	"pricing":   true,
-	"docs":      true,
-	"use-cases": true,
-	"compare":   true,
-	"blog":      true,
-	"about":     true,
+	"pricing":       true,
+	"docs":          true,
+	"use-cases":     true,
+	"compare":       true,
+	"blog":          true,
+	"about":         true,
+	"contact":       true,
+	"alternatives":  true,
+	"benchmarks":    true,
+	"terms":         true,
+	"privacy":       true,
+	"cookie-policy": true,
 	// /waitlist is the public post-signup "you are on the list" marketing page.
 	// No session required: visitors land here after joining the waitlist and must
 	// be able to read it without being redirected to the console.
 	"waitlist": true,
+	// /mitos is the Go vanity import tree: `go get mitos.run/mitos/...` fetches
+	// the go-import meta page, which the marketing site serves with HTTP 200 at
+	// every import depth. Routing it anywhere else breaks `go get`.
+	"mitos": true,
 	// Astro emits its bundled CSS/JS under /_astro/ (the build.assets default).
 	// The console's Vite bundle lives under /assets/, so /assets is owned by the
 	// console (see authSegments), NOT marketing. Routing /assets to marketing
