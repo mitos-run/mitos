@@ -102,7 +102,32 @@ spec:
             scheme: https
             statusCode: 301
 ---
-# HTTPRoute: HTTPS traffic from mitos.run and www.mitos.run -> mitos-frontdoor.
+# HTTPRoute: HTTPS traffic on www.mitos.run -> 301 to the apex. The apex is the
+# canonical host everywhere (sitemap, canonicals, OG tags); serving content on
+# www would create a full duplicate of the site. Kept as its own route (not a
+# hostname on mitos-edge-tls) so external-dns still provisions the www record.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mitos-edge-www-redirect
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-gateway
+spec:
+  parentRefs:
+    - name: mitos-edge
+      sectionName: https
+  hostnames:
+    - {{ printf "www.%s" $hostname | quote }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            hostname: {{ $hostname | quote }}
+            statusCode: 301
+---
+# HTTPRoute: HTTPS traffic from mitos.run -> mitos-frontdoor.
 # Security response headers are injected via ResponseHeaderModifier:
 #   HSTS: max-age 1 year, subdomains included.
 #   Content-Security-Policy: frame-ancestors 'none' (no embedding).
@@ -122,7 +147,6 @@ spec:
       sectionName: https
   hostnames:
     - {{ $hostname | quote }}
-    - {{ printf "www.%s" $hostname | quote }}
   rules:
     - backendRefs:
         - name: mitos-frontdoor

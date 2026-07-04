@@ -27,9 +27,19 @@ func TestDecide(t *testing.T) {
 		{"/blog", "marketing", false, false},
 		{"/blog/post-1", "marketing", false, false},
 		{"/about", "marketing", false, false},
+		{"/contact", "marketing", false, false},
+		{"/alternatives", "marketing", false, false},
+		{"/benchmarks", "marketing", false, false},
+		{"/terms", "marketing", false, false},
+		{"/privacy", "marketing", false, false},
+		{"/cookie-policy", "marketing", false, false},
 		// /waitlist is the public post-signup "you are on the list" marketing
 		// page; no session required.
 		{"/waitlist", "marketing", false, false},
+		// /mitos is the Go vanity import tree; `go get mitos.run/mitos/...`
+		// must reach the marketing-served go-import meta at every depth.
+		{"/mitos", "marketing", false, false},
+		{"/mitos/internal/frontdoor", "marketing", false, false},
 		{"/assets/x.js", "console", false, false},
 		{"/_astro/x.css", "marketing", false, false},
 		{"/og-image.png", "marketing", false, false},
