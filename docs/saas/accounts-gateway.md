@@ -106,24 +106,42 @@ the exact mode. Honest per-cap status (issue #615):
 
 - Kill-switch suspensions: ENFORCED. The gateway reads the durable Postgres
   `suspensions` table (behind a short-TTL fail-closed cache), the same table
-  the console's billing service writes on a hard-spend-cap breach or an
-  exhausted dunning sequence, so a billing-driven or abuse-driven suspend
-  binds every replica within the cache TTL (a few seconds).
+  the console's billing paths write, so a billing-driven or abuse-driven
+  suspend binds every replica within the cache TTL (a few seconds). Two
+  billing paths fire it in production: the drawdown cycle evaluates each
+  active org's HARD spend cap right after settling its usage
+  (`billing.Service.EnforceSpendCapFromLedger`: period spend is the calendar
+  month's usage-drawdown debits; metered overage is not yet included since no
+  invoice source exists pre-#618), and the provider webhook suspends on the
+  transition into the suspended status (subscription canceled or paused,
+  payment retries exhausted). Recovery is NOT auto-lifted: a payment recovers
+  the billing status, lifting the kill-switch is an operator review decision.
 - Request-rate and creation-rate caps: ENFORCED, per org and per source IP.
 - Concurrent-sandbox cap: ENFORCED at the gateway from LIVE Kubernetes state.
   `controlplane.LiveCounter` counts the org's Sandbox objects in a
   non-terminal phase (namespace plus org label scoped, the same model the
-  control plane uses, including single-tenant mode) on every create. A count
-  failure DENIES the create (fail closed): an unreachable apiserver never
-  reads as "zero live sandboxes".
+  control plane uses, including single-tenant mode) on every create, counting
+  `spec.replicas` per object (a fork fan-out of N is N VMs). A count failure
+  DENIES the create (fail closed): an unreachable apiserver never reads as
+  "zero live sandboxes"; the gateway runs one startup self-check so a
+  persistent RBAC or scheme misconfiguration (which would deny every create)
+  is loud at boot. Honest limits: admission is check-then-create with NO
+  reservation, so a parallel create burst can overshoot the cap by up to the
+  tier's creation-rate burst; Terminating counts as live (it holds capacity),
+  so a wedged teardown consumes a slot until resolved; a create asking for
+  `replicas: N` is admitted as +1 rather than +N (the body is not parsed at
+  enforcement time; the fan-out is counted from the next create on); each
+  create costs one uncached org-scoped LIST against the apiserver, fine at
+  current fleet sizes.
 - Per-sandbox size caps (vCPU, memory, storage): NOT yet enforced. The
   gateway adapter's `SizeOf` seam is unwired, so a create is checked with a
   zero spec and the size cap cannot trip.
 - Aggregate resource caps (vCPU, memory, storage across the org): NOT yet
   enforced. Sandboxes carry no per-create resource fields, so honest
   aggregates need each sandbox's pool-resolved footprint; the live counter
-  deliberately reports zero for these rather than guessing. Wiring `SizeOf`
-  plus the pool-resolved aggregates is the deferred remainder of issue #615.
+  deliberately reports zero for these rather than guessing. Wiring `SizeOf`,
+  the pool-resolved aggregates, admission-side replicas (+N at create time),
+  and a cached or paginated counter is the deferred remainder of issue #615.
 - Tier resolution: every org currently resolves to the FREE tier (the
   tightest caps, deny-by-default egress). A plan-backed resolver is pending
   the issue #615 / #618 product decisions; failing to the smallest tier is
