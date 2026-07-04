@@ -174,6 +174,39 @@ func TestCreateInviteRateLimited(t *testing.T) {
 	}
 }
 
+func TestCreateInviteDuplicateRejectionDoesNotConsumeQuota(t *testing.T) {
+	f := newInviteFixture(t)
+	f.con.inviteRateLimit = newInviteRateLimiter(2, 24*time.Hour)
+
+	if w := f.req(t, "POST", "/console/invites", `{"email":"quota-dup@example.com"}`, f.aliceID, f.orgID); w.Code != http.StatusCreated {
+		t.Fatalf("first create: %d %s", w.Code, w.Body.String())
+	}
+	// A duplicate of the still-pending email is rejected...
+	if w := f.req(t, "POST", "/console/invites", `{"email":"quota-dup@example.com"}`, f.aliceID, f.orgID); w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate create: %d %s, want 400", w.Code, w.Body.String())
+	}
+	// ...and must NOT have consumed the second slot of the limit=2 budget: a
+	// genuinely new invite still fits.
+	if w := f.req(t, "POST", "/console/invites", `{"email":"quota-new@example.com"}`, f.aliceID, f.orgID); w.Code != http.StatusCreated {
+		t.Fatalf("third create (new email): %d %s, want 201 (duplicate rejection must not consume quota)", w.Code, w.Body.String())
+	}
+}
+
+func TestResendInviteNotFoundDoesNotConsumeQuota(t *testing.T) {
+	f := newInviteFixture(t)
+	f.con.inviteRateLimit = newInviteRateLimiter(1, 24*time.Hour)
+
+	// A resend of a nonexistent invitation id is rejected...
+	if w := f.req(t, "POST", "/console/invites/does-not-exist/resend", "", f.aliceID, f.orgID); w.Code != http.StatusNotFound {
+		t.Fatalf("resend of unknown id: %d %s, want 404", w.Code, w.Body.String())
+	}
+	// ...and must not have consumed the single slot of the limit=1 budget: a
+	// genuine create still fits.
+	if w := f.req(t, "POST", "/console/invites", `{"email":"after-notfound@example.com"}`, f.aliceID, f.orgID); w.Code != http.StatusCreated {
+		t.Fatalf("create after not-found resend: %d %s, want 201 (not-found resend must not consume quota)", w.Code, w.Body.String())
+	}
+}
+
 func TestRevokeInviteAndCrossOrgIsolation(t *testing.T) {
 	f := newInviteFixture(t)
 	w := f.req(t, "POST", "/console/invites", `{"email":"revoke-me@example.com"}`, f.aliceID, f.orgID)

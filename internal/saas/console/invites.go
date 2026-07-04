@@ -37,14 +37,34 @@ func newInviteRateLimiter(limit int, window time.Duration) *inviteRateLimiter {
 	return &inviteRateLimiter{limit: limit, window: window, hits: map[string][]time.Time{}}
 }
 
-// Allow records an attempt for key at now and reports whether it is within
-// the cap. A nil receiver or a non-positive limit always allows (disabled).
+// Allow reports whether key is within the cap at now, pruning stale hits as
+// it goes. It does NOT itself record a new hit: the caller must call Record
+// once the create/resend it is guarding actually succeeds, so a rejected
+// attempt (an already-pending duplicate, an unknown resend id) never burns
+// quota. A nil receiver or a non-positive limit always allows (disabled).
 func (l *inviteRateLimiter) Allow(key string, now time.Time) bool {
 	if l == nil || l.limit <= 0 {
 		return true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return len(l.prune(key, now)) < l.limit
+}
+
+// Record adds a hit for key at now. Call only after the operation it guards
+// has actually succeeded; a nil receiver or non-positive limit is a no-op.
+func (l *inviteRateLimiter) Record(key string, now time.Time) {
+	if l == nil || l.limit <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.hits[key] = append(l.prune(key, now), now)
+}
+
+// prune drops hits for key older than the window, stores the surviving
+// slice back, and returns it. The caller must hold l.mu.
+func (l *inviteRateLimiter) prune(key string, now time.Time) []time.Time {
 	cutoff := now.Add(-l.window)
 	var fresh []time.Time
 	for _, t := range l.hits[key] {
@@ -52,12 +72,8 @@ func (l *inviteRateLimiter) Allow(key string, now time.Time) bool {
 			fresh = append(fresh, t)
 		}
 	}
-	if len(fresh) >= l.limit {
-		l.hits[key] = fresh
-		return false
-	}
-	l.hits[key] = append(fresh, now)
-	return true
+	l.hits[key] = fresh
+	return fresh
 }
 
 // InvitationView is the console's JSON shape of one org invitation. State is
@@ -171,6 +187,7 @@ func (c *Console) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the invitation could not be created"))
 		return
 	}
+	c.inviteRateLimit.Record(orgID, c.deps.Now())
 	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: accountID,
 		Action: "invite.create", Target: inv.ID, TargetType: "invite", TargetName: inv.Email,
@@ -244,6 +261,7 @@ func (c *Console) handleResendInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	c.inviteRateLimit.Record(orgID, c.deps.Now())
 	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: accountID,
 		Action: "invite.resend", Target: inv.ID, TargetType: "invite", TargetName: inv.Email,

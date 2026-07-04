@@ -201,6 +201,80 @@ func TestInvitationResendMintsFreshTokenAndKeepsPending(t *testing.T) {
 	}
 }
 
+// failingInviteSender is an InviteEmailSender that always fails, used to
+// exercise the atomicity of CreateInvite/ResendInvite when delivery fails
+// after (or during) the store write.
+type failingInviteSender struct{ err error }
+
+func (f failingInviteSender) SendInvite(_ context.Context, _, _, _, _ string) error {
+	return f.err
+}
+
+func TestInvitationCreateSendFailureLeavesNoPhantomInvite(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store, orgID, ownerID := seedOrg(t)
+	sendErr := errors.New("smtp down")
+	svc := saas.NewInvitationService(store, failingInviteSender{err: sendErr}, saas.WithInvitationClock(fixedClock(now)))
+	ctx := context.Background()
+
+	if _, err := svc.CreateInvite(ctx, orgID, ownerID, "phantom@example.com", saas.RoleMember); err == nil {
+		t.Fatal("CreateInvite: want error when the sender fails, got nil")
+	}
+
+	invs, err := svc.ListInvites(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListInvites: %v", err)
+	}
+	for _, inv := range invs {
+		if inv.Email == "phantom@example.com" {
+			t.Errorf("phantom pending invitation left behind after send failure: %+v", inv)
+		}
+	}
+
+	// A prior send failure must not block a later, real invite to the same
+	// address: no row should remain to trip ErrInvitePending.
+	workingSvc := saas.NewInvitationService(store, saas.NewFakeInviteEmailSender(), saas.WithInvitationClock(fixedClock(now)))
+	if _, err := workingSvc.CreateInvite(ctx, orgID, ownerID, "phantom@example.com", saas.RoleMember); err != nil {
+		t.Errorf("re-invite after send failure: got %v, want nil (no phantom row should remain)", err)
+	}
+}
+
+func TestInvitationResendSendFailurePreservesOriginal(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store, orgID, ownerID := seedOrg(t)
+	sender := saas.NewFakeInviteEmailSender()
+	svc := saas.NewInvitationService(store, sender, saas.WithInvitationClock(fixedClock(now)))
+	ctx := context.Background()
+
+	inv, err := svc.CreateInvite(ctx, orgID, ownerID, "resend-fail@example.com", saas.RoleMember)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	sendErr := errors.New("smtp down")
+	failingSvc := saas.NewInvitationService(store, failingInviteSender{err: sendErr}, saas.WithInvitationClock(fixedClock(now)))
+	if _, err := failingSvc.ResendInvite(ctx, orgID, inv.ID); err == nil {
+		t.Fatal("ResendInvite: want error when the sender fails, got nil")
+	}
+
+	// The ORIGINAL invitation must still be present and pending.
+	stored, err := store.GetInvitationByTokenHash(ctx, inv.TokenHash)
+	if err != nil {
+		t.Fatalf("original invitation missing after failed resend: %v", err)
+	}
+	if stored.State != saas.InvitationPending {
+		t.Errorf("original invitation state = %q, want pending", stored.State)
+	}
+
+	invs, err := svc.ListInvites(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListInvites: %v", err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("invitations after failed resend: got %d, want 1 (only the original)", len(invs))
+	}
+}
+
 func TestInvitationResendRefusesAlreadyAccepted(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store, orgID, ownerID := seedOrg(t)
@@ -293,6 +367,47 @@ func TestInvitationAcceptConsumerDomainRequiresExactMatch(t *testing.T) {
 	}
 	if _, err := svc.AcceptInvite(ctx, "acct-y", "someone@gmail.com", token); err != nil {
 		t.Errorf("exact gmail.com match: got %v, want nil", err)
+	}
+}
+
+func TestInvitationAcceptExistingMemberDoesNotDemote(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store, orgID, ownerID := seedOrg(t)
+	sender := saas.NewFakeInviteEmailSender()
+	svc := saas.NewInvitationService(store, sender, saas.WithInvitationClock(fixedClock(now)))
+	ctx := context.Background()
+
+	// The sole owner invites their OWN address at member role (a mistaken or
+	// malicious self-invite). Accepting it must never demote them past the
+	// last-owner guard.
+	if _, err := svc.CreateInvite(ctx, orgID, ownerID, "owner@acme.com", saas.RoleMember); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	token := sender.LastToken("owner@acme.com")
+
+	accepted, err := svc.AcceptInvite(ctx, ownerID, "owner@acme.com", token)
+	if err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+	if accepted.State != saas.InvitationAccepted {
+		t.Errorf("accepted.State = %q, want accepted", accepted.State)
+	}
+
+	mems, err := store.ListOrgMembers(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListOrgMembers: %v", err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.AccountID == ownerID {
+			found = true
+			if m.Role != saas.RoleOwner {
+				t.Errorf("owner's role after self-accepting a member invite = %q, want owner (accept must not demote)", m.Role)
+			}
+		}
+	}
+	if !found {
+		t.Error("owner membership missing after accept")
 	}
 }
 

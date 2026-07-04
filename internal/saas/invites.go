@@ -310,6 +310,12 @@ func (s *InvitationService) CreateInvite(ctx context.Context, orgID, inviterID, 
 		return Invitation{}, fmt.Errorf("create invite: store: %w", err)
 	}
 	if err := s.sendInvite(ctx, inv, rawToken); err != nil {
+		// Best-effort cleanup: an undelivered invite must not leave a phantom
+		// pending row behind. A phantom row is unrecoverable (its raw token
+		// only ever existed in the email that never arrived) and would block
+		// re-inviting this address via ErrInvitePending, so it is removed
+		// rather than left for a human to notice.
+		_ = s.store.RemoveInvitation(ctx, inv.ID)
 		return Invitation{}, fmt.Errorf("create invite: send email: %w", err)
 	}
 	return inv, nil
@@ -377,10 +383,13 @@ func (s *InvitationService) RevokeInvite(ctx context.Context, orgID, id string) 
 
 // ResendInvite re-sends the invite with a FRESH token and a renewed expiry.
 // The raw token is never persisted, so a resend cannot recover the original
-// one; it mints a new one instead. The old invitation row is deleted and
-// replaced by a new one (new id) carrying the same org, email, role, and
-// inviter. Only a pending (including lazily-expired) invitation may be
-// resent; an already-accepted invitation returns ErrInviteNotPending.
+// one; it mints a new one instead. The replacement row (new id) carrying the
+// same org, email, role, and inviter is created and SENT before the old row
+// is removed: only once delivery succeeds is the old invitation deleted, so
+// a delivery failure leaves the original, still-valid invite intact rather
+// than destroying it in exchange for an undelivered replacement. Only a
+// pending (including lazily-expired) invitation may be resent; an
+// already-accepted invitation returns ErrInviteNotPending.
 func (s *InvitationService) ResendInvite(ctx context.Context, orgID, id string) (Invitation, error) {
 	inv, err := s.findInOrg(ctx, orgID, id)
 	if err != nil {
@@ -392,9 +401,6 @@ func (s *InvitationService) ResendInvite(ctx context.Context, orgID, id string) 
 		// resendable
 	default:
 		return Invitation{}, ErrInviteNotPending
-	}
-	if err := s.store.RemoveInvitation(ctx, id); err != nil {
-		return Invitation{}, fmt.Errorf("resend invite: remove old: %w", err)
 	}
 	rawToken, err := s.tokengen()
 	if err != nil {
@@ -415,7 +421,14 @@ func (s *InvitationService) ResendInvite(ctx context.Context, orgID, id string) 
 		return Invitation{}, fmt.Errorf("resend invite: store: %w", err)
 	}
 	if err := s.sendInvite(ctx, fresh, rawToken); err != nil {
+		// Best-effort cleanup of the undelivered replacement; the ORIGINAL
+		// invitation (still removed below only on success) is left intact so
+		// the recipient's existing link keeps working.
+		_ = s.store.RemoveInvitation(ctx, fresh.ID)
 		return Invitation{}, fmt.Errorf("resend invite: send email: %w", err)
+	}
+	if err := s.store.RemoveInvitation(ctx, inv.ID); err != nil {
+		return Invitation{}, fmt.Errorf("resend invite: remove old: %w", err)
 	}
 	return fresh, nil
 }
@@ -481,7 +494,11 @@ func (s *InvitationService) LookupInvite(ctx context.Context, rawToken string) (
 // address, then adds accountID as a member of the invitation's org at its
 // role and marks the invitation accepted. It returns the accepted
 // invitation (OrgID and Role populated) so the caller can build a response
-// and an audit event.
+// and an audit event. If accountID is ALREADY a member of the invitation's
+// org, its existing role is left untouched: accept only ever grants
+// membership, it never demotes (or promotes) an existing member, which
+// matters most for a sole owner accepting a lower-role invite addressed to
+// their own email, an accidental self-demotion past the last-owner guard.
 func (s *InvitationService) AcceptInvite(ctx context.Context, accountID, accountEmail, rawToken string) (Invitation, error) {
 	if rawToken == "" {
 		return Invitation{}, ErrNotFound
@@ -502,13 +519,26 @@ func (s *InvitationService) AcceptInvite(ctx context.Context, accountID, account
 	if !InviteEmailMatches(inv.Email, accountEmail) {
 		return Invitation{}, ErrInviteEmailMismatch
 	}
-	if err := s.store.PutMembership(ctx, Membership{
-		AccountID: accountID,
-		OrgID:     inv.OrgID,
-		Role:      inv.Role,
-		CreatedAt: now,
-	}); err != nil {
-		return Invitation{}, fmt.Errorf("accept invite: store membership: %w", err)
+	existingMemberships, err := s.store.ListMemberships(ctx, accountID)
+	if err != nil {
+		return Invitation{}, fmt.Errorf("accept invite: list memberships: %w", err)
+	}
+	alreadyMember := false
+	for _, m := range existingMemberships {
+		if m.OrgID == inv.OrgID {
+			alreadyMember = true
+			break
+		}
+	}
+	if !alreadyMember {
+		if err := s.store.PutMembership(ctx, Membership{
+			AccountID: accountID,
+			OrgID:     inv.OrgID,
+			Role:      inv.Role,
+			CreatedAt: now,
+		}); err != nil {
+			return Invitation{}, fmt.Errorf("accept invite: store membership: %w", err)
+		}
 	}
 	if err := s.store.UpdateInvitationState(ctx, inv.ID, InvitationAccepted); err != nil {
 		return Invitation{}, fmt.Errorf("accept invite: mark accepted: %w", err)
