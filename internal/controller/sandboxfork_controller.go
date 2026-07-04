@@ -371,8 +371,17 @@ func (r *SandboxReconciler) deletePendingForkChildPods(ctx context.Context, fork
 		activated[fork.Status.Children[i].Name] = true
 		activated[fork.Status.Children[i].SandboxID] = true
 	}
+	// List through the UNCACHED reader when available, mirroring the source
+	// lookup's cache-staleness guard above: a just-created pending pod the
+	// informer cache has not observed yet would be silently skipped by a
+	// cached list, and the SourceTerminated short-circuit means this cleanup
+	// never runs again, leaking the pod's KVM and memory requests forever.
+	lister := client.Reader(r.Client)
+	if r.APIReader != nil {
+		lister = r.APIReader
+	}
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
+	if err := lister.List(ctx, &pods,
 		client.InNamespace(fork.Namespace),
 		client.MatchingLabels{huskForkLabel: fork.Name},
 	); err != nil {
