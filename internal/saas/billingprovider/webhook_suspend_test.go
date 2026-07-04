@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/quota"
 )
 
 // recordingSuspender records billing.Suspender calls for the webhook tests.
@@ -87,6 +88,120 @@ func TestWebhookSuspendFailureIsRetried(t *testing.T) {
 	got, _ := status.Status(ctx, "org-alice")
 	if got == billing.StatusSuspended {
 		t.Error("billing status flipped to suspended although the kill-switch write failed; the retry would then be transition-gated away")
+	}
+}
+
+// realSuspender builds the production adapter (quota.BillingSuspender over a
+// mem suspension store) so the lift tests exercise the REAL reason-scoped lift
+// semantics, not a fake's.
+func realSuspender() (*quota.BillingSuspender, *quota.MemSuspensionStore) {
+	store := quota.NewMemSuspensionStore()
+	return quota.NewBillingSuspender(quota.NewKillSwitch(store, nil)), store
+}
+
+// TestWebhookTopUpLiftsSpendCapSuspension asserts the recovery half of the
+// spend-cap loop: a cleared paid top-up lifts the org's spend_cap suspension
+// (the org paid; the drawdown window resets at the payment) and restores the
+// billing status from suspended to active, so the org is admitted at the
+// gateway again without operator action.
+func TestWebhookTopUpLiftsSpendCapSuspension(t *testing.T) {
+	ctx := context.Background()
+	status := billing.NewMemStatusStore()
+	if err := status.SetStatus(ctx, "org-alice", billing.StatusSuspended); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	sus, store := realSuspender()
+	if err := store.Suspend(ctx, quota.Suspension{OrgID: "org-alice", Reason: quota.ReasonSpendCap, Note: "hard cap"}); err != nil {
+		t.Fatalf("seed suspension: %v", err)
+	}
+	ledger := billing.NewMemCreditLedger()
+	h := NewWebhookHandler(
+		fakeProvider{ev: Event{CustomerRef: "cus_alice", TopUp: &TopUpCredit{OrgID: "org-alice", AmountCents: 1000, Ref: "txn-1"}}},
+		fakeCustomers{"cus_alice": "org-alice"}, nil, status, ledger, fixedNow()).WithSuspender(sus)
+
+	if w := post(h); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if _, suspended, _ := store.IsSuspended(ctx, "org-alice"); suspended {
+		t.Error("spend-cap suspension not lifted by the paid top-up")
+	}
+	got, _ := status.Status(ctx, "org-alice")
+	if got != billing.StatusActive {
+		t.Errorf("billing status after top-up lift = %q, want active", got)
+	}
+	if bal, _ := ledger.Balance(ctx, "org-alice"); bal != 1000 {
+		t.Errorf("balance = %d, want 1000 (the credit itself must still land)", bal)
+	}
+}
+
+// TestWebhookActiveStatusLiftsDunningSuspension asserts payment recovery: a
+// provider event whose normalized status transitions the org from suspended
+// back to active lifts a dunning suspension, so a paid-up org is admitted
+// again without operator action.
+func TestWebhookActiveStatusLiftsDunningSuspension(t *testing.T) {
+	ctx := context.Background()
+	status := billing.NewMemStatusStore()
+	if err := status.SetStatus(ctx, "org-alice", billing.StatusSuspended); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	sus, store := realSuspender()
+	if err := store.Suspend(ctx, quota.Suspension{OrgID: "org-alice", Reason: quota.ReasonDunning, Note: "retries exhausted"}); err != nil {
+		t.Fatalf("seed suspension: %v", err)
+	}
+	h := NewWebhookHandler(fakeProvider{ev: Event{Status: billing.StatusActive, CustomerRef: "cus_alice"}},
+		fakeCustomers{"cus_alice": "org-alice"}, nil, status, nil, nil).WithSuspender(sus)
+
+	if w := post(h); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if _, suspended, _ := store.IsSuspended(ctx, "org-alice"); suspended {
+		t.Error("dunning suspension not lifted on the active-status transition")
+	}
+	got, _ := status.Status(ctx, "org-alice")
+	if got != billing.StatusActive {
+		t.Errorf("billing status = %q, want active", got)
+	}
+}
+
+// TestWebhookLiftNeverTouchesManualHold asserts a manual-review hold survives
+// BOTH automated recovery paths: neither a top-up nor an active-status
+// transition lifts a held suspension; only the operator hook does.
+func TestWebhookLiftNeverTouchesManualHold(t *testing.T) {
+	ctx := context.Background()
+	sus, store := realSuspender()
+	if err := store.Suspend(ctx, quota.Suspension{OrgID: "org-alice", Reason: quota.ReasonSpendCap, Note: "operator hold", ManualHold: true}); err != nil {
+		t.Fatalf("seed held spend-cap suspension: %v", err)
+	}
+
+	// Top-up path: held spend_cap suspension survives; the credit still lands
+	// and the webhook still acks (a held org paying is not an error).
+	status := billing.NewMemStatusStore()
+	ledger := billing.NewMemCreditLedger()
+	h := NewWebhookHandler(
+		fakeProvider{ev: Event{CustomerRef: "cus_alice", TopUp: &TopUpCredit{OrgID: "org-alice", AmountCents: 500, Ref: "txn-2"}}},
+		fakeCustomers{"cus_alice": "org-alice"}, nil, status, ledger, fixedNow()).WithSuspender(sus)
+	if w := post(h); w.Code != http.StatusOK {
+		t.Fatalf("top-up status = %d, want 200", w.Code)
+	}
+	if _, suspended, _ := store.IsSuspended(ctx, "org-alice"); !suspended {
+		t.Fatal("a manual-hold suspension was lifted by a top-up")
+	}
+
+	// Active-status path: a held dunning suspension survives too.
+	if err := store.Suspend(ctx, quota.Suspension{OrgID: "org-bob", Reason: quota.ReasonDunning, Note: "held for review", ManualHold: true}); err != nil {
+		t.Fatalf("seed held dunning suspension: %v", err)
+	}
+	status2 := billing.NewMemStatusStore()
+	if err := status2.SetStatus(ctx, "org-bob", billing.StatusSuspended); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	h2 := NewWebhookHandler(fakeProvider{ev: Event{Status: billing.StatusActive, CustomerRef: "cus_bob"}},
+		fakeCustomers{"cus_bob": "org-bob"}, nil, status2, nil, nil).WithSuspender(sus)
+	if w := post(h2); w.Code != http.StatusOK {
+		t.Fatalf("active status = %d, want 200", w.Code)
+	}
+	if _, suspended, _ := store.IsSuspended(ctx, "org-bob"); !suspended {
+		t.Fatal("a manual-hold suspension was lifted by an active-status transition")
 	}
 }
 

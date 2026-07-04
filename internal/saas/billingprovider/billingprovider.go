@@ -123,7 +123,13 @@ type WebhookHandler struct {
 	status    billing.StatusStore
 	ledger    billing.CreditLedger
 	suspender billing.Suspender
-	now       func() time.Time
+	// lifter is the recovery half of the kill-switch seam, set by WithSuspender
+	// when the suspender also implements billing.SuspensionLifter (the
+	// production quota.BillingSuspender does): a paid top-up lifts spend_cap,
+	// an active-status transition lifts dunning. Reason-scoped; manual holds
+	// survive.
+	lifter billing.SuspensionLifter
+	now    func() time.Time
 }
 
 // NewWebhookHandler builds the webhook endpoint for a provider. A nil linker
@@ -144,12 +150,17 @@ func NewWebhookHandler(p Provider, customers CustomerResolver, linker CustomerLi
 // applied and a suspend failure is a 5xx (the provider retries); the
 // transition gate keeps webhook redeliveries from churning the suspension
 // record. Nil (the default) keeps the status-only behavior (community edition
-// without a wired kill-switch). Recovery is deliberately NOT auto-lifted here:
-// a payment-succeeded event flips the billing status back to active, but
-// lifting the kill-switch suspension is the operator's review decision (see
-// docs/saas/pricing.md).
+// without a wired kill-switch). When s also implements
+// billing.SuspensionLifter (the production quota.BillingSuspender does), the
+// recovery half is wired too: a cleared paid top-up lifts a spend_cap
+// suspension and an active-status transition lifts a dunning suspension, both
+// reason-scoped; a manual-hold suspension survives every automated lift and
+// clears only through the operator hook (see docs/saas/pricing.md).
 func (h *WebhookHandler) WithSuspender(s billing.Suspender) *WebhookHandler {
 	h.suspender = s
+	if l, ok := s.(billing.SuspensionLifter); ok {
+		h.lifter = l
+	}
 	return h
 }
 
@@ -191,6 +202,37 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Recovery (issue #615): the org paid, so a spend_cap suspension lifts
+		// (the spend window resets at this payment, see
+		// billing.Service.EnforceSpendCapFromLedger, so the next drawdown cycle
+		// does not re-suspend for pre-payment spend). Attempted on redeliveries
+		// too: LiftReason is idempotent, and gating it on a fresh credit could
+		// strand the lift if the first delivery failed after crediting. A lift
+		// failure is a 5xx so the provider retries; a manual hold survives (the
+		// lift reports false and the ack proceeds; a held org paying is fine).
+		if h.lifter != nil {
+			lifted, err := h.lifter.LiftReason(r.Context(), ev.TopUp.OrgID, "spend_cap")
+			if err != nil {
+				http.Error(w, "suspension lift failed", http.StatusInternalServerError)
+				return
+			}
+			if lifted {
+				// The spend-cap breach also set the billing status to suspended;
+				// restore it so the console and the dunning machine agree with
+				// the lifted kill-switch.
+				cur, err := h.status.Status(r.Context(), ev.TopUp.OrgID)
+				if err != nil {
+					http.Error(w, "status read failed", http.StatusInternalServerError)
+					return
+				}
+				if cur == billing.StatusSuspended {
+					if err := h.status.SetStatus(r.Context(), ev.TopUp.OrgID, billing.StatusActive); err != nil {
+						http.Error(w, "status update failed", http.StatusInternalServerError)
+						return
+					}
+				}
+			}
+		}
 	}
 	if ev.Status == "" {
 		w.WriteHeader(http.StatusOK) // acknowledged, nothing to apply
@@ -215,6 +257,19 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// billing while the gateway still admits it. The gate (current status not
 	// already suspended) keeps redeliveries from churning the suspension time.
 	// The note is non-secret; no payment detail crosses this seam.
+	// Recovery (issue #615): a payment-recovered subscription (normalized
+	// status active) lifts a dunning suspension. Attempted regardless of the
+	// stored status (LiftReason is an idempotent no-op when not suspended, and
+	// gating on the status store could strand a lift across a store skew). A
+	// lift failure is a 5xx BEFORE the status flips, so the provider retries
+	// and the org can never read active in billing while the gateway still
+	// blocks it. Manual holds survive (reason-scoped lift).
+	if h.lifter != nil && ev.Status == billing.StatusActive {
+		if _, err := h.lifter.LiftReason(r.Context(), orgID, "dunning"); err != nil {
+			http.Error(w, "suspension lift failed", http.StatusInternalServerError)
+			return
+		}
+	}
 	if h.suspender != nil && ev.Status == billing.StatusSuspended {
 		cur, err := h.status.Status(r.Context(), orgID)
 		if err != nil {

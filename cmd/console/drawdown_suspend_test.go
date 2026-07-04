@@ -67,7 +67,7 @@ func TestDrawdownCycleSuspendsBreachedCapInSharedStore(t *testing.T) {
 	if string(sus.Reason) != "spend_cap" {
 		t.Errorf("reason = %q, want spend_cap", sus.Reason)
 	}
-	if !sus.ManualHold {
-		t.Error("a spend-cap suspension must carry the manual-review hold")
+	if sus.ManualHold {
+		t.Error("an automated spend-cap suspension must NOT carry a manual hold (a paid top-up is its lift lever)")
 	}
 }

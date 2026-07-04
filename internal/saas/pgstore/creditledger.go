@@ -204,3 +204,33 @@ func (l *PgCreditLedger) Entries(ctx context.Context, orgID string) ([]billing.L
 	}
 	return out, rows.Err()
 }
+
+// EntriesSince implements billing.ScopedLedgerReader: the org's entries with
+// at >= since, in append order, served from the (org_id, at) index (migration
+// 0012) so the drawdown driver's per-cycle spend-cap read is bounded by the
+// month, not the org's lifetime history.
+func (l *PgCreditLedger) EntriesSince(ctx context.Context, orgID string, since time.Time) ([]billing.LedgerEntry, error) {
+	const q = `SELECT org_id, kind, amount, idem_key, at, note FROM credit_ledger WHERE org_id = $1 AND at >= $2 ORDER BY id`
+	rows, err := l.pool.Query(ctx, q, orgID, since)
+	if err != nil {
+		return nil, fmt.Errorf("ledger entries since: %w", err)
+	}
+	defer rows.Close()
+	var out []billing.LedgerEntry
+	for rows.Next() {
+		var e billing.LedgerEntry
+		var kind string
+		var amount int64
+		if err := rows.Scan(&e.OrgID, &kind, &amount, &e.Key, &e.At, &e.Note); err != nil {
+			return nil, fmt.Errorf("scan ledger entry: %w", err)
+		}
+		e.Kind = billing.EntryKind(kind)
+		e.Amount = billing.Money(amount)
+		e.At = e.At.UTC()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// compile-time assertion: the Postgres ledger serves the scoped read.
+var _ billing.ScopedLedgerReader = (*PgCreditLedger)(nil)

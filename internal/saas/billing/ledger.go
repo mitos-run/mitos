@@ -43,6 +43,18 @@ type LedgerEntry struct {
 	Note string
 }
 
+// ScopedLedgerReader is the OPTIONAL time-scoped read a ledger can implement
+// so period-bounded evaluations (the drawdown driver's spend-cap check) read
+// one month of entries instead of the org's lifetime history. Both the
+// in-memory and the Postgres ledgers implement it (the Postgres read is
+// indexed on (org_id, at), migration 0012); the spend-cap evaluation falls
+// back to the full Entries scan for a ledger that does not.
+type ScopedLedgerReader interface {
+	// EntriesSince returns the org's entries with At at or after since, in
+	// append order.
+	EntriesSince(ctx context.Context, orgID string, since time.Time) ([]LedgerEntry, error)
+}
+
 // ErrDuplicateEntry is returned when an entry with an existing idempotency key
 // is appended, or when a settle's processed-window marker already exists. It
 // makes the drawdown idempotent: replaying the same usage record is a no-op,
@@ -259,6 +271,20 @@ func (l *MemCreditLedger) Entries(_ context.Context, orgID string) ([]LedgerEntr
 	defer l.mu.Unlock()
 	out := make([]LedgerEntry, len(l.byOrg[orgID]))
 	copy(out, l.byOrg[orgID])
+	return out, nil
+}
+
+// EntriesSince implements ScopedLedgerReader: the org's entries at or after
+// since, in append order.
+func (l *MemCreditLedger) EntriesSince(_ context.Context, orgID string, since time.Time) ([]LedgerEntry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []LedgerEntry
+	for _, e := range l.byOrg[orgID] {
+		if !e.At.Before(since) {
+			out = append(out, e)
+		}
+	}
 	return out, nil
 }
 

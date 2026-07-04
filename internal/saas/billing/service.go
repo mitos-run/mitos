@@ -16,9 +16,22 @@ import (
 // suspender). reason and note are non-secret and safe to log.
 type Suspender interface {
 	// Suspend suspends the org so it fails closed everywhere. manualHold marks
-	// that a human must review before it is lifted (a spend-cap suspension carries
-	// a hold so a runaway agent's org is not auto-unsuspended into the same bill).
+	// that a human must review before it is lifted; the automated billing paths
+	// pass false so the matching payment recovery can lift the suspension.
 	Suspend(ctx context.Context, orgID, reason, note string, manualHold bool) error
+}
+
+// SuspensionLifter is the recovery half of the kill-switch seam (issue #615):
+// the reason-scoped automated lift. quota.BillingSuspender satisfies it (the
+// same adapter that satisfies Suspender), so the paths that suspend can also
+// recover: a paid top-up lifts a spend_cap suspension, a payment-recovered
+// subscription lifts a dunning suspension. The lift is reason-scoped and NEVER
+// touches a manual-hold suspension, so billing recovery cannot lift an abuse,
+// emergency-stop, or operator-held suspension.
+type SuspensionLifter interface {
+	// LiftReason lifts the org's suspension if it carries exactly this reason
+	// and no manual hold, reporting whether anything was lifted.
+	LiftReason(ctx context.Context, orgID, reason string) (bool, error)
 }
 
 // AlertSink receives soft-cap budget alerts. A SOFT cap does not suspend; it
@@ -328,8 +341,12 @@ func (s *Service) EnforceSpendCap(ctx context.Context, orgID string, periodSpend
 	if cap.HardCap > 0 && periodSpend >= cap.HardCap {
 		if s.suspend != nil {
 			// Note is non-secret: org id, the cap, the spend. No payment detail.
+			// NO manual hold: a paid top-up is the automated lift lever for a
+			// spend-cap suspension (the SuspensionLifter seam), and the spend
+			// window resets at the payment, so the org is not lifted back into
+			// the same breach. A held suspension remains the operator's tool.
 			note := fmt.Sprintf("hard spend cap reached: spend %d cents >= cap %d cents", int64(periodSpend), int64(cap.HardCap))
-			if err := s.suspend.Suspend(ctx, orgID, "spend_cap", note, true); err != nil {
+			if err := s.suspend.Suspend(ctx, orgID, "spend_cap", note, false); err != nil {
 				return false, fmt.Errorf("suspend on spend cap: %w", err)
 			}
 		}
@@ -358,22 +375,32 @@ func (s *Service) SetSpendCap(ctx context.Context, cap SpendCap) error {
 }
 
 // EnforceSpendCapFromLedger derives the org's period spend from the credit
-// ledger and enforces the spend cap over it: the period is the current
-// CALENDAR MONTH (UTC), and the spend is the sum of the org's usage-drawdown
-// debits in that period. It is the PRODUCTION caller of EnforceSpendCap: the
-// console's drawdown driver runs it after settling an org's usage each cycle,
-// so a breached hard cap suspends the org (issue #615) instead of the cap
-// being computed by nothing.
+// ledger and enforces the spend cap over it. The period is the current
+// CALENDAR MONTH (UTC), and the window RESETS at the org's latest in-month
+// paid top-up: spend is the sum of usage-drawdown debits settled at or after
+// max(month start, latest top-up). The reset is what makes the payment-driven
+// lift coherent: a top-up lifts a spend_cap suspension (the org paid and
+// chose to continue), and without the reset the very next cycle would re-read
+// the same pre-payment spend and re-suspend immediately. Re-suspension
+// happens only when the org burns past the cap AGAIN after paying. It is the
+// PRODUCTION caller of EnforceSpendCap: the console's drawdown driver runs it
+// after settling an active org's usage each cycle (issue #615).
+//
+// Read cost: the scan is month-bounded, not lifetime-bounded. When the ledger
+// implements ScopedLedgerReader (both the in-memory and Postgres ledgers do;
+// Postgres serves it from the (org_id, at) index, migration 0012) only the
+// current month's entries are read; the full Entries scan is the fallback for
+// a ledger that does not. Orgs with NO configured cap short-circuit before
+// any ledger read at all.
 //
 // HONEST LIMIT: drawdown debits are prepaid-credit spend. Metered overage
 // beyond credit is not yet included, because pre-#618 no invoice source
 // exists (the drawdown caps its debit at the available balance and nothing
 // bills the remainder); once overage billing lands, its invoiced amount must
 // be folded into this sum. Until then the hard cap binds prepaid spend, which
-// is the only money that moves.
-//
-// An org with NO configured cap short-circuits before any ledger read, so
-// uncapped orgs never pay a per-cycle Entries scan.
+// is the only money that moves. The window reset keys on settle time (entry
+// At), so usage settled after a top-up counts toward the new window even if
+// it accrued before the payment; the skew is bounded by the drawdown lookback.
 func (s *Service) EnforceSpendCapFromLedger(ctx context.Context, orgID string) (suspended bool, err error) {
 	cap, ok, err := s.caps.Get(ctx, orgID)
 	if err != nil {
@@ -382,15 +409,29 @@ func (s *Service) EnforceSpendCapFromLedger(ctx context.Context, orgID string) (
 	if !ok || (cap.HardCap <= 0 && cap.SoftCap <= 0) {
 		return false, nil
 	}
-	entries, err := s.ledger.Entries(ctx, orgID)
+	now := s.now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var entries []LedgerEntry
+	if sr, isScoped := s.ledger.(ScopedLedgerReader); isScoped {
+		entries, err = sr.EntriesSince(ctx, orgID, periodStart)
+	} else {
+		entries, err = s.ledger.Entries(ctx, orgID)
+	}
 	if err != nil {
 		return false, fmt.Errorf("read ledger for spend cap: %w", err)
 	}
-	now := s.now().UTC()
-	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	// The spend window starts at the later of the month start and the org's
+	// latest in-month paid top-up (signup credit is not a payment and does not
+	// reset the window).
+	windowStart := periodStart
+	for _, e := range entries {
+		if e.Kind == KindTopUp && e.Amount > 0 && !e.At.UTC().Before(periodStart) && e.At.UTC().After(windowStart) {
+			windowStart = e.At.UTC()
+		}
+	}
 	var spend Money
 	for _, e := range entries {
-		if e.Kind == KindUsageDrawdown && e.Amount < 0 && !e.At.UTC().Before(periodStart) {
+		if e.Kind == KindUsageDrawdown && e.Amount < 0 && !e.At.UTC().Before(windowStart) {
 			spend += -e.Amount
 		}
 	}

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -73,11 +74,11 @@ func newScheme() *runtime.Scheme {
 func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, client.Client, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("load kubeconfig for the control-plane client: %w", err)
 	}
 	c, err := client.New(cfg, client.Options{Scheme: newScheme()})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("build controller-runtime client: %w", err)
 	}
 	opts := []controlplane.Option{controlplane.WithReadyTimeout(readyTimeout)}
 	if defaultPool != "" {

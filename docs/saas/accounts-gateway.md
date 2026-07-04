@@ -114,8 +114,11 @@ the exact mode. Honest per-cap status (issue #615):
   month's usage-drawdown debits; metered overage is not yet included since no
   invoice source exists pre-#618), and the provider webhook suspends on the
   transition into the suspended status (subscription canceled or paused,
-  payment retries exhausted). Recovery is NOT auto-lifted: a payment recovers
-  the billing status, lifting the kill-switch is an operator review decision.
+  payment retries exhausted). Recovery is payment-driven and reason-scoped: a
+  cleared paid top-up lifts a spend_cap suspension (the spend window resets at
+  the payment) and an active-status transition lifts a dunning suspension;
+  the automated lift can never touch another reason or any manual-hold
+  suspension, which clear only through the operator hook.
 - Request-rate and creation-rate caps: ENFORCED, per org and per source IP.
 - Concurrent-sandbox cap: ENFORCED at the gateway from LIVE Kubernetes state.
   `controlplane.LiveCounter` counts the org's Sandbox objects in a

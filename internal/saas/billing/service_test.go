@@ -123,7 +123,9 @@ func TestPushRetryAfterTransientFailureNoDoubleReport(t *testing.T) {
 
 // TestSoftCapFiresAlertHardCapSuspends asserts the spend-cap behavior: crossing
 // the SOFT cap fires a budget alert with no suspension; crossing the HARD cap
-// suspends via the #213 kill-switch seam with a manual hold.
+// suspends via the #213 kill-switch seam WITHOUT a manual hold, because a paid
+// top-up is the automated lift lever (a held suspension could never be lifted
+// by payment; only operator-imposed suspensions carry holds).
 func TestSoftCapFiresAlertHardCapSuspends(t *testing.T) {
 	fake := NewFakeStripe()
 	sus := &recordingSuspender{}
@@ -155,7 +157,7 @@ func TestSoftCapFiresAlertHardCapSuspends(t *testing.T) {
 		t.Errorf("soft cap did not fire exactly one alert: %+v", alerts.events)
 	}
 
-	// At hard cap: suspend via the kill-switch seam, manual hold.
+	// At hard cap: suspend via the kill-switch seam, no manual hold (payment lifts).
 	suspended, err = svc.EnforceSpendCap(ctx, "org1", USD(120))
 	if err != nil {
 		t.Fatalf("hard cap: %v", err)
@@ -166,8 +168,8 @@ func TestSoftCapFiresAlertHardCapSuspends(t *testing.T) {
 	if len(sus.calls) != 1 {
 		t.Fatalf("hard cap fired %d suspends, want 1", len(sus.calls))
 	}
-	if sus.calls[0].orgID != "org1" || sus.calls[0].reason != "spend_cap" || !sus.calls[0].manualHold {
-		t.Errorf("hard-cap suspend = %+v, want org1/spend_cap/manualHold", sus.calls[0])
+	if sus.calls[0].orgID != "org1" || sus.calls[0].reason != "spend_cap" || sus.calls[0].manualHold {
+		t.Errorf("hard-cap suspend = %+v, want org1/spend_cap without a manual hold (a top-up must be able to lift it)", sus.calls[0])
 	}
 	// The note is non-secret: it must not be empty and must mention the cap.
 	if sus.calls[0].note == "" {

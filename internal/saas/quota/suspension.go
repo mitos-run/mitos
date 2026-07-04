@@ -152,6 +152,25 @@ func (k *KillSwitch) Lift(ctx context.Context, orgID string) (bool, error) {
 	return k.store.Lift(ctx, orgID)
 }
 
+// LiftReason is the reason-scoped AUTOMATED lift (issue #615): it clears the
+// org's suspension only when the current suspension carries exactly this
+// reason AND no manual hold. The billing recovery paths use it (a paid top-up
+// lifts spend_cap, a payment-recovered subscription lifts dunning), so a
+// recovery event can never lift a suspension it does not own: an abuse or
+// emergency-stop suspension, or ANY suspension held for human review, survives
+// every automated lift and clears only through Lift (the operator hook). It
+// returns whether a suspension was lifted; an unsuspended org is a no-op.
+func (k *KillSwitch) LiftReason(ctx context.Context, orgID string, reason SuspensionReason) (bool, error) {
+	sus, suspended, err := k.store.IsSuspended(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if !suspended || sus.Reason != reason || sus.ManualHold {
+		return false, nil
+	}
+	return k.store.Lift(ctx, orgID)
+}
+
 // EmergencyStop suspends every org in orgs at once with ReasonEmergencyStop and a
 // manual hold, so none lifts automatically. This is the pool-wide / org-wide big
 // red button. It returns the number of orgs newly suspended.
