@@ -5,11 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"mitos.run/mitos/internal/metering"
 )
+
+// huskScrapeConcurrency bounds the number of in-flight husk-pod scrapes per
+// cycle (issue #682, was #656). Fleet size is per-VM (one husk pod per
+// sandbox), so a sequential scrape serialized N unreachable pods into
+// N x scrapeTimeout during a partial outage, delaying metering for the healthy
+// fleet. With the bounded pool the cycle duration is set by the slowest pool
+// lane, not the fleet size, while the bound keeps the controller from opening
+// an unbounded number of connections into tenant pod networks at once.
+const huskScrapeConcurrency = 8
 
 // HuskPod is one claimed, org-labeled husk pod the HuskSource scrapes. VMID is
 // the pod's vm-id (the pod NAME: the id the pod reports as its single metering
@@ -71,7 +81,29 @@ type HuskSource struct {
 	// source's lifetime. It is a process counter the wiring surfaces as a metric or
 	// logged count; it never carries pod identity or error text.
 	skipped atomic.Int64
+
+	// terminations, when set (SetTerminations), is drained each Collect to emit
+	// a FINAL sample per released claim, closing the half-open window between
+	// the last scrape and terminate (issue #682, was #664). last remembers each
+	// pod's newest emitted sample (keyed by vm-id) so the final sample carries
+	// the last MEASURED levels; finalized remembers vm-ids already given their
+	// final sample so a duplicate termination event (lifetime expiry followed
+	// by object delete) can never bill twice. Both maps are touched only from
+	// Collect (the single collector goroutine) and pruned on a bounded horizon.
+	terminations *TerminationLog
+	last         map[string]Sample
+	finalized    map[string]time.Time
+	// maxHold is the collector's configured Config.MaxHold, set alongside the
+	// termination log, so the synthesized-pair clamp and Integrate's own hold
+	// bound (cfg.MaxHold) never diverge on a non-default Config.
+	maxHold time.Duration
 }
+
+// terminationStateRetention bounds how long the source remembers a pod's last
+// sample and a finalized vm-id after it stops being scraped. Termination
+// events arrive within a reconcile of the release (seconds), so minutes of
+// memory is plenty; the bound keeps both maps from growing with fleet churn.
+const terminationStateRetention = 15 * time.Minute
 
 // NewHuskSource builds the live husk-pod source. vcpus may be nil (every sandbox
 // treated as 1 vCPU, matching the collector default). client may be nil (a default
@@ -100,10 +132,22 @@ func NewHuskSource(
 }
 
 // Collect scrapes every claimed org-labeled husk pod once and returns the union
-// of org-tagged Samples tagged with a single scrape timestamp so all samples in
-// one cycle share an instant (the property Integrate's windowing relies on). A
-// pod that is unreachable, errors, or returns a non-200 is skipped and counted;
-// Collect itself never returns an error for an unreachable pod.
+// of org-tagged Samples. Every LIVE (scraped) sample in a cycle shares the
+// cycle's single scrape timestamp; the final and synthesized samples appended
+// for released claims (SetTerminations) carry their own instants: the release
+// time and, for a never-scraped sandbox, its clamped start. Integrate handles
+// the mix because it groups and orders samples per sandbox; no cross-sandbox
+// timestamp property is assumed. A pod that is unreachable, errors, or returns
+// a non-200 is skipped and counted; Collect itself never returns an error for
+// an unreachable pod.
+//
+// The scrapes fan out over a bounded worker pool (huskScrapeConcurrency; issue
+// #682) so the cycle duration is set by the slowest pool lane, never by the
+// fleet size: N unreachable pods no longer serialize into N x scrapeTimeout.
+// The single shared scrape timestamp and the skip-and-count semantics are
+// unchanged; results keep the lister's pod order. Collect itself is meant for
+// ONE caller (the collector loop): the injected vcpus func must be safe for
+// concurrent use (the nil default is).
 func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 	at := s.now()
 	pods, err := s.pods.ListHuskPods(ctx)
@@ -113,45 +157,189 @@ func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 		// bill for the whole fleet, the exact failure mode issue #613 closes.
 		return nil, fmt.Errorf("list husk pods: %w", err)
 	}
-	var out []Sample
+	billable := pods[:0:0]
 	for _, pod := range pods {
 		if pod.OrgID == "" || pod.VMID == "" {
 			// An unattributed pod (no trusted org label) or one with no vm-id is not
 			// billable. Skip it without counting it as a scrape failure.
 			continue
 		}
-		report, ok := s.scrape(ctx, pod)
-		if !ok {
-			s.skipped.Add(1)
-			continue
+		billable = append(billable, pod)
+	}
+
+	results := make([][]Sample, len(billable))
+	workers := huskScrapeConcurrency
+	if len(billable) < workers {
+		workers = len(billable)
+	}
+	if workers > 0 {
+		next := make(chan int)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range next {
+					results[i] = s.podSamples(ctx, billable[i], at)
+				}
+			}()
 		}
-		// Attribute ONLY this pod's own vm-id to its org, from the TRUSTED label.
-		// Any other sample id the (untrusted) pod returns resolves unattributed and
-		// is dropped, so a pod can bill only its own vm-id/org (defense in depth).
-		orgOf := func(sandboxID string) (string, bool) {
-			if sandboxID == pod.VMID {
-				return pod.OrgID, true
-			}
-			return "", false
+		for i := range billable {
+			next <- i
 		}
-		samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
-		// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
-		// claim label (issue #663), so usage_records reconcile to the sb-... id
-		// the customer saw, never the internal husk pod name. The trust check
-		// above stays keyed on the pod's vm-id: the pod cannot choose its billing
-		// id, only the controller's label does. Fallback: a pod whose lister
-		// carried no APIID (label absent; pre-#663 lister or a bespoke self-host
-		// lister) keeps the pod name, preserving the old behavior rather than
-		// dropping the sample. The Sample's Node field keeps the pod name (the
-		// vm-id), so support can still map a record back to the pod.
-		if pod.APIID != "" {
-			for i := range samples {
-				samples[i].SandboxID = pod.APIID
-			}
-		}
+		close(next)
+		wg.Wait()
+	}
+
+	var out []Sample
+	for _, samples := range results {
 		out = append(out, samples...)
 	}
+	out = s.appendFinalSamples(out, billable, results, at)
 	return out, nil
+}
+
+// SetTerminations wires the claim-release event log (issue #682, was #664) and
+// the collector's configured Config.MaxHold, which bounds how far back a
+// synthesized pair may reach (zero or negative falls back to the
+// DefaultConfig hold). When set, each Collect drains the log and emits a final
+// sample per released claim; a nil log (the default) disables the tracking
+// entirely, so a wiring that never terminates through the controller (tests,
+// bespoke listers) pays nothing. Call before the first Collect; not safe to
+// swap concurrently.
+func (s *HuskSource) SetTerminations(log *TerminationLog, maxHold time.Duration) {
+	if maxHold <= 0 {
+		maxHold = DefaultConfig().MaxHold
+	}
+	s.terminations = log
+	s.maxHold = maxHold
+}
+
+// appendFinalSamples remembers this cycle's newest sample per pod, then drains
+// the termination log and appends one FINAL sample per released claim:
+//
+//   - A pod scraped before (a last sample within the retention horizon) gets a
+//     CLONE of its last measured sample stamped at the release instant. The
+//     ordinary Integrate path then bills the [last scrape, terminate] tail at
+//     the last measured level, holds at most MaxHold across a scrape gap, and
+//     the cloned cumulative counters delta to zero: no invented egress.
+//   - A pod NEVER scraped (terminated before its first scrape: the sub-minute
+//     job) gets a synthesized start/end pair over [StartedAt, At] carrying only
+//     the KNOWN allocation (vCPUs); memory and disk were never measured and
+//     stay zero (customer-favorable). The start is clamped to At-MaxHold so a
+//     stale StartedAt (scrape history lost across a controller restart) can
+//     never rewrite long-settled windows.
+//
+// A vm-id is finalized at most once (the finalized guard): a duplicate
+// termination event can only under-bill, never double-bill. An unattributed
+// event (no org) is dropped: it was never billable. Runs on the single
+// collector goroutine; both maps are private to it.
+func (s *HuskSource) appendFinalSamples(out []Sample, billable []HuskPod, results [][]Sample, at time.Time) []Sample {
+	if s.terminations == nil {
+		return out
+	}
+	if s.last == nil {
+		s.last = map[string]Sample{}
+		s.finalized = map[string]time.Time{}
+	}
+	for i, pod := range billable {
+		if len(results[i]) > 0 {
+			s.last[pod.VMID] = results[i][len(results[i])-1]
+		}
+	}
+	maxHold := s.maxHold
+	if maxHold <= 0 {
+		// SetTerminations normalizes this; keep a defensive floor for a wiring
+		// that set the field directly.
+		maxHold = DefaultConfig().MaxHold
+	}
+	for _, t := range s.terminations.Drain() {
+		if t.VMID == "" || t.OrgID == "" || t.At.IsZero() {
+			continue
+		}
+		if _, done := s.finalized[t.VMID]; done {
+			continue
+		}
+		s.finalized[t.VMID] = at
+		if lastSample, ok := s.last[t.VMID]; ok {
+			delete(s.last, t.VMID)
+			if t.At.After(lastSample.Timestamp) {
+				final := lastSample
+				final.Timestamp = t.At
+				out = append(out, final)
+			}
+			continue
+		}
+		// Never scraped: synthesize the pair from control-plane facts only.
+		if t.StartedAt.IsZero() {
+			continue
+		}
+		start := t.StartedAt
+		if minStart := t.At.Add(-maxHold); start.Before(minStart) {
+			start = minStart
+		}
+		if !t.At.After(start) {
+			continue
+		}
+		id := t.APIID
+		if id == "" {
+			id = t.VMID
+		}
+		first := Sample{OrgID: t.OrgID, SandboxID: id, Node: t.VMID, Timestamp: start, VCPUs: s.vcpus(id)}
+		last := first
+		last.Timestamp = t.At
+		out = append(out, first, last)
+	}
+	for vm, sample := range s.last {
+		if at.Sub(sample.Timestamp) > terminationStateRetention {
+			delete(s.last, vm)
+		}
+	}
+	for vm, ts := range s.finalized {
+		if at.Sub(ts) > terminationStateRetention {
+			delete(s.finalized, vm)
+		}
+	}
+	return out
+}
+
+// podSamples scrapes one billable husk pod and converts its report to
+// org-tagged Samples stamped with the cycle's shared timestamp. A failed scrape
+// is skip-and-counted (nil samples), never an error: one bad pod must not zero
+// out the bill for the healthy fleet. It is called from the Collect worker
+// pool, so it touches only the pod, the atomic skip counter, and the injected
+// seams; it never writes shared source state.
+func (s *HuskSource) podSamples(ctx context.Context, pod HuskPod, at time.Time) []Sample {
+	report, ok := s.scrape(ctx, pod)
+	if !ok {
+		s.skipped.Add(1)
+		return nil
+	}
+	// Attribute ONLY this pod's own vm-id to its org, from the TRUSTED label.
+	// Any other sample id the (untrusted) pod returns resolves unattributed and
+	// is dropped, so a pod can bill only its own vm-id/org (defense in depth).
+	orgOf := func(sandboxID string) (string, bool) {
+		if sandboxID == pod.VMID {
+			return pod.OrgID, true
+		}
+		return "", false
+	}
+	samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
+	// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
+	// claim label (issue #663), so usage_records reconcile to the sb-... id
+	// the customer saw, never the internal husk pod name. The trust check
+	// above stays keyed on the pod's vm-id: the pod cannot choose its billing
+	// id, only the controller's label does. Fallback: a pod whose lister
+	// carried no APIID (label absent; pre-#663 lister or a bespoke self-host
+	// lister) keeps the pod name, preserving the old behavior rather than
+	// dropping the sample. The Sample's Node field keeps the pod name (the
+	// vm-id), so support can still map a record back to the pod.
+	if pod.APIID != "" {
+		for i := range samples {
+			samples[i].SandboxID = pod.APIID
+		}
+	}
+	return samples
 }
 
 // scrape GETs GET /v1/metering from one husk pod and decodes the Report. It
