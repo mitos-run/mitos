@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.3](https://github.com/mitos-run/mitos/compare/v1.20.2...v1.20.3) (2026-07-04)
+
+
+### Bug Fixes
+
+* **controller:** terminal-phase husk reap covers Failed claims; billing tail never dropped ([#701](https://github.com/mitos-run/mitos/issues/701)) ([7e947e9](https://github.com/mitos-run/mitos/commit/7e947e955dbb14b13fdbe77120e3944a74025800))
+
 ## [1.20.2](https://github.com/mitos-run/mitos/compare/v1.20.1...v1.20.2) (2026-07-04)
 
 
