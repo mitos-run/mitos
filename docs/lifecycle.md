@@ -138,5 +138,5 @@ On expiry the claim's backing VM is actually stopped at the terminate instant:
 in husk mode the claimed pod is deleted (the warm pool refills the slot), in
 raw-forkd mode the node engine terminates the VM. Terminated therefore also
 marks the end of metered usage; the final billing sample is recorded at the
-terminate instant (issue #682's tail window), never at the later object
-deletion.
+terminate instant, closing the tail window between the last usage scrape and
+termination, never at the later object deletion.

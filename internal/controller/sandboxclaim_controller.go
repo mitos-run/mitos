@@ -406,10 +406,12 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 	// reconcileHuskClaim, with no usage tail ever recorded for that pod; the
 	// sweep below closes that gap too. Sweep on every terminal-phase reconcile:
 	// it is one label-selector List, empty in raw-forkd mode (no pod carries the
-	// label) and a no-op once the pod is already gone. A lingering Running pod
-	// keeps re-enqueuing this claim via the huskPodToClaim pod watch, so a
-	// transient list/delete error here converges on retry instead of leaking
-	// forever like the bug this replaces.
+	// label) and a no-op once the pod is already gone. A static lingering
+	// Running pod emits no new watch event on its own, so what actually
+	// converges a transient list/delete error here is the returned error
+	// driving the controller-runtime workqueue's backoff retry (plus a real
+	// pod event, if one occurs), instead of leaking forever like the bug this
+	// replaces.
 	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
 		if err := r.sweepClaimedHuskPods(ctx, claim); err != nil {
 			logger.Error(err, "sweep lingering claimed husk pods for terminal claim; will retry", "claim", claim.Name)
@@ -1380,8 +1382,9 @@ func (r *SandboxReconciler) reconcileLifetime(ctx context.Context, claim *v1.San
 // instant already recorded the tail. For a Failed claim with no prior tail
 // record, this call is what actually closes the billing window. A list or
 // delete error is returned so the caller's terminal-phase reconcile retries;
-// the lingering Running pod's own watch keeps re-enqueuing the claim, so the
-// retry converges.
+// a static lingering pod emits no new watch event on its own, so it is the
+// controller-runtime workqueue's backoff on the returned error (plus any real
+// pod event) that converges the retry.
 func (r *SandboxReconciler) sweepClaimedHuskPods(ctx context.Context, claim *v1.Sandbox) error {
 	var claimedHusk corev1.PodList
 	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
