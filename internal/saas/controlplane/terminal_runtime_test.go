@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "mitos.run/mitos/api/v1"
@@ -27,10 +28,10 @@ import (
 // lifetimeTerminatedSandbox builds a sandbox exactly as the controller's
 // terminateLifetime stamps it: phase Terminated, FinishedAt, and a Terminated
 // condition carrying the reap reason, with the stale runtime endpoint still in
-// status.
-func lifetimeTerminatedSandbox(org, name, endpoint, token, reason string) (*v1.Sandbox, *metav1.Time) {
+// status. Returns the sandbox-token Secret alongside so callers seed the fake
+// client without a second readySandbox call.
+func lifetimeTerminatedSandbox(org, name, endpoint, token, reason string) (*v1.Sandbox, *corev1.Secret) {
 	sb, secret := readySandbox(org, name, endpoint, token)
-	_ = secret
 	now := metav1.Now()
 	sb.Status.Phase = v1.SandboxTerminated
 	sb.Status.FinishedAt = &now
@@ -41,7 +42,7 @@ func lifetimeTerminatedSandbox(org, name, endpoint, token, reason string) (*v1.S
 		Reason:             reason,
 		Message:            "lifetime bound exceeded",
 	}}
-	return sb, &now
+	return sb, secret
 }
 
 // TestProxyTerminatedSandboxTypedIdleTimeoutNeverDialed asserts a runtime call
@@ -59,8 +60,7 @@ func TestProxyTerminatedSandboxTypedIdleTimeoutNeverDialed(t *testing.T) {
 			defer srv.Close()
 			endpoint := strings.TrimPrefix(srv.URL, "http://")
 
-			sb, _ := lifetimeTerminatedSandbox(orgA, "sb-gone", endpoint, "tok", reason)
-			_, secret := readySandbox(orgA, "sb-gone", endpoint, "tok")
+			sb, secret := lifetimeTerminatedSandbox(orgA, "sb-gone", endpoint, "tok", reason)
 			cp := New(newFakeClient(t, sb, secret), WithHTTPClient(srv.Client()))
 
 			hdr := http.Header{}
@@ -153,8 +153,7 @@ func TestProxyFailedSandboxTypedNeverDialed(t *testing.T) {
 // resolve path refuses a Terminated sandbox with the same typed error as the
 // Forward proxy, instead of resolving the stale endpoint.
 func TestResolveRuntimeTerminatedIsTypedIdleTimeout(t *testing.T) {
-	sb, _ := lifetimeTerminatedSandbox(orgA, "sb-pty-gone", "10.1.2.3:9091", "tok", "IdleTimeout")
-	_, secret := readySandbox(orgA, "sb-pty-gone", "10.1.2.3:9091", "tok")
+	sb, secret := lifetimeTerminatedSandbox(orgA, "sb-pty-gone", "10.1.2.3:9091", "tok", "IdleTimeout")
 	cp := New(newFakeClient(t, sb, secret))
 
 	_, aerr := cp.ResolveRuntime(context.Background(), orgA, "sb-pty-gone")

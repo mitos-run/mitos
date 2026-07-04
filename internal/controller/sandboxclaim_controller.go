@@ -403,6 +403,10 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
 		if claim.Status.Phase == v1.SandboxTerminated {
 			if err := r.reapClaimHuskPods(ctx, claim); err != nil {
+				// This is the self-heal for a crash or failed delete between
+				// the Terminated stamp and the reap (issue #688); operators
+				// need the failure visible to diagnose a repeating loop here.
+				log.FromContext(ctx).Error(err, "self-heal reap of a Terminated claim's husk pods failed; will retry", "claim", claim.Name)
 				return ctrl.Result{}, err
 			}
 		}
