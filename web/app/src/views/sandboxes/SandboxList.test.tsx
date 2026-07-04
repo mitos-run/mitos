@@ -35,16 +35,22 @@ function renderSandboxList() {
 }
 
 beforeEach(() => {
-  vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = String(input)
     if (url.endsWith('/console/capabilities')) {
       return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
     }
-    if (url.endsWith('/console/sandboxes')) {
+    if (url.endsWith('/console/sandboxes') && (init?.method ?? 'GET').toUpperCase() === 'GET') {
       return Promise.resolve(new Response(JSON.stringify({ sandboxes }), { status: 200, headers: { 'content-type': 'application/json' } }))
     }
     if (url.includes('/console/sandboxes/sb-1')) {
       return Promise.resolve(new Response(JSON.stringify(sandboxes[0]), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.endsWith('/console/templates')) {
+      return Promise.resolve(new Response(JSON.stringify({ templates: [{ name: 'python-3.12', org_id: 'o1', description: '', image: '', updated_at: '' }] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.endsWith('/console/projects')) {
+      return Promise.resolve(new Response(JSON.stringify({ org_id: 'o1', projects: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
     }
     if (url.includes('/console/sandboxes/')) {
       return Promise.resolve(new Response('', { status: 204 }))
@@ -121,5 +127,12 @@ describe('SandboxList', () => {
     // sb-1 has project_id 'p1', sb-2 has no project_id
     expect(screen.getByText('p1')).toBeInTheDocument()
     expect(screen.getByText('Unassigned')).toBeInTheDocument()
+  })
+
+  it('the New sandbox primary action opens the create modal', async () => {
+    await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByRole('table', { name: /sandboxes/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /new sandbox/i }))
+    expect(await screen.findByRole('dialog', { name: /new sandbox/i })).toBeInTheDocument()
   })
 })

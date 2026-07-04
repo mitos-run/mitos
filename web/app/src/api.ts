@@ -63,6 +63,20 @@ export type SandboxView = {
   project_id?: string
 }
 
+// CreateSandboxRequest is the body of POST /console/sandboxes. vcpus/mem_gib
+// must be one of the static options the server validates (1/2/4 vCPU;
+// 1/2/4/8 GiB); project_id is optional (empty means unassigned).
+export type CreateSandboxRequest = {
+  template: string
+  vcpus: number
+  mem_gib: number
+  project_id?: string
+}
+
+export type ForkResult = { org_id: string; source: string; ids: string[] }
+
+export type ExecResult = { stdout: string; stderr: string; exit_code: number }
+
 export type ForkNode = {
   id: string
   parent_id: string
@@ -195,6 +209,15 @@ export async function post<T>(path: string, body: unknown): Promise<T | null> {
   return text ? (JSON.parse(text) as T) : null
 }
 
+// apiErrorMessage extracts the console's apierr envelope's cause (the
+// actionable, non-secret detail: "vcpus must be one of 1, 2, 4") from a
+// failed response, falling back to a generic "<op>: <status>" message when the
+// body is not the expected shape.
+async function apiErrorMessage(r: Response, op: string): Promise<string> {
+  const body = await r.json().catch(() => null)
+  return body?.error?.cause ?? body?.error?.message ?? `${op}: ${r.status}`
+}
+
 export const api = {
   capabilities: () => get<Capabilities>('/console/capabilities'),
   // authConfig fetches the public /auth/connectors endpoint which returns the
@@ -240,6 +263,40 @@ export const api = {
     const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/logs`, { credentials: 'same-origin' })
     if (!r.ok) throw new Error(`logs: ${r.status}`)
     return r.text()
+  },
+  // logStreamURL is the SSE endpoint useLogStream's EventSource connects to.
+  // It is same-origin and cookie-authenticated, so no token needs to travel in
+  // the URL.
+  logStreamURL: (id: string) => `/console/sandboxes/${encodeURIComponent(id)}/logs/stream`,
+  createSandbox: async (req: CreateSandboxRequest) => {
+    const r = await fetch('/console/sandboxes', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(req),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'create sandbox'))
+    return (await r.json()) as SandboxView
+  },
+  forkSandbox: async (id: string, count: number) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/fork`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ count }),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'fork sandbox'))
+    return (await r.json()) as ForkResult
+  },
+  execSandbox: async (id: string, cmd: string, timeoutS?: number) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/exec`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cmd, timeout_s: timeoutS ?? 0 }),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'exec'))
+    return (await r.json()) as ExecResult
   },
   forktree: () => get<ForkTree>('/console/forktree'),
   keys: () => get<{ keys: KeyView[] }>('/console/keys').then((r) => r.keys ?? []),
