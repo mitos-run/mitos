@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.1](https://github.com/mitos-run/mitos/compare/v1.20.0...v1.20.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* **controller:** lifetime terminate actually stops the husk VM ([#697](https://github.com/mitos-run/mitos/issues/697)) ([b657258](https://github.com/mitos-run/mitos/commit/b657258c4452f972ecbaab2e95699b46ff4acc3a))
+
 ## [1.20.0](https://github.com/mitos-run/mitos/compare/v1.19.5...v1.20.0) (2026-07-04)
 
 
