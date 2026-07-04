@@ -158,15 +158,20 @@ CLAIMED husk pod's own in-pod `GET /v1/metering` through a BOUNDED worker pool
 (8 concurrent scrapes; issue #682): fleet size is per-VM, so a sequential scrape
 serialized N unreachable pods into N x the per-request timeout during a partial
 outage. With the pool the cycle duration is set by the slowest pool lane, not
-the fleet size. All samples in one cycle still share a single scrape timestamp,
-and unreachable pods are still skip-and-counted. Every completed cycle exports
-its wall duration as the `mitos_usage_collect_cycle_duration_seconds` gauge and
-logs a one-line summary at default verbosity (samples, records, orgs, duration,
-cumulative skip counters), so a healthy pipeline is visibly healthy, a
-zero-collecting one is visibly broken, and a slowing scrape path is alertable
-(issue #617). The console-side drawdown line reports `settledCents` and
-`carriedMilliCents` per cycle (issue #672), the money half of the same
-visibility gap.
+the fleet size. All live samples in one cycle still share a single scrape
+timestamp, and unreachable pods are still skip-and-counted. Every completed
+cycle exports its wall duration as the
+`mitos_usage_collect_cycle_duration_seconds` gauge and logs a one-line summary
+at default verbosity (samples, records, orgs, duration, cumulative skip
+counters). Zero samples with no claimed pods is a normal quiet fleet; the
+summary makes an UNEXPECTEDLY zero-collecting pipeline (zero samples while
+sandboxes are running) visible in one line, and the gauge makes a slowing
+scrape path alertable (issue #617). The duration gauge is set only on success,
+so failed cycles additionally increment the
+`mitos_usage_collect_cycle_failures_total` counter: alert on its rate for a
+collector that is erroring rather than slowing. The console-side drawdown line
+reports `settledCents` and `carriedMilliCents` per cycle (issue #672), the
+money half of the same visibility gap.
 
 **Terminate-time final sample** (issue #682, was #664): scraping once per
 window leaves the presence between the LAST scrape and terminate unrecorded (a

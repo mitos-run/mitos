@@ -33,6 +33,11 @@ type Metrics struct {
 	// signal for #617 is "the cycle is slowing down", which a last-value gauge
 	// answers directly at the 1-per-cadence sample rate.
 	cycleSeconds prometheus.Gauge
+	// cycleFailures counts FAILED collection cycles. The duration gauge is set
+	// only on success, so under a sustained failure it freezes at the last
+	// healthy value and looks fine; this counter is the metrics-only signal
+	// that lets #617 alert on a failing collector (a nonzero rate).
+	cycleFailures prometheus.Counter
 }
 
 // NewMetrics builds the per-org usage metric vectors. They are unregistered; the
@@ -68,6 +73,10 @@ func NewMetrics() *Metrics {
 			Name: "mitos_usage_gpu_seconds_total",
 			Help: "Cumulative GPU-seconds of billable sandbox usage by org, summed over every settled usage record. Monotonic within a controller process; reset only by a restart, where the durable store is the system of record.",
 		}, []string{"org"}),
+		cycleFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "mitos_usage_collect_cycle_failures_total",
+			Help: "Total failed usage collection cycles (scrape, integrate, or upsert error). The cycle-duration gauge is set only on success, so alert on this counter's rate for a failing collector.",
+		}),
 		cycleSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "mitos_usage_collect_cycle_duration_seconds",
 			Help: "Wall duration of the most recent usage collection cycle (scrape, integrate, upsert) in seconds. The husk scrape fans out over a bounded worker pool, so this is set by the slowest pool lane, not the fleet size; a sustained rise means unreachable pods or fleet growth.",
@@ -79,7 +88,7 @@ func NewMetrics() *Metrics {
 // metrics registry). It panics on a duplicate registration, the standard
 // fail-fast for a misconfigured wiring.
 func (m *Metrics) MustRegister(reg prometheus.Registerer) {
-	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes, m.gpuSeconds, m.cycleSeconds)
+	reg.MustRegister(m.vcpuSeconds, m.memGiBSecs, m.egressBytes, m.gpuSeconds, m.cycleSeconds, m.cycleFailures)
 }
 
 // ObserveCycle records one completed collection cycle's stats: today only the
@@ -87,6 +96,13 @@ func (m *Metrics) MustRegister(reg prometheus.Registerer) {
 // The stats carry counts and a duration only, never an id or a secret.
 func (m *Metrics) ObserveCycle(stats CycleStats) {
 	m.cycleSeconds.Set(stats.Duration.Seconds())
+}
+
+// ObserveCycleFailure counts one failed collection cycle. It carries no cause,
+// identity, or secret: the paired error log has the (sanitized) detail; the
+// counter exists so metrics alone can drive the #617 alert.
+func (m *Metrics) ObserveCycleFailure() {
+	m.cycleFailures.Inc()
 }
 
 // Observe sets the per-org gauges from the store's CUMULATIVE per-org Totals. It

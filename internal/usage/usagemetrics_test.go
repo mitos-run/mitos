@@ -254,6 +254,40 @@ func TestObserveCycleExportsCycleDuration(t *testing.T) {
 	}
 }
 
+// TestObserveCycleFailureIncrementsCounter asserts the cycle-failure counter
+// (issue #682 review follow-up) is exported and counts every failed cycle. The
+// duration gauge is set only on success, so under a sustained failure it
+// freezes at the last healthy value; this counter is the metrics-only signal
+// #617 alerting needs for a failing collector.
+func TestObserveCycleFailureIncrementsCounter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics()
+	m.MustRegister(reg)
+
+	read := func() float64 {
+		t.Helper()
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		for _, mf := range mfs {
+			if mf.GetName() == "mitos_usage_collect_cycle_failures_total" {
+				return mf.GetMetric()[0].GetCounter().GetValue()
+			}
+		}
+		return 0
+	}
+
+	m.ObserveCycleFailure()
+	if got := read(); got != 1 {
+		t.Fatalf("cycle failures after one failure = %v, want 1", got)
+	}
+	m.ObserveCycleFailure()
+	if got := read(); got != 2 {
+		t.Fatalf("cycle failures after two failures = %v, want 2", got)
+	}
+}
+
 // gaugeValue reads the value of mitos_usage_vcpu_seconds_total for the given org
 // from the registry, and whether a series for that org is present.
 func gaugeValue(t *testing.T, reg *prometheus.Registry, org string) (float64, bool) {
