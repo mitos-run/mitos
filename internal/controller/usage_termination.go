@@ -31,8 +31,21 @@ import (
 // (no trusted mitos.run/org label: the self-host path) was never billable and
 // records nothing. Callers that already listed the claim's pods (the delete
 // path) pass them directly.
+//
+// ONE EVENT PER CLAIM: a claim whose phase is already Terminated recorded its
+// event at the lifetime terminate (terminateLifetime calls the hook BEFORE
+// stamping the phase), which is the TRUE instant the VM was reaped, so the
+// later object delete records nothing here. A second event would be worse
+// than none: it either no-op-consumes the collector's finalized guard (so the
+// event actually carrying the tail is guard-dropped) or, past the source's
+// retention horizon, synthesizes a phantom pair. The collector's finalized
+// guard stays as the second line of defense for a requeued terminate path
+// that records twice before the phase persists.
 func (r *SandboxReconciler) recordHuskTerminations(claim *v1.Sandbox, pods []corev1.Pod, at time.Time) {
 	if r.UsageTerminations == nil {
+		return
+	}
+	if claim.Status.Phase == v1.SandboxTerminated {
 		return
 	}
 	var started time.Time

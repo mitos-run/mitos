@@ -92,7 +92,9 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 	// Claim-release final samples (issue #682): the SandboxReconciler records a
 	// termination per released husk pod into this shared log; the husk source
 	// drains it each cycle to close the [last scrape, terminate] tail window.
-	huskSource.SetTerminations(u.Terminations)
+	// The configured MaxHold rides along so the source's tail clamp always
+	// matches the hold bound Integrate applies.
+	huskSource.SetTerminations(u.Terminations, cfg.MaxHold)
 	source := usage.NewMultiSource(nodeSource, huskSource)
 
 	store := u.Store

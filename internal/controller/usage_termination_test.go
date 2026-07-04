@@ -92,6 +92,57 @@ func TestRecordClaimHuskTerminations(t *testing.T) {
 	}
 }
 
+// TestRecordHuskTerminationsOncePerClaim pins the one-event-per-claim contract:
+// a lifetime-expired claim records its termination at the lifetime terminate
+// (the TRUE instant the VM was reaped; the hook runs before the Terminated
+// phase is stamped), and the later object delete, which sees the claim already
+// Terminated, must record NOTHING. Two events for the same claim are worse
+// than one: the first no-op-consumes the collector's finalized guard and the
+// second (the one carrying the tail) is then guard-dropped, or, past the
+// retention horizon, the second synthesizes a phantom pair.
+func TestRecordHuskTerminationsOncePerClaim(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	started := metav1.NewTime(time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC))
+	claim := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb-once", Namespace: "mitos-org-acme"},
+		Status:     v1.SandboxStatus{Phase: v1.SandboxReady, StartedAt: &started},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "python-husk-once",
+			Namespace: "mitos-org-acme",
+			Labels: map[string]string{
+				huskLabel:       "true",
+				huskClaimLabel:  "sb-once",
+				"mitos.run/org": "acme",
+			},
+		},
+	}
+	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	r := &SandboxReconciler{Client: cl, UsageTerminations: usage.NewTerminationLog()}
+
+	// Lifetime expiry: terminateLifetime records BEFORE stamping Terminated.
+	r.recordClaimHuskTerminations(context.Background(), claim)
+
+	// terminateLifetime then stamps the terminal phase; the later object delete
+	// reconciles the claim in this state and must not record a second event.
+	claim.Status.Phase = v1.SandboxTerminated
+	r.recordHuskTerminations(claim, []corev1.Pod{*pod}, time.Now())
+	r.recordClaimHuskTerminations(context.Background(), claim)
+
+	terms := r.UsageTerminations.Drain()
+	if len(terms) != 1 {
+		t.Fatalf("want exactly 1 termination for a lifetime-terminated then deleted claim, got %d: %+v", len(terms), terms)
+	}
+	if terms[0].VMID != "python-husk-once" {
+		t.Errorf("VMID = %q, want python-husk-once", terms[0].VMID)
+	}
+}
+
 // TestRecordClaimHuskTerminationsNilLogIsNoOp asserts a reconciler without the
 // usage wiring (self-host, collector off) records nothing and never panics:
 // the hook must be invisible when metering is disabled.

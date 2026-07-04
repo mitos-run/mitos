@@ -74,7 +74,7 @@ func TestHuskSourceFinalSampleAtTermination(t *testing.T) {
 	}}}
 	terms := NewTerminationLog()
 	src := NewHuskSource(pods, nil, srv.Client(), "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	first, err := src.Collect(context.Background())
 	if err != nil {
@@ -152,7 +152,7 @@ func TestHuskSourceHundredSecondSandboxBillsHundredSeconds(t *testing.T) {
 	}}}
 	terms := NewTerminationLog()
 	src := NewHuskSource(pods, nil, srv.Client(), "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	var all []Sample
 	collect := func() {
@@ -195,7 +195,7 @@ func TestHuskSourceSynthesizesNeverScrapedSandbox(t *testing.T) {
 	clock := termBase.Add(50 * time.Second)
 	terms := NewTerminationLog()
 	src := NewHuskSource(&mutableHuskPods{}, nil, nil, "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	terms.Record(Termination{
 		VMID: "husk-short", APIID: "sb-short", OrgID: "acme",
@@ -237,7 +237,7 @@ func TestHuskSourceSynthesizedPairClampsOldStart(t *testing.T) {
 	clock := endAt.Add(10 * time.Second)
 	terms := NewTerminationLog()
 	src := NewHuskSource(&mutableHuskPods{}, nil, nil, "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	terms.Record(Termination{
 		VMID: "husk-old", APIID: "sb-old", OrgID: "acme",
@@ -257,9 +257,41 @@ func TestHuskSourceSynthesizedPairClampsOldStart(t *testing.T) {
 	}
 }
 
+// TestHuskSourceSynthesizedPairClampFollowsConfiguredMaxHold asserts the tail
+// clamp uses the COLLECTOR'S configured MaxHold, not the package default: with
+// a non-default hold the synthesized start must sit exactly hold before the
+// terminate instant, so the clamp and Integrate's own hold bound (cfg.MaxHold)
+// never diverge on a non-default Config.
+func TestHuskSourceSynthesizedPairClampFollowsConfiguredMaxHold(t *testing.T) {
+	endAt := termBase.Add(2 * time.Hour)
+	clock := endAt.Add(10 * time.Second)
+	terms := NewTerminationLog()
+	src := NewHuskSource(&mutableHuskPods{}, nil, nil, "http", func() time.Time { return clock })
+	hold := 30 * time.Second // deliberately not DefaultConfig().MaxHold
+	src.SetTerminations(terms, hold)
+
+	terms.Record(Termination{
+		VMID: "husk-hold", APIID: "sb-hold", OrgID: "acme",
+		StartedAt: termBase, At: endAt,
+	})
+
+	samples, err := src.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("want a clamped start/end pair, got %+v", samples)
+	}
+	wantStart := endAt.Add(-hold)
+	if !samples[0].Timestamp.Equal(wantStart) {
+		t.Errorf("pair start = %v, want clamped to At minus the CONFIGURED hold %v", samples[0].Timestamp, wantStart)
+	}
+}
+
 // TestHuskSourceTerminationRecordedOnceGuard asserts a vm-id already finalized
-// is never billed again, even when a second termination event arrives (a
-// lifetime-expiry terminate followed by the object delete records twice).
+// is never billed again, even when a second termination event arrives (the
+// controller records once per claim, but a requeued terminate path can still
+// record twice before the Terminated phase persists).
 // Without the guard the second event would synthesize a fresh start/end pair
 // and double-bill the sandbox.
 func TestHuskSourceTerminationRecordedOnceGuard(t *testing.T) {
@@ -273,7 +305,7 @@ func TestHuskSourceTerminationRecordedOnceGuard(t *testing.T) {
 	}}}
 	terms := NewTerminationLog()
 	src := NewHuskSource(pods, nil, srv.Client(), "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	if _, err := src.Collect(context.Background()); err != nil {
 		t.Fatal(err)
@@ -313,7 +345,7 @@ func TestHuskSourceIgnoresUnattributedTermination(t *testing.T) {
 	clock := termBase
 	terms := NewTerminationLog()
 	src := NewHuskSource(&mutableHuskPods{}, nil, nil, "http", func() time.Time { return clock })
-	src.SetTerminations(terms)
+	src.SetTerminations(terms, 0)
 
 	terms.Record(Termination{VMID: "husk-selfhost", StartedAt: termBase.Add(-30 * time.Second), At: termBase})
 

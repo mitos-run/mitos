@@ -185,11 +185,14 @@ and the husk source drains those events each cycle to emit a FINAL sample:
   the start is clamped to `terminate - MaxHold` so a stale StartedAt can never
   rewrite long-settled windows.
 
-A vm-id is finalized at most once (a duplicate event, for example lifetime
-expiry followed by the object delete, is dropped), so the tail can only be
-billed once. The event log is in-memory and best-effort: a controller restart
-or a node-loss drain loses the tail sample, which under-bills that tail and
-nothing else; recording never blocks or fails a terminate.
+One claim records ONE event, at the true terminate instant: a claim already
+Terminated (lifetime expiry) recorded its event then, and the later object
+delete records nothing. Downstream, a vm-id is finalized at most once (the
+collector's guard, the second line of defense for a requeued terminate that
+records twice), so the tail can only be billed once. The event log is
+in-memory and best-effort: a controller restart or a node-loss drain loses the
+tail sample, which under-bills that tail and nothing else; recording never
+blocks or fails a terminate.
 
 The **org tag** comes from the sandbox -> owning-org mapping, and it is a billing
 trust boundary: the org is derived solely from control-plane identity, never from

@@ -215,17 +215,20 @@ func (c *Collector) CollectOnce(ctx context.Context) (CycleStats, error) {
 	c.pruneBuffer()
 	recs := Integrate(c.buf, c.cfg)
 	stats.Records = len(recs)
+	// One pass over the records: count distinct orgs for the cycle summary and
+	// upsert as we go. On an upsert error the org count covers the records
+	// walked so far, consistent with "stats cover the work done up to the
+	// failure".
 	orgs := map[string]bool{}
 	for _, r := range recs {
 		orgs[r.OrgID] = true
-	}
-	stats.Orgs = len(orgs)
-	for _, r := range recs {
 		if err := c.store.UpsertRecord(ctx, r); err != nil {
+			stats.Orgs = len(orgs)
 			stats.Duration = time.Since(start)
 			return stats, fmt.Errorf("upsert usage record (sandbox %s window %s): %w", r.SandboxID, r.Window, err)
 		}
 	}
+	stats.Orgs = len(orgs)
 	if c.OnTotals != nil {
 		if tp, ok := c.store.(TotalsProvider); ok {
 			c.OnTotals(tp.TotalsByOrg())

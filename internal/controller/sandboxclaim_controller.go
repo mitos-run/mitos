@@ -1236,7 +1236,9 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 	// Record the usage termination BEFORE deleting the pods, so the collector
-	// can bill the half-open [last scrape, terminate] window (issue #682).
+	// can bill the half-open [last scrape, terminate] window (issue #682). A
+	// claim already Terminated (lifetime expiry) recorded its event at the TRUE
+	// terminate instant and the hook skips it here: one claim, one event.
 	// Best-effort and idempotent downstream: a retried delete records again and
 	// the collector's finalized guard keeps a vm-id from ever billing twice.
 	r.recordHuskTerminations(claim, claimedHusk.Items, time.Now())

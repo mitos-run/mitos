@@ -93,6 +93,10 @@ type HuskSource struct {
 	terminations *TerminationLog
 	last         map[string]Sample
 	finalized    map[string]time.Time
+	// maxHold is the collector's configured Config.MaxHold, set alongside the
+	// termination log, so the synthesized-pair clamp and Integrate's own hold
+	// bound (cfg.MaxHold) never diverge on a non-default Config.
+	maxHold time.Duration
 }
 
 // terminationStateRetention bounds how long the source remembers a pod's last
@@ -128,10 +132,14 @@ func NewHuskSource(
 }
 
 // Collect scrapes every claimed org-labeled husk pod once and returns the union
-// of org-tagged Samples tagged with a single scrape timestamp so all samples in
-// one cycle share an instant (the property Integrate's windowing relies on). A
-// pod that is unreachable, errors, or returns a non-200 is skipped and counted;
-// Collect itself never returns an error for an unreachable pod.
+// of org-tagged Samples. Every LIVE (scraped) sample in a cycle shares the
+// cycle's single scrape timestamp; the final and synthesized samples appended
+// for released claims (SetTerminations) carry their own instants: the release
+// time and, for a never-scraped sandbox, its clamped start. Integrate handles
+// the mix because it groups and orders samples per sandbox; no cross-sandbox
+// timestamp property is assumed. A pod that is unreachable, errors, or returns
+// a non-200 is skipped and counted; Collect itself never returns an error for
+// an unreachable pod.
 //
 // The scrapes fan out over a bounded worker pool (huskScrapeConcurrency; issue
 // #682) so the cycle duration is set by the slowest pool lane, never by the
@@ -191,12 +199,21 @@ func (s *HuskSource) Collect(ctx context.Context) ([]Sample, error) {
 	return out, nil
 }
 
-// SetTerminations wires the claim-release event log (issue #682, was #664).
-// When set, each Collect drains the log and emits a final sample per released
-// claim; nil (the default) disables the tracking entirely, so a wiring that
-// never terminates through the controller (tests, bespoke listers) pays
-// nothing. Call before the first Collect; not safe to swap concurrently.
-func (s *HuskSource) SetTerminations(log *TerminationLog) { s.terminations = log }
+// SetTerminations wires the claim-release event log (issue #682, was #664) and
+// the collector's configured Config.MaxHold, which bounds how far back a
+// synthesized pair may reach (zero or negative falls back to the
+// DefaultConfig hold). When set, each Collect drains the log and emits a final
+// sample per released claim; a nil log (the default) disables the tracking
+// entirely, so a wiring that never terminates through the controller (tests,
+// bespoke listers) pays nothing. Call before the first Collect; not safe to
+// swap concurrently.
+func (s *HuskSource) SetTerminations(log *TerminationLog, maxHold time.Duration) {
+	if maxHold <= 0 {
+		maxHold = DefaultConfig().MaxHold
+	}
+	s.terminations = log
+	s.maxHold = maxHold
+}
 
 // appendFinalSamples remembers this cycle's newest sample per pod, then drains
 // the termination log and appends one FINAL sample per released claim:
@@ -230,7 +247,12 @@ func (s *HuskSource) appendFinalSamples(out []Sample, billable []HuskPod, result
 			s.last[pod.VMID] = results[i][len(results[i])-1]
 		}
 	}
-	maxHold := DefaultConfig().MaxHold
+	maxHold := s.maxHold
+	if maxHold <= 0 {
+		// SetTerminations normalizes this; keep a defensive floor for a wiring
+		// that set the field directly.
+		maxHold = DefaultConfig().MaxHold
+	}
 	for _, t := range s.terminations.Drain() {
 		if t.VMID == "" || t.OrgID == "" || t.At.IsZero() {
 			continue
