@@ -55,8 +55,22 @@ once `StartedAt + timeout` passes. The reaper terminates the VM, stamps
 `sandboxclaim_controller.go:1183`). maxLifetime does not depend on a reachable
 forkd for the decision.
 
-- Bound: terminal within a reconcile after the deadline.
-- Proving test: `TestClaimMaxLifetimeReaped`.
+`terminateLifetime` is shared by the idleTimeout reap path below, and in husk
+mode it deletes the claim's backing husk pod at the terminate instant. This
+matters because forkd never tracks husk pods, so `terminateOnNode` alone
+cannot stop the VM: without the delete, a reaped claim would sit `Terminated`
+while its pod kept running and kept being billed. The tail usage record is
+taken on the listed pod before the pod delete and before the phase is stamped
+Terminated, so the guard that skips a Terminated claim on the later object
+delete cannot double-record it. The pool then refills the freed slot.
+Raw-forkd claims carry no such pod, so this step is a no-op there.
+
+- Bound: terminal within a reconcile after the deadline; the claimed husk pod
+  gone in the same reconcile.
+- Proving tests: `TestClaimMaxLifetimeReaped`,
+  `TestTerminateLifetimeDeletesClaimedHuskPodsAndRecordsTail`,
+  `TestTerminateLifetimeThenDeleteRecordsExactlyOneTail`,
+  `TestHuskClaimLifetimeExpiryDeletesClaimedPod`.
 
 ### idleTimeout: an inactive Ready claim is reaped
 

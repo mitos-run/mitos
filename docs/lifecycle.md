@@ -133,3 +133,10 @@ A subsequent call against a reaped sandbox returns the typed `idle_timeout` erro
 (`docs/api/errors.md`), whose remediation points at creating a fresh sandbox or
 calling `set_timeout` earlier to keep it alive. Pause is the explicit way to hold
 a sandbox without terminating it; expiry never auto-pauses.
+
+On expiry the claim's backing VM is actually stopped at the terminate instant:
+in husk mode the claimed pod is deleted (the warm pool refills the slot), in
+raw-forkd mode the node engine terminates the VM. Terminated therefore also
+marks the end of metered usage; the final billing sample is recorded at the
+terminate instant (issue #682's tail window), never at the later object
+deletion.
