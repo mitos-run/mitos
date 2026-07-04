@@ -130,7 +130,14 @@ func main() {
 		// The counter shares the control plane's client and namespace model
 		// (per-org, or the pinned single-tenant namespace) so it counts exactly
 		// where the control plane creates.
-		liveUsage = quota.NewLiveCounterSource(controlplane.NewLiveCounter(k8sClient, *singleTenantNS))
+		counter := controlplane.NewLiveCounter(k8sClient, *singleTenantNS)
+		liveUsage = quota.NewLiveCounterSource(counter)
+		// One startup self-check so a persistent RBAC/scheme misconfiguration
+		// (which would fail-closed-deny EVERY create while reads keep working)
+		// is loud at boot; a failure logs remediation and keeps serving.
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+		probeLiveCounter(probeCtx, counter, logger)
+		cancelProbe()
 		if *singleTenantNS != "" {
 			logger.Info("gateway using the real control plane in single-tenant mode", "ready_timeout", readyTimeout.String(), "default_pool", *defaultPool, "single_tenant_namespace", *singleTenantNS)
 		} else {

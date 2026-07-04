@@ -64,6 +64,28 @@ func TestLiveCounterCountsNonTerminalPhases(t *testing.T) {
 	}
 }
 
+// TestLiveCounterCountsReplicas asserts a Sandbox with Spec.Replicas = N
+// counts as N live sandboxes, not 1: replicas is the fork fan-out, so one
+// object with replicas=100 is 100 running VMs. Counting objects instead of
+// replicas would let a free-tier org (cap 2) run ~200 VMs via 2 objects,
+// bypassing exactly the lever the concurrency cap exists for.
+func TestLiveCounterCountsReplicas(t *testing.T) {
+	fanned := sandboxInPhase(orgA, "sb-fan", v1.SandboxReady)
+	fanned.Spec.Replicas = 100
+	single := sandboxInPhase(orgA, "sb-one", v1.SandboxReady) // Replicas unset = 1.
+	terminatedFan := sandboxInPhase(orgA, "sb-dead-fan", v1.SandboxTerminated)
+	terminatedFan.Spec.Replicas = 50 // terminal: contributes nothing.
+	c := newFakeClient(t, fanned, single, terminatedFan)
+	lc := NewLiveCounter(c, "")
+	got, err := lc.Count(context.Background(), orgA)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if got.ConcurrentSandboxes != 101 {
+		t.Errorf("ConcurrentSandboxes = %d, want 101 (100 replicas + 1 single, terminated fan excluded)", got.ConcurrentSandboxes)
+	}
+}
+
 // TestLiveCounterScopedToOrg asserts another org's sandboxes never count, even
 // when a mislabeled object sits inside the org's own namespace (defense in
 // depth: namespace AND label must both match).

@@ -20,7 +20,25 @@ import (
 //
 // Phase semantics: Pending, Restoring, Ready, Terminating, and the empty
 // just-created phase all count (each holds or is about to hold capacity);
-// Terminated and Failed do not.
+// Terminated and Failed do not. Terminating counting as live is deliberate (a
+// tearing-down VM still holds capacity), with the honest consequence that a
+// WEDGED teardown consumes a concurrency slot until it resolves.
+//
+// Replica semantics: a Sandbox with Spec.Replicas = N counts as N (the fork
+// fan-out is N running VMs; the create path accepts a client-supplied
+// replicas value, so counting objects would let a capped org fan out past its
+// tier).
+//
+// Admission semantics (honest limits): the enforcer's check-then-create has NO
+// reservation step, so parallel in-flight creates can each read the same
+// pre-create count and overshoot the cap; the overshoot is bounded by the
+// tier's creation-rate bucket burst (free tier: 5/min). And a create request
+// asking for replicas = N is admitted as +1 today, not +N: the create body is
+// not parsed at enforcement time (the same gap as the unwired SizeOf seam,
+// same deferred follow-up), so the fan-out lands in the NEXT create's count
+// rather than gating its own. Each create costs one uncached org-scoped LIST
+// against the apiserver, which is fine at current fleet sizes; a cached or
+// paginated counter is part of the same follow-up.
 //
 // Aggregate footprint (VCPUs, MemBytes, StorageBytes) is left at ZERO for now:
 // a Sandbox carries no per-create resource fields, so honest aggregates
@@ -82,7 +100,16 @@ func (l *LiveCounter) Count(ctx context.Context, orgID string) (quota.LiveUsage,
 		case v1.SandboxTerminated, v1.SandboxFailed:
 			continue
 		}
-		n++
+		// Replicas is the fork fan-out: ONE Sandbox object with replicas = N is N
+		// running VMs, and the create path accepts a client-supplied replicas
+		// value, so counting objects instead of replicas would let a capped org
+		// fan out far past its tier (2 objects x 100 replicas on a cap of 2).
+		// Unset/zero/one all count as one.
+		r := int(sbs.Items[i].Spec.Replicas)
+		if r < 1 {
+			r = 1
+		}
+		n += r
 	}
 	return quota.LiveUsage{ConcurrentSandboxes: n}, nil
 }
