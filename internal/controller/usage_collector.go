@@ -44,6 +44,14 @@ type UsageCollectorRunnable struct {
 	// (or a future durable store) can inspect or substitute it; defaults to an
 	// in-memory store.
 	Store usage.UsageStore
+
+	// Terminations, when set, is the claim-release event log shared with the
+	// SandboxReconciler (issue #682): the reconciler records a termination at
+	// claim release, and the husk source drains it each cycle to emit the final
+	// sample that closes the [last scrape, terminate] window. Nil disables the
+	// tail accounting (samples then end at the last scrape, the pre-#682
+	// behavior).
+	Terminations *usage.TerminationLog
 }
 
 // Start runs the collector loop until ctx is canceled. It builds the live
@@ -81,6 +89,12 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 		u.HTTPScheme,
 		nil,
 	)
+	// Claim-release final samples (issue #682): the SandboxReconciler records a
+	// termination per released husk pod into this shared log; the husk source
+	// drains it each cycle to close the [last scrape, terminate] tail window.
+	// The configured MaxHold rides along so the source's tail clamp always
+	// matches the hold bound Integrate applies.
+	huskSource.SetTerminations(u.Terminations, cfg.MaxHold)
 	source := usage.NewMultiSource(nodeSource, huskSource)
 
 	store := u.Store
@@ -111,12 +125,20 @@ func (u *UsageCollectorRunnable) Start(ctx context.Context) error {
 	}
 }
 
-// cycle runs one scrape-integrate-upsert-publish cycle and logs a COUNT of skipped
-// nodes and skipped husk pods (never node/pod identity or error text) on a
-// transient cycle error. The two skip counters are the degradation signals an
-// operator alerts on.
+// cycle runs one scrape-integrate-upsert-publish cycle. A SUCCESSFUL cycle
+// emits a one-line summary at default verbosity (issue #682, was #665: a
+// healthy pipeline must be visibly healthy, and a zero-collecting one must not
+// look identical to it); a failed cycle logs the error. Both lines carry
+// COUNTS and a duration only, never node/pod identity, org ids, error values,
+// or secrets. The cumulative skip counters on the summary are the degradation
+// signals an operator alerts on.
 func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, collector *usage.Collector, nodeSource *usage.NodeRegistrySource, huskSource *usage.HuskSource) {
-	if err := collector.CollectOnce(ctx); err != nil {
+	stats, err := collector.CollectOnce(ctx)
+	if err != nil {
+		// Count the failure BEFORE logging: the duration gauge is set only on
+		// success, so under a sustained failure it freezes at the last healthy
+		// value; this counter is what lets #617 alert from metrics alone.
+		usageMetrics.ObserveCycleFailure()
 		// The cycle error carries only ids/window text from the store path, never a
 		// secret; still log it sparingly.
 		logger.Error(err, "usage collection cycle failed",
@@ -124,12 +146,17 @@ func (u *UsageCollectorRunnable) cycle(ctx context.Context, logger logr.Logger, 
 			"skippedHuskPods", huskSource.SkippedPods())
 		return
 	}
-	if skipped := nodeSource.SkippedNodes(); skipped > 0 {
-		logger.V(1).Info("usage collection skipped unreachable nodes", "skippedNodesCumulative", skipped)
-	}
-	if skipped := huskSource.SkippedPods(); skipped > 0 {
-		logger.V(1).Info("usage collection skipped unreachable husk pods", "skippedHuskPodsCumulative", skipped)
-	}
+	// Export the cycle duration (issue #682, was #656): with the bounded husk
+	// scrape pool this is set by the slowest pool lane, and a sustained rise is
+	// the degradation signal #617 alerting watches.
+	usageMetrics.ObserveCycle(stats)
+	logger.Info("usage collection cycle",
+		"samples", stats.Samples,
+		"records", stats.Records,
+		"orgs", stats.Orgs,
+		"durationMs", stats.Duration.Milliseconds(),
+		"skippedNodesCumulative", nodeSource.SkippedNodes(),
+		"skippedHuskPodsCumulative", huskSource.SkippedPods())
 }
 
 // usageMetrics is the per-org usage Prometheus view, registered ONCE on the

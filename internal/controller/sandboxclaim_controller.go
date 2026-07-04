@@ -21,6 +21,7 @@ import (
 	"mitos.run/mitos/internal/husk"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/observability"
+	"mitos.run/mitos/internal/usage"
 	"mitos.run/mitos/internal/vsock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -144,6 +145,14 @@ type SandboxReconciler struct {
 
 	// Now is the reconciler's clock, injectable for tests. Nil uses time.Now.
 	Now func() time.Time
+
+	// UsageTerminations, when set (hosted, usage collector on), receives one
+	// usage.Termination per claimed, org-labeled husk pod at claim release or
+	// lifetime terminate, so the usage collector can bill the half-open window
+	// between the last scrape and the terminate instant (issue #682, was #664).
+	// Nil (the self-host default) records nothing; every call is nil-safe and
+	// best-effort: usage recording never blocks or fails a terminate.
+	UsageTerminations *usage.TerminationLog
 
 	// Demand is the shared per-pool claim-arrival tracker the warm-pool
 	// autoscaler reads. The claim reconciler records an arrival whenever a claim
@@ -1226,6 +1235,14 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 		logger.Error(err, "list claimed husk pods on delete; will retry", "claim", claim.Name)
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
+	// Record the usage termination BEFORE deleting the pods, so the collector
+	// can bill the half-open [last scrape, terminate] window (issue #682). A
+	// claim already Terminated (lifetime expiry) recorded its event at the TRUE
+	// terminate instant and the hook skips it here: one claim, one event.
+	// Best-effort and idempotent downstream: a retried delete records again and
+	// the collector's finalized guard keeps a vm-id from ever billing twice. The
+	// instant comes from the reconciler clock (r.now()) so tests can freeze it.
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
 	for i := range claimedHusk.Items {
 		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "delete claimed husk pod on release", "pod", claimedHusk.Items[i].Name)
@@ -1354,6 +1371,11 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 			return ctrl.Result{}, err
 		}
 	}
+
+	// The backing VM is gone: close the usage tail window at this instant
+	// (issue #682). Best-effort; a duplicate record from the later object
+	// delete is deduplicated by the collector's finalized guard.
+	r.recordClaimHuskTerminations(ctx, claim)
 
 	now := metav1.Now()
 	claim.Status.Phase = v1.SandboxTerminated
