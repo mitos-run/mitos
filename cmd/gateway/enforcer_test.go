@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +36,13 @@ type enforceFixture struct {
 
 func newEnforceFixture(t *testing.T) enforceFixture {
 	t.Helper()
+	return newEnforceFixtureLive(t, nil)
+}
+
+// newEnforceFixtureLive is newEnforceFixture with an injected live-usage
+// source, mirroring main's wiring of the cluster-backed live counter.
+func newEnforceFixtureLive(t *testing.T, live quota.LiveUsageSource) enforceFixture {
+	t.Helper()
 	store := saas.NewMemStore()
 	if err := store.PutOrg(context.Background(), saas.Organization{ID: "org-1", Name: "Org One"}); err != nil {
 		t.Fatalf("PutOrg: %v", err)
@@ -44,7 +52,7 @@ func newEnforceFixture(t *testing.T) enforceFixture {
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
-	wiring := buildQuotaEnforcer(enforcementConfig{enabled: true})
+	wiring := buildQuotaEnforcer(enforcementConfig{enabled: true, live: live})
 	cp := &recordingControlPlane{}
 	gw := saas.NewGateway(keys, wiring.enforcer, cp, nil)
 	return enforceFixture{gw: gw, cp: cp, raw: created.RawKey, orgID: "org-1", wiring: wiring}
@@ -168,6 +176,90 @@ func TestEnforceKillSwitchViaAbuseSignal(t *testing.T) {
 	rec := do(t, f.gw, http.MethodGet, "/v1/sandboxes", f.raw, "", "203.0.113.5:1234", "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("abuse-suspended status = %d, want 403", rec.Code)
+	}
+}
+
+// TestEnforceConcurrencyCapDeniesAtCap asserts an org already AT its tier's
+// concurrency cap (free tier: 2) is denied a create with the typed
+// quota_exceeded envelope and never reaches the control plane, while the same
+// org one below the cap is admitted. This is the issue #615 seam-2 behavior:
+// the cap is enforced at the gateway from the live count, nowhere else.
+func TestEnforceConcurrencyCapDeniesAtCap(t *testing.T) {
+	free := quota.DefaultTiers()[quota.TierFree]
+	atCap := quota.LiveUsageFunc(func(_ context.Context, _ string) (quota.LiveUsage, error) {
+		return quota.LiveUsage{ConcurrentSandboxes: free.MaxConcurrentSandboxes}, nil
+	})
+	f := newEnforceFixtureLive(t, atCap)
+	rec := do(t, f.gw, http.MethodPost, "/v1/sandboxes", f.raw, `{"pool":"default"}`, "203.0.113.5:1234", "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("at-cap create status = %d, want 429; body = %s", rec.Code, rec.Body.String())
+	}
+	if code := errCode(t, rec); code != "quota_exceeded" {
+		t.Errorf("at-cap error code = %q, want quota_exceeded", code)
+	}
+	if len(f.cp.got) != 0 {
+		t.Error("control plane reached for an at-cap create")
+	}
+
+	belowCap := quota.LiveUsageFunc(func(_ context.Context, _ string) (quota.LiveUsage, error) {
+		return quota.LiveUsage{ConcurrentSandboxes: free.MaxConcurrentSandboxes - 1}, nil
+	})
+	f2 := newEnforceFixtureLive(t, belowCap)
+	rec2 := do(t, f2.gw, http.MethodPost, "/v1/sandboxes", f2.raw, `{"pool":"default"}`, "203.0.113.5:1234", "")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("below-cap create status = %d, want 200; body = %s", rec2.Code, rec2.Body.String())
+	}
+	if len(f2.cp.got) != 1 {
+		t.Fatalf("control plane saw %d requests for a below-cap create, want 1", len(f2.cp.got))
+	}
+}
+
+// TestEnforceConcurrencyCapDoesNotBlockReads asserts the live cap only gates
+// creates: an at-cap org can still list and read its sandboxes (no dead end;
+// the caller can see and terminate what is running to get back under the cap).
+func TestEnforceConcurrencyCapDoesNotBlockReads(t *testing.T) {
+	free := quota.DefaultTiers()[quota.TierFree]
+	atCap := quota.LiveUsageFunc(func(_ context.Context, _ string) (quota.LiveUsage, error) {
+		return quota.LiveUsage{ConcurrentSandboxes: free.MaxConcurrentSandboxes}, nil
+	})
+	f := newEnforceFixtureLive(t, atCap)
+	rec := do(t, f.gw, http.MethodGet, "/v1/sandboxes", f.raw, "", "203.0.113.5:1234", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("at-cap list status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEnforceLiveErrorDeniesCreate asserts a live-usage read failure DENIES a
+// create (fail closed): an unreachable cluster must never read as "zero live
+// sandboxes" on the anti-abuse path.
+func TestEnforceLiveErrorDeniesCreate(t *testing.T) {
+	broken := quota.LiveUsageFunc(func(_ context.Context, _ string) (quota.LiveUsage, error) {
+		return quota.LiveUsage{}, errors.New("apiserver unavailable")
+	})
+	f := newEnforceFixtureLive(t, broken)
+	rec := do(t, f.gw, http.MethodPost, "/v1/sandboxes", f.raw, `{"pool":"default"}`, "203.0.113.5:1234", "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("live-error create status = %d, want 429 (deny); body = %s", rec.Code, rec.Body.String())
+	}
+	if len(f.cp.got) != 0 {
+		t.Error("control plane reached although the live count was unreadable")
+	}
+}
+
+// TestBuildQuotaEnforcerModeNamesLivePosture asserts the startup mode string
+// names whether the live concurrency cap is enforced, so the posture is never
+// silent: with an injected live source it names live enforcement; without one
+// it names the gap.
+func TestBuildQuotaEnforcerModeNamesLivePosture(t *testing.T) {
+	withLive := buildQuotaEnforcer(enforcementConfig{enabled: true, live: quota.LiveUsageFunc(
+		func(_ context.Context, _ string) (quota.LiveUsage, error) { return quota.LiveUsage{}, nil },
+	)})
+	if !strings.Contains(withLive.mode, "live concurrency cap") {
+		t.Errorf("with-live mode = %q, want it to name the live concurrency cap", withLive.mode)
+	}
+	withoutLive := buildQuotaEnforcer(enforcementConfig{enabled: true})
+	if !strings.Contains(withoutLive.mode, "NOT enforced") {
+		t.Errorf("without-live mode = %q, want it to name the unenforced live caps", withoutLive.mode)
 	}
 }
 

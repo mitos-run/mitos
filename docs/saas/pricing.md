@@ -156,15 +156,29 @@ usage push never double-credits or double-debits. All unit-tested.
   webhook, console banner). No suspension.
 - HARD cap breach: SUSPENDS the org through the kill-switch (the
   `Suspender` seam, satisfied by `quota.BillingSuspender` wrapping
-  `quota.KillSwitch`) with a MANUAL HOLD, so a runaway agent cannot generate an
-  unbounded bill and the org is not auto-lifted back into the same bill.
+  `quota.KillSwitch`), so a runaway agent cannot generate an unbounded bill.
+  The automated suspend carries NO manual hold: a cleared paid top-up is the
+  lift lever (`SuspensionLifter.LiftReason`, reason-scoped), and the spend
+  window resets at the payment, so the org is not lifted back into the same
+  breach; it re-suspends only by burning past the cap AGAIN after paying.
+  Operator-imposed suspensions with a manual hold survive every automated
+  lift and clear only through the operator Lift hook.
+
+In production the drawdown driver evaluates the cap each cycle for every org
+that settled usage (`Service.EnforceSpendCapFromLedger`): period spend is the
+sum of the org's usage-drawdown debits since max(calendar month start, latest
+in-month paid top-up), read via the month-scoped `ScopedLedgerReader` path
+(Postgres serves it from the `(org_id, at)` index, migration 0012). Metered
+overage beyond credit is not yet part of period spend: pre-#618 no invoice
+source exists, so prepaid drawdown is the only money that moves.
 
 The hard-cap suspend reaches the kill-switch through a narrow `Suspender`
 interface so `internal/saas/billing` does not import `internal/saas/quota` (no
 cycle); the adapter that maps billing reasons to `quota.SuspensionReason`
 (`ReasonSpendCap`, `ReasonDunning`) lives in the quota package. Unit-tested:
-crossing the hard cap fires exactly one kill-switch suspend with a manual hold;
-crossing the soft cap fires exactly one alert.
+crossing the hard cap fires exactly one kill-switch suspend (no hold);
+crossing the soft cap fires exactly one alert; a top-up lifts the spend-cap
+suspension and a manual hold survives it.
 
 ## Dunning state machine
 

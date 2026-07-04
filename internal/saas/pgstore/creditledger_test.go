@@ -268,3 +268,39 @@ func TestPgProcessedWindows(t *testing.T) {
 		t.Errorf("in-horizon marker %q was pruned", wZero.Key())
 	}
 }
+
+// TestPgCreditLedgerEntriesSince pins the month-scoped read the spend-cap
+// evaluation uses (billing.ScopedLedgerReader, issue #615): only entries at or
+// after the bound return, so the per-cycle read is bounded by the month, not
+// the org's lifetime history. Requires MITOS_TEST_DATABASE_DSN (skips
+// otherwise).
+func TestPgCreditLedgerEntriesSince(t *testing.T) {
+	dsn := testDSN(t)
+	pg, err := pgstore.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(pg.Close)
+	truncateTables(t, dsn, "credit_ledger")
+	l := pgstore.NewPgCreditLedger(pg.Pool())
+	ctx := context.Background()
+	old := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	cut := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if err := l.Append(ctx, billing.LedgerEntry{OrgID: "o1", Kind: billing.KindUsageDrawdown, Amount: -10, Key: "old", At: old}); err != nil {
+		t.Fatalf("append old: %v", err)
+	}
+	if err := l.Append(ctx, billing.LedgerEntry{OrgID: "o1", Kind: billing.KindUsageDrawdown, Amount: -20, Key: "new", At: cut.Add(24 * time.Hour)}); err != nil {
+		t.Fatalf("append new: %v", err)
+	}
+	// Another org's in-window entry never leaks in.
+	if err := l.Append(ctx, billing.LedgerEntry{OrgID: "o2", Kind: billing.KindUsageDrawdown, Amount: -30, Key: "other", At: cut.Add(24 * time.Hour)}); err != nil {
+		t.Fatalf("append other: %v", err)
+	}
+	got, err := l.EntriesSince(ctx, "o1", cut)
+	if err != nil {
+		t.Fatalf("EntriesSince: %v", err)
+	}
+	if len(got) != 1 || got[0].Key != "new" {
+		t.Fatalf("EntriesSince = %+v, want only o1's in-window entry", got)
+	}
+}

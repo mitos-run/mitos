@@ -8,12 +8,37 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/billingprovider"
 	"mitos.run/mitos/internal/saas/billingprovider/paddle"
 	"mitos.run/mitos/internal/saas/billingprovider/stripe"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/pgstore"
+	"mitos.run/mitos/internal/saas/quota"
 )
+
+// newBillingSuspender builds the billing.Suspender the console's billing
+// service drives (issue #615 residual wiring): a billing-driven suspension
+// (hard spend cap, exhausted dunning) goes through the quota kill-switch into
+// a suspension store. With a Postgres pool that store is the SHARED durable
+// suspensions table (migration 0008), the exact table the gateway's
+// kill-switch enforcement reads, so a console-side suspend blocks the org at
+// every gateway replica within the gateway's suspension-cache TTL (a few
+// seconds). Without a pool (dev only) the store is in-process: the suspension
+// is recorded but no other process sees it, and the log names that gap.
+// The returned store is exposed for tests and any future console read path.
+func newBillingSuspender(pool *pgxpool.Pool, logger *slog.Logger) (billing.Suspender, quota.SuspensionStore) {
+	var store quota.SuspensionStore
+	if pool != nil {
+		store = pgstore.NewPgSuspensionStore(pool)
+	} else {
+		logger.Warn("billing suspensions are in-process (dev only); a billing-driven suspend does NOT reach the gateway kill-switch without a database DSN")
+		store = quota.NewMemSuspensionStore()
+	}
+	return quota.NewBillingSuspender(quota.NewKillSwitch(store, nil)), store
+}
 
 // portalLinker adapts a billingprovider.Provider + an org-customer map into the
 // console.PortalLinker seam: it resolves the org's customer ref, then asks the
@@ -117,9 +142,18 @@ type billingWiring struct {
 // pgstore.PgCustomers when Postgres is configured, in-memory otherwise (DEV
 // ONLY: an in-memory map cannot survive a restart, so a webhook arriving after
 // a redeploy would drop its status sync).
+//
+// suspender is the kill-switch seam (issue #615): a webhook event whose
+// normalized status is suspended drives it on the transition into suspended,
+// so the org fails closed at the gateway (via the shared suspensions table)
+// and not only in its billing status; the same adapter's SuspensionLifter
+// half drives the payment-driven recovery lifts. main passes the
+// newBillingSuspender adapter over the same store the drawdown spend-cap
+// path uses.
+//
 // webhookMetrics (nil-safe) counts signature-verification failures and 5xx
 // handler errors for the #617 billing alerts; it carries no payload detail.
-func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, webhookMetrics *billingprovider.WebhookMetrics) billingWiring {
+func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger billing.CreditLedger, customers billingprovider.Customers, suspender billing.Suspender, webhookMetrics *billingprovider.WebhookMetrics) billingWiring {
 	if !envBool("MITOS_CONSOLE_BILLING") {
 		return billingWiring{portal: nil} // console fills the no-portal default
 	}
@@ -154,7 +188,12 @@ func setupBilling(logger *slog.Logger, status billing.StatusStore, creditLedger 
 		// customers is passed as BOTH the resolver and the linker: an event
 		// whose signature-verified custom_data names the org records the org
 		// <-> customer link before processing (the write half of #614/#618).
-		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithMetrics(webhookMetrics),
+		// WithSuspender: a suspended-status event drives the kill-switch into
+		// the shared suspensions table (and payment events drive the
+		// reason-scoped lifts), so the gateway blocks and readmits the org
+		// within its suspension-cache TTL. WithMetrics counts verify failures
+		// and 5xx errors for the #617 alerts.
+		webhook:        billingprovider.NewWebhookHandler(provider, customers, customers, status, creditLedger, time.Now).WithSuspender(suspender).WithMetrics(webhookMetrics),
 		topUp:          tu,
 		topUpProductID: topUpProductID,
 		topUpCurrency:  topUpCurrency,

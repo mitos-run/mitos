@@ -26,6 +26,14 @@ type enforcementConfig struct {
 	// when a database is configured, so suspensions survive restarts and bind every
 	// replica. Nil falls back to an in-process MemSuspensionStore (dev only).
 	suspensions quota.SuspensionStore
+	// live is the live-usage source the concurrency and aggregate caps read. main
+	// wires the cluster-backed counter (controlplane.LiveCounter over the same
+	// controller-runtime client the control plane uses) when the real control
+	// plane is in use, so the concurrency cap is enforced against what the org is
+	// ACTUALLY running. Nil falls back to conservativeLiveUsage (stub/dev wiring
+	// with no cluster client), under which the live caps are not enforced; the
+	// mode string names that gap.
+	live quota.LiveUsageSource
 }
 
 // quotaWiring is the constructed enforcement surface: the saas.QuotaEnforcer the
@@ -54,22 +62,21 @@ type quotaWiring struct {
 	mode string
 }
 
-// conservativeLiveUsage is the gateway's default LiveUsageSource until the real
-// cluster-backed live count (quota.LiveCounter over the controller's running-
-// sandbox set) is wired into the gateway binary. It reports ZERO live footprint,
-// which means the live concurrency and aggregate resource caps are NOT enforced
-// anywhere today: the control plane does NOT re-check them, so an org can exceed
-// its tier's concurrency and aggregate caps until the real live count is wired
-// (issue #615 part 2). The per-sandbox size cap, the per-org and per-IP
-// request-rate buckets, the creation-rate bucket, and the kill-switch ALL still
-// apply, so this default still bounds the dominant abuse vectors (request floods,
-// create churn, oversized single sandboxes, and suspended orgs); unbounded
-// steady-state accumulation of small sandboxes is the gap.
+// conservativeLiveUsage is the fallback LiveUsageSource for wiring modes with
+// NO cluster client (the --allow-stub dev path). It reports ZERO live
+// footprint, which means the live concurrency and aggregate caps are NOT
+// enforced in that mode: no other layer re-checks them (the control plane does
+// not), so the enforcement gap is real and the startup mode string names it.
+// The per-org and per-IP request-rate buckets, the creation-rate bucket, and
+// the kill-switch all still apply. The real deployment wires
+// controlplane.LiveCounter (the cluster-backed count over the org's Sandbox
+// objects) via enforcementConfig.live, which makes the concurrency cap live;
+// the aggregate caps additionally need the pool-resolved footprint and stay a
+// deferred #615 follow-up.
 //
 // The controller's internal usage API (:8092) serves time-integrated usage
 // records, not an instantaneous per-org running count, so an adapter over it
-// would misreport live footprint; the honest fix is wiring quota.LiveCounter
-// over the controller's running-sandbox set (tracked in #615).
+// would misreport live footprint; it is deliberately not used here.
 type conservativeLiveUsage struct{}
 
 func (conservativeLiveUsage) Live(_ context.Context, _ string) (quota.LiveUsage, error) {
@@ -127,10 +134,23 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 		sus = quota.NewMemSuspensionStore()
 		susMode = "in-process kill-switch store, NOT durable and NOT shared across replicas (DEV ONLY; set a database DSN for a durable kill-switch)"
 	}
+	// Live-usage source: the cluster-backed counter when main wired one (the
+	// real deployment), the zero-footprint stub otherwise. The mode string names
+	// which caps are actually live so the posture is never silent. Honesty note:
+	// even with the live counter, only the CONCURRENCY cap is enforced today;
+	// the aggregate resource caps need the pool-resolved footprint and the
+	// per-sandbox size cap needs the GatewayAdapter SizeOf seam, both deferred
+	// #615 follow-ups.
+	live := cfg.live
+	liveMode := "live concurrency cap enforced from cluster state (aggregate and per-sandbox size caps not yet: pool-resolved footprint and the SizeOf seam are follow-ups)"
+	if live == nil {
+		live = conservativeLiveUsage{}
+		liveMode = "live concurrency and aggregate caps NOT enforced (no cluster client; zero live footprint reported)"
+	}
 	enf := quota.NewEnforcer(quota.Deps{
 		Tiers:       quota.DefaultTiers(),
 		TierOf:      freeTierResolver,
-		LiveUsage:   conservativeLiveUsage{},
+		LiveUsage:   live,
 		Suspensions: sus,
 		// Now nil: the enforcer creates a real-clock rate limiter.
 	})
@@ -147,7 +167,7 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 		killSwitch:       ks,
 		billingSuspender: quota.NewBillingSuspender(ks),
 		suspensions:      sus,
-		mode:             "ENABLED (real quota.Enforcer; per-org and per-IP rate limits, per-sandbox size cap, creation-rate cap, and kill-switch; " + susMode + ")",
+		mode:             "ENABLED (real quota.Enforcer; per-org and per-IP rate limits, creation-rate cap, and kill-switch; " + liveMode + "; " + susMode + ")",
 	}
 }
 

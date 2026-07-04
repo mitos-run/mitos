@@ -58,6 +58,11 @@ type fakeDrawdowner struct {
 	pruneOlderThan []time.Time
 	pruneErr       error
 	pruned         int64
+	// capChecks records the orgs whose spend cap was evaluated; capSuspends maps
+	// an org to the suspended result; capErr fails every cap evaluation.
+	capChecks   []string
+	capSuspends map[string]bool
+	capErr      error
 }
 
 func (f *fakeDrawdowner) Drawdown(_ context.Context, rec usage.UsageRecord) (billing.DrawdownResult, error) {
@@ -83,6 +88,14 @@ func (f *fakeDrawdowner) PruneProcessedWindows(_ context.Context, olderThan time
 		return 0, f.pruneErr
 	}
 	return f.pruned, nil
+}
+
+func (f *fakeDrawdowner) EnforceSpendCapFromLedger(_ context.Context, orgID string) (bool, error) {
+	f.capChecks = append(f.capChecks, orgID)
+	if f.capErr != nil {
+		return false, f.capErr
+	}
+	return f.capSuspends[orgID], nil
 }
 
 func testLogger() *slog.Logger {
@@ -150,6 +163,45 @@ func TestRunDrawdownOnceCountsFailuresAndContinues(t *testing.T) {
 	}
 	if stats.drawn != 0 || stats.failed != 2 {
 		t.Errorf("stats = %+v, want drawn=0 failed=2", stats)
+	}
+}
+
+// TestRunDrawdownOnceEnforcesSpendCapPerActiveOrg asserts the cycle evaluates
+// the spend cap for every org that had records in the lookback (the issue #615
+// production path: settling usage is the moment spend can newly breach a cap)
+// and skips idle orgs, that a suspending evaluation is counted, and that a cap
+// evaluation error is counted as a failure without aborting the cycle.
+func TestRunDrawdownOnceEnforcesSpendCapPerActiveOrg(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	orgs := &fakeOrgLister{orgs: []saas.Organization{{ID: "org-a"}, {ID: "org-idle"}}}
+	store := &fakeRecordLister{records: map[string][]usage.UsageRecord{
+		"org-a": {{OrgID: "org-a", SandboxID: "sb-1", Window: now.Add(-10 * time.Minute)}},
+	}}
+	svc := &fakeDrawdowner{capSuspends: map[string]bool{"org-a": true}}
+
+	stats := runDrawdownOnce(context.Background(), testLogger(), orgs, store, svc, 2*time.Hour, now, nil)
+
+	if len(svc.capChecks) != 1 || svc.capChecks[0] != "org-a" {
+		t.Fatalf("cap checks = %v, want exactly [org-a] (idle orgs skip the scan)", svc.capChecks)
+	}
+	if stats.suspended != 1 {
+		t.Errorf("stats.suspended = %d, want 1", stats.suspended)
+	}
+	if stats.failed != 0 {
+		t.Errorf("stats.failed = %d, want 0", stats.failed)
+	}
+
+	// A cap evaluation error is a counted failure, never a cycle abort.
+	svcErr := &fakeDrawdowner{capErr: errors.New("caps store down")}
+	stats = runDrawdownOnce(context.Background(), testLogger(), orgs, store, svcErr, 2*time.Hour, now, nil)
+	if len(svcErr.capChecks) != 1 {
+		t.Fatalf("cap checks with error = %v, want the active org still checked", svcErr.capChecks)
+	}
+	if stats.failed == 0 {
+		t.Error("a cap evaluation error must count as a failure")
+	}
+	if stats.suspended != 0 {
+		t.Errorf("stats.suspended = %d, want 0 on error", stats.suspended)
 	}
 }
 

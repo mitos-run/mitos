@@ -134,6 +134,14 @@ func main() {
 		log.Fatalf("MITOS_CONSOLE_RATES: %v", err)
 	}
 
+	// billingSuspender routes EVERY billing-driven suspension (a provider
+	// webhook reporting the subscription suspended, a breached hard spend cap
+	// in the drawdown cycle) into the shared suspensions table the gateway
+	// kill-switch reads, and its SuspensionLifter half drives the
+	// payment-driven recovery lifts (issue #615); see newBillingSuspender.
+	// Built once and shared by the webhook and the drawdown service below.
+	billingSuspender, _ := newBillingSuspender(pool, logger)
+
 	// Metrics registry for the #617 SaaS alerts: the billing webhook counters,
 	// the drawdown driver series, and the readiness-probe Postgres failure
 	// counter. Served on its own cluster-internal listener below, never on the
@@ -142,7 +150,7 @@ func main() {
 	webhookMetrics := billingprovider.NewWebhookMetrics()
 	webhookMetrics.MustRegister(metricsRegistry)
 
-	bill := setupBilling(logger, statusStore, creditLedger, customers, webhookMetrics)
+	bill := setupBilling(logger, statusStore, creditLedger, customers, billingSuspender, webhookMetrics)
 
 	// sessionStore is created before console.New so it can be passed into
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
@@ -252,7 +260,14 @@ func main() {
 		log.Fatalf("drawdown: %v", err)
 	}
 	if ddInterval > 0 {
-		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates})
+		// Suspend: the SAME billingSuspender the webhook uses, so a hard spend
+		// cap breached in the drawdown cycle lands in the durable suspensions
+		// table the gateway kill-switch reads (issue #615); without this seam
+		// the service computed the suspension and dropped it. The driver calls
+		// EnforceSpendCapFromLedger after settling each active org. Caps is the
+		// shared spend-cap store the BFF writes, so enforcement sees the org's
+		// real caps instead of an empty in-memory default.
+		dd := billing.NewService(billing.Config{Ledger: creditLedger, Status: statusStore, Rates: rates, Caps: spendCapStore, Suspend: billingSuspender})
 		// The drawdown metrics are registered ONLY when the driver is enabled:
 		// the DrawdownStalled alert watches last-success staleness, and a
 		// deployment with the driver off must expose no series to go stale.
