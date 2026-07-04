@@ -62,7 +62,11 @@ func (c *Console) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, e)
 		return
 	}
-	events, err := c.deps.Audit.List(r.Context(), orgID)
+	// The export reads up to MaxAuditListLimit (matching MemAuditLog's own
+	// per-org retention cap) rather than DefaultAuditListLimit: it is a full
+	// export, not a paginated view, so it should read everything the store is
+	// guaranteed to still hold.
+	events, err := c.deps.Audit.List(r.Context(), orgID, MaxAuditListLimit)
 	if err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
 			WithCause("the audit log could not be read"))

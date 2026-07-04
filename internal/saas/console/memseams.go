@@ -105,8 +105,17 @@ func (m *MemTemplateLister) List(_ context.Context, orgID string) ([]TemplateVie
 	return out, nil
 }
 
+// maxAuditEventsPerOrg bounds MemAuditLog's per-org history so a long-running
+// dev/self-host process without Postgres configured cannot grow this map
+// without limit: once an org crosses the cap, Record drops the oldest event to
+// make room for the new one. Postgres deployments have no such cap (retention
+// there is the operator's own pruning policy, issue #163); this is purely a
+// memory-safety backstop for the in-memory fallback.
+const maxAuditEventsPerOrg = 10000
+
 // MemAuditLog is the in-memory AuditRecorder tested default. It is append-only
-// and org-scoped; List returns a copy in reverse-chronological order. Safe for
+// (up to maxAuditEventsPerOrg, after which the oldest event is dropped) and
+// org-scoped; List returns a copy in reverse-chronological order. Safe for
 // concurrent use.
 type MemAuditLog struct {
 	mu    sync.Mutex
@@ -118,23 +127,36 @@ func NewMemAuditLog() *MemAuditLog {
 	return &MemAuditLog{byOrg: map[string][]AuditEvent{}}
 }
 
-// Record appends an event to its org's log. The event carries no secret.
+// Record appends an event to its org's log. The event carries no secret. If
+// the org's log is at maxAuditEventsPerOrg, the oldest event is dropped first
+// so memory never grows past the cap.
 func (m *MemAuditLog) Record(_ context.Context, ev AuditEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.byOrg[ev.OrgID] = append(m.byOrg[ev.OrgID], ev)
+	events := append(m.byOrg[ev.OrgID], ev)
+	if len(events) > maxAuditEventsPerOrg {
+		events = events[len(events)-maxAuditEventsPerOrg:]
+	}
+	m.byOrg[ev.OrgID] = events
 	return nil
 }
 
-// List returns the org's events, most recent first. It never returns another
-// org's events.
-func (m *MemAuditLog) List(_ context.Context, orgID string) ([]AuditEvent, error) {
+// List returns up to limit of the org's events, most recent first. limit <= 0
+// defaults to DefaultAuditListLimit. It never returns another org's events.
+func (m *MemAuditLog) List(_ context.Context, orgID string, limit int) ([]AuditEvent, error) {
+	if limit <= 0 {
+		limit = DefaultAuditListLimit
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	src := m.byOrg[orgID]
-	out := make([]AuditEvent, len(src))
-	for i, ev := range src {
-		out[len(src)-1-i] = ev
+	n := len(src)
+	if n > limit {
+		n = limit
+	}
+	out := make([]AuditEvent, n)
+	for i := 0; i < n; i++ {
+		out[i] = src[len(src)-1-i]
 	}
 	return out, nil
 }

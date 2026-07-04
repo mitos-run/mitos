@@ -741,7 +741,7 @@ func (c *Console) handleAudit(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the audit log could not be read for this organization")
 		return
 	}
-	events, err := c.deps.Audit.List(r.Context(), orgID)
+	events, err := c.deps.Audit.List(r.Context(), orgID, DefaultAuditListLimit)
 	if err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the audit log could not be read"))
 		return

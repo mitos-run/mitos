@@ -126,7 +126,7 @@ func TestSecretMutationAudited(t *testing.T) {
 	f.req(t, "POST", "/console/secrets", `{"name":"K","value":"`+value+`"}`, f.aliceAcct, f.aliceOrg)
 	f.req(t, "DELETE", "/console/secrets/K", "", f.aliceAcct, f.aliceOrg)
 
-	events, err := f.audit.List(context.Background(), f.aliceOrg)
+	events, err := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if err != nil {
 		t.Fatalf("audit list: %v", err)
 	}

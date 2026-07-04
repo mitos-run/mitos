@@ -360,7 +360,7 @@ func TestSinkCreateAndDeleteAuditCarryTargetType(t *testing.T) {
 		t.Fatalf("delete sink status %d, body=%s", rrDel.Code, rrDel.Body.String())
 	}
 
-	events, err := audit.List(context.Background(), orgA)
+	events, err := audit.List(context.Background(), orgA, 0)
 	if err != nil {
 		t.Fatalf("list audit: %v", err)
 	}

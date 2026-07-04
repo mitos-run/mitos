@@ -163,6 +163,17 @@ type AuditEvent struct {
 	At         time.Time `json:"at"`
 }
 
+// DefaultAuditListLimit is the page size GET /console/audit reads: enough for
+// the audit table's default view without pulling an org's entire history on
+// every load. MaxAuditListLimit is the cap the NDJSON export
+// (GET /console/audit/export) reads instead: it deliberately matches
+// MemAuditLog's own per-org retention cap, so an export can read everything
+// the store is guaranteed to still hold, durable or in-memory.
+const (
+	DefaultAuditListLimit = 200
+	MaxAuditListLimit     = 10000
+)
+
 // AuditRecorder is the org-scoped audit-log seam. No audit log existed in the
 // accounts service, so the console defines this minimal interface and ships an
 // in-memory tested implementation (MemAuditLog). The console records key
@@ -171,7 +182,8 @@ type AuditEvent struct {
 type AuditRecorder interface {
 	// Record appends an audit event. The event carries no secret.
 	Record(ctx context.Context, ev AuditEvent) error
-	// List returns the org's audit events in reverse-chronological order (most
-	// recent first). It only ever returns the named org's events.
-	List(ctx context.Context, orgID string) ([]AuditEvent, error)
+	// List returns up to limit of the org's audit events in reverse-chronological
+	// order (most recent first). limit <= 0 is treated as DefaultAuditListLimit.
+	// It only ever returns the named org's events.
+	List(ctx context.Context, orgID string, limit int) ([]AuditEvent, error)
 }

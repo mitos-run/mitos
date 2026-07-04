@@ -479,12 +479,12 @@ func TestSandboxTerminateOwnSucceedsAndAudits(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("terminate own status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if len(events) == 0 || events[0].Action != "sandbox.terminate" {
 		t.Errorf("expected a sandbox.terminate audit event, got %+v", events)
 	}
 	// The audit event must NOT have landed in bob's log.
-	bobEvents, _ := f.audit.List(context.Background(), f.bobOrg)
+	bobEvents, _ := f.audit.List(context.Background(), f.bobOrg, 0)
 	if len(bobEvents) != 0 {
 		t.Errorf("alice terminate leaked into bob audit log: %+v", bobEvents)
 	}

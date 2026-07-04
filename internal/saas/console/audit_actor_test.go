@@ -21,7 +21,7 @@ func TestAuditRecordsActorNameFromEmailFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("terminate status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if len(events) == 0 {
 		t.Fatal("expected an audit event")
 	}
@@ -49,7 +49,7 @@ func TestAuditActorLookupFailureLeavesActorNameEmpty(t *testing.T) {
 		Action:  "key.create",
 		Target:  "k1",
 	})
-	events, err := f.audit.List(context.Background(), f.aliceOrg)
+	events, err := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestKeyCreateAndRevokeAuditCarryKeyNameAndType(t *testing.T) {
 	}
 	decode(t, w, &created)
 
-	events, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	var createEv *AuditEvent
 	for i := range events {
 		if events[i].Action == "key.create" && events[i].Target == created.Key.ID {
@@ -105,7 +105,7 @@ func TestKeyCreateAndRevokeAuditCarryKeyNameAndType(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Fatalf("revoke status = %d body=%s", w2.Code, w2.Body.String())
 	}
-	events2, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events2, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	var revokeEv *AuditEvent
 	for i := range events2 {
 		if events2[i].Action == "key.revoke" && events2[i].Target == created.Key.ID {
@@ -129,7 +129,7 @@ func TestProjectCreateAuditCarriesProjectName(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create project status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if len(events) == 0 || events[0].Action != "project.create" {
 		t.Fatalf("expected a project.create event, got %+v", events)
 	}
@@ -158,7 +158,7 @@ func TestMemberRoleAuditCarriesTargetAccountName(t *testing.T) {
 		t.Fatalf("set role status = %d body=%s", w.Code, w.Body.String())
 	}
 
-	events, err := rf.con.deps.Audit.List(context.Background(), rf.orgID)
+	events, err := rf.con.deps.Audit.List(context.Background(), rf.orgID, 0)
 	if err != nil {
 		t.Fatalf("list audit: %v", err)
 	}

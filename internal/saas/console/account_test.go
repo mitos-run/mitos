@@ -281,7 +281,7 @@ func TestAccountSessionsRevokeAll(t *testing.T) {
 func TestProfileUpdateAuditTargetIsEmpty(t *testing.T) {
 	f := newAccountFixture(t)
 	f.req(t, "PATCH", "/console/account", `{"display_name":"New Name"}`, f.aliceAcct, f.aliceOrg)
-	events, err := f.con.deps.Audit.List(context.Background(), f.aliceOrg)
+	events, err := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
 	if err != nil {
 		t.Fatalf("list audit: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestSessionRevokeAuditCarriesSessionLabel(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
 	var ev *AuditEvent
 	for i := range events {
 		if events[i].Action == "session.revoke" {
@@ -340,7 +340,7 @@ func TestSessionRevokeAllAuditTargetIsEmpty(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
 	var ev *AuditEvent
 	for i := range events {
 		if events[i].Action == "session.revoke_all" {
