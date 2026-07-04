@@ -54,9 +54,15 @@ describe('renderAuditSentence', () => {
     expect(s.object).toBe('')
   })
 
-  it('renders profile.update with no object', () => {
-    const s = renderAuditSentence(ev({ action: 'profile.update', target: '' }), 'me')
+  it('renders profile.update with no object and correct grammar for "You"', () => {
+    const s = renderAuditSentence(ev({ actor_id: 'me', actor_name: 'Alice', action: 'profile.update', target: '' }), 'me')
     expect(s.object).toBe('')
+    expect(`${s.actor} ${s.verb}`).toBe('You updated the account profile')
+  })
+
+  it('renders session.revoke as "revoked session <label>"', () => {
+    const s = renderAuditSentence(ev({ action: 'session.revoke', target: 's1', target_name: 'browser' }), 'me')
+    expect(`${s.verb} ${s.object}`).toBe('revoked session browser')
   })
 
   it('falls back to the raw action code for an unknown action (e.g. a future invite.* action)', () => {
