@@ -52,8 +52,12 @@ query parameter, path, or body, and returns ONLY that org's data.
 | `/console/usage` | GET | current + historical usage and cost | `UsageStore` + `PriceList.Cost` |
 | `/console/billing` | GET | plan/status, spend, credit balance, dunning, ledger | billing ledger + status + caps + rates |
 | `/console/sandboxes` | GET | list running sandboxes | `SandboxControl` seam |
+| `/console/sandboxes` | POST | create a sandbox from a template | `SandboxControl.Create` |
 | `/console/sandboxes/{id}` | GET | inspect a sandbox | `SandboxControl` seam |
 | `/console/sandboxes/{id}` | DELETE | terminate a sandbox | `SandboxControl` seam |
+| `/console/sandboxes/{id}/fork` | POST | fork a sandbox into count copies (<=16) | `SandboxControl.Fork` |
+| `/console/sandboxes/{id}/exec` | POST | run one command (<=60s timeout) | `SandboxControl.Exec` |
+| `/console/sandboxes/{id}/logs/stream` | GET | live log tail over SSE | `LogStreamer` seam |
 | `/console/members` | GET | org members + roles | `AccountService.ListMembers` |
 | `/console/audit` | GET | org audit log | `AuditRecorder` seam |
 | `/console/templates` | GET | list templates | `TemplateLister` seam |
@@ -87,17 +91,33 @@ the seam, not just the handler.
 Live sandboxes are the deliberate differentiator. The BFF shapes the view and
 enforces org-scoping NOW behind two seams:
 
-- `SandboxControl` (list / inspect / terminate): the in-memory
-  `MemSandboxControl` is the tested default. The REAL implementation queries the
-  control plane (the controller's claim/sandbox records) scoped to one org. That
-  cluster query is the documented follow-up; the seam is the place org-scoping is
-  enforced, so swapping it in does not move the isolation boundary.
-- `LogStreamer` (live log tail): a documented seam that reuses the EXISTING SDK
-  exec/log streaming transport (forkd `:9091` to the guest agent over vsock). The
-  BFF's job is only to AUTHORIZE the stream: the sandbox must belong to the
-  caller's org, otherwise the streamer returns `not_found`. The transport itself
-  is already built and tested elsewhere; wiring the proxy (an HTTP chunked or
-  websocket bridge over the existing transport) is the follow-up.
+- `SandboxControl` (list / inspect / terminate / create / fork / exec): the
+  in-memory `MemSandboxControl` is the tested default. The REAL implementation
+  (`internal/saas/console/clustersandbox`) queries and mutates the control
+  plane (`v1.Sandbox` CRDs) scoped to one org. Create writes a `v1.Sandbox`
+  sourced from the chosen pool template; Fork creates COUNT separate top-level
+  `v1.Sandbox` objects (each `replicas=1`, `source.fromSandbox` set to the
+  source), deliberately differing from `agentcli.ClusterBackend.Fork`'s
+  one-object-with-`replicas=N` shape so every fork stays independently
+  addressable through this same seam and visible as its own node in the fork
+  tree; Exec dials the sandbox's own HTTP endpoint with its token Secret's
+  bearer token, the same transport and Secret convention the CLI's
+  `ClusterBackend` uses. KNOWN GAP: `SandboxSpec` has no per-sandbox resource
+  override (sizing lives on the pool template), so Create's requested
+  vcpu/mem are recorded as display-only annotations, not enforced; making
+  per-request sizing real needs either a CRD field or a catalog of
+  per-size pool templates.
+- `LogStreamer` (live log tail): a documented seam. Unlike create/fork/exec,
+  there is currently NO real transport at all (no forkd/guest RPC exposes a
+  sandbox's stdout/stderr), so the real cluster deployment wires an explicit
+  `UnsupportedRawLogStreamer` that reports `ErrUnsupported`, mapped to HTTP 501
+  on both the plain `GET .../logs` route and the SSE `GET .../logs/stream`
+  route, rather than silently serving an always-empty, always-successful
+  stream. The BFF's job is still to AUTHORIZE the stream first (the sandbox
+  must belong to the caller's org, otherwise `not_found`), so authorization is
+  proven independent of whether a transport exists. Building the real
+  transport (an HTTP chunked or websocket bridge, or a genuinely new
+  forkd/guest RPC) is the follow-up.
 
 ## What ships today
 
@@ -114,9 +134,13 @@ enforces org-scoping NOW behind two seams:
 
 ## Documented follow-ups
 
-- The SPA frontend (React/Next) that renders the BFF.
-- The real control-plane `SandboxControl` (cluster query) and the `LogStreamer`
-  proxy over the existing exec/log transport.
+- The `LogStreamer` real transport: no forkd/guest RPC exposes a sandbox's
+  stdout/stderr today; the cluster deployment reports HTTP 501 honestly rather
+  than faking a stream. See the `LogStreamer` bullet above.
+- Per-request sandbox resource sizing (vcpus/mem_gib on create): `SandboxSpec`
+  has no per-sandbox override field, so a console-created sandbox's actual
+  resources are still whatever its pool template configures; the requested
+  sizing is recorded for display only. See the `SandboxControl` bullet above.
 - The `TemplateLister` over the `SandboxPool` CRDs (inline `spec.template`).
 - Real Stripe invoice objects in the billing view (today it shows the credit
   ledger entries).
