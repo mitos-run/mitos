@@ -265,8 +265,10 @@ func TestWaitlistAdapterListAndApprove(t *testing.T) {
 		t.Fatalf("entries = %+v", entries)
 	}
 
-	if err := a.Approve(context.Background(), "waiting@example.com"); err != nil {
+	if alreadyApproved, err := a.Approve(context.Background(), "waiting@example.com"); err != nil {
 		t.Fatalf("Approve: %v", err)
+	} else if alreadyApproved {
+		t.Fatal("a fresh approval must not report alreadyApproved")
 	}
 	if ok, _ := allowlist.IsAllowed(context.Background(), "waiting@example.com"); !ok {
 		t.Fatal("Approve did not add the email to the allowlist")
@@ -281,7 +283,7 @@ func TestWaitlistAdapterListAndApprove(t *testing.T) {
 // rather than silently succeeding.
 func TestWaitlistAdapterApproveNotConfigured(t *testing.T) {
 	a := waitlistAdapter{pending: onboarding.NewMemPendingStore(), now: time.Now}
-	if err := a.Approve(context.Background(), "x@example.com"); !errors.Is(err, console.ErrWaitlistNotConfigured) {
+	if _, err := a.Approve(context.Background(), "x@example.com"); !errors.Is(err, console.ErrWaitlistNotConfigured) {
 		t.Fatalf("err = %v, want console.ErrWaitlistNotConfigured", err)
 	}
 }

@@ -103,11 +103,12 @@ node inventory, and the signup waitlist. It is gated by `isInstanceAdmin`
 
 | Endpoint | Method | Reads |
 | --- | --- | --- |
-| `/console/admin/overview` | GET | org count, running sandboxes across all orgs, node readiness (or `null` if no `NodeSource`), signup mode |
+| `/console/admin/overview` | GET | org count, running sandboxes across all orgs (plus `running_sandboxes_orgs`, how many orgs that rollup actually scanned), node readiness (or `null` if no `NodeSource`), signup mode |
 | `/console/admin/orgs` | GET | every org's plan tier, member count, running sandboxes, month-to-date usage (capped at the oldest 200 orgs for the rollup; `total` is always the true count) |
 | `/console/admin/nodes` | GET | the cluster's k8s nodes (name, ready, `mitos.run/kvm` label, `mitos.run/dedicated` taint, allocatable cpu/mem); `{"available": false}` with no Kubernetes client configured |
 | `/console/admin/waitlist` | GET | recorded waitlist entries (email, recorded time) |
-| `/console/admin/waitlist/{id}/approve` | POST | grants allowlist access to the entry's email and sends the "you're in" notification (`onboarding.ApproveWaitlistEntry`, the SAME mechanism `POST /internal/approve-signup` uses) |
+| `/console/admin/waitlist/{id}/approve` | POST | grants allowlist access to the entry's email and sends the "you're in" notification (`onboarding.ApproveWaitlistEntry`, the SAME mechanism `POST /internal/approve-signup` uses); 404 if the id does not decode to an email currently on the waitlist; idempotent (`"already_approved": true`, no second notification) if the email already held allowlist access |
+| `/console/admin/audit` | GET | this plane's own audit events (see below) |
 
 `Orgs` (`console.OrgDirectory`) is the one seam here that is deliberately NOT
 org-scoped: it lists every organization, because it backs this operator
@@ -117,17 +118,28 @@ is configured; unlike every other seam in this package, `New` does NOT fill
 that in with an in-memory default, since "no cluster" is a real, permanent
 state the handler must report honestly rather than paper over.
 
-KNOWN GAP: waitlist entries are only ever written when the onboarding
-funnel's `POST /onboarding/signup` route is mounted, which happens only when
-`MITOS_CONSOLE_SIGNUP` is on (see `docs/saas/onboarding.md`). In the default
-waitlist deployment there is currently no wired public entry point that
-calls `Service.SignUp` in `ModeWaitlist`, so `/console/admin/waitlist` is
-correctly plumbed to the funnel's `PendingStore` but may show nothing until
-that collection gap is closed (a documented follow-up, not this
-workstream's scope).
+`running_sandboxes` on the overview shares the SAME 200-org rollup cap
+`/console/admin/orgs` has; `running_sandboxes_orgs` is how many orgs it
+actually scanned (the capped subset), so the SPA can show the same "showing
+first N of Orgs orgs" honesty disclosure the orgs table has, instead of
+silently implying the tile covers every org once a deployment crosses the cap.
+
+Waitlist collection over HTTP: as of issue #718, a deployment in waitlist
+mode (self-serve signup disabled) mounts `POST /onboarding/waitlist {email}`
+(see `docs/saas/onboarding.md`), a minimal intake distinct from the full
+signup funnel, so `/console/admin/waitlist` is no longer plumbed to a
+`PendingStore` that nothing can ever write to.
 
 Every `/console/admin/...` handler is audited (`admin.*` actions,
-`TargetType` `"system"` for the read views, `"waitlist"` for approve).
+`TargetType` `"system"` for the read views, `"waitlist"` for approve),
+recorded under the reserved `OrgID` `console.InstanceAuditOrgID`
+(`"_instance"`, never a real org id) so these events are not invisible to
+every org-scoped audit view the way an empty `OrgID` would be; `GET
+/console/admin/audit` is the one place they surface. A FAILED
+`authorizeAdmin` attempt (unauthenticated, or authenticated but not an
+instance admin) is also audited as `admin.denied` (`TargetType` `"system"`,
+`Detail` the requested path only), so denied probing of this plane is
+itself visible there.
 
 ## Live-sandbox and log-streaming approach
 

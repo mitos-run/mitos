@@ -230,6 +230,11 @@ export type SessionView = {
 export type AdminOverview = {
   orgs: number
   running_sandboxes: number
+  // How many orgs running_sandboxes actually scanned (the oldest
+  // min(orgs, 200)): compare to orgs the SAME way AdminOrgsResponse's
+  // orgs.length/total pair is compared, to show a "showing sandboxes from
+  // the first N of orgs orgs" disclosure once a deployment crosses the cap.
+  running_sandboxes_orgs: number
   // null when no NodeSource is configured on this deployment (an honest
   // "not available" rather than a fabricated 0).
   nodes_ready: number | null
@@ -591,8 +596,16 @@ export const api = {
       credentials: 'same-origin',
     })
     if (!r.ok) throw new Error(await apiErrorMessage(r, 'approve waitlist entry'))
-    return (await r.json()) as { email: string; approved: boolean }
+    // already_approved is true when this email held allowlist access before
+    // this call: the entry was approved earlier, so no second notification
+    // was sent (idempotent; see internal/saas/console/admin.go).
+    return (await r.json()) as { email: string; approved: boolean; already_approved: boolean }
   },
+  // adminAudit reads the instance-operator plane's own audit events (issue
+  // #714): admin.* actions, including denied authorizeAdmin attempts, that
+  // an org's own GET /console/audit never surfaces (they carry no OrgID any
+  // tenant-scoped view would match).
+  adminAudit: () => get<{ events: AuditEvent[] }>('/console/admin/audit').then((r) => r.events ?? []),
 }
 
 export async function firstActivity(): Promise<FirstActivity> {

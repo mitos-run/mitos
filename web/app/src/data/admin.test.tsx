@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { useAdminOverview, useAdminOrgs, useAdminNodes, useAdminWaitlist, useApproveWaitlistEntry } from './admin'
+import { useAdminOverview, useAdminOrgs, useAdminNodes, useAdminWaitlist, useApproveWaitlistEntry, useAdminAudit } from './admin'
 
 function wrapper() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -17,11 +17,19 @@ function jsonResponse(body: unknown) {
 describe('useAdminOverview', () => {
   it('fetches the overview document', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ orgs: 3, running_sandboxes: 5, nodes_ready: 2, nodes_total: 2, signup_mode: 'waitlist' }),
+      jsonResponse({
+        orgs: 3,
+        running_sandboxes: 5,
+        running_sandboxes_orgs: 3,
+        nodes_ready: 2,
+        nodes_total: 2,
+        signup_mode: 'waitlist',
+      }),
     )
     const { result } = renderHook(() => useAdminOverview(), { wrapper: wrapper() })
     await waitFor(() => expect(result.current.data).toBeDefined())
     expect(result.current.data?.orgs).toBe(3)
+    expect(result.current.data?.running_sandboxes_orgs).toBe(3)
     expect(result.current.data?.signup_mode).toBe('waitlist')
   })
 })
@@ -63,9 +71,33 @@ describe('useAdminWaitlist / useApproveWaitlistEntry', () => {
     await waitFor(() => expect(list.result.current.data).toBeDefined())
     expect(list.result.current.data).toHaveLength(1)
 
-    fetchMock.mockResolvedValueOnce(jsonResponse({ email: 'email@example.com', approved: true }))
+    fetchMock.mockResolvedValueOnce(jsonResponse({ email: 'email@example.com', approved: true, already_approved: false }))
     const approve = renderHook(() => useApproveWaitlistEntry(), { wrapper: Wrapper })
     approve.result.current.mutate('ZW1haWxAZXhhbXBsZS5jb20')
     await waitFor(() => expect(approve.result.current.isSuccess).toBe(true))
+    expect(approve.result.current.data?.already_approved).toBe(false)
+  })
+})
+
+describe('useAdminAudit', () => {
+  it('fetches the instance-operator plane audit events', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        events: [
+          {
+            org_id: '_instance',
+            actor_id: 'a1',
+            action: 'admin.overview.view',
+            target: '',
+            detail: 'viewed the instance operator overview',
+            at: '2026-01-01T00:00:00Z',
+          },
+        ],
+      }),
+    )
+    const { result } = renderHook(() => useAdminAudit(), { wrapper: wrapper() })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(result.current.data).toHaveLength(1)
+    expect(result.current.data?.[0].action).toBe('admin.overview.view')
   })
 })

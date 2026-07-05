@@ -93,18 +93,20 @@ type EmailSender interface {
 // for a human clicking the link. It is NOT for production: a real sender never
 // retains tokens.
 type FakeEmailSender struct {
-	mu       sync.Mutex
-	sent     map[string]string // email -> last token sent
-	approved map[string]bool   // email -> approval sent
-	invited  map[string]string // email -> last invite token sent
+	mu            sync.Mutex
+	sent          map[string]string // email -> last token sent
+	approved      map[string]bool   // email -> approval sent
+	approvedCount map[string]int    // email -> how many times SendApproved was called
+	invited       map[string]string // email -> last invite token sent
 }
 
 // NewFakeEmailSender returns an empty fake sender.
 func NewFakeEmailSender() *FakeEmailSender {
 	return &FakeEmailSender{
-		sent:     map[string]string{},
-		approved: map[string]bool{},
-		invited:  map[string]string{},
+		sent:          map[string]string{},
+		approved:      map[string]bool{},
+		approvedCount: map[string]int{},
+		invited:       map[string]string{},
 	}
 }
 
@@ -121,6 +123,7 @@ func (f *FakeEmailSender) SendApproved(_ context.Context, email string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.approved[email] = true
+	f.approvedCount[email]++
 	return nil
 }
 
@@ -155,6 +158,15 @@ func (f *FakeEmailSender) Approved(email string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.approved[email]
+}
+
+// ApprovedCount returns how many times SendApproved has been called for
+// email. This is a TEST helper for asserting idempotent approval (issue
+// #714) never re-sends the notification.
+func (f *FakeEmailSender) ApprovedCount(email string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approvedCount[email]
 }
 
 // E2ETokenSink captures raw verify tokens at signup time so a QA harness can

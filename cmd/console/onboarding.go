@@ -391,10 +391,10 @@ func (a waitlistAdapter) List(ctx context.Context) ([]console.WaitlistEntry, err
 	return out, nil
 }
 
-func (a waitlistAdapter) Approve(ctx context.Context, email string) error {
+func (a waitlistAdapter) Approve(ctx context.Context, email string) (bool, error) {
 	if a.allowlist == nil || a.email == nil {
-		return console.ErrWaitlistNotConfigured
+		return false, console.ErrWaitlistNotConfigured
 	}
-	_, err := onboarding.ApproveWaitlistEntry(ctx, a.allowlist, a.email, email, "instance admin: waitlist approve", a.now())
-	return err
+	_, alreadyApproved, err := onboarding.ApproveWaitlistEntry(ctx, a.allowlist, a.email, email, "instance admin: waitlist approve", a.now())
+	return alreadyApproved, err
 }

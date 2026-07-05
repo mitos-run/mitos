@@ -71,7 +71,7 @@ describe('routes config', () => {
 })
 
 describe('Operate nav group (instance-operator plane)', () => {
-  const adminPaths = ['/admin', '/admin/orgs', '/admin/nodes', '/admin/waitlist']
+  const adminPaths = ['/admin', '/admin/orgs', '/admin/nodes', '/admin/waitlist', '/admin/audit']
 
   it('adds Operate to GROUP_ORDER after Billing', () => {
     expect(GROUP_ORDER).toContain('Operate')

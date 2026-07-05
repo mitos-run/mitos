@@ -318,12 +318,15 @@ func TestApproveWaitlistEntry_SuccessAddsAllowlistAndSendsEmail(t *testing.T) {
 	al := NewMemAllowlist(nil)
 	em := NewFakeEmailSender()
 
-	canonical, err := ApproveWaitlistEntry(context.Background(), al, em, "User+tag@Example.com", "approved via admin", fixedNow())
+	canonical, alreadyApproved, err := ApproveWaitlistEntry(context.Background(), al, em, "User+tag@Example.com", "approved via admin", fixedNow())
 	if err != nil {
 		t.Fatalf("ApproveWaitlistEntry: %v", err)
 	}
 	if canonical != "user@example.com" {
 		t.Fatalf("canonical = %q, want user@example.com", canonical)
+	}
+	if alreadyApproved {
+		t.Fatal("a fresh approval must not report alreadyApproved")
 	}
 	if ok, _ := al.IsAllowed(context.Background(), "user@example.com"); !ok {
 		t.Fatal("allowlist does not contain the approved canonical email")
@@ -339,7 +342,7 @@ func TestApproveWaitlistEntry_InvalidEmail(t *testing.T) {
 	al := NewMemAllowlist(nil)
 	em := NewFakeEmailSender()
 
-	_, err := ApproveWaitlistEntry(context.Background(), al, em, "not-an-email", "", fixedNow())
+	_, _, err := ApproveWaitlistEntry(context.Background(), al, em, "not-an-email", "", fixedNow())
 	if !errors.Is(err, ErrInvalidEmail) {
 		t.Fatalf("err = %v, want ErrInvalidEmail", err)
 	}
@@ -355,7 +358,7 @@ func TestApproveWaitlistEntry_InvalidEmail(t *testing.T) {
 func TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow(t *testing.T) {
 	al := NewMemAllowlist(nil)
 
-	_, err := ApproveWaitlistEntry(context.Background(), al, errSendApproved{}, "err@example.com", "", fixedNow())
+	_, _, err := ApproveWaitlistEntry(context.Background(), al, errSendApproved{}, "err@example.com", "", fixedNow())
 	if err == nil {
 		t.Fatal("expected an error when SendApproved fails")
 	}
@@ -364,5 +367,36 @@ func TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow(t *testing.T) {
 	}
 	if ok, _ := al.IsAllowed(context.Background(), "err@example.com"); !ok {
 		t.Fatal("allowlist must contain the row even when SendApproved fails")
+	}
+}
+
+// TestApproveWaitlistEntry_AlreadyApprovedDoesNotResend asserts a second
+// approval of the same canonical email is idempotent: SendApproved is
+// called only once (issue #714: a repeat admin approve must not re-send the
+// notification), and the second call reports alreadyApproved.
+func TestApproveWaitlistEntry_AlreadyApprovedDoesNotResend(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	_, first, err := ApproveWaitlistEntry(context.Background(), al, em, "repeat@example.com", "first approval", fixedNow())
+	if err != nil {
+		t.Fatalf("first approval: %v", err)
+	}
+	if first {
+		t.Fatal("first approval must not report alreadyApproved")
+	}
+
+	canonical, second, err := ApproveWaitlistEntry(context.Background(), al, em, "repeat@example.com", "second approval", fixedNow())
+	if err != nil {
+		t.Fatalf("second approval: %v", err)
+	}
+	if !second {
+		t.Fatal("second approval of the same email must report alreadyApproved")
+	}
+	if canonical != "repeat@example.com" {
+		t.Fatalf("canonical = %q, want repeat@example.com", canonical)
+	}
+	if got := em.ApprovedCount("repeat@example.com"); got != 1 {
+		t.Fatalf("SendApproved called %d times, want exactly 1", got)
 	}
 }

@@ -354,6 +354,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/admin/nodes", c.handleAdminNodes)
 	mux.HandleFunc("GET /console/admin/waitlist", c.handleAdminWaitlist)
 	mux.HandleFunc("POST /console/admin/waitlist/{id}/approve", c.handleAdminWaitlistApprove)
+	mux.HandleFunc("GET /console/admin/audit", c.handleAdminAudit)
 	c.mux = mux
 }
 
