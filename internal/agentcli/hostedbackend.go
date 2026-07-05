@@ -51,14 +51,14 @@ func inClusterBaseURL() string {
 //	ws (workspace verbs)     -> not supported; use the hosted dashboard or cluster mode
 //	template build/push      -> not supported; use cluster mode with a KVM node
 //
-// Fork semantics: Fork(sandboxID, n) issues n POST /v1/fork calls, each with
-// {"template": sandboxID, "id": newID}. The gateway resolves the sandbox to its
-// original template and re-forks from that snapshot -- exactly what
-// mcp.HTTPBackend.Fork does and what the Python SDK does (passing self.template
-// to /v1/fork). The source sandbox keeps running; each child is an independent
-// sibling cloned from the shared template snapshot, NOT a live memory fork of
-// the running sandbox. That live-fork capability requires the cluster backend
-// (source.fromSandbox on a KVM node).
+// Fork semantics: Fork(sandboxID, n) issues n POST /v1/sandboxes/{id}/fork
+// calls (one per child, each with a fresh Idempotency-Key), the TRUE live-fork
+// route the gateway serves since PR #710: the control plane checkpoints the
+// running source and boots each child from that checkpoint (source.fromSandbox),
+// so children inherit the source's live memory and disk. This is exactly what
+// mcp.HTTPBackend.Fork does and what the Python SDK's _fork_one does. Against
+// an older server without that route, Fork falls back once to the legacy flat
+// template route (POST /v1/fork).
 type HostedBackend struct {
 	baseURL string           // trailing slash stripped; set once at construction
 	apiKey  string           // bearer token; NEVER logged or placed in errors
@@ -179,12 +179,17 @@ func (b *HostedBackend) WriteFile(ctx context.Context, sandboxID, path, content 
 	return b.hb.WriteFile(ctx, sandboxID, path, content)
 }
 
-// Fork forks sandboxID into n independent siblings by issuing n POST /v1/fork
-// calls, each with {"template": sandboxID, "id": <random>}. The gateway
-// resolves the sandbox to its template and re-forks from that snapshot; the
-// source sandbox keeps running. This matches the mcp.HTTPBackend.Fork and
-// Python SDK fork behavior. A replicas value below 1 is treated as 1. On a
-// mid-loop failure the error names the already-created ids.
+// Fork live-forks sandboxID into n children by issuing n POST
+// /v1/sandboxes/{id}/fork calls (each with {"id": <child>, "pause_source":
+// true} and a fresh Idempotency-Key): the gateway checkpoints the RUNNING
+// source and boots each child from that checkpoint, so children inherit the
+// source's live memory and disk; the source keeps running. The old flat
+// POST /v1/fork {"template": sandboxID} route is only used as a one-shot
+// fallback against older servers (the hosted control plane resolves that
+// template field as a pool name and answers 404 `no such pool "sb-..."`).
+// This matches the mcp.HTTPBackend.Fork and Python SDK fork behavior. A
+// replicas value below 1 is treated as 1. On a mid-loop failure the error
+// names the already-created ids.
 func (b *HostedBackend) Fork(ctx context.Context, sandboxID string, n int) ([]string, error) {
 	return b.hb.Fork(ctx, sandboxID, n)
 }
@@ -194,35 +199,82 @@ func (b *HostedBackend) Terminate(ctx context.Context, sandboxID string) error {
 	return b.hb.Terminate(ctx, sandboxID)
 }
 
-// hostedSandboxEntry is one element of the GET /v1/sandboxes response.
+// hostedSandboxEntry is one element of the GET /v1/sandboxes response. It
+// covers BOTH wire shapes: the hosted gateway's entries carry id, phase,
+// endpoint, and a camelCase createdAt; the standalone sandbox-server's entries
+// carry id, template_id, endpoint, snake_case created_at, and fork_time_ms.
 type hostedSandboxEntry struct {
-	ID         string  `json:"id"`
-	TemplateID string  `json:"template_id"`
-	Endpoint   string  `json:"endpoint"`
-	CreatedAt  string  `json:"created_at"`
-	ForkTimeMs float64 `json:"fork_time_ms"`
+	ID         string `json:"id"`
+	TemplateID string `json:"template_id"`
+	Endpoint   string `json:"endpoint"`
+	Phase      string `json:"phase"`
+	CreatedAt  string `json:"created_at"`
+	// CreatedAtCamel is the hosted gateway's spelling of the creation
+	// timestamp; createdTime returns whichever key the server sent.
+	CreatedAtCamel string  `json:"createdAt"`
+	ForkTimeMs     float64 `json:"fork_time_ms"`
+}
+
+// createdTime returns the creation timestamp under whichever key the server
+// used (created_at on the standalone server, createdAt on the hosted gateway).
+func (s hostedSandboxEntry) createdTime() string {
+	if s.CreatedAt != "" {
+		return s.CreatedAt
+	}
+	return s.CreatedAtCamel
+}
+
+// decodeSandboxList decodes a GET /v1/sandboxes response body in EITHER wire
+// shape: the hosted gateway returns an object {"sandboxes": [...]}, while the
+// standalone sandbox-server returns a bare array.
+func decodeSandboxList(raw []byte) ([]hostedSandboxEntry, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var items []hostedSandboxEntry
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, fmt.Errorf("decode sandbox list array: %w", err)
+		}
+		return items, nil
+	}
+	var wrapped struct {
+		Sandboxes []hostedSandboxEntry `json:"sandboxes"`
+	}
+	if err := json.Unmarshal(trimmed, &wrapped); err != nil {
+		return nil, fmt.Errorf("decode sandbox list object: %w", err)
+	}
+	return wrapped.Sandboxes, nil
 }
 
 // List calls GET /v1/sandboxes and maps the results to SandboxInfo rows. The
 // namespace argument is ignored in hosted mode (the api key scopes visibility).
-// The Phase is always "Ready" because listed sandboxes are live by definition.
-// The Pool field carries the template id, the nearest analog to a pool name.
+// The Phase comes off the wire when the server reports one (the hosted gateway
+// does) and defaults to "Ready" otherwise (the standalone server lists only
+// live sandboxes). The Pool field carries the template id when the server
+// reports one, the nearest analog to a pool name.
 func (b *HostedBackend) List(ctx context.Context, _ string) ([]SandboxInfo, error) {
-	var items []hostedSandboxEntry
-	if err := b.do(ctx, http.MethodGet, "/v1/sandboxes", nil, &items); err != nil {
+	var raw json.RawMessage
+	if err := b.do(ctx, http.MethodGet, "/v1/sandboxes", nil, &raw); err != nil {
+		return nil, fmt.Errorf("list sandboxes: %w", err)
+	}
+	items, err := decodeSandboxList(raw)
+	if err != nil {
 		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
 	now := time.Now()
 	out := make([]SandboxInfo, 0, len(items))
 	for _, s := range items {
 		age := time.Duration(0)
-		if t, err := time.Parse(time.RFC3339, s.CreatedAt); err == nil {
+		if t, err := time.Parse(time.RFC3339, s.createdTime()); err == nil {
 			age = now.Sub(t)
+		}
+		phase := s.Phase
+		if phase == "" {
+			phase = "Ready"
 		}
 		out = append(out, SandboxInfo{
 			Name:     s.ID,
 			Pool:     s.TemplateID,
-			Phase:    "Ready",
+			Phase:    phase,
 			Node:     "",
 			Endpoint: s.Endpoint,
 			Age:      age,
