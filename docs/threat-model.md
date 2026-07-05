@@ -117,6 +117,14 @@ open, with a severity on the review rows) is preserved throughout.
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
 
+### Operator-selected AppArmor confinement
+
+The Helm chart leaves `forkd.appArmorProfile` unset by default, so AppArmor
+selection remains with the container runtime. Operators can explicitly select
+`Unconfined` or a pre-loaded `Localhost` profile for forkd. `Unconfined` removes
+AppArmor confinement, while a Localhost profile must be reviewed, loaded, and
+kept consistent on every eligible KVM node.
+
 ## 0. Default execution surface: the unprivileged husk pod (issue #18)
 
 Pod-native execution is now the DEFAULT (the controller runs

@@ -42,6 +42,8 @@ func TestSchemaRejectsUnknownTopLevelKey(t *testing.T) {
 func TestSchemaRejectsUnknownComponentKey(t *testing.T) {
 	renderExpectSchemaError(t, "console.typoKey=1")
 	renderExpectSchemaError(t, "forkd.enableNetwork=true")
+	renderExpectSchemaError(t, "forkd.appArmorProfile.typo=true")
+	renderExpectSchemaError(t, "forkd.appArmorProfile.localhostProfile=mitos-forkd")
 	renderExpectSchemaError(t, "gateway.enforce.trustedProxyHop=1")
 }
 
@@ -82,4 +84,22 @@ func TestSchemaAcceptsTalosProfile(t *testing.T) {
 	if !strings.Contains(string(out), "FOWNER") {
 		t.Fatal("talos profile did not add CAP_FOWNER to forkd")
 	}
+}
+
+// TestForkdAppArmorProfileRenders asserts the optional AppArmor profile is
+// absent by default and rendered when configured.
+func TestForkdAppArmorProfileRenders(t *testing.T) {
+	out := render(t)
+	if strings.Contains(out, "appArmorProfile:") {
+		t.Fatal("default chart render unexpectedly contains appArmorProfile")
+	}
+
+	out = render(
+		t,
+		"forkd.appArmorProfile.type=Localhost",
+		"forkd.appArmorProfile.localhostProfile=mitos-forkd",
+	)
+	mustContain(t, out, "appArmorProfile:")
+	mustContain(t, out, "type: Localhost")
+	mustContain(t, out, "localhostProfile: mitos-forkd")
 }
