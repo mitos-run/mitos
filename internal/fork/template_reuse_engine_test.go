@@ -64,12 +64,12 @@ func TestCreateTemplateEngineReusesHealthyTemplate(t *testing.T) {
 	seedHealthyTemplate(t, e, id)
 
 	built := false
-	e.runTemplateBuild = func(string, firecracker.VMConfig, []string, *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(string, firecracker.VMConfig, []string, *firecracker.WorkloadSpec, bool) error {
 		built = true
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/reuse-rootfs.ext4", nil, nil, nil, nil, false); err != nil {
+	if err := e.CreateTemplate(id, "/fake/reuse-rootfs.ext4", nil, nil, nil, nil, false, false); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if built {
@@ -94,7 +94,7 @@ func TestCreateTemplateEngineRebuildsCorruptedTemplate(t *testing.T) {
 	oldTemplateDir := templateDir(e.dataDir, id)
 
 	built := false
-	e.runTemplateBuild = func(gotID string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(gotID string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec, _ bool) error {
 		built = true
 		// The pre-rebuild delete must run BEFORE runTemplateBuild: the old
 		// (corrupted) template directory must already be gone.
@@ -105,7 +105,7 @@ func TestCreateTemplateEngineRebuildsCorruptedTemplate(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/rebuild-rootfs.ext4", nil, nil, nil, nil, false); err != nil {
+	if err := e.CreateTemplate(id, "/fake/rebuild-rootfs.ext4", nil, nil, nil, nil, false, false); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if !built {
@@ -133,7 +133,7 @@ func TestCreateTemplateEngineForceRebuildAlwaysRebuilds(t *testing.T) {
 	oldTemplateDir := templateDir(e.dataDir, id)
 
 	built := false
-	e.runTemplateBuild = func(gotID string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(gotID string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec, _ bool) error {
 		built = true
 		if _, err := os.Stat(oldTemplateDir); !os.IsNotExist(err) {
 			t.Errorf("expected old template dir %s to be deleted before a forced rebuild, stat err = %v", oldTemplateDir, err)
@@ -142,7 +142,7 @@ func TestCreateTemplateEngineForceRebuildAlwaysRebuilds(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/force-rebuild-rootfs.ext4", nil, nil, nil, nil, true); err != nil {
+	if err := e.CreateTemplate(id, "/fake/force-rebuild-rootfs.ext4", nil, nil, nil, nil, true, false); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if !built {
