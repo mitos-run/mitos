@@ -514,3 +514,42 @@ func (c *Console) handleAdminWaitlistApprove(w http.ResponseWriter, r *http.Requ
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"email": email, "approved": true})
 }
+
+// --- GET /console/admin/nodes ---
+
+// adminNodesResponse is the wire shape of GET /console/admin/nodes.
+// Available is false when no NodeSource is configured (Deps.Nodes == nil,
+// the honest "not available in this deployment" state) OR when the
+// configured source failed to list nodes (a cluster hiccup is reported the
+// same way as "not configured": either way the operator gets no real data,
+// and a stale/fabricated node list would be worse than an honest blank).
+type adminNodesResponse struct {
+	Available bool       `json:"available"`
+	Nodes     []NodeView `json:"nodes"`
+}
+
+// handleAdminNodes serves GET /console/admin/nodes.
+func (c *Console) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	resp := adminNodesResponse{Nodes: []NodeView{}}
+	if c.deps.Nodes != nil {
+		if nodes, err := c.deps.Nodes.Nodes(r.Context()); err == nil {
+			resp.Available = true
+			if nodes != nil {
+				resp.Nodes = nodes
+			}
+		}
+	}
+	c.audit(r.Context(), AuditEvent{
+		ActorID:    accountID,
+		Action:     "admin.nodes.view",
+		TargetType: "system",
+		Detail:     "viewed the node inventory",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, resp)
+}

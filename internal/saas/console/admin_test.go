@@ -495,3 +495,115 @@ func TestAdminWaitlistForbiddenForNonAdmin(t *testing.T) {
 		t.Fatalf("approve status = %d, want 403", w.Code)
 	}
 }
+
+// --- GET /console/admin/nodes ---
+
+// fakeNodeSource is a test NodeSource double.
+type fakeNodeSource struct {
+	nodes []NodeView
+	err   error
+}
+
+func (f *fakeNodeSource) Nodes(context.Context) ([]NodeView, error) { return f.nodes, f.err }
+
+// TestAdminNodesUnconfiguredReportsUnavailable asserts a Console with no
+// NodeSource wired reports {"available": false, "nodes": []}, never a
+// fabricated node list.
+func TestAdminNodesUnconfiguredReportsUnavailable(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/nodes", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var body struct {
+		Available bool       `json:"available"`
+		Nodes     []NodeView `json:"nodes"`
+	}
+	decode(t, w, &body)
+	if body.Available {
+		t.Error("expected available=false with no NodeSource configured")
+	}
+	if len(body.Nodes) != 0 {
+		t.Errorf("expected no nodes, got %+v", body.Nodes)
+	}
+}
+
+// TestAdminNodesConfiguredReportsNodes asserts a configured NodeSource is
+// reported available with its node list passed through.
+func TestAdminNodesConfiguredReportsNodes(t *testing.T) {
+	fn := &fakeNodeSource{nodes: []NodeView{
+		{Name: "node-1", Ready: true, KVM: true, Dedicated: true, AllocatableCPU: "16", AllocatableMem: "62Gi"},
+	}}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Nodes:               fn,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/nodes", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var body struct {
+		Available bool       `json:"available"`
+		Nodes     []NodeView `json:"nodes"`
+	}
+	decode(t, w, &body)
+	if !body.Available {
+		t.Error("expected available=true with a configured NodeSource")
+	}
+	if len(body.Nodes) != 1 || body.Nodes[0].Name != "node-1" {
+		t.Fatalf("nodes = %+v", body.Nodes)
+	}
+}
+
+// TestAdminNodesSourceErrorReportsUnavailable asserts a NodeSource error
+// degrades to available=false rather than a 500, since a cluster hiccup
+// should not break the whole admin nodes page.
+func TestAdminNodesSourceErrorReportsUnavailable(t *testing.T) {
+	fn := &fakeNodeSource{err: context.DeadlineExceeded}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Nodes:               fn,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/nodes", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var body struct {
+		Available bool `json:"available"`
+	}
+	decode(t, w, &body)
+	if body.Available {
+		t.Error("expected available=false when the NodeSource errors")
+	}
+}
+
+// TestAdminNodesForbiddenForNonAdmin asserts the same 403 gating as every
+// other /console/admin/... endpoint.
+func TestAdminNodesForbiddenForNonAdmin(t *testing.T) {
+	f := newAdminFixture(t, Deps{Capabilities: Capabilities{Edition: "hosted"}})
+	regular, org, err := f.accounts.SignUp(context.Background(), "regular@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/nodes", regular.ID, org.ID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}

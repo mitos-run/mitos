@@ -279,6 +279,10 @@ func main() {
 		// deliberately un-scoped to any one org (see console.OrgDirectory).
 		InstanceAdminEmails: instanceAdminEmailsFromEnv(),
 		Orgs:                store,
+		// The node-inventory seam for GET /console/admin/nodes: the real
+		// cluster lister when a kube client is available, nil (honest
+		// "not available") otherwise.
+		Nodes: buildNodeSource(logger),
 		// The waitlist view/approve seam: reads the SAME pendingStore the
 		// funnel writes to and approves through the SAME allowlist +
 		// EmailSender mountOnboarding wires below, so an admin approving a
