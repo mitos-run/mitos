@@ -36,6 +36,8 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 	switch req.Op {
 	case "sandbox.create":
 		return k.create(ctx, req)
+	case "sandbox.fork":
+		return k.fork(ctx, req)
 	case "sandbox.status":
 		return k.status(ctx, req)
 	case "sandbox.list":
@@ -60,7 +62,7 @@ func (k *K8sControlPlane) Forward(ctx context.Context, req saas.ForwardRequest) 
 		return errResp(apierr.Get(apierr.CodeNotFound).
 			WithMessage("no such route or operation").
 			WithCause(fmt.Sprintf("the request did not map to a known gateway operation (resolved op %q)", req.Op)).
-			WithRemediation("Use a documented route: POST or GET /v1/sandboxes, GET or DELETE /v1/sandboxes/<id>, POST or GET /v1/templates, POST /v1/fork, or the runtime paths under /v1/sandboxes/<id>/.")), nil
+			WithRemediation("Use a documented route: POST or GET /v1/sandboxes, GET or DELETE /v1/sandboxes/<id>, POST /v1/sandboxes/<id>/fork, POST or GET /v1/templates, POST /v1/fork, or the runtime paths under /v1/sandboxes/<id>/.")), nil
 	}
 }
 
@@ -103,6 +105,7 @@ type secretMountReq struct {
 // and the per-sandbox token (returned ONLY here). On Failed it returns the
 // rejection condition as an LLM-legible 4xx; on timeout a 504-style error.
 func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (saas.ForwardResponse, error) {
+	startedAt := k.now()
 	var body createBody
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -211,12 +214,16 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		}
 	}
 
-	return k.pollReady(ctx, ns, name, req.OrgID)
+	return k.pollReady(ctx, ns, name, startedAt)
 }
 
 // pollReady blocks until the sandbox reaches Ready (returns 201 + token), Failed
-// (returns the rejection message), or the readiness timeout (504-style).
-func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name, orgID string) (saas.ForwardResponse, error) {
+// (returns the rejection message), a terminal Rejected condition (409 with the
+// controller's actionable message; the fork engine records it without a Failed
+// phase, so waiting on the phase alone would misreport it as a timeout), or the
+// readiness timeout (504-style). startedAt is when the create or fork op began;
+// it feeds the observed-latency fallback in the ready payload.
+func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name string, startedAt time.Time) (saas.ForwardResponse, error) {
 	deadline := k.now().Add(k.readyTimeout)
 	ticker := time.NewTicker(k.pollInterval)
 	defer ticker.Stop()
@@ -235,10 +242,19 @@ func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name, orgID string)
 
 		switch sb.Status.Phase {
 		case v1.SandboxReady:
-			return k.readyResponse(ctx, &sb)
+			return k.readyResponse(ctx, &sb, startedAt)
 		case v1.SandboxFailed:
 			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
 				WithCause("the sandbox failed to start: "+failureReason(&sb)), http.StatusBadGateway)), nil
+		}
+
+		// A terminal Rejected condition (the fork engine's secret-inheritance
+		// default-deny) is recorded WITHOUT a Failed phase; surface the
+		// controller's actionable message instead of pending into a timeout.
+		if msg, rejected := rejectedReason(&sb); rejected {
+			return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
+				WithMessage("the sandbox was rejected by the controller").
+				WithCause(msg), http.StatusConflict)), nil
 		}
 
 		if !k.now().Before(deadline) {
@@ -256,39 +272,121 @@ func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name, orgID string)
 }
 
 // readyResponse reads the per-sandbox token Secret and returns the 201 create
-// payload. The token is returned ONLY here and is never logged.
+// payload. The token is returned ONLY here and is never logged. It serves BOTH
+// origins: a pool claim (source.poolRef, endpoint and token on the object
+// itself) and a live fork (source.fromSandbox, whose endpoint and token live on
+// the fork's first CHILD; the gateway fork route creates single-child forks).
 //
-// The response includes template_id (the pool name the sandbox was forked from)
-// and fork_time_ms so the Python SDK DirectSandbox constructor can parse it
-// without a KeyError: SandboxServer.fork and DirectSandbox._fork_one both read
-// data["template_id"] and data["fork_time_ms"] from the JSON body.
-func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox) (saas.ForwardResponse, error) {
-	endpoint := sb.Status.Endpoint
-	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
+// The response includes template_id (the pool the sandbox descends from; for a
+// fork, the SOURCE's pool) and fork_time_ms so the Python SDK DirectSandbox
+// constructor can parse it without a KeyError: SandboxServer.fork and
+// DirectSandbox._fork_one both read data["template_id"] and
+// data["fork_time_ms"] from the JSON body.
+func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox, startedAt time.Time) (saas.ForwardResponse, error) {
+	endpoint := runtimeEndpoint(sb)
+	token, err := k.readSandboxToken(ctx, sb)
 	if err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the sandbox is ready but its access token secret could not be read")), nil
-	}
-	poolName := ""
-	if sb.Spec.Source.PoolRef != nil {
-		poolName = sb.Spec.Source.PoolRef.Name
 	}
 	payload := map[string]any{
 		"id":           sb.Name,
 		"endpoint":     endpoint,
 		"token":        token,
 		"phase":        string(v1.SandboxReady),
-		"template_id":  poolName,
-		"fork_time_ms": 0.0,
+		"template_id":  k.templateID(ctx, sb),
+		"fork_time_ms": forkTimeMs(sb, startedAt, k.now()),
 	}
 	return jsonResp(http.StatusCreated, payload), nil
 }
 
-// readToken reads data.token from the controller-owned <name>-sandbox-token
-// Secret in the sandbox namespace.
-func (k *K8sControlPlane) readToken(ctx context.Context, ns, name string) (string, error) {
+// forkTimeMs is the honest fork latency for the ready payload: the
+// engine-measured startup latency the controller recorded (a pool claim stamps
+// status.startupLatencyMs; a live fork stamps the child's startupLatencyMs),
+// falling back to the control plane's own observed submit-to-Ready wall time
+// when the engine value is absent. Never a hardcoded zero.
+func forkTimeMs(sb *v1.Sandbox, startedAt, now time.Time) float64 {
+	if sb.Status.StartupLatencyMs > 0 {
+		return float64(sb.Status.StartupLatencyMs)
+	}
+	if len(sb.Status.Children) > 0 && sb.Status.Children[0].StartupLatencyMs > 0 {
+		return float64(sb.Status.Children[0].StartupLatencyMs)
+	}
+	elapsed := now.Sub(startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return float64(elapsed.Milliseconds())
+}
+
+// templateID is the pool name the sandbox descends from: the poolRef for a
+// claim, or the SOURCE's poolRef for a fromSandbox fork (best-effort: a source
+// deleted after the fork completed yields ""). The SDK stores it as the child's
+// template.
+func (k *K8sControlPlane) templateID(ctx context.Context, sb *v1.Sandbox) string {
+	if sb.Spec.Source.PoolRef != nil {
+		return sb.Spec.Source.PoolRef.Name
+	}
+	if src := sb.Spec.Source.FromSandbox; src != nil {
+		var parent v1.Sandbox
+		if err := k.c.Get(ctx, client.ObjectKey{Namespace: sb.Namespace, Name: src.Name}, &parent); err == nil {
+			if parent.Spec.Source.PoolRef != nil {
+				return parent.Spec.Source.PoolRef.Name
+			}
+		}
+	}
+	return ""
+}
+
+// runtimeEndpoint is the address runtime traffic for sb targets: the object's
+// own endpoint for a pool claim, or the first fork child's endpoint for a
+// fromSandbox fork (the fork object is the fan-out record; the controller
+// stamps endpoints on status.children, never on the fork object itself).
+func runtimeEndpoint(sb *v1.Sandbox) string {
+	if sb.Status.Endpoint != "" {
+		return sb.Status.Endpoint
+	}
+	if len(sb.Status.Children) > 0 {
+		return sb.Status.Children[0].Endpoint
+	}
+	return ""
+}
+
+// tokenSecretNameFor is the controller-owned token Secret for runtime access to
+// sb: <name>-sandbox-token for a pool claim; for a fromSandbox fork the tokens
+// are per CHILD (<child>-sandbox-token, reissued so the source's token never
+// opens a fork), and the gateway fork route creates single-child forks, so the
+// first child's Secret is the one.
+func tokenSecretNameFor(sb *v1.Sandbox) string {
+	if sb.Spec.Source.FromSandbox != nil && len(sb.Status.Children) > 0 {
+		return sb.Status.Children[0].Name + tokenSecretSuffix
+	}
+	return sb.Name + tokenSecretSuffix
+}
+
+// runtimeSandboxID is the sandbox id the DAEMON serving runtimeEndpoint(sb)
+// knows the VM by: the object name for a pool claim, or the first child's
+// engine-registered id for a fromSandbox fork. It rides X-Sandbox-Id and the
+// lifecycle body so raw-forkd (a shared per-node endpoint that routes by id)
+// addresses the right VM; a single-sandbox husk endpoint ignores it.
+func runtimeSandboxID(sb *v1.Sandbox) string {
+	if sb.Status.Endpoint == "" && len(sb.Status.Children) > 0 && sb.Status.Children[0].SandboxID != "" {
+		return sb.Status.Children[0].SandboxID
+	}
+	return sb.Name
+}
+
+// readSandboxToken reads the bearer token for runtime access to sb from its
+// controller-owned Secret (fork-aware via tokenSecretNameFor).
+func (k *K8sControlPlane) readSandboxToken(ctx context.Context, sb *v1.Sandbox) (string, error) {
+	return k.readToken(ctx, sb.Namespace, tokenSecretNameFor(sb))
+}
+
+// readToken reads data.token from the named controller-owned Secret in the
+// sandbox namespace.
+func (k *K8sControlPlane) readToken(ctx context.Context, ns, secretName string) (string, error) {
 	var secret corev1.Secret
-	key := client.ObjectKey{Namespace: ns, Name: name + tokenSecretSuffix}
+	key := client.ObjectKey{Namespace: ns, Name: secretName}
 	if err := k.c.Get(ctx, key, &secret); err != nil {
 		return "", fmt.Errorf("read token secret %s/%s: %w", ns, key.Name, err)
 	}
@@ -297,6 +395,18 @@ func (k *K8sControlPlane) readToken(ctx context.Context, ns, name string) (strin
 		return "", fmt.Errorf("token secret %s/%s has no token", ns, key.Name)
 	}
 	return tok, nil
+}
+
+// rejectedReason reports whether the controller recorded a terminal Rejected
+// condition on the sandbox and returns its message.
+func rejectedReason(sb *v1.Sandbox) (string, bool) {
+	for i := range sb.Status.Conditions {
+		c := sb.Status.Conditions[i]
+		if c.Type == "Rejected" && c.Status == metav1.ConditionTrue {
+			return c.Message, true
+		}
+	}
+	return "", false
 }
 
 // status returns the org-scoped sandbox status. A sandbox that does not exist OR
@@ -379,12 +489,13 @@ func (k *K8sControlPlane) getOwned(ctx context.Context, orgID, name string) (*v1
 }
 
 // sandboxSummary is the per-sandbox JSON in status and list responses. It never
-// carries the token.
+// carries the token. The endpoint is fork-aware (runtimeEndpoint), so a live
+// fork's status names the child endpoint runtime traffic actually targets.
 func sandboxSummary(sb *v1.Sandbox) map[string]any {
 	return map[string]any{
 		"id":        sb.Name,
 		"phase":     string(sb.Status.Phase),
-		"endpoint":  sb.Status.Endpoint,
+		"endpoint":  runtimeEndpoint(sb),
 		"createdAt": sb.CreationTimestamp.UTC().Format(time.RFC3339),
 	}
 }

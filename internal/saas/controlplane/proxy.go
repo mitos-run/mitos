@@ -45,12 +45,15 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 	if aerr := terminalRuntimeError(sb); aerr != nil {
 		return errResp(*aerr), nil
 	}
-	if sb.Status.Endpoint == "" {
+	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
+	// endpoint and (reissued) token on its first CHILD, never on the fork object.
+	endpoint := runtimeEndpoint(sb)
+	if endpoint == "" {
 		return errResp(apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", id))), nil
 	}
 
-	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
+	token, err := k.readSandboxToken(ctx, sb)
 	if err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the per-sandbox access token secret could not be read")), nil
@@ -64,7 +67,7 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 		}
 	}
 
-	target := "http://" + sb.Status.Endpoint + connectService + method
+	target := "http://" + endpoint + connectService + method
 	httpMethod := req.Method
 	if httpMethod == "" {
 		httpMethod = http.MethodPost
@@ -80,7 +83,7 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 	// set from the control-plane-resolved name, never trusted from the client.
 	copyRuntimeHeaders(outReq.Header, req.Header)
 	outReq.Header.Set("Authorization", "Bearer "+token)
-	outReq.Header.Set("X-Sandbox-Id", sb.Name)
+	outReq.Header.Set("X-Sandbox-Id", runtimeSandboxID(sb))
 
 	resp, err := k.httpClient.Do(outReq)
 	if err != nil {

@@ -36,16 +36,19 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 	if aerr := terminalRuntimeError(sb); aerr != nil {
 		return saas.RuntimeTarget{}, aerr
 	}
-	if sb.Status.Endpoint == "" {
+	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
+	// endpoint and (reissued) token on its first CHILD, never on the fork object.
+	endpoint := runtimeEndpoint(sb)
+	if endpoint == "" {
 		e := apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", id))
 		return saas.RuntimeTarget{}, &e
 	}
-	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
+	token, err := k.readSandboxToken(ctx, sb)
 	if err != nil {
 		e := apierr.Get(apierr.CodeInternal).
 			WithCause("the per-sandbox access token secret could not be read")
 		return saas.RuntimeTarget{}, &e
 	}
-	return saas.RuntimeTarget{Endpoint: sb.Status.Endpoint, Token: token, SandboxID: sb.Name}, nil
+	return saas.RuntimeTarget{Endpoint: endpoint, Token: token, SandboxID: runtimeSandboxID(sb)}, nil
 }
