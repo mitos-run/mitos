@@ -102,7 +102,7 @@ function BoxesSection({ topUpAvailable, onManageBilling }: { topUpAvailable: boo
       ) : !boxes || boxes.length === 0 ? (
         <EmptyState title="No boxes available" body="The reserved-capacity catalog could not be loaded." />
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
+        <div className="stat-grid" style={{ marginBottom: 'var(--space-4)' }}>
           {boxes.map((b) => (
             <div key={b.key} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
               <strong>{b.vcpu} vCPU / {b.mem_gib} GiB</strong>
@@ -222,7 +222,7 @@ export function Billing() {
             </button>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 'var(--space-4)', marginBottom: 'var(--space-6)' }}>
+          <div className="stat-grid" style={{ marginBottom: 'var(--space-6)' }}>
             <StatTile label="Balance" value={fmtDollars(data.balance_cents)} />
             <StatTile label="Spend" value={fmtDollars(data.spend_cents)} />
             <StatTile

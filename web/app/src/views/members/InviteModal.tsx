@@ -81,16 +81,7 @@ export function InviteModal({ onClose }: InviteModalProps) {
 
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'color-mix(in srgb, black 60%, transparent)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 100,
-        padding: 'var(--space-4)',
-      }}
+      className="modal-backdrop"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
@@ -99,8 +90,7 @@ export function InviteModal({ onClose }: InviteModalProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="invite-modal-title"
-        className="card"
-        style={{ width: '100%', maxWidth: '480px', padding: 'var(--space-6)' }}
+        className="card modal"
       >
         <h2 id="invite-modal-title" style={{ marginTop: 0, marginBottom: 'var(--space-2)' }}>
           Invite people

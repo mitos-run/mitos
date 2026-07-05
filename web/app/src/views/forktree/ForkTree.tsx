@@ -51,7 +51,12 @@ function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => voi
   }
 
   return (
-    <aside role="region" aria-label={`Details for sandbox ${node.id}`} className="card" style={{ padding: 'var(--space-5)', marginBottom: 'var(--space-5)' }}>
+    <aside
+      role="region"
+      aria-label={`Details for sandbox ${node.id}`}
+      className="card fork-node-panel"
+      style={{ padding: 'var(--space-5)', marginBottom: 'var(--space-5)' }}
+    >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
         <h3 className="mono" style={{ margin: 0 }}>{node.id}</h3>
         <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="Close details">
@@ -93,6 +98,11 @@ function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => voi
 // up to MAX_R. A modest logarithmic scale avoids huge nodes dominating.
 const MIN_R = 10
 const MAX_R = 28
+
+// Minimum invisible hit-target radius: half of the 44px touch-target
+// recommendation, so a small (MIN_R = 10) node is still comfortably tappable
+// on a phone/tablet even though its visible circle is much smaller.
+const MIN_HIT_R = 22
 
 function nodeRadius(node: PositionedNode, maxDirty: number): number {
   if (maxDirty <= 0 || node.private_dirty_bytes <= 0) return MIN_R
@@ -195,6 +205,16 @@ export function ForkTree() {
             const cls = nodeClass(node)
             return (
               <g key={node.id} onClick={() => setSelectedId(node.id)} style={{ cursor: 'pointer' }}>
+                {/* Invisible hit-target circle: enlarges the tappable area to
+                    at least a 44px diameter without changing the visible node
+                    size, so small nodes stay comfortably tappable on touch. */}
+                <circle
+                  aria-hidden="true"
+                  cx={node.x}
+                  cy={node.y}
+                  r={Math.max(r, MIN_HIT_R)}
+                  fill="transparent"
+                />
                 <circle
                   className={cls}
                   cx={node.x}

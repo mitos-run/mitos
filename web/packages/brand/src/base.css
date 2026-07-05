@@ -950,16 +950,105 @@ html[data-reduce-motion="1"] * {
   margin: var(--space-2) 0 0;
 }
 
-/* The action slot keeps the primary action aligned to the title baseline. */
+/* The action slot keeps the primary action aligned to the title baseline.
+   flex-wrap: multiple actions never force a horizontal scroll; they wrap to
+   their own line instead. */
 .page-header-actions {
   flex-shrink: 0;
   display: flex;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+/* Stat tile grids (Usage, Billing balance/spend, Boxes catalog): auto-fill
+   columns that collapse to one on a narrow viewport. The min() wrapper is the
+   overflow-safe form of minmax() (see .cockpit-grid above): the track's
+   minimum is clamped to 100% of the container, so a viewport (or nested
+   panel) narrower than the nominal tile width never forces a horizontal
+   scrollbar on the page body. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+  gap: var(--space-4);
+}
+
+/* Shared modal: centered card on desktop, full-screen sheet on small phones.
+   Used by InviteModal and NewSandboxModal (both dialog-role confirmations). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--space-4);
+}
+
+.modal {
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100dvh - 2 * var(--space-4));
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+/* Below 480px width the modal becomes a full-screen sheet: no floating card,
+   no backdrop margin, safe-area padding so notches/home-indicators never
+   clip the close/cancel controls. */
+@media (max-width: 480px) {
+  .modal-backdrop {
+    padding: 0;
+  }
+
+  .modal {
+    max-width: 100dvw;
+    width: 100dvw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    padding: calc(var(--space-5) + env(safe-area-inset-top)) var(--space-4)
+      calc(var(--space-5) + env(safe-area-inset-bottom));
+  }
+}
+
+/* Fork-tree node detail panel: a normal card on desktop; a bottom sheet
+   pinned to the viewport edge on phones, so opening it never pushes the
+   accessible table further down an already-tall page. */
+@media (max-width: 480px) {
+  .fork-node-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    margin: 0;
+    max-height: 80vh;
+    overflow-y: auto;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom));
+  }
+}
+
+/* Coarse pointers (touch): bump interactive chrome that is otherwise sized
+   for a mouse cursor up to the 44px minimum hit-area recommendation. Gated
+   on pointer:coarse so desktop density is untouched. */
+@media (pointer: coarse) {
+  .btn,
+  .search-trigger,
+  .palette li button {
+    min-height: 44px;
+  }
+
+  .palette li button {
+    display: flex;
+    align-items: center;
   }
 }

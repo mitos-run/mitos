@@ -105,6 +105,18 @@ describe('NewSandboxModal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  // Mobile: the dialog carries the shared .modal class so base.css's
+  // <=480px media query turns it into a full-screen sheet instead of a small
+  // floating card, and the backdrop carries .modal-backdrop so its padding
+  // collapses to 0 at that breakpoint (see base.css).
+  it('carries the shared modal classes for the mobile full-screen sheet treatment', () => {
+    mockFetch()
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.className).toContain('modal')
+    expect(dialog.parentElement?.className).toContain('modal-backdrop')
+  })
+
   it('shows a message and no form when there are no templates', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)

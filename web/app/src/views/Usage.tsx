@@ -33,7 +33,7 @@ export function Usage() {
           body="Metrics will appear here once sandboxes have been run."
         />
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 'var(--space-4)' }}>
+        <div className="stat-grid">
           {Object.entries(totals).map(([key, value]) => (
             <StatTile
               key={key}

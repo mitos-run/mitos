@@ -87,6 +87,18 @@ describe('Billing view', () => {
     expect(screen.getByText('Hard cap')).toBeInTheDocument()
   })
 
+  // Mobile: the balance/spend/cap tiles use the shared .stat-grid class,
+  // whose overflow-safe minmax() collapses the grid to one column on a
+  // narrow viewport without ever forcing a horizontal scrollbar (see
+  // base.css's .stat-grid rule).
+  it('lays out the balance/spend/cap tiles in the shared overflow-safe stat-grid', async () => {
+    const { container } = await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByText('Balance')).toBeInTheDocument())
+    const grid = screen.getByText('Balance').closest('.stat-grid')
+    expect(grid).not.toBeNull()
+    expect(container.querySelectorAll('.stat-grid').length).toBeGreaterThanOrEqual(1)
+  })
+
   it('renders the ledger table with the entry reason', async () => {
     await renderAt('/billing', caps)
     await waitFor(() => expect(screen.getByText('signup credit')).toBeInTheDocument())

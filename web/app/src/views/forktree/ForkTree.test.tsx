@@ -119,6 +119,22 @@ describe('ForkTree view', () => {
     expect(screen.queryByText(/not found/i)).not.toBeInTheDocument()
   })
 
+  // Touch: each node's small visible circle (radius as low as MIN_R=10, a
+  // 20px diameter) sits behind a larger invisible hit-target circle so a
+  // tap on a phone/tablet has a comfortable >=44px-diameter target even
+  // though the visible node stays small. The SVG itself stays aria-hidden
+  // (the table is the a11y source of truth), so this only affects pointer
+  // hit-testing, not the accessibility tree.
+  it('gives every node an invisible hit-target circle at least 22px in radius', async () => {
+    const { container } = renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const hitCircles = Array.from(container.querySelectorAll('circle[fill="transparent"]'))
+    expect(hitCircles.length).toBe(2)
+    hitCircles.forEach((c) => {
+      expect(Number(c.getAttribute('r'))).toBeGreaterThanOrEqual(22)
+    })
+  })
+
   it('shows an error state when the fetch fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
@@ -175,6 +191,17 @@ describe('ForkTree node detail panel', () => {
     expect(screen.getByRole('region', { name: /details for sandbox root/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /close details/i }))
     expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
+  })
+
+  // Mobile: the panel carries fork-node-panel so base.css's <=480px media
+  // query pins it to the bottom of the viewport as a sheet, instead of
+  // opening inline above an already-tall page.
+  it('carries the fork-node-panel class for the mobile bottom-sheet treatment', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for root/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox root/i })
+    expect(panel.className).toContain('fork-node-panel')
   })
 
   it('Fork posts to the fork endpoint with the chosen count', async () => {

@@ -114,33 +114,35 @@ export function Roles() {
       {(data?.custom ?? []).length > 0 && (
         <section className="card" style={{ marginBottom: 'var(--space-6)' }}>
           <h2 style={{ marginBottom: 'var(--space-4)' }}>Custom roles</h2>
-          <table className="tbl" aria-label="Custom roles">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Permissions</th>
-                <th scope="col"><span className="sr-only">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.custom ?? []).map((role) => (
-                <tr key={role.name}>
-                  <td>{role.name}</td>
-                  <td className="t-dim">{role.permissions.join(', ')}</td>
-                  <td>
-                    <button
-                      className="btn btn-ghost"
-                      aria-label={`Delete ${role.name}`}
-                      onClick={() => handleDelete(role.name)}
-                      disabled={deleteRole.isPending}
-                    >
-                      Delete
-                    </button>
-                  </td>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="tbl" aria-label="Custom roles">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Permissions</th>
+                  <th scope="col"><span className="sr-only">Actions</span></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(data?.custom ?? []).map((role) => (
+                  <tr key={role.name}>
+                    <td>{role.name}</td>
+                    <td className="t-dim">{role.permissions.join(', ')}</td>
+                    <td>
+                      <button
+                        className="btn btn-ghost"
+                        aria-label={`Delete ${role.name}`}
+                        onClick={() => handleDelete(role.name)}
+                        disabled={deleteRole.isPending}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 
