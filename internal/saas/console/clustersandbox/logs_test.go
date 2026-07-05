@@ -1,6 +1,7 @@
 package clustersandbox
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync/atomic"
@@ -194,6 +195,48 @@ func TestStreamLogsNoPodsTransportIsUnsupported(t *testing.T) {
 	err := c.StreamLogs(context.Background(), "alice", "sb-a1", newChanLogSink())
 	if err != console.ErrUnsupported {
 		t.Fatalf("err = %v, want console.ErrUnsupported", err)
+	}
+}
+
+// TestStreamPodLinesOversizedLineEmitsTruncatedMarkerAndContinues asserts that
+// a single log line exceeding maxLogLineBytes degrades gracefully: before
+// this fix bufio.Scanner's ErrTooLong hard-erred the whole follow on such a
+// line. Now the oversized line is replaced by truncatedLineMarker and the
+// stream keeps following subsequent, normal-sized lines through to a clean
+// EOF.
+func TestStreamPodLinesOversizedLineEmitsTruncatedMarkerAndContinues(t *testing.T) {
+	oversized := bytes.Repeat([]byte("x"), maxLogLineBytes+10)
+	pr, pw := io.Pipe()
+	sink := newChanLogSink()
+
+	done := make(chan error, 1)
+	go func() { done <- streamPodLines(context.Background(), pr, sink) }()
+
+	go func() {
+		_, _ = pw.Write([]byte("before\n"))
+		_, _ = pw.Write(oversized)
+		_, _ = pw.Write([]byte("\n"))
+		_, _ = pw.Write([]byte("after\n"))
+		_ = pw.Close()
+	}()
+
+	if got := recvLine(t, sink); got != "before\n" {
+		t.Fatalf("first line = %q, want %q", got, "before\n")
+	}
+	if got := recvLine(t, sink); got != truncatedLineMarker {
+		t.Fatalf("oversized line = %q, want the truncated marker %q", got, truncatedLineMarker)
+	}
+	if got := recvLine(t, sink); got != "after\n" {
+		t.Fatalf("line after the oversized one = %q, want %q; the follow did not continue", got, "after\n")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("streamPodLines err = %v, want nil (clean EOF)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("streamPodLines did not return on clean EOF after the oversized line")
 	}
 }
 

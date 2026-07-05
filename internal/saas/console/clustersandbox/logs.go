@@ -63,10 +63,19 @@ func (p clientsetPodLogStreamer) StreamPodLogs(ctx context.Context, ns, pod stri
 // console process growing without bound.
 const logLineBufferCap = 512
 
-// maxLogLineBytes bounds a single scanned line (bufio.Scanner's own token
-// cap): a pod writing one absurdly long line with no newline must not grow
-// memory without bound either.
+// maxLogLineBytes bounds a single line's buffered length: a pod writing one
+// absurdly long line with no newline must not grow memory without bound
+// either. It sizes the bufio.Reader streamPodLines reads through, so a line
+// that does not fit is detected as bufio.ErrBufferFull rather than silently
+// growing (readBoundedLine below turns that into a graceful truncation
+// instead of a hard error).
 const maxLogLineBytes = 1 << 20 // 1 MiB
+
+// truncatedLineMarker replaces a single log line that exceeds maxLogLineBytes
+// with no newline in sight. It lets a follow degrade gracefully (skip the
+// oversized line, keep streaming) instead of hard-erroring the whole
+// connection the way bufio.Scanner's ErrTooLong used to.
+const truncatedLineMarker = "[line truncated]\n"
 
 // StreamLogs streams orgID's sandboxID husk pod's stdout/stderr, following
 // new output as the pod produces it, until ctx is done or the pod's log
@@ -95,7 +104,9 @@ func (s *Control) StreamLogs(ctx context.Context, orgID, sandboxID string, sink 
 // bounded, drop-oldest buffer (logLineBufferCap) so a slow sink cannot make
 // this hold unbounded memory. It returns when ctx is done (r is closed, which
 // stops the upstream follow), r reaches a clean EOF (nil error), or
-// sink.Write errors (the client disconnected).
+// sink.Write errors (the client disconnected). A single line over
+// maxLogLineBytes does not end the follow: it is replaced by
+// truncatedLineMarker and streaming continues with the next line.
 func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) error {
 	defer r.Close()
 
@@ -103,13 +114,21 @@ func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) 
 	scanDone := make(chan error, 1)
 	go func() {
 		defer close(lines)
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
-		for scanner.Scan() {
-			line := append(append([]byte(nil), scanner.Bytes()...), '\n')
-			pushDropOldest(lines, line)
+		br := bufio.NewReaderSize(r, maxLogLineBytes)
+		for {
+			line, err := readBoundedLine(br)
+			if len(line) > 0 {
+				pushDropOldest(lines, line)
+			}
+			if err != nil {
+				if err == io.EOF {
+					scanDone <- nil // a clean end, matching bufio.Scanner's nil Err() on EOF
+				} else {
+					scanDone <- err
+				}
+				return
+			}
 		}
-		scanDone <- scanner.Err()
 	}()
 
 	for {
@@ -124,6 +143,62 @@ func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) 
 				return err
 			}
 		}
+	}
+}
+
+// readBoundedLine reads one newline-terminated line from br. A line that fits
+// within maxLogLineBytes is returned verbatim, with its line ending collapsed
+// to a single trailing '\n' (mirroring bufio.ScanLines' \r?\n rule). A line
+// that does NOT fit is never buffered past the cap: readBoundedLine discards
+// it via discardOversizedLine and returns truncatedLineMarker in its place, so
+// one absurdly long line degrades the stream instead of erroring it out. The
+// final line of input with no trailing newline (a clean EOF mid-line) is
+// still returned, with '\n' appended, alongside the io.EOF (or other read)
+// error that ended it, matching bufio.Scanner's last-line behavior.
+func readBoundedLine(br *bufio.Reader) ([]byte, error) {
+	chunk, err := br.ReadSlice('\n')
+	if err == nil {
+		return stripCRLF(chunk), nil
+	}
+	if err == bufio.ErrBufferFull {
+		return discardOversizedLine(br)
+	}
+	if len(chunk) > 0 {
+		line := append(append([]byte(nil), chunk...), '\n')
+		return line, err
+	}
+	return nil, err
+}
+
+// stripCRLF returns a fresh copy of chunk (which ends with '\n', as returned
+// by br.ReadSlice('\n')) with any single '\r' immediately preceding the '\n'
+// removed, matching bufio.ScanLines' \r?\n line-ending rule.
+func stripCRLF(chunk []byte) []byte {
+	line := append([]byte(nil), chunk...)
+	if n := len(line); n >= 2 && line[n-2] == '\r' {
+		line[n-2] = '\n'
+		return line[:n-1]
+	}
+	return line
+}
+
+// discardOversizedLine is called once br's buffer has filled without finding
+// a newline: the current line already exceeds maxLogLineBytes. It discards
+// everything already buffered (never returns it to the caller) and keeps
+// reading, still bounded by br's own fixed buffer size so memory never grows
+// past maxLogLineBytes, until it actually reaches the line's real newline (or
+// the stream ends), then reports a single truncatedLineMarker line so the
+// caller's follow keeps going instead of hard-erroring on bufio.ErrTooLong.
+func discardOversizedLine(br *bufio.Reader) ([]byte, error) {
+	for {
+		_, err := br.ReadSlice('\n')
+		if err == nil || err == io.EOF {
+			return []byte(truncatedLineMarker), nil
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return nil, err
 	}
 }
 
