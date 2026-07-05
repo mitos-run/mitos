@@ -156,18 +156,18 @@ func opFromPath(method, path string) string {
 		return "sandbox.status"
 	case strings.HasPrefix(p, "sandboxes/") && method == http.MethodDelete:
 		return "sandbox.terminate"
-	// Live fork (issue #596): the flat SDK forks a running sandbox via
+	// Live fork (issues #596, #709): the flat SDK forks a running sandbox via
 	// POST /v1/sandboxes/<id>/fork (DirectSandbox._fork_one). On the STANDALONE
-	// server that path is a true live fork of the running source. On the hosted
-	// gateway there is no live-fork control-plane op yet, so map it to
-	// sandbox.create to keep the flat SDK working: the create handler reads the
-	// body's template as the pool, exactly as POST /v1/fork does today, so hosted
-	// behavior is unchanged (a template claim). Routing this to the live
-	// FromSandbox controller path is a documented follow-up; the cluster SDK
-	// already live-forks on hosted. Without this case the POST falls through to
-	// "sandbox.post" and the control plane rejects it as an unknown operation.
+	// server that path is a true live fork of the running source; on the hosted
+	// gateway it now routes to the dedicated sandbox.fork op, whose control-plane
+	// handler resolves the ORG-OWNED source from the path and submits a
+	// Source.FromSandbox Sandbox (the live fork engine, #611), so hosted and
+	// standalone agree: the child inherits the source's live memory and disk.
+	// The flat POST /v1/fork below names NO source sandbox in its path and stays
+	// a template claim (sandbox.create). Without this case the POST falls through
+	// to "sandbox.post" and the control plane rejects it as an unknown operation.
 	case strings.HasPrefix(p, "sandboxes/") && strings.HasSuffix(p, "/fork") && method == http.MethodPost:
-		return "sandbox.create"
+		return "sandbox.fork"
 	// Template operations: the SDK calls POST /v1/templates (ensure_template) before
 	// forking, and GET /v1/templates (list_templates) to discover available pools.
 	// Without these cases both fall through to "sandbox.<method>", which the control

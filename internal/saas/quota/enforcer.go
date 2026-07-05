@@ -74,8 +74,20 @@ type Request struct {
 }
 
 // isCreate reports whether the op creates a sandbox (the lifecycle, size, and
-// aggregate caps apply only to creates).
-func (r Request) isCreate() bool { return r.Op == "sandbox.create" }
+// aggregate caps apply only to creates). A live fork (sandbox.fork, issue
+// #709) adds a running VM exactly like a create, so it is classed the same:
+// otherwise an org at its concurrency cap could fan out past it via forks. Its
+// size is checked with a zero spec (the child inherits the source's shape;
+// SizeOf applies only to create bodies), the same documented honest limit as
+// an unwired SizeOf.
+func (r Request) isCreate() bool {
+	switch r.Op {
+	case "sandbox.create", "sandbox.fork":
+		return true
+	default:
+		return false
+	}
+}
 
 // isLifecycle reports whether the op is an expensive lifecycle operation that
 // charges the lifecycle rate bucket (create, terminate, fork). Everything else is
