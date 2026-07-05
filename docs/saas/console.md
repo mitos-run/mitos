@@ -1,8 +1,10 @@
 # SaaS hosted web console: BFF and stack decision
 
 Status: foundational. This ships the tested
-backend-for-frontend (BFF) the console UI consumes; the SPA frontend, the real
-cluster live-sandbox query, and log streaming are documented follow-ups below.
+backend-for-frontend (BFF) the console UI consumes; the SPA frontend and the
+real cluster live-sandbox query are documented follow-ups below. Live log
+streaming (issue #715) is wired for the husk-pod path; see the
+`LogStreamer` bullet below for what is and is not covered.
 
 The console is the human surface over the accounts/keys, usage and cost,
 billing, quota, live sandboxes, and templates
@@ -179,17 +181,27 @@ enforces org-scoping NOW behind two seams:
   vcpu/mem are recorded as display-only annotations, not enforced; making
   per-request sizing real needs either a CRD field or a catalog of
   per-size pool templates.
-- `LogStreamer` (live log tail): a documented seam. Unlike create/fork/exec,
-  there is currently NO real transport at all (no forkd/guest RPC exposes a
-  sandbox's stdout/stderr), so the real cluster deployment wires an explicit
-  `UnsupportedRawLogStreamer` that reports `ErrUnsupported`, mapped to HTTP 501
-  on both the plain `GET .../logs` route and the SSE `GET .../logs/stream`
-  route, rather than silently serving an always-empty, always-successful
-  stream. The BFF's job is still to AUTHORIZE the stream first (the sandbox
-  must belong to the caller's org, otherwise `not_found`), so authorization is
-  proven independent of whether a transport exists. Building the real
-  transport (an HTTP chunked or websocket bridge, or a genuinely new
-  forkd/guest RPC) is the follow-up.
+- `LogStreamer` (live log tail): `clustersandbox.Control` implements it
+  directly (`StreamLogs`, `internal/saas/console/clustersandbox/logs.go`),
+  the same org-scoping pattern as Get/Terminate/Exec (`s.get` first; a
+  cross-org or missing sandbox id is `ErrNotFound` and the pod-log transport
+  is never touched). The real transport is the husk stub pod's Kubernetes
+  pod-log stream with `PodLogOptions.Follow: true` (a client-go typed
+  clientset; a controller-runtime client cannot open the pod-logs
+  subresource), the SAME source `cmd/kubectl-mitos logs` already reads
+  one-shot: `api/v1` `SandboxStatus.Pod` is the husk pod name. Lines are
+  pumped through a bounded, drop-oldest buffer (512 lines) so a slow client
+  cannot make the console hold unbounded memory; canceling the request
+  context closes the upstream pod-log stream, actually stopping the follow,
+  not just abandoning it; the pod's log stream ending (the container exited,
+  the sandbox was deleted) is a clean EOF, not an error. KNOWN GAP: a sandbox
+  on the raw-forkd path has no husk pod (`SandboxStatus.Pod` is empty), so it
+  has no log source yet and `StreamLogs` reports `ErrUnsupported` (HTTP 501)
+  for that one sandbox honestly, rather than a permanently-empty stream that
+  looks like a quiet, working one; the same applies, deployment-wide, if the
+  pod-logs clientset could not be built at startup. The BFF's job is still to
+  AUTHORIZE the stream first, so authorization is proven independent of
+  whether a transport exists.
 
 ## What ships today
 
@@ -206,9 +218,12 @@ enforces org-scoping NOW behind two seams:
 
 ## Documented follow-ups
 
-- The `LogStreamer` real transport: no forkd/guest RPC exposes a sandbox's
-  stdout/stderr today; the cluster deployment reports HTTP 501 honestly rather
-  than faking a stream. See the `LogStreamer` bullet above.
+- The `LogStreamer` real transport is wired for the husk-pod path (see the
+  `LogStreamer` bullet above). Remaining gap: a sandbox on the raw-forkd path
+  has no husk pod and so no log source yet; a genuinely new forkd/guest RPC
+  that exposes a raw-forkd sandbox's own stdout/stderr (as opposed to the
+  husk stub console) is the follow-up for that path, and continues to report
+  HTTP 501 honestly until then.
 - Per-request sandbox resource sizing (vcpus/mem_gib on create): `SandboxSpec`
   has no per-sandbox override field, so a console-created sandbox's actual
   resources are still whatever its pool template configures; the requested

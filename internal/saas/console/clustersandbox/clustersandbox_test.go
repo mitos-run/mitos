@@ -58,7 +58,15 @@ func sbWithRegion(org, name, phase, region string) *v1.Sandbox {
 func newControl(t *testing.T, objs ...client.Object) *Control {
 	t.Helper()
 	c := fakeclient.NewClientBuilder().WithScheme(scheme(t)).WithObjects(objs...).Build()
-	return New(c)
+	return New(c, nil)
+}
+
+// newControlWithPods builds a Control wired with a PodLogStreamer, for the
+// log-streaming tests below.
+func newControlWithPods(t *testing.T, pods PodLogStreamer, objs ...client.Object) *Control {
+	t.Helper()
+	c := fakeclient.NewClientBuilder().WithScheme(scheme(t)).WithObjects(objs...).Build()
+	return New(c, pods)
 }
 
 // TestListScopedToOrgNamespace asserts List returns only the caller org's
@@ -176,6 +184,13 @@ func TestTerminateOwnedDeletes(t *testing.T) {
 // TestImplementsSandboxControl is a compile-time seam assertion.
 func TestImplementsSandboxControl(t *testing.T) {
 	var _ console.SandboxControl = (*Control)(nil)
+}
+
+// TestImplementsLogStreamer is a compile-time seam assertion: the cluster
+// Control satisfies console.LogStreamer directly (StreamLogs, see logs.go),
+// the same org-scoping pattern as Get/Terminate/Exec.
+func TestImplementsLogStreamer(t *testing.T) {
+	var _ console.LogStreamer = (*Control)(nil)
 }
 
 // TestCreateWritesOrgScopedSandboxWithPoolRef asserts Create writes a Sandbox
