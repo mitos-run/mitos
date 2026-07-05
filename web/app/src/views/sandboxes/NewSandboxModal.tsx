@@ -17,6 +17,7 @@ import { Button } from '@mitos/brand'
 import { useCreateSandbox } from '../../data/sandboxes'
 import { useTemplates } from '../../data/account'
 import { useProjects } from '../../data/org'
+import { useCapabilities } from '../../data/query'
 import { useModalFocus } from '../../ui/useModalFocus'
 
 const VCPU_OPTIONS = [1, 2, 4]
@@ -30,12 +31,19 @@ export type NewSandboxModalProps = {
 export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
   const { data: templates = [], isLoading: templatesLoading } = useTemplates()
   const { data: projects = [] } = useProjects()
+  const { data: caps } = useCapabilities()
   const createSandbox = useCreateSandbox()
   const [template, setTemplate] = useState('')
   const [vcpus, setVcpus] = useState(1)
   const [memGiB, setMemGiB] = useState(1)
   const [projectId, setProjectId] = useState('')
+  const [region, setRegion] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // The region picker is shown ONLY when the deployment advertises more than
+  // one placement value (issue #712 phase 0); a single-value deployment (the
+  // phase 0 default everywhere) applies its one value silently server-side,
+  // with no picker at all, so this list stays empty and renders nothing.
+  const regionValues = caps?.placement?.values ?? []
   const firstFieldRef = useRef<HTMLSelectElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
 
@@ -59,6 +67,14 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
     if (!template && templates.length > 0) setTemplate(templates[0].name)
   }, [template, templates])
 
+  // Default the region select to the registry's default value once
+  // capabilities load, so the picker never opens on a blank/invalid choice.
+  useEffect(() => {
+    if (!region && regionValues.length > 1) {
+      setRegion(regionValues.find((v) => v.default)?.name ?? regionValues[0].name)
+    }
+  }, [region, regionValues])
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!template || createSandbox.isPending) return
@@ -69,6 +85,7 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
         vcpus,
         mem_gib: memGiB,
         project_id: projectId || undefined,
+        region: regionValues.length > 1 ? region || undefined : undefined,
       })
       onCreated?.(created.id)
       onClose()
@@ -147,6 +164,20 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
             <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginTop: 0, marginBottom: 'var(--space-4)' }}>
               Sizing is a request. Sandboxes currently run the template's resources; per-sandbox sizing is coming.
             </p>
+
+            {regionValues.length > 1 && (
+              <div className="form-row" style={{ marginBottom: 'var(--space-4)' }}>
+                <label htmlFor="new-sandbox-region">{caps?.placement?.key ?? 'Region'}</label>
+                <select id="new-sandbox-region" value={region} onChange={(e) => setRegion(e.target.value)}>
+                  {regionValues.map((v) => (
+                    <option key={v.name} value={v.name} disabled={!v.available}>
+                      {v.display}
+                      {v.available ? '' : ' (coming soon)'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {projects.length > 0 && (
               <div className="form-row" style={{ marginBottom: 'var(--space-5)' }}>

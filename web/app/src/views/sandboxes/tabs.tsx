@@ -22,6 +22,10 @@ export function OverviewTab({ sb }: { sb: SandboxView }) {
     ['Template', sb.template], ['Node', sb.node], ['Phase', sb.phase],
     ['Requested vCPUs', String(sb.vcpus)], ['Requested memory', fmtBytes(sb.mem_bytes)], ['Created', sb.created_at || '-'],
   ]
+  // Region (issue #712 phase 0) is shown only when present: a single-value
+  // deployment stamps no label at all, so most sandboxes have no region to
+  // show, and an absent row is more honest than a blank one.
+  if (sb.region) rows.push(['Region', sb.region])
   return (
     <dl className="kv">
       {rows.map(([k, v]) => (<div key={k} className="kv-row"><dt className="t-dim">{k}</dt><dd className="mono">{v}</dd></div>))}

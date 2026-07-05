@@ -115,16 +115,23 @@ export type SandboxView = {
   mem_bytes: number
   created_at: string
   project_id?: string
+  // region is the placement value (issue #712 phase 0) this sandbox's tree
+  // root was created in. Empty/absent means the deployment's registry
+  // default. A fork always carries its parent's region.
+  region?: string
 }
 
 // CreateSandboxRequest is the body of POST /console/sandboxes. vcpus/mem_gib
 // must be one of the static options the server validates (1/2/4 vCPU;
-// 1/2/4/8 GiB); project_id is optional (empty means unassigned).
+// 1/2/4/8 GiB); project_id is optional (empty means unassigned). region is
+// optional (issue #712 phase 0): omit it to use the org's home region, or
+// set it to one of Capabilities.placement.values[].name.
 export type CreateSandboxRequest = {
   template: string
   vcpus: number
   mem_gib: number
   project_id?: string
+  region?: string
 }
 
 // ForkResult is the shape of a fork response. On a full success (HTTP 200)

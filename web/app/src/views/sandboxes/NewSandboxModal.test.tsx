@@ -19,7 +19,7 @@ const templates = [
 
 let postedBody: unknown = null
 
-function mockFetch(opts: { createStatus?: number; createBody?: unknown } = {}) {
+function mockFetch(opts: { createStatus?: number; createBody?: unknown; placement?: unknown } = {}) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
@@ -28,6 +28,11 @@ function mockFetch(opts: { createStatus?: number; createBody?: unknown } = {}) {
     }
     if (url.endsWith('/console/projects')) {
       return Promise.resolve(new Response(JSON.stringify({ org_id: 'o1', projects: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.endsWith('/console/capabilities')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ placement: opts.placement }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
     }
     if (url.endsWith('/console/sandboxes') && method === 'POST') {
       postedBody = init?.body ? JSON.parse(String(init.body)) : null
@@ -181,5 +186,41 @@ describe('NewSandboxModal', () => {
     wrap(<NewSandboxModal onClose={() => {}} />)
     await waitFor(() => expect(screen.getByText(/no templates are available yet/i)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /create sandbox/i })).not.toBeInTheDocument()
+  })
+
+  // --- Region picker (issue #712 phase 0) ---
+
+  it('shows no region picker when the deployment has a single placement value', async () => {
+    mockFetch({ placement: { key: 'cluster', values: [{ name: 'default', display: 'default', default: true, available: true }] } })
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
+    expect(screen.queryByLabelText(/region/i)).not.toBeInTheDocument()
+  })
+
+  it('shows no region picker when capabilities carry no placement at all (older server)', async () => {
+    mockFetch()
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
+    expect(screen.queryByLabelText(/region/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a region picker defaulted to the registry default when the deployment has more than one value, and posts the selection', async () => {
+    mockFetch({
+      placement: {
+        key: 'region',
+        values: [
+          { name: 'fra', display: 'Frankfurt (EU)', default: true, available: true },
+          { name: 'iad', display: 'Ashburn (US)', default: false, available: true },
+        ],
+      },
+    })
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
+    const regionSelect = await screen.findByLabelText(/region/i)
+    await waitFor(() => expect(regionSelect).toHaveValue('fra'))
+
+    fireEvent.change(regionSelect, { target: { value: 'iad' } })
+    fireEvent.click(screen.getByRole('button', { name: /create sandbox/i }))
+    await waitFor(() => expect(postedBody).toMatchObject({ region: 'iad' }))
   })
 })
