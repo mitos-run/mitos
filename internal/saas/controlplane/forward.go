@@ -251,10 +251,18 @@ func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name string, starte
 		// A terminal Rejected condition (the fork engine's secret-inheritance
 		// default-deny) is recorded WITHOUT a Failed phase; surface the
 		// controller's actionable message instead of pending into a timeout.
-		if msg, rejected := rejectedReason(&sb); rejected {
+		// The secrets gate gets its own 403 whose remediation names the exact
+		// wire-level opt-in, so an agent can self-correct in one round trip.
+		if c := rejectedCondition(&sb); c != nil {
+			if c.Reason == "SecretInheritanceDenied" {
+				return errResp(withStatus(apierr.Get(apierr.CodeForbidden).
+					WithMessage("the fork was rejected: the source sandbox holds secrets").
+					WithCause(c.Message).
+					WithRemediation("A live fork duplicates the source VM's memory, including delivered secret values, so it is denied by default. Re-request the fork with \"secret_inheritance\": \"inherit\" in the body to explicitly permit duplicating them into the child, or fork a sandbox that holds no secrets."), http.StatusForbidden)), nil
+			}
 			return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
 				WithMessage("the sandbox was rejected by the controller").
-				WithCause(msg), http.StatusConflict)), nil
+				WithCause(c.Message), http.StatusConflict)), nil
 		}
 
 		if !k.now().Before(deadline) {
@@ -289,15 +297,22 @@ func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox, sta
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the sandbox is ready but its access token secret could not be read")), nil
 	}
+	templateID := k.templateID(ctx, sb)
 	payload := map[string]any{
 		"id":           sb.Name,
 		"endpoint":     endpoint,
 		"token":        token,
 		"phase":        string(v1.SandboxReady),
-		"template_id":  k.templateID(ctx, sb),
+		"template_id":  templateID,
 		"fork_time_ms": forkTimeMs(sb, startedAt, k.now()),
 	}
-	return jsonResp(http.StatusCreated, payload), nil
+	resp := jsonResp(http.StatusCreated, payload)
+	// Echo the non-identifying pool name so the gateway's telemetry can attach
+	// it as the pool property on sandbox.created and sandbox.forked events.
+	if templateID != "" {
+		resp.Header.Set("X-Mitos-Pool", templateID)
+	}
+	return resp, nil
 }
 
 // forkTimeMs is the honest fork latency for the ready payload: the
@@ -415,16 +430,17 @@ func (k *K8sControlPlane) readToken(ctx context.Context, ns, secretName string) 
 	return tok, nil
 }
 
-// rejectedReason reports whether the controller recorded a terminal Rejected
-// condition on the sandbox and returns its message.
-func rejectedReason(sb *v1.Sandbox) (string, bool) {
+// rejectedCondition returns the controller's terminal Rejected condition on
+// the sandbox, or nil when none is recorded. Callers branch on the Reason
+// (SecretInheritanceDenied gets its own public shape).
+func rejectedCondition(sb *v1.Sandbox) *metav1.Condition {
 	for i := range sb.Status.Conditions {
-		c := sb.Status.Conditions[i]
+		c := &sb.Status.Conditions[i]
 		if c.Type == "Rejected" && c.Status == metav1.ConditionTrue {
-			return c.Message, true
+			return c
 		}
 	}
-	return "", false
+	return nil
 }
 
 // status returns the org-scoped sandbox status. A sandbox that does not exist OR
