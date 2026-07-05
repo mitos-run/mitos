@@ -107,8 +107,11 @@ sandbox-server process, plain HTTP, one token.
   k8s-claim backend.
 - `sandbox_fork` issues one `POST /v1/fork` per replica. The sandbox-server
   fork endpoint has no replicas parameter and its `template` field is a
-  template lookup, so the source id must resolve there. True
-  fork-of-a-running-sandbox is the k8s `Sandbox` with `spec.source.fromSandbox` path and is a follow-up.
+  template lookup, so the source id must resolve there. A true
+  fork-of-a-running-sandbox exists server-side at
+  `POST /v1/sandboxes/<id>/fork` (standalone and hosted; the k8s
+  `spec.source.fromSandbox` engine); driving it from this backend is a
+  follow-up.
 - `sandbox_exec` and the file tools require the bearer token on the
   sandbox-server (its exec/files routes are token-guarded); `fork` does not.
 

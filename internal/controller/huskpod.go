@@ -1008,6 +1008,12 @@ func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, 
 	delete(pod.Labels, huskPoolLabel)
 	pod.Labels[huskLabel] = "true"
 	pod.Labels[huskForkLabel] = fork.Name
+	// The claim label carries the hosted sandbox id for a claimed pod; a fork
+	// child is claimed by its fork Sandbox from birth. The usage scraper
+	// (HuskPodScrapeLister) selects on this label, so a fork child without it
+	// is silently unbilled, and the claim-label pod-deletion paths (release,
+	// lifetime terminate) reap by it.
+	pod.Labels[huskClaimLabel] = fork.Name
 	_ = controllerutil.SetControllerReference(fork, pod, scheme)
 	return pod
 }
