@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/tenant"
 	"mitos.run/mitos/internal/usage"
 )
@@ -198,6 +199,82 @@ func TestHuskPodScrapeListerSelectsClaimedOrgLabeledPods(t *testing.T) {
 		if _, ok := byVM[absent]; ok {
 			t.Errorf("%s must be omitted (unclaimed / no org / no PodIP)", absent)
 		}
+	}
+}
+
+// TestBuildForkChildPodCarriesBillingLabels asserts a fork child pod is born
+// CLAIMED by its fork Sandbox: buildForkChildPod stamps mitos.run/claim with
+// the fork's name. The usage scraper selects on that label (a fork child
+// without it is silently unbilled) and the claim-label pod-deletion paths
+// (release, lifetime terminate) reap by it. The pod must still carry the husk
+// and fork labels, the org label derived from the per-org namespace, and NO
+// pool label (it is never a warm-pool slot).
+func TestBuildForkChildPodCarriesBillingLabels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sb-child-1", Namespace: "mitos-org-acme", UID: "uid-fork"}}
+	pod := buildForkChildPod(fork, "sb-child-1-0", HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "sb-child-1",
+		ForkSourceNode: "kvm-node-1",
+	}, scheme)
+
+	if pod.Labels[huskClaimLabel] != "sb-child-1" {
+		t.Fatalf("fork child claim label = %q, want the fork name (billing scraper and terminate paths select on it); labels=%v", pod.Labels[huskClaimLabel], pod.Labels)
+	}
+	if pod.Labels[huskForkLabel] != "sb-child-1" || pod.Labels[huskLabel] != "true" {
+		t.Fatalf("fork child labels = %v, want fork=sb-child-1 and husk=true", pod.Labels)
+	}
+	if _, ok := pod.Labels[huskPoolLabel]; ok {
+		t.Fatalf("fork child must NOT carry the pool warm-slot label; labels=%v", pod.Labels)
+	}
+	if pod.Labels[tenant.OrgLabelKey] != "acme" {
+		t.Fatalf("org label = %q, want acme (derived from the per-org namespace)", pod.Labels[tenant.OrgLabelKey])
+	}
+}
+
+// TestScrapeListerIncludesForkChildren pins the billing contract for fork
+// children: a Running fork-child pod carrying the claim label (stamped by
+// buildForkChildPod) surfaces from HuskPodScrapeLister with VMID = the pod
+// name, APIID = the fork Sandbox's name (the id the customer saw from
+// POST /v1/sandboxes/<id>/fork), and the trusted org.
+func TestScrapeListerIncludesForkChildren(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	forkChild := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb-child-1-0",
+			Namespace: "mitos-org-acme",
+			Labels: map[string]string{
+				huskLabel:          "true",
+				huskForkLabel:      "sb-child-1",
+				huskClaimLabel:     "sb-child-1",
+				tenant.OrgLabelKey: "acme",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.9"},
+	}
+	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(forkChild).Build()
+	lister := &HuskPodScrapeLister{Client: cl}
+	got, err := lister.ListHuskPods(context.Background())
+	if err != nil {
+		t.Fatalf("ListHuskPods: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 scrapable fork child, got %d: %+v", len(got), got)
+	}
+	p := got[0]
+	if p.VMID != "sb-child-1-0" || p.APIID != "sb-child-1" || p.OrgID != "acme" {
+		t.Errorf("fork child = %+v, want VMID sb-child-1-0, APIID sb-child-1 (the hosted fork id), org acme", p)
 	}
 }
 
