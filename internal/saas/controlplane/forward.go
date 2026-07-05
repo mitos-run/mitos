@@ -253,7 +253,7 @@ func (k *K8sControlPlane) pollReadyTicker(ctx context.Context, ns, name string, 
 	for {
 		var sb v1.Sandbox
 		if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
-			return readSandboxError(err), nil
+			return readSandboxError(ctx, err), nil
 		}
 
 		if resp, done := k.sandboxOutcome(ctx, &sb, startedAt); done {
@@ -305,8 +305,13 @@ func (k *K8sControlPlane) sandboxOutcome(ctx context.Context, sb *v1.Sandbox, st
 }
 
 // readSandboxError maps a readiness-wait Get failure to its envelope: a
-// NotFound means the object vanished mid-create (a terminate raced the wait).
-func readSandboxError(err error) saas.ForwardResponse {
+// canceled request keeps its canceled envelope (the client hung up; the Get
+// error is just the interruption surfacing), and a NotFound means the object
+// vanished mid-create (a terminate raced the wait).
+func readSandboxError(ctx context.Context, err error) saas.ForwardResponse {
+	if ctx.Err() != nil {
+		return createCanceledError()
+	}
 	if apierrors.IsNotFound(err) {
 		return sandboxRemovedError()
 	}

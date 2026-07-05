@@ -53,7 +53,7 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 	// wait would idle until the fallback re-Get.
 	var sb v1.Sandbox
 	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
-		return readSandboxError(err), true
+		return readSandboxError(ctx, err), true
 	}
 	if resp, done := k.sandboxOutcome(ctx, &sb, startedAt); done {
 		return resp, true
@@ -81,7 +81,7 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 				return saas.ForwardResponse{}, false
 			}
 			evSb, ok := ev.Object.(*v1.Sandbox)
-			if !ok || evSb.Name != name {
+			if !ok || evSb.Namespace != ns || evSb.Name != name {
 				// A bookmark or error event, or (under the fake client, which
 				// does not filter watches by field selector) another sandbox
 				// in the namespace.
@@ -101,7 +101,7 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 			// identical to the poll path.
 			var cur v1.Sandbox
 			if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &cur); err != nil {
-				return readSandboxError(err), true
+				return readSandboxError(ctx, err), true
 			}
 			if resp, done := k.sandboxOutcome(ctx, &cur, startedAt); done {
 				return resp, true
