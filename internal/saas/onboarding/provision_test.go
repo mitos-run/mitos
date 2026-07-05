@@ -8,23 +8,27 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/billing"
 )
 
 // captureProvisioner records the org id and display name it was asked to
 // provision, and can be made to fail to drive the error path.
 type captureProvisioner struct {
 	mu    sync.Mutex
-	calls []struct{ orgID, displayName string }
+	calls []struct{ orgID, displayName, region string }
 	err   error
 }
 
-func (c *captureProvisioner) Provision(_ context.Context, orgID, displayName string) error {
+func (c *captureProvisioner) Provision(_ context.Context, orgID, displayName, region string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {
 		return c.err
 	}
-	c.calls = append(c.calls, struct{ orgID, displayName string }{orgID, displayName})
+	c.calls = append(c.calls, struct{ orgID, displayName, region string }{orgID, displayName, region})
 	return nil
 }
 
@@ -71,6 +75,54 @@ func TestVerifyProvisionsOrgCR(t *testing.T) {
 	}
 	if got.displayName != res.Org.Name {
 		t.Fatalf("provisioned display name %q, want %q", got.displayName, res.Org.Name)
+	}
+}
+
+// TestVerifyProvisionsOrgCRWithHomeRegion asserts that when the account
+// service is configured with a placement registry default home region
+// (issue #712 phase 0), that region flows through SignUp's Personal org and
+// on into the OrgProvisioner.Provision call, so a self-host operator's Org
+// reconciler can label the tenant namespace's Org CR with it.
+func TestVerifyProvisionsOrgCRWithHomeRegion(t *testing.T) {
+	store := saas.NewMemStore()
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	keys := saas.NewKeyService(store, saas.WithClock(clock))
+	accounts := saas.NewAccountService(store, keys, saas.WithClock(clock), saas.WithHomeRegion("iad"))
+	prov := &captureProvisioner{}
+	tok := 0
+	tokengen := func() (string, error) {
+		tok++
+		return "tok-" + string(rune('0'+tok)), nil
+	}
+	email := NewFakeEmailSender()
+	svc := NewService(accounts, store, NewMemPendingStore(), billing.NewMemCreditLedger(), email,
+		WithMode(ModeOpen),
+		WithClock(clock),
+		WithTokenGen(tokengen),
+		WithOrgProvisioner(prov),
+	)
+
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "region@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	tokVal := email.LastToken("region@example.com")
+	if tokVal == "" {
+		t.Fatal("no token captured")
+	}
+	res, err := svc.Verify(ctx, tokVal)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Org.HomeRegion != "iad" {
+		t.Fatalf("org.HomeRegion = %q, want iad", res.Org.HomeRegion)
+	}
+	if prov.count() != 1 {
+		t.Fatalf("provisioner called %d times, want 1", prov.count())
+	}
+	if got := prov.calls[0].region; got != "iad" {
+		t.Errorf("Provision region = %q, want iad", got)
 	}
 }
 

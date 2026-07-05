@@ -110,6 +110,39 @@ func TestAccountProfileReturnsCallerProfile(t *testing.T) {
 	}
 }
 
+// TestAccountProfileMembershipsCarryHomeRegion asserts each membership row in
+// the account profile carries its org's HomeRegion (issue #712 phase 0),
+// joined from the org lookup rather than the bare membership record.
+func TestAccountProfileMembershipsCarryHomeRegion(t *testing.T) {
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion("fra"))
+	ctx := context.Background()
+	acct, org, err := accounts.SignUp(ctx, "region@account-test.example")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	con := New(Deps{Accounts: accounts, Audit: NewMemAuditLog(), Now: time.Now})
+
+	r := httptest.NewRequest("GET", "/console/account", nil)
+	r = r.WithContext(WithCaller(r.Context(), acct.ID, org.ID))
+	w := httptest.NewRecorder()
+	con.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp AccountView
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Memberships) != 1 {
+		t.Fatalf("memberships = %+v, want exactly 1", resp.Memberships)
+	}
+	if got := resp.Memberships[0].HomeRegion; got != "fra" {
+		t.Errorf("membership HomeRegion = %q, want fra", got)
+	}
+}
+
 func TestAccountProfileNeverReturnsOtherAccount(t *testing.T) {
 	f := newAccountFixture(t)
 	// Alice authenticated but we ensure her profile contains her account_id only.

@@ -38,6 +38,38 @@ func TestSignUpCreatesPersonalOrgAndOwnerMembership(t *testing.T) {
 	}
 }
 
+// TestSignUpStampsHomeRegion asserts a new Personal org is stamped with the
+// deployment's placement registry default region (issue #712 phase 0), and
+// that a service built with no WithHomeRegion option leaves it empty
+// (meaning "the deployment's registry default", resolved elsewhere).
+func TestSignUpStampsHomeRegion(t *testing.T) {
+	store := NewMemStore()
+	svc := NewAccountService(store, NewKeyService(store), WithHomeRegion("fra"))
+	_, org, err := svc.SignUp(context.Background(), "region@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	if org.HomeRegion != "fra" {
+		t.Errorf("HomeRegion = %q, want fra", org.HomeRegion)
+	}
+	stored, err := store.GetOrg(context.Background(), org.ID)
+	if err != nil {
+		t.Fatalf("GetOrg: %v", err)
+	}
+	if stored.HomeRegion != "fra" {
+		t.Errorf("stored HomeRegion = %q, want fra", stored.HomeRegion)
+	}
+
+	svcNoRegion, _ := newAccountFixture(t)
+	_, orgNoRegion, err := svcNoRegion.SignUp(context.Background(), "noregion@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	if orgNoRegion.HomeRegion != "" {
+		t.Errorf("HomeRegion with no WithHomeRegion option = %q, want empty", orgNoRegion.HomeRegion)
+	}
+}
+
 // TestSignUpRejectsDuplicateEmail asserts a second sign-up on the same email
 // fails rather than creating a second account.
 func TestSignUpRejectsDuplicateEmail(t *testing.T) {

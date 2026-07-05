@@ -121,15 +121,20 @@ type SessionView struct {
 	Current   bool      `json:"current"`
 }
 
-// accountView builds an AccountView from a saas.Account and its memberships.
-func accountView(acct saas.Account, mems []saas.Membership) AccountView {
+// accountView builds an AccountView from a saas.Account and its memberships,
+// joining each membership's org HomeRegion from orgs (keyed by org id). orgs
+// is best-effort: a membership whose org is missing from the map (a lookup
+// failure upstream) simply gets an empty HomeRegion rather than failing the
+// whole view.
+func accountView(acct saas.Account, mems []saas.Membership, orgs map[string]saas.Organization) AccountView {
 	mv := make([]MemberView, 0, len(mems))
 	for _, m := range mems {
 		mv = append(mv, MemberView{
-			AccountID: m.AccountID,
-			OrgID:     m.OrgID,
-			Role:      m.Role,
-			CreatedAt: m.CreatedAt,
+			AccountID:  m.AccountID,
+			OrgID:      m.OrgID,
+			Role:       m.Role,
+			CreatedAt:  m.CreatedAt,
+			HomeRegion: orgs[m.OrgID].HomeRegion,
 		})
 	}
 	return AccountView{
@@ -140,6 +145,23 @@ func accountView(acct saas.Account, mems []saas.Membership) AccountView {
 		Locale:      acct.Locale,
 		Memberships: mv,
 	}
+}
+
+// orgsByID resolves orgs (issue #712's HomeRegion join) via
+// AccountService.Organizations, keyed by org id. A lookup failure returns an
+// empty map rather than an error: accountView's join is best-effort, so one
+// bad org lookup degrades to an empty HomeRegion rather than failing the
+// whole account view.
+func orgsByID(ctx context.Context, accounts *saas.AccountService, accountID string) map[string]saas.Organization {
+	orgs, err := accounts.Organizations(ctx, accountID)
+	if err != nil {
+		return map[string]saas.Organization{}
+	}
+	out := make(map[string]saas.Organization, len(orgs))
+	for _, o := range orgs {
+		out[o.ID] = o
+	}
+	return out
 }
 
 // handleGetAccount returns the caller's profile and memberships. The account id
@@ -156,7 +178,8 @@ func (c *Console) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read")
 		return
 	}
-	writeJSON(w, http.StatusOK, accountView(acct, mems))
+	orgs := orgsByID(r.Context(), c.deps.Accounts, accountID)
+	writeJSON(w, http.StatusOK, accountView(acct, mems, orgs))
 }
 
 // updateProfileRequest is the PATCH /console/account body. Only non-empty fields
@@ -206,7 +229,8 @@ func (c *Console) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		Detail:     "updated account profile",
 		At:         c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, accountView(updated, mems))
+	orgs := orgsByID(r.Context(), c.deps.Accounts, accountID)
+	writeJSON(w, http.StatusOK, accountView(updated, mems, orgs))
 }
 
 // handleListSessions returns the caller's sessions. The account id is from

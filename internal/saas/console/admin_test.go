@@ -379,6 +379,14 @@ func TestAdminOrgsShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignUp team customer: %v", err)
 	}
+	// Stamp a home region directly (issue #712 phase 0): SignUp itself leaves
+	// it empty in this fixture (no WithHomeRegion configured), so seed it the
+	// way a real registry-default stamp would land, and assert the rollup
+	// surfaces it read-only.
+	teamOrg.HomeRegion = "fra"
+	if err := f.store.PutOrg(ctx, teamOrg); err != nil {
+		t.Fatalf("seed home region: %v", err)
+	}
 	member, _, err := f.accounts.SignUp(ctx, "second-member@example.com")
 	if err != nil {
 		t.Fatalf("SignUp second member: %v", err)
@@ -435,6 +443,9 @@ func TestAdminOrgsShape(t *testing.T) {
 	wantCents := int64(billing.DefaultRates().CostCents(usage.UsageRecord{VCPUSeconds: 3600}))
 	if teamRow.MonthUsageCents != wantCents {
 		t.Errorf("month_usage_cents = %d, want %d (prior-month record must be excluded)", teamRow.MonthUsageCents, wantCents)
+	}
+	if teamRow.HomeRegion != "fra" {
+		t.Errorf("home_region = %q, want fra", teamRow.HomeRegion)
 	}
 }
 

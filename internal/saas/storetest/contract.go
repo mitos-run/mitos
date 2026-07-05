@@ -91,7 +91,7 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		s := factory(t)
 		ctx := context.Background()
 		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-		o := saas.Organization{ID: "org-1", Name: "Acme", CreatedAt: created, Personal: true}
+		o := saas.Organization{ID: "org-1", Name: "Acme", CreatedAt: created, Personal: true, HomeRegion: "fra"}
 		if err := s.PutOrg(ctx, o); err != nil {
 			t.Fatalf("PutOrg: %v", err)
 		}
@@ -104,6 +104,26 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 		if _, err := s.GetOrg(ctx, "missing"); !errors.Is(err, saas.ErrNotFound) {
 			t.Errorf("GetOrg unknown: got %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("OrgHomeRegionDefaultsToEmpty", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		// An org put with no HomeRegion (the pre-#712 shape, and any deployment
+		// that never sets one) round-trips as the empty string, meaning "the
+		// deployment's registry default" rather than a stored region name.
+		o := saas.Organization{ID: "org-noregion", Name: "Old", CreatedAt: created}
+		if err := s.PutOrg(ctx, o); err != nil {
+			t.Fatalf("PutOrg: %v", err)
+		}
+		got, err := s.GetOrg(ctx, "org-noregion")
+		if err != nil {
+			t.Fatalf("GetOrg: %v", err)
+		}
+		if got.HomeRegion != "" {
+			t.Errorf("HomeRegion = %q, want empty", got.HomeRegion)
 		}
 	})
 

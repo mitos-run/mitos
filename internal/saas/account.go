@@ -18,6 +18,11 @@ type AccountService struct {
 	keys  *KeyService
 	now   func() time.Time
 	idgen func() string
+	// homeRegion is the deployment's placement registry default (issue #712
+	// phase 0), stamped on the Personal org SignUp mints. Empty is a valid
+	// value: it means "the deployment's registry default", resolved wherever
+	// HomeRegion is read, not encoded as a literal here.
+	homeRegion string
 }
 
 // NewAccountService builds an account service over store and the key service.
@@ -28,7 +33,7 @@ func NewAccountService(store Store, keys *KeyService, opts ...KeyServiceOption) 
 	for _, o := range opts {
 		o(cfg)
 	}
-	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen}
+	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen, homeRegion: cfg.homeRegion}
 }
 
 // SignUp provisions a new account and its Personal organization, makes the
@@ -44,10 +49,11 @@ func (s *AccountService) SignUp(ctx context.Context, email string) (Account, Org
 	}
 	now := s.now()
 	org := Organization{
-		ID:        s.idgen(),
-		Name:      "Personal",
-		CreatedAt: now,
-		Personal:  true,
+		ID:         s.idgen(),
+		Name:       "Personal",
+		CreatedAt:  now,
+		Personal:   true,
+		HomeRegion: s.homeRegion,
 	}
 	acct := Account{
 		ID:            s.idgen(),

@@ -25,7 +25,7 @@ func TestProvisionCreatesOrgCR(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	p := New(c)
 
-	if err := p.Provision(context.Background(), "org-abc", "Personal"); err != nil {
+	if err := p.Provision(context.Background(), "org-abc", "Personal", ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 
@@ -48,10 +48,10 @@ func TestProvisionIsIdempotentOnAlreadyExists(t *testing.T) {
 	p := New(c)
 	ctx := context.Background()
 
-	if err := p.Provision(ctx, "org-dup", "Personal"); err != nil {
+	if err := p.Provision(ctx, "org-dup", "Personal", ""); err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
-	if err := p.Provision(ctx, "org-dup", "Personal"); err != nil {
+	if err := p.Provision(ctx, "org-dup", "Personal", ""); err != nil {
 		t.Fatalf("second provision should be idempotent, got: %v", err)
 	}
 
@@ -71,10 +71,10 @@ func TestProvisionReconcilesDisplayName(t *testing.T) {
 	p := New(c)
 	ctx := context.Background()
 
-	if err := p.Provision(ctx, "org-rename", "Old Name"); err != nil {
+	if err := p.Provision(ctx, "org-rename", "Old Name", ""); err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
-	if err := p.Provision(ctx, "org-rename", "New Name"); err != nil {
+	if err := p.Provision(ctx, "org-rename", "New Name", ""); err != nil {
 		t.Fatalf("rename provision: %v", err)
 	}
 	var got v1.Org
@@ -89,7 +89,57 @@ func TestProvisionReconcilesDisplayName(t *testing.T) {
 func TestProvisionRejectsEmptyOrgID(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	p := New(c)
-	if err := p.Provision(context.Background(), "", "x"); err == nil {
+	if err := p.Provision(context.Background(), "", "x", ""); err == nil {
 		t.Fatal("expected error for empty org id")
+	}
+}
+
+// TestProvisionStampsRegionLabel asserts a non-empty region is stamped as the
+// mitos.run/region label on the Org CR at creation time, and reconciled on a
+// later Provision call if it drifts.
+func TestProvisionStampsRegionLabel(t *testing.T) {
+	c := fakeclient.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	p := New(c)
+	ctx := context.Background()
+
+	if err := p.Provision(ctx, "org-region", "Personal", "fra"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	var got v1.Org
+	if err := c.Get(ctx, client.ObjectKey{Name: "org-region"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Labels["mitos.run/region"] != "fra" {
+		t.Fatalf("region label = %q, want fra", got.Labels["mitos.run/region"])
+	}
+
+	if err := p.Provision(ctx, "org-region", "Personal", "iad"); err != nil {
+		t.Fatalf("reprovision with drifted region: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKey{Name: "org-region"}, &got); err != nil {
+		t.Fatalf("get after reprovision: %v", err)
+	}
+	if got.Labels["mitos.run/region"] != "iad" {
+		t.Fatalf("region label after reconcile = %q, want iad", got.Labels["mitos.run/region"])
+	}
+}
+
+// TestProvisionEmptyRegionStampsNoLabel asserts an empty region (the
+// deployment's registry default) leaves the Org CR with no region label at
+// all, rather than an empty-string value.
+func TestProvisionEmptyRegionStampsNoLabel(t *testing.T) {
+	c := fakeclient.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	p := New(c)
+	ctx := context.Background()
+
+	if err := p.Provision(ctx, "org-noregion", "Personal", ""); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	var got v1.Org
+	if err := c.Get(ctx, client.ObjectKey{Name: "org-noregion"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, ok := got.Labels["mitos.run/region"]; ok {
+		t.Fatalf("expected no region label, got %q", got.Labels["mitos.run/region"])
 	}
 }

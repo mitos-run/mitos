@@ -814,6 +814,14 @@ type MemberView struct {
 	CreatedAt   time.Time `json:"created_at"`
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
+	// HomeRegion is the membership's org's data-residency anchor (issue #712
+	// phase 0), read-only here: it is set once at org creation from the
+	// deployment's placement registry default and never edited through this
+	// view. Empty means the deployment's registry default (an org created
+	// before this field existed, or one never stamped). Joined best-effort
+	// from the org lookup in accountView; a lookup failure leaves it empty
+	// rather than failing the whole membership list.
+	HomeRegion string `json:"home_region"`
 }
 
 func (c *Console) handleListMembers(w http.ResponseWriter, r *http.Request) {
