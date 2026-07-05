@@ -25,6 +25,7 @@ import { AdminOverview } from '../views/admin/Overview'
 import { AdminOrgs } from '../views/admin/Orgs'
 import { AdminNodes } from '../views/admin/Nodes'
 import { AdminWaitlist } from '../views/admin/Waitlist'
+import { AdminAudit } from '../views/admin/Audit'
 
 export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing' | 'Operate'
 export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing', 'Operate']
@@ -77,6 +78,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/admin/orgs', label: 'Organizations', group: 'Operate', element: () => <AdminOrgs />, when: (c) => !!c.admin },
   { path: '/admin/nodes', label: 'Nodes', group: 'Operate', element: () => <AdminNodes />, when: (c) => !!c.admin },
   { path: '/admin/waitlist', label: 'Waitlist', group: 'Operate', element: () => <AdminWaitlist />, when: (c) => !!c.admin },
+  { path: '/admin/audit', label: 'Audit', group: 'Operate', element: () => <AdminAudit />, when: (c) => !!c.admin },
 ]
 
 export function visibleRoutes(caps: Capabilities): RouteDef[] {

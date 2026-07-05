@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -248,6 +249,9 @@ func TestAdminOverviewShape(t *testing.T) {
 	if view.RunningSandboxes != 2 {
 		t.Errorf("running_sandboxes = %d, want 2", view.RunningSandboxes)
 	}
+	if view.RunningSandboxesOrgs != 2 {
+		t.Errorf("running_sandboxes_orgs = %d, want 2 (every org scanned, under the cap)", view.RunningSandboxesOrgs)
+	}
 	if view.SignupMode != "waitlist" {
 		t.Errorf("signup_mode = %q, want waitlist", view.SignupMode)
 	}
@@ -271,6 +275,71 @@ func TestAdminOverviewSignupModeOpen(t *testing.T) {
 	decode(t, w, &view)
 	if view.SignupMode != "open" {
 		t.Errorf("signup_mode = %q, want open", view.SignupMode)
+	}
+}
+
+// manyOrgDirectory wraps a real OrgDirectory and appends synthetic orgs to
+// ListOrgs, so a test can exercise the adminOrgRollupCap boundary without
+// creating 200+ real accounts/orgs through SignUp. ListOrgMembers reports an
+// empty membership list for a synthetic org id (there is no real membership
+// data behind it) instead of falling through to the wrapped directory,
+// which would not recognize the id at all.
+type manyOrgDirectory struct {
+	OrgDirectory
+	extra []saas.Organization
+}
+
+func (m *manyOrgDirectory) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
+	base, err := m.OrgDirectory.ListOrgs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(base, m.extra...), nil
+}
+
+func (m *manyOrgDirectory) ListOrgMembers(ctx context.Context, orgID string) ([]saas.Membership, error) {
+	for _, o := range m.extra {
+		if o.ID == orgID {
+			return nil, nil
+		}
+	}
+	return m.OrgDirectory.ListOrgMembers(ctx, orgID)
+}
+
+// TestAdminOverviewRunningSandboxesOrgsCappedDiscloses asserts that when the
+// org count exceeds adminOrgRollupCap, RunningSandboxesOrgs reports the
+// capped subset actually scanned (not the true total), so the SPA can show
+// the same "showing first N of Orgs orgs" honesty disclosure the orgs table
+// already has (issue #714: previously the running-sandboxes tile implied
+// full coverage with no such caveat).
+func TestAdminOverviewRunningSandboxesOrgsCappedDiscloses(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, opsOrg, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	extra := make([]saas.Organization, adminOrgRollupCap+5)
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range extra {
+		extra[i] = saas.Organization{ID: fmt.Sprintf("synthetic-org-%d", i), Name: "synthetic", CreatedAt: base.Add(time.Duration(i) * time.Hour)}
+	}
+	f.con.deps.Orgs = &manyOrgDirectory{OrgDirectory: f.store, extra: extra}
+
+	w := f.req(t, "GET", "/console/admin/overview", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var view AdminOverview
+	decode(t, w, &view)
+	wantTotal := adminOrgRollupCap + 5 + 1 // the extra synthetic orgs plus ops's own real org
+	if view.Orgs != wantTotal {
+		t.Fatalf("orgs = %d, want %d (the true, uncapped total)", view.Orgs, wantTotal)
+	}
+	if view.RunningSandboxesOrgs != adminOrgRollupCap {
+		t.Fatalf("running_sandboxes_orgs = %d, want %d (the cap)", view.RunningSandboxesOrgs, adminOrgRollupCap)
 	}
 }
 
@@ -546,17 +615,25 @@ func (f *fakeWaitlistSource) List(context.Context) ([]WaitlistEntry, error) {
 	return f.entries, nil
 }
 
-func (f *fakeWaitlistSource) Approve(_ context.Context, email string) error {
+func (f *fakeWaitlistSource) Approve(_ context.Context, email string) (bool, error) {
 	if f.approveErr != nil {
-		return f.approveErr
+		return false, f.approveErr
+	}
+	for _, a := range f.approved {
+		if a == email {
+			return true, nil
+		}
 	}
 	f.approved = append(f.approved, email)
-	return nil
+	return false, nil
 }
 
 // TestAdminWaitlistDefaultNotConfigured asserts the safe-to-instantiate
-// default (no WaitlistSource wired) lists as empty and refuses approval with
-// an honest 501, never a fabricated success.
+// default (no WaitlistSource wired) lists as empty and refuses approval of
+// an id that is not on that (empty) list with an honest 404, never a
+// fabricated success. See TestAdminWaitlistApproveNotConfiguredForRealEntry
+// for the 501 "approve mechanism unconfigured" path, which requires an id
+// that IS on the list (issue #714's new validation runs first).
 func TestAdminWaitlistDefaultNotConfigured(t *testing.T) {
 	f := newAdminFixture(t, Deps{
 		Capabilities:        Capabilities{Edition: "hosted"},
@@ -579,8 +656,111 @@ func TestAdminWaitlistDefaultNotConfigured(t *testing.T) {
 	}
 
 	w = f.req(t, "POST", "/console/admin/waitlist/"+encodeWaitlistID("someone@example.com")+"/approve", ops.ID, org.ID)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("approve status = %d, want 404 (no such waitlist entry); body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAdminWaitlistApproveNotConfiguredForRealEntry asserts that when the id
+// DOES decode to a real waitlist entry but the backing allowlist/email seam
+// is unconfigured, approve still reports the honest 501 (not a 404): the
+// entry-existence check and the "is the approve mechanism configured" check
+// are independent failure modes.
+func TestAdminWaitlistApproveNotConfiguredForRealEntry(t *testing.T) {
+	fw := &fakeWaitlistSource{
+		entries:    []WaitlistEntry{{Email: "waiting@example.com", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}},
+		approveErr: ErrWaitlistNotConfigured,
+	}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "POST", "/console/admin/waitlist/"+encodeWaitlistID("waiting@example.com")+"/approve", ops.ID, org.ID)
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("approve status = %d, want 501; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAdminWaitlistApproveUnknownEmailNotOnListIs404 asserts a well-formed id
+// (valid base64, a syntactically plausible email) that does not correspond
+// to ANY currently recorded waitlist entry is rejected with 404 rather than
+// reaching WaitlistSource.Approve: an admin must not be able to grant
+// allowlist access to an arbitrary address that never actually joined the
+// waitlist.
+func TestAdminWaitlistApproveUnknownEmailNotOnListIs404(t *testing.T) {
+	fw := &fakeWaitlistSource{entries: []WaitlistEntry{
+		{Email: "real@example.com", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "POST", "/console/admin/waitlist/"+encodeWaitlistID("never-joined@example.com")+"/approve", ops.ID, org.ID)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	if len(fw.approved) != 0 {
+		t.Fatal("Approve must not be called for an email that is not on the waitlist")
+	}
+}
+
+// TestAdminWaitlistApproveIdempotent asserts a second approval of the same
+// entry returns already_approved: true and does not call Approve's
+// underlying mechanism a second time in a way that would resend a
+// notification (fakeWaitlistSource models this the same way the real
+// ApproveWaitlistEntry does: idempotent by email).
+func TestAdminWaitlistApproveIdempotent(t *testing.T) {
+	fw := &fakeWaitlistSource{entries: []WaitlistEntry{
+		{Email: "twice@example.com", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	id := encodeWaitlistID("twice@example.com")
+
+	first := f.req(t, "POST", "/console/admin/waitlist/"+id+"/approve", ops.ID, org.ID)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first approve status = %d, body=%s", first.Code, first.Body.String())
+	}
+	var firstBody struct {
+		Approved        bool `json:"approved"`
+		AlreadyApproved bool `json:"already_approved"`
+	}
+	decode(t, first, &firstBody)
+	if !firstBody.Approved || firstBody.AlreadyApproved {
+		t.Fatalf("first approve body = %+v, want approved=true already_approved=false", firstBody)
+	}
+
+	second := f.req(t, "POST", "/console/admin/waitlist/"+id+"/approve", ops.ID, org.ID)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second approve status = %d, body=%s", second.Code, second.Body.String())
+	}
+	var secondBody struct {
+		Approved        bool `json:"approved"`
+		AlreadyApproved bool `json:"already_approved"`
+	}
+	decode(t, second, &secondBody)
+	if !secondBody.Approved || !secondBody.AlreadyApproved {
+		t.Fatalf("second approve body = %+v, want approved=true already_approved=true", secondBody)
+	}
+	if len(fw.approved) != 1 {
+		t.Fatalf("approved = %v, want exactly one recorded approval", fw.approved)
 	}
 }
 
@@ -770,5 +950,178 @@ func TestAdminNodesForbiddenForNonAdmin(t *testing.T) {
 	w := f.req(t, "GET", "/console/admin/nodes", regular.ID, org.ID)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
+// --- GET /console/admin/audit ---
+
+// TestAdminAuditForbiddenForNonAdmin asserts the same gating as every other
+// /console/admin/... endpoint.
+func TestAdminAuditForbiddenForNonAdmin(t *testing.T) {
+	f := newAdminFixture(t, Deps{Capabilities: Capabilities{Edition: "hosted"}})
+	regular, org, err := f.accounts.SignUp(context.Background(), "regular@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/audit", regular.ID, org.ID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
+// TestAdminAuditSurfacesInstanceEvents asserts GET /console/admin/audit
+// returns admin.* events recorded under InstanceAuditOrgID (issue #714:
+// these carried an empty OrgID before, making them invisible everywhere,
+// since a normal org's own GET /console/audit is scoped to that org's own
+// id). Viewing another org's own GET /console/audit must NOT show them.
+func TestAdminAuditSurfacesInstanceEvents(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, opsOrg, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+
+	// Generate at least one admin.* event (admin.overview.view) to read back.
+	w := f.req(t, "GET", "/console/admin/overview", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("overview status = %d", w.Code)
+	}
+
+	w = f.req(t, "GET", "/console/admin/audit", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decode(t, w, &body)
+	found := false
+	for _, ev := range body.Events {
+		if ev.Action == "admin.overview.view" {
+			found = true
+			if ev.OrgID != InstanceAuditOrgID {
+				t.Errorf("event org_id = %q, want %q", ev.OrgID, InstanceAuditOrgID)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("admin.overview.view event not found in %+v", body.Events)
+	}
+
+	// ops's OWN org-scoped audit view must NOT show the instance-level event:
+	// it is scoped to opsOrg.ID, not InstanceAuditOrgID.
+	w = f.req(t, "GET", "/console/audit", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("org audit status = %d", w.Code)
+	}
+	var orgBody struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decode(t, w, &orgBody)
+	for _, ev := range orgBody.Events {
+		if ev.Action == "admin.overview.view" {
+			t.Fatalf("admin.overview.view event leaked into the org-scoped audit view: %+v", ev)
+		}
+	}
+}
+
+// --- admin.denied audit ---
+
+// TestAdminDeniedAuditedForNonAdmin asserts a forbidden (non-admin) request
+// to a /console/admin/... endpoint is recorded as "admin.denied" under
+// InstanceAuditOrgID with the requested path as Detail, so a pattern of
+// denied admin-plane probing is itself visible (issue #714).
+func TestAdminDeniedAuditedForNonAdmin(t *testing.T) {
+	fw := &fakeWaitlistSource{}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	regular, org, err := f.accounts.SignUp(context.Background(), "regular@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	ops, opsOrg, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp ops: %v", err)
+	}
+
+	w := f.req(t, "GET", "/console/admin/overview", regular.ID, org.ID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+
+	events, err := f.con.deps.Audit.List(context.Background(), InstanceAuditOrgID, DefaultAuditListLimit)
+	if err != nil {
+		t.Fatalf("Audit.List: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Action == "admin.denied" {
+			found = true
+			if ev.ActorID != regular.ID {
+				t.Errorf("admin.denied actor_id = %q, want %q", ev.ActorID, regular.ID)
+			}
+			if ev.TargetType != "system" {
+				t.Errorf("admin.denied target_type = %q, want system", ev.TargetType)
+			}
+			if ev.Detail != "/console/admin/overview" {
+				t.Errorf("admin.denied detail = %q, want /console/admin/overview", ev.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no admin.denied event recorded; events = %+v", events)
+	}
+
+	// A successful admin request must NOT itself be recorded as denied.
+	w = f.req(t, "GET", "/console/admin/overview", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ops overview status = %d", w.Code)
+	}
+	events, err = f.con.deps.Audit.List(context.Background(), InstanceAuditOrgID, DefaultAuditListLimit)
+	if err != nil {
+		t.Fatalf("Audit.List: %v", err)
+	}
+	deniedCount := 0
+	for _, ev := range events {
+		if ev.Action == "admin.denied" {
+			deniedCount++
+		}
+	}
+	if deniedCount != 1 {
+		t.Fatalf("admin.denied count = %d, want exactly 1 (the earlier forbidden attempt only)", deniedCount)
+	}
+}
+
+// TestAdminDeniedAuditedForUnauthenticated asserts an entirely
+// unauthenticated request (no caller resolved at all) is ALSO recorded as
+// "admin.denied", with an empty ActorID, rather than only auditing the
+// authenticated-but-forbidden case.
+func TestAdminDeniedAuditedForUnauthenticated(t *testing.T) {
+	f := newAdminFixture(t, Deps{Capabilities: Capabilities{Edition: "hosted"}})
+	w := f.req(t, "GET", "/console/admin/overview", "", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	events, err := f.con.deps.Audit.List(context.Background(), InstanceAuditOrgID, DefaultAuditListLimit)
+	if err != nil {
+		t.Fatalf("Audit.List: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Action == "admin.denied" {
+			found = true
+			if ev.ActorID != "" {
+				t.Errorf("admin.denied actor_id = %q, want empty (unauthenticated)", ev.ActorID)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no admin.denied event recorded for the unauthenticated attempt; events = %+v", events)
 	}
 }

@@ -11,7 +11,11 @@
 // "admin" or "owner" is NOT automatically an instance admin; see
 // isInstanceAdmin). Every /console/admin/... handler goes through
 // authorizeAdmin, never authorize, and is audited via the admin.* action
-// namespace.
+// namespace, always under InstanceAuditOrgID (see its doc) so these events
+// are never invisible the way a normal org-scoped event with an empty OrgID
+// would be. A FAILED authorizeAdmin attempt is also audited, as
+// "admin.denied" (see authorizeAdmin), so denied probing of this plane is
+// itself visible via GET /console/admin/audit.
 //
 // Two paths grant the capability (isInstanceAdmin):
 //
@@ -49,6 +53,17 @@ import (
 // always the TRUE total, uncapped; only the per-org rollup subset is capped,
 // at the oldest adminOrgRollupCap orgs by creation time.
 const adminOrgRollupCap = 200
+
+// InstanceAuditOrgID is the reserved AuditEvent.OrgID value every
+// instance-operator-plane event (the admin.* action namespace) is recorded
+// under: an admin.* event has no single owning org (it is either a
+// deployment-wide read like admin.overview.view, or a denied access attempt
+// that predates knowing who the caller even is), so recording it with an
+// empty OrgID left it permanently invisible to every audit view, which is
+// itself org-scoped (see AuditEvent.OrgID's doc). No real organization may
+// ever be assigned this id (see saas.Organization.ID's generation), so it
+// can never collide with a tenant's own audit stream.
+const InstanceAuditOrgID = "_instance"
 
 // OrgDirectory is the org-wide read seam the instance-operator plane uses.
 // Unlike every other console seam, it is NOT scoped to the caller's own org:
@@ -122,9 +137,12 @@ type WaitlistSource interface {
 	// List returns every recorded waitlist entry.
 	List(ctx context.Context) ([]WaitlistEntry, error)
 	// Approve grants allowlist access to email and sends the approved
-	// notification. Returns ErrWaitlistNotConfigured if no allowlist/email
-	// seam is wired on this deployment.
-	Approve(ctx context.Context, email string) error
+	// notification, UNLESS email already holds allowlist access (tracked via
+	// the SAME allowlist row Approve itself would add), in which case it is
+	// idempotent: no second row is added and no second notification is
+	// sent, and alreadyApproved is true. Returns ErrWaitlistNotConfigured if
+	// no allowlist/email seam is wired on this deployment.
+	Approve(ctx context.Context, email string) (alreadyApproved bool, err error)
 }
 
 // ErrWaitlistNotConfigured is returned by WaitlistSource.Approve when the
@@ -139,7 +157,9 @@ var ErrWaitlistNotConfigured = errors.New("console: no waitlist/allowlist seam i
 type nullWaitlistSource struct{}
 
 func (nullWaitlistSource) List(context.Context) ([]WaitlistEntry, error) { return nil, nil }
-func (nullWaitlistSource) Approve(context.Context, string) error         { return ErrWaitlistNotConfigured }
+func (nullWaitlistSource) Approve(context.Context, string) (bool, error) {
+	return false, ErrWaitlistNotConfigured
+}
 
 // isInstanceAdmin resolves whether accountID holds the instance-operator
 // capability on this deployment. See the package doc above for the two
@@ -183,14 +203,39 @@ func (c *Console) isInstanceAdmin(ctx context.Context, accountID string) bool {
 func (c *Console) authorizeAdmin(r *http.Request) (accountID string, e apierr.Error, ok bool) {
 	accountID, _, e, ok = c.caller(r)
 	if !ok {
+		// accountID is "" here: caller() never resolved an identity (no
+		// session, or an invalid one). The denial is still recorded so a
+		// pattern of unauthenticated probing of this plane is visible, not
+		// just probing by an authenticated-but-not-admin caller.
+		c.auditAdminDenied(r, accountID)
 		return "", e, false
 	}
 	if !c.isInstanceAdmin(r.Context(), accountID) {
+		c.auditAdminDenied(r, accountID)
 		return "", apierr.Get(apierr.CodeForbidden).
 			WithCause("the caller does not hold the instance-operator capability on this deployment"), false
 	}
 	var noErr apierr.Error
 	return accountID, noErr, true
+}
+
+// auditAdminDenied best-effort records a denied /console/admin/... access
+// attempt: action "admin.denied", TargetType "system" (there is no single
+// org/entity target for a denial), Detail is the requested PATH ONLY, never
+// the method or the query string (a query string could carry something a
+// misbehaving client should not have logged back to it). accountID may be
+// "" (an entirely unauthenticated request); the event is recorded either
+// way via c.audit, which is itself already best-effort (an audit failure
+// never fails the request).
+func (c *Console) auditAdminDenied(r *http.Request, accountID string) {
+	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
+		ActorID:    accountID,
+		Action:     "admin.denied",
+		TargetType: "system",
+		Detail:     r.URL.Path,
+		At:         c.deps.Now(),
+	})
 }
 
 // adminOrgsCapped returns every org (all), sorted oldest-first by CreatedAt,
@@ -275,12 +320,19 @@ func signupMode(signupEnabled bool) string {
 // from RunningSandboxes rather than failing the whole request (see
 // handleAdminOverview).
 type AdminOverview struct {
-	Orgs             int    `json:"orgs"`
-	RunningSandboxes int    `json:"running_sandboxes"`
-	FailedOrgs       int    `json:"failed_orgs,omitempty"`
-	NodesReady       *int   `json:"nodes_ready"`
-	NodesTotal       *int   `json:"nodes_total"`
-	SignupMode       string `json:"signup_mode"`
+	Orgs             int `json:"orgs"`
+	RunningSandboxes int `json:"running_sandboxes"`
+	// RunningSandboxesOrgs is how many orgs RunningSandboxes was actually
+	// rolled up over: the oldest min(Orgs, adminOrgRollupCap). The SPA
+	// compares this to Orgs the SAME way the orgs table compares its own
+	// Orgs/Total, to show an honest "showing sandboxes from the first N of
+	// Orgs orgs" disclosure when the 200-org cap is hit, instead of
+	// implying RunningSandboxes covers every org on a large deployment.
+	RunningSandboxesOrgs int    `json:"running_sandboxes_orgs"`
+	FailedOrgs           int    `json:"failed_orgs,omitempty"`
+	NodesReady           *int   `json:"nodes_ready"`
+	NodesTotal           *int   `json:"nodes_total"`
+	SignupMode           string `json:"signup_mode"`
 }
 
 // handleAdminOverview serves GET /console/admin/overview.
@@ -315,10 +367,11 @@ func (c *Console) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		running += n
 	}
 	view := AdminOverview{
-		Orgs:             len(all),
-		RunningSandboxes: running,
-		FailedOrgs:       failedOrgs,
-		SignupMode:       signupMode(c.deps.Capabilities.Signup),
+		Orgs:                 len(all),
+		RunningSandboxes:     running,
+		RunningSandboxesOrgs: len(capped),
+		FailedOrgs:           failedOrgs,
+		SignupMode:           signupMode(c.deps.Capabilities.Signup),
 	}
 	if c.deps.Nodes != nil {
 		if nodes, err := c.deps.Nodes.Nodes(r.Context()); err == nil {
@@ -337,6 +390,7 @@ func (c *Console) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		// unconfigured NodeSource) rather than failing the whole request.
 	}
 	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
 		ActorID:    accountID,
 		Action:     "admin.overview.view",
 		TargetType: "system",
@@ -437,6 +491,7 @@ func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
 		ActorID:    accountID,
 		Action:     "admin.orgs.view",
 		TargetType: "system",
@@ -493,6 +548,7 @@ func (c *Console) handleAdminWaitlist(w http.ResponseWriter, r *http.Request) {
 		out = append(out, AdminWaitlistEntryView{ID: encodeWaitlistID(en.Email), Email: en.Email, CreatedAt: en.CreatedAt})
 	}
 	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
 		ActorID:    accountID,
 		Action:     "admin.waitlist.view",
 		TargetType: "system",
@@ -526,6 +582,14 @@ func waitlistApproveNotConfiguredError(err error) apierr.Error {
 // "you're in" notification through the funnel's configured EmailSender. It
 // does NOT create an account, an org, or any invitation; the entry's owner
 // still completes signup/verify themselves once past the allowlist gate.
+//
+// The id must decode to an email that IS currently on the recorded
+// waitlist; a well-formed id for an email that was never waitlisted (a
+// fabricated or stale id) is a 404, not a silent approve of an arbitrary
+// address. Approving an email that was already approved by an earlier call
+// is idempotent (see WaitlistSource.Approve): no second notification is
+// sent, and the response carries "already_approved": true instead of a
+// misleading identical "fresh approval" response.
 func (c *Console) handleAdminWaitlistApprove(w http.ResponseWriter, r *http.Request) {
 	accountID, e, ok := c.authorizeAdmin(r)
 	if !ok {
@@ -537,7 +601,24 @@ func (c *Console) handleAdminWaitlistApprove(w http.ResponseWriter, r *http.Requ
 		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).WithCause("the waitlist entry id is not valid"))
 		return
 	}
-	if err := c.deps.Waitlist.Approve(r.Context(), email); err != nil {
+	entries, err := c.deps.Waitlist.List(r.Context())
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the waitlist could not be read"))
+		return
+	}
+	onWaitlist := false
+	for _, en := range entries {
+		if strings.EqualFold(en.Email, email) {
+			onWaitlist = true
+			break
+		}
+	}
+	if !onWaitlist {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).WithCause("no waitlist entry exists for this id"))
+		return
+	}
+	alreadyApproved, err := c.deps.Waitlist.Approve(r.Context(), email)
+	if err != nil {
 		if errors.Is(err, ErrWaitlistNotConfigured) {
 			apierr.Encode(w, waitlistApproveNotConfiguredError(err))
 			return
@@ -545,15 +626,20 @@ func (c *Console) handleAdminWaitlistApprove(w http.ResponseWriter, r *http.Requ
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the waitlist entry could not be approved"))
 		return
 	}
+	detail := "approved waitlist entry"
+	if alreadyApproved {
+		detail = "waitlist entry was already approved; no notification re-sent"
+	}
 	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
 		ActorID:    accountID,
 		Action:     "admin.waitlist.approve",
 		Target:     email,
 		TargetType: "waitlist",
-		Detail:     "approved waitlist entry",
+		Detail:     detail,
 		At:         c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"email": email, "approved": true})
+	writeJSON(w, http.StatusOK, map[string]any{"email": email, "approved": true, "already_approved": alreadyApproved})
 }
 
 // --- GET /console/admin/nodes ---
@@ -586,6 +672,7 @@ func (c *Console) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
 		ActorID:    accountID,
 		Action:     "admin.nodes.view",
 		TargetType: "system",
@@ -593,4 +680,39 @@ func (c *Console) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- GET /console/admin/audit ---
+
+// handleAdminAudit serves GET /console/admin/audit: the instance-operator
+// plane's own audit visibility (issue #714). Every admin.* event (including
+// a DENIED authorizeAdmin attempt, action "admin.denied") is recorded under
+// InstanceAuditOrgID, so this is the one place an operator can see them; a
+// normal org's own GET /console/audit never surfaces them, since it is
+// scoped to that org's OrgID and admin.* events carry none. Reads through
+// the SAME AuditRecorder every org-scoped audit view reads, so the wire
+// shape (AuditEvent) is identical.
+func (c *Console) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	events, err := c.deps.Audit.List(r.Context(), InstanceAuditOrgID, DefaultAuditListLimit)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the instance operator audit log could not be read"))
+		return
+	}
+	if events == nil {
+		events = []AuditEvent{}
+	}
+	c.audit(r.Context(), AuditEvent{
+		OrgID:      InstanceAuditOrgID,
+		ActorID:    accountID,
+		Action:     "admin.audit.view",
+		TargetType: "system",
+		Detail:     "viewed the instance operator audit log",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }

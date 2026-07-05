@@ -2,7 +2,7 @@
 // (accessible, per-row), joined date, and remove; Invite button + modal; a
 // Pending invites section showing state/expiry with resend/revoke. Supports
 // loading, empty, and error states; the empty state doubles as the invite CTA.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@mitos/brand'
@@ -11,6 +11,7 @@ import { useAccount } from '../data/account-settings'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
+import { useModalFocus } from '../ui/useModalFocus'
 import type { Role } from '../api'
 import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
@@ -36,6 +37,18 @@ export function Members() {
   )
   const [inviteOpen, setInviteOpen] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<{ accountId: string; label: string } | null>(null)
+  // Tracks whichever row's Remove/Leave button opened the confirm, so
+  // closing it (Cancel, Escape, or confirming) can return focus to that same
+  // trigger via the shared useModalFocus hook, matching ForkTree's pattern.
+  const removeTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const confirmDialogRef = useRef<HTMLDivElement>(null)
+  const confirmCancelRef = useRef<HTMLButtonElement>(null)
+
+  useModalFocus(confirmDialogRef, {
+    active: confirmRemove !== null,
+    initialFocusRef: confirmCancelRef,
+    returnFocusRef: removeTriggerRef,
+  })
 
   // Escape closes the confirm; a backdrop click deliberately does not (see
   // the alertdialog below), so this is the only non-button way out.
@@ -169,7 +182,10 @@ export function Members() {
                   <td>
                     <button
                       className="btn btn-ghost"
-                      onClick={() => setConfirmRemove({ accountId: m.account_id, label: primary })}
+                      onClick={(e) => {
+                        removeTriggerRef.current = e.currentTarget
+                        setConfirmRemove({ accountId: m.account_id, label: primary })
+                      }}
                       aria-label={isSelf ? 'Leave this organization' : `Remove ${primary}`}
                     >
                       {isSelf ? 'Leave' : 'Remove'}
@@ -244,6 +260,7 @@ export function Members() {
         // explicit Cancel button are the only ways out besides confirming.
         <div className="modal-backdrop">
           <div
+            ref={confirmDialogRef}
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="confirm-remove-title"
@@ -258,7 +275,7 @@ export function Members() {
                 : 'They will lose access to this organization immediately.'}
             </p>
             <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', marginTop: 'var(--space-5)' }}>
-              <button className="btn btn-ghost" onClick={() => setConfirmRemove(null)}>
+              <button ref={confirmCancelRef} className="btn btn-ghost" onClick={() => setConfirmRemove(null)}>
                 Cancel
               </button>
               <button className="btn" onClick={onConfirmRemove}>

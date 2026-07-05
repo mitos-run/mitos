@@ -274,4 +274,35 @@ describe('ForkTree node detail panel', () => {
     fireEvent.click(screen.getByRole('button', { name: /^fork 2/i }))
     await waitFor(() => expect(forkBody).toEqual({ count: 2 }))
   })
+
+  // Issue #716: a partial fork failure (HTTP 207) still resolves the fetch
+  // as "ok" (207 is in the 200-299 range), so the survivor ids and error
+  // come back through the SAME success path, not a rejected promise. The
+  // panel must show "created K of N" plus the reason rather than a
+  // misleading plain "Forked" success.
+  it('shows "created K of N" with the error on a partial fork failure (HTTP 207)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/forktree')) {
+        return Promise.resolve(new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.includes('/fork') && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ org_id: 'o1', source: 'fork-a', ids: ['fork-a-fork-1'], error: 'cluster api timeout' }),
+            { status: 207, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const countInput = screen.getByLabelText(/^fork$/i)
+    fireEvent.change(countInput, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: /^fork 2/i }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/created 1 of 2 for fork-a: cluster api timeout/i))
+  })
 })

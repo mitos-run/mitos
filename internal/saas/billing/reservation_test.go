@@ -15,9 +15,9 @@ func TestBoxCatalogValues(t *testing.T) {
 		vcpu, memGiB int
 		monthlyCents int64
 	}{
-		{BoxS, 2, 4, 1900},
-		{BoxM, 4, 8, 3900},
-		{BoxL, 8, 16, 7500},
+		{BoxS(), 2, 4, 1900},
+		{BoxM(), 4, 8, 3900},
+		{BoxL(), 8, 16, 7500},
 	}
 	for _, c := range cases {
 		if c.res.VCPU != c.vcpu || c.res.MemGiB != c.memGiB || c.res.MonthlyCents != c.monthlyCents {
@@ -27,6 +27,25 @@ func TestBoxCatalogValues(t *testing.T) {
 	catalog := BoxCatalog()
 	if len(catalog) != 3 {
 		t.Fatalf("BoxCatalog() has %d entries, want 3", len(catalog))
+	}
+}
+
+// TestBoxAccessorsReturnIndependentCopies asserts mutating a Reservation
+// obtained from BoxS/BoxM/BoxL (or from BoxCatalog's slice) never affects a
+// later call: the package's real catalog entries are unexported package
+// vars a caller can no longer reach directly, only ever getting a copy back.
+func TestBoxAccessorsReturnIndependentCopies(t *testing.T) {
+	s := BoxS()
+	s.MonthlyCents = 0
+	s.Key = "corrupted"
+	if again := BoxS(); again.MonthlyCents != 1900 || again.Key != "box_s" {
+		t.Fatalf("BoxS() after mutating a prior copy = %+v, want the unmodified catalog entry", again)
+	}
+
+	catalog := BoxCatalog()
+	catalog[0].MonthlyCents = 0
+	if again := BoxCatalog(); again[0].MonthlyCents != 1900 {
+		t.Fatalf("BoxCatalog()[0] after mutating a prior copy = %+v, want the unmodified catalog entry", again[0])
 	}
 }
 
@@ -40,9 +59,9 @@ func TestCreditCentsForReservationDiscountMath(t *testing.T) {
 		res    Reservation
 		credit int64
 	}{
-		{BoxS, 2714},  // $19.00 / 0.70 = $27.1428... -> 2714 cents.
-		{BoxM, 5571},  // $39.00 / 0.70 = $55.7142... -> 5571 cents.
-		{BoxL, 10714}, // $75.00 / 0.70 = $107.1428... -> 10714 cents.
+		{BoxS(), 2714},  // $19.00 / 0.70 = $27.1428... -> 2714 cents.
+		{BoxM(), 5571},  // $39.00 / 0.70 = $55.7142... -> 5571 cents.
+		{BoxL(), 10714}, // $75.00 / 0.70 = $107.1428... -> 10714 cents.
 	}
 	for _, c := range cases {
 		got := CreditCentsForReservation(c.res)
@@ -58,14 +77,14 @@ func TestCreditCentsForReservationDiscountMath(t *testing.T) {
 func TestApplyMonthlyGrantCreditsLedgerOnce(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemCreditLedger()
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS, "2026-07"); err != nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS(), "2026-07"); err != nil {
 		t.Fatalf("ApplyMonthlyGrant: %v", err)
 	}
 	bal, err := l.Balance(ctx, "org1")
 	if err != nil {
 		t.Fatalf("Balance: %v", err)
 	}
-	if want := Money(CreditCentsForReservation(BoxS)); bal != want {
+	if want := Money(CreditCentsForReservation(BoxS())); bal != want {
 		t.Errorf("balance = %d, want %d", int64(bal), int64(want))
 	}
 	entries, _ := l.Entries(ctx, "org1")
@@ -84,15 +103,15 @@ func TestApplyMonthlyGrantCreditsLedgerOnce(t *testing.T) {
 func TestApplyMonthlyGrantIsIdempotentPerOrgMonth(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemCreditLedger()
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxM, "2026-07"); err != nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxM(), "2026-07"); err != nil {
 		t.Fatalf("first grant: %v", err)
 	}
-	err := ApplyMonthlyGrant(ctx, l, "org1", BoxM, "2026-07")
+	err := ApplyMonthlyGrant(ctx, l, "org1", BoxM(), "2026-07")
 	if !errors.Is(err, ErrDuplicateEntry) {
 		t.Fatalf("second grant err = %v, want ErrDuplicateEntry", err)
 	}
 	bal, _ := l.Balance(ctx, "org1")
-	if want := Money(CreditCentsForReservation(BoxM)); bal != want {
+	if want := Money(CreditCentsForReservation(BoxM())); bal != want {
 		t.Errorf("balance after replay = %d, want %d (credited once)", int64(bal), int64(want))
 	}
 	entries, _ := l.Entries(ctx, "org1")
@@ -107,13 +126,13 @@ func TestApplyMonthlyGrantIsIdempotentPerOrgMonth(t *testing.T) {
 func TestApplyMonthlyGrantDistinguishesMonthAndBox(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemCreditLedger()
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS, "2026-07"); err != nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS(), "2026-07"); err != nil {
 		t.Fatalf("box S july: %v", err)
 	}
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS, "2026-08"); err != nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS(), "2026-08"); err != nil {
 		t.Fatalf("box S august: %v", err)
 	}
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxL, "2026-07"); err != nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxL(), "2026-07"); err != nil {
 		t.Fatalf("box L july: %v", err)
 	}
 	entries, _ := l.Entries(ctx, "org1")
@@ -127,7 +146,7 @@ func TestApplyMonthlyGrantDistinguishesMonthAndBox(t *testing.T) {
 func TestApplyMonthlyGrantRejectsMalformedYearMonth(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemCreditLedger()
-	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS, "not-a-month"); err == nil {
+	if err := ApplyMonthlyGrant(ctx, l, "org1", BoxS(), "not-a-month"); err == nil {
 		t.Fatal("expected an error for a malformed year-month")
 	}
 	entries, _ := l.Entries(ctx, "org1")

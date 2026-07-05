@@ -199,6 +199,11 @@ type TemplateLister interface {
 // "system" (the instance-operator plane's other read views, which have no
 // single org/entity target).
 type AuditEvent struct {
+	// OrgID scopes the event to one organization for every normal (non-admin)
+	// action. The reserved value console.InstanceAuditOrgID ("_instance") is
+	// used instead for every instance-operator-plane (admin.*) event, which
+	// has no single owning org; a real org id can never take this value (see
+	// InstanceAuditOrgID's doc), so the two namespaces never collide.
 	OrgID      string    `json:"org_id"`
 	ActorID    string    `json:"actor_id"`
 	ActorName  string    `json:"actor_name"`

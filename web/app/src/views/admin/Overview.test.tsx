@@ -39,6 +39,7 @@ describe('AdminOverview view', () => {
     mockFetch({
       orgs: 3,
       running_sandboxes: 5,
+      running_sandboxes_orgs: 3,
       nodes_ready: null,
       nodes_total: null,
       signup_mode: 'open',
@@ -50,16 +51,48 @@ describe('AdminOverview view', () => {
   })
 
   it('renders no failed-orgs note when failed_orgs is absent', async () => {
-    mockFetch({ orgs: 3, running_sandboxes: 5, nodes_ready: null, nodes_total: null, signup_mode: 'open' })
+    mockFetch({ orgs: 3, running_sandboxes: 5, running_sandboxes_orgs: 3, nodes_ready: null, nodes_total: null, signup_mode: 'open' })
     await renderAt('/admin', caps)
     await waitFor(() => expect(screen.getByText('Organizations')).toBeInTheDocument())
     expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument()
   })
 
   it('renders no failed-orgs note when failed_orgs is zero', async () => {
-    mockFetch({ orgs: 3, running_sandboxes: 5, nodes_ready: null, nodes_total: null, signup_mode: 'open', failed_orgs: 0 })
+    mockFetch({ orgs: 3, running_sandboxes: 5, running_sandboxes_orgs: 3, nodes_ready: null, nodes_total: null, signup_mode: 'open', failed_orgs: 0 })
     await renderAt('/admin', caps)
     await waitFor(() => expect(screen.getByText('Organizations')).toBeInTheDocument())
     expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument()
+  })
+
+  // The running-sandboxes tile must carry the same "showing first N of
+  // orgs" honesty disclosure the orgs table already has once the 200-org
+  // rollup cap is hit (issue #714): previously it silently implied full
+  // coverage regardless of deployment size.
+  it('shows a rollup-cap disclosure under the running-sandboxes tile when running_sandboxes_orgs is less than orgs', async () => {
+    mockFetch({
+      orgs: 250,
+      running_sandboxes: 40,
+      running_sandboxes_orgs: 200,
+      nodes_ready: null,
+      nodes_total: null,
+      signup_mode: 'open',
+    })
+    await renderAt('/admin', caps)
+    await waitFor(() => expect(screen.getByText('Running sandboxes')).toBeInTheDocument())
+    expect(screen.getByText(/showing sandboxes from the first 200 of 250 organizations/i)).toBeInTheDocument()
+  })
+
+  it('omits the rollup-cap disclosure when every org was scanned', async () => {
+    mockFetch({
+      orgs: 3,
+      running_sandboxes: 5,
+      running_sandboxes_orgs: 3,
+      nodes_ready: null,
+      nodes_total: null,
+      signup_mode: 'open',
+    })
+    await renderAt('/admin', caps)
+    await waitFor(() => expect(screen.getByText('Running sandboxes')).toBeInTheDocument())
+    expect(screen.queryByText(/showing sandboxes from the first/i)).not.toBeInTheDocument()
   })
 })

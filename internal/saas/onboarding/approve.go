@@ -65,7 +65,7 @@ func (h *approveSignupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	canonical, err := ApproveWaitlistEntry(r.Context(), h.allowlist, h.email, req.Email, req.Note, h.now())
+	canonical, _, err := ApproveWaitlistEntry(r.Context(), h.allowlist, h.email, req.Email, req.Note, h.now())
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidEmail):
@@ -111,20 +111,25 @@ var errApproveAllowlistAdd = errors.New("onboarding: approve waitlist entry: add
 // reuses (via an adapter in cmd/console), so an operator approving through
 // either surface produces an identical allowlist row and email.
 //
-// Returns the canonical email on success. Returns ErrInvalidEmail if
-// rawEmail cannot be reduced to a canonical identity; a error wrapping
-// errApproveAllowlistAdd if the allowlist write failed (nothing was sent);
-// or the raw error from email.SendApproved if the allowlist row was added
-// but the notification could not be sent (the caller may retry: Add is
-// idempotent).
-func ApproveWaitlistEntry(ctx context.Context, allowlist Allowlist, email EmailSender, rawEmail, note string, now time.Time) (canonical string, err error) {
+// Returns the canonical email on success, and alreadyApproved true when
+// canonical already held allowlist access BEFORE this call: in that case
+// neither Add nor SendApproved is called again, so a second approval of the
+// same email (an operator double-clicking Approve, or re-approving a
+// waitlist row that still lists the email because entries are never
+// removed) never re-sends the "you're in" notification. Returns
+// ErrInvalidEmail if rawEmail cannot be reduced to a canonical identity; an
+// error wrapping errApproveAllowlistAdd if the allowlist write failed
+// (nothing was sent); or the raw error from email.SendApproved if the
+// allowlist row was added but the notification could not be sent (the
+// caller may retry: Add is idempotent).
+func ApproveWaitlistEntry(ctx context.Context, allowlist Allowlist, email EmailSender, rawEmail, note string, now time.Time) (canonical string, alreadyApproved bool, err error) {
 	// canonicalEmail folds plus-tags (all providers) and Gmail dots so the
 	// allowlist row stored here matches the identity key the Verify gate reads.
 	// An operator approving u.ser+x@gmail.com must produce the same row as a
 	// signup whose Verify gate checks user@gmail.com.
 	canonical, valid := canonicalEmail(rawEmail)
 	if !valid {
-		return "", ErrInvalidEmail
+		return "", false, ErrInvalidEmail
 	}
 	// The allowlist row is the canonical IDENTITY; the approval email is
 	// DELIVERED to the address as typed (normalized), so a plus-tagged inbox
@@ -136,11 +141,20 @@ func ApproveWaitlistEntry(ctx context.Context, allowlist Allowlist, email EmailS
 		delivery = canonical
 	}
 
+	// Idempotency check: a lookup failure is treated as "not yet approved"
+	// (fail OPEN) rather than blocking the approval outright on a read
+	// hiccup; Add below is itself idempotent, so at worst this re-sends one
+	// redundant notification instead of silently refusing a legitimate
+	// approval.
+	if already, lookupErr := allowlist.IsAllowed(ctx, canonical); lookupErr == nil && already {
+		return canonical, true, nil
+	}
+
 	if err := allowlist.Add(ctx, canonical, note, now); err != nil {
-		return "", fmt.Errorf("%w: %w", errApproveAllowlistAdd, err)
+		return "", false, fmt.Errorf("%w: %w", errApproveAllowlistAdd, err)
 	}
 	if err := email.SendApproved(ctx, delivery); err != nil {
-		return "", fmt.Errorf("onboarding: approve waitlist entry: send approved email: %w", err)
+		return "", false, fmt.Errorf("onboarding: approve waitlist entry: send approved email: %w", err)
 	}
-	return canonical, nil
+	return canonical, false, nil
 }

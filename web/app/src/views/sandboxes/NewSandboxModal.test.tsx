@@ -105,6 +105,27 @@ describe('NewSandboxModal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  it('traps Tab from the last button in the dialog back to the template select', async () => {
+    mockFetch()
+    wrap(<NewSandboxModal onClose={() => {}} />)
+    const templateSelect = await screen.findByLabelText(/template/i)
+    screen.getByRole('button', { name: /create sandbox/i }).focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(templateSelect).toHaveFocus()
+  })
+
+  it('returns focus to the trigger once closed', async () => {
+    mockFetch()
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    trigger.focus()
+    const { unmount } = wrap(<NewSandboxModal onClose={() => {}} />)
+    await screen.findByLabelText(/template/i)
+    unmount()
+    expect(trigger).toHaveFocus()
+    trigger.remove()
+  })
+
   // Mobile: the dialog carries the shared .modal class so base.css's
   // <=480px media query turns it into a full-screen sheet instead of a small
   // floating card, and the backdrop carries .modal-backdrop so its padding
@@ -115,6 +136,38 @@ describe('NewSandboxModal', () => {
     const dialog = screen.getByRole('dialog')
     expect(dialog.className).toContain('modal')
     expect(dialog.parentElement?.className).toContain('modal-backdrop')
+  })
+
+  it('focuses the dialog container while templates load, then the template select once they resolve', async () => {
+    let resolveTemplates: ((res: Response) => void) | undefined
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/templates')) {
+        // Never resolves until the test explicitly does so below: models the
+        // async gap between the dialog mounting and templates (and the
+        // template <select> that firstFieldRef points at) actually loading in.
+        return new Promise((resolve) => {
+          resolveTemplates = resolve
+        })
+      }
+      if (url.endsWith('/console/projects')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ org_id: 'o1', projects: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    wrap(<NewSandboxModal onClose={() => {}} />)
+
+    await waitFor(() => expect(screen.getByText(/loading templates/i)).toBeInTheDocument())
+    expect(screen.getByRole('dialog')).toHaveFocus()
+
+    resolveTemplates!(
+      new Response(JSON.stringify({ templates }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
+    expect(screen.getByLabelText(/template/i)).toHaveFocus()
   })
 
   it('shows a message and no form when there are no templates', async () => {

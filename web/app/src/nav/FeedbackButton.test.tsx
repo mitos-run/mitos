@@ -55,6 +55,25 @@ describe('FeedbackButton', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('returns focus to the feedback button once the dialog closes', () => {
+    render(<FeedbackButton caps={emailCaps} route="/billing" />)
+    const trigger = screen.getByRole('button', { name: /send feedback/i })
+    fireEvent.click(trigger)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(trigger).toHaveFocus()
+  })
+
+  it('traps Tab from the last button in the dialog back to the textarea', () => {
+    render(<FeedbackButton caps={emailCaps} route="/billing" />)
+    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }))
+    const dialog = screen.getByRole('dialog')
+    const sendButton = within(dialog).getByRole('button', { name: /^send feedback$/i })
+    sendButton.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    const textarea = screen.getByLabelText(/what happened/i)
+    expect(textarea).toHaveFocus()
+  })
+
   it('shows the exact diagnostics text in a read-only details block', () => {
     render(<FeedbackButton caps={emailCaps} route="/billing" />)
     fireEvent.click(screen.getByRole('button', { name: /send feedback/i }))
@@ -75,7 +94,9 @@ describe('FeedbackButton', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^send feedback$/i }))
     expect(assign).toHaveBeenCalledTimes(1)
     const url = assign.mock.calls[0][0] as string
-    expect(url).toMatch(/^mailto:feedback@mitos\.run\?/)
+    // The target is encodeURIComponent'd (encoding "@" to "%40") so a
+    // misconfigured target can never break out of the mailto to-part.
+    expect(url).toMatch(/^mailto:feedback%40mitos\.run\?/)
     expect(url).toContain('subject=Mitos%20feedback')
     expect(url).toContain(encodeURIComponent('The fork tree is slow'))
     expect(url).toContain(encodeURIComponent('1.6.0'))

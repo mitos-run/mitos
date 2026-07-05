@@ -53,7 +53,11 @@ import (
 // secure is the Secure cookie flag, matching the OIDC handler's value.
 func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pending onboarding.PendingStore, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool, allowlist onboarding.Allowlist) {
 	if !caps.signupEnabled() {
-		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
+		// Waitlist mode: no account is ever provisioned over HTTP here, but a
+		// visitor still needs SOME way to join the waitlist (issue #718; the
+		// full /onboarding/signup path is deliberately not mounted in this
+		// mode). mountWaitlistOnly wires just that narrower intake.
+		mountWaitlistOnly(mux, logger, accounts, store, pending, creditLedger)
 		return
 	}
 
@@ -191,6 +195,44 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 			logger.Info("onboarding E2E token endpoint mounted (QA only; bearer and domain gates active)")
 		}
 	}
+}
+
+// mountWaitlistOnly builds a waitlist-mode onboarding.Service (ModeWaitlist,
+// the default) and mounts ONLY POST /onboarding/waitlist on mux (issue #718).
+// It never provisions an account and never sends mail, so it needs no real
+// EmailSender (the dev/no-op sender is wired but never invoked) and no org
+// provisioner. It shares pending with the open-mode path and with
+// console.Deps.Waitlist's waitlistAdapter (constructed unconditionally in
+// main.go), so a waitlist entry recorded here shows up in the operator
+// waitlist view/approve the same as one recorded through the open-mode
+// funnel's own waitlist branch.
+func mountWaitlistOnly(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pending onboarding.PendingStore, creditLedger billing.CreditLedger) {
+	svc := onboarding.NewService(
+		accounts, store, pending, creditLedger, devLogEmailSender{log: logger},
+		onboarding.WithMode(onboarding.ModeWaitlist),
+		onboarding.WithLogger(logger),
+	)
+
+	// A modest, fixed per-IP cap: this intake is a much smaller surface than
+	// the full signup funnel (no account, no email sent), so a conservative
+	// fixed default is enough to blunt bulk submission without adding a
+	// second set of env variables to document alongside
+	// MITOS_CONSOLE_SIGNUP_IP_LIMIT/WINDOW.
+	handlerOpts := []onboarding.HandlerOption{
+		onboarding.WithVelocity(onboarding.NewVelocity(5, time.Hour)),
+	}
+	// Same reverse-proxy trust model as the open-mode funnel: without this,
+	// a deployment behind a gateway would rate-limit by the gateway's own
+	// address instead of the real client IP.
+	if s := strings.TrimSpace(os.Getenv("MITOS_CONSOLE_TRUSTED_PROXY_HOPS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			handlerOpts = append(handlerOpts, onboarding.WithTrustedProxyHops(n))
+		}
+	}
+
+	h := onboarding.NewHandler(svc, logger, handlerOpts...)
+	h.RoutesWaitlistOnly(mux)
+	logger.Info("onboarding waitlist-only intake mounted (self-serve signup disabled)")
 }
 
 // signupGate is the minimal capability surface mountOnboarding reads, so the
@@ -349,10 +391,10 @@ func (a waitlistAdapter) List(ctx context.Context) ([]console.WaitlistEntry, err
 	return out, nil
 }
 
-func (a waitlistAdapter) Approve(ctx context.Context, email string) error {
+func (a waitlistAdapter) Approve(ctx context.Context, email string) (bool, error) {
 	if a.allowlist == nil || a.email == nil {
-		return console.ErrWaitlistNotConfigured
+		return false, console.ErrWaitlistNotConfigured
 	}
-	_, err := onboarding.ApproveWaitlistEntry(ctx, a.allowlist, a.email, email, "instance admin: waitlist approve", a.now())
-	return err
+	_, alreadyApproved, err := onboarding.ApproveWaitlistEntry(ctx, a.allowlist, a.email, email, "instance admin: waitlist approve", a.now())
+	return alreadyApproved, err
 }

@@ -5,7 +5,7 @@
 // so Enter/Space just works) into the node detail side panel. Layout is a
 // pure function of layoutForkTree(nodes) so this component is a thin renderer
 // over positions.
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Button } from '@mitos/brand'
 import { useForkTree } from '../../data/forktree'
@@ -15,6 +15,7 @@ import { Skeleton } from '../../ui/Skeleton'
 import { EmptyState } from '../../ui/EmptyState'
 import { useToast } from '../../ui/Toast'
 import { PageHeader } from '../../ui/PageHeader'
+import { useModalFocus } from '../../ui/useModalFocus'
 import { NewSandboxModal } from '../sandboxes/NewSandboxModal'
 import { layoutForkTree, type PositionedNode } from './layout'
 
@@ -25,24 +26,45 @@ const MAX_FORK_COUNT = 16
 // calls for. Rendered as a labelled region so it is announced when it
 // appears; focus moves to the heading on mount (mirrors FeedbackButton's
 // textarea-focus-on-open pattern) so a keyboard/screen-reader user gets a
-// clear signal the panel opened, and onClose (wired by the caller) returns
-// focus to the "Details" button that opened it.
-function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => void }) {
+// clear signal the panel opened. This is a panel, not a modal (no Tab trap:
+// the rest of the page stays reachable), but it shares the same
+// open/close focus plumbing as every dialog via useModalFocus: on unmount,
+// focus returns to the "Details" button (returnFocusRef, set by the caller)
+// that opened it.
+function NodeDetailPanel({
+  node,
+  returnFocusRef,
+  onClose,
+}: {
+  node: ForkNode
+  returnFocusRef: RefObject<HTMLButtonElement | null>
+  onClose: () => void
+}) {
   const [count, setCount] = useState(2)
   const fork = useForkSandbox()
   const terminate = useTerminateSandbox()
   const { notify } = useToast()
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
 
-  useEffect(() => {
-    headingRef.current?.focus()
-  }, [])
+  useModalFocus(panelRef, { active: true, initialFocusRef: headingRef, returnFocusRef, trap: false })
 
   function onFork() {
+    const requested = count
     fork.mutate(
-      { id: node.id, count },
+      { id: node.id, count: requested },
       {
-        onSuccess: (res) => notify(`Forked ${node.id} into ${res.ids.length}`, 'ok'),
+        // A partial failure (HTTP 207: some forks landed before a later one
+        // failed) still resolves onSuccess (fetch treats 207 as ok), so it
+        // is res.error, not onError, that carries the failure: show "created
+        // K of N" plus the reason instead of a misleading plain success.
+        onSuccess: (res) => {
+          if (res.error) {
+            notify(`Created ${res.ids.length} of ${requested} for ${node.id}: ${res.error}`, 'error')
+          } else {
+            notify(`Forked ${node.id} into ${res.ids.length}`, 'ok')
+          }
+        },
         onError: (err) => notify(err instanceof Error ? err.message : `Failed to fork ${node.id}`, 'error'),
       },
     )
@@ -60,6 +82,7 @@ function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => voi
 
   return (
     <aside
+      ref={panelRef}
       role="region"
       aria-label={`Details for sandbox ${node.id}`}
       className="card fork-node-panel"
@@ -126,9 +149,11 @@ export function ForkTree() {
   const { data, isLoading, isError } = useForkTree()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [showNew, setShowNew] = useState(false)
-  // Tracks the "Details" button that opened the panel, so closing it can
-  // return focus to the same trigger (keyboard/screen-reader users get no
-  // signal otherwise that focus silently landed back on <body>).
+  // Tracks the "Details" button that opened the panel; passed to
+  // NodeDetailPanel as returnFocusRef so the shared useModalFocus hook
+  // returns focus to the same trigger on close (keyboard/screen-reader
+  // users get no signal otherwise that focus silently landed back on
+  // <body>).
   const lastDetailsTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   if (isError) {
@@ -183,10 +208,8 @@ export function ForkTree() {
           // node change, and the mount-only focus effect never re-fires.
           key={selectedNode.id}
           node={selectedNode}
-          onClose={() => {
-            setSelectedId(null)
-            lastDetailsTriggerRef.current?.focus()
-          }}
+          returnFocusRef={lastDetailsTriggerRef}
+          onClose={() => setSelectedId(null)}
         />
       )}
 

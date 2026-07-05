@@ -64,7 +64,16 @@ function SandboxHeaderActions({ id }: { id: string }) {
     fork.mutate(
       { id, count: 1 },
       {
-        onSuccess: (res) => notify(`Forked ${id} into ${res.ids[0] ?? 'a new sandbox'}`, 'ok'),
+        // A partial failure (HTTP 207) still resolves onSuccess (fetch
+        // treats 207 as ok), so it is res.error, not onError, that carries
+        // the failure here too, matching ForkTree's panel.
+        onSuccess: (res) => {
+          if (res.error) {
+            notify(`Created ${res.ids.length} of 1 for ${id}: ${res.error}`, 'error')
+          } else {
+            notify(`Forked ${id} into ${res.ids[0] ?? 'a new sandbox'}`, 'ok')
+          }
+        },
         onError: (err) => notify(err instanceof Error ? err.message : `Failed to fork ${id}`, 'error'),
       },
     )

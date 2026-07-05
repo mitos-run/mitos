@@ -8,6 +8,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -157,6 +158,88 @@ func TestForkSandboxSucceedsReturnsIDsAndAudits(t *testing.T) {
 	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if len(events) == 0 || events[0].Action != "sandbox.fork" || events[0].Target != "sb-alice-1" {
 		t.Fatalf("expected a sandbox.fork audit event, got %+v", events)
+	}
+}
+
+// partialForkSandboxControl wraps a real SandboxControl but makes Fork
+// return a fixed (survivors, err) pair unconditionally, standing in for a
+// cluster partial failure: the underlying seam creates each fork
+// independently, so an error partway through still leaves however many
+// landed so far (see clustersandbox.Control.Fork's doc); survivors == nil
+// stands in for a TOTAL failure (nothing landed at all).
+type partialForkSandboxControl struct {
+	SandboxControl
+	survivors []string
+	err       error
+}
+
+func (p *partialForkSandboxControl) Fork(context.Context, string, string, int) ([]string, error) {
+	return p.survivors, p.err
+}
+
+// TestForkSandboxPartialFailureReturns207WithSurvivorsAndError asserts a
+// partial fork failure (issue #716) reports the survivor ids and the error
+// via a 207-style body, rather than discarding the ids the previous
+// behavior did (a bare c.failSandbox(w, err) call that dropped them).
+func TestForkSandboxPartialFailureReturns207WithSurvivorsAndError(t *testing.T) {
+	f := newFixture(t)
+	forkErr := errors.New("create fork 3/5 of sb-alice-1: cluster api timeout")
+	f.con.deps.Sandboxes = &partialForkSandboxControl{
+		SandboxControl: f.sandboxes,
+		survivors:      []string{"sb-alice-1-fork-1", "sb-alice-1-fork-2"},
+		err:            forkErr,
+	}
+
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/fork", `{"count":5}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want 207; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Source string   `json:"source"`
+		IDs    []string `json:"ids"`
+		Error  string   `json:"error"`
+	}
+	decode(t, w, &resp)
+	if resp.Source != "sb-alice-1" {
+		t.Errorf("source = %q, want sb-alice-1", resp.Source)
+	}
+	if len(resp.IDs) != 2 || resp.IDs[0] != "sb-alice-1-fork-1" || resp.IDs[1] != "sb-alice-1-fork-2" {
+		t.Fatalf("ids = %+v, want the two survivor ids preserved", resp.IDs)
+	}
+	if resp.Error != forkErr.Error() {
+		t.Errorf("error = %q, want %q", resp.Error, forkErr.Error())
+	}
+
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
+	if len(events) == 0 {
+		t.Fatal("expected a sandbox.fork audit event for the partial failure")
+	}
+	ev := events[0]
+	if ev.Action != "sandbox.fork" || ev.Target != "sb-alice-1" {
+		t.Fatalf("audit event = %+v, want action sandbox.fork target sb-alice-1", ev)
+	}
+	if !strings.Contains(ev.Detail, "2 of 5") {
+		t.Errorf("audit detail = %q, want it to record the survivor count (2 of 5)", ev.Detail)
+	}
+}
+
+// TestForkSandboxTotalFailureReturnsPlainError asserts a TOTAL fork failure
+// (no survivor ids at all) still goes through the ordinary failSandbox path
+// (no ids/error 207 body): there is nothing to report as a partial success.
+func TestForkSandboxTotalFailureReturnsPlainError(t *testing.T) {
+	f := newFixture(t)
+	f.con.deps.Sandboxes = &partialForkSandboxControl{
+		SandboxControl: f.sandboxes,
+		survivors:      nil,
+		err:            errors.New("cluster api unavailable"),
+	}
+
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/fork", `{"count":5}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"ids"`) {
+		t.Errorf("total-failure body must not carry an ids field: %s", w.Body.String())
 	}
 }
 
