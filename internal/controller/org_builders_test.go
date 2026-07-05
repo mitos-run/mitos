@@ -10,6 +10,53 @@ import (
 	"mitos.run/mitos/internal/tenant"
 )
 
+// TestBuildOrgPoolFromTemplate asserts the per-org pool clones the reference
+// pool's full spec (image, resources, placement) and overrides ONLY warm.min to
+// the configured floor, carries the org label and target name/namespace, so a
+// per-org create in the org namespace has a schedulable pool to fork from (issue
+// #288 multi-tenancy enablement).
+func TestBuildOrgPoolFromTemplate(t *testing.T) {
+	tmpl := &v1.SandboxPool{
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image:     "ghcr.io/mitos-run/mitos-python:v1.13.0",
+				Resources: v1.SandboxResources{CPU: resource.MustParse("2"), Memory: resource.MustParse("512Mi")},
+			},
+			Warm: &v1.PoolWarm{Min: 8},
+			Placement: &v1.PoolPlacement{
+				NodeSelector: map[string]string{"mitos.run/kvm": "true"},
+			},
+		},
+	}
+	org := &v1.Org{}
+	org.Name = "acme"
+	pool := buildOrgPoolFromTemplate(org, tenant.NamespaceForOrg("acme"), "python", tmpl, 0)
+
+	if pool.Name != "python" {
+		t.Fatalf("name = %q, want python", pool.Name)
+	}
+	if pool.Namespace != "mitos-org-acme" {
+		t.Fatalf("namespace = %q, want mitos-org-acme", pool.Namespace)
+	}
+	if got := pool.Labels[tenant.OrgLabelKey]; got != "acme" {
+		t.Fatalf("org label = %q, want acme", got)
+	}
+	if pool.Spec.Template == nil || pool.Spec.Template.Image != "ghcr.io/mitos-run/mitos-python:v1.13.0" {
+		t.Fatalf("template image not cloned: %+v", pool.Spec.Template)
+	}
+	if pool.Spec.Placement == nil || pool.Spec.Placement.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Fatalf("placement not cloned: %+v", pool.Spec.Placement)
+	}
+	if pool.Spec.Warm == nil || pool.Spec.Warm.Min != 0 {
+		t.Fatalf("warm.min = %+v, want a non-nil Warm with Min 0 (overridden)", pool.Spec.Warm)
+	}
+	// The clone must be independent: mutating it must not touch the template.
+	pool.Spec.Placement.NodeSelector["mitos.run/kvm"] = "mutated"
+	if tmpl.Spec.Placement.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Fatalf("clone shares the template's placement map (not a deep copy)")
+	}
+}
+
 // TestBuildOrgDefaultDenyPolicy asserts the per-org NetworkPolicy is
 // default-deny in BOTH directions with a single DNS egress allow, applies to
 // every pod in the namespace, and carries the org label.

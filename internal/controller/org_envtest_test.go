@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,6 +155,92 @@ func TestOrgReconcilerProvisionsIsolationStack(t *testing.T) {
 	}
 	if !hasReadyCondition(after.Status.Conditions) {
 		t.Errorf("org missing Ready=True condition: %+v", after.Status.Conditions)
+	}
+}
+
+// TestOrgReconcilerProvisionsPoolFromTemplate asserts that when a pool template
+// is configured the reconciler clones it (full spec, warm.min overridden to 0)
+// into the org namespace under OrgPoolName, owner-referenced to the Org, so a
+// per-org create has a schedulable pool to fork from (issue #288).
+func TestOrgReconcilerProvisionsPoolFromTemplate(t *testing.T) {
+	stamp := time.Now().UnixNano()
+	// Seed a reference pool in the controller namespace ("mitos"). Ensure the
+	// namespace exists first (envtest starts with none).
+	mitosNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mitos"}}
+	if err := k8sClient.Create(ctx, mitosNS); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mitos namespace: %v", err)
+	}
+	tmplName := fmt.Sprintf("python-%d", stamp)
+	tmpl := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: tmplName, Namespace: "mitos"},
+		Spec: v1.SandboxPoolSpec{
+			Template:  &v1.PoolTemplateSpec{Image: "ghcr.io/mitos-run/mitos-python:v1.13.0"},
+			Warm:      &v1.PoolWarm{Min: 8},
+			Placement: &v1.PoolPlacement{NodeSelector: map[string]string{"mitos.run/kvm": "true"}},
+		},
+	}
+	if err := k8sClient.Create(ctx, tmpl); err != nil {
+		t.Fatalf("create template pool: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, tmpl) })
+
+	orgID := fmt.Sprintf("pooled-%d", stamp)
+	org := &v1.Org{ObjectMeta: metav1.ObjectMeta{Name: orgID}}
+	if err := k8sClient.Create(ctx, org); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, org) })
+
+	r := newOrgReconciler()
+	r.PoolTemplateName = tmplName
+	r.PoolTemplateNamespace = "mitos"
+	r.OrgPoolName = "python"
+	r.OrgPoolWarmMin = 0
+	reconcileOrg(t, r, orgID)
+
+	ns := tenant.NamespaceForOrg(orgID)
+	var pool v1.SandboxPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "python", Namespace: ns}, &pool); err != nil {
+		t.Fatalf("get org pool: %v", err)
+	}
+	if pool.Spec.Template == nil || pool.Spec.Template.Image != "ghcr.io/mitos-run/mitos-python:v1.13.0" {
+		t.Errorf("pool template image = %+v, want cloned image", pool.Spec.Template)
+	}
+	if pool.Spec.Placement == nil || pool.Spec.Placement.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("pool placement not cloned: %+v", pool.Spec.Placement)
+	}
+	if pool.Spec.Warm == nil || pool.Spec.Warm.Min != 0 {
+		t.Errorf("pool warm = %+v, want Min 0 (overridden)", pool.Spec.Warm)
+	}
+	if pool.Labels[tenant.OrgLabelKey] != orgID {
+		t.Errorf("pool org label = %q, want %q", pool.Labels[tenant.OrgLabelKey], orgID)
+	}
+	if !hasOrgOwner(pool.OwnerReferences, orgID) {
+		t.Errorf("pool missing Org owner reference: %+v", pool.OwnerReferences)
+	}
+}
+
+// TestOrgReconcilerSkipsPoolWhenUnconfigured asserts that with no pool template
+// (the self-host / bring-your-own-pool posture) NO pool is created, so a
+// single-tenant install is unaffected.
+func TestOrgReconcilerSkipsPoolWhenUnconfigured(t *testing.T) {
+	orgID := fmt.Sprintf("nopool-%d", time.Now().UnixNano())
+	org := &v1.Org{ObjectMeta: metav1.ObjectMeta{Name: orgID}}
+	if err := k8sClient.Create(ctx, org); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, org) })
+
+	r := newOrgReconciler() // PoolTemplateName empty
+	reconcileOrg(t, r, orgID)
+
+	ns := tenant.NamespaceForOrg(orgID)
+	var list v1.SandboxPoolList
+	if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatalf("a pool was created despite no template: %+v", list.Items)
 	}
 }
 

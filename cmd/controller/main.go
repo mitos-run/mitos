@@ -79,6 +79,10 @@ func main() {
 	var orgDefaultMaxSandboxes int
 	var orgDefaultCPU string
 	var orgDefaultMemory string
+	var orgPoolTemplateName string
+	var orgPoolTemplateNamespace string
+	var orgPoolName string
+	var orgPoolWarmMin int
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -109,6 +113,10 @@ func main() {
 	flag.IntVar(&orgDefaultMaxSandboxes, "org-default-max-sandboxes", 50, "Default per-org sandbox/pod count ceiling applied to an Org's ResourceQuota when the Org sets no spec.quota override. The per-org abuse-control primitive: it bounds how much one tenant can schedule. Only used with --enable-org-tenancy.")
 	flag.StringVar(&orgDefaultCPU, "org-default-cpu", "32", "Default per-org aggregate CPU limit ceiling (a Kubernetes quantity, for example 32 or 32000m) applied to an Org's ResourceQuota when the Org sets no spec.quota override. Only used with --enable-org-tenancy.")
 	flag.StringVar(&orgDefaultMemory, "org-default-memory", "64Gi", "Default per-org aggregate memory limit ceiling (a Kubernetes quantity, for example 64Gi) applied to an Org's ResourceQuota when the Org sets no spec.quota override. Only used with --enable-org-tenancy.")
+	flag.StringVar(&orgPoolTemplateName, "org-pool-template-name", "", "Name of a reference SandboxPool (in --org-pool-template-namespace) whose full spec (image, resources, placement, snapshots, network) is cloned into every org namespace so a per-org create has a schedulable pool to fork from. Empty (the default) provisions NO per-org pool (bring-your-own-pool). Only used with --enable-org-tenancy.")
+	flag.StringVar(&orgPoolTemplateNamespace, "org-pool-template-namespace", "", "Namespace of the reference pool named by --org-pool-template-name. Empty defaults to the controller's own namespace. Only used with --enable-org-tenancy.")
+	flag.StringVar(&orgPoolName, "org-pool-name", "", "Name the cloned pool is created under in each org namespace; MUST match the pool name a create resolves (the SDK's image/pool argument). Empty defaults to --org-pool-template-name. Only used with --enable-org-tenancy.")
+	flag.IntVar(&orgPoolWarmMin, "org-pool-warm-min", 0, "warm.min override on the cloned per-org pool. Default 0: no idle warm husks, so N per-org pools cost nothing at rest; the first fork per org cold-starts and the pool warms on demand. Only used with --enable-org-tenancy.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -336,12 +344,16 @@ func main() {
 			os.Exit(1)
 		}
 		orgReconciler := &controller.OrgReconciler{
-			Client:               mgr.GetClient(),
-			PoolSecretsSubject:   "mitos-controller",
-			PoolSecretsNamespace: poolControllerNamespace,
-			DefaultMaxSandboxes:  int32(orgDefaultMaxSandboxes), //nolint:gosec // flag value, operator-controlled, bounded by ResourceQuota semantics
-			DefaultCPU:           orgCPU,
-			DefaultMemory:        orgMem,
+			Client:                mgr.GetClient(),
+			PoolSecretsSubject:    "mitos-controller",
+			PoolSecretsNamespace:  poolControllerNamespace,
+			DefaultMaxSandboxes:   int32(orgDefaultMaxSandboxes), //nolint:gosec // flag value, operator-controlled, bounded by ResourceQuota semantics
+			DefaultCPU:            orgCPU,
+			DefaultMemory:         orgMem,
+			PoolTemplateName:      orgPoolTemplateName,
+			PoolTemplateNamespace: orgPoolTemplateNamespace,
+			OrgPoolName:           orgPoolName,
+			OrgPoolWarmMin:        int32(orgPoolWarmMin), //nolint:gosec // flag value, operator-controlled
 		}
 		if err := orgReconciler.SetupWithManager(mgr); err != nil {
 			logger.Error(err, "unable to create controller", "controller", "Org")
@@ -349,6 +361,12 @@ func main() {
 		}
 		logger.Info("org tenancy: ENABLED; provisioning per-org isolation namespaces (mitos-org-<id>) with PSA privileged labels, a ResourceQuota ceiling, a LimitRange, a default-deny NetworkPolicy + DNS egress, and the mitos-pool-secrets RoleBinding. Cross-org isolation is the separate namespace + default-deny NetworkPolicy + ResourceQuota + the microVM; a NetworkPolicy-enforcing CNI is required",
 			"default-max-sandboxes", orgDefaultMaxSandboxes, "default-cpu", orgDefaultCPU, "default-memory", orgDefaultMemory)
+		if orgPoolTemplateName != "" {
+			logger.Info("org tenancy: per-org pool ENABLED; cloning a reference pool spec into each org namespace with warm.min overridden so a per-org create has a schedulable pool to fork from",
+				"template-name", orgPoolTemplateName, "template-namespace", orgPoolTemplateNamespace, "org-pool-name", orgPoolName, "warm-min", orgPoolWarmMin)
+		} else {
+			logger.Info("org tenancy: per-org pool disabled (no --org-pool-template-name); each org namespace has NO pool until one is provisioned (bring-your-own-pool)")
+		}
 	} else {
 		logger.Info("org tenancy: disabled (default); self-host single-tenant. Pass --enable-org-tenancy for hosted multi-tenant per-org namespaces")
 	}

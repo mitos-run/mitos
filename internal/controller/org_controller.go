@@ -65,6 +65,28 @@ type OrgReconciler struct {
 	// DefaultMemory is the per-org aggregate memory limit ceiling applied when an
 	// Org sets no Quota override.
 	DefaultMemory resource.Quantity
+
+	// PoolTemplateName is the name of a reference SandboxPool (in
+	// PoolTemplateNamespace) whose spec is cloned into every org namespace so a
+	// per-org create has a pool to fork from. Cloning the full spec (template,
+	// resources, placement, snapshots, network) from ONE source of truth is what
+	// makes the per-org pool schedulable on the same nodes as the reference pool,
+	// which a bare image cannot. Empty disables per-org pool provisioning (the
+	// self-host / bring-your-own-pool posture), so a single-tenant install is
+	// unaffected.
+	PoolTemplateName string
+	// PoolTemplateNamespace is where the reference pool lives. Empty defaults to
+	// the controller's own namespace (PoolSecretsNamespace, else "mitos").
+	PoolTemplateNamespace string
+	// OrgPoolName is the name the cloned pool is created under in each org
+	// namespace. It MUST match the pool name a create resolves (the SDK passes it
+	// as the image/pool argument). Empty defaults to PoolTemplateName.
+	OrgPoolName string
+	// OrgPoolWarmMin overrides warm.min on the cloned per-org pool. Default 0: no
+	// dormant warm husks are held, so N per-org pools cost nothing at rest (the
+	// snapshot is content-addressed and deduped per node); the first fork per org
+	// cold-starts and the pool warms on demand.
+	OrgPoolWarmMin int32
 }
 
 const (
@@ -128,7 +150,81 @@ func (r *OrgReconciler) ensureStack(ctx context.Context, org *v1.Org, ns string)
 	if err := r.ensurePoolSecretsRoleBinding(ctx, org, ns); err != nil {
 		return err
 	}
+	if err := r.ensureOrgPool(ctx, org, ns); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ensureOrgPool clones the reference SandboxPool (PoolTemplateNamespace/
+// PoolTemplateName) into the org namespace when a template is configured. It is a
+// no-op otherwise (the self-host / bring-your-own-pool posture), so a
+// single-tenant install is unaffected. Cloning the full spec carries placement,
+// resources, snapshots, and network from one source of truth, so the per-org
+// pool schedules exactly where the reference pool does. The pool is created ONLY
+// (never updated): once it exists the reconciler leaves its spec alone, so a
+// warm.min bumped by the autoscaler or an operator persists. Owner-referenced to
+// the Org for cascade deletion.
+func (r *OrgReconciler) ensureOrgPool(ctx context.Context, org *v1.Org, ns string) error {
+	if r.PoolTemplateName == "" {
+		return nil
+	}
+	tns := r.PoolTemplateNamespace
+	if tns == "" {
+		tns = r.PoolSecretsNamespace
+	}
+	if tns == "" {
+		tns = defaultControllerNamespace
+	}
+	name := r.OrgPoolName
+	if name == "" {
+		name = r.PoolTemplateName
+	}
+
+	// Create-once: if the per-org pool already exists, leave it alone.
+	existing := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(existing), existing); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get org pool %s/%s: %w", ns, name, err)
+	}
+
+	var tmpl v1.SandboxPool
+	if err := r.Get(ctx, client.ObjectKey{Namespace: tns, Name: r.PoolTemplateName}, &tmpl); err != nil {
+		// A missing template is an operator misconfiguration, not a transient: fail
+		// the reconcile so it surfaces on the Org status with actionable context.
+		return fmt.Errorf("get org pool template %s/%s: %w", tns, r.PoolTemplateName, err)
+	}
+
+	desired := buildOrgPoolFromTemplate(org, ns, name, &tmpl, r.OrgPoolWarmMin)
+	if err := r.setOwner(org, desired); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create org pool %s/%s: %w", ns, name, err)
+	}
+	return nil
+}
+
+// buildOrgPoolFromTemplate builds a per-org SandboxPool by deep-copying the
+// reference pool's spec and overriding only warm.min. Placement, resources,
+// snapshots, template image, and network are carried verbatim so the per-org
+// pool schedules exactly like the reference. warmMin defaults the pool to no
+// idle warm husks (0) so N per-org pools cost nothing at rest.
+func buildOrgPoolFromTemplate(org *v1.Org, ns, name string, tmpl *v1.SandboxPool, warmMin int32) *v1.SandboxPool {
+	spec := *tmpl.Spec.DeepCopy()
+	if spec.Warm == nil {
+		spec.Warm = &v1.PoolWarm{}
+	}
+	spec.Warm.Min = warmMin
+	return &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    tenant.OrgLabels(org.Name),
+		},
+		Spec: spec,
+	}
 }
 
 // ensureNamespace creates or updates the org namespace with the org label and
@@ -213,7 +309,7 @@ func buildOrgResourceQuota(org *v1.Org, ns string, defMaxSandboxes int32, defCPU
 	}
 
 	hard := corev1.ResourceList{
-		corev1.ResourcePods:        *resource.NewQuantity(int64(maxPods), resource.DecimalSI),
+		corev1.ResourcePods:         *resource.NewQuantity(int64(maxPods), resource.DecimalSI),
 		"count/sandboxes.mitos.run": *resource.NewQuantity(int64(maxSandboxes), resource.DecimalSI),
 		corev1.ResourceLimitsCPU:    cpu,
 		corev1.ResourceLimitsMemory: mem,

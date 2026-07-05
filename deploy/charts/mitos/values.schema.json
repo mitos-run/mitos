@@ -21,7 +21,11 @@
         "pullPolicy": {
           "description": "Image pull policy for the container.",
           "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
         }
       }
     },
@@ -55,7 +59,10 @@
         },
         "minAvailable": {
           "description": "minAvailable for the PDB; an integer count or a percentage string.",
-          "type": ["integer", "string"]
+          "type": [
+            "integer",
+            "string"
+          ]
         }
       }
     },
@@ -94,7 +101,10 @@
         "kind": {
           "description": "Kind of the issuer reference.",
           "type": "string",
-          "enum": ["ClusterIssuer", "Issuer"]
+          "enum": [
+            "ClusterIssuer",
+            "Issuer"
+          ]
         }
       }
     },
@@ -149,13 +159,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "replicas": {
           "description": "Number of controller replicas; multiple replicas run HA with leader election.",
           "type": "integer"
         },
-        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
-        "resources": { "$ref": "#/definitions/resources" },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/podDisruptionBudget"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
         "enableHuskPods": {
           "description": "Render --enable-husk-pods so each SandboxPool maintains a warm pool of pre-scheduled husk pods.",
           "type": "boolean"
@@ -195,11 +211,38 @@
             },
             "defaultCPU": {
               "description": "Default per-org aggregate CPU limit ceiling, a Kubernetes quantity.",
-              "type": ["string", "integer", "number"]
+              "type": [
+                "string",
+                "integer",
+                "number"
+              ]
             },
             "defaultMemory": {
               "description": "Default per-org aggregate memory limit ceiling, a Kubernetes quantity.",
               "type": "string"
+            },
+            "poolTemplate": {
+              "description": "Per-org SandboxPool cloned from a reference pool: when name is set, clone that pool's full spec into every org namespace with warm.min overridden.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "Reference SandboxPool to clone; empty disables per-org pools.",
+                  "type": "string"
+                },
+                "namespace": {
+                  "description": "Namespace of the reference pool; empty defaults to the release namespace.",
+                  "type": "string"
+                },
+                "orgPoolName": {
+                  "description": "Name the cloned pool takes per org; empty defaults to name.",
+                  "type": "string"
+                },
+                "warmMin": {
+                  "description": "warm.min override on the cloned pool.",
+                  "type": "integer"
+                }
+              }
             }
           }
         },
@@ -220,16 +263,24 @@
               "description": "Internal usage API listen address in :port form; the container and Service port derive from it.",
               "type": "string"
             },
-            "tokenSecret": { "$ref": "#/definitions/secretRef" },
-            "priceList": { "$ref": "#/definitions/rateMap" }
+            "tokenSecret": {
+              "$ref": "#/definitions/secretRef"
+            },
+            "priceList": {
+              "$ref": "#/definitions/rateMap"
+            }
           }
         },
         "extraArgs": {
           "description": "Extra args appended verbatim to the controller container args.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "extraEnv": { "$ref": "#/definitions/extraEnv" }
+        "extraEnv": {
+          "$ref": "#/definitions/extraEnv"
+        }
       }
     },
     "huskStub": {
@@ -237,7 +288,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "image": { "$ref": "#/definitions/componentImage" }
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        }
       }
     },
     "forkd": {
@@ -245,12 +298,16 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "priorityClassName": {
           "description": "Priority class so forkd is never evicted under resource pressure; empty disables.",
           "type": "string"
         },
-        "resources": { "$ref": "#/definitions/resources" },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
         "dataDir": {
           "description": "Value for forkd --data-dir and the data hostPath mountPath.",
           "type": "string"
@@ -267,7 +324,11 @@
             "type": {
               "description": "Seccomp profile type.",
               "type": "string",
-              "enum": ["RuntimeDefault", "Unconfined", "Localhost"]
+              "enum": [
+                "RuntimeDefault",
+                "Unconfined",
+                "Localhost"
+              ]
             },
             "localhostProfile": {
               "description": "Path of the Localhost seccomp profile relative to the kubelet seccomp root.",
@@ -278,17 +339,23 @@
         "extraCapabilities": {
           "description": "Extra Linux capabilities added to forkd's hardened base set; the base set is not removable here.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "nodeSelector": {
           "description": "nodeSelector pinning forkd to KVM nodes.",
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "tolerations": {
           "description": "Tolerations so forkd lands on dedicated, tainted KVM workers; rendered verbatim.",
           "type": "array",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object"
+          }
         }
       }
     },
@@ -301,7 +368,9 @@
           "description": "Gate the device plugin DaemonSet.",
           "type": "boolean"
         },
-        "image": { "$ref": "#/definitions/componentImage" }
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        }
       }
     },
     "kernelProvisioner": {
@@ -339,7 +408,10 @@
         "failurePolicy": {
           "description": "Webhook failure policy; Fail rejects a claim if the webhook is unreachable.",
           "type": "string",
-          "enum": ["Fail", "Ignore"]
+          "enum": [
+            "Fail",
+            "Ignore"
+          ]
         }
       }
     },
@@ -370,7 +442,9 @@
           "description": "Gate the facade Deployment plus its ServiceAccount and RBAC.",
           "type": "boolean"
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "defaultPool": {
           "description": "The mitos.run pool a Sandbox binds to when it carries no bridge annotation.",
           "type": "string"
@@ -379,7 +453,9 @@
           "description": "The cluster DNS domain the facade uses to build in-cluster URLs.",
           "type": "string"
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "canary": {
@@ -391,7 +467,9 @@
           "description": "Gate the whole canary: Deployment, Service, ServiceMonitor, optional Secret.",
           "type": "boolean"
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "pool": {
           "description": "Template the canary forks each cycle; keep it small for a fast, cheap probe.",
           "type": "string"
@@ -447,7 +525,9 @@
             }
           }
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "monitoring": {
@@ -517,19 +597,25 @@
     "imagePullSecrets": {
       "description": "Image pull secret names attached to every workload pod spec, rendered verbatim.",
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object"
+      }
     },
     "commonLabels": {
       "description": "Extra labels merged onto every resource the chart renders.",
       "type": "object",
-      "additionalProperties": { "type": "string" }
+      "additionalProperties": {
+        "type": "string"
+      }
     },
     "database": {
       "description": "Durable persistence for the front door: bring your own managed Postgres, referenced as a Secret.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "dsnSecretRef": { "$ref": "#/definitions/secretRef" }
+        "dsnSecretRef": {
+          "$ref": "#/definitions/secretRef"
+        }
       }
     },
     "console": {
@@ -544,15 +630,24 @@
         "edition": {
           "description": "Runtime edition value; community for self-host, hosted for the SaaS.",
           "type": "string",
-          "enum": ["community", "hosted"]
+          "enum": [
+            "community",
+            "hosted"
+          ]
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "replicas": {
           "description": "Console replicas; more than one requires a shared session store first.",
           "type": "integer"
         },
-        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
-        "resources": { "$ref": "#/definitions/resources" },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/podDisruptionBudget"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
         "signup": {
           "description": "Self-serve org signup; defaults off (waitlist mode), server-controlled per the #208 gate.",
           "type": "boolean"
@@ -564,12 +659,16 @@
         "autoAllowDomains": {
           "description": "Email domains whose signups bypass the manual allowlist approval, rendered comma-joined.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "authConnectors": {
           "description": "Social-login connectors advertised at GET /auth/connectors; known values are github and google.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "antiAbuse": {
           "description": "Signup anti-abuse knobs; everything defaults off or empty.",
@@ -585,7 +684,9 @@
                   "description": "The public Friendly Captcha sitekey; not a secret.",
                   "type": "string"
                 },
-                "secretRef": { "$ref": "#/definitions/secretRef" },
+                "secretRef": {
+                  "$ref": "#/definitions/secretRef"
+                },
                 "url": {
                   "description": "Verification API base URL override; empty uses the binary's built-in default endpoint.",
                   "type": "string"
@@ -595,11 +696,16 @@
             "disposableAllowDomains": {
               "description": "Email domains exempted from the disposable-email-domain blocklist, rendered comma-joined.",
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "signupIPLimit": {
               "description": "Per-IP signup velocity cap; empty renders no env, 0 disables the cap entirely.",
-              "type": ["string", "integer"]
+              "type": [
+                "string",
+                "integer"
+              ]
             },
             "signupIPWindow": {
               "description": "Per-IP signup velocity window, a Go duration string such as 30m.",
@@ -641,7 +747,9 @@
             }
           }
         },
-        "extraEnv": { "$ref": "#/definitions/extraEnv" },
+        "extraEnv": {
+          "$ref": "#/definitions/extraEnv"
+        },
         "secrets": {
           "description": "Secret-store providers advertised in capabilities and wired into the binary.",
           "type": "object",
@@ -674,7 +782,10 @@
                 "perOrg": {
                   "description": "Per-tenant isolation mode: path or namespace.",
                   "type": "string",
-                  "enum": ["path", "namespace"]
+                  "enum": [
+                    "path",
+                    "namespace"
+                  ]
                 }
               }
             }
@@ -694,8 +805,12 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "apiKeySecretRef": { "$ref": "#/definitions/secretRef" },
-                "webhookSecretRef": { "$ref": "#/definitions/secretRef" },
+                "apiKeySecretRef": {
+                  "$ref": "#/definitions/secretRef"
+                },
+                "webhookSecretRef": {
+                  "$ref": "#/definitions/secretRef"
+                },
                 "baseURL": {
                   "description": "Paddle API host; empty uses the binary's built-in live default.",
                   "type": "string"
@@ -710,7 +825,9 @@
                 }
               }
             },
-            "rates": { "$ref": "#/definitions/rateMap" }
+            "rates": {
+              "$ref": "#/definitions/rateMap"
+            }
           }
         },
         "onboarding": {
@@ -751,7 +868,9 @@
             }
           }
         },
-        "ingress": { "$ref": "#/definitions/ingress" }
+        "ingress": {
+          "$ref": "#/definitions/ingress"
+        }
       }
     },
     "gateway": {
@@ -763,12 +882,16 @@
           "description": "Render the gateway Deployment, Service, and RBAC.",
           "type": "boolean"
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "replicas": {
           "description": "Number of gateway replicas.",
           "type": "integer"
         },
-        "podDisruptionBudget": { "$ref": "#/definitions/podDisruptionBudget" },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/podDisruptionBudget"
+        },
         "enforce": {
           "description": "Abuse-control enforcement: quotas, rate limits, and the kill-switch.",
           "type": "object",
@@ -784,12 +907,16 @@
             }
           }
         },
-        "resources": { "$ref": "#/definitions/resources" },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
         "singleTenantNamespace": {
           "description": "When non-empty, pins all sandbox operations to this fixed namespace instead of per-org namespaces.",
           "type": "string"
         },
-        "ingress": { "$ref": "#/definitions/ingress" }
+        "ingress": {
+          "$ref": "#/definitions/ingress"
+        }
       }
     },
     "telemetry": {
@@ -809,8 +936,12 @@
           "description": "The collector endpoint the network sink POSTs JSON to; required when enabled, empty fails closed.",
           "type": "string"
         },
-        "saltSecretRef": { "$ref": "#/definitions/secretRef" },
-        "tokenSecretRef": { "$ref": "#/definitions/secretRef" }
+        "saltSecretRef": {
+          "$ref": "#/definitions/secretRef"
+        },
+        "tokenSecretRef": {
+          "$ref": "#/definitions/secretRef"
+        }
       }
     },
     "expose": {
@@ -822,7 +953,9 @@
           "description": "Gate the expose-proxy Deployment, Service, and optional Ingress and Certificate.",
           "type": "boolean"
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "replicas": {
           "description": "Number of proxy replicas.",
           "type": "integer"
@@ -839,7 +972,11 @@
             "type": {
               "description": "Service type.",
               "type": "string",
-              "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ]
             }
           }
         },
@@ -876,7 +1013,9 @@
                   "description": "Render a cert-manager Certificate for the wildcard domain.",
                   "type": "boolean"
                 },
-                "issuerRef": { "$ref": "#/definitions/issuerRef" }
+                "issuerRef": {
+                  "$ref": "#/definitions/issuerRef"
+                }
               }
             },
             "secretName": {
@@ -915,7 +1054,9 @@
             }
           }
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "dex": {
@@ -973,7 +1114,9 @@
           "description": "Number of frontdoor replicas.",
           "type": "integer"
         },
-        "image": { "$ref": "#/definitions/componentImage" },
+        "image": {
+          "$ref": "#/definitions/componentImage"
+        },
         "marketingURL": {
           "description": "In-cluster URL of the marketing static-site Service; empty derives the default.",
           "type": "string"
@@ -989,9 +1132,13 @@
         "marketingPagesAddrs": {
           "description": "GitHub Pages anycast IP:port addresses for the marketing upstream; empty means in-cluster mode.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "edge": {
@@ -1020,7 +1167,9 @@
               "description": "Name of the TLS Secret created by cert-manager and referenced by the Gateway listener.",
               "type": "string"
             },
-            "issuerRef": { "$ref": "#/definitions/issuerRef" }
+            "issuerRef": {
+              "$ref": "#/definitions/issuerRef"
+            }
           }
         }
       }
@@ -1046,7 +1195,9 @@
           "description": "Full OCI image reference for the marketing static site; required when marketing.enabled is true.",
           "type": "string"
         },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
       }
     },
     "networkPolicy": {
@@ -1066,7 +1217,9 @@
             "extraEgress": {
               "description": "Extra CiliumNetworkPolicy egress rule objects appended verbatim to the shared control-plane policy.",
               "type": "array",
-              "items": { "type": "object" }
+              "items": {
+                "type": "object"
+              }
             }
           }
         }
