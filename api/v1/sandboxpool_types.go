@@ -154,6 +154,18 @@ type PoolTemplateSpec struct {
 	// exec-time entrypoint default that is never started during the build).
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
+
+	// WarmKernel, when true, has the template build run one trivial run_code
+	// cell AFTER init and the workload start and BEFORE the snapshot, so the
+	// code-interpreter kernel is captured live and every fork skips its ~5s
+	// lazy kernel start on the first run_code. The warmup cell draws no
+	// randomness (the kernel's Python PRNGs stay unseeded in the snapshot;
+	// each fork seeds fresh after the per-fork CRNG reseed, see
+	// docs/fork-correctness.md) and fails open: an image without the kernel
+	// logs and builds unchanged, so non-python pools may leave this set.
+	// +kubebuilder:default=false
+	// +optional
+	WarmKernel bool `json:"warmKernel,omitempty"`
 }
 
 // WorkloadSpec declares a serving workload captured running in the template

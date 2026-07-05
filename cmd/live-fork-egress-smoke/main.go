@@ -157,7 +157,7 @@ func run(image, dataDir, fcBin, kernel, agentBin, sentinel string, proxyPort int
 	}
 
 	templateID := "lfe-tmpl"
-	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, false); err != nil {
+	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, false, false); err != nil {
 		return setupErr(fmt.Errorf("create template: %w", err))
 	}
 
