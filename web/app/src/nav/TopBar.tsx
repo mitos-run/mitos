@@ -5,11 +5,15 @@
 import type { RefObject } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Mark } from '@mitos/brand'
+import type { Capabilities } from '../api'
 import { SearchTrigger } from './SearchTrigger'
 import { ThemeToggle } from './ThemeToggle'
+import { FeedbackButton } from './FeedbackButton'
 import { AccountMenu } from './AccountMenu'
 
-export function TopBar({ onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: {
+export function TopBar({ caps, route, onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: {
+  caps: Capabilities
+  route: string
   onSearch: () => void
   onToggleDrawer: () => void
   drawerOpen: boolean
@@ -39,6 +43,7 @@ export function TopBar({ onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: 
         <div className="topbar-spacer" />
         <SearchTrigger onClick={onSearch} />
         <a className="topbar-help" href="/docs" target="_blank" rel="noreferrer">Help</a>
+        <FeedbackButton caps={caps} route={route} />
         <ThemeToggle />
         <AccountMenu />
       </div>

@@ -204,11 +204,13 @@ a { color: var(--cyan); }
   align-items: center;
 }
 
-/* Shared 44x44 quiet icon-button base for .menu-button and .theme-toggle
-   (see .theme-toggle below): box model and focus treatment are identical;
-   each keeps its own display, color, transition, and hover rules. */
+/* Shared 44x44 quiet icon-button base for .menu-button, .theme-toggle, and
+   .feedback-button (see .theme-toggle / .feedback-button below): box model
+   and focus treatment are identical; each keeps its own display, color,
+   transition, and hover rules. */
 .menu-button,
-.theme-toggle {
+.theme-toggle,
+.feedback-button {
   min-width: 44px;
   min-height: 44px;
   align-items: center;
@@ -221,7 +223,8 @@ a { color: var(--cyan); }
 }
 
 .menu-button:focus-visible,
-.theme-toggle:focus-visible {
+.theme-toggle:focus-visible,
+.feedback-button:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 2px;
 }
@@ -737,6 +740,20 @@ html[data-reduce-motion="1"] * {
 }
 
 .theme-toggle:hover {
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
+/* Feedback button: quiet icon button, same footprint and focus treatment as
+   .theme-toggle, always visible. Sits between the Help link and the theme
+   toggle in TopBar. */
+.feedback-button {
+  display: flex;
+  color: var(--ink-3);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.feedback-button:hover {
   background: var(--field-1);
   color: var(--ink-2);
 }

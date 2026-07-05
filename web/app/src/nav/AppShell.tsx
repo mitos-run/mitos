@@ -76,6 +76,8 @@ export function AppShell() {
   return (
     <div className="app-shell-frame">
       <TopBar
+        caps={caps}
+        route={pathname}
         onSearch={() => setPaletteOpen(true)}
         onToggleDrawer={() => setDrawerOpen((v) => !v)}
         drawerOpen={drawerOpen}
