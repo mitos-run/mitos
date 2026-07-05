@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -394,18 +395,48 @@ var sseHeartbeatInterval = 15 * time.Second
 // httpLogSink does for the plain /logs route: this way an authorization
 // failure that occurs before any line is written can still change the status
 // code (WriteHeader has not been called yet).
+//
+// mu guards every write to w: handleSandboxLogsStream runs StreamLogs (which
+// calls Write) in its own goroutine so a real follow transport that blocks
+// for the sandbox's whole lifetime does not starve the heartbeat loop below,
+// which writes heartbeats directly to w on the handler's own goroutine. The
+// mutex is what makes those two goroutines' writes to the same
+// ResponseWriter safe to interleave.
 type sseLogSink struct {
+	mu      sync.Mutex
 	w       http.ResponseWriter
 	flusher http.Flusher
 	wrote   bool
 }
 
 func (s *sseLogSink) Write(line []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.wrote {
 		writeSSEHeaders(s.w)
 	}
 	s.wrote = true
 	if err := writeSSEData(s.w, line); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	return nil
+}
+
+// heartbeat writes an SSE comment to keep the connection alive across a lull
+// in log output, under the same mutex as Write so the two can never
+// interleave mid-line on the underlying ResponseWriter. It is a no-op before
+// the first real line (or the authorization/existence outcome, whichever
+// comes first): the SSE headers are not sent yet, and a cross-org or missing
+// sandbox id must still be free to become a plain 404 rather than a 200
+// heartbeat.
+func (s *sseLogSink) heartbeat() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.wrote {
+		return nil
+	}
+	if _, err := io.WriteString(s.w, ": heartbeat\n\n"); err != nil {
 		return err
 	}
 	s.flusher.Flush()
@@ -441,12 +472,29 @@ func writeSSEData(w io.Writer, line []byte) error {
 // sandbox id is 404 with no content, an unsupported real transport is 501),
 // then holds the connection open, sending a heartbeat comment every
 // sseHeartbeatInterval, until the client disconnects or the server shuts the
-// request down (ctx canceled). Any new lines the underlying LogStreamer
-// pushes while StreamLogs is still running are forwarded live; when
-// StreamLogs returns (the fake and the current in-memory default do so
-// immediately after their buffered lines), the heartbeat loop keeps the
-// stream alive so a future push-capable transport can reuse this same
-// handler unchanged.
+// request down (ctx canceled).
+//
+// StreamLogs runs in its own goroutine because a real follow transport (the
+// cluster adapter's husk-pod log follow, see clustersandbox/logs.go) blocks
+// for the sandbox's whole lifetime, not just until a fixed buffer is
+// drained: without a concurrent heartbeat, a sandbox that goes quiet for a
+// while (no new log lines, so sink.Write is never called) would leave this
+// SSE connection sending no bytes at all, which any idle-timeout proxy
+// between the console and the browser could then drop as dead. New lines the
+// LogStreamer pushes while it is still running are forwarded live via
+// sink.Write; heartbeats interleave safely because sink guards every write
+// with its own mutex (see sseLogSink). Once StreamLogs returns (the pod
+// stream ended, or a finite fake/in-memory streamer completed), the select's
+// streamDone case is disabled (set to nil) so only the heartbeat and
+// disconnect cases remain live, exactly matching the pre-existing behavior
+// for those transports.
+//
+// On client disconnect (r.Context().Done()), the handler waits for
+// StreamLogs to actually return before returning itself: net/http does not
+// allow writes to the ResponseWriter after the handler returns, and
+// StreamLogs is required to observe ctx cancellation and stop promptly (the
+// cluster adapter's context-cancellation-propagation contract), so this wait
+// is bounded in every real implementation.
 func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request) {
 	_, orgID, e, ok := c.caller(r)
 	if !ok {
@@ -461,28 +509,37 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 	}
 	sink := &sseLogSink{w: w, flusher: flusher}
 	id := r.PathValue("id")
-	if err := c.deps.Logs.StreamLogs(r.Context(), orgID, id, sink); err != nil {
-		if !sink.wrote {
-			c.failSandbox(w, err)
-		}
-		return
-	}
-	if !sink.wrote {
-		writeSSEHeaders(w)
-	}
-	flusher.Flush()
+
+	streamDone := make(chan error, 1)
+	go func() {
+		streamDone <- c.deps.Logs.StreamLogs(r.Context(), orgID, id, sink)
+	}()
 
 	ticker := time.NewTicker(sseHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			if streamDone != nil {
+				<-streamDone // wait so no write below can race the handler returning
+			}
 			return
-		case <-ticker.C:
-			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+		case err := <-streamDone:
+			streamDone = nil // disable this case: StreamLogs already returned
+			if err != nil {
+				if !sink.wrote {
+					c.failSandbox(w, err)
+				}
 				return
 			}
+			if !sink.wrote {
+				writeSSEHeaders(w)
+			}
 			flusher.Flush()
+		case <-ticker.C:
+			if err := sink.heartbeat(); err != nil {
+				return
+			}
 		}
 	}
 }

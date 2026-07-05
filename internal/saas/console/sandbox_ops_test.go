@@ -453,3 +453,74 @@ func TestSandboxLogsStreamSendsSSEAndClosesOnCtxCancel(t *testing.T) {
 		t.Fatalf("missing heartbeat comment: %q", body)
 	}
 }
+
+// blockingLogStreamer models a real follow transport (the cluster adapter's
+// husk-pod log follow): it writes one line, then blocks until ctx is done,
+// exactly like clustersandbox.Control.StreamLogs does while following a live
+// pod. It is the load-bearing stand-in for proving the 501-honest path
+// "flips to working": once a real, blocking LogStreamer is wired in, the SSE
+// handler must still heartbeat (not starve) and still return promptly on
+// disconnect, not just for the finite in-memory/fake streamer the other SSE
+// test above exercises.
+type blockingLogStreamer struct {
+	line string
+}
+
+func (b *blockingLogStreamer) StreamLogs(ctx context.Context, _, _ string, sink LogSink) error {
+	if err := sink.Write([]byte(b.line)); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport asserts that
+// when the LogStreamer is a real, blocking follow (not a finite fake that
+// returns immediately), the SSE handler still sends heartbeats WHILE the
+// transport is active, and still returns promptly once the client
+// disconnects: this is the concurrency the real cluster transport actually
+// needs (see sandbox_ops.go's handleSandboxLogsStream doc), which the
+// finite-streamer test above cannot exercise since it returns before any
+// heartbeat is due.
+func TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	con := New(Deps{
+		Sandboxes: sandboxes,
+		Logs:      &blockingLogStreamer{line: "live-line\n"},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, "acct-1", "org-alice"))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	// Give the concurrent heartbeat loop time to fire more than once WHILE
+	// the transport is still blocked mid-follow, before we disconnect.
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after ctx cancel while a blocking follow transport was active")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "data: live-line") {
+		t.Fatalf("missing the blocking transport's live line: %q", body)
+	}
+	if strings.Count(body, ": heartbeat") < 2 {
+		t.Fatalf("want at least 2 heartbeats while the follow transport blocked, got: %q", body)
+	}
+}
