@@ -60,6 +60,32 @@ describe('AppShell', () => {
     expect((main as HTMLElement).style.minWidth).toBe('0')
   })
 
+  it('shows the version footer under the ownership badge and copies it (with edition) on click', async () => {
+    const withVersion: Capabilities = { ...caps, version: '1.6.0' }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(withVersion), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ sandboxes: [], secrets: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    await renderAt('/sandboxes', withVersion)
+    const versionButton = await screen.findByRole('button', { name: /copy version.*mitos 1\.6\.0/i })
+    expect(versionButton).toHaveTextContent('mitos 1.6.0')
+    await userEvent.click(versionButton)
+    expect(writeText).toHaveBeenCalledWith('mitos 1.6.0 (community)')
+    expect(await screen.findByText('Copied')).toBeInTheDocument()
+  })
+
+  it('renders no version footer when the server does not advertise a version (older server)', async () => {
+    await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Sandboxes' })).toBeInTheDocument())
+    expect(screen.queryByText(/^mitos /)).not.toBeInTheDocument()
+  })
+
   it('shows no ownership badge on the hosted edition', async () => {
     const hosted: Capabilities = { ...caps, ownership: 'hosted' }
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
