@@ -180,33 +180,20 @@ export function getFirstRun(uc?: string): FirstRunContent {
 // Synthetic trigger: shown in the 90 second troubleshooting panel so a stuck
 // user has something to copy-paste that proves the wiring works, independent
 // of whichever runtime tab they picked above. The CLI one-liner is `mitos run
-// <command>` (create, exec, terminate, documented in docs/cli.md). The curl
-// pair mirrors the same two calls the CLI makes under the hood: POST /v1/fork
-// (fields: template, id, per internal/mcp/httpbackend.go), then a runtime call
-// against the sandbox.v1.Sandbox Connect service.
+// <command>` (create, exec, terminate, documented in docs/cli.md).
 //
-// The runtime call is POST /sandbox.v1.Sandbox/ExecStream (the native Connect
-// path, id via the X-Sandbox-Id header), NOT the "friendly alias"
-// /v1/sandboxes/<id>/exec: that alias maps the "exec" verb to the bidi Exec
-// method (internal/saas/controlplane/proxy.go connectMethod, case "exec":
-// return "Exec"; mirrored in internal/saas/gateway.go runtimeMethod), which
-// per proto/sandbox/v1/sandbox.proto requires HTTP/2 duplex and a nested
-// {"open":{"command":...}} body (ExecRequest.open, an ExecOpen), not a flat
-// command string. ExecStream is the documented HTTP/1.1-reachable,
-// non-interactive counterpart (same proto file, ExecStreamRequest, field
-// `command`) and is what internal/mcp/httpbackend.go HTTPBackend.Exec calls
-// under the hood, so the flat {"command":"echo hello"} body below is grounded
-// in ExecStreamRequest.command, not invented. docs/api/v2-spec.md documents
-// the same native-path-plus-X-Sandbox-Id-header pattern for the sibling
-// RunCode server-streaming RPC.
+// No exec RPC on the surface is plain-curl-able: every one is a connect-go
+// streaming RPC (Exec is bidi, ExecStream is server-streaming) and rejects a
+// plain curl application/json body with a 415, since streaming RPCs need a
+// Connect-enveloped body, not flat JSON. The only true unary JSON route is
+// POST /v1/fork (fields: template, id, per internal/mcp/httpbackend.go),
+// which itself creates a Running sandbox and flips the first-activity signal
+// on its own, so it stands alone as the raw-HTTP alternative below.
 export const SYNTHETIC_TRIGGER = {
   cli: 'mitos run "echo hello"',
   curl: `\
 curl -s -X POST https://api.mitos.run/v1/fork \\
   -H "Authorization: Bearer $MITOS_API_KEY" -H "Content-Type: application/json" \\
-  -d '{"template":"python","id":"trigger-1"}'
-
-curl -s -X POST https://api.mitos.run/sandbox.v1.Sandbox/ExecStream \\
-  -H "Authorization: Bearer $MITOS_API_KEY" -H "X-Sandbox-Id: trigger-1" -H "Content-Type: application/json" \\
-  -d '{"command":"echo hello"}'`,
+  -d '{"template":"python","id":"trigger-1"}'`,
+  note: 'Exec streaming needs the CLI or an SDK; a successful fork is already enough to light up your first activity.',
 }

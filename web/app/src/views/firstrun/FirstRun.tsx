@@ -624,6 +624,7 @@ export function FirstRun({ uc }: FirstRunProps) {
               </p>
               <code className="firstrun-troubleshoot-snippet">{SYNTHETIC_TRIGGER.cli}</code>
               <code className="firstrun-troubleshoot-snippet">{SYNTHETIC_TRIGGER.curl}</code>
+              <p className="firstrun-troubleshoot-note">{SYNTHETIC_TRIGGER.note}</p>
             </div>
           )}
 
