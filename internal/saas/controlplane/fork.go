@@ -9,6 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
@@ -18,17 +19,21 @@ import (
 
 // forkBody is the POST /v1/sandboxes/{id}/fork request shape. The Python SDK
 // (DirectSandbox._fork_one) sends {"id": <child>, "template": <pool>,
-// "pause_source": true}: id and template are accepted for compatibility but the
-// control plane names the child itself and derives the template from the
-// SOURCE's pool (a live fork boots from the source's memory, never from a
-// caller-named template). replicas and count are recognized only to be
-// rejected honestly when they ask for more than one child.
+// "pause_source": true}: a valid id names the child (DNS-1123, pre-validated);
+// an absent id lets the control plane generate one. template is accepted for
+// compatibility but the template is derived from the SOURCE's pool (a live
+// fork boots from the source's memory, never from a caller-named template).
+// secret_inheritance is the explicit opt-in for duplicating the source's
+// in-memory secrets into the child ("reissue" is the controller's default:
+// the fork gets fresh credentials). replicas and count are recognized only to
+// be rejected honestly when they ask for more than one child.
 type forkBody struct {
-	ID          string `json:"id,omitempty"`
-	Template    string `json:"template,omitempty"`
-	PauseSource bool   `json:"pause_source,omitempty"`
-	Replicas    int32  `json:"replicas,omitempty"`
-	Count       int32  `json:"count,omitempty"`
+	ID                string `json:"id,omitempty"`
+	Template          string `json:"template,omitempty"`
+	PauseSource       bool   `json:"pause_source,omitempty"`
+	SecretInheritance string `json:"secret_inheritance,omitempty"`
+	Replicas          int32  `json:"replicas,omitempty"`
+	Count             int32  `json:"count,omitempty"`
 }
 
 // fork serves the hosted live fork (issue #709): it resolves the ORG-OWNED
@@ -70,6 +75,22 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 			WithRemediation("Call POST /v1/sandboxes/<id>/fork once per child (the SDK's fork(n) does this), or create a Sandbox with spec.source.fromSandbox and spec.replicas through the Kubernetes API for an indexed fan-out.")), nil
 	}
 
+	// Validate the caller's inputs BEFORE any cluster read or write, so a bad
+	// request is an instant typed 400, never an object that pends into a
+	// timeout or a raw api server validation error.
+	if body.SecretInheritance != "" && body.SecretInheritance != string(v1.SecretReissue) && body.SecretInheritance != string(v1.SecretInherit) {
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithCause(fmt.Sprintf("secret_inheritance %q is not a mode", body.SecretInheritance)).
+			WithRemediation("Use \"reissue\" (the default: the fork gets fresh credentials) or \"inherit\" (explicit opt-in: the fork duplicates the source's in-memory secrets).")), nil
+	}
+	if body.ID != "" {
+		if errs := validation.IsDNS1123Subdomain(body.ID); len(errs) > 0 {
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause(fmt.Sprintf("the requested fork id %q is not a valid name: %s", body.ID, errs[0])).
+				WithRemediation("Use lowercase alphanumerics and hyphens (RFC 1123), or omit id to have one generated.")), nil
+		}
+	}
+
 	// Fast-fail on a missing or cross-org source (the #646 pool fast-fail
 	// precedent): waiting can never help, and the controller would only fail the
 	// fork terminally after the caller blocked for the full ready timeout. A
@@ -103,7 +124,10 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)
-	name := generateName()
+	name := body.ID
+	if name == "" {
+		name = generateName()
+	}
 	sb := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -119,10 +143,18 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 			},
 		},
 	}
+	if body.SecretInheritance != "" {
+		sb.Spec.SecretInheritance = v1.SecretInheritanceMode(body.SecretInheritance)
+	}
 
 	if err := k.c.Create(ctx, sb); err != nil {
 		switch {
 		case apierrors.IsAlreadyExists(err):
+			if body.ID != "" {
+				return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
+					WithCause(fmt.Sprintf("a sandbox named %q already exists in this organization", name)).
+					WithRemediation("Choose a different id, or omit id to have one generated."), http.StatusConflict)), nil
+			}
 			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
 				WithCause("a sandbox with the generated name already exists; retry"), http.StatusConflict)), nil
 		case isNamespaceMissing(err, ns):
