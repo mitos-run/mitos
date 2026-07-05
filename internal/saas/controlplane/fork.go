@@ -79,6 +79,19 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 		return notFound(id), nil
 	}
 
+	// A source that is itself a fromSandbox fork is rejected honestly: the
+	// running VM is the fork's CHILD, while a new FromSandbox spec would name
+	// the fork OBJECT, and the controller's fork-of-fork resolution is not
+	// proven on this surface (its templateID would also be empty). Until it is,
+	// the honest answer is a typed reject with a path forward, not an
+	// unverified fork that can only pend into a timeout.
+	if src.Spec.Source.FromSandbox != nil {
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithMessage("forking a fork is not supported on this API yet").
+			WithCause(fmt.Sprintf("sandbox %q is itself a live fork (source.fromSandbox); this route serves pool-descended sources only", id)).
+			WithRemediation("Fork the original pool-created sandbox again, or create a fresh sandbox from the pool, bring it to the state you want, and fork that.")), nil
+	}
+
 	// A live fork copies the source VM's running memory, so the source must be
 	// Ready NOW: anything else is a state conflict, answered instantly with the
 	// phase and what to do about it.

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -386,5 +387,159 @@ func TestForkedSandboxRuntimeProxyReachesChild(t *testing.T) {
 	}
 	if m["endpoint"] != endpoint {
 		t.Errorf("status endpoint = %v, want the child endpoint %q", m["endpoint"], endpoint)
+	}
+}
+
+// forkWithChildren builds a Ready org-A fork object named name whose children
+// carry the given phases (child i is "<name>-fork-<i>" at endpoint), plus the
+// first child's token Secret. It models the post-create shape the controller's
+// fork engine leaves behind.
+func forkWithChildren(name, endpoint string, phases ...v1.SandboxPhase) (*v1.Sandbox, *corev1.Secret) {
+	ns := tenant.NamespaceForOrg(orgA)
+	children := make([]v1.SandboxChild, 0, len(phases))
+	for i, ph := range phases {
+		child := fmt.Sprintf("%s-fork-%d", name, i)
+		children = append(children, v1.SandboxChild{
+			Name: child, SandboxID: child, Endpoint: endpoint, Phase: ph,
+		})
+	}
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: tenant.OrgLabels(orgA)},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{
+			FromSandbox: &v1.FromSandboxSource{Name: "sb-src"},
+		}},
+		Status: v1.SandboxStatus{
+			Phase:         v1.SandboxReady,
+			ReadyReplicas: int32(len(phases)),
+			Children:      children,
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-fork-0" + tokenSecretSuffix, Namespace: ns},
+		Data:       map[string][]byte{"token": []byte("child-tok"), "endpoint": []byte(endpoint)},
+	}
+	return fork, secret
+}
+
+// TestForkChildTerminatedYieldsTypedErrorNotProxied asserts a fork whose ONLY
+// child was reaped (the GC flips the CHILD phase while the parent fork object
+// stays Ready) answers a runtime call with the documented typed idle_timeout
+// error BEFORE any dial, exactly like a reaped pool claim (issue #688), never a
+// generic 502 against the dead child endpoint.
+func TestForkChildTerminatedYieldsTypedErrorNotProxied(t *testing.T) {
+	var reached bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	fork, childSecret := forkWithChildren("sb-fk", endpoint, v1.SandboxTerminated)
+	c := newFakeClient(t, fork, childSecret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.runtime", Path: "/v1/sandboxes/sb-fk/exec", Method: http.MethodPost,
+		BodyStream: strings.NewReader(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if reached {
+		t.Fatal("runtime call for a reaped fork child REACHED the dead endpoint; it must fail typed before any dial")
+	}
+	if resp.Status != http.StatusGone {
+		t.Fatalf("status = %d, want 410 (typed idle_timeout); body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "idle_timeout") {
+		t.Errorf("error is not the typed idle_timeout: %s", resp.Body)
+	}
+
+	// The WebSocket resolver consults the same gate.
+	if _, aerr := cp.ResolveRuntime(context.Background(), orgA, "sb-fk"); aerr == nil || aerr.Code != "idle_timeout" {
+		t.Errorf("ResolveRuntime error = %+v, want typed idle_timeout", aerr)
+	}
+}
+
+// TestForkMultiChildRuntimeIsTypedErrorNotChildZero asserts the gateway runtime
+// surface refuses a fork fan-out with MORE than one child (created by another
+// client, for example the cluster SDK) with a typed error naming the
+// single-child limitation, instead of silently routing every call to child 0
+// while children 1..N-1 are unreachable.
+func TestForkMultiChildRuntimeIsTypedErrorNotChildZero(t *testing.T) {
+	var reached bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	fork, childSecret := forkWithChildren("sb-fan", endpoint, v1.SandboxReady, v1.SandboxReady)
+	c := newFakeClient(t, fork, childSecret)
+	cp := New(c, WithHTTPClient(srv.Client()))
+
+	// Runtime proxy (exec/files/run_code).
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.runtime", Path: "/v1/sandboxes/sb-fan/exec", Method: http.MethodPost,
+		BodyStream: strings.NewReader(`{}`),
+	})
+	if reached {
+		t.Fatal("multi-child fork runtime call was silently routed to child 0")
+	}
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("proxy status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "single-child") {
+		t.Errorf("proxy error does not name the single-child limitation: %s", resp.Body)
+	}
+
+	// The WebSocket resolver.
+	if _, aerr := cp.ResolveRuntime(context.Background(), orgA, "sb-fan"); aerr == nil || !strings.Contains(aerr.Cause, "single-child") {
+		t.Errorf("ResolveRuntime error = %+v, want the single-child limitation", aerr)
+	}
+
+	// Pause/resume lifecycle.
+	lresp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.pause", Path: "/v1/pause", Body: []byte(`{"sandbox":"sb-fan"}`),
+	})
+	if reached {
+		t.Fatal("multi-child fork pause was silently routed to child 0")
+	}
+	if lresp.Status != http.StatusBadRequest || !strings.Contains(string(lresp.Body), "single-child") {
+		t.Errorf("pause status = %d body = %s, want 400 naming the single-child limitation", lresp.Status, lresp.Body)
+	}
+}
+
+// TestForkOfForkIsRejected asserts forking a source that is itself a
+// fromSandbox fork is a typed invalid_input naming the limitation: the running
+// VM is the fork's CHILD, not the fork object the new FromSandbox would name,
+// and the controller fork-of-fork resolution is not proven on this surface, so
+// the honest answer is a reject with remediation, not an unverified fork.
+func TestForkOfForkIsRejected(t *testing.T) {
+	fork, childSecret := forkWithChildren("sb-parentfork", "10.9.9.9:9091", v1.SandboxReady)
+	c := newFakeClient(t, fork, childSecret)
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.fork", Path: "/v1/sandboxes/sb-parentfork/fork", Body: []byte(`{}`),
+	})
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	body := string(resp.Body)
+	if !strings.Contains(body, "invalid_input") {
+		t.Errorf("error is not typed invalid_input: %s", body)
+	}
+	if !strings.Contains(body, "itself a live fork") {
+		t.Errorf("error does not name the fork-of-fork limitation: %s", body)
+	}
+	if !strings.Contains(body, "remediation") {
+		t.Errorf("error carries no remediation: %s", body)
+	}
+	// Only the pre-seeded parent fork exists; no new fork object was created.
+	if forks := forkObjects(t, c); len(forks) != 1 {
+		t.Errorf("fork objects = %d, want only the pre-seeded parent (nothing created)", len(forks))
 	}
 }

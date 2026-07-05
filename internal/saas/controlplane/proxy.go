@@ -45,6 +45,11 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 	if aerr := terminalRuntimeError(sb); aerr != nil {
 		return errResp(*aerr), nil
 	}
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return errResp(*aerr), nil
+	}
 	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
 	// endpoint and (reissued) token on its first CHILD, never on the fork object.
 	endpoint := runtimeEndpoint(sb)

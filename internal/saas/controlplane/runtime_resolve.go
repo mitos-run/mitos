@@ -36,6 +36,11 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 	if aerr := terminalRuntimeError(sb); aerr != nil {
 		return saas.RuntimeTarget{}, aerr
 	}
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return saas.RuntimeTarget{}, aerr
+	}
 	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
 	// endpoint and (reissued) token on its first CHILD, never on the fork object.
 	endpoint := runtimeEndpoint(sb)

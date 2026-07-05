@@ -364,6 +364,24 @@ func tokenSecretNameFor(sb *v1.Sandbox) string {
 	return sb.Name + tokenSecretSuffix
 }
 
+// multiChildRuntimeError refuses the gateway runtime surface for a fromSandbox
+// fork with MORE than one child. The gateway's own fork route creates
+// single-child forks, but a fork object created by another client (the cluster
+// SDK, kubectl) can fan out to N children, each with its own endpoint and
+// reissued token; silently routing every call to child 0 would misdirect
+// traffic and leave children 1..N-1 unreachable. Nil means the surface can
+// serve sb.
+func multiChildRuntimeError(sb *v1.Sandbox) *apierr.Error {
+	if sb.Spec.Source.FromSandbox != nil && len(sb.Status.Children) > 1 {
+		e := apierr.Get(apierr.CodeInvalidInput).
+			WithMessage("the sandbox is a multi-child fork fan-out, which this API cannot address").
+			WithCause(fmt.Sprintf("sandbox %q has %d fork children; this surface serves single-child forks only and will not silently pick one", sb.Name, len(sb.Status.Children))).
+			WithRemediation("Address each child directly through the Kubernetes API (status.children carries per-child endpoints and each child has its own token Secret), or create single-child forks with POST /v1/sandboxes/<id>/fork.")
+		return &e
+	}
+	return nil
+}
+
 // runtimeSandboxID is the sandbox id the DAEMON serving runtimeEndpoint(sb)
 // knows the VM by: the object name for a pool claim, or the first child's
 // engine-registered id for a fromSandbox fork. It rides X-Sandbox-Id and the
