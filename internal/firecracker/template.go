@@ -229,7 +229,10 @@ func (tm *TemplateManager) warmKernelGRPC(vsockPath string) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	wctx, cancel := context.WithTimeout(ctx, warmKernelTimeoutSecs*time.Second)
+	// Client margin over the guest-requested timeout, like startWorkloadGRPC:
+	// the guest must get the chance to report its own timeout cleanly instead
+	// of the client racing it into an ambiguous context error.
+	wctx, cancel := context.WithTimeout(ctx, (warmKernelTimeoutSecs+30)*time.Second)
 	defer cancel()
 	stream, err := client.Sandbox.RunCodeStream(wctx, &sandboxv1.RunCodeStreamRequest{
 		Code:           warmKernelCode,
