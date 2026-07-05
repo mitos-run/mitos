@@ -16,7 +16,27 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"mitos.run/mitos/internal/saas"
 )
+
+// newMemberAuthorizedAccounts returns an *saas.AccountService seeded with a
+// single RoleMember membership for (acctID, orgID): enough for
+// canAccessSandbox's PermReadOnly check (added alongside the log routes'
+// per-project RBAC gate) to grant an unassigned sandbox's logs, without
+// pulling in the full projectAccessFixture for tests that otherwise only
+// care about the SSE transport's own behavior.
+func newMemberAuthorizedAccounts(t *testing.T, acctID, orgID string) *saas.AccountService {
+	t.Helper()
+	store := saas.NewMemStore()
+	accounts := saas.NewAccountService(store, saas.NewKeyService(store))
+	if err := store.PutMembership(context.Background(), saas.Membership{
+		AccountID: acctID, OrgID: orgID, Role: saas.RoleMember, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	return accounts
+}
 
 func (f *fixture) reqBody(t *testing.T, method, target, body, acct, org string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -491,6 +511,7 @@ func TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport(t *testing.T) 
 	sandboxes := NewMemSandboxControl()
 	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
 	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
 		Sandboxes: sandboxes,
 		Logs:      &blockingLogStreamer{line: "live-line\n"},
 	})
@@ -629,6 +650,7 @@ func TestSandboxLogsStreamNoWriteAfterHandlerReturnsOnHeartbeatFailure(t *testin
 	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
 	streamer := &recordingPeriodicLogStreamer{interval: 2 * time.Millisecond, sawCancel: make(chan bool, 1)}
 	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
 		Sandboxes: sandboxes,
 		Logs:      streamer,
 	})

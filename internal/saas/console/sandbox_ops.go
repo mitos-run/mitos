@@ -470,8 +470,10 @@ func writeSSEData(w io.Writer, line []byte) error {
 
 // handleSandboxLogsStream is the SSE counterpart to handleSandboxLogs: it
 // authorizes and streams exactly like the plain route (a cross-org or missing
-// sandbox id is 404 with no content, an unsupported real transport is 501),
-// then holds the connection open, sending a heartbeat comment every
+// sandbox id is 404 with no content; a caller who lacks per-project
+// PermReadOnly on the sandbox's project gets the SAME 404, mirroring
+// handleInspectSandbox's existence-hiding gate; an unsupported real transport
+// is 501), then holds the connection open, sending a heartbeat comment every
 // sseHeartbeatInterval, until the client disconnects or the server shuts the
 // request down (ctx canceled).
 //
@@ -503,9 +505,37 @@ func writeSSEData(w io.Writer, line []byte) error {
 // client disconnect: a dead connection does not itself stop a blocking real
 // follow transport, so the handler must cancel it explicitly there too.
 func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
+		return
+	}
+	id := r.PathValue("id")
+	// Gated the SAME way as inspect (handleInspectSandbox in console.go): the
+	// sandbox must belong to the org (404 via c.failSandbox on a missing/
+	// cross-org id) and the caller must hold PermReadOnly on its project, with
+	// a denial ALSO mapped to 404 (not 403) so a caller without project access
+	// cannot tell an out-of-reach sandbox apart from one that does not exist.
+	sb, err := c.deps.Sandboxes.Get(r.Context(), orgID, id)
+	if err != nil {
+		c.failSandbox(w, err)
+		return
+	}
+	// The project tag gates access; a lookup error must fail closed, not fall
+	// back to the unassigned/org-wide path.
+	pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", sb.ID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox project assignment could not be read"))
+		return
+	}
+	canSee, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, pid, saas.PermReadOnly)
+	if accessErr != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+		return
+	}
+	if !canSee {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+			WithCause("the sandbox does not exist or is not accessible"))
 		return
 	}
 	flusher, hasFlusher := w.(http.Flusher)
@@ -515,7 +545,6 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 		return
 	}
 	sink := &sseLogSink{w: w, flusher: flusher}
-	id := r.PathValue("id")
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel() // belt-and-suspenders: every explicit return path below already cancels first
