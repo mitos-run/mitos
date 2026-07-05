@@ -1,9 +1,11 @@
 package clustersandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -237,6 +239,25 @@ func TestStreamPodLinesOversizedLineEmitsTruncatedMarkerAndContinues(t *testing.
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("streamPodLines did not return on clean EOF after the oversized line")
+	}
+}
+
+// TestReadBoundedLineEOFMidLineStripsTrailingCR is the regression test for the
+// EOF-mid-line branch of readBoundedLine: when the underlying reader hits EOF
+// (or any other read error) before finding a newline, the last, partial line
+// is still returned with '\n' appended. Before this fix, a trailing '\r' left
+// over from a CRLF-terminated stream that happened to end mid-line (no final
+// newline) was never stripped, unlike the delimiter path (stripCRLF), which
+// runs on every complete line. A pod's final write before it exits is exactly
+// this shape, so the caller must not see a stray '\r' in the emitted line.
+func TestReadBoundedLineEOFMidLineStripsTrailingCR(t *testing.T) {
+	br := bufio.NewReader(strings.NewReader("last-line\r"))
+	line, err := readBoundedLine(br)
+	if err != io.EOF {
+		t.Fatalf("err = %v, want io.EOF", err)
+	}
+	if got, want := string(line), "last-line\n"; got != want {
+		t.Fatalf("line = %q, want %q (trailing \\r stripped)", got, want)
 	}
 }
 

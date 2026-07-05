@@ -153,8 +153,11 @@ func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) 
 // it via discardOversizedLine and returns truncatedLineMarker in its place, so
 // one absurdly long line degrades the stream instead of erroring it out. The
 // final line of input with no trailing newline (a clean EOF mid-line) is
-// still returned, with '\n' appended, alongside the io.EOF (or other read)
-// error that ended it, matching bufio.Scanner's last-line behavior.
+// still returned, with '\n' appended and any trailing '\r' stripped via the
+// SAME stripCRLF rule as the delimiter path (so a CRLF-terminated stream that
+// happens to end mid-line, e.g. the last write before the pod exits, does not
+// leave a stray '\r' in the emitted line), alongside the io.EOF (or other
+// read) error that ended it, matching bufio.Scanner's last-line behavior.
 func readBoundedLine(br *bufio.Reader) ([]byte, error) {
 	chunk, err := br.ReadSlice('\n')
 	if err == nil {
@@ -165,7 +168,7 @@ func readBoundedLine(br *bufio.Reader) ([]byte, error) {
 	}
 	if len(chunk) > 0 {
 		line := append(append([]byte(nil), chunk...), '\n')
-		return line, err
+		return stripCRLF(line), err
 	}
 	return nil, err
 }
