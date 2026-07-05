@@ -98,6 +98,52 @@ func TestVerifyWithNoInviteTokenBehavesLikePlainSignUp(t *testing.T) {
 	}
 }
 
+// TestVerifyAutoJoinsGmailAliasInvite asserts the auto-join comparison uses
+// the SAME canonicalization signup dedup does: an invite addressed to a
+// Gmail dotted/plus-tagged alias of the address the signup actually
+// verifies with must still auto-join, even though saas.InviteEmailMatches
+// alone (gmail.com is a consumer domain there, requiring an exact address
+// match) would refuse it.
+func TestVerifyAutoJoinsGmailAliasInvite(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeOpen)
+
+	// Invite addressed to a dotted alias; the signup verifies with the
+	// canonical (undotted) address.
+	inv, rawToken := seedInvite(t, h.store, "invited-org-gmail", "j.ohn@gmail.com", h.now.Add(24*time.Hour))
+
+	if _, err := h.svc.SignUpWithInvite(ctx, "john@gmail.com", "", rawToken); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	verifyToken := h.email.LastToken("john@gmail.com")
+	out, err := h.svc.Verify(ctx, verifyToken)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	mems, err := h.store.ListMemberships(ctx, out.Account.ID)
+	if err != nil {
+		t.Fatalf("ListMemberships: %v", err)
+	}
+	var joinedInvited bool
+	for _, m := range mems {
+		if m.OrgID == inv.OrgID {
+			joinedInvited = true
+		}
+	}
+	if !joinedInvited {
+		t.Errorf("account did not auto-join the invited org for a Gmail dotted-alias invite: memberships=%+v", mems)
+	}
+
+	got, err := h.store.GetInvitationByTokenHash(ctx, inv.TokenHash)
+	if err != nil {
+		t.Fatalf("GetInvitationByTokenHash: %v", err)
+	}
+	if got.State != saas.InvitationAccepted {
+		t.Errorf("invitation state = %q, want accepted", got.State)
+	}
+}
+
 func TestVerifyIgnoresExpiredOrMismatchedInvite(t *testing.T) {
 	ctx := context.Background()
 

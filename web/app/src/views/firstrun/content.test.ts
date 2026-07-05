@@ -128,4 +128,14 @@ describe('SYNTHETIC_TRIGGER curl is a real, plain-curl-able unary route', () => 
   it('never references the sandbox.v1.Sandbox Connect service', () => {
     expect(SYNTHETIC_TRIGGER.curl).not.toContain('/sandbox.v1.Sandbox/')
   })
+
+  // A hardcoded id (e.g. "trigger-1") means pasting the same command twice
+  // hits a duplicate-id conflict against the real API; the example must
+  // generate a fresh id on every run via shell substitution instead.
+  it('uses a shell-substituted, copy-paste-safe id instead of a hardcoded literal', () => {
+    expect(SYNTHETIC_TRIGGER.curl).not.toContain('"trigger-1"')
+    // The id must break out of the single-quoted -d body to let bash expand
+    // $(date +%s); a literal $(...) left inside single quotes never runs.
+    expect(SYNTHETIC_TRIGGER.curl).toContain(`"id":"trigger-'$(date +%s)'"`)
+  })
 })

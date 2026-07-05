@@ -69,15 +69,49 @@ describe('AppShell', () => {
       }
       return Promise.resolve(new Response(JSON.stringify({ sandboxes: [], secrets: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
     })
+    const originalClipboard = navigator.clipboard
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
 
-    await renderAt('/sandboxes', withVersion)
-    const versionButton = await screen.findByRole('button', { name: /copy version.*mitos 1\.6\.0/i })
-    expect(versionButton).toHaveTextContent('mitos 1.6.0')
-    await userEvent.click(versionButton)
-    expect(writeText).toHaveBeenCalledWith('mitos 1.6.0 (community)')
-    expect(await screen.findByText('Copied')).toBeInTheDocument()
+    try {
+      await renderAt('/sandboxes', withVersion)
+      const versionButton = await screen.findByRole('button', { name: /copy version.*mitos 1\.6\.0/i })
+      expect(versionButton).toHaveTextContent('mitos 1.6.0')
+      await userEvent.click(versionButton)
+      expect(writeText).toHaveBeenCalledWith('mitos 1.6.0 (community)')
+      expect(await screen.findByText('Copied')).toBeInTheDocument()
+    } finally {
+      Object.assign(navigator, { clipboard: originalClipboard })
+    }
+  })
+
+  it('clears the pending copy-reset timeout on unmount so it never fires setState after unmount', async () => {
+    const withVersion: Capabilities = { ...caps, version: '1.6.0' }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify(withVersion), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ sandboxes: [], secrets: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    const originalClipboard = navigator.clipboard
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const clearSpy = vi.spyOn(window, 'clearTimeout')
+
+    try {
+      const view = await renderAt('/sandboxes', withVersion)
+      const versionButton = await screen.findByRole('button', { name: /copy version.*mitos 1\.6\.0/i })
+      await userEvent.click(versionButton)
+      await screen.findByText('Copied')
+
+      view.unmount()
+
+      expect(clearSpy).toHaveBeenCalled()
+    } finally {
+      clearSpy.mockRestore()
+      Object.assign(navigator, { clipboard: originalClipboard })
+    }
   })
 
   it('renders no version footer when the server does not advertise a version (older server)', async () => {

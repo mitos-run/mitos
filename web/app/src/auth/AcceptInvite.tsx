@@ -19,6 +19,13 @@
 //     success rather than an error, so the user is never told an operation
 //     failed when they are, in fact, already a member.
 //
+// Dead invites: an invite that has already expired or been revoked must
+// never render a live CTA (accept, sign in, or create account), since most
+// invitees hit this page before they are authenticated. Both the initial
+// lookup and the accept-call catch path treat 'expired' and 'revoked' as
+// terminal states with honest, distinct copy, before anything falls through
+// to the live 'ready' flow.
+//
 // Brand: Fluorescence tokens only; AuthShell for chrome (same centered
 // Card-on-field shell as Login/Signup/Verify for visual parity).
 // A11y: single aria-live region drives all state transitions; real buttons
@@ -101,6 +108,8 @@ type AcceptState =
   | { kind: 'loading' }
   | { kind: 'no-token' }
   | { kind: 'invalid' }
+  | { kind: 'expired' }
+  | { kind: 'revoked' }
   | { kind: 'ready'; look: InviteLookupView }
   | { kind: 'accepting'; look: InviteLookupView }
   | { kind: 'accepted'; orgName: string }
@@ -137,8 +146,17 @@ export function AcceptInvite({ token: tokenProp, authenticated = false }: Accept
       .inviteLookup(token)
       .then((look) => {
         if (cancelled) return
+        // A dead invite (already expired, or revoked by an admin) must never
+        // fall through to the live 'ready' flow: most invitees are not yet
+        // authenticated on this first visit, so without this check they would
+        // get a sign-in / create-account CTA for an invite that can never be
+        // accepted, and only find out after signing in or signing up.
         if (look.state === 'accepted' && authenticated) {
           setState({ kind: 'accepted', orgName: look.org_name })
+        } else if (look.state === 'expired') {
+          setState({ kind: 'expired' })
+        } else if (look.state === 'revoked') {
+          setState({ kind: 'revoked' })
         } else {
           setState({ kind: 'ready', look })
         }
@@ -167,7 +185,11 @@ export function AcceptInvite({ token: tokenProp, authenticated = false }: Accept
           return
         }
         if (fresh.state === 'expired') {
-          setState({ kind: 'error', message: 'This invitation has expired.' })
+          setState({ kind: 'expired' })
+          return
+        }
+        if (fresh.state === 'revoked') {
+          setState({ kind: 'revoked' })
           return
         }
       } catch {
@@ -182,7 +204,11 @@ export function AcceptInvite({ token: tokenProp, authenticated = false }: Accept
       ? 'You are in'
       : state.kind === 'invalid' || state.kind === 'no-token'
         ? 'Invitation not found'
-        : 'Join organization'
+        : state.kind === 'expired'
+          ? 'Invitation expired'
+          : state.kind === 'revoked'
+            ? 'Invitation revoked'
+            : 'Join organization'
 
   const subtitle =
     state.kind === 'loading'
@@ -191,9 +217,13 @@ export function AcceptInvite({ token: tokenProp, authenticated = false }: Accept
         ? `You have joined ${state.orgName}.`
         : state.kind === 'invalid' || state.kind === 'no-token'
           ? 'This link is invalid or has expired.'
-          : authenticated
-            ? 'Confirm to join this organization.'
-            : 'Sign in or create an account to accept.'
+          : state.kind === 'expired'
+            ? 'This invitation has expired.'
+            : state.kind === 'revoked'
+              ? 'This invitation is no longer valid.'
+              : authenticated
+                ? 'Confirm to join this organization.'
+                : 'Sign in or create an account to accept.'
 
   function renderBody() {
     switch (state.kind) {
@@ -213,6 +243,20 @@ export function AcceptInvite({ token: tokenProp, authenticated = false }: Accept
               sign in
             </a>{' '}
             if you already have an account.
+          </p>
+        )
+
+      case 'expired':
+        return (
+          <p style={{ margin: 0, fontSize: 'var(--step--1)', color: 'var(--ink-3)', textAlign: 'center' }}>
+            This invitation has expired. Ask the person who invited you to send a new one.
+          </p>
+        )
+
+      case 'revoked':
+        return (
+          <p style={{ margin: 0, fontSize: 'var(--step--1)', color: 'var(--ink-3)', textAlign: 'center' }}>
+            This invitation is no longer valid. Ask whoever invited you for a new one if you still need access.
           </p>
         )
 

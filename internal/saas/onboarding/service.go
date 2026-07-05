@@ -750,13 +750,21 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 // autoJoinPendingInvite looks up the invitation pending.InviteTokenHash
 // refers to (a no-op when empty, i.e. the common case of a signup with no
 // invite context) and, if it is still effectively pending and acct's email
-// satisfies saas.InviteEmailMatches against the invite's address, adds acct
-// as a member of the invitation's org at its role and marks the invitation
-// accepted. Every failure path (unknown invite, expired, mismatch, or a
-// store error) is swallowed: this is a best-effort UX nicety layered on top
-// of the REQUIRED signup flow, never a reason to fail Verify. The explicit
-// POST /console/invites/accept endpoint remains the primary, always-
-// available accept path.
+// matches the invite's address, adds acct as a member of the invitation's
+// org at its role and marks the invitation accepted. The match is either
+// saas.InviteEmailMatches (exact match, or same-domain colleague match on a
+// non-consumer domain) OR both addresses folding to the same canonicalEmail:
+// signup dedup already canonicalizes (strips a "+tag", and for gmail.com /
+// googlemail.com also strips dots and folds the domain), so without this an
+// invite sent to "j.ohn+work@gmail.com" would never auto-join a "john@gmail.com"
+// signup even though signup's own dedup treats them as the same person.
+// saas.InviteEmailMatches alone cannot express this: gmail.com is a
+// consumer domain there, so it requires an exact address match. Every
+// failure path (unknown invite, expired, mismatch, or a store error) is
+// swallowed: this is a best-effort UX nicety layered on top of the REQUIRED
+// signup flow, never a reason to fail Verify. The explicit POST
+// /console/invites/accept endpoint remains the primary, always-available
+// accept path.
 func (s *Service) autoJoinPendingInvite(ctx context.Context, pending PendingSignup, acct saas.Account, now time.Time) {
 	if pending.InviteTokenHash == "" {
 		return
@@ -768,7 +776,10 @@ func (s *Service) autoJoinPendingInvite(ctx context.Context, pending PendingSign
 	if inv.EffectiveState(now) != saas.InvitationPending {
 		return
 	}
-	if !saas.InviteEmailMatches(inv.Email, acct.Email) {
+	inviteCanon, inviteOK := canonicalEmail(inv.Email)
+	acctCanon, acctOK := canonicalEmail(acct.Email)
+	canonicalMatch := inviteOK && acctOK && inviteCanon == acctCanon
+	if !saas.InviteEmailMatches(inv.Email, acct.Email) && !canonicalMatch {
 		return
 	}
 	if err := s.store.PutMembership(ctx, saas.Membership{

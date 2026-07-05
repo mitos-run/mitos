@@ -5,7 +5,7 @@
 // so Enter/Space just works) into the node detail side panel. Layout is a
 // pure function of layoutForkTree(nodes) so this component is a thin renderer
 // over positions.
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Button } from '@mitos/brand'
 import { useForkTree } from '../../data/forktree'
@@ -23,12 +23,20 @@ const MAX_FORK_COUNT = 16
 // NodeDetailPanel: the side panel a selected node opens. Shows id/phase/
 // private+shared bytes and the Fork n / Open / Terminate actions the brief
 // calls for. Rendered as a labelled region so it is announced when it
-// appears; the close button returns focus-worthy control to the caller.
+// appears; focus moves to the heading on mount (mirrors FeedbackButton's
+// textarea-focus-on-open pattern) so a keyboard/screen-reader user gets a
+// clear signal the panel opened, and onClose (wired by the caller) returns
+// focus to the "Details" button that opened it.
 function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => void }) {
   const [count, setCount] = useState(2)
   const fork = useForkSandbox()
   const terminate = useTerminateSandbox()
   const { notify } = useToast()
+  const headingRef = useRef<HTMLHeadingElement>(null)
+
+  useEffect(() => {
+    headingRef.current?.focus()
+  }, [])
 
   function onFork() {
     fork.mutate(
@@ -58,7 +66,7 @@ function NodeDetailPanel({ node, onClose }: { node: ForkNode; onClose: () => voi
       style={{ padding: 'var(--space-5)', marginBottom: 'var(--space-5)' }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
-        <h3 className="mono" style={{ margin: 0 }}>{node.id}</h3>
+        <h3 ref={headingRef} tabIndex={-1} className="mono" style={{ margin: 0 }}>{node.id}</h3>
         <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="Close details">
           Close
         </button>
@@ -118,6 +126,10 @@ export function ForkTree() {
   const { data, isLoading, isError } = useForkTree()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [showNew, setShowNew] = useState(false)
+  // Tracks the "Details" button that opened the panel, so closing it can
+  // return focus to the same trigger (keyboard/screen-reader users get no
+  // signal otherwise that focus silently landed back on <body>).
+  const lastDetailsTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   if (isError) {
     return (
@@ -162,7 +174,15 @@ export function ForkTree() {
     <section aria-label="Fork tree" style={{ padding: 'var(--space-5)' }}>
       <PageHeader title="Fork tree" />
 
-      {selectedNode && <NodeDetailPanel node={selectedNode} onClose={() => setSelectedId(null)} />}
+      {selectedNode && (
+        <NodeDetailPanel
+          node={selectedNode}
+          onClose={() => {
+            setSelectedId(null)
+            lastDetailsTriggerRef.current?.focus()
+          }}
+        />
+      )}
 
       {/* SVG visualization: decorative and mouse-clickable only. It stays
           aria-hidden (a focusable-but-hidden element is a trap for keyboard/
@@ -270,7 +290,10 @@ export function ForkTree() {
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => setSelectedId(node.id)}
+                    onClick={(e) => {
+                      lastDetailsTriggerRef.current = e.currentTarget
+                      setSelectedId(node.id)
+                    }}
                     aria-label={`View details for ${node.id}`}
                   >
                     Details

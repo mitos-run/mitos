@@ -194,6 +194,6 @@ export const SYNTHETIC_TRIGGER = {
   curl: `\
 curl -s -X POST https://api.mitos.run/v1/fork \\
   -H "Authorization: Bearer $MITOS_API_KEY" -H "Content-Type: application/json" \\
-  -d '{"template":"python","id":"trigger-1"}'`,
+  -d '{"template":"python","id":"trigger-'$(date +%s)'"}'`,
   note: 'Exec streaming needs the CLI or an SDK; a successful fork is already enough to light up your first activity.',
 }

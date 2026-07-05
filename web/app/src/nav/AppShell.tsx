@@ -169,6 +169,13 @@ function OwnershipBadge({ caps }: { caps: Capabilities }) {
 // carry.
 function VersionFooter({ caps }: { caps: Capabilities }) {
   const [copied, setCopied] = useState(false)
+  const resetTimeout = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (resetTimeout.current !== null) window.clearTimeout(resetTimeout.current)
+    }
+  }, [])
 
   if (!caps.version) return null
 
@@ -176,7 +183,8 @@ function VersionFooter({ caps }: { caps: Capabilities }) {
     try {
       await navigator.clipboard.writeText(`mitos ${caps.version} (${caps.edition})`)
       setCopied(true)
-      window.setTimeout(() => setCopied(false), 1500)
+      if (resetTimeout.current !== null) window.clearTimeout(resetTimeout.current)
+      resetTimeout.current = window.setTimeout(() => setCopied(false), 1500)
     } catch {
       // Clipboard access can fail (permissions, insecure context); staying
       // silent keeps this a harmless no-op rather than surfacing an error for

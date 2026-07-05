@@ -101,4 +101,16 @@ describe('appearance subscribe', () => {
     setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
     expect(listener).not.toHaveBeenCalled()
   })
+
+  it('isolates a throwing listener so later subscribers still get notified', () => {
+    const throwing = vi.fn(() => {
+      throw new Error('boom')
+    })
+    const after = vi.fn()
+    subscribe(throwing)
+    subscribe(after)
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(throwing).toHaveBeenCalledTimes(1)
+    expect(after).toHaveBeenCalledTimes(1)
+  })
 })

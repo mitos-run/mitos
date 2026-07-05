@@ -3,6 +3,8 @@
 // Pending invites section showing state/expiry with resend/revoke. Supports
 // loading, empty, and error states; the empty state doubles as the invite CTA.
 import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@mitos/brand'
 import { useMembers, useSetRole, useRemoveMember, useInvites, useRevokeInvite, useResendInvite } from '../data/org'
 import { useAccount } from '../data/account-settings'
@@ -18,6 +20,8 @@ import { InviteModal } from './members/InviteModal'
 const ROLES: Role[] = ['owner', 'admin', 'billing', 'member', 'viewer']
 
 export function Members() {
+  const navigate = useNavigate()
+  const qc = useQueryClient()
   const { data: members = [], isLoading, isError } = useMembers()
   const { data: account } = useAccount()
   const setRole = useSetRole()
@@ -57,9 +61,18 @@ export function Members() {
   function onConfirmRemove() {
     if (!confirmRemove) return
     const target = confirmRemove
+    const isSelfLeave = account?.account_id === target.accountId
     setConfirmRemove(null)
     removeMember.mutate(target.accountId, {
-      onSuccess: () => notify(`Removed ${target.label}`, 'ok'),
+      onSuccess: () => {
+        if (isSelfLeave) {
+          notify('You left the organization.', 'ok')
+          void qc.invalidateQueries({ queryKey: ['capabilities'] })
+          void navigate({ to: '/' })
+        } else {
+          notify(`Removed ${target.label}`, 'ok')
+        }
+      },
       onError: () => notify(`Failed to remove ${target.label}`, 'error'),
     })
   }

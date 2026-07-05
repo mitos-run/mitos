@@ -193,6 +193,30 @@ describe('ForkTree node detail panel', () => {
     expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
   })
 
+  // Keyboard/screen-reader users get no signal a panel opened unless focus
+  // actually moves into it; opening via the table's "Details" button must
+  // land focus on the panel's heading.
+  it('moves focus into the panel (onto its heading) when opened via the Details button', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    const heading = within(panel).getByRole('heading', { name: 'fork-a' })
+    await waitFor(() => expect(document.activeElement).toBe(heading))
+  })
+
+  // Closing the panel must return focus to the button that opened it, not
+  // silently drop it back to <body>.
+  it('returns focus to the triggering Details button when the panel is closed', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const trigger = screen.getByRole('button', { name: /view details for root/i })
+    fireEvent.click(trigger)
+    expect(screen.getByRole('region', { name: /details for sandbox root/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /close details/i }))
+    expect(document.activeElement).toBe(trigger)
+  })
+
   // Mobile: the panel carries fork-node-panel so base.css's <=480px media
   // query pins it to the bottom of the viewport as a sheet, instead of
   // opening inline above an already-tall page.

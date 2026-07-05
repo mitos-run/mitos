@@ -60,15 +60,20 @@ export function InviteModal({ onClose }: InviteModalProps) {
     e.preventDefault()
     if (emails.length === 0 || sending) return
     setSending(true)
-    const outcomes: SendResult[] = []
-    for (const email of emails) {
-      try {
-        await createInvite.mutateAsync({ email, role })
-        outcomes.push({ email, ok: true })
-      } catch (err) {
-        outcomes.push({ email, ok: false, message: err instanceof Error ? err.message : 'failed to send' })
-      }
-    }
+    // Each address's send has its own try/catch, so one failing invite never
+    // aborts the others; running them concurrently (instead of one await per
+    // iteration) turns N sequential round-trips into one, without changing
+    // the per-address success/failure semantics below.
+    const outcomes = await Promise.all(
+      emails.map(async (email): Promise<SendResult> => {
+        try {
+          await createInvite.mutateAsync({ email, role })
+          return { email, ok: true }
+        } catch (err) {
+          return { email, ok: false, message: err instanceof Error ? err.message : 'failed to send' }
+        }
+      }),
+    )
     setSending(false)
     setResults(outcomes)
     // Only clear the textarea of addresses that succeeded, so a partial

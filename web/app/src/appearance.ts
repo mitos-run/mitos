@@ -93,6 +93,12 @@ export function subscribe(listener: Listener): () => void {
 
 function notify(): void {
   for (const listener of listeners) {
-    listener()
+    try {
+      listener()
+    } catch {
+      // Isolate one bad subscriber from breaking the rest: every mounted
+      // control observing this value must still get notified even if an
+      // earlier listener throws.
+    }
   }
 }
