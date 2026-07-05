@@ -91,7 +91,18 @@ export function AppShell() {
           ))}
           <OwnershipBadge caps={caps} />
         </nav>
-        <main style={{ flex: 1, padding: 'var(--space-6)' }}>
+        {/* minWidth: 0 overrides the flex item default of min-width:auto. Without
+            it, a wide descendant (e.g. a .tbl forced to min-width:600px on a
+            narrow viewport, or any long unbreakable token) sets main's own
+            automatic minimum size and blows out the whole page width even
+            though that descendant has its own overflow-x:auto wrapper: the
+            wrapper only clips ITS children, it does not stop this flex item
+            from being sized to fit them. This is the load-bearing fix that
+            makes every "wrap the table in overflow-x:auto" pattern in the
+            view files actually contain the scroll, instead of just adding a
+            second (redundant) inner scrollbar next to a body that still
+            scrolls horizontally. */}
+        <main style={{ flex: 1, minWidth: 0, padding: 'var(--space-6)' }}>
           <Outlet />
         </main>
       </div>

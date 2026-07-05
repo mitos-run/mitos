@@ -39,6 +39,27 @@ describe('AppShell', () => {
     await waitFor(() => expect(screen.getByText('Self-hosted')).toBeInTheDocument())
   })
 
+  // Regression guard for a real mobile-viewport bug (found via Playwright at
+  // 375px, not visible in jsdom): <main> is a flex item (flex:1 inside
+  // .app-shell's display:flex) with no explicit min-width. A flex item's
+  // default min-width is 'auto', which lets its own automatic minimum size
+  // grow to fit the min-content size of ANY descendant, even one many levels
+  // deep with its own overflow-x:auto wrapper (e.g. a .tbl forced to
+  // min-width:600px on a narrow viewport). The wrapper's overflow-x:auto only
+  // clips ITS children; it does nothing to stop this flex item from being
+  // sized to fit them, so without min-width:0 here a single wide table
+  // anywhere on the page silently made the whole page body scroll
+  // horizontally on a phone. jsdom has no layout engine so this cannot be
+  // asserted via getBoundingClientRect; asserting the inline style directly
+  // pins the fix that a future refactor could otherwise drop unnoticed.
+  it('gives the routed content pane min-width:0 so a wide descendant cannot force page-body horizontal scroll', async () => {
+    await renderAt('/sandboxes', caps)
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Sandboxes' })).toBeInTheDocument())
+    const main = document.querySelector('main')
+    expect(main).not.toBeNull()
+    expect((main as HTMLElement).style.minWidth).toBe('0')
+  })
+
   it('shows no ownership badge on the hosted edition', async () => {
     const hosted: Capabilities = { ...caps, ownership: 'hosted' }
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {

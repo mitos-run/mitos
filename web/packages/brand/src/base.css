@@ -10,6 +10,18 @@
 
 * { box-sizing: border-box; }
 
+/* overflow-x: hidden on both html and body: the mobile pass found (and fixed
+   above, see .sr-only and AppShell's <main> min-width:0) a real bug where the
+   page body could genuinely be scrolled/dragged horizontally on a phone,
+   caused by a positioned descendant's containing block skipping past every
+   intermediate overflow-x:auto wrapper straight to the root. Those two fixes
+   address the confirmed mechanism, but this class of bug (an escaping
+   containing block, or a future component that forgets its own wrapper) is
+   easy to reintroduce one component at a time. This is the same
+   belt-and-suspenders clamp already used on the marketing site
+   (website/src/styles/base.css): whichever element ends up as "the scrolling
+   element", it is clamped, so a future regression degrades to clipped
+   content instead of a swipeable page. */
 html, body {
   margin: 0;
   background: var(--field);
@@ -18,6 +30,7 @@ html, body {
   font-size: var(--step-0);
   line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 /* The fixed sensor field: faint reticle + grain, < a few % luminance. */
@@ -152,9 +165,28 @@ a { color: var(--cyan); }
 .skeleton-row { animation: pulse 1.2s var(--ease) infinite; }
 @keyframes pulse { 50% { opacity: 0.5; } }
 
-/* Screen-reader only: visually hidden but accessible to assistive technology. */
+/* Screen-reader only: visually hidden but accessible to assistive technology.
+   top/left: 0 is load-bearing, not cosmetic. Without an explicit inset, an
+   absolutely positioned element with no positioned ancestor is placed at its
+   "static position" (roughly where it would sit if it were still in normal
+   flow) relative to the initial containing block. Every .tbl action-column
+   header uses this class inside a <th> (e.g. `<span className="sr-only">
+   Details</span>`), and on a narrow viewport that table is forced wide
+   (.tbl { min-width: 600px }) and clipped only visually by its
+   overflow-x:auto wrapper. Visual clipping does not stop an absolutely
+   positioned descendant's LAYOUT geometry (its scrollable-overflow
+   contribution) from propagating to its containing block, which for an
+   unpositioned ancestor chain is the document root: the far-right static
+   position of the hidden span was silently forcing document scrollWidth past
+   the viewport width, i.e. the page body itself became horizontally
+   scrollable even though every table looked correctly clipped. Pinning the
+   position removes that phantom contribution; it is still a zero-size,
+   clipped, off-flow box, so it stays invisible and does not affect the
+   screen-reader/focus order (that is DOM order, not visual position). */
 .sr-only {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 1px;
   height: 1px;
   padding: 0;
