@@ -147,23 +147,6 @@ func accountView(acct saas.Account, mems []saas.Membership, orgs map[string]saas
 	}
 }
 
-// orgsByID resolves orgs (issue #712's HomeRegion join) via
-// AccountService.Organizations, keyed by org id. A lookup failure returns an
-// empty map rather than an error: accountView's join is best-effort, so one
-// bad org lookup degrades to an empty HomeRegion rather than failing the
-// whole account view.
-func orgsByID(ctx context.Context, accounts *saas.AccountService, accountID string) map[string]saas.Organization {
-	orgs, err := accounts.Organizations(ctx, accountID)
-	if err != nil {
-		return map[string]saas.Organization{}
-	}
-	out := make(map[string]saas.Organization, len(orgs))
-	for _, o := range orgs {
-		out[o.ID] = o
-	}
-	return out
-}
-
 // handleGetAccount returns the caller's profile and memberships. The account id
 // is always taken from the request context; it is never read from the path,
 // query, or body, which is the account-isolation guarantee.
@@ -178,7 +161,9 @@ func (c *Console) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read")
 		return
 	}
-	orgs := orgsByID(r.Context(), c.deps.Accounts, accountID)
+	// Resolve orgs (issue #712's HomeRegion join) from the memberships already
+	// read above, so the account view does not re-list memberships.
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
 	writeJSON(w, http.StatusOK, accountView(acct, mems, orgs))
 }
 
@@ -229,7 +214,7 @@ func (c *Console) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		Detail:     "updated account profile",
 		At:         c.deps.Now(),
 	})
-	orgs := orgsByID(r.Context(), c.deps.Accounts, accountID)
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
 	writeJSON(w, http.StatusOK, accountView(updated, mems, orgs))
 }
 

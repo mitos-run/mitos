@@ -114,6 +114,25 @@ func (s *AccountService) Organizations(ctx context.Context, accountID string) ([
 	return out, nil
 }
 
+// OrganizationsFor resolves the orgs named by mems, keyed by org id. It is the
+// zero-extra-round-trip variant of Organizations for callers that already hold
+// the account's memberships (from Profile): it skips the membership list and
+// does one GetOrg per unique org. Best-effort, matching Organizations: a
+// failed org lookup is skipped rather than failing the whole map, so a caller
+// joining orgs onto a view degrades to a missing entry rather than an error.
+func (s *AccountService) OrganizationsFor(ctx context.Context, mems []Membership) map[string]Organization {
+	out := make(map[string]Organization, len(mems))
+	for _, m := range mems {
+		if _, ok := out[m.OrgID]; ok {
+			continue
+		}
+		if org, err := s.store.GetOrg(ctx, m.OrgID); err == nil {
+			out[m.OrgID] = org
+		}
+	}
+	return out
+}
+
 // isMember reports whether accountID belongs to orgID. It is the authorization
 // guard the CLI key verbs use so an account cannot manage another org's keys.
 func (s *AccountService) isMember(ctx context.Context, accountID, orgID string) bool {

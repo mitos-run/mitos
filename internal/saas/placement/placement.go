@@ -96,6 +96,12 @@ func (r Registry) Multi() bool {
 // the colon is trimmed. A token with no display segment uses the name as its
 // display text. The FIRST non-empty token becomes the default value; every
 // parsed value is marked Available. An empty or all-empty input returns nil.
+//
+// Display text must not contain a comma: the split is on "," before the ":"
+// split, so a comma inside a display segment (e.g. "iad:Ashburn, VA") is
+// parsed as two tokens, silently truncating the display to "Ashburn" and
+// dropping the "VA" fragment as an invalid label value. Operators writing
+// MITOS_CONSOLE_PLACEMENT_VALUES should keep display text comma-free.
 func ParseValues(raw string) []Value {
 	var out []Value
 	for _, tok := range strings.Split(raw, ",") {
