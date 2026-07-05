@@ -12,10 +12,31 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"mitos.run/mitos/internal/saas"
 )
+
+// newMemberAuthorizedAccounts returns an *saas.AccountService seeded with a
+// single RoleMember membership for (acctID, orgID): enough for
+// canAccessSandbox's PermReadOnly check (added alongside the log routes'
+// per-project RBAC gate) to grant an unassigned sandbox's logs, without
+// pulling in the full projectAccessFixture for tests that otherwise only
+// care about the SSE transport's own behavior.
+func newMemberAuthorizedAccounts(t *testing.T, acctID, orgID string) *saas.AccountService {
+	t.Helper()
+	store := saas.NewMemStore()
+	accounts := saas.NewAccountService(store, saas.NewKeyService(store))
+	if err := store.PutMembership(context.Background(), saas.Membership{
+		AccountID: acctID, OrgID: orgID, Role: saas.RoleMember, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	return accounts
+}
 
 func (f *fixture) reqBody(t *testing.T, method, target, body, acct, org string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -68,6 +89,60 @@ func TestCreateSandboxRejectsOutOfBoundsVCPUsAndMem(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("body %s: status = %d, want 400; resp=%s", body, w.Code, w.Body.String())
 		}
+	}
+}
+
+// TestCreateSandboxAcceptsValidRegion asserts a region matching the
+// deployment's placement registry (issue #712 phase 0; newFixture's default
+// Console gets the community default registry, key "cluster" value
+// "default") is accepted and carried onto the created sandbox's view.
+func TestCreateSandboxAcceptsValidRegion(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1,"region":"default"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var sb SandboxView
+	decode(t, w, &sb)
+	if sb.Region != "default" {
+		t.Errorf("created sandbox Region = %q, want default", sb.Region)
+	}
+}
+
+// TestCreateSandboxRejectsUnknownRegion asserts a region that is not in the
+// deployment's placement registry is refused with a 400 naming the valid
+// values in its remediation (the LLM-legible error rule, issue #28), rather
+// than silently falling through to the adapter.
+func TestCreateSandboxRejectsUnknownRegion(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1,"region":"iad"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Remediation string `json:"remediation"`
+		} `json:"error"`
+	}
+	decode(t, w, &body)
+	if !strings.Contains(body.Error.Remediation, "default") {
+		t.Errorf("remediation = %q, want it to name the valid value \"default\"", body.Error.Remediation)
+	}
+}
+
+// TestCreateSandboxOmittedRegionLeavesItEmpty asserts a create request with
+// no region field succeeds and leaves SandboxView.Region empty (meaning the
+// org's home region), rather than requiring every caller to specify one.
+func TestCreateSandboxOmittedRegionLeavesItEmpty(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var sb SandboxView
+	decode(t, w, &sb)
+	if sb.Region != "" {
+		t.Errorf("created sandbox Region = %q, want empty", sb.Region)
 	}
 }
 
@@ -451,5 +526,287 @@ func TestSandboxLogsStreamSendsSSEAndClosesOnCtxCancel(t *testing.T) {
 	}
 	if !strings.Contains(body, ": heartbeat") {
 		t.Fatalf("missing heartbeat comment: %q", body)
+	}
+}
+
+// blockingLogStreamer models a real follow transport (the cluster adapter's
+// husk-pod log follow): it writes one line, then blocks until ctx is done,
+// exactly like clustersandbox.Control.StreamLogs does while following a live
+// pod. It is the load-bearing stand-in for proving the 501-honest path
+// "flips to working": once a real, blocking LogStreamer is wired in, the SSE
+// handler must still heartbeat (not starve) and still return promptly on
+// disconnect, not just for the finite in-memory/fake streamer the other SSE
+// test above exercises.
+type blockingLogStreamer struct {
+	line string
+}
+
+func (b *blockingLogStreamer) StreamLogs(ctx context.Context, _, _ string, sink LogSink) error {
+	if err := sink.Write([]byte(b.line)); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport asserts that
+// when the LogStreamer is a real, blocking follow (not a finite fake that
+// returns immediately), the SSE handler still sends heartbeats WHILE the
+// transport is active, and still returns promptly once the client
+// disconnects: this is the concurrency the real cluster transport actually
+// needs (see sandbox_ops.go's handleSandboxLogsStream doc), which the
+// finite-streamer test above cannot exercise since it returns before any
+// heartbeat is due.
+func TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
+		Sandboxes: sandboxes,
+		Logs:      &blockingLogStreamer{line: "live-line\n"},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, "acct-1", "org-alice"))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	// Give the concurrent heartbeat loop time to fire more than once WHILE
+	// the transport is still blocked mid-follow, before we disconnect.
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after ctx cancel while a blocking follow transport was active")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "data: live-line") {
+		t.Fatalf("missing the blocking transport's live line: %q", body)
+	}
+	if strings.Count(body, ": heartbeat") < 2 {
+		t.Fatalf("want at least 2 heartbeats while the follow transport blocked, got: %q", body)
+	}
+}
+
+// emptyLogStreamer models a LogStreamer that completes cleanly having
+// written zero lines (e.g. a sandbox with no log output yet). It is the
+// stand-in for the MINOR fix in issue #726: before that fix, this exact
+// shape left sink.wrote permanently false even after writeSSEHeaders had
+// already sent the 200 response, so the ticker.C heartbeat case no-op'd for
+// the rest of the connection's life.
+type emptyLogStreamer struct{}
+
+func (emptyLogStreamer) StreamLogs(_ context.Context, _, _ string, _ LogSink) error {
+	return nil
+}
+
+// TestSandboxLogsStreamEmptyStreamStillHeartbeats is the regression test for
+// the MINOR fix in issue #726: a stream that finishes with zero log lines
+// (StreamLogs returns nil having never called sink.Write) must still send
+// heartbeats for as long as the connection is held open, not go silent after
+// its initial 200 response. Before the fix, writeSSEHeaders was called but
+// sink.wrote was never latched true on this path, so heartbeat() kept
+// no-op'ing forever and an idle-timeout proxy could drop the connection
+// despite it being intentionally kept alive.
+func TestSandboxLogsStreamEmptyStreamStillHeartbeats(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
+		Sandboxes: sandboxes,
+		Logs:      emptyLogStreamer{},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, "acct-1", "org-alice"))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	// Give the heartbeat ticker time to fire more than once after StreamLogs
+	// already completed with zero lines, proving wrote latched true with no
+	// real content ever written.
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after ctx cancel for an empty (zero-line) stream")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "data:") {
+		t.Fatalf("expected no data events for an empty stream, got: %q", body)
+	}
+	if strings.Count(body, ": heartbeat") < 2 {
+		t.Fatalf("want at least 2 heartbeats for an empty (zero-line) stream, got: %q", body)
+	}
+}
+
+// recordingPeriodicLogStreamer models a real follow transport that keeps
+// writing lines on its own goroutine for as long as ctx is alive (a live
+// husk-pod follow with steady output), unlike blockingLogStreamer above which
+// writes exactly once then goes silent. It records whether it observed ctx
+// cancellation (vs. returning for some other reason) so a test can prove the
+// SSE handler actually stops the upstream on the heartbeat-failure path, not
+// just abandons the goroutine.
+type recordingPeriodicLogStreamer struct {
+	interval  time.Duration
+	sawCancel chan bool
+}
+
+func (p *recordingPeriodicLogStreamer) StreamLogs(ctx context.Context, _, _ string, sink LogSink) error {
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			p.sawCancel <- true
+			return ctx.Err()
+		case <-ticker.C:
+			if err := sink.Write([]byte("tick-line\n")); err != nil {
+				p.sawCancel <- false
+				return err
+			}
+		}
+	}
+}
+
+// timedWrite records one Write to raceDetectResponseWriter along with when it
+// happened, so a test can assert no write landed after the SSE handler had
+// already returned to net/http.
+type timedWrite struct {
+	at   time.Time
+	data string
+}
+
+// raceDetectResponseWriter is a minimal http.ResponseWriter + http.Flusher
+// fake that fails exactly the heartbeat payload sseLogSink.heartbeat sends
+// (": heartbeat\n\n"), simulating a broken connection discovered only on a
+// heartbeat write, while succeeding on every other write. It timestamps every
+// write it sees.
+type raceDetectResponseWriter struct {
+	mu     sync.Mutex
+	header http.Header
+	code   int
+	writes []timedWrite
+}
+
+func newRaceDetectResponseWriter() *raceDetectResponseWriter {
+	return &raceDetectResponseWriter{header: http.Header{}}
+}
+
+func (w *raceDetectResponseWriter) Header() http.Header { return w.header }
+
+func (w *raceDetectResponseWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.code = code
+}
+
+func (w *raceDetectResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, timedWrite{at: time.Now(), data: string(p)})
+	if string(p) == ": heartbeat\n\n" {
+		return 0, errors.New("simulated broken connection on heartbeat write")
+	}
+	return len(p), nil
+}
+
+func (w *raceDetectResponseWriter) Flush() {}
+
+func (w *raceDetectResponseWriter) writesAfter(t time.Time) []timedWrite {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var late []timedWrite
+	for _, tw := range w.writes {
+		if tw.at.After(t) {
+			late = append(late, tw)
+		}
+	}
+	return late
+}
+
+// TestSandboxLogsStreamNoWriteAfterHandlerReturnsOnHeartbeatFailure is the
+// regression test for the write-after-ServeHTTP-return hazard: when the
+// ticker.C branch's heartbeat write fails while a real, blocking follow
+// transport is still active, the handler must stop the upstream (cancel a
+// derived context) and wait for it to actually return BEFORE the handler
+// itself returns, so net/http never observes a write to the ResponseWriter
+// after ServeHTTP has already returned. Before the fix, this branch returned
+// immediately without draining the background StreamLogs goroutine, so the
+// transport could keep calling sink.Write after the handler had returned.
+func TestSandboxLogsStreamNoWriteAfterHandlerReturnsOnHeartbeatFailure(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	streamer := &recordingPeriodicLogStreamer{interval: 2 * time.Millisecond, sawCancel: make(chan bool, 1)}
+	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
+		Sandboxes: sandboxes,
+		Logs:      streamer,
+	})
+
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(context.Background(), "acct-1", "org-alice"))
+	w := newRaceDetectResponseWriter()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after the heartbeat write failed; upstream was not stopped")
+	}
+	returnedAt := time.Now()
+
+	select {
+	case sawCancel := <-streamer.sawCancel:
+		if !sawCancel {
+			t.Fatal("upstream StreamLogs did not observe ctx cancellation; it returned for another reason")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream StreamLogs never returned; the handler leaked the transport goroutine")
+	}
+
+	// Give a still-buggy handler a chance to sneak in a late write before checking.
+	time.Sleep(50 * time.Millisecond)
+
+	if late := w.writesAfter(returnedAt); len(late) > 0 {
+		t.Fatalf("write(s) to the ResponseWriter after the handler returned: %+v", late)
 	}
 }

@@ -18,8 +18,8 @@ model so the import swap is the only change.
 
 Daytona verb -> mitos op (and whether it works TODAY against the standalone server):
 
-    Daytona(config)                  -> hold api_key + base_url            works today
-    daytona.create(params)           -> mitos.create() / DirectSandbox     works today
+    Daytona(config)                  -> hold api_key + base_url + target   works today
+    daytona.create(params)           -> mitos.create(region=target)       works today
     daytona.get(id)                  -> SandboxServer.list_sandboxes lookup works today
     daytona.list()                   -> SandboxServer.list_sandboxes       works today
     daytona.delete(sandbox)          -> DirectSandbox.terminate            works today
@@ -66,12 +66,19 @@ def _create_direct(
     base_url: Optional[str] = None,
     id: Optional[str] = None,
     network: Optional[Network] = None,
+    region: Optional[str] = None,
 ) -> DirectSandbox:
     """The single seam that builds a native ``DirectSandbox``.
 
     Factored out so tests can patch it to a fake target and exercise the shim
-    without a server, the same pattern ``mitos.e2b`` uses."""
-    return _create(image, api_key=api_key, base_url=base_url, id=id, network=network)
+    without a server, the same pattern ``mitos.e2b`` uses.
+
+    region (issue #712 phase 0) is Daytona's ``target`` mapped onto Mitos
+    placement (see ``Daytona.create``); passed through to ``mitos.create``
+    unchanged."""
+    return _create(
+        image, api_key=api_key, base_url=base_url, id=id, network=network, region=region
+    )
 
 
 # --------------------------------------------------------------------------
@@ -83,9 +90,12 @@ class DaytonaConfig:
     """Daytona's ``DaytonaConfig``.
 
     Holds the credentials the ``Daytona`` client uses. ``api_url`` is Daytona's
-    name for the server base; it maps onto the Mitos ``base_url``. Extra Daytona
-    fields (``target``, ``organization_id``, ...) are accepted and ignored so a
-    Daytona config literal constructs unchanged."""
+    name for the server base; it maps onto the Mitos ``base_url``. ``target``
+    (issue #712 phase 0) maps onto Mitos placement's ``region``: no longer
+    silently ignored, ``Daytona(DaytonaConfig(target="fra")).create(...)``
+    requests that placement value the same way ``mitos.create(region="fra")``
+    does. Other extra Daytona fields (``organization_id``, ...) are still
+    accepted and ignored so a Daytona config literal constructs unchanged."""
 
     def __init__(
         self,
@@ -473,6 +483,11 @@ class Daytona:
         cfg = config or DaytonaConfig()
         self._api_key = cfg.api_key
         self._base_url = cfg.api_url
+        # target (issue #712 phase 0): Daytona's region/target selector, mapped
+        # onto Mitos placement at create time (Daytona's per-create target, if
+        # ever added, would take priority; DaytonaConfig has no such field
+        # today, so the client-level target is the only source).
+        self._target = cfg.target
 
     def create(
         self,
@@ -486,10 +501,19 @@ class Daytona:
         ``image`` / ``snapshot`` selects the base; ``env_vars`` / ``labels`` are
         accepted and not applied today.
 
+        ``DaytonaConfig(target=...)`` (issue #712 phase 0) maps onto Mitos's
+        ``region``: previously accepted and silently ignored, it now selects
+        a placement value the same way ``mitos.create(region=...)`` does. A
+        self-hosted single-cluster server still ignores it; a hosted
+        deployment validates it against its placement registry.
+
         works today against the bare mock server."""
         params = params or CreateSandboxBaseParams()
         sb = _create_direct(
-            params._image(), api_key=self._api_key, base_url=self._base_url
+            params._image(),
+            api_key=self._api_key,
+            base_url=self._base_url,
+            region=self._target,
         )
         return Sandbox(sb, language=params.language)
 

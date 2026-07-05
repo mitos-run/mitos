@@ -150,6 +150,69 @@ func TestCrossNodeAggregation(t *testing.T) {
 	}
 }
 
+// TestIntegrateCarriesRegionOntoRecord asserts a sample's Region (issue #712
+// phase 0) is carried onto the UsageRecord it produces, both via the
+// rate-unit integration path and the counter-only window path, and that a
+// sample with no region (the pre-#712 shape) produces a record with an
+// empty Region rather than erroring.
+func TestIntegrateCarriesRegionOntoRecord(t *testing.T) {
+	rateSamples := []Sample{
+		{OrgID: "orgA", Region: "fra", SandboxID: "sbx1", Node: "n1", Timestamp: at(baseTime, 0), VCPUs: 1},
+		{OrgID: "orgA", Region: "fra", SandboxID: "sbx1", Node: "n1", Timestamp: at(baseTime, 30), VCPUs: 1},
+	}
+	recs := Integrate(rateSamples, DefaultConfig())
+	if len(recs) != 1 || recs[0].Region != "fra" {
+		t.Fatalf("rate-path records = %+v, want exactly one record with Region fra", recs)
+	}
+
+	// Counter-only path: two samples in the same window produce a record via
+	// the counter delta (see the window-counter loop in Integrate).
+	counterSamples := []Sample{
+		{OrgID: "orgA", Region: "iad", SandboxID: "sbx2", Timestamp: at(baseTime, 0), EgressBytes: 100},
+		{OrgID: "orgA", Region: "iad", SandboxID: "sbx2", Timestamp: at(baseTime, 30), EgressBytes: 300},
+	}
+	recs = Integrate(counterSamples, DefaultConfig())
+	if len(recs) != 1 || recs[0].Region != "iad" || recs[0].EgressBytes != 200 {
+		t.Fatalf("counter-path records = %+v, want exactly one record with Region iad and EgressBytes 200", recs)
+	}
+
+	noRegion := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx3", Timestamp: at(baseTime, 0), EgressBytes: 100},
+		{OrgID: "orgA", SandboxID: "sbx3", Timestamp: at(baseTime, 30), EgressBytes: 150},
+	}
+	recs = Integrate(noRegion, DefaultConfig())
+	if len(recs) != 1 || recs[0].Region != "" {
+		t.Fatalf("no-region records = %+v, want exactly one record with an empty Region", recs)
+	}
+}
+
+// TestSamplesFromReportRegionOf asserts SamplesFromReport tags each sample
+// with regionOf's result (issue #712 phase 0), and that a nil regionOf (the
+// NodeRegistrySource path, which has no placement concept) leaves every
+// sample's Region empty rather than panicking.
+func TestSamplesFromReportRegionOf(t *testing.T) {
+	report := metering.Aggregate([]metering.Sample{
+		{ID: "sbx1", Template: "tpl", MemoryUnique: 10},
+	})
+	orgOf := func(string) (string, bool) { return "orgA", true }
+
+	regionOf := func(id string) string {
+		if id == "sbx1" {
+			return "fra"
+		}
+		return ""
+	}
+	samples, _ := SamplesFromReport("n1", baseTime, report, orgOf, func(string) int32 { return 1 }, regionOf)
+	if len(samples) != 1 || samples[0].Region != "fra" {
+		t.Fatalf("samples = %+v, want exactly one sample with Region fra", samples)
+	}
+
+	samples, _ = SamplesFromReport("n1", baseTime, report, orgOf, func(string) int32 { return 1 }, nil)
+	if len(samples) != 1 || samples[0].Region != "" {
+		t.Fatalf("samples with nil regionOf = %+v, want exactly one sample with an empty Region", samples)
+	}
+}
+
 // TestSamplesFromReportCoWNoDoubleCount is the CoW-double-count guard: converting
 // a node report to per-sandbox samples must amortize each template's shared-once
 // set across its forks so the summed memory level reconstructs UsedCoWAware, not
@@ -166,7 +229,7 @@ func TestSamplesFromReportCoWNoDoubleCount(t *testing.T) {
 	}
 
 	orgOf := func(string) (string, bool) { return "orgA", true }
-	samples, recon := SamplesFromReport("n1", baseTime, report, orgOf, func(string) int32 { return 1 })
+	samples, recon := SamplesFromReport("n1", baseTime, report, orgOf, func(string) int32 { return 1 }, nil)
 
 	var sumLevel int64
 	for _, s := range samples {

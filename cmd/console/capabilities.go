@@ -10,6 +10,7 @@ import (
 
 	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/placement"
 )
 
 // knownAuthConnectors is the closed set of social-login provider identifiers
@@ -50,7 +51,29 @@ func capabilitiesFromEnv() console.Capabilities {
 		AuthConnectors: parseAuthConnectors(os.Getenv("MITOS_CONSOLE_AUTH_CONNECTORS")),
 		Feedback:       feedbackCapabilityFromEnv(edition),
 		Version:        version,
+		Placement:      placementFromEnv(edition),
 	}
+}
+
+// placementFromEnv builds the deployment's placement registry (issue #712
+// phase 0): the operator-defined key and the values it advertises. Hosted
+// defaults to key "region" with the single Frankfurt value; self-hosted
+// community defaults to key "cluster" with a single "default" value. Either
+// can be overridden by MITOS_CONSOLE_PLACEMENT_KEY / MITOS_CONSOLE_PLACEMENT_VALUES
+// regardless of edition, so a self-host operator can rename the key to
+// whatever fits their fleet (cluster, zone, dc) without a code change, and a
+// hosted deployment can add a second region ahead of phase 1 actually
+// routing to it.
+func placementFromEnv(edition string) placement.Registry {
+	defaultKey := "cluster"
+	defaultValues := "default"
+	if edition == "hosted" {
+		defaultKey = "region"
+		defaultValues = "fra:Frankfurt (EU)"
+	}
+	key := envOr("MITOS_CONSOLE_PLACEMENT_KEY", defaultKey)
+	values := envOr("MITOS_CONSOLE_PLACEMENT_VALUES", defaultValues)
+	return placement.New(key, values)
 }
 
 // feedbackCapabilityFromEnv resolves the console's one-click feedback

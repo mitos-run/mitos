@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.23.0](https://github.com/mitos-run/mitos/compare/v1.22.0...v1.23.0) (2026-07-05)
+
+
+### Features
+
+* **console:** follow husk-pod logs for live sandbox log streaming ([5b09c6d](https://github.com/mitos-run/mitos/commit/5b09c6d8a0b7a59cbe377ac90600271c0a1fa7f9))
+* **console:** live sandbox log streaming via husk pod-log follow ([#715](https://github.com/mitos-run/mitos/issues/715)) ([8b5835c](https://github.com/mitos-run/mitos/commit/8b5835c3eb2f9237d230a1860a342737fb48d62c))
+* **console:** quality follow-ups: shared modal focus, operator-plane hardening, fork partial results, waitlist intake ([20eca5d](https://github.com/mitos-run/mitos/commit/20eca5d93e515f573e542fd951be6f923001004c))
+* **saas:** federation Phase 0, region-shaped single cluster ([#712](https://github.com/mitos-run/mitos/issues/712)) ([#728](https://github.com/mitos-run/mitos/issues/728)) ([11b1f3e](https://github.com/mitos-run/mitos/commit/11b1f3e4b45cc9c4da08acc5e6d7d6074a047511))
+
+
+### Bug Fixes
+
+* **console:** bound live log stream memory by bytes; heartbeat empty streams ([#726](https://github.com/mitos-run/mitos/issues/726)) ([#727](https://github.com/mitos-run/mitos/issues/727)) ([f7bbecb](https://github.com/mitos-run/mitos/commit/f7bbecb710578a67f59b915e80a63e70194ed3cc))
+* **console:** gate log routes on per-project access, not just org ([0d494f0](https://github.com/mitos-run/mitos/commit/0d494f0dc309c4b0a705a09c8c700d906b4dbee5))
+* **console:** heartbeat the SSE log stream while a real follow blocks ([d127d04](https://github.com/mitos-run/mitos/commit/d127d04b909cd5df19001b6bc889476c94ad3e15))
+* **console:** stop the upstream log follow before every SSE return ([1daca4e](https://github.com/mitos-run/mitos/commit/1daca4e5836f29c7b846534d43a38a858abed891))
+* **console:** strip trailing CR on readBoundedLine's EOF-mid-line path ([2c63f21](https://github.com/mitos-run/mitos/commit/2c63f21abf063dd8052d59f8d40e089b91d3d3ae))
+* **console:** truncate oversized pod-log lines instead of erroring ([ec146b8](https://github.com/mitos-run/mitos/commit/ec146b8284d436ba1cc682f4056d10e8719e49c5))
+* **mcp:** cap HTTPBackend.Exec output at 1 MiB per stream ([75fdea7](https://github.com/mitos-run/mitos/commit/75fdea7fe0e30406b3fe31f6620e25358f5fd2c5))
+* **web:** focus modal container while async initial-focus target loads ([fb56a09](https://github.com/mitos-run/mitos/commit/fb56a09b515cf5d3bdb3144ffea36c329671294e))
+
 ## [1.22.0](https://github.com/mitos-run/mitos/compare/v1.21.0...v1.22.0) (2026-07-05)
 
 

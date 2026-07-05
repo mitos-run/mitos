@@ -419,6 +419,10 @@ type AdminOrgView struct {
 	Members         int    `json:"members"`
 	Running         int    `json:"running"`
 	MonthUsageCents int64  `json:"month_usage_cents"`
+	// HomeRegion is the org's data-residency anchor (issue #712 phase 0),
+	// read-only: an operator can see where each org lives, not change it here.
+	// Empty means the deployment's registry default.
+	HomeRegion string `json:"home_region"`
 }
 
 // AdminOrgsResponse is the response shape of GET /console/admin/orgs. Total
@@ -488,6 +492,7 @@ func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
 			Members:         len(members),
 			Running:         running,
 			MonthUsageCents: usageCents,
+			HomeRegion:      org.HomeRegion,
 		})
 	}
 	c.audit(r.Context(), AuditEvent{

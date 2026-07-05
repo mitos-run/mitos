@@ -65,8 +65,10 @@ var (
 // an error.
 type OrgProvisioner interface {
 	// Provision ensures the tenant Org resource exists for orgID with the given
-	// display name. It MUST treat an already-existing org as success.
-	Provision(ctx context.Context, orgID, displayName string) error
+	// display name and home region (issue #712 phase 0; empty region means the
+	// deployment's registry default, and implementations may treat it as a
+	// no-op label). It MUST treat an already-existing org as success.
+	Provision(ctx context.Context, orgID, displayName, region string) error
 }
 
 // EmailSender is the seam that delivers the verification email. The fake
@@ -724,7 +726,7 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 	// landing in an org with no namespace; the provisioner is required to be
 	// idempotent so a retry is safe.
 	if s.provision != nil {
-		if err := s.provision.Provision(ctx, org.ID, org.Name); err != nil {
+		if err := s.provision.Provision(ctx, org.ID, org.Name, org.HomeRegion); err != nil {
 			return VerifyResult{}, fmt.Errorf("onboarding verify: provision tenant org: %w", err)
 		}
 	} else {

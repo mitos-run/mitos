@@ -53,6 +53,25 @@ export type Capabilities = {
   // build). Optional (absent on older servers); rendered in the sidebar
   // footer and included in feedback diagnostics.
   version?: string
+  // placement is the deployment's placement registry (issue #712 phase 0):
+  // the operator-defined key (hosted: "region"; self-host: whatever the
+  // operator names it) and the values it advertises. Optional (absent on
+  // older servers); NewSandboxModal shows a region picker ONLY when
+  // values.length > 1, so a single-value deployment (the phase 0 default
+  // everywhere) renders no picker at all.
+  placement?: PlacementCapability
+}
+
+export type PlacementValue = {
+  name: string
+  display: string
+  default: boolean
+  available: boolean
+}
+
+export type PlacementCapability = {
+  key: string
+  values: PlacementValue[]
 }
 
 export type FeedbackCapability = {
@@ -96,16 +115,23 @@ export type SandboxView = {
   mem_bytes: number
   created_at: string
   project_id?: string
+  // region is the placement value (issue #712 phase 0) this sandbox's tree
+  // root was created in. Empty/absent means the deployment's registry
+  // default. A fork always carries its parent's region.
+  region?: string
 }
 
 // CreateSandboxRequest is the body of POST /console/sandboxes. vcpus/mem_gib
 // must be one of the static options the server validates (1/2/4 vCPU;
-// 1/2/4/8 GiB); project_id is optional (empty means unassigned).
+// 1/2/4/8 GiB); project_id is optional (empty means unassigned). region is
+// optional (issue #712 phase 0): omit it to use the org's home region, or
+// set it to one of Capabilities.placement.values[].name.
 export type CreateSandboxRequest = {
   template: string
   vcpus: number
   mem_gib: number
   project_id?: string
+  region?: string
 }
 
 // ForkResult is the shape of a fork response. On a full success (HTTP 200)

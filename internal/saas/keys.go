@@ -61,6 +61,11 @@ type KeyService struct {
 	// idgen generates opaque ids for accounts, orgs, and keys. Injectable so tests
 	// are deterministic; the default is a random url-safe id.
 	idgen func() string
+	// homeRegion is the deployment's placement registry default, threaded
+	// through NewAccountService's options reuse (see WithHomeRegion) so a
+	// newly minted org is stamped with it. Only NewAccountService reads this
+	// field; KeyService itself has no notion of region.
+	homeRegion string
 }
 
 // KeyServiceOption configures a KeyService.
@@ -79,6 +84,14 @@ func WithClock(now func() time.Time) KeyServiceOption {
 // WithIDGen sets the id generator (for deterministic tests).
 func WithIDGen(gen func() string) KeyServiceOption {
 	return func(s *KeyService) { s.idgen = gen }
+}
+
+// WithHomeRegion sets the deployment's placement registry default region
+// (placement.Registry.DefaultName()), stamped on every org SignUp mints from
+// here on. Passed to NewAccountService, not NewKeyService directly; a
+// KeyService built for key issuance alone has no use for it.
+func WithHomeRegion(region string) KeyServiceOption {
+	return func(s *KeyService) { s.homeRegion = region }
 }
 
 // NewKeyService builds a key service over store.

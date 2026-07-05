@@ -6,16 +6,33 @@
 package console
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/placement"
 )
+
+// validPlacementNames renders r's available value names as a comma-separated
+// list for an LLM-legible 400 remediation (issue #28's rule): "fra, iad"
+// rather than a raw JSON dump. Used only by handleCreateSandbox's region
+// validation error.
+func validPlacementNames(r placement.Registry) string {
+	names := make([]string, 0, len(r.Values))
+	for _, v := range r.Values {
+		if v.Available {
+			names = append(names, v.Name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
 
 // allowedVCPUs / allowedMemGiB are the console's v1 quota bounds for the
 // create-sandbox vcpu/mem selects: conservative, static options (issue #322).
@@ -82,6 +99,11 @@ type createSandboxRequest struct {
 	VCPUs     int32  `json:"vcpus"`
 	MemGiB    int32  `json:"mem_gib"`
 	ProjectID string `json:"project_id"`
+	// Region is the placement value (issue #712 phase 0) requested for this
+	// sandbox's tree root. Empty means the org's home region. Validated
+	// against the deployment's placement.Registry in handleCreateSandbox
+	// before being forwarded to SandboxControl.Create.
+	Region string `json:"region"`
 }
 
 // handleCreateSandbox provisions a new sandbox in the caller's org. Authorization
@@ -121,6 +143,12 @@ func (c *Console) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			WithCause("mem_gib must be one of 1, 2, 4, 8"))
 		return
 	}
+	if req.Region != "" && !c.deps.Capabilities.Placement.Valid(req.Region) {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).
+			WithCause(fmt.Sprintf("region %q is not a valid %s for this deployment", req.Region, c.deps.Capabilities.Placement.Key)).
+			WithRemediation(fmt.Sprintf("Omit region to use the org's home region, or set it to one of: %s.", validPlacementNames(c.deps.Capabilities.Placement))))
+		return
+	}
 	if req.ProjectID != "" {
 		found, err := c.validateProjectInOrg(r, orgID, req.ProjectID)
 		if err != nil {
@@ -149,6 +177,7 @@ func (c *Console) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Template: req.Template,
 		VCPUs:    req.VCPUs,
 		MemGiB:   req.MemGiB,
+		Region:   req.Region,
 	})
 	if err != nil {
 		c.failSandbox(w, err)
@@ -394,18 +423,48 @@ var sseHeartbeatInterval = 15 * time.Second
 // httpLogSink does for the plain /logs route: this way an authorization
 // failure that occurs before any line is written can still change the status
 // code (WriteHeader has not been called yet).
+//
+// mu guards every write to w: handleSandboxLogsStream runs StreamLogs (which
+// calls Write) in its own goroutine so a real follow transport that blocks
+// for the sandbox's whole lifetime does not starve the heartbeat loop below,
+// which writes heartbeats directly to w on the handler's own goroutine. The
+// mutex is what makes those two goroutines' writes to the same
+// ResponseWriter safe to interleave.
 type sseLogSink struct {
+	mu      sync.Mutex
 	w       http.ResponseWriter
 	flusher http.Flusher
 	wrote   bool
 }
 
 func (s *sseLogSink) Write(line []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.wrote {
 		writeSSEHeaders(s.w)
 	}
 	s.wrote = true
 	if err := writeSSEData(s.w, line); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	return nil
+}
+
+// heartbeat writes an SSE comment to keep the connection alive across a lull
+// in log output, under the same mutex as Write so the two can never
+// interleave mid-line on the underlying ResponseWriter. It is a no-op before
+// the first real line (or the authorization/existence outcome, whichever
+// comes first): the SSE headers are not sent yet, and a cross-org or missing
+// sandbox id must still be free to become a plain 404 rather than a 200
+// heartbeat.
+func (s *sseLogSink) heartbeat() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.wrote {
+		return nil
+	}
+	if _, err := io.WriteString(s.w, ": heartbeat\n\n"); err != nil {
 		return err
 	}
 	s.flusher.Flush()
@@ -438,19 +497,72 @@ func writeSSEData(w io.Writer, line []byte) error {
 
 // handleSandboxLogsStream is the SSE counterpart to handleSandboxLogs: it
 // authorizes and streams exactly like the plain route (a cross-org or missing
-// sandbox id is 404 with no content, an unsupported real transport is 501),
-// then holds the connection open, sending a heartbeat comment every
+// sandbox id is 404 with no content; a caller who lacks per-project
+// PermReadOnly on the sandbox's project gets the SAME 404, mirroring
+// handleInspectSandbox's existence-hiding gate; an unsupported real transport
+// is 501), then holds the connection open, sending a heartbeat comment every
 // sseHeartbeatInterval, until the client disconnects or the server shuts the
-// request down (ctx canceled). Any new lines the underlying LogStreamer
-// pushes while StreamLogs is still running are forwarded live; when
-// StreamLogs returns (the fake and the current in-memory default do so
-// immediately after their buffered lines), the heartbeat loop keeps the
-// stream alive so a future push-capable transport can reuse this same
-// handler unchanged.
+// request down (ctx canceled).
+//
+// StreamLogs runs in its own goroutine because a real follow transport (the
+// cluster adapter's husk-pod log follow, see clustersandbox/logs.go) blocks
+// for the sandbox's whole lifetime, not just until a fixed buffer is
+// drained: without a concurrent heartbeat, a sandbox that goes quiet for a
+// while (no new log lines, so sink.Write is never called) would leave this
+// SSE connection sending no bytes at all, which any idle-timeout proxy
+// between the console and the browser could then drop as dead. New lines the
+// LogStreamer pushes while it is still running are forwarded live via
+// sink.Write; heartbeats interleave safely because sink guards every write
+// with its own mutex (see sseLogSink). Once StreamLogs returns (the pod
+// stream ended, or a finite fake/in-memory streamer completed), the select's
+// streamDone case is disabled (set to nil) so only the heartbeat and
+// disconnect cases remain live, exactly matching the pre-existing behavior
+// for those transports.
+//
+// On EVERY return path the handler first cancels a context derived from
+// r.Context() (stopping the upstream StreamLogs call, per the cluster
+// adapter's context-cancellation-propagation contract) and only then waits
+// for the background StreamLogs goroutine to actually return before
+// returning itself: net/http does not allow writes to the ResponseWriter
+// after the handler returns, so without this wait the goroutine could still
+// be mid-Write when the handler's return unblocks net/http to reuse or close
+// the connection (write-after-ServeHTTP-return, undefined behavior on a
+// keep-alive connection). This matters even on the ticker.C heartbeat-error
+// path (the connection is dead, so heartbeat() failed) and not only on
+// client disconnect: a dead connection does not itself stop a blocking real
+// follow transport, so the handler must cancel it explicitly there too.
 func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
+		return
+	}
+	id := r.PathValue("id")
+	// Gated the SAME way as inspect (handleInspectSandbox in console.go): the
+	// sandbox must belong to the org (404 via c.failSandbox on a missing/
+	// cross-org id) and the caller must hold PermReadOnly on its project, with
+	// a denial ALSO mapped to 404 (not 403) so a caller without project access
+	// cannot tell an out-of-reach sandbox apart from one that does not exist.
+	sb, err := c.deps.Sandboxes.Get(r.Context(), orgID, id)
+	if err != nil {
+		c.failSandbox(w, err)
+		return
+	}
+	// The project tag gates access; a lookup error must fail closed, not fall
+	// back to the unassigned/org-wide path.
+	pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", sb.ID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox project assignment could not be read"))
+		return
+	}
+	canSee, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, pid, saas.PermReadOnly)
+	if accessErr != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+		return
+	}
+	if !canSee {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+			WithCause("the sandbox does not exist or is not accessible"))
 		return
 	}
 	flusher, hasFlusher := w.(http.Flusher)
@@ -460,29 +572,58 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 		return
 	}
 	sink := &sseLogSink{w: w, flusher: flusher}
-	id := r.PathValue("id")
-	if err := c.deps.Logs.StreamLogs(r.Context(), orgID, id, sink); err != nil {
-		if !sink.wrote {
-			c.failSandbox(w, err)
-		}
-		return
-	}
-	if !sink.wrote {
-		writeSSEHeaders(w)
-	}
-	flusher.Flush()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel() // belt-and-suspenders: every explicit return path below already cancels first
+
+	streamDone := make(chan error, 1)
+	go func() {
+		streamDone <- c.deps.Logs.StreamLogs(ctx, orgID, id, sink)
+	}()
 
 	ticker := time.NewTicker(sseHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			cancel() // stop the upstream before waiting so it can actually return
+			if streamDone != nil {
+				<-streamDone // wait so no write below can race the handler returning
+			}
 			return
-		case <-ticker.C:
-			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+		case err := <-streamDone:
+			streamDone = nil // disable this case: StreamLogs already returned
+			if err != nil {
+				if !sink.wrote {
+					c.failSandbox(w, err)
+				}
 				return
 			}
+			if !sink.wrote {
+				writeSSEHeaders(w)
+				// Without this, an empty stream (StreamLogs completed
+				// cleanly with zero lines, e.g. no log output yet) would
+				// send its 200 SSE headers here but sink.wrote would stay
+				// false forever: heartbeat() no-ops on !wrote, so the
+				// ticker.C case below would never emit another byte for
+				// the rest of this connection's life, and an idle-timeout
+				// proxy between the console and the browser could drop it
+				// as dead despite the connection being intentionally held
+				// open.
+				sink.wrote = true
+			}
 			flusher.Flush()
+		case <-ticker.C:
+			if err := sink.heartbeat(); err != nil {
+				// The connection is dead: stop the upstream and wait for it
+				// to actually return before we do, so it cannot call
+				// sink.Write after this handler has returned to net/http.
+				cancel()
+				if streamDone != nil {
+					<-streamDone
+				}
+				return
+			}
 		}
 	}
 }

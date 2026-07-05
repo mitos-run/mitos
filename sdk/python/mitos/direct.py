@@ -330,6 +330,7 @@ class DirectSandbox:
         idempotency_key: Optional[str] = None,
         workload: Optional[dict] = None,
         resources: Optional[dict] = None,
+        region: Optional[str] = None,
     ) -> "DirectSandbox":
         """Flat one-liner: return a READY sandbox handle for image.
 
@@ -347,10 +348,15 @@ class DirectSandbox:
 
         workload and resources (issue #314) are forwarded to ensure_template when
         set, so a caller can request a workload-backed warm template end to end.
+
+        region (issue #712 phase 0) requests a placement value for this
+        sandbox's tree root on a hosted deployment; omit it (the default) to
+        use the org's home region. A fork of this sandbox always inherits its
+        region, so region is never a parameter on the fork path.
         """
         server = SandboxServer.from_auth(api_key=api_key, base_url=base_url)
         server.ensure_template(image, network=network, workload=workload, resources=resources)
-        return server.fork(image, id=id, idempotency_key=idempotency_key)
+        return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer auth for the sandbox API; empty when no key is configured.
@@ -743,19 +749,28 @@ class SandboxServer:
         template: str,
         id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        region: Optional[str] = None,
     ) -> DirectSandbox:
         """Fork template into a fresh sandbox. idempotency_key (issue #22): when
         set, a retried fork with the same key returns the sandbox the first call
         created instead of a duplicate; when None one is auto-generated so a
-        transparently retried fork never double-creates."""
+        transparently retried fork never double-creates.
+
+        region (issue #712 phase 0) requests a placement value for this
+        sandbox's tree root; omit it to use the org's home region. It is sent
+        only when set, so a standalone/self-host server that predates
+        placement sees exactly the request shape it always has."""
         if id is None:
             id = f"sandbox-{uuid.uuid4().hex[:8]}"
         if idempotency_key is None:
             idempotency_key = uuid.uuid4().hex
+        body: dict = {"template": template, "id": id}
+        if region is not None:
+            body["region"] = region
         resp = _fork_post(
             self._http,
             f"{self.url}/v1/fork",
-            {"template": template, "id": id},
+            body,
             self._creating_headers(idempotency_key),
         )
         raise_for_status(resp, token=self._api_key)
@@ -784,6 +799,7 @@ def create(
     idempotency_key: Optional[str] = None,
     workload: Optional[dict] = None,
     resources: Optional[dict] = None,
+    region: Optional[str] = None,
 ) -> DirectSandbox:
     """Flat one-liner native onboarding: return a READY sandbox handle.
 
@@ -803,6 +819,12 @@ def create(
     workload and resources (issue #314) are forwarded to ensure_template when
     set, so a caller can request a workload-backed warm template end to end.
 
+    region (issue #712 phase 0) requests a placement value (e.g. "fra") for
+    this sandbox's tree root on a hosted deployment; the server validates it
+    against the deployment's placement registry. Omit it (the default) to use
+    the org's home region. A self-hosted single-cluster server ignores it
+    today; passing it is forward-compatible, not an error.
+
     The k8s operator path stays available as AgentRun(...).sandbox(...).
     """
     return DirectSandbox.create(
@@ -814,4 +836,5 @@ def create(
         idempotency_key=idempotency_key,
         workload=workload,
         resources=resources,
+        region=region,
     )

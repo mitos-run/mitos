@@ -82,6 +82,18 @@ def test_fork_auto_id():
     assert len(sandbox.id) > 10
 
 
+def test_fork_with_region_is_forward_compatible():
+    """region (issue #712 phase 0) is sent in the fork body when set; the
+    standalone sandbox-server (no orgs, no placement concept) has no
+    DisallowUnknownFields decoder and simply ignores it, so passing it never
+    breaks a request against today's server. This proves the SDK's new
+    parameter is forward-compatible, not just unit-tested against a mock."""
+    server = SandboxServer(SERVER_URL)
+    sandbox = server.fork("test-python", "test-sandbox-region", region="fra")
+    assert sandbox.id == "test-sandbox-region"
+    assert sandbox.template == "test-python"
+
+
 def test_fork_unknown_template():
     server = SandboxServer(SERVER_URL)
     from mitos.errors import AgentRunError

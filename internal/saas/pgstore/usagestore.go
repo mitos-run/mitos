@@ -46,17 +46,18 @@ var (
 func (s *PgUsageStore) UpsertRecord(ctx context.Context, rec usage.UsageRecord) error {
 	const q = `
         INSERT INTO usage_records
-            (org_id, sandbox_id, window_start, vcpu_seconds, mem_gib_seconds, storage_gib_hours, egress_bytes, gpu_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (org_id, sandbox_id, window_start, vcpu_seconds, mem_gib_seconds, storage_gib_hours, egress_bytes, gpu_seconds, region)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (org_id, sandbox_id, window_start) DO UPDATE SET
             vcpu_seconds      = EXCLUDED.vcpu_seconds,
             mem_gib_seconds   = EXCLUDED.mem_gib_seconds,
             storage_gib_hours = EXCLUDED.storage_gib_hours,
             egress_bytes      = EXCLUDED.egress_bytes,
-            gpu_seconds       = EXCLUDED.gpu_seconds`
+            gpu_seconds       = EXCLUDED.gpu_seconds,
+            region            = EXCLUDED.region`
 	_, err := s.pool.Exec(ctx, q,
 		rec.OrgID, rec.SandboxID, rec.Window.UTC(),
-		rec.VCPUSeconds, rec.MemGiBSeconds, rec.StorageGiBHours, rec.EgressBytes, rec.GPUSeconds)
+		rec.VCPUSeconds, rec.MemGiBSeconds, rec.StorageGiBHours, rec.EgressBytes, rec.GPUSeconds, rec.Region)
 	if err != nil {
 		return fmt.Errorf("upsert usage record: %w", err)
 	}
@@ -70,7 +71,7 @@ func (s *PgUsageStore) UpsertRecord(ctx context.Context, rec usage.UsageRecord) 
 // cross-org isolation. The returned slice is non-nil even when empty.
 func (s *PgUsageStore) ListRecords(ctx context.Context, orgID string, from, to time.Time) ([]usage.UsageRecord, error) {
 	const q = `
-        SELECT org_id, sandbox_id, window_start, vcpu_seconds, mem_gib_seconds, storage_gib_hours, egress_bytes, gpu_seconds
+        SELECT org_id, sandbox_id, window_start, vcpu_seconds, mem_gib_seconds, storage_gib_hours, egress_bytes, gpu_seconds, region
         FROM usage_records
         WHERE org_id = $1
           AND ($2::timestamptz IS NULL OR window_start >= $2)
@@ -87,7 +88,7 @@ func (s *PgUsageStore) ListRecords(ctx context.Context, orgID string, from, to t
 		var r usage.UsageRecord
 		if err := rows.Scan(
 			&r.OrgID, &r.SandboxID, &r.Window,
-			&r.VCPUSeconds, &r.MemGiBSeconds, &r.StorageGiBHours, &r.EgressBytes, &r.GPUSeconds,
+			&r.VCPUSeconds, &r.MemGiBSeconds, &r.StorageGiBHours, &r.EgressBytes, &r.GPUSeconds, &r.Region,
 		); err != nil {
 			return nil, fmt.Errorf("scan usage record: %w", err)
 		}

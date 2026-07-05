@@ -194,11 +194,70 @@ func (b *HTTPBackend) connectError(op string, err error) error {
 	return errors.New(op + ": " + b.redact(err.Error()))
 }
 
+// maxTransportExecOutputBytes bounds how many bytes of stdout/stderr Exec
+// accumulates in memory PER STREAM while draining the ExecStream RPC, before
+// any caller-side truncation (e.g. the console's own 256 KiB cap,
+// maxExecOutputBytes in internal/saas/console/sandbox_ops.go). Without this
+// cap, a sandbox command that never stops writing to stdout/stderr would
+// make this loop buffer without bound: every caller of this transport (the
+// CLI, the MCP server, the console) inherits that OOM risk, not just the one
+// caller that happens to truncate downstream today. 1 MiB is well above any
+// normal command's output (so it does not visibly change today's small/medium
+// exec results) while still bounding the worst case; it is deliberately
+// larger than the console's 256 KiB downstream cap because this transport is
+// also used directly with no downstream truncation of its own (the CLI,
+// sandbox-server tests).
+const maxTransportExecOutputBytes = 1 << 20 // 1 MiB
+
+// execOutputTruncatedMarker is appended (on its own line) to stdout or
+// stderr when either was cut off at maxTransportExecOutputBytes, so a caller
+// can tell truncated output apart from a command that genuinely produced
+// exactly that many bytes.
+const execOutputTruncatedMarker = "\n[exec output truncated at 1 MiB]"
+
+// boundedExecOutput accumulates up to maxTransportExecOutputBytes of a single
+// exec stream (stdout or stderr) and silently drops anything beyond the cap
+// instead of growing without bound, remembering whether anything was dropped
+// so String can append execOutputTruncatedMarker.
+type boundedExecOutput struct {
+	buf       strings.Builder
+	truncated bool
+}
+
+// write appends p, capping accumulated bytes at maxTransportExecOutputBytes.
+// Once the cap is reached (here or on an earlier call), further bytes are
+// dropped and truncated is latched true; write never grows buf past the cap.
+func (o *boundedExecOutput) write(p []byte) {
+	if o.truncated {
+		return
+	}
+	room := maxTransportExecOutputBytes - o.buf.Len()
+	if room <= 0 {
+		o.truncated = true
+		return
+	}
+	if len(p) > room {
+		p = p[:room]
+		o.truncated = true
+	}
+	o.buf.Write(p)
+}
+
+// String returns the accumulated (possibly capped) output, with
+// execOutputTruncatedMarker appended when write ever dropped bytes.
+func (o *boundedExecOutput) String() string {
+	if o.truncated {
+		return o.buf.String() + execOutputTruncatedMarker
+	}
+	return o.buf.String()
+}
+
 // Exec runs command in the sandbox over the Connect sandbox.v1.Sandbox/ExecStream
 // RPC (the HTTP/1.1-reachable non-interactive exec). It drains the server stream,
-// accumulating stdout and stderr chunks and reading the terminal exit code, then
-// folds the result into ExecResult. A timeoutSec of 0 passes 0 so the guest
-// default applies.
+// accumulating stdout and stderr chunks (each capped at
+// maxTransportExecOutputBytes, see boundedExecOutput) and reading the
+// terminal exit code, then folds the result into ExecResult. A timeoutSec of
+// 0 passes 0 so the guest default applies.
 func (b *HTTPBackend) Exec(ctx context.Context, sandboxID, command string, timeoutSec int) (ExecResult, error) {
 	if !validSandboxID(sandboxID) {
 		return ExecResult{}, fmt.Errorf("exec: invalid sandbox id %q", sandboxID)
@@ -220,14 +279,14 @@ func (b *HTTPBackend) Exec(ctx context.Context, sandboxID, command string, timeo
 	defer func() { _ = stream.Close() }()
 
 	var res ExecResult
-	var stdout, stderr strings.Builder
+	var stdout, stderr boundedExecOutput
 	for stream.Receive() {
 		msg := stream.Msg()
 		if out := msg.GetStdout(); len(out) > 0 {
-			stdout.Write(out)
+			stdout.write(out)
 		}
 		if errOut := msg.GetStderr(); len(errOut) > 0 {
-			stderr.Write(errOut)
+			stderr.write(errOut)
 		}
 		if exit := msg.GetExit(); exit != nil {
 			res.ExitCode = int(exit.GetExitCode())

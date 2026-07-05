@@ -57,7 +57,7 @@ func RunContract(t *testing.T, factory func(t *testing.T) usage.UsageStore) {
 		recs := []usage.UsageRecord{
 			{OrgID: "org-a", SandboxID: "sb-2", Window: w(1), VCPUSeconds: 2, MemGiBSeconds: 1, StorageGiBHours: 0.5, EgressBytes: 20, GPUSeconds: 3},
 			{OrgID: "org-a", SandboxID: "sb-1", Window: w(1), VCPUSeconds: 1, MemGiBSeconds: 2, StorageGiBHours: 0.25, EgressBytes: 10, GPUSeconds: 1},
-			{OrgID: "org-a", SandboxID: "sb-1", Window: w(0), VCPUSeconds: 4, MemGiBSeconds: 3, StorageGiBHours: 0.1, EgressBytes: 5, GPUSeconds: 0},
+			{OrgID: "org-a", SandboxID: "sb-1", Window: w(0), VCPUSeconds: 4, MemGiBSeconds: 3, StorageGiBHours: 0.1, EgressBytes: 5, GPUSeconds: 0, Region: "fra"},
 		}
 		for _, r := range recs {
 			if err := s.UpsertRecord(ctx, r); err != nil {
@@ -81,10 +81,16 @@ func RunContract(t *testing.T, factory func(t *testing.T) usage.UsageStore) {
 				t.Fatalf("record[%d] = (%s, %s), want (%s, %s)", i, got[i].SandboxID, got[i].Window, want.sb, want.win)
 			}
 		}
-		// Values for (sb-1, w0) must round trip.
+		// Values for (sb-1, w0) must round trip, including Region (issue #712
+		// phase 0: a best-effort dimension, not part of the idempotency key).
 		r0 := got[0]
-		if r0.VCPUSeconds != 4 || r0.MemGiBSeconds != 3 || r0.StorageGiBHours != 0.1 || r0.EgressBytes != 5 || r0.GPUSeconds != 0 {
+		if r0.VCPUSeconds != 4 || r0.MemGiBSeconds != 3 || r0.StorageGiBHours != 0.1 || r0.EgressBytes != 5 || r0.GPUSeconds != 0 || r0.Region != "fra" {
 			t.Fatalf("value round trip mismatch for (sb-1, w0): %+v", r0)
+		}
+		// (sb-1, w1) was upserted with no Region: it must round trip as empty
+		// rather than inheriting the sibling record's value.
+		if got[1].Region != "" {
+			t.Fatalf("record[1] Region = %q, want empty (no region was set for this record)", got[1].Region)
 		}
 	})
 

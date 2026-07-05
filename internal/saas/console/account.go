@@ -121,15 +121,20 @@ type SessionView struct {
 	Current   bool      `json:"current"`
 }
 
-// accountView builds an AccountView from a saas.Account and its memberships.
-func accountView(acct saas.Account, mems []saas.Membership) AccountView {
+// accountView builds an AccountView from a saas.Account and its memberships,
+// joining each membership's org HomeRegion from orgs (keyed by org id). orgs
+// is best-effort: a membership whose org is missing from the map (a lookup
+// failure upstream) simply gets an empty HomeRegion rather than failing the
+// whole view.
+func accountView(acct saas.Account, mems []saas.Membership, orgs map[string]saas.Organization) AccountView {
 	mv := make([]MemberView, 0, len(mems))
 	for _, m := range mems {
 		mv = append(mv, MemberView{
-			AccountID: m.AccountID,
-			OrgID:     m.OrgID,
-			Role:      m.Role,
-			CreatedAt: m.CreatedAt,
+			AccountID:  m.AccountID,
+			OrgID:      m.OrgID,
+			Role:       m.Role,
+			CreatedAt:  m.CreatedAt,
+			HomeRegion: orgs[m.OrgID].HomeRegion,
 		})
 	}
 	return AccountView{
@@ -156,7 +161,10 @@ func (c *Console) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read")
 		return
 	}
-	writeJSON(w, http.StatusOK, accountView(acct, mems))
+	// Resolve orgs (issue #712's HomeRegion join) from the memberships already
+	// read above, so the account view does not re-list memberships.
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
+	writeJSON(w, http.StatusOK, accountView(acct, mems, orgs))
 }
 
 // updateProfileRequest is the PATCH /console/account body. Only non-empty fields
@@ -206,7 +214,8 @@ func (c *Console) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		Detail:     "updated account profile",
 		At:         c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, accountView(updated, mems))
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
+	writeJSON(w, http.StatusOK, accountView(updated, mems, orgs))
 }
 
 // handleListSessions returns the caller's sessions. The account id is from

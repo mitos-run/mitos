@@ -111,6 +111,7 @@ func (m *MemSandboxControl) Create(_ context.Context, orgID string, req CreateSa
 		VCPUs:     req.VCPUs,
 		MemBytes:  int64(req.MemGiB) << 30,
 		CreatedAt: time.Now(),
+		Region:    req.Region,
 	}
 	m.byID[sb.ID] = sb
 	return sb, nil
@@ -139,6 +140,9 @@ func (m *MemSandboxControl) Fork(_ context.Context, orgID, sandboxID string, cou
 			VCPUs:     src.VCPUs,
 			MemBytes:  src.MemBytes,
 			CreatedAt: time.Now(),
+			// Region always carries over verbatim from the parent: a live CoW
+			// fork cannot cross clusters (issue #712 phase 0 constraint).
+			Region: src.Region,
 		}
 		ids = append(ids, id)
 	}

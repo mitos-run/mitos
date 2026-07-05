@@ -160,23 +160,24 @@ func scanAccount(row pgx.Row) (saas.Account, error) {
 
 func (s *PgStore) PutOrg(ctx context.Context, o saas.Organization) error {
 	const q = `
-        INSERT INTO orgs (id, name, created_at, personal)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO orgs (id, name, created_at, personal, home_region)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (id) DO UPDATE SET
-            name       = EXCLUDED.name,
-            created_at = EXCLUDED.created_at,
-            personal   = EXCLUDED.personal`
-	if _, err := s.pool.Exec(ctx, q, o.ID, o.Name, timePtr(o.CreatedAt), o.Personal); err != nil {
+            name        = EXCLUDED.name,
+            created_at  = EXCLUDED.created_at,
+            personal    = EXCLUDED.personal,
+            home_region = COALESCE(NULLIF(orgs.home_region, ''), EXCLUDED.home_region)`
+	if _, err := s.pool.Exec(ctx, q, o.ID, o.Name, timePtr(o.CreatedAt), o.Personal, o.HomeRegion); err != nil {
 		return fmt.Errorf("put org: %w", err)
 	}
 	return nil
 }
 
 func (s *PgStore) GetOrg(ctx context.Context, id string) (saas.Organization, error) {
-	const q = `SELECT id, name, created_at, personal FROM orgs WHERE id = $1`
+	const q = `SELECT id, name, created_at, personal, home_region FROM orgs WHERE id = $1`
 	var o saas.Organization
 	var createdAt *time.Time
-	if err := s.pool.QueryRow(ctx, q, id).Scan(&o.ID, &o.Name, &createdAt, &o.Personal); err != nil {
+	if err := s.pool.QueryRow(ctx, q, id).Scan(&o.ID, &o.Name, &createdAt, &o.Personal, &o.HomeRegion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return saas.Organization{}, saas.ErrNotFound
 		}
@@ -189,7 +190,7 @@ func (s *PgStore) GetOrg(ctx context.Context, id string) (saas.Organization, err
 // ListOrgs returns every organization (issue #602: the console's usage
 // drawdown driver iterates the orgs). Operator/machine surface only.
 func (s *PgStore) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
-	const q = `SELECT id, name, created_at, personal FROM orgs`
+	const q = `SELECT id, name, created_at, personal, home_region FROM orgs`
 	rows, err := s.pool.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("list orgs: %w", err)
@@ -199,7 +200,7 @@ func (s *PgStore) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
 	for rows.Next() {
 		var o saas.Organization
 		var createdAt *time.Time
-		if err := rows.Scan(&o.ID, &o.Name, &createdAt, &o.Personal); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &createdAt, &o.Personal, &o.HomeRegion); err != nil {
 			return nil, fmt.Errorf("scan org: %w", err)
 		}
 		o.CreatedAt = timeVal(createdAt)

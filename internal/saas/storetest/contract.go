@@ -91,7 +91,7 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		s := factory(t)
 		ctx := context.Background()
 		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-		o := saas.Organization{ID: "org-1", Name: "Acme", CreatedAt: created, Personal: true}
+		o := saas.Organization{ID: "org-1", Name: "Acme", CreatedAt: created, Personal: true, HomeRegion: "fra"}
 		if err := s.PutOrg(ctx, o); err != nil {
 			t.Fatalf("PutOrg: %v", err)
 		}
@@ -104,6 +104,67 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 		if _, err := s.GetOrg(ctx, "missing"); !errors.Is(err, saas.ErrNotFound) {
 			t.Errorf("GetOrg unknown: got %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("OrgHomeRegionDefaultsToEmpty", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		// An org put with no HomeRegion (the pre-#712 shape, and any deployment
+		// that never sets one) round-trips as the empty string, meaning "the
+		// deployment's registry default" rather than a stored region name.
+		o := saas.Organization{ID: "org-noregion", Name: "Old", CreatedAt: created}
+		if err := s.PutOrg(ctx, o); err != nil {
+			t.Fatalf("PutOrg: %v", err)
+		}
+		got, err := s.GetOrg(ctx, "org-noregion")
+		if err != nil {
+			t.Fatalf("GetOrg: %v", err)
+		}
+		if got.HomeRegion != "" {
+			t.Errorf("HomeRegion = %q, want empty", got.HomeRegion)
+		}
+	})
+
+	t.Run("OrgHomeRegionWriteOnce", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		// HomeRegion is the residency anchor and write-once. An empty stored
+		// region may be stamped for the first time (SignUp creates the org, a
+		// later PutOrg sets the region), so seed it empty then set it.
+		o := saas.Organization{ID: "org-imm", Name: "Acme", CreatedAt: created}
+		if err := s.PutOrg(ctx, o); err != nil {
+			t.Fatalf("PutOrg initial: %v", err)
+		}
+		o.HomeRegion = "fra"
+		if err := s.PutOrg(ctx, o); err != nil {
+			t.Fatalf("PutOrg first region stamp: %v", err)
+		}
+		got, err := s.GetOrg(ctx, "org-imm")
+		if err != nil {
+			t.Fatalf("GetOrg after stamp: %v", err)
+		}
+		if got.HomeRegion != "fra" {
+			t.Fatalf("HomeRegion after first stamp = %q, want fra (empty is stampable once)", got.HomeRegion)
+		}
+		// Once non-empty, a later PutOrg (a rename, a load-modify-store update,
+		// or a reconstructed literal that changed or forgot the region) must
+		// never move it; other fields still update normally.
+		reput := saas.Organization{ID: "org-imm", Name: "Acme Renamed", CreatedAt: created, HomeRegion: "iad"}
+		if err := s.PutOrg(ctx, reput); err != nil {
+			t.Fatalf("PutOrg re-put: %v", err)
+		}
+		got, err = s.GetOrg(ctx, "org-imm")
+		if err != nil {
+			t.Fatalf("GetOrg after re-put: %v", err)
+		}
+		if got.HomeRegion != "fra" {
+			t.Errorf("HomeRegion = %q, want %q (immutable once set)", got.HomeRegion, "fra")
+		}
+		if got.Name != "Acme Renamed" {
+			t.Errorf("Name = %q, want %q (non-region fields still update)", got.Name, "Acme Renamed")
 		}
 	})
 
@@ -478,7 +539,11 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		// saas.InvitationTTL (7 days). NOT to now (expired at birth) and NOT
 		// left zero (never expires); an invitation created without explicit
 		// times gets the standard lifetime.
-		before := time.Now().UTC()
+		// Truncate the lower bound to microseconds: Postgres stores timestamptz
+		// at microsecond precision, so a defaulted CreatedAt read back from
+		// pgstore is the store's now floored to the microsecond, which can land
+		// a few hundred nanoseconds below a nanosecond-precision before.
+		before := time.Now().UTC().Truncate(time.Microsecond)
 		inv := saas.Invitation{ID: "inv-z", OrgID: "org-1", Email: "zoe@example.com", TokenHash: "hash-inv-z", State: saas.InvitationPending}
 		must(t, s.CreateInvitation(ctx, inv))
 		after := time.Now().UTC()

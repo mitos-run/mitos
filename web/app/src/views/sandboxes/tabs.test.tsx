@@ -34,6 +34,19 @@ describe('OverviewTab', () => {
     expect(screen.queryByText(/^vcpus$/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/^memory$/i)).not.toBeInTheDocument()
   })
+
+  // issue #712 phase 0: region is shown only when present, so a single-value
+  // deployment (no label stamped at all) never shows an empty/misleading row.
+  it('shows no Region row when the sandbox has none', () => {
+    render(<OverviewTab sb={sb} />)
+    expect(screen.queryByText('Region')).not.toBeInTheDocument()
+  })
+
+  it('shows the Region row when the sandbox carries one', () => {
+    render(<OverviewTab sb={{ ...sb, region: 'fra' }} />)
+    expect(screen.getByText('Region')).toBeInTheDocument()
+    expect(screen.getByText('fra')).toBeInTheDocument()
+  })
 })
 
 describe('LogsTab', () => {
