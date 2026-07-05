@@ -518,8 +518,22 @@ func (s *Service) signUp(ctx context.Context, email, useCase, inviteToken string
 	now := s.now()
 
 	if s.mode == ModeWaitlist {
-		if err := s.pending.AddWaitlist(ctx, WaitlistEntry{Email: email, CreatedAt: now}); err != nil {
-			return SignupResult{}, fmt.Errorf("onboarding sign up: record waitlist: %w", err)
+		// Dedupe by canonical identity: a repeat submission of the same
+		// address (a visitor double-clicking Join, or a client retry after a
+		// dropped response) is a no-op rather than a second row, so the
+		// waitlist an operator later reviews has one row per person, not one
+		// row per submission. Best-effort: PendingStore has no unique
+		// constraint on email, so two concurrent FIRST-time submissions of
+		// the same address could still race into two rows; harmless, since
+		// approval targets an email, not a row index.
+		already, err := s.waitlistHasEmail(ctx, canonical)
+		if err != nil {
+			return SignupResult{}, fmt.Errorf("onboarding sign up: check waitlist: %w", err)
+		}
+		if !already {
+			if err := s.pending.AddWaitlist(ctx, WaitlistEntry{Email: email, CreatedAt: now}); err != nil {
+				return SignupResult{}, fmt.Errorf("onboarding sign up: record waitlist: %w", err)
+			}
 		}
 		// The waitlist subject keys on the canonical identity hash so the analytics
 		// event carries no PII and folded variants of one identity map to one
@@ -797,6 +811,23 @@ func (s *Service) autoJoinPendingInvite(ctx context.Context, pending PendingSign
 // design-partner invite flow). The real invite/notify path is a follow-up.
 func (s *Service) JoinWaitlist(ctx context.Context) ([]WaitlistEntry, error) {
 	return s.pending.Waitlist(ctx)
+}
+
+// waitlistHasEmail reports whether canonical (an already-canonicalized
+// identity, see canonicalEmail) is already recorded on the waitlist, so
+// signUp's ModeWaitlist branch can skip adding a duplicate row for a repeat
+// submission of the same person.
+func (s *Service) waitlistHasEmail(ctx context.Context, canonical string) (bool, error) {
+	entries, err := s.pending.Waitlist(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if c, ok := canonicalEmail(e.Email); ok && c == canonical {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RecordFirstSandbox records that subject created its first sandbox. The gateway

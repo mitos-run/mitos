@@ -84,15 +84,26 @@ func WithTrustedProxyHops(n int) HandlerOption {
 
 // Handler serves the PUBLIC, unauthenticated onboarding endpoints:
 //
-//	POST /onboarding/signup   {"email": "..."} -> 202 (always the same shape)
-//	POST /onboarding/verify   {"token": "..."} -> 200 with the account/org/key
+//	POST /onboarding/signup    {"email": "..."} -> 202 (always the same shape)
+//	POST /onboarding/verify    {"token": "..."} -> 200 with the account/org/key
 //	GET  /onboarding/verify?token=... -> 200 (browser-friendly link target)
+//	POST /onboarding/waitlist  {"email": "..."} -> 202 (always the same shape)
 //
 // SignUp NEVER reveals whether an email already has an account: it returns the
 // same accepted response in every case so a probe cannot enumerate accounts. The
 // raw verify token is delivered only to the user's inbox by the EmailSender; it
 // is never returned by SignUp and never logged. Verify is the only place a token
 // is accepted, and a bad / expired / used token yields a generic failure.
+//
+// /onboarding/waitlist (see RoutesWaitlistOnly) is the minimal, standalone
+// intake mounted INSTEAD of the full signup/verify set when the funnel is in
+// waitlist mode: there is no verify token to redeem and no account is ever
+// provisioned in that mode, so the deployment still needs some HTTP surface
+// for a visitor to join the waitlist. It shares the Handler's svc, logger,
+// and abuse-guard options (velocity, trusted-proxy-hops) with the full
+// funnel; it never enables disposable-domain or captcha checks itself (the
+// caller decides which options to configure), since it is a much smaller
+// surface (no account, no email sent) than full signup.
 type Handler struct {
 	svc              *Service
 	log              *slog.Logger
@@ -127,6 +138,15 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /onboarding/verify", h.verify)
 }
 
+// RoutesWaitlistOnly registers ONLY the waitlist intake (POST
+// /onboarding/waitlist), never /onboarding/signup or /onboarding/verify. Use
+// this instead of Routes when the funnel is in waitlist mode: it mounts a
+// deliberately narrower surface (issue #718) than a caller might expect from
+// the name similarity to Routes.
+func (h *Handler) RoutesWaitlistOnly(mux *http.ServeMux) {
+	mux.HandleFunc("POST /onboarding/waitlist", h.joinWaitlist)
+}
+
 // writeAccepted writes the uniform 202 accepted response that every guarded
 // signup rejection and every normal signup must share. Byte-identical output is
 // the no-enumeration contract: callers MUST use this helper and MUST NOT inline
@@ -136,6 +156,65 @@ func (h *Handler) writeAccepted(w http.ResponseWriter) {
 		"status":  "accepted",
 		"message": "if that address can sign up, a verification email is on its way",
 	})
+}
+
+// writeWaitlistAccepted writes the uniform 202 accepted response every
+// /onboarding/waitlist call returns, fresh or duplicate: byte-identical output
+// is the same no-enumeration contract writeAccepted provides for signup.
+func (h *Handler) writeWaitlistAccepted(w http.ResponseWriter) {
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "accepted",
+		"message": "you're on the waitlist; we'll email you when your access is ready",
+	})
+}
+
+// joinWaitlist handles POST /onboarding/waitlist: the minimal, standalone
+// intake mounted when the funnel is in waitlist mode (see
+// RoutesWaitlistOnly). It validates and normalizes the email, applies the
+// same per-IP velocity guard signUp does when configured, then hands off to
+// the service, which is idempotent by canonical identity (a repeat join is a
+// no-op, not a duplicate row) and never provisions an account or sends mail
+// in this mode. Every outcome except a genuine server fault returns the same
+// 202 so a probe cannot tell a fresh join from a duplicate, a rate-limited
+// one, or a malformed email that happened to parse.
+func (h *Handler) joinWaitlist(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return // decodeJSON already wrote the error
+	}
+	email, ok := normalizeEmail(req.Email)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "a valid email address is required")
+		return
+	}
+
+	// Per-IP velocity guard: silently cap mass-submission from a single
+	// source without revealing that a rate limit fired. The IP value is
+	// never logged.
+	if h.velocity != nil && !h.velocity.Allow(h.clientIP(r), time.Now()) {
+		h.log.Info("onboarding waitlist join refused", "reason", "velocity")
+		h.writeWaitlistAccepted(w)
+		return
+	}
+
+	if _, err := h.svc.SignUp(r.Context(), email, ""); err != nil {
+		// ErrInvalidEmail (a syntactically valid but un-canonicalizable
+		// address) collapses to the same uniform 202 as a genuine join, the
+		// same odd-email handling signUp applies; any other error is a real
+		// server fault and is surfaced.
+		if errors.Is(err, ErrInvalidEmail) {
+			h.log.Info("onboarding waitlist join refused", "reason", "email")
+			h.writeWaitlistAccepted(w)
+			return
+		}
+		h.log.Error("onboarding waitlist join", "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "could not join the waitlist; please try again")
+		return
+	}
+	h.log.Info("onboarding waitlist join accepted")
+	h.writeWaitlistAccepted(w)
 }
 
 // signUp handles POST /onboarding/signup. It validates and normalizes the email,

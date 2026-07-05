@@ -52,6 +52,70 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 	}
 }
 
+// TestMountOnboardingWaitlistOnlyWhenSignupDisabled asserts that with signup
+// disabled, mountOnboarding mounts POST /onboarding/waitlist (issue #718: the
+// gap where waitlist mode had no HTTP intake at all), and that it records a
+// waitlist entry the SAME onboarding.PendingStore console.Deps.Waitlist
+// reads. It also asserts the endpoint is absent when signup is enabled (the
+// full funnel is the intake in that mode).
+func TestMountOnboardingWaitlistOnlyWhenSignupDisabled(t *testing.T) {
+	t.Setenv("MITOS_SMTP_HOST", "")
+	t.Setenv("MITOS_CONSOLE_ORG_TENANCY", "")
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys)
+	sessions := saas.NewSessionStore()
+	newTok := func() string { return "test-session-token" }
+	pending := onboarding.NewMemPendingStore()
+
+	muxOff := http.NewServeMux()
+	mountOnboarding(muxOff, logger, accounts, store, pending, billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/onboarding/waitlist", strings.NewReader(`{"email":"waiter@example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	muxOff.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("waitlist join: status %d, want 202; body %s", rr.Code, rr.Body.String())
+	}
+
+	entries, err := pending.Waitlist(context.Background())
+	if err != nil {
+		t.Fatalf("Waitlist: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Email != "waiter@example.com" {
+		t.Fatalf("waitlist entries = %+v", entries)
+	}
+
+	// A duplicate join is a no-op (idempotent) and still returns 202.
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/onboarding/waitlist", strings.NewReader(`{"email":"waiter@example.com"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	muxOff.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusAccepted {
+		t.Fatalf("duplicate waitlist join: status %d, want 202", rr2.Code)
+	}
+	entries, err = pending.Waitlist(context.Background())
+	if err != nil {
+		t.Fatalf("Waitlist (after duplicate): %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("waitlist entries after duplicate = %+v, want exactly one", entries)
+	}
+
+	// Not mounted when signup is enabled: the full funnel is the intake.
+	muxOn := http.NewServeMux()
+	mountOnboarding(muxOn, logger, accounts, store, onboarding.NewMemPendingStore(), billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
+	reqOn := httptest.NewRequest(http.MethodPost, "/onboarding/waitlist", strings.NewReader(`{"email":"a@b.com"}`))
+	reqOn.Header.Set("Content-Type", "application/json")
+	rrOn := httptest.NewRecorder()
+	muxOn.ServeHTTP(rrOn, reqOn)
+	if rrOn.Code != http.StatusNotFound {
+		t.Fatalf("waitlist-with-signup-on: expected 404 (route not mounted), got %d", rrOn.Code)
+	}
+}
+
 // TestDevLogEmailSenderNeverLogsToken asserts the dev fallback sender logs that a
 // send occurred but NEVER writes the email or the token.
 func TestDevLogEmailSenderNeverLogsToken(t *testing.T) {
