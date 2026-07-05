@@ -650,6 +650,18 @@ spec:
                       - name
                       type: object
                     type: array
+                  warmKernel:
+                    default: false
+                    description: |-
+                      WarmKernel, when true, has the template build run one trivial run_code
+                      cell AFTER init and the workload start and BEFORE the snapshot, so the
+                      code-interpreter kernel is captured live and every fork skips its ~5s
+                      lazy kernel start on the first run_code. The warmup cell draws no
+                      randomness (the kernel's Python PRNGs stay unseeded in the snapshot;
+                      each fork seeds fresh after the per-fork CRNG reseed, see
+                      docs/fork-correctness.md) and fails open: an image without the kernel
+                      logs and builds unchanged, so non-python pools may leave this set.
+                    type: boolean
                   workload:
                     description: |-
                       Workload declares a long-running process the build starts AFTER init and

@@ -314,7 +314,7 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	templateVols := []v1.SandboxVolume{
 		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1.ForkPolicyFresh},
 	}
-	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5, nil, nil, nil)
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
