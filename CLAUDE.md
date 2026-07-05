@@ -114,6 +114,14 @@ Jobs:
 
 All eight are required checks on main; main requires branches to be up to date.
 
+### PR lifecycle (mandatory, every PR)
+
+Opening a PR is not the end of the job; the PR is yours until it merges:
+
+1. **Conform to the template and policy before pushing.** The pr-policy workflow enforces a conventional-commit title (types: feat, fix, docs, ci, chore, refactor, test; no other types), all required body sections from `.github/pull_request_template.md` (the pr-policy workflow hard-fails on missing `## Thinking Path`, `## Verification`, or `## Model Used` with real content; fill the rest of the template honestly too), no em or en dashes in added lines, and no internal references. Write the PR to pass these on the first run, not after a red check.
+2. **Drive CI green yourself.** Watch the checks after every push; investigate and fix every failure. Never leave a PR red, never ask a human to shepherd a check you can fix, and never merge with a failing or skipped required check. Flaky reruns are a last resort after reading the failure, not a first response.
+3. **Resolve ALL CodeRabbit feedback.** Triage every CodeRabbit comment like a human review finding: fix what is right, and reply with a concrete technical rebuttal where it is wrong; never ignore or blanket-dismiss. The PR is not mergeable while CodeRabbit comments sit unaddressed.
+
 The self-hosted real-KVM-cluster workflow (cluster-e2e.yaml, push / `ci-cluster`-labeled-PR triggered, not one of the eight required checks) carries the predicate-level e2e suites: `cluster-husk-e2e`, `cluster-workspace-e2e`, `cluster-husk-network-e2e`, and `cluster-facade-conformance-e2e` (the agents.x-k8s.io facade Ready predicate on a real booted VMM, issue #357). The object-level `facade-conformance` kind job in ci.yaml proves the facade bridge object-level on kind.
 
 ## Security Practices
