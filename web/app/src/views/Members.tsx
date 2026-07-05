@@ -2,7 +2,7 @@
 // (accessible, per-row), joined date, and remove; Invite button + modal; a
 // Pending invites section showing state/expiry with resend/revoke. Supports
 // loading, empty, and error states; the empty state doubles as the invite CTA.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@mitos/brand'
 import { useMembers, useSetRole, useRemoveMember, useInvites, useRevokeInvite, useResendInvite } from '../data/org'
 import { useAccount } from '../data/account-settings'
@@ -32,6 +32,17 @@ export function Members() {
   )
   const [inviteOpen, setInviteOpen] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<{ accountId: string; label: string } | null>(null)
+
+  // Escape closes the confirm; a backdrop click deliberately does not (see
+  // the alertdialog below), so this is the only non-button way out.
+  useEffect(() => {
+    if (!confirmRemove) return
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setConfirmRemove(null)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [confirmRemove])
 
   function onRoleChange(accountId: string, role: Role) {
     setRole.mutate(
@@ -213,37 +224,34 @@ export function Members() {
       {inviteOpen && <InviteModal onClose={() => setInviteOpen(false)} />}
 
       {confirmRemove && (
-        <div
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="confirm-remove-title"
-          className="card"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            margin: 'auto',
-            width: '100%',
-            maxWidth: '420px',
-            height: 'fit-content',
-            padding: 'var(--space-6)',
-            zIndex: 100,
-          }}
-        >
-          <h2 id="confirm-remove-title" style={{ marginTop: 0 }}>
-            Remove {confirmRemove.label}?
-          </h2>
-          <p className="t-dim">
-            {confirmRemove.accountId === account?.account_id
-              ? 'You will lose access to this organization immediately.'
-              : 'They will lose access to this organization immediately.'}
-          </p>
-          <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', marginTop: 'var(--space-5)' }}>
-            <button className="btn btn-ghost" onClick={() => setConfirmRemove(null)}>
-              Cancel
-            </button>
-            <button className="btn" onClick={onConfirmRemove}>
-              Remove
-            </button>
+        // This is a destructive confirmation, not a dismissable dialog: a
+        // stray click outside it must never silently remove someone from
+        // the org, so unlike InviteModal/NewSandboxModal the backdrop
+        // deliberately has no onMouseDown-to-close handler. Escape and the
+        // explicit Cancel button are the only ways out besides confirming.
+        <div className="modal-backdrop">
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="confirm-remove-title"
+            className="card modal"
+          >
+            <h2 id="confirm-remove-title" style={{ marginTop: 0 }}>
+              Remove {confirmRemove.label}?
+            </h2>
+            <p className="t-dim">
+              {confirmRemove.accountId === account?.account_id
+                ? 'You will lose access to this organization immediately.'
+                : 'They will lose access to this organization immediately.'}
+            </p>
+            <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', marginTop: 'var(--space-5)' }}>
+              <button className="btn btn-ghost" onClick={() => setConfirmRemove(null)}>
+                Cancel
+              </button>
+              <button className="btn" onClick={onConfirmRemove}>
+                Remove
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -205,6 +205,41 @@ describe('Members view', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(screen.getByText('bob')).toBeInTheDocument()
   })
+
+  // Mobile + shared-modal parity: the confirm dialog carries the same
+  // .modal / .modal-backdrop classes as InviteModal and NewSandboxModal so it
+  // gets the <=480px full-screen-sheet treatment and safe-area padding from
+  // base.css, instead of the old raw position:fixed styling.
+  it('renders the remove confirmation inside the shared .modal with a .modal-backdrop sibling', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog.className).toContain('modal')
+    expect(dialog.parentElement?.className).toContain('modal-backdrop')
+  })
+
+  // Destructive confirm: Escape closes it, but a backdrop click must not
+  // (a stray click cannot silently confirm removing someone from the org).
+  it('closes the remove confirmation on Escape', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.getByText('bob')).toBeInTheDocument()
+  })
+
+  it('does not close the remove confirmation on a backdrop click', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    const backdrop = dialog.parentElement as HTMLElement
+    fireEvent.mouseDown(backdrop, { target: backdrop })
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  })
 })
 
 describe('Projects view', () => {
