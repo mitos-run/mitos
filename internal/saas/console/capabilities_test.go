@@ -146,3 +146,47 @@ func TestCapabilitiesAuthConnectorsInResponse(t *testing.T) {
 		}
 	})
 }
+
+// TestCapabilitiesDefaultsIncludeFeedbackAndVersion asserts the community
+// default carries a usable feedback channel (github, so a self-hoster with no
+// support inbox still has a one-click path to file an issue) and a version
+// string (defaulting "dev" until a build injects one), so the SPA's feedback
+// dialog and sidebar footer never render empty.
+func TestCapabilitiesDefaultsIncludeFeedbackAndVersion(t *testing.T) {
+	c := New(Deps{})
+	_, caps := getCaps(t, c)
+	if caps.Feedback.Channel != "github" {
+		t.Errorf("feedback.channel = %q, want github", caps.Feedback.Channel)
+	}
+	if caps.Feedback.Target != "mitos-run/mitos" {
+		t.Errorf("feedback.target = %q, want mitos-run/mitos", caps.Feedback.Target)
+	}
+	if caps.Version != "dev" {
+		t.Errorf("version = %q, want dev", caps.Version)
+	}
+}
+
+// TestCapabilitiesFeedbackAndVersionEchoedVerbatim asserts an explicit
+// Capabilities config (as cmd/console's capabilitiesFromEnv builds) is
+// returned unchanged: Feedback and Version are deployment-level config, not
+// resolved per-request like Plan/Entitlements/Admin.
+func TestCapabilitiesFeedbackAndVersionEchoedVerbatim(t *testing.T) {
+	want := Capabilities{
+		Edition:   "hosted",
+		Teams:     true,
+		IDP:       "oidc",
+		Proof:     true,
+		Ownership: "hosted",
+		Secrets:   SecretsCapability{Providers: []string{"kube"}},
+		Feedback:  FeedbackCapability{Channel: "email", Target: "feedback@mitos.run"},
+		Version:   "1.6.0",
+	}
+	c := New(Deps{Capabilities: want})
+	_, caps := getCaps(t, c)
+	if caps.Feedback.Channel != "email" || caps.Feedback.Target != "feedback@mitos.run" {
+		t.Errorf("feedback = %+v, want email/feedback@mitos.run", caps.Feedback)
+	}
+	if caps.Version != "1.6.0" {
+		t.Errorf("version = %q, want 1.6.0", caps.Version)
+	}
+}

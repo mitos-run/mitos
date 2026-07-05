@@ -63,6 +63,31 @@ type Capabilities struct {
 	// per-request from the caller's context, never a deployment-wide
 	// default; an unauthenticated request always sees false.
 	Admin bool `json:"admin"`
+	// Feedback advertises the one-click feedback channel the SPA's
+	// FeedbackButton composes into: email (the hosted default, opened as a
+	// mailto:) or a GitHub new-issue link (the community default). There is
+	// no server-persisted feedback store in v1; this is deployment-level
+	// config, not resolved per-request. See FeedbackCapability.
+	Feedback FeedbackCapability `json:"feedback"`
+	// Version is the console binary's build version (wired from -ldflags at
+	// release time where available), or "dev" for a local/unreleased build.
+	// The SPA renders it in the sidebar footer and includes it in feedback
+	// diagnostics so a report always carries what build produced it.
+	Version string `json:"version"`
+}
+
+// FeedbackCapability tells the SPA where composed feedback goes. There is NO
+// server write path for feedback in v1: the SPA hands the message + attached
+// diagnostics straight to the OS mail client (channel "email") or opens a
+// browser tab at a prefilled GitHub new-issue URL (channel "github"). Nothing
+// here is ever a secret, so it is safe to serve from the unauthenticated
+// capabilities endpoint.
+type FeedbackCapability struct {
+	// Channel is "email" or "github".
+	Channel string `json:"channel"`
+	// Target is a mailto address when Channel is "email", or an "owner/repo"
+	// GitHub slug when Channel is "github".
+	Target string `json:"target"`
 }
 
 // SecretsCapability advertises which secret-store providers are enabled. The
@@ -88,6 +113,8 @@ func defaultCapabilities() Capabilities {
 		AuthConnectors: []string{},
 		Plan:           billing.PlanFree,
 		Entitlements:   billing.EntitlementsFor(billing.PlanFree, "community"),
+		Feedback:       FeedbackCapability{Channel: "github", Target: "mitos-run/mitos"},
+		Version:        "dev",
 	}
 }
 

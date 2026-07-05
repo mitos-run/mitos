@@ -48,6 +48,28 @@ func capabilitiesFromEnv() console.Capabilities {
 		Proof:          true,
 		Ownership:      ownership,
 		AuthConnectors: parseAuthConnectors(os.Getenv("MITOS_CONSOLE_AUTH_CONNECTORS")),
+		Feedback:       feedbackCapabilityFromEnv(edition),
+		Version:        version,
+	}
+}
+
+// feedbackCapabilityFromEnv resolves the console's one-click feedback
+// channel. Hosted deployments default to email support (target overridable
+// via MITOS_CONSOLE_FEEDBACK_EMAIL); self-hosted community deployments
+// default to a GitHub new-issue link against mitos-run/mitos (target
+// overridable via MITOS_CONSOLE_FEEDBACK_GITHUB_REPO, e.g. for a fork). This
+// is server-controlled like the rest of Capabilities: the SPA only renders
+// what it is told, and there is no server write path for feedback in v1.
+func feedbackCapabilityFromEnv(edition string) console.FeedbackCapability {
+	if edition == "hosted" {
+		return console.FeedbackCapability{
+			Channel: "email",
+			Target:  envOr("MITOS_CONSOLE_FEEDBACK_EMAIL", "feedback@mitos.run"),
+		}
+	}
+	return console.FeedbackCapability{
+		Channel: "github",
+		Target:  envOr("MITOS_CONSOLE_FEEDBACK_GITHUB_REPO", "mitos-run/mitos"),
 	}
 }
 

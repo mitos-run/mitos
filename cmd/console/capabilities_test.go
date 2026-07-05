@@ -171,6 +171,63 @@ func TestAuthConnectorsEndpoint(t *testing.T) {
 	})
 }
 
+// TestCapabilitiesFromEnvFeedbackAndVersion asserts the feedback channel
+// defaults follow edition (hosted -> email support inbox, community -> a
+// GitHub new-issue link) and that both env overrides and the build version
+// are threaded through capabilitiesFromEnv into the served document.
+func TestCapabilitiesFromEnvFeedbackAndVersion(t *testing.T) {
+	clearFeedbackEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{"MITOS_CONSOLE_EDITION", "MITOS_CONSOLE_FEEDBACK_EMAIL", "MITOS_CONSOLE_FEEDBACK_GITHUB_REPO"} {
+			t.Setenv(k, "")
+		}
+	}
+
+	t.Run("community default is github mitos-run/mitos", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "github" || c.Feedback.Target != "mitos-run/mitos" {
+			t.Errorf("feedback = %+v, want {github mitos-run/mitos}", c.Feedback)
+		}
+	})
+
+	t.Run("community github repo override", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_FEEDBACK_GITHUB_REPO", "acme/fork")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "github" || c.Feedback.Target != "acme/fork" {
+			t.Errorf("feedback = %+v, want {github acme/fork}", c.Feedback)
+		}
+	})
+
+	t.Run("hosted default is email feedback@mitos.run", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_EDITION", "hosted")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "email" || c.Feedback.Target != "feedback@mitos.run" {
+			t.Errorf("feedback = %+v, want {email feedback@mitos.run}", c.Feedback)
+		}
+	})
+
+	t.Run("hosted email override", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_EDITION", "hosted")
+		t.Setenv("MITOS_CONSOLE_FEEDBACK_EMAIL", "support@example.com")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "email" || c.Feedback.Target != "support@example.com" {
+			t.Errorf("feedback = %+v, want {email support@example.com}", c.Feedback)
+		}
+	})
+
+	t.Run("version comes from the package build var", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		c := capabilitiesFromEnv()
+		if c.Version != version {
+			t.Errorf("version = %q, want %q (the package build var)", c.Version, version)
+		}
+	})
+}
+
 // TestPlanSourceFromEnvDefaultsToFree asserts that with MITOS_CONSOLE_TEAM_ORGS
 // unset, every org resolves to PlanFree: the manual-grant allowlist is empty
 // by default.
