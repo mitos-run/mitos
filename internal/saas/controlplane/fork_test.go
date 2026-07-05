@@ -79,9 +79,11 @@ func TestForkCreatesFromSandboxAndReturnsToken(t *testing.T) {
 	stop := flipForkToReadyWhenCreated(t, c, orgA, "10.9.9.9:9091", "child-token", 42)
 	defer stop()
 
+	// No "id" in the body: the control plane generates the child name
+	// (TestForkHonorsRequestedChildID covers the caller-named path).
 	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
 		OrgID: orgA, Op: "sandbox.fork", Path: "/v1/sandboxes/sb-src/fork",
-		Body: []byte(`{"id":"child","template":"python","pause_source":true}`),
+		Body: []byte(`{"template":"python","pause_source":true}`),
 	})
 	if err != nil {
 		t.Fatalf("Forward: %v", err)
@@ -135,6 +137,9 @@ func TestForkCreatesFromSandboxAndReturnsToken(t *testing.T) {
 	}
 	if !sb.Spec.Source.FromSandbox.PauseSource {
 		t.Error("pause_source=true was not carried onto spec.source.fromSandbox.pauseSource")
+	}
+	if sb.Spec.SecretInheritance != "" {
+		t.Errorf("SecretInheritance = %q, want empty (the reissue default; inherit is an explicit opt-in)", sb.Spec.SecretInheritance)
 	}
 }
 
@@ -258,17 +263,18 @@ func TestForkRejectsReplicasGreaterThanOne(t *testing.T) {
 }
 
 // TestForkRejectedConditionSurfacesConflict asserts a fork the controller
-// rejects terminally (the Rejected condition, for example the
-// secret-inheritance default-deny) surfaces the controller's actionable message
-// as a 409, never a misleading ready-timeout 504.
+// rejects terminally with a GENERIC Rejected condition surfaces the
+// controller's actionable message as a 409, never a misleading ready-timeout
+// 504. (The SecretInheritanceDenied reason gets its own dedicated 403 shape:
+// TestForkSecretInheritanceDeniedSurfacesForbidden.)
 func TestForkRejectedConditionSurfacesConflict(t *testing.T) {
 	src, srcSecret := readySandbox(orgA, "sb-src", "10.0.0.1:9091", "tok")
 	c := newFakeClient(t, src, srcSecret)
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 	stop := flipWhenCreated(t, c, orgA, func(sb *v1.Sandbox) {
 		sb.Status.Conditions = []metav1.Condition{{
-			Type: "Rejected", Status: metav1.ConditionTrue, Reason: "SecretInheritanceDenied",
-			Message:            "source sandbox holds secrets; recreate the fork with spec.secretInheritance=inherit to permit it (forks duplicate guest memory, including secret values)",
+			Type: "Rejected", Status: metav1.ConditionTrue, Reason: "SourceGone",
+			Message:            "source sandbox \"sb-src\" does not exist, so this fork's fan-out can never complete",
 			LastTransitionTime: metav1.Now(),
 		}}
 	})
@@ -280,7 +286,7 @@ func TestForkRejectedConditionSurfacesConflict(t *testing.T) {
 	if resp.Status != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", resp.Status, resp.Body)
 	}
-	if !strings.Contains(string(resp.Body), "secretInheritance") {
+	if !strings.Contains(string(resp.Body), "can never complete") {
 		t.Errorf("rejection message not surfaced: %s", resp.Body)
 	}
 }
