@@ -40,6 +40,10 @@ export type Capabilities = {
   // deployment (informational only on community, which is never plan-gated).
   plan?: 'free' | 'team'
   entitlements?: Entitlements
+  // admin is true when the CALLER holds the instance-operator capability; it
+  // gates the "Operate" nav group and /admin/* routes. Optional (absent on
+  // older servers), like authConnectors/plan/entitlements above.
+  admin?: boolean
 }
 
 export type AuthConnectorsResponse = {
@@ -205,6 +209,47 @@ export type SessionView = {
   label: string
   created_at: string
   current: boolean
+}
+
+// --- Instance-operator plane (/console/admin/...) ---
+
+export type AdminOverview = {
+  orgs: number
+  running_sandboxes: number
+  // null when no NodeSource is configured on this deployment (an honest
+  // "not available" rather than a fabricated 0).
+  nodes_ready: number | null
+  nodes_total: number | null
+  signup_mode: 'open' | 'waitlist'
+}
+
+export type AdminOrgView = {
+  id: string
+  name: string
+  tier: string
+  members: number
+  running: number
+  month_usage_cents: number
+}
+
+export type AdminNodeView = {
+  name: string
+  ready: boolean
+  kvm: boolean
+  dedicated: boolean
+  allocatable_cpu: string
+  allocatable_mem: string
+}
+
+export type AdminNodesResponse = {
+  available: boolean
+  nodes: AdminNodeView[]
+}
+
+export type AdminWaitlistEntryView = {
+  id: string
+  email: string
+  created_at: string
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -511,6 +556,18 @@ export const api = {
       credentials: 'same-origin',
     })
     if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
+  },
+  adminOverview: () => get<AdminOverview>('/console/admin/overview'),
+  adminOrgs: () => get<{ orgs: AdminOrgView[]; total: number }>('/console/admin/orgs'),
+  adminNodes: () => get<AdminNodesResponse>('/console/admin/nodes'),
+  adminWaitlist: () => get<{ entries: AdminWaitlistEntryView[] }>('/console/admin/waitlist').then((r) => r.entries ?? []),
+  approveWaitlistEntry: async (id: string) => {
+    const r = await fetch(`/console/admin/waitlist/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'approve waitlist entry'))
+    return (await r.json()) as { email: string; approved: boolean }
   },
 }
 
